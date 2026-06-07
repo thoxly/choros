@@ -80,4 +80,49 @@ export class JobStore {
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((j) => ({ ...j }));
   }
+
+  /**
+   * Atomically select up to maxJobs available jobs from the given topics,
+   * acquire an exclusive lock on each, and return defensive copies in FIFO order.
+   *
+   * Available predicate:
+   *   state === CREATED  OR  (state === LOCKED AND lockExpiry <= clock.now())
+   *
+   * Returns [] immediately if maxJobs <= 0 or topics is empty.
+   * Each returned element is a defensive copy; internal records are frozen snapshots.
+   */
+  fetchAndLock(
+    workerId: string,
+    topics: string[],
+    maxJobs: number,
+    lockDurationMs: number
+  ): Job[] {
+    if (maxJobs <= 0 || topics.length === 0) {
+      return [];
+    }
+    const now = this.clock.now();
+    const topicSet = new Set(topics);
+    const candidates = [...this.jobs.values()]
+      .filter((j) => {
+        if (!topicSet.has(j.topic)) return false;
+        return (
+          j.state === JobState.CREATED ||
+          (j.state === JobState.LOCKED &&
+            j.lockExpiry !== undefined &&
+            j.lockExpiry <= now)
+        );
+      })
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, maxJobs);
+    return candidates.map((j) => {
+      const locked = Object.freeze({
+        ...j,
+        state: JobState.LOCKED,
+        lockOwner: workerId,
+        lockExpiry: this.clock.now() + lockDurationMs,
+      });
+      this.jobs.set(locked.id, locked);
+      return { ...locked };
+    });
+  }
 }
