@@ -125,4 +125,87 @@ export class JobStore {
       return { ...locked };
     });
   }
+
+  /**
+   * Mark a job as completed by the owning worker.
+   * Ownership gate precedence: NOT_FOUND → NOT_LOCKED → LOCK_EXPIRED → NOT_OWNER.
+   * On success: stores a new frozen snapshot with state=COMPLETED and lock fields cleared.
+   * Returns { ok: true } on success; does NOT return the updated Job (use getById).
+   */
+  complete(workerId: string, jobId: string): CompleteResult {
+    const job = this.jobs.get(jobId);
+    if (job === undefined) {
+      return { ok: false, code: "NOT_FOUND" };
+    }
+    if (job.state !== JobState.LOCKED) {
+      return { ok: false, code: "NOT_LOCKED" };
+    }
+    if (job.lockExpiry! <= this.clock.now()) {
+      return { ok: false, code: "LOCK_EXPIRED" };
+    }
+    if (job.lockOwner !== workerId) {
+      return { ok: false, code: "NOT_OWNER" };
+    }
+    const updated: Job = Object.freeze({
+      ...job,
+      state: JobState.COMPLETED,
+      lockOwner: undefined,
+      lockExpiry: undefined,
+    });
+    this.jobs.set(jobId, updated);
+    return { ok: true };
+  }
+
+  /**
+   * Report a job failure by the owning worker, optionally scheduling a retry.
+   * Ownership gate precedence: NOT_FOUND → NOT_LOCKED → LOCK_EXPIRED → NOT_OWNER.
+   * retries > 0 → state=CREATED (job re-available); retries <= 0 → state=FAILED.
+   * retryTimeoutMs is accepted for API parity with the external-task pattern but is
+   * RECORDED-ONLY / not enforced — no availableAt field is set (deferred: parallel T-0004
+   * write-zone constraint blocks the types.ts change required to store the field).
+   * Returns { ok: true } on success; does NOT return the updated Job (use getById).
+   */
+  fail(workerId: string, jobId: string, retries: number, retryTimeoutMs: number): FailResult {
+    // retryTimeoutMs is accepted for API parity but not enforced as a delay here;
+    // enforcement is deferred to fetchAndLock (T-0004) which will filter by availableAt.
+    void retryTimeoutMs;
+    const job = this.jobs.get(jobId);
+    if (job === undefined) {
+      return { ok: false, code: "NOT_FOUND" };
+    }
+    if (job.state !== JobState.LOCKED) {
+      return { ok: false, code: "NOT_LOCKED" };
+    }
+    if (job.lockExpiry! <= this.clock.now()) {
+      return { ok: false, code: "LOCK_EXPIRED" };
+    }
+    if (job.lockOwner !== workerId) {
+      return { ok: false, code: "NOT_OWNER" };
+    }
+    const nextState = retries > 0 ? JobState.CREATED : JobState.FAILED;
+    const nextRetries = retries > 0 ? retries : 0;
+    const updated: Job = Object.freeze({
+      ...job,
+      state: nextState,
+      retries: nextRetries,
+      lockOwner: undefined,
+      lockExpiry: undefined,
+    });
+    this.jobs.set(jobId, updated);
+    return { ok: true };
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Result-union types — exported from jobStore.ts (NOT from types.ts).
+// These are behavioural contracts belonging to the store, not domain types.
+// ---------------------------------------------------------------------------
+
+/** The four gate-failure codes shared by complete and fail. */
+export type ErrorCode = "NOT_FOUND" | "NOT_LOCKED" | "LOCK_EXPIRED" | "NOT_OWNER";
+
+/** Discriminated result union returned by JobStore.complete(). */
+export type CompleteResult = { ok: true } | { ok: false; code: ErrorCode };
+
+/** Discriminated result union returned by JobStore.fail(). */
+export type FailResult = { ok: true } | { ok: false; code: ErrorCode };
