@@ -1,0 +1,212 @@
+/* ============================================================================
+   CHOROS — components.css
+   Стилизация примитивов. Только токены --chs-*, никаких хардкод-значений.
+   ============================================================================ */
+
+/* ---------------- ExecutorBadge ---------------- */
+.chs-exec {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  height: 22px;
+  padding: 0 var(--chs-space-4) 0 var(--chs-space-3);
+  border-radius: var(--chs-radius-2);
+  font-size: var(--chs-text-sm);
+  font-weight: var(--chs-weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.chs-exec__glyph { width: 9px; height: 9px; flex: none; display: block; }
+.chs-exec--human   { color: var(--chs-exec-human);   background: var(--chs-exec-human-soft);   border-color: var(--chs-exec-human-border); }
+.chs-exec--agent   { color: var(--chs-exec-agent);   background: var(--chs-exec-agent-soft);   border-color: var(--chs-exec-agent-border); }
+.chs-exec--service { color: var(--chs-exec-service); background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); }
+.chs-exec--bare { background: transparent; border-color: transparent; padding-left: 0; }
+.chs-exec--dot { gap: var(--chs-space-3); }
+
+/* ---------------- MonoId ---------------- */
+.chs-monoid {
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm);
+  letter-spacing: var(--chs-tracking-mono);
+  color: var(--chs-color-text-muted);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  white-space: nowrap;
+}
+.chs-monoid--chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--chs-space-3);
+  border-radius: var(--chs-radius-1);
+  background: var(--chs-color-neutral-soft);
+  color: var(--chs-color-text);
+}
+.chs-monoid__pre { color: var(--chs-color-text-faint); }
+
+/* ---------------- Mono value (числа/таймстамп/бюджет) ---------------- */
+.chs-mono {
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm);
+  letter-spacing: var(--chs-tracking-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- StatusChip ---------------- */
+.chs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chs-space-3);
+  height: 20px;
+  padding: 0 var(--chs-space-4);
+  border-radius: var(--chs-radius-1);
+  font-size: var(--chs-text-xs);
+  font-weight: var(--chs-weight-medium);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chs-chip__dot { width: 6px; height: 6px; border-radius: var(--chs-radius-full); flex: none; }
+.chs-chip--running { color: var(--chs-color-info);    background: var(--chs-color-info-soft); }
+.chs-chip--running .chs-chip__dot { background: var(--chs-color-info); box-shadow: 0 0 0 3px var(--chs-color-info-soft); }
+.chs-chip--done    { color: var(--chs-color-success); background: var(--chs-color-success-soft); }
+.chs-chip--done    .chs-chip__dot { background: var(--chs-color-success); }
+.chs-chip--failed  { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft); }
+.chs-chip--failed  .chs-chip__dot { background: var(--chs-color-danger); }
+.chs-chip--waiting { color: var(--chs-color-warning); background: var(--chs-color-warning-soft); }
+.chs-chip--waiting .chs-chip__dot { background: var(--chs-color-warning); }
+.chs-chip--paused  { color: var(--chs-color-text-muted); background: var(--chs-color-neutral-soft); }
+.chs-chip--paused  .chs-chip__dot { background: var(--chs-color-text-muted); }
+
+@keyframes chs-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.chs-chip--running .chs-chip__dot { animation: chs-pulse 1.8s ease-in-out infinite; }
+
+/* ---------------- Button ---------------- */
+.chs-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--chs-space-3);
+  height: var(--chs-control-h);
+  padding: 0 var(--chs-space-6);
+  border-radius: var(--chs-radius-2);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  font-weight: var(--chs-weight-medium);
+  line-height: 1;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+  user-select: none;
+}
+.chs-btn:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+.chs-btn--sm { height: var(--chs-control-h-sm); padding: 0 var(--chs-space-5); font-size: var(--chs-text-sm); }
+.chs-btn--primary   { background: var(--chs-color-accent); color: var(--chs-color-accent-fg); }
+.chs-btn--primary:hover { background: var(--chs-color-accent-hover); }
+.chs-btn--secondary { background: var(--chs-color-surface-raised); color: var(--chs-color-text); border-color: var(--chs-color-border-strong); }
+.chs-btn--secondary:hover { background: var(--chs-color-overlay); border-color: var(--chs-color-border-strong); }
+.chs-btn--ghost     { background: transparent; color: var(--chs-color-text-muted); }
+.chs-btn--ghost:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-btn--danger    { background: transparent; color: var(--chs-color-danger); border-color: var(--chs-color-danger-soft); }
+.chs-btn--danger:hover { background: var(--chs-color-danger-soft); }
+.chs-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.chs-btn__glyph { width: 12px; height: 12px; flex: none; }
+
+/* ---------------- Input ---------------- */
+.chs-field { display: flex; flex-direction: column; gap: var(--chs-space-3); }
+.chs-label { font-size: var(--chs-text-xs); color: var(--chs-color-text-muted); font-weight: var(--chs-weight-medium); letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; }
+.chs-input {
+  height: var(--chs-control-h);
+  padding: 0 var(--chs-space-5);
+  background: var(--chs-color-bg);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2);
+  color: var(--chs-color-text);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  width: 100%;
+  transition: border-color 90ms ease, box-shadow 90ms ease;
+}
+.chs-input::placeholder { color: var(--chs-color-text-faint); }
+.chs-input:focus { outline: none; border-color: var(--chs-color-accent); box-shadow: 0 0 0 3px var(--chs-color-accent-soft); }
+.chs-input--mono { font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); }
+.chs-input--invalid { border-color: var(--chs-color-danger); }
+.chs-input--invalid:focus { box-shadow: 0 0 0 3px var(--chs-color-danger-soft); }
+
+/* ---------------- BudgetMeter ---------------- */
+.chs-budget { display: flex; flex-direction: column; gap: var(--chs-space-2); min-width: 120px; }
+.chs-budget__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--chs-space-4); }
+.chs-budget__val { font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; color: var(--chs-color-text); white-space: nowrap; }
+.chs-budget__total { color: var(--chs-color-text-faint); }
+.chs-budget__track { height: 4px; border-radius: var(--chs-radius-1); background: var(--chs-color-track); overflow: hidden; }
+.chs-budget__fill { height: 100%; border-radius: var(--chs-radius-1); background: var(--chs-color-accent); transition: width 240ms ease; }
+.chs-budget__fill--warn { background: var(--chs-color-warning); }
+.chs-budget__fill--over { background: var(--chs-color-danger); }
+
+/* ---------------- TaskRow ---------------- */
+.chs-taskrow {
+  display: grid;
+  grid-template-columns: 16px 1fr 132px 96px 150px 84px;
+  align-items: center;
+  gap: var(--chs-space-6);
+  height: var(--chs-row-h);
+  padding: 0 var(--chs-space-6);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+  cursor: default;
+}
+.chs-taskrow:hover { background: var(--chs-color-hover); }
+.chs-taskrow__marker { width: 6px; height: 6px; border-radius: var(--chs-radius-full); }
+.chs-taskrow__name { font-size: var(--chs-text-base); color: var(--chs-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chs-taskrow__name small { display:block; font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); }
+
+/* ---------------- AuditEvent ---------------- */
+.chs-audit {
+  display: grid;
+  grid-template-columns: 168px 22px 1fr;
+  align-items: start;
+  gap: var(--chs-space-6);
+  padding: var(--chs-space-4) var(--chs-space-6);
+  border-left: 2px solid var(--chs-color-border);
+  font-size: var(--chs-text-sm);
+}
+.chs-audit:hover { background: var(--chs-color-hover); border-left-color: var(--chs-color-accent); }
+.chs-audit__time { font-family: var(--chs-font-mono); font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); letter-spacing: var(--chs-tracking-mono); padding-top: 1px; }
+.chs-audit__rail { display: flex; justify-content: center; padding-top: 3px; }
+.chs-audit__rail .chs-exec__glyph { width: 8px; height: 8px; }
+.chs-audit__body { color: var(--chs-color-text-muted); }
+.chs-audit__body b { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
+
+/* ---------------- DenseTable ---------------- */
+.chs-table { width: 100%; border-collapse: collapse; font-size: var(--chs-text-base); }
+.chs-table thead th {
+  text-align: left;
+  font-size: var(--chs-text-2xs);
+  font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  color: var(--chs-color-text-faint);
+  padding: 0 var(--chs-space-6);
+  height: 30px;
+  border-bottom: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+  position: sticky; top: 0;
+}
+.chs-table tbody td {
+  padding: 0 var(--chs-space-6);
+  height: var(--chs-row-h);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+  color: var(--chs-color-text);
+  vertical-align: middle;
+}
+.chs-table tbody tr:hover td { background: var(--chs-color-hover); }
+.chs-table td.chs-num, .chs-table th.chs-num { text-align: right; font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------------- Surface / panel (для витрины) ---------------- */
+.chs-panel {
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  overflow: hidden;
+}
