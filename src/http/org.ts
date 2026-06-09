@@ -111,7 +111,7 @@ function findOrgData(): OrgDepartment[] {
   return ORG_SEED;
 }
 
-function findEmployee(employeeId: string): OrgPerson & { position: string; department: string } | null {
+export function findEmployee(employeeId: string): OrgPerson & { position: string; department: string } | null {
   for (const department of ORG_SEED) {
     for (const position of department.positions) {
       for (const person of position.people) {
@@ -126,6 +126,30 @@ function findEmployee(employeeId: string): OrgPerson & { position: string; depar
     }
   }
   return null;
+}
+
+export function listSelectableUsers(): Array<{
+  id: string;
+  name: string;
+  position: string;
+  department: string;
+}> {
+  const users = [];
+  for (const department of ORG_SEED) {
+    for (const position of department.positions) {
+      for (const person of position.people) {
+        if (person.type === "human") {
+          users.push({
+            id: person.id,
+            name: person.name,
+            position: position.title,
+            department: department.name,
+          });
+        }
+      }
+    }
+  }
+  return users;
 }
 
 // ---------------------------------------------------------------------------
