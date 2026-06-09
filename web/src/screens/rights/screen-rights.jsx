@@ -2,12 +2,11 @@
    CHOROS — screen-rights.jsx
    ЭКРАН П1R: «Права и доступ». Read-first.
    Модель: право = ГРАНТ {роль · ресурс · операция · охват(scope)}.
-   Доступные инструменты (MCP) и видимые поля форм — ПРОИЗВОДНЫЕ от грантов,
-   а не отдельные тумблеры. Слева — роли (по подразделениям), справа — матрица
-   грантов выбранной роли + вычисленные из неё инструменты и поля.
    ============================================================================ */
 
-const { useState: useStateRights } = React;
+import React, { useState } from 'react';
+import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, OpChip, DerivedChip } from '../../components/components.jsx';
+import { Icon } from '../../app-shell/icon.jsx';
 
 const ROLES = [
   {
@@ -136,7 +135,7 @@ function RoleRailItem({ role, active, onSelect }) {
 }
 
 function RightsScreen({ initialRole }) {
-  const [sel, setSel] = useStateRights(() => (byId(initialRole) ? initialRole : ROLES[0].id));
+  const [sel, setSel] = useState(() => (byId(initialRole) ? initialRole : ROLES[0].id));
   // переключение карточки исполнителя → роль
   React.useEffect(() => { if (byId(initialRole)) setSel(initialRole); }, [initialRole]);
   const role = byId(sel) || ROLES[0];
@@ -253,4 +252,4 @@ function RightsScreen({ initialRole }) {
   );
 }
 
-Object.assign(window, { RightsScreen });
+export default RightsScreen;

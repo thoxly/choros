@@ -1,11 +1,11 @@
 /* ============================================================================
    CHOROS — ra-grant-trail.jsx
    ЭКРАН 4: ЖУРНАЛ ВЫДАЧИ ПРАВ (grant trail).
-   Плотная append-only таблица: кто · кому · какой грант · когда · предложил/
-   подтвердил · охват. Моно-ID и таймстампы. Часть единого аудита.
    ============================================================================ */
 
-const { useState: useStateGT } = React;
+import React, { useState } from 'react';
+import { ExecutorBadge, MonoId, Mono, OpChip, Button } from '../../components/components.jsx';
+import { TRAIL, ProvenanceTag, SectionHead } from './ra-data.jsx';
 
 const ACTION_META = {
   grant:  { label: "выдан",  cls: "grant" },
@@ -21,8 +21,8 @@ const TRAIL_FILTERS = [
 ];
 
 function GrantTrailScreen() {
-  const [filter, setFilter] = useStateGT("all");
-  const [critOnly, setCritOnly] = useStateGT(false);
+  const [filter, setFilter] = useState("all");
+  const [critOnly, setCritOnly] = useState(false);
 
   const rows = TRAIL.filter((r) => (filter === "all" || r.action === filter) && (!critOnly || r.crit));
   const counts = TRAIL_FILTERS.reduce((acc, f) => {
@@ -100,4 +100,4 @@ function GrantTrailScreen() {
   );
 }
 
-Object.assign(window, { GrantTrailScreen });
+export default GrantTrailScreen;

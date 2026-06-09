@@ -5,7 +5,9 @@
    действие «взять из пула».
    ============================================================================ */
 
-const { useState: useStateInbox, useMemo: useMemoInbox } = React;
+import React, { useState, useMemo } from 'react';
+import { Button, MonoId, Mono, ExecutorBadge } from '../components/components.jsx';
+import { Icon } from '../app-shell/icon.jsx';
 
 const TASKS = [
   { id: "t1", status: "running", name: "Проверить реквизиты счёта №4471", step: "Согласование счёта · узел Проверка", inst: "INS-7731", execType: "agent", execName: "Счёт-агент", sla: { min: 120, left: 88 }, due: "07.06 16:40" },
@@ -49,17 +51,17 @@ function SLACell({ sla }) {
 }
 
 function InboxScreen() {
-  const [tab, setTab] = useStateInbox("all");
-  const [taken, setTaken] = useStateInbox(() => ({}));
+  const [tab, setTab] = useState("all");
+  const [taken, setTaken] = useState(() => ({}));
 
-  const counts = useMemoInbox(() => ({
+  const counts = useMemo(() => ({
     all: TASKS.length,
     mine: TASKS.filter((t) => t.execName === "А. Кравцова" || t.execName === "Е. Ларина").length,
     pool: TASKS.filter((t) => t.pool && !taken[t.id]).length,
     esc: TASKS.filter((t) => t.step.includes("эскалация") || t.step.includes("L2") || t.status === "failed").length,
   }), [taken]);
 
-  const rows = useMemoInbox(() => {
+  const rows = useMemo(() => {
     return TASKS.filter((t) => {
       if (tab === "mine") return t.execName === "А. Кравцова" || t.execName === "Е. Ларина" || taken[t.id];
       if (tab === "pool") return t.pool && !taken[t.id];
@@ -149,4 +151,4 @@ function InboxScreen() {
   );
 }
 
-Object.assign(window, { InboxScreen });
+export default InboxScreen;

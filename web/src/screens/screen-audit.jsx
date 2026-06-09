@@ -6,7 +6,8 @@
    таймстампом; раскрывается payload (вход/выход, длительность, токены, ₽).
    ============================================================================ */
 
-const { useState: useStateAudit } = React;
+import React, { useState } from 'react';
+import { ExecGlyph, MonoId, Mono, StatusChip, BudgetMeter, EXEC_META } from '../components/components.jsx';
 
 const INSTANCE = {
   process: "Согласование счёта поставщика",
@@ -67,8 +68,8 @@ const TRACE = [
   },
 ];
 
-function AuditEventRich({ ev, last }) {
-  const [open, setOpen] = useStateAudit(false);
+function AuditEventRich({ ev }) {
+  const [open, setOpen] = useState(false);
   const isTool = !!ev.tool;
   const expandable = !!ev.payload;
   return (
@@ -167,4 +168,4 @@ function AuditScreen() {
   );
 }
 
-Object.assign(window, { AuditScreen });
+export default AuditScreen;

@@ -1,12 +1,11 @@
 /* ============================================================================
    CHOROS — ra-sod.jsx
    ЭКРАН 3: SoD И КОНФЛИКТЫ (разделение обязанностей).
-   Индикатор несовместимых ролей (кто запрашивает ≠ кто утверждает).
-   При попытке назначить конфликтную пару — предупреждение со ссылкой на правило.
-   Внизу — полный реестр правил SoD.
    ============================================================================ */
 
-const { useState: useStateSoD } = React;
+import React, { useState } from 'react';
+import { ExecutorBadge, Mono, Button } from '../../components/components.jsx';
+import { SOD_RULES, SectionHead } from './ra-data.jsx';
 
 /* субъект и его текущие роли */
 const SOD_SUBJECT = { type: "human", name: "Е. Ларина", held: ["Контролёр расчётов", "Сверка платежей"] };
@@ -27,7 +26,7 @@ function findConflicts(candidate, held) {
 }
 
 function SoDScreen() {
-  const [candidate, setCandidate] = useStateSoD("Согласование ≤ ₽250 000");
+  const [candidate, setCandidate] = useState("Согласование ≤ ₽250 000");
   const conflicts = findConflicts(candidate, SOD_SUBJECT.held);
   const blocked = conflicts.some((c) => c.rule.severity === "block");
   const warned = conflicts.length > 0 && !blocked;
@@ -157,4 +156,4 @@ function SoDScreen() {
   );
 }
 
-Object.assign(window, { SoDScreen });
+export default SoDScreen;

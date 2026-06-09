@@ -10,7 +10,7 @@
    Тип шага = тип исполнителя; маркер-класс chs-exec-* несёт цвето-код.
    ============================================================================ */
 
-const { useState: useEdState } = React;
+import React, { useState as useEdState } from 'react';
 
 /* --------------------------------------------------------------------------
    Воспроизведённый КАНВАС bpmn-js (SVG в .djs-container)
@@ -575,4 +575,4 @@ function EditorShell() {
   );
 }
 
-Object.assign(window, { EditorShell, ProcessEditor });
+export { EditorShell, ProcessEditor };

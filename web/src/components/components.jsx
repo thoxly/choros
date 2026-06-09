@@ -4,6 +4,8 @@
    (форма дублирует цвет — узнаваемость без опоры только на оттенок).
    ============================================================================ */
 
+import React from 'react';
+
 const EXEC_META = {
   human:   { label: "Человек", cls: "chs-exec--human",   color: "var(--chs-exec-human)" },
   agent:   { label: "Агент",   cls: "chs-exec--agent",   color: "var(--chs-exec-agent)" },
@@ -212,8 +214,8 @@ function AuditEvent({ ts, actorType = "service", actor, action, target }) {
   );
 }
 
-Object.assign(window, {
+export {
   ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
-});
+};

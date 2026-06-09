@@ -1,11 +1,14 @@
 /* ============================================================================
    CHOROS — ra-shell.jsx
-   Оболочка раздела «Права и доступ». Наследует каркас продукта:
-   левая навигация + топбар + переключатель тем. Вторичные вкладки — четыре
-   экрана раздела. Icon берётся из shell.jsx.
+   Оболочка раздела «Права и доступ» (standalone preview).
    ============================================================================ */
 
-const { useState: useStateShell, useEffect: useEffectShell } = React;
+import React, { useState, useEffect } from 'react';
+import { Icon } from '../../app-shell/icon.jsx';
+import RoleEditorScreen from './ra-role-editor.jsx';
+import CriticalityScreen from './ra-criticality.jsx';
+import SoDScreen from './ra-sod.jsx';
+import GrantTrailScreen from './ra-grant-trail.jsx';
 
 const RA_NAV = [
   { group: "Оркестрация", items: [
@@ -39,14 +42,14 @@ function RA_ThemeToggle({ theme, setTheme }) {
 }
 
 function RightsAdminShell() {
-  const [theme, setTheme] = useStateShell(() => localStorage.getItem("chs-theme") || "dark");
-  const [tab, setTab] = useStateShell(() => localStorage.getItem("chs-ra-tab") || "editor");
+  const [theme, setTheme] = useState(() => localStorage.getItem("chs-theme") || "dark");
+  const [tab, setTab] = useState(() => localStorage.getItem("chs-ra-tab") || "editor");
 
-  useEffectShell(() => {
+  useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("chs-theme", theme);
   }, [theme]);
-  useEffectShell(() => { localStorage.setItem("chs-ra-tab", tab); }, [tab]);
+  useEffect(() => { localStorage.setItem("chs-ra-tab", tab); }, [tab]);
 
   const tabMeta = RA_TABS.find((t) => t.id === tab) || RA_TABS[0];
 
@@ -121,4 +124,4 @@ function RightsAdminShell() {
   );
 }
 
-Object.assign(window, { RightsAdminShell });
+export default RightsAdminShell;
