@@ -1,0 +1,144 @@
+/* ============================================================================
+   CHOROS — editor.css
+   СТРУКТУРНЫЙ КАРКАС экрана «Редактор процесса» и воспроизведённого DOM bpmn-js.
+   Здесь — только раскладка/геометрия (display / position / размеры / flex).
+   Цвет и «кожа» приходят из bpmn-theme.css (override-слой) + tokens.css.
+   В реальной интеграции эту роль играет diagram-js.css; в макете — этот файл.
+   ============================================================================ */
+
+/* ---- Каркас экрана: тулбар сверху, [канвас | панель свойств] снизу ---- */
+.chs-editor { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+.chs-edtoolbar {
+  display: flex; align-items: center; gap: var(--chs-space-6); flex: none;
+  height: 44px; padding: 0 var(--chs-space-6) 0 var(--chs-space-7);
+  border-bottom: 1px solid var(--chs-color-border); background: var(--chs-color-bg);
+}
+.chs-edtoolbar__id { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
+.chs-edtoolbar__name { font-size: var(--chs-text-md); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-tight); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chs-edtoolbar__meta { display: flex; align-items: center; gap: var(--chs-space-4); flex: none; }
+.chs-edtoolbar__sep { width: 1px; height: 20px; background: var(--chs-color-border); flex: none; }
+.chs-edtoolbar__group { display: flex; align-items: center; gap: var(--chs-space-2); }
+.chs-edtoolbar__spacer { flex: 1; }
+.chs-edtoolbar__dirty { font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs); color: var(--chs-color-warning); display: inline-flex; align-items: center; gap: var(--chs-space-3); white-space: nowrap; flex: none; }
+.chs-edtoolbar__dirty::before { content: ""; width: 5px; height: 5px; border-radius: var(--chs-radius-full); background: var(--chs-color-warning); }
+
+.chs-editor__body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 312px; }
+
+/* ============================================================================
+   КАНВАС (.djs-container) — позиционирующий контекст для палитры/пада/попапа
+   ============================================================================ */
+.chs-canvas-outer { position: relative; min-width: 0; overflow: hidden; }
+.chs-canvas { position: absolute; inset: 0; overflow: hidden; }
+.djs-container {
+  position: relative; width: 100%; height: 100%; overflow: hidden;
+  background-image: radial-gradient(var(--chs-color-border-faint) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.chs-diagram { position: absolute; top: 0; left: 0; transform-origin: top left; overflow: visible; }
+.chs-diagram > svg { display: block; background: none !important; overflow: visible; }
+
+/* макет-специфика: подпись типа под названием шага + ручки выделения */
+.chs-shape-sub { fill: var(--chs-color-text-faint) !important; font-family: var(--chs-font-mono) !important; letter-spacing: var(--chs-tracking-mono); text-transform: uppercase; }
+.djs-resizer-visual { rx: 1; }
+
+/* зум-виджет в углу */
+.chs-zoom {
+  position: absolute; right: var(--chs-space-6); bottom: var(--chs-space-6); z-index: 20;
+  display: flex; align-items: stretch; height: var(--chs-control-h);
+  border: 1px solid var(--chs-color-border-strong); border-radius: var(--chs-radius-2);
+  background: var(--chs-color-surface); box-shadow: var(--chs-shadow-1); overflow: hidden;
+}
+.chs-zoom button { border: none; background: transparent; color: var(--chs-color-text-muted); width: 30px; cursor: pointer; font-size: var(--chs-text-lg); display: flex; align-items: center; justify-content: center; }
+.chs-zoom button:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-zoom__val { display: flex; align-items: center; justify-content: center; min-width: 48px; padding: 0 var(--chs-space-4); font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); border-left: 1px solid var(--chs-color-border); border-right: 1px solid var(--chs-color-border); }
+
+/* ============================================================================
+   ПАЛИТРА (.djs-palette) — вертикальная, одна колонка, слева сверху
+   ============================================================================ */
+.djs-palette { position: absolute; z-index: 30; width: 48px; padding: var(--chs-space-3); }
+.djs-palette-entries { display: flex; flex-direction: column; align-items: center; gap: var(--chs-space-2); }
+.djs-palette .entry {
+  display: flex; align-items: center; justify-content: center; cursor: pointer; position: relative;
+}
+.djs-palette .entry > svg { width: 18px; height: 18px; display: block; }
+.djs-palette .separator { width: 100%; height: 0; }
+
+/* ============================================================================
+   CONTEXT-PAD (.djs-context-pad) — плавающие действия у выбранного узла
+   ============================================================================ */
+.djs-context-pad { position: absolute; z-index: 60; display: grid; grid-template-columns: 26px 26px; gap: var(--chs-space-2); }
+.djs-context-pad .entry { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.djs-context-pad .entry > svg { width: 15px; height: 15px; display: block; }
+.djs-context-pad .entry--span2 { grid-column: 1 / 3; width: auto !important; }
+
+/* ============================================================================
+   POPUP-МЕНЮ (.djs-popup) — «Заменить элемент»
+   ============================================================================ */
+.djs-popup { position: absolute; z-index: 80; width: 260px; display: flex; flex-direction: column; overflow: hidden; }
+.djs-popup-header { display: flex; flex-direction: column; gap: var(--chs-space-4); flex: none; }
+.djs-popup-search { display: flex; align-items: center; gap: var(--chs-space-4); }
+.djs-popup-search svg { width: 13px; height: 13px; color: var(--chs-color-text-faint); flex: none; }
+.djs-popup-search input { flex: 1; padding: 0 var(--chs-space-4); }
+.djs-popup-body { padding: var(--chs-space-3); overflow-y: auto; max-height: 320px; display: flex; flex-direction: column; gap: var(--chs-space-4); }
+.djs-popup-group { display: flex; flex-direction: column; gap: 1px; }
+.djs-popup .entry-header { padding: var(--chs-space-3) var(--chs-space-4) var(--chs-space-2); }
+.djs-popup .entry {
+  display: flex; align-items: center; gap: var(--chs-space-5);
+  height: 30px; padding: 0 var(--chs-space-4); cursor: pointer;
+}
+.djs-popup .entry > [class^="bpmn-icon-"], .djs-popup .entry > [class*=" bpmn-icon-"] { font-size: 17px; width: 20px; text-align: center; flex: none; }
+.djs-popup .entry > svg { width: 18px; height: 18px; flex: none; }
+.djs-popup-entry-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.djs-popup__execdot { width: 7px; height: 7px; flex: none; }
+.djs-popup__execdot--human   { border-radius: var(--chs-radius-full); background: var(--chs-exec-human); }
+.djs-popup__execdot--agent   { background: var(--chs-exec-agent); transform: rotate(45deg); }
+.djs-popup__execdot--service { border-radius: var(--chs-radius-1); background: var(--chs-exec-service); }
+
+/* ============================================================================
+   ПАНЕЛЬ СВОЙСТВ (.bio-properties-panel*) — справа
+   ============================================================================ */
+.bio-properties-panel-container { min-height: 0; overflow-y: auto; }
+.bio-properties-panel { display: flex; flex-direction: column; min-height: 100%; }
+
+.bio-properties-panel-header { display: flex; align-items: center; gap: var(--chs-space-5); flex: none; }
+.bio-properties-panel-header-icon { width: 26px; height: 26px; flex: none; display: flex; align-items: center; justify-content: center; border-radius: var(--chs-radius-2); border: 1px solid; }
+.bio-properties-panel-header-icon svg { width: 13px; height: 13px; }
+.bio-properties-panel-header-icon--human   { background: var(--chs-exec-human-soft);   border-color: var(--chs-exec-human-border); color: var(--chs-exec-human) !important; }
+.bio-properties-panel-header-icon--agent   { background: var(--chs-exec-agent-soft);   border-color: var(--chs-exec-agent-border); color: var(--chs-exec-agent) !important; }
+.bio-properties-panel-header-icon--service { background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); color: var(--chs-exec-service) !important; }
+.bio-properties-panel-header-labels { display: flex; flex-direction: column; gap: var(--chs-space-2); min-width: 0; }
+
+.bio-properties-panel-group-header { display: flex; align-items: center; cursor: pointer; user-select: none; }
+.bio-properties-panel-group-header-title { flex: 1; min-width: 0; }
+.bio-properties-panel-group-header-buttons { display: flex; align-items: center; gap: var(--chs-space-3); flex: none; }
+.bio-properties-panel-dot { width: 6px; height: 6px; border-radius: var(--chs-radius-full); }
+.bio-properties-panel-arrow { width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; transition: transform 120ms ease; }
+.bio-properties-panel-arrow svg { width: 9px; height: 9px; }
+.bio-properties-panel-group-header[aria-expanded="false"] .bio-properties-panel-arrow { transform: rotate(-90deg); }
+.bio-properties-panel-group-entries { display: none; flex-direction: column; }
+.bio-properties-panel-group-entries.open { display: flex; }
+
+.bio-properties-panel-entry { display: flex; flex-direction: column; }
+.bio-properties-panel-label { display: block; }
+.bio-properties-panel-input,
+.bio-properties-panel-select select { width: 100%; padding: 0 var(--chs-space-5); }
+.bio-properties-panel-select { position: relative; }
+.bio-properties-panel-textfield, .bio-properties-panel-select, .bio-properties-panel-numberfield { width: 100%; }
+
+/* пара «поле + единица», ряд из двух полей */
+.chs-pp-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--chs-space-5); }
+.chs-pp-inline { display: flex; align-items: center; gap: var(--chs-space-4); }
+.chs-pp-unit { font-family: var(--chs-font-mono); font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); flex: none; }
+.chs-pp-readonly { display: inline-flex; align-items: center; gap: var(--chs-space-4); }
+
+/* производные артефакты (read-only) в панели */
+.chs-pp-derived { display: flex; flex-wrap: wrap; gap: var(--chs-space-3); }
+.chs-pp-note { font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); line-height: var(--chs-leading-snug); margin-top: var(--chs-space-3); }
+
+/* автономия — мини-шкала в панели */
+.chs-pp-autonomy { display: flex; height: 22px; border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-2); overflow: hidden; }
+.chs-pp-autonomy span { display: flex; align-items: center; padding: 0 var(--chs-space-4); font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-medium); white-space: nowrap; }
+.chs-pp-autonomy .z-auto { background: var(--chs-color-success-soft); color: var(--chs-color-success); }
+.chs-pp-autonomy .z-review { background: var(--chs-color-warning-soft); color: var(--chs-color-warning); }
+.chs-pp-autonomy .z-block { background: var(--chs-color-danger-soft); color: var(--chs-color-danger); }
