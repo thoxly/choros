@@ -62,14 +62,14 @@ function InboxScreen() {
 
   const counts = useMemo(() => ({
     all: list.length,
-    mine: list.filter((t) => t.execName === "А. Кравцова" || t.execName === "Е. Ларина").length,
+    mine: list.filter((t) => t.mine || taken[t.id]).length,
     pool: list.filter((t) => t.pool && !taken[t.id]).length,
     esc: list.filter((t) => t.step.includes("эскалация") || t.step.includes("L2") || t.status === "failed").length,
   }), [list, taken]);
 
   const rows = useMemo(() => {
     return list.filter((t) => {
-      if (tab === "mine") return t.execName === "А. Кравцова" || t.execName === "Е. Ларина" || taken[t.id];
+      if (tab === "mine") return t.mine || taken[t.id];
       if (tab === "pool") return t.pool && !taken[t.id];
       if (tab === "esc") return t.step.includes("эскалация") || t.step.includes("L2") || t.status === "failed";
       return true;

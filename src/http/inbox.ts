@@ -7,6 +7,8 @@
  */
 import { type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { findEmployee } from "./org.js";
+import { DEV_USER_HEADER } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -23,6 +25,7 @@ type InboxItem = {
   pool?: boolean;
   sla: { min: number; left: number };
   due: string;
+  mine?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -48,9 +51,25 @@ const INBOX_SEED: InboxItem[] = [
 // Data accessors
 // ---------------------------------------------------------------------------
 
-function findInboxItems(): InboxItem[] {
-  // TODO(T-0107): scope to authenticated dev-user
-  return INBOX_SEED;
+function findInboxItems(devUserId?: string): InboxItem[] {
+  // Resolve dev-user to person if provided
+  let person = null;
+  if (devUserId && typeof devUserId === "string") {
+    person = findEmployee(devUserId);
+  }
+
+  // Add mine flag to each item: true if item is assigned to this person
+  return INBOX_SEED.map((item) => {
+    const mine =
+      person !== null &&
+      item.execType === "human" &&
+      item.execName === person.name;
+
+    return {
+      ...item,
+      mine,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -58,9 +77,15 @@ function findInboxItems(): InboxItem[] {
 // ---------------------------------------------------------------------------
 
 export function registerInboxRoutes(router: Router, _store?: JobStore): void {
-  // GET /api/inbox — return full inbox task list
-  router.register("GET", "/api/inbox", async (_req, res) => {
-    const items = findInboxItems();
+  // GET /api/inbox — return full inbox task list with mine flag per item
+  router.register("GET", "/api/inbox", async (req, res) => {
+    // Read the dev-user header (handle both string and array cases)
+    let devUserId = req.headers[DEV_USER_HEADER];
+    if (Array.isArray(devUserId)) {
+      devUserId = devUserId[0];
+    }
+
+    const items = findInboxItems(devUserId);
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items }));
