@@ -7,6 +7,7 @@ import { registerInboxRoutes } from "./http/inbox.js";
 import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
+import { registerProcessesRoutes } from "./http/processes.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,9 @@ function buildRouter(store: JobStore): Router {
 
   // Register rights endpoints
   registerRightsRoutes(router, store);
+
+  // Register processes endpoints
+  registerProcessesRoutes(router, store);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));

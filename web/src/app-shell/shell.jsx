@@ -11,6 +11,7 @@ import { getDevUser, clearDevUser, setDevUser } from './dev-auth.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
+import ProcessesScreen from '../screens/screen-processes.jsx';
 import AuditScreen from '../screens/screen-audit.jsx';
 import RightsScreen from '../screens/rights/screen-rights.jsx';
 
@@ -22,7 +23,7 @@ const NAV = [
     items: [
       { id: "inbox", label: "Инбокс задач", icon: "inbox", count: 18, screen: true },
       { id: "org", label: "Оргструктура", icon: "org", screen: true },
-      { id: "processes", label: "Процессы", icon: "process", count: 7 },
+      { id: "processes", label: "Процессы", icon: "process", count: 7, screen: true },
     ],
   },
   {
@@ -43,6 +44,7 @@ const NAV = [
 const SCREEN_META = {
   inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
   org:   { crumb: ["Оркестрация", "Оргструктура"] },
+  processes: { crumb: ["Оркестрация", "Процессы"] },
   audit: { crumb: ["Наблюдаемость", "Аудит инстанса"] },
   rights: { crumb: ["Доступ", "Права и доступ"] },
 };
@@ -196,6 +198,7 @@ function AppShell() {
             <Route path="/" element={<InboxScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
+            <Route path="/processes" element={<ProcessesScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
           </Routes>
