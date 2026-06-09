@@ -14,6 +14,11 @@
 сервис) узнаются сквозным цвето-иконочным кодом `--chs-exec-*` + форма глифа
 (круг / ромб / квадрат).
 
+> Исключение по правилу контракта: `src/forms/form-theme.css` **самодостаточен** —
+> объявляет свою копию `--chs-*` внутри себя, потому что форма исполняется в
+> опаковом sandbox-iframe и снаружи ничего не наследует. Это требование Промпта 3,
+> не нарушение: значения те же, просто продублированы для изоляции.
+
 ## Структура (репо-маппинг, handoff §2)
 
 ```
@@ -22,42 +27,27 @@ web/
 │   ├── design-system.html        П0 — токены + примитивы
 │   ├── chrome.html               П1 — оргструктура · инбокс · аудит · права · каркас
 │   ├── rights.html               П1R — права и доступ (standalone hero)
-│   └── process-editor.html       П2 — редактор процесса (тема bpmn-js)
+│   ├── process-editor.html       П2 — редактор процесса (тема bpmn-js)
+│   └── forms.html                П3 — формы (sandbox-iframe, dark/light)
 └── src/
     ├── design/
     │   ├── tokens.css            ← П0: КОНТРАКТ --chs-* (источник истины)
     │   └── showcase.{jsx,css}    ← П0: витрина дизайн-системы
     ├── components/               ← П0: доменные примитивы
     │   └── components.{jsx,css}    ExecutorBadge, TaskRow, AuditEvent, MonoId,
-    │                               BudgetMeter, ReservationMeter (две крыши),
-    │                               RoleAssignment, OpChip, DerivedChip, …
-    ├── app-shell/                ← П1: оболочка
-    │   ├── shell.jsx               нав (вкл. «Права и доступ») · топбар · темы
-    │   └── app.css                 стили экранов П1 (+ стили новых примитивов*)
-    ├── screens/                  ← П1: экраны
-    │   ├── screen-org.jsx          оргструктура + карточка исполнителя (read)
-    │   ├── screen-inbox.jsx        инбокс задач
-    │   ├── screen-audit.jsx        таймлайн аудита инстанса (hero)
-    │   └── rights/               ← П1R: «Права и доступ» (hero)
-    │       ├── screen-rights.jsx   in-shell обёртка (роутится из shell)
-    │       ├── ra-shell.jsx        standalone RightsAdminShell (вкладки)
-    │       ├── ra-role-editor.jsx  редактор роли (структурные гранты + scope-решётка)
-    │       ├── ra-criticality.jsx  role_criticality + dual-control + эффективный дифф
-    │       ├── ra-sod.jsx          SoD-конфликты + реестр правил
-    │       ├── ra-grant-trail.jsx  журнал выдачи прав (append-only)
-    │       ├── ra-data.jsx         общие данные/хелперы П1R
-    │       └── rights-admin.css    стили П1R
-    └── canvas/                   ← П2: BPMN Canvas
-        ├── bpmn-theme.css          ТЕМА: override .djs-*/.bpmn-icon-* через --chs-*
-        ├── screen-editor.jsx       макет редактора (харнесс превью)
-        └── editor.css              роль diagram-js.css в макете
+    │                               BudgetMeter, ReservationMeter, RoleAssignment,
+    │                               OpChip, DerivedChip, …
+    ├── app-shell/                ← П1: оболочка (shell.jsx · app.css)
+    ├── screens/                  ← П1: оргструктура · инбокс · аудит
+    │   └── rights/               ← П1R: «Права и доступ» (in-shell + standalone)
+    ├── canvas/                   ← П2: BPMN Canvas
+    │   ├── bpmn-theme.css          ТЕМА: override .djs-*/.bpmn-icon-* через --chs-*
+    │   ├── screen-editor.jsx       макет редактора (харнесс превью)
+    │   └── editor.css              роль diagram-js.css в макете
+    └── forms/                    ← П3: Forms
+        ├── form-theme.css          ТЕМА form-js (.fjs-*), САМОДОСТАТОЧНА для iframe
+        └── form-defs.js            2 эталонные формы + sandbox-скрипт (auto-height)
 ```
-
-> `*` Стили четырёх новых примитивов (`chs-resv`/`chs-asgn`/`chs-op`/`chs-derived`)
-> сейчас лежат в `app-shell/app.css`, а сами компоненты — в `components/components.jsx`.
-> Известный долг: при следующем ре-экспорте перенести их в `components/components.css`,
-> чтобы слой примитивов был самодостаточным. Витрина П0 их не использует, поэтому
-> `design-system.html` рендерится и без `app.css`.
 
 ## Поверхности (5 проектов Claude Design)
 
@@ -67,12 +57,13 @@ web/
 | **П1** | Chrome | `src/app-shell/` + `src/screens/` | ✅ интегрирован (v2, on-model) |
 | **П1R** | Права и доступ *(hero)* | `src/screens/rights/` | ✅ интегрирован |
 | **П2** | BPMN Canvas | `src/canvas/bpmn-theme.css` | ✅ тема интегрирована |
-| **П3** | Forms | `src/forms/form-theme.css` | ⏳ не сгенерирован |
+| **П3** | Forms | `src/forms/form-theme.css` | ✅ интегрирован — **5/5** |
 
 ## Предпросмотр
 
 Открой любой `web/preview/*.html` в браузере (React + Babel-standalone с CDN,
-сборка не нужна). Витрины подключены к каноническим путям `src/`, поэтому
-показывают ровно то, что лежит в репо.
+сборка не нужна). `forms.html` исполняет формы в реальных `sandbox`-iframe.
+Витрины подключены к каноническим путям `src/`, поэтому показывают ровно то,
+что лежит в репо.
 
 > Правило: в `main` не мержим — это гейт фаундера. Интеграция идёт в ветку `dev`.

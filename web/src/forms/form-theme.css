@@ -1,0 +1,556 @@
+/* ============================================================================
+   CHOROS — form-theme.css
+   Тема для форм form-js (.fjs-*), исполняемых в ИЗОЛИРОВАННОМ sandbox-iframe.
+
+   ВНУТРЬ iframe ничего не наследуется снаружи → этот файл САМОДОСТАТОЧЕН:
+   он сам объявляет все нужные --chs-* токены (тёмная :root + светлая [data-theme]),
+   подключает шрифты и переопределяет классы form-js.
+
+   Подключение внутри sandbox-документа:
+     <link rel="stylesheet" href="choros-app/form-theme.css">
+     <html data-theme="dark|light">  ← тема выбирается на корне документа формы
+
+   Все значения — только через --chs-* (chs = CHoroS). Никаких хардкодов.
+   ============================================================================ */
+
+@import url("https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+/* ============================================================================
+   1. ТОКЕНЫ  (самодостаточная копия — форма живёт в опаковом origin)
+   ============================================================================ */
+:root {
+  /* --- сырая нейтральная шкала (графит, cool-neutral, низкая хрома) --- */
+  --chs-neutral-0:    oklch(0.992 0.001 265);
+  --chs-neutral-50:   oklch(0.972 0.002 265);
+  --chs-neutral-100:  oklch(0.944 0.003 265);
+  --chs-neutral-200:  oklch(0.905 0.004 265);
+  --chs-neutral-300:  oklch(0.855 0.005 265);
+  --chs-neutral-400:  oklch(0.715 0.006 265);
+  --chs-neutral-500:  oklch(0.585 0.007 265);
+  --chs-neutral-600:  oklch(0.475 0.007 265);
+  --chs-neutral-700:  oklch(0.375 0.007 265);
+  --chs-neutral-750:  oklch(0.318 0.007 265);
+  --chs-neutral-800:  oklch(0.272 0.006 265);
+  --chs-neutral-850:  oklch(0.228 0.006 265);
+  --chs-neutral-900:  oklch(0.193 0.005 265);
+  --chs-neutral-950:  oklch(0.158 0.005 265);
+  --chs-neutral-1000: oklch(0.125 0.004 265);
+
+  /* --- сырые хроматические тона --- */
+  --chs-blue-400:   oklch(0.700 0.130 250);
+  --chs-blue-500:   oklch(0.620 0.155 250);
+  --chs-blue-600:   oklch(0.540 0.150 250);
+  --chs-amber-400:  oklch(0.800 0.110 70);
+  --chs-amber-500:  oklch(0.760 0.130 70);
+  --chs-violet-400: oklch(0.700 0.150 305);
+  --chs-violet-500: oklch(0.640 0.170 305);
+  --chs-teal-400:   oklch(0.760 0.105 175);
+  --chs-teal-500:   oklch(0.700 0.115 175);
+  --chs-green-500:  oklch(0.700 0.140 150);
+  --chs-red-500:    oklch(0.630 0.190 25);
+
+  /* --- типографика --- */
+  --chs-font-sans: "Golos Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --chs-font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --chs-text-2xs:  10px;
+  --chs-text-xs:   11px;
+  --chs-text-sm:   12px;
+  --chs-text-base: 13px;
+  --chs-text-md:   14px;
+  --chs-text-lg:   16px;
+  --chs-weight-regular:  400;
+  --chs-weight-medium:   500;
+  --chs-weight-semibold: 600;
+  --chs-weight-bold:     700;
+  --chs-tracking-wide:   0.04em;
+  --chs-tracking-mono:   0.01em;
+  --chs-leading-snug:    1.3;
+  --chs-leading-normal:  1.5;
+
+  /* --- отступы (шаг 2/4px, плотно) --- */
+  --chs-space-1:  2px;
+  --chs-space-2:  4px;
+  --chs-space-3:  6px;
+  --chs-space-4:  8px;
+  --chs-space-5:  12px;
+  --chs-space-6:  16px;
+  --chs-space-7:  20px;
+  --chs-space-8:  24px;
+  --chs-space-9:  32px;
+
+  /* --- радиусы (резкие грани) --- */
+  --chs-radius-1:    2px;
+  --chs-radius-2:    4px;
+  --chs-radius-3:    6px;
+  --chs-radius-full: 999px;
+
+  /* --- размеры плотности --- */
+  --chs-control-h:    30px;
+  --chs-control-h-sm: 24px;
+  --chs-row-h-sm:     30px;
+
+  /* --- тени (минимум) --- */
+  --chs-shadow-1: 0 1px 2px rgba(0,0,0,0.40);
+  --chs-shadow-2: 0 6px 20px -6px rgba(0,0,0,0.55);
+
+  /* ===== СЕМАНТИКА — ТЁМНАЯ (по умолчанию) ===== */
+  --chs-color-bg:            var(--chs-neutral-1000);
+  --chs-color-surface:       var(--chs-neutral-950);
+  --chs-color-surface-2:     var(--chs-neutral-900);
+  --chs-color-surface-raised:var(--chs-neutral-850);
+  --chs-color-overlay:       var(--chs-neutral-850);
+
+  --chs-color-border:        var(--chs-neutral-800);
+  --chs-color-border-strong: var(--chs-neutral-700);
+  --chs-color-border-faint:  var(--chs-neutral-900);
+
+  --chs-color-text:          var(--chs-neutral-100);
+  --chs-color-text-muted:    var(--chs-neutral-400);
+  --chs-color-text-faint:    var(--chs-neutral-500);
+  --chs-color-text-inverse:  var(--chs-neutral-1000);
+
+  --chs-color-hover:         color-mix(in oklch, var(--chs-neutral-0) 6%, transparent);
+  --chs-color-active:        color-mix(in oklch, var(--chs-neutral-0) 10%, transparent);
+
+  --chs-color-accent:        var(--chs-blue-500);
+  --chs-color-accent-hover:  var(--chs-blue-400);
+  --chs-color-accent-fg:     var(--chs-neutral-0);
+  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-blue-500) 16%, transparent);
+  --chs-color-accent-border: color-mix(in oklch, var(--chs-blue-500) 45%, transparent);
+  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-blue-400) 60%, transparent);
+
+  /* три исполнителя — сквозной цвето-код */
+  --chs-exec-human:          var(--chs-amber-400);
+  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-amber-500) 15%, transparent);
+  --chs-exec-human-border:   color-mix(in oklch, var(--chs-amber-500) 42%, transparent);
+  --chs-exec-agent:          var(--chs-violet-400);
+  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-violet-500) 17%, transparent);
+  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-violet-500) 45%, transparent);
+  --chs-exec-service:        var(--chs-teal-400);
+  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-teal-500) 15%, transparent);
+  --chs-exec-service-border: color-mix(in oklch, var(--chs-teal-500) 42%, transparent);
+
+  --chs-color-success:       var(--chs-green-500);
+  --chs-color-success-soft:  color-mix(in oklch, var(--chs-green-500) 15%, transparent);
+  --chs-color-warning:       var(--chs-amber-500);
+  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-amber-500) 15%, transparent);
+  --chs-color-danger:        var(--chs-red-500);
+  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-red-500) 16%, transparent);
+  --chs-color-info:          var(--chs-blue-400);
+  --chs-color-neutral-soft:  color-mix(in oklch, var(--chs-neutral-0) 8%, transparent);
+  --chs-color-track:         var(--chs-neutral-800);
+}
+
+/* ===== СЕМАНТИКА — СВЕТЛАЯ ===== */
+[data-theme="light"] {
+  --chs-color-bg:            var(--chs-neutral-100);
+  --chs-color-surface:       var(--chs-neutral-0);
+  --chs-color-surface-2:     var(--chs-neutral-50);
+  --chs-color-surface-raised:var(--chs-neutral-0);
+  --chs-color-overlay:       var(--chs-neutral-0);
+
+  --chs-color-border:        var(--chs-neutral-200);
+  --chs-color-border-strong: var(--chs-neutral-300);
+  --chs-color-border-faint:  var(--chs-neutral-100);
+
+  --chs-color-text:          var(--chs-neutral-900);
+  --chs-color-text-muted:    var(--chs-neutral-600);
+  --chs-color-text-faint:    var(--chs-neutral-500);
+  --chs-color-text-inverse:  var(--chs-neutral-0);
+
+  --chs-color-hover:         color-mix(in oklch, var(--chs-neutral-1000) 5%, transparent);
+  --chs-color-active:        color-mix(in oklch, var(--chs-neutral-1000) 9%, transparent);
+
+  --chs-color-accent:        var(--chs-blue-600);
+  --chs-color-accent-hover:  var(--chs-blue-500);
+  --chs-color-accent-fg:     var(--chs-neutral-0);
+  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-blue-500) 12%, transparent);
+  --chs-color-accent-border: color-mix(in oklch, var(--chs-blue-600) 35%, transparent);
+  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-blue-500) 50%, transparent);
+
+  --chs-exec-human:          oklch(0.620 0.130 65);
+  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-amber-500) 22%, transparent);
+  --chs-exec-human-border:   color-mix(in oklch, oklch(0.620 0.130 65) 40%, transparent);
+  --chs-exec-agent:          var(--chs-violet-500);
+  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-violet-500) 16%, transparent);
+  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-violet-500) 40%, transparent);
+  --chs-exec-service:        oklch(0.560 0.110 175);
+  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-teal-500) 20%, transparent);
+  --chs-exec-service-border: color-mix(in oklch, oklch(0.560 0.110 175) 40%, transparent);
+
+  --chs-color-success:       oklch(0.580 0.140 150);
+  --chs-color-success-soft:  color-mix(in oklch, var(--chs-green-500) 18%, transparent);
+  --chs-color-warning:       oklch(0.620 0.130 65);
+  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-amber-500) 24%, transparent);
+  --chs-color-danger:        oklch(0.560 0.180 25);
+  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-red-500) 16%, transparent);
+  --chs-color-info:          var(--chs-blue-600);
+  --chs-color-neutral-soft:  color-mix(in oklch, var(--chs-neutral-1000) 7%, transparent);
+  --chs-color-track:         var(--chs-neutral-200);
+
+  --chs-shadow-1: 0 1px 2px rgba(16,18,24,0.10);
+  --chs-shadow-2: 0 8px 24px -8px rgba(16,18,24,0.18);
+}
+
+/* ============================================================================
+   2. БАЗА ДОКУМЕНТА ФОРМЫ
+   ============================================================================ */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--chs-color-surface);
+  color: var(--chs-color-text);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  line-height: var(--chs-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: color-mix(in oklch, var(--chs-color-accent) 24%, transparent); }
+
+/* ============================================================================
+   3. FORM-JS  (.fjs-*)  — переопределение под плотный инженерный стиль
+   ============================================================================ */
+.fjs-container {
+  background: var(--chs-color-surface);
+  color: var(--chs-color-text);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+}
+.fjs-form { padding: var(--chs-space-7); }
+
+/* --- раскладка: вертикальный поток + строки/колонки --- */
+.fjs-vertical-layout { display: flex; flex-direction: column; gap: var(--chs-space-6); }
+.fjs-row    { display: flex; gap: var(--chs-space-6); align-items: flex-end; }
+.fjs-column { flex: 1 1 0; min-width: 0; }
+.fjs-column[data-col="2"] { flex: 2 1 0; }
+
+/* --- заголовок формы (text-компонент в роли титула) --- */
+.fjs-form-title {
+  display: flex; align-items: baseline; gap: var(--chs-space-5);
+  padding-bottom: var(--chs-space-5);
+  border-bottom: 1px solid var(--chs-color-border);
+  margin-bottom: var(--chs-space-1);
+}
+.fjs-form-title h1 {
+  margin: 0; font-size: var(--chs-text-lg); font-weight: var(--chs-weight-semibold);
+  letter-spacing: -0.01em; color: var(--chs-color-text);
+}
+.fjs-form-title .fjs-form-title-id {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-sm);
+  letter-spacing: var(--chs-tracking-mono); color: var(--chs-color-text-faint);
+}
+
+/* --- поле: лейбл + контрол + описание --- */
+.fjs-form-field { display: flex; flex-direction: column; gap: var(--chs-space-3); min-width: 0; }
+.fjs-form-field-label {
+  margin: 0;
+  font-size: var(--chs-text-xs);
+  font-weight: var(--chs-weight-medium);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  color: var(--chs-color-text-muted);
+}
+.fjs-asterix { color: var(--chs-color-danger); margin-left: 2px; }
+.fjs-form-field-description {
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-text-faint);
+  margin-top: calc(-1 * var(--chs-space-1));
+}
+
+/* --- текстовые контролы --- */
+.fjs-input,
+.fjs-textarea,
+.fjs-select-display {
+  width: 100%;
+  height: var(--chs-control-h);
+  padding: 0 var(--chs-space-5);
+  background: var(--chs-color-bg);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2);
+  color: var(--chs-color-text);
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  line-height: var(--chs-control-h);
+  transition: border-color 90ms ease, box-shadow 90ms ease;
+}
+.fjs-textarea {
+  height: auto;
+  min-height: 62px;
+  padding: var(--chs-space-4) var(--chs-space-5);
+  line-height: var(--chs-leading-snug);
+  resize: vertical;
+}
+.fjs-input::placeholder,
+.fjs-textarea::placeholder { color: var(--chs-color-text-faint); }
+.fjs-input:focus,
+.fjs-textarea:focus,
+.fjs-select-display:focus,
+.fjs-select-display[data-open="true"] {
+  outline: none;
+  border-color: var(--chs-color-accent);
+  box-shadow: 0 0 0 3px var(--chs-color-accent-soft);
+}
+
+/* машинные числа/деньги — моноширинный (брендовое правило) */
+.fjs-form-field-number .fjs-input,
+.fjs-input--mono {
+  font-family: var(--chs-font-mono);
+  letter-spacing: var(--chs-tracking-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- input-group: контейнер для адорнментов / стрелок --- */
+.fjs-input-group { position: relative; display: flex; align-items: stretch; }
+.fjs-input-group .fjs-input { flex: 1 1 auto; min-width: 0; }
+.fjs-input-adornment {
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 var(--chs-space-5);
+  height: var(--chs-control-h);
+  border: 1px solid var(--chs-color-border-strong);
+  border-left: 0;
+  border-radius: 0 var(--chs-radius-2) var(--chs-radius-2) 0;
+  background: var(--chs-color-surface-2);
+  color: var(--chs-color-text-muted);
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm);
+  white-space: nowrap;
+}
+.fjs-input-group:focus-within .fjs-input { border-right-color: var(--chs-color-accent); }
+.fjs-input-group .fjs-input--adorned { border-radius: var(--chs-radius-2) 0 0 var(--chs-radius-2); }
+
+/* стрелки числового поля */
+.fjs-number-arrow-container {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--chs-color-border-strong);
+  border-left: 0;
+  border-radius: 0 var(--chs-radius-2) var(--chs-radius-2) 0;
+  overflow: hidden;
+}
+.fjs-number-arrow-up,
+.fjs-number-arrow-down {
+  flex: 1; width: 22px; border: 0; cursor: pointer;
+  background: var(--chs-color-surface-2);
+  color: var(--chs-color-text-muted);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8px; line-height: 1;
+}
+.fjs-number-arrow-up { border-bottom: 1px solid var(--chs-color-border); }
+.fjs-number-arrow-up:hover,
+.fjs-number-arrow-down:hover { background: var(--chs-color-overlay); color: var(--chs-color-text); }
+
+/* --- select (кастомный дисплей form-js) --- */
+.fjs-form-field-select { position: relative; }
+.fjs-select-display {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--chs-space-4); cursor: pointer; user-select: none;
+}
+.fjs-select-display[data-empty="true"] .fjs-select-value { color: var(--chs-color-text-faint); }
+.fjs-select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fjs-select-arrow {
+  flex: none; width: 10px; height: 10px; color: var(--chs-color-text-faint);
+  transition: transform 120ms ease;
+}
+.fjs-select-display[data-open="true"] .fjs-select-arrow { transform: rotate(180deg); color: var(--chs-color-accent); }
+.fjs-dropdownlist {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 20;
+  background: var(--chs-color-surface-raised);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2);
+  box-shadow: var(--chs-shadow-2);
+  padding: var(--chs-space-2);
+  max-height: 220px; overflow: auto;
+  display: none;
+}
+.fjs-dropdownlist[data-open="true"] { display: block; }
+.fjs-dropdownlist-item {
+  display: flex; align-items: center; gap: var(--chs-space-4);
+  height: var(--chs-row-h-sm); padding: 0 var(--chs-space-4);
+  border-radius: var(--chs-radius-1); cursor: pointer;
+  font-size: var(--chs-text-base); color: var(--chs-color-text);
+}
+.fjs-dropdownlist-item:hover { background: var(--chs-color-hover); }
+.fjs-dropdownlist-item[aria-selected="true"] { color: var(--chs-color-accent); }
+.fjs-dropdownlist-item[aria-selected="true"]::after {
+  content: ""; margin-left: auto; width: 12px; height: 12px; flex: none;
+  background: currentColor;
+  -webkit-mask: var(--chs-check) center / contain no-repeat;
+  mask: var(--chs-check) center / contain no-repeat;
+}
+.fjs-dropdownlist-item .fjs-dd-mono {
+  margin-left: auto; font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-sm); color: var(--chs-color-text-faint);
+}
+
+/* --- чекбокс / радио (нативные, перерисованы) --- */
+.fjs-checkbox,
+.fjs-radio { accent-color: var(--chs-color-accent); }
+.fjs-checkbox-group,
+.fjs-radio-group { display: flex; flex-direction: column; gap: var(--chs-space-1); }
+.fjs-radio-group[data-inline="true"] { flex-direction: row; gap: var(--chs-space-2); flex-wrap: wrap; }
+
+.fjs-checkbox-label,
+.fjs-radio-label {
+  display: flex; align-items: center; gap: var(--chs-space-4);
+  min-height: var(--chs-control-h-sm);
+  padding: 0 var(--chs-space-3) 0 0;
+  font-size: var(--chs-text-base);
+  color: var(--chs-color-text);
+  cursor: pointer; user-select: none;
+}
+/* инлайн-вариант радио = сегментные ячейки */
+.fjs-radio-group[data-inline="true"] .fjs-radio-label {
+  padding: 0 var(--chs-space-5);
+  height: var(--chs-control-h);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-2);
+  background: var(--chs-color-bg);
+}
+.fjs-radio-group[data-inline="true"] .fjs-radio-label:has(.fjs-radio:checked) {
+  border-color: var(--chs-color-accent);
+  background: var(--chs-color-accent-soft);
+  color: var(--chs-color-text);
+}
+
+.fjs-checkbox,
+.fjs-radio {
+  appearance: none; -webkit-appearance: none;
+  flex: none; width: 16px; height: 16px; margin: 0;
+  background: var(--chs-color-bg);
+  border: 1px solid var(--chs-color-border-strong);
+  cursor: pointer; position: relative;
+}
+.fjs-checkbox { border-radius: var(--chs-radius-1); }
+.fjs-radio    { border-radius: var(--chs-radius-full); }
+.fjs-checkbox:checked,
+.fjs-radio:checked { background: var(--chs-color-accent); border-color: var(--chs-color-accent); }
+.fjs-checkbox:checked::after {
+  content: ""; position: absolute; inset: 0;
+  background: var(--chs-color-accent-fg);
+  -webkit-mask: var(--chs-check) center / 11px 11px no-repeat;
+  mask: var(--chs-check) center / 11px 11px no-repeat;
+}
+.fjs-radio:checked::after {
+  content: ""; position: absolute; inset: 4px;
+  border-radius: var(--chs-radius-full); background: var(--chs-color-accent-fg);
+}
+.fjs-checkbox:focus-visible,
+.fjs-radio:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+
+/* --- кнопки --- */
+.fjs-button-group { display: flex; gap: var(--chs-space-4); }
+.fjs-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--chs-space-3);
+  height: var(--chs-control-h); padding: 0 var(--chs-space-7);
+  border: 1px solid transparent; border-radius: var(--chs-radius-2);
+  font-family: var(--chs-font-sans); font-size: var(--chs-text-base);
+  font-weight: var(--chs-weight-medium); line-height: 1; cursor: pointer; white-space: nowrap;
+  background: var(--chs-color-accent); color: var(--chs-color-accent-fg);
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+}
+.fjs-button:hover { background: var(--chs-color-accent-hover); }
+.fjs-button:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+.fjs-button--secondary {
+  background: var(--chs-color-surface-raised); color: var(--chs-color-text);
+  border-color: var(--chs-color-border-strong);
+}
+.fjs-button--secondary:hover { background: var(--chs-color-overlay); }
+.fjs-button--danger {
+  background: transparent; color: var(--chs-color-danger);
+  border-color: var(--chs-color-danger-soft);
+}
+.fjs-button--danger:hover { background: var(--chs-color-danger-soft); }
+
+/* --- разделитель --- */
+.fjs-separator { border: 0; border-top: 1px solid var(--chs-color-border); margin: var(--chs-space-1) 0; }
+
+/* --- группа полей --- */
+.fjs-form-field-group > .fjs-group {
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  background: var(--chs-color-surface-2);
+  padding: var(--chs-space-6);
+}
+.fjs-group-label {
+  display: block; margin-bottom: var(--chs-space-5);
+  font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-wide); text-transform: uppercase;
+  color: var(--chs-color-text-faint);
+}
+
+/* --- ошибки валидации --- */
+.fjs-form-field-error,
+.fjs-form-field-feel-expression-error {
+  font-size: var(--chs-text-xs); color: var(--chs-color-danger);
+}
+.fjs-has-errors .fjs-input,
+.fjs-has-errors .fjs-textarea,
+.fjs-has-errors .fjs-select-display {
+  border-color: var(--chs-color-danger);
+}
+.fjs-has-errors .fjs-input:focus,
+.fjs-has-errors .fjs-textarea:focus {
+  box-shadow: 0 0 0 3px var(--chs-color-danger-soft);
+}
+
+/* ============================================================================
+   4. READ-ONLY TEXT (.fjs-form-field-text) — сводка «что согласуем»
+   Брендовые помощники, объявлены здесь же ради самодостаточности iframe.
+   ============================================================================ */
+.fjs-text-view { font-size: var(--chs-text-base); color: var(--chs-color-text-muted); }
+.fjs-text-view p { margin: 0 0 var(--chs-space-3); }
+.fjs-text-view strong { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
+
+.fjs-kv {
+  display: grid; grid-template-columns: 116px 1fr;
+  gap: var(--chs-space-2) var(--chs-space-6);
+  align-items: center;
+}
+.fjs-kv dt {
+  font-size: var(--chs-text-xs); letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase; color: var(--chs-color-text-faint);
+}
+.fjs-kv dd { margin: 0; color: var(--chs-color-text); }
+.fjs-mono {
+  font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono);
+  font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "zero" 1;
+}
+.fjs-mono--accent { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
+
+/* сумма-плашка (итого / лимит) */
+.fjs-amount {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--chs-space-5);
+  padding: var(--chs-space-4) var(--chs-space-5);
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-2);
+  background: var(--chs-color-bg);
+}
+.fjs-amount__label {
+  font-size: var(--chs-text-xs); letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase; color: var(--chs-color-text-muted);
+}
+.fjs-amount__val {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-lg);
+  font-weight: var(--chs-weight-medium); letter-spacing: var(--chs-tracking-mono);
+  font-variant-numeric: tabular-nums; color: var(--chs-color-text);
+}
+.fjs-amount--ok    .fjs-amount__val { color: var(--chs-color-text); }
+.fjs-amount--limit { background: var(--chs-color-success-soft); border-color: transparent; }
+.fjs-amount--limit .fjs-amount__val { color: var(--chs-color-success); }
+
+/* брейдж исполнителя (сквозной код Человек/Агент/Сервис) внутри формы */
+.fjs-exec {
+  display: inline-flex; align-items: center; gap: var(--chs-space-3);
+  height: 22px; padding: 0 var(--chs-space-4) 0 var(--chs-space-3);
+  border-radius: var(--chs-radius-2); font-size: var(--chs-text-sm);
+  font-weight: var(--chs-weight-medium); line-height: 1; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.fjs-exec__glyph { width: 9px; height: 9px; flex: none; }
+.fjs-exec--human   { color: var(--chs-exec-human);   background: var(--chs-exec-human-soft);   border-color: var(--chs-exec-human-border); }
+.fjs-exec--agent   { color: var(--chs-exec-agent);   background: var(--chs-exec-agent-soft);   border-color: var(--chs-exec-agent-border); }
+.fjs-exec--service { color: var(--chs-exec-service); background: var(--chs-exec-service-soft); border-color: var(--chs-exec-service-border); }
+
+/* иконка-галочка (mask) — общий ресурс для чекбоксов/списков */
+:root { --chs-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3 8.5l3.2 3L13 5'/%3E%3C/svg%3E"); }
