@@ -4,6 +4,7 @@ import { JobStore } from "./core/jobStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
+import { registerAuthRoutes } from "./http/auth.js";
 
 // ---------------------------------------------------------------------------
 // Internal builder — composes a Router with health + external-worker routes.
@@ -23,6 +24,9 @@ function buildRouter(store: JobStore): Router {
 
   // Register external-worker endpoints
   registerExternalWorkerRoutes(router, store);
+
+  // Register auth endpoints
+  registerAuthRoutes(router, store);
 
   // Register org structure endpoints
   registerOrgRoutes(router, store);

@@ -102,9 +102,19 @@
   font-size: var(--chs-text-xs); font-weight: var(--chs-weight-semibold);
   color: var(--chs-exec-human); font-family: var(--chs-font-sans);
 }
-.chs-nav__userinfo { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.chs-nav__userinfo { min-width: 0; display: flex; flex-direction: column; gap: 1px; flex: 1; }
 .chs-nav__username { font-size: var(--chs-text-sm); font-weight: var(--chs-weight-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chs-nav__userrole { font-size: var(--chs-text-2xs); color: var(--chs-color-text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chs-nav__logout-btn {
+  flex: none; padding: 0 var(--chs-space-3); height: 24px;
+  border: none; background: transparent; color: var(--chs-color-text-muted);
+  font-family: var(--chs-font-sans); font-size: var(--chs-text-2xs);
+  font-weight: var(--chs-weight-medium); cursor: pointer; border-radius: var(--chs-radius-1);
+  transition: background 80ms ease, color 80ms ease;
+}
+.chs-nav__logout-btn:hover {
+  background: var(--chs-color-hover); color: var(--chs-color-text);
+}
 
 /* ---------------- Рабочая область ---------------- */
 .chs-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }

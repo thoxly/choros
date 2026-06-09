@@ -7,6 +7,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Routes, Route } from 'react-router-dom';
 import { Button } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
+import { getDevUser, clearDevUser, setDevUser } from './dev-auth.js';
+import LoginScreen from '../screens/screen-login.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
 import AuditScreen from '../screens/screen-audit.jsx';
@@ -113,6 +115,7 @@ function Topbar({ screen, theme, setTheme }) {
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "dark");
   const [rightsFocus, setRightsFocus] = useState(null);
+  const [devUser, setDevUserState] = useState(() => getDevUser());
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -130,6 +133,21 @@ function AppShell() {
     setRightsFocus(roleId || null);
     navigate('/rights');
   };
+
+  const handleLogin = (user) => {
+    setDevUser(user);
+    setDevUserState(user);
+  };
+
+  const handleLogout = () => {
+    clearDevUser();
+    setDevUserState(null);
+  };
+
+  // Gate: if not logged in, show login screen
+  if (!devUser) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
 
   return (
     <div className="chs-shell">
@@ -160,11 +178,14 @@ function AppShell() {
         </div>
 
         <div className="chs-nav__foot">
-          <div className="chs-nav__userglyph">МС</div>
+          <div className="chs-nav__userglyph">{devUser.name.split(' ').slice(0, 2).map((word) => word[0]).join('')}</div>
           <div className="chs-nav__userinfo">
-            <span className="chs-nav__username">М. Соколов</span>
-            <span className="chs-nav__userrole">Оператор control-plane</span>
+            <span className="chs-nav__username">{devUser.name}</span>
+            <span className="chs-nav__userrole">{devUser.position}</span>
           </div>
+          <button onClick={handleLogout} title="Выйти" className="chs-nav__logout-btn">
+            Выйти
+          </button>
         </div>
       </aside>
 
