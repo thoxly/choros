@@ -5,6 +5,7 @@ import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
 import { registerAuthRoutes } from "./http/auth.js";
+import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 
 // ---------------------------------------------------------------------------
 // Internal builder — composes a Router with health + external-worker routes.
@@ -33,6 +34,9 @@ function buildRouter(store: JobStore): Router {
 
   // Register inbox endpoints
   registerInboxRoutes(router, store);
+
+  // Set static file handler as fallback for everything else
+  router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
 
   return router;
 }

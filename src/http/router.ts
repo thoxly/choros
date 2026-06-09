@@ -139,6 +139,7 @@ function sendErrorEnvelope(
 
 export class Router {
   private readonly routes: RouteEntry[] = [];
+  private fallback: RouteHandler | null = null;
 
   register(method: string, pattern: string, handler: RouteHandler): void {
     const upperMethod = method.toUpperCase();
@@ -156,6 +157,10 @@ export class Router {
     }
 
     this.routes.push({ method: upperMethod, segments, paramIndex, paramName, handler });
+  }
+
+  setFallback(handler: RouteHandler): void {
+    this.fallback = handler;
   }
 
   dispatch(req: IncomingMessage, res: ServerResponse): void {
@@ -214,7 +219,34 @@ export class Router {
       }
     }
 
-    // No route matched → 404
+    // No route matched — try fallback if set
+    if (this.fallback) {
+      let result: void | Promise<void>;
+      try {
+        result = this.fallback(req, res, {});
+      } catch (err) {
+        // Handle sync errors immediately
+        if (err instanceof HttpError) {
+          sendErrorEnvelope(res, err.statusCode, err.code, err.message);
+        } else {
+          sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
+        }
+        return;
+      }
+
+      if (result instanceof Promise) {
+        result.catch((err: unknown) => {
+          if (err instanceof HttpError) {
+            sendErrorEnvelope(res, err.statusCode, err.code, err.message);
+          } else {
+            sendErrorEnvelope(res, 500, "INTERNAL", "internal server error");
+          }
+        });
+      }
+      return;
+    }
+
+    // No route matched and no fallback → 404
     sendErrorEnvelope(res, 404, "NOT_FOUND", "route not found");
   }
 }
