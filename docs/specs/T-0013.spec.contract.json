@@ -1,0 +1,27 @@
+{
+  "task_id": "T-0013",
+  "status": "ready",
+  "summary": "Complete specification of Choros tenant-isolation foundation invariants: scoped schema, FORCE RLS + default-DENY, non-owner app role, SET LOCAL-only tenant context, fail-closed async workers, tenant-scoped audit log, per-request Keycloak iss/aud/tenant-claim validation — 15 CI-checkable acceptance criteria covering all 7 day-1 guards.",
+  "functional": ["FR-1 scoped schema","FR-2 FORCE RLS default-DENY","FR-3 non-owner app role","FR-4 SET LOCAL only","FR-5 fail-closed async","FR-6 tenant-scoped audit","FR-7 per-request iss/aud/tenant validation"],
+  "non_functional": ["NF-1 zero drift one path","NF-2 schema-enforced","NF-3 single audit narrative","NF-4 tenant_id leading index","NF-5 negligible latency"],
+  "out_of_scope": ["running migrations (T-0053)","pooled-mode","billing","Flowable internal tables","Keycloak provisioning","cell registry","152-FZ legal","RBAC E3","jobStore migration"],
+  "acceptance_criteria": [
+    {"id":"AC-1","text":"app role rolbypassrls = f","verifiable_as":"test"},
+    {"id":"AC-2","text":"every tenant table relrowsecurity true","verifiable_as":"test"},
+    {"id":"AC-3","text":"no tenant context -> count 0 (default-DENY)","verifiable_as":"test"},
+    {"id":"AC-4","text":"SET LOCAL transaction-scoped only","verifiable_as":"test"},
+    {"id":"AC-5","text":"tenant_id leading column of every composite index/FK","verifiable_as":"fitness"},
+    {"id":"AC-6","text":"cross-tenant read returns 0","verifiable_as":"test"},
+    {"id":"AC-7","text":"cross-tenant write affects 0 rows","verifiable_as":"test"},
+    {"id":"AC-8","text":"migrations idempotent with >=2 tenants, no merge","verifiable_as":"test"},
+    {"id":"AC-9","text":"audit_log tenant-scoped","verifiable_as":"test"},
+    {"id":"AC-10","text":"async/worker without tenant ctx fail-closed","verifiable_as":"test"},
+    {"id":"AC-11","text":"mismatched tenant claim -> 401/403","verifiable_as":"test"},
+    {"id":"AC-12","text":"wrong iss -> 401","verifiable_as":"test"},
+    {"id":"AC-13","text":"wrong aud -> 401/403","verifiable_as":"test"},
+    {"id":"AC-14","text":"scoped uniqueness (tenant_id,key)","verifiable_as":"test"},
+    {"id":"AC-15","text":"tenant_id NULL -> NOT NULL violation","verifiable_as":"test"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0013-tenant-isolation.spec.md"
+}
