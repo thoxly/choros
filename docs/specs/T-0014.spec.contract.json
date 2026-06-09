@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0014",
+  "status": "ready",
+  "summary": "Defines the three-level resource namespace (Application -> Registry [registry_def] -> Record) that authorization grants will bind to. Pins entity schemas, scoped-uniqueness rules, FK integrity, the grant-binding surface (three reference shapes), system-registry flag, and 17 acceptance criteria. Fully inherits T-0013 tenant-isolation invariants.",
+  "functional": [
+    "Exactly three namespace levels in fixed order: Application -> Registry (registry_def) -> Record; no other shape permitted",
+    "application entity: (tenant_id, slug) scoped-unique per tenant; slug URL-safe; deletion blocked when registries exist",
+    "registry_def entity: (tenant_id, application_id, slug) scoped-unique; carries record_schema jsonb (JSON Schema); FK to application within same tenant; is_system flag",
+    "record entity: identified by (tenant_id, id); data jsonb validated against parent registry_def.record_schema at write time; FK to registry_def within same tenant",
+    "All FKs have tenant_id as leading column; cross-tenant FKs structurally impossible",
+    "Grant-binding surface: three reference shapes — application-level, registry-level, record-level; all UUIDs immutable on rename",
+    "System registries (is_system=true) visible, grantable, protected from tenant-admin deletion"
+  ],
+  "non_functional": [
+    "Full T-0013 tenant isolation on all three tables: tenant_id NOT NULL leading PK, ENABLE+FORCE RLS, default-DENY, withTenant, scoped uniqueness",
+    "record_schema jsonb enables schema evolution without DDL; no separate registry_type discriminator in MVP",
+    "Application/registry/record UUIDs stable across renames — grant bindings survive slug/display_name changes",
+    "tenant_id leading index column on all composite indexes",
+    "No orphaned rows: structural FK enforcement + delete-blocking at API layer"
+  ],
+  "out_of_scope": [
+    "Grant/authority model (grant table, roles, permission resolution) — T-0018",
+    "Opaque object handles — T-0015",
+    "Migrations/DDL/RLS policy bodies — T-0053",
+    "UI / REST API endpoint definitions for CRUD",
+    "Record-level access control enforcement logic — T-0018",
+    "Flowable process integration with registry records — T-0015/Etap 2",
+    "Keycloak/identity provisioning beyond tenant_id JWT claim",
+    "Agent registry product feature schema — Etap 2"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "For every table in {application, registry_def, record}: relrowsecurity AND relforcerowsecurity = true. Zero exceptions.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "INSERT tenant_id=NULL into any of the three tables raises NOT NULL violation.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "No SET LOCAL choros.tenant_id, SELECT count(*) each table as choros_app returns 0 (default-DENY).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Context=tenant_A, SELECT count(*) WHERE tenant_id=tenant_B returns 0 on all three tables.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Two tenants may each have application.slug='procurement'; duplicate within same tenant raises unique violation.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Two applications in one tenant may each have registry_def.slug='requests'; duplicate within (tenant_id,application_id) raises unique violation.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "INSERT registry_def with application_id not in application for same tenant_id raises FK violation.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "INSERT record with registry_id not in registry_def for same tenant_id raises FK violation.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "For every FK on registry_def and record, tenant_id is at position 1. T-0013 FF-5 probe extended to new tables.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "Updating application.slug does not change application.id; registry_def rows remain valid via FK.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "Updating registry_def.slug does not change registry_def.id; record rows remain valid via FK.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "DELETE application with registry_def children raises FK violation or API-rejected; no orphaned rows.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "DELETE registry_def with record children raises FK violation or API-rejected; no orphaned rows.", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "Tenant-admin API DELETE on registry_def is_system=true rejected with explicit error.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "Static schema lint confirms the three grant-binding reference shapes are constructable from column defs — no missing UUID column.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "known_tenant_tables CI fixture from T-0013 FF-2 extended to include application, registry_def, record; CI fails if any lacks FORCE RLS.", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "INSERT record with data non-conformant to parent registry_def.record_schema rejected at app layer; conformant accepted.", "verifiable_as": "test"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0014-registry-model.spec.md"
+}
