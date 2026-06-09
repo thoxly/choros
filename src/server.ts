@@ -2,6 +2,7 @@ import * as http from "node:http";
 import { Router } from "./http/router.js";
 import { JobStore } from "./core/jobStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
+import { registerOrgRoutes } from "./http/org.js";
 
 // ---------------------------------------------------------------------------
 // Internal builder — composes a Router with health + external-worker routes.
@@ -21,6 +22,9 @@ function buildRouter(store: JobStore): Router {
 
   // Register external-worker endpoints
   registerExternalWorkerRoutes(router, store);
+
+  // Register org structure endpoints
+  registerOrgRoutes(router, store);
 
   return router;
 }
