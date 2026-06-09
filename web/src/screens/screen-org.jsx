@@ -9,51 +9,14 @@
      • гранты здесь НЕ редактируются — кнопка «Права и доступ» ведёт в П1R.
    ============================================================================ */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, RoleAssignment, ReservationMeter, BudgetMeter, EXEC_META } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
-
-/* ---- Данные оргструктуры ---- */
-const ORG = [
-  {
-    id: "fin", name: "Финансы", positions: [
-      {
-        id: "fin-ctrl", title: "Контролёр расчётов", people: [
-          { id: "e-kravtsova", type: "human", name: "А. Кравцова" },
-          { id: "a-recon", type: "agent", name: "Сверка-агент", model: "recon-v3" },
-        ],
-      },
-      {
-        id: "fin-appr", title: "Согласующий счетов", people: [
-          { id: "a-invoice", type: "agent", name: "Счёт-агент", model: "invoice-v4" },
-          { id: "e-mironov", type: "human", name: "Д. Миронов" },
-        ],
-      },
-      { id: "fin-cfo", title: "Финансовый директор", people: [{ id: "e-larina", type: "human", name: "Е. Ларина" }] },
-    ],
-  },
-  {
-    id: "cs", name: "Клиентский сервис", positions: [
-      {
-        id: "cs-l1", title: "Линия поддержки L1", people: [
-          { id: "a-triage", type: "agent", name: "Триаж-агент", model: "triage-v2" },
-          { id: "e-orlov", type: "human", name: "К. Орлов" },
-          { id: "e-savina", type: "human", name: "Н. Савина" },
-        ],
-      },
-      { id: "cs-l2", title: "Эскалации L2", people: [{ id: "e-petrov", type: "human", name: "И. Петров" }], vacancy: 1 },
-    ],
-  },
-  {
-    id: "plat", name: "Платформа", positions: [
-      { id: "plat-int", title: "Интеграции", people: [{ id: "e-belov", type: "human", name: "С. Белов" }] },
-      { id: "plat-svc", title: "Сервисные коннекторы", people: [{ id: "s-ledger", type: "service", name: "ledger-sync" }, { id: "s-ocr", type: "service", name: "ocr-gateway" }] },
-    ],
-  },
-];
+import { devHeaders } from '../app-shell/dev-auth.js';
 
 /* ---- Карточки исполнителей ----
-   roles → assignments (read); грант-атомы живут в П1R (screen-rights).        */
+   roles → assignments (read); грант-атомы живут в П1R (screen-rights).
+   NOTE: detail panel remains mock — /api/org exposes only the tree; rich executor detail is a future slice. */
 const EXEC_DETAIL = {
   "a-invoice": {
     type: "agent", name: "Счёт-агент", position: "Согласующий счетов", dept: "Финансы",
@@ -147,12 +110,12 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
   );
 }
 
-function OrgTree({ selectedId, onSelect }) {
+function OrgTree({ org, selectedId, onSelect }) {
   const [open, setOpen] = useState(() => ({ fin: true, "fin-appr": true, cs: true, "cs-l1": true, plat: false }));
   const toggle = (id) => setOpen((o) => ({ ...o, [id]: !o[id] }));
 
   const rows = [];
-  ORG.forEach((dept) => {
+  org.forEach((dept) => {
     const headcount = dept.positions.reduce((n, p) => n + p.people.length, 0);
     rows.push(
       <TreeRow key={dept.id} depth={0} kind="dept" label={dept.name} count={headcount}
@@ -344,11 +307,48 @@ function ExecutorDetail({ data, onOpenRights }) {
 
 function OrgScreen({ onOpenRights }) {
   const [selected, setSelected] = useState("a-invoice");
+  const [departments, setDepartments] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = async () => {
+    setError(null);
+    try {
+      const res = await fetch('/api/org', { headers: devHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setDepartments(data.departments);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
   const data = EXEC_DETAIL[selected] || EXEC_DETAIL["a-invoice"];
+
   return (
     <div className="chs-org">
-      <OrgTree selectedId={selected} onSelect={setSelected} />
-      <ExecutorDetail data={data} onOpenRights={onOpenRights} />
+      {error ? (
+        <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
+          <p style={{ marginBottom: "var(--chs-space-3)" }}>Ошибка загрузки оргструктуры: {error}</p>
+          <Button onClick={load}>Повторить</Button>
+        </div>
+      ) : departments === null ? (
+        <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
+          Загрузка оргструктуры…
+        </div>
+      ) : departments.length === 0 ? (
+        <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
+          Пусто
+        </div>
+      ) : (
+        <>
+          <OrgTree org={departments} selectedId={selected} onSelect={setSelected} />
+          <ExecutorDetail data={data} onOpenRights={onOpenRights} />
+        </>
+      )}
     </div>
   );
 }
