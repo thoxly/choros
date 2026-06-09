@@ -58,14 +58,19 @@ export function createServer(store: JobStore = new JobStore()): http.Server {
  * Named export preserved for backwards-compatibility with health.test.ts, which
  * imports and calls `handleRequest` directly rather than going through createServer.
  *
- * Backed by a module-level default-store router so that GET /health (and the
+ * Backed by a lazy-built default-store router so that GET /health (and the
  * external-worker routes) behave identically to what createServer() would produce.
+ * Lazy evaluation ensures environment variables (e.g., CHOROS_WEB_DIST) set by
+ * test harnesses are respected.
  */
-const _defaultRouter = buildRouter(new JobStore());
+let _defaultRouter: Router | null = null;
 
 export const handleRequest = (
   req: http.IncomingMessage,
   res: http.ServerResponse
 ): void => {
+  if (!_defaultRouter) {
+    _defaultRouter = buildRouter(new JobStore());
+  }
   _defaultRouter.dispatch(req, res);
 };

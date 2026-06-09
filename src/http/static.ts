@@ -78,6 +78,11 @@ export function makeStaticHandler(distDir: string): RouteHandler {
       throw new HttpError(400, "VALIDATION", "invalid URL encoding");
     }
 
+    // GET/HEAD only: reject other methods with 404 before any file logic
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      throw new HttpError(404, "NOT_FOUND", "route not found");
+    }
+
     // API guard: reject unmatched /api/* routes with 404 (don't serve SPA/HTML)
     if (decodedPath.startsWith("/api/")) {
       throw new HttpError(404, "NOT_FOUND", "route not found");
