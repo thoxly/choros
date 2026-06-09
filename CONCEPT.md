@@ -205,6 +205,17 @@ Schema → предпросмотр → версионирование вмес�
 Безопасность: код формы исполняется в **sandbox-iframe**, все данные валидируются
 на бэкенде по схеме (фронт не доверен). Fallback для тривиальных форм — form-js.
 
+> **Модель авторинга, расширяемость, версионность и среды клиента — отдельное
+> архитектурное решение, см.
+> [docs/design/extensibility-and-authoring.md](docs/design/extensibility-and-authoring.md).**
+> Короткой версией: авторинг **двухэтажный** над одним named-binding контрактом —
+> Floor-1 (кнопочный декларативный, zero-LLM, дефолт) → DMN-middle → Floor-2
+> (agent-authored код без палитры-потолка). «Системный config-агент» = сотрудник
+> (§3): авторит только в DRAFT, promote и деструктив — human-gated. Связка
+> процесс↔форма↔схема версионируется когерентно (git-под-капотом, наружу —
+> семантический changelog + one-click promote). Form-js fallback здесь — это
+> Floor-1, поднятый до этажа-дефолта.
+
 ---
 
 ## 8. Стандарты ИИ-агентов
@@ -330,7 +341,10 @@ A2A для внешних агентов · миграция версий про
 - **Граница OSS / Enterprise у Flowable** — external worker есть в open source, но
   лицензию фич проверять до коммита на движок (запас — Operaton / CIB seven).
 - **Миграция инстансов** при изменении процесса — заложить в модель данных с
-  первого дня, потом дорого.
+  первого дня, потом дорого. **Спроектировано:**
+  [docs/design/extensibility-and-authoring.md](docs/design/extensibility-and-authoring.md)
+  §7 — drain-by-default для in-flight, per-record expand/contract object-schema,
+  Camunda-mapping как on-demand эскалация за red-line, откат forward-only.
 - **Продуктовый риск** — не пытаться повторить ELMA целиком. Ядро ценности — агенты
   в оргструктуре, остальное минимально достаточное.
 - **Зрелость форков Camunda 7** (Operaton, CIB seven) — им около года, проверять
