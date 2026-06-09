@@ -4,108 +4,10 @@
    Модель: право = ГРАНТ {роль · ресурс · операция · охват(scope)}.
    ============================================================================ */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, OpChip, DerivedChip } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
-
-const ROLES = [
-  {
-    id: "role-fin-control", name: "Контролёр расчётов", dept: "Финансы", scope: "Финансы",
-    holders: [{ type: "human", name: "А. Кравцова" }],
-    grants: [
-      { res: "Реестр счетов", uri: "mcp://ledger.invoices", ops: ["read", "write"], scope: "Финансы" },
-      { res: "Сверка платежей", uri: "mcp://ledger.recon", ops: ["read", "write"], scope: "Финансы" },
-      { res: "Контрагенты (KYC)", uri: "mcp://counterparty.kyc", ops: ["read", "write"], scope: "Финансы" },
-      { res: "Платёжный шлюз", uri: "mcp://payments.initiate", ops: ["exec"], scope: "≤ ₽250 000" },
-    ],
-    fields: [
-      { name: "Сумма счёта", a: "read" }, { name: "Контрагент", a: "write" },
-      { name: "Реквизиты", a: "write" }, { name: "Лимит платежа", a: "read" },
-    ],
-  },
-  {
-    id: "role-fin-approve-250", name: "Согласование ≤ ₽250 000", dept: "Финансы", scope: "Финансы · Согласование счёта",
-    holders: [{ type: "human", name: "А. Кравцова" }, { type: "human", name: "Е. Ларина" }],
-    grants: [
-      { res: "Реестр счетов", uri: "mcp://ledger.invoices", ops: ["read"], scope: "Финансы · Согласование счёта" },
-      { res: "Платёжный шлюз", uri: "mcp://payments.initiate", ops: ["exec"], scope: "≤ ₽250 000" },
-    ],
-    fields: [
-      { name: "Сумма счёта", a: "read" }, { name: "Решение", a: "write" }, { name: "Возврат средств", a: "hidden" },
-    ],
-  },
-  {
-    id: "role-fin-approve-50", name: "Согласующий счетов ≤ ₽50 000", dept: "Финансы", scope: "Финансы · Согласование счёта",
-    holders: [{ type: "agent", name: "Счёт-агент" }],
-    grants: [
-      { res: "Реестр счетов", uri: "mcp://ledger.invoices", ops: ["read", "write"], scope: "Финансы · Согласование счёта" },
-      { res: "Справочник договоров", uri: "mcp://contracts.lookup", ops: ["read"], scope: "Финансы" },
-      { res: "OCR-распознавание", uri: "mcp://ocr.extract", ops: ["exec"], scope: "Финансы · Согласование счёта" },
-      { res: "Платёжный шлюз", uri: "mcp://payments.initiate", ops: ["exec"], scope: "≤ ₽50 000" },
-    ],
-    fields: [
-      { name: "Сумма счёта", a: "read" }, { name: "Контрагент", a: "read" }, { name: "Договор", a: "read" },
-      { name: "Реквизиты", a: "write" }, { name: "Возврат средств", a: "hidden" },
-    ],
-  },
-  {
-    id: "role-fin-recon", name: "Сверка платежей", dept: "Финансы", scope: "Финансы · Закрытие месяца",
-    holders: [{ type: "agent", name: "Счёт-агент" }, { type: "human", name: "А. Кравцова" }],
-    grants: [
-      { res: "Реестр счетов", uri: "mcp://ledger.invoices", ops: ["read"], scope: "Финансы" },
-      { res: "Сверка платежей", uri: "mcp://ledger.recon", ops: ["read", "write"], scope: "Финансы · Закрытие месяца" },
-      { res: "Шина событий", uri: "mcp://bus.publish", ops: ["exec"], scope: "Финансы" },
-    ],
-    fields: [
-      { name: "Период", a: "read" }, { name: "Расхождение", a: "write" }, { name: "Комментарий", a: "write" },
-    ],
-  },
-  {
-    id: "role-fin-escrcv", name: "Приёмник эскалаций агентов", dept: "Финансы", scope: "Финансы",
-    holders: [{ type: "human", name: "А. Кравцова" }],
-    grants: [
-      { res: "Очередь эскалаций", uri: "mcp://escalations.queue", ops: ["read", "write"], scope: "Финансы" },
-      { res: "Журнал агентов", uri: "mcp://agents.audit", ops: ["read"], scope: "Финансы" },
-    ],
-    fields: [
-      { name: "Инцидент", a: "read" }, { name: "Резолюция", a: "write" },
-    ],
-  },
-  {
-    id: "role-cs-l1", name: "Линия поддержки L1", dept: "Клиентский сервис", scope: "Клиентский сервис · Поддержка",
-    holders: [{ type: "agent", name: "Триаж-агент" }, { type: "human", name: "К. Орлов" }, { type: "human", name: "Н. Савина" }],
-    grants: [
-      { res: "Очередь обращений", uri: "mcp://support.queue", ops: ["read", "write"], scope: "Поддержка" },
-      { res: "База знаний", uri: "mcp://kb.search", ops: ["read"], scope: "—" },
-      { res: "CRM клиента", uri: "mcp://crm.customer", ops: ["read"], scope: "Поддержка" },
-    ],
-    fields: [
-      { name: "Тема", a: "read" }, { name: "Категория", a: "write" }, { name: "Ответ", a: "write" },
-      { name: "Возврат средств", a: "hidden" },
-    ],
-  },
-  {
-    id: "role-cs-l2", name: "Эскалации L2", dept: "Клиентский сервис", scope: "Клиентский сервис · Поддержка",
-    holders: [{ type: "human", name: "И. Петров" }],
-    grants: [
-      { res: "Очередь обращений", uri: "mcp://support.queue", ops: ["read", "write"], scope: "Поддержка" },
-      { res: "CRM клиента", uri: "mcp://crm.customer", ops: ["read", "write"], scope: "Поддержка" },
-      { res: "Возвраты средств", uri: "mcp://payments.refund", ops: ["exec"], scope: "≤ ₽30 000" },
-    ],
-    fields: [
-      { name: "Спор", a: "read" }, { name: "Возврат средств", a: "write" }, { name: "Решение", a: "write" },
-    ],
-  },
-  {
-    id: "role-plat-ledger", name: "Коннектор реестра", dept: "Платформа", scope: "Платформа",
-    holders: [{ type: "service", name: "ledger-sync" }],
-    grants: [
-      { res: "Реестр счетов", uri: "mcp://ledger.invoices", ops: ["read", "write"], scope: "Платформа" },
-      { res: "Шина событий", uri: "mcp://bus.publish", ops: ["exec"], scope: "Платформа" },
-    ],
-    fields: [],
-  },
-];
+import { devHeaders } from '../../app-shell/dev-auth.js';
 
 const ROLE_GROUPS = [
   { dept: "Финансы", ids: ["role-fin-control", "role-fin-approve-250", "role-fin-approve-50", "role-fin-recon", "role-fin-escrcv"] },
@@ -113,7 +15,6 @@ const ROLE_GROUPS = [
   { dept: "Платформа", ids: ["role-plat-ledger"] },
 ];
 
-const byId = (id) => ROLES.find((r) => r.id === id);
 const grantCount = (r) => r.grants.reduce((n, g) => n + g.ops.length, 0);
 const toolName = (uri) => uri.replace(/^mcp:\/\//, "");
 
@@ -135,10 +36,72 @@ function RoleRailItem({ role, active, onSelect }) {
 }
 
 function RightsScreen({ initialRole }) {
-  const [sel, setSel] = useState(() => (byId(initialRole) ? initialRole : ROLES[0].id));
-  // переключение карточки исполнителя → роль
-  React.useEffect(() => { if (byId(initialRole)) setSel(initialRole); }, [initialRole]);
-  const role = byId(sel) || ROLES[0];
+  const [roles, setRoles] = useState(null);
+  const [error, setError] = useState(null);
+  const [sel, setSel] = useState(initialRole || null);
+
+  const load = async () => {
+    try {
+      const res = await fetch('/api/rights', {
+        headers: devHeaders(),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setRoles(data.roles);
+      setError(null);
+    } catch (e) {
+      setError(e.message || 'Failed to load roles');
+      setRoles(null);
+    }
+  };
+
+  // Load roles on mount
+  useEffect(() => {
+    load();
+  }, []);
+
+  // Update selected role when roles load or change
+  useEffect(() => {
+    if (roles) {
+      if (!sel || !roles.find(r => r.id === sel)) {
+        setSel(roles[0]?.id ?? null);
+      }
+    }
+  }, [roles]);
+
+  // Render: error → loading → empty → content
+  if (error) {
+    return (
+      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ marginBottom: '1rem', color: 'var(--chs-color-text-error, #d32f2f)' }}>
+            Ошибка загрузки ролей: {error}
+          </p>
+          <Button onClick={load}>Повторить</Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (roles === null) {
+    return (
+      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+        <p>Загрузка ролей…</p>
+      </div>
+    );
+  }
+
+  if (roles.length === 0) {
+    return (
+      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+        <p>Нет ролей</p>
+      </div>
+    );
+  }
+
+  const role = roles.find(r => r.id === sel) || roles[0];
   const tools = [...new Set(role.grants.map((g) => g.uri))];
 
   return (
@@ -147,16 +110,19 @@ function RightsScreen({ initialRole }) {
       <div className="chs-rights__rail">
         <div className="chs-rights__railhead">
           <span>Роли</span>
-          <span className="chs-rights__railcount">{ROLES.length}</span>
+          <span className="chs-rights__railcount">{roles.length}</span>
         </div>
         <div className="chs-rights__search"><Icon name="search" /><span>Поиск роли</span></div>
         <div className="chs-rights__roles">
           {ROLE_GROUPS.map((grp) => (
             <div className="chs-rights__rgroup" key={grp.dept}>
               <div className="chs-rights__rgrouplabel">{grp.dept}</div>
-              {grp.ids.map((id) => (
-                <RoleRailItem key={id} role={byId(id)} active={sel === id} onSelect={setSel} />
-              ))}
+              {grp.ids.map((id) => {
+                const roleItem = roles.find(r => r.id === id);
+                return roleItem ? (
+                  <RoleRailItem key={id} role={roleItem} active={sel === id} onSelect={setSel} />
+                ) : null;
+              })}
             </div>
           ))}
         </div>
