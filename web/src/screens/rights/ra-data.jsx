@@ -5,7 +5,9 @@
    Всё на токенах --chs-*; форма исполнителя дублирует цвет (круг/ромб/квадрат).
    ============================================================================ */
 
-const { useState: useStateRA, useMemo: useMemoRA } = React;
+import React from 'react';
+import { ExecGlyph, ExecutorBadge, Mono, Button, OpChip } from '../../components/components.jsx';
+import { Icon } from '../../app-shell/icon.jsx';
 
 /* ---------------------------------------------------------------------------
    ОПЕРАЦИИ ГРАНТА — машинные коды
@@ -172,9 +174,6 @@ const TRAIL = [
    ОБЩИЕ ПРИМИТИВЫ РАЗДЕЛА
    =========================================================================== */
 
-/* OpChip — переопределяем локально не нужно, есть глобальный OpChip из DS.
-   Используем существующий window.OpChip. */
-
 /* CriticalityBadge — компактный бейдж критичности + три оси (форма + цвет) */
 function CriticalityBadge({ axes, size = "md" }) {
   const level = critLevel(axes);
@@ -260,8 +259,8 @@ function Segmented({ value, onChange, options }) {
   );
 }
 
-Object.assign(window, {
+export {
   OP_LABEL, OP_RU, ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI,
   PRESETS, CRIT_AXES, critLevel, CRIT_META, axesFromGrants, SOD_RULES, TRAIL,
   CriticalityBadge, AxisList, ScopeToken, ProvenanceTag, SectionHead, Segmented,
-});
+};

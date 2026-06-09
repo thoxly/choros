@@ -1,14 +1,11 @@
 /* ============================================================================
    CHOROS — ra-criticality.jsx
    ЭКРАН 2: КРИТИЧНОСТЬ И DUAL-CONTROL (ядро модели).
-   role_criticality по трём осям. Экран подтверждения изменения прав:
-   если назначение поднимает критичность → «ТРЕБУЕТСЯ ДВА АППРУВЕРА» + эффективный
-   дифф (что реально расширяется, не построчный) + список аппруверов и их статусы.
-   Состояния: ожидает / частично подтверждено / подтверждено / отклонено.
-   Некритичное изменение → один scoped-аппрувер.
    ============================================================================ */
 
-const { useState: useStateCR } = React;
+import React, { useState, useEffect } from 'react';
+import { ExecutorBadge, ExecGlyph, Mono, Button } from '../../components/components.jsx';
+import { CriticalityBadge, AxisList, SectionHead, Segmented, CRIT_AXES, critLevel } from './ra-data.jsx';
 
 /* Два сценария запроса на изменение прав */
 const SCENARIOS = {
@@ -59,7 +56,7 @@ const DIFF_META = {
 };
 
 function CriticalityScreen() {
-  const [scenario, setScenario] = useStateCR("critical");
+  const [scenario, setScenario] = useState("critical");
   const sc = SCENARIOS[scenario];
   const fromLevel = critLevel(sc.fromAxes);
   const toLevel = critLevel(sc.toAxes);
@@ -67,8 +64,8 @@ function CriticalityScreen() {
   const dual = sc.approvers.length > 1;
 
   // статусы аппруверов: pending | approved | rejected
-  const [states, setStates] = useStateCR(() => sc.approvers.map(() => "pending"));
-  React.useEffect(() => { setStates(sc.approvers.map(() => "pending")); }, [scenario]);
+  const [states, setStates] = useState(() => sc.approvers.map(() => "pending"));
+  useEffect(() => { setStates(sc.approvers.map(() => "pending")); }, [scenario]);
 
   const setAt = (i, v) => setStates((s) => s.map((x, j) => (j === i ? v : x)));
   const approved = states.filter((s) => s === "approved").length;
@@ -202,4 +199,4 @@ function CriticalityScreen() {
   );
 }
 
-Object.assign(window, { CriticalityScreen });
+export default CriticalityScreen;

@@ -9,7 +9,9 @@
      • гранты здесь НЕ редактируются — кнопка «Права и доступ» ведёт в П1R.
    ============================================================================ */
 
-const { useState: useStateOrg } = React;
+import React, { useState } from 'react';
+import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, RoleAssignment, ReservationMeter, BudgetMeter, EXEC_META } from '../components/components.jsx';
+import { Icon } from '../app-shell/icon.jsx';
 
 /* ---- Данные оргструктуры ---- */
 const ORG = [
@@ -146,7 +148,7 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
 }
 
 function OrgTree({ selectedId, onSelect }) {
-  const [open, setOpen] = useStateOrg(() => ({ fin: true, "fin-appr": true, cs: true, "cs-l1": true, plat: false }));
+  const [open, setOpen] = useState(() => ({ fin: true, "fin-appr": true, cs: true, "cs-l1": true, plat: false }));
   const toggle = (id) => setOpen((o) => ({ ...o, [id]: !o[id] }));
 
   const rows = [];
@@ -341,7 +343,7 @@ function ExecutorDetail({ data, onOpenRights }) {
 }
 
 function OrgScreen({ onOpenRights }) {
-  const [selected, setSelected] = useStateOrg("a-invoice");
+  const [selected, setSelected] = useState("a-invoice");
   const data = EXEC_DETAIL[selected] || EXEC_DETAIL["a-invoice"];
   return (
     <div className="chs-org">
@@ -351,4 +353,4 @@ function OrgScreen({ onOpenRights }) {
   );
 }
 
-Object.assign(window, { OrgScreen });
+export default OrgScreen;

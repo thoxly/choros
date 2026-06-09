@@ -1,14 +1,15 @@
 /* ============================================================================
    CHOROS — ra-role-editor.jsx
    ЭКРАН 1: РЕДАКТОР РОЛИ.
-   Право = структурный ГРАНТ {ресурс · операция · охват}, НЕ список тумблеров.
-   Прогрессивное раскрытие: ПРОСТОЙ (пресеты) / РАСШИРЕННЫЙ (полный грант).
-   Scope-пикер по закрытой решётке: дерево узлов + теги + числовой интервал;
-   охват можно только СУЖАТЬ относительно потолка роли (монотонное сужение).
-   Блок «опиши роль словами → LLM предлагает гранты → ты подтверждаешь».
    ============================================================================ */
 
-const { useState: useStateRE } = React;
+import React, { useState } from 'react';
+import { Mono, Button, OpChip } from '../../components/components.jsx';
+import { Icon } from '../../app-shell/icon.jsx';
+import {
+  ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI, PRESETS,
+  axesFromGrants, CriticalityBadge, ScopeToken, ProvenanceTag, SectionHead, Segmented,
+} from './ra-data.jsx';
 
 /* потолок охвата роли — выше него выбор заблокирован */
 const CEILING_ID = "fin"; // Финансы
@@ -154,13 +155,13 @@ function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
 
 /* ---------------- Экран ---------------- */
 function RoleEditorScreen() {
-  const [mode, setMode] = useStateRE("advanced");
-  const [grants, setGrants] = useStateRE(INITIAL_GRANTS);
-  const [openIdx, setOpenIdx] = useStateRE(-1);
-  const [presetSel, setPresetSel] = useStateRE(["p-recon"]);
-  const [llmText, setLlmText] = useStateRE("Агент-помощник согласования: читает счёт и договор, распознаёт суммы со сканов, готовит решение до ₽50 000. Платежи не инициирует.");
-  const [proposed, setProposed] = useStateRE([]); // {…grant, status}
-  const [proposedShown, setProposedShown] = useStateRE(false);
+  const [mode, setMode] = useState("advanced");
+  const [grants, setGrants] = useState(INITIAL_GRANTS);
+  const [openIdx, setOpenIdx] = useState(-1);
+  const [presetSel, setPresetSel] = useState(["p-recon"]);
+  const [llmText, setLlmText] = useState("Агент-помощник согласования: читает счёт и договор, распознаёт суммы со сканов, готовит решение до ₽50 000. Платежи не инициирует.");
+  const [proposed, setProposed] = useState([]);
+  const [proposedShown, setProposedShown] = useState(false);
 
   const axes = axesFromGrants(grants);
 
@@ -355,4 +356,4 @@ function RoleEditRail() {
   );
 }
 
-Object.assign(window, { RoleEditorScreen });
+export default RoleEditorScreen;
