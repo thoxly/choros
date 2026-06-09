@@ -29,10 +29,10 @@ describe("Inbox API E2E", () => {
     });
   });
 
-  function makeRequest(method: string, path: string): Promise<{ statusCode: number; body: string }> {
+  function makeRequest(method: string, path: string, headers?: Record<string, string>): Promise<{ statusCode: number; body: string }> {
     return new Promise((resolve, reject) => {
       const url = new URL(baseUrl + path);
-      const req = http.request(url, { method }, (res) => {
+      const req = http.request(url, { method, headers }, (res) => {
         let body = "";
         res.on("data", (chunk: Buffer) => {
           body += chunk.toString();
@@ -179,5 +179,51 @@ describe("Inbox API E2E", () => {
     const t6 = items.find((item) => item.id === "t6") as Record<string, unknown>;
     expect(t6.pool).toBe(true);
     expect(t6.status).toBe("failed");
+  });
+
+  it("T-0112: GET /api/inbox with X-Dev-User header resolves mine flag", async () => {
+    const result = await makeRequest("GET", "/api/inbox", { "x-dev-user": "e-kravtsova" });
+
+    expect(result.statusCode).toBe(200);
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    const items = data.items as Array<Record<string, unknown>>;
+
+    // Find items assigned to А. Кравцова (t2 has execName "А. Кравцова")
+    const t2 = items.find((item) => item.id === "t2") as Record<string, unknown>;
+    expect(t2).toBeDefined();
+    expect(t2.execName).toBe("А. Кравцова");
+    expect(t2.mine).toBe(true);
+
+    // At least one item should have mine === true
+    const mineTasks = items.filter((item) => item.mine === true);
+    expect(mineTasks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("T-0112: GET /api/inbox without X-Dev-User header sets all mine to false", async () => {
+    const result = await makeRequest("GET", "/api/inbox");
+
+    expect(result.statusCode).toBe(200);
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    const items = data.items as Array<Record<string, unknown>>;
+
+    // All items should have mine === false when no header provided
+    for (const item of items) {
+      expect(item.mine).toBe(false);
+    }
+  });
+
+  it("T-0112: GET /api/inbox mine flag only true for human execType", async () => {
+    const result = await makeRequest("GET", "/api/inbox", { "x-dev-user": "e-kravtsova" });
+
+    expect(result.statusCode).toBe(200);
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    const items = data.items as Array<Record<string, unknown>>;
+
+    // Items with mine === true should have execType === "human"
+    for (const item of items) {
+      if (item.mine === true) {
+        expect(item.execType).toBe("human");
+      }
+    }
   });
 });
