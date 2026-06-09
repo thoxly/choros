@@ -6,6 +6,7 @@
  * Zero external dependencies — only node:http types and router.ts.
  */
 import { HttpError, type Router } from "./router.js";
+import { JobStore } from "../core/jobStore.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -131,7 +132,7 @@ function findEmployee(employeeId: string): OrgPerson & { position: string; depar
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerOrgRoutes(router: Router): void {
+export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   // GET /api/org — return full org tree
   router.register("GET", "/api/org", async (_req, res) => {
     const departments = findOrgData();

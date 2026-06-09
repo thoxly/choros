@@ -24,7 +24,7 @@ function buildRouter(store: JobStore): Router {
   registerExternalWorkerRoutes(router, store);
 
   // Register org structure endpoints
-  registerOrgRoutes(router);
+  registerOrgRoutes(router, store);
 
   return router;
 }
