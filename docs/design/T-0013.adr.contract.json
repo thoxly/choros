@@ -1,0 +1,98 @@
+{
+  "task_id": "T-0013",
+  "status": "ready",
+  "decision": "Single-schema, RLS-enforced, schema-structural tenant isolation identical in silo (N=1) and future pooled (N>1) — one isolation code-path, zero drift. Every tenant-owned table carries tenant_id uuid NOT NULL (no default) as leading column of PK/composite indexes/FKs; uniqueness scoped to (tenant_id, business_key). Every tenant table has ENABLE + FORCE ROW LEVEL SECURITY, default-DENY, one permissive policy comparing tenant_id to transaction-local GUC current_setting('choros.tenant_id', true). App connects as non-superuser, non-owner, NOBYPASSRLS role choros_app; separate choros_migrator owns DDL and is never used at runtime. Tenant context set only via SET LOCAL / set_config('choros.tenant_id',$1,true) in an explicit transaction. Async/worker/Flowable-external-worker paths set context explicitly and fail closed if absent. audit_log is an ordinary tenant table. Every inbound request validates JWT signature plus iss/aud/tenant-claim, rejecting mismatches 401/403. Proportional: minimal standard Postgres RLS, no custom engine. Design-only: SQL/migrations/role provisioning land in T-0053.",
+  "rejected_alternatives": [
+    {"option": "Schema-per-tenant / bridge", "why_not": "Catalog bloat in low hundreds, no legal benefit, doubles migration/test/audit surface, second isolation code-path. Rejected source §5."},
+    {"option": "App-layer-only filtering (no RLS)", "why_not": "Isolation becomes discipline not structure (NF-2); one missing WHERE = silent cross-tenant leak; cannot satisfy default-DENY AC-3/6/7."},
+    {"option": "App role with BYPASSRLS / owner / superuser", "why_not": "Exempt from RLS even with FORCE; apparatus becomes decorative. Violates §9 guard 1 / AC-1."},
+    {"option": "Session-level SET instead of SET LOCAL", "why_not": "PgBouncer transaction-pooling reuses connection without resetting session GUCs -> context bleed. Forbidden §9 guard 2."},
+    {"option": "Decorative tenant_id with constant DEFAULT_TENANT", "why_not": "At N=1 global vs scoped uniqueness indistinguishable; later retrofit is multi-year (§4). Defeated by >=2-tenant migration test FF-8/AC-8."},
+    {"option": "SECURITY DEFINER views/functions over tenant tables", "why_not": "Run with definer/owner rights, bypassing caller RLS — back door around default-DENY. Guarded by FF-13."},
+    {"option": "Build pooled-RLS deployment now", "why_not": "Founder decision §5/§11: silo only now; pooled laid into foundation, not implemented until mass cheap SaaS tier. RLS still runs at N=1 for one code-path."}
+  ],
+  "object_model": [
+    {"entity": "TenantTableConvention", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL no default, leading PK column, leading column of every composite index and FK"},
+      {"name": "id", "type": "uuid NOT NULL; PK is (tenant_id, id)"},
+      {"name": "business_key", "type": "UNIQUE scoped as (tenant_id, business_key)"}
+    ]},
+    {"entity": "job", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column RLS key"},
+      {"name": "id", "type": "uuid NOT NULL PK (tenant_id,id)"},
+      {"name": "topic", "type": "text NOT NULL"},
+      {"name": "variables", "type": "jsonb NOT NULL"},
+      {"name": "state", "type": "text NOT NULL CREATED|LOCKED|COMPLETED|FAILED"},
+      {"name": "retries", "type": "integer NOT NULL"},
+      {"name": "lock_owner", "type": "text NULL"},
+      {"name": "lock_expiry", "type": "bigint NULL unix epoch ms"},
+      {"name": "created_at", "type": "bigint NOT NULL unix epoch ms"}
+    ]},
+    {"entity": "audit_log", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column RLS key"},
+      {"name": "id", "type": "uuid NOT NULL PK (tenant_id,id)"},
+      {"name": "actor", "type": "text NOT NULL"},
+      {"name": "action", "type": "text NOT NULL"},
+      {"name": "target", "type": "text NULL"},
+      {"name": "payload", "type": "jsonb NOT NULL"},
+      {"name": "occurred_at", "type": "bigint NOT NULL unix epoch ms"}
+    ]},
+    {"entity": "choros_app", "fields": [
+      {"name": "rolsuper", "type": "false"},
+      {"name": "rolbypassrls", "type": "false"},
+      {"name": "ownership", "type": "not owner of any tenant table"},
+      {"name": "grants", "type": "SELECT,INSERT,UPDATE,DELETE on tenant tables only; no DDL"}
+    ]},
+    {"entity": "choros_migrator", "fields": [
+      {"name": "ownership", "type": "owns tenant tables, holds DDL"},
+      {"name": "runtime_use", "type": "never used at runtime; migrations only"}
+    ]},
+    {"entity": "TenantContextGUC", "fields": [
+      {"name": "name", "type": "choros.tenant_id (supersedes spec placeholder app.current_tenant_id)"},
+      {"name": "read", "type": "current_setting('choros.tenant_id', true) — missing => NULL => default-DENY"},
+      {"name": "set", "type": "set_config('choros.tenant_id',$1,true) or SET LOCAL (transaction-local only)"}
+    ]}
+  ],
+  "contracts": [
+    "withTenant<T>(tenantId, fn): fail-closed: throw MissingTenantContextError if tenantId absent/blank BEFORE any query; else BEGIN; set_config('choros.tenant_id',tenantId,true); run fn; COMMIT (ROLLBACK on error). Only sanctioned path to tenant data.",
+    "Worker/async entrypoints wrapped: handler(msg) -> withTenant(resolveTenant(msg), tx=>...); resolveTenant undefined => withTenant throws => job aborts (no global run).",
+    "Connection contract: app runtime authenticates as choros_app; INVARIANT rolbypassrls=false, rolsuper=false, not owner; no raw tenant-table query outside withTenant.",
+    "RLS policy template per tenant table T: ENABLE + FORCE ROW LEVEL SECURITY; CREATE POLICY tenant_isolation ON T USING (tenant_id = current_setting('choros.tenant_id', true)::uuid) WITH CHECK (same). Default-DENY when GUC unset.",
+    "validateToken(jwt, ctx) on EVERY inbound request after signature verify: iss===expectedRealmIssuerUrl else 401; aud includes expectedClientId else 401/403; tenantClaim===ctx.actingTenantId else 401/403; all local, no network round-trip."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "App role lacks BYPASSRLS and superuser", "ci_check": "Live(T-0053): as choros_app SELECT rolbypassrls,rolsuper FROM pg_roles WHERE rolname=current_user MUST be (f,f). Static-now: grep role/migration SQL forbids BYPASSRLS/SUPERUSER on app role."},
+    {"id": "FF-2", "rule": "FORCE RLS active on every tenant table", "ci_check": "Live(T-0053): pg_class query asserts relrowsecurity AND relforcerowsecurity on all tenant tables; 0 violations."},
+    {"id": "FF-3", "rule": "Default-DENY: no tenant context => 0 rows", "ci_check": "Live(T-0053): as choros_app with no SET LOCAL, count(*) each tenant table MUST be 0."},
+    {"id": "FF-4", "rule": "Tenant context transaction-local only; session SET forbidden", "ci_check": "Static-now: ci/checks/no-session-set.sh greps src/ for non-local SET/set_config(...,false) -> fail. Live(T-0053): after COMMIT, count without new SET LOCAL MUST be 0 (AC-4)."},
+    {"id": "FF-5", "rule": "tenant_id leading column of every composite index and FK", "ci_check": "Live(T-0053) ci/checks/tenant_id_leading.sql: for each multi-col index (pg_index) and FK (pg_constraint contype=f) on a tenant table, assert position-1 column is tenant_id; any violation fail."},
+    {"id": "FF-6", "rule": "Cross-tenant READ from real app role returns 0", "ci_check": "Live(T-0053): seed A and B; as choros_app SET LOCAL choros.tenant_id=A, count WHERE tenant_id=B MUST be 0; unfiltered = A-only."},
+    {"id": "FF-7", "rule": "Cross-tenant WRITE from app role affects 0 rows", "ci_check": "Live(T-0053): context=A, UPDATE/DELETE WHERE tenant_id=B reports 0 rows; verify B unchanged via choros_migrator."},
+    {"id": "FF-8", "rule": "Migrations idempotent with >=2 tenants; scoped uniqueness never degenerates", "ci_check": "Live(T-0053): apply migrations, seed >=2 tenant_id per table, re-run suite; no unique-constraint violation / no cross-tenant merge."},
+    {"id": "FF-9", "rule": "audit_log tenant-scoped, no app-reachable cross-tenant read", "ci_check": "Live(T-0053): context=A count audit_log WHERE tenant_id=B=0, unfiltered A-only. Static-now: grep forbids app-layer audit_log query outside withTenant."},
+    {"id": "FF-10", "rule": "Fail-closed tenant context in async/worker/Flowable paths", "ci_check": "Live(T-0053) integration: scheduler, inbox consumer, Flowable external-worker stub WITHOUT context MUST throw/abort, 0 tenant rows. Static-now lint: every worker entrypoint wrapped in withTenant."},
+    {"id": "FF-11", "rule": "Per-request iss/aud/tenant-claim validation", "ci_check": "Live(T-0053) integration: wrong iss=>401; wrong aud=>401/403; tenant-claim!=acting=>401/403 no data. Static-now: validateToken invoked in request-pipeline middleware, no route bypass."},
+    {"id": "FF-12", "rule": "Scoped uniqueness and tenant_id NOT NULL at DB layer", "ci_check": "Live(T-0053): same business_key across two tenants succeeds, duplicate within one tenant=>unique violation; tenant_id=NULL insert (choros_migrator)=>NOT NULL violation."},
+    {"id": "FF-13", "rule": "No SECURITY DEFINER back door on tenant tables", "ci_check": "Static-now: grep migration SQL forbids SECURITY DEFINER views/functions over tenant tables in app-reachable code. Live(T-0053): pg_proc.prosecdef audit."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "choros_app role + connection contract + FF-1"},
+    {"ac": "AC-2", "covered_by": "convention + policy template + FF-2"},
+    {"ac": "AC-3", "covered_by": "template GUC unset => NULL => deny + FF-3"},
+    {"ac": "AC-4", "covered_by": "GUC + withTenant + FF-4"},
+    {"ac": "AC-5", "covered_by": "convention + FF-5"},
+    {"ac": "AC-6", "covered_by": "USING predicate + FF-6"},
+    {"ac": "AC-7", "covered_by": "WITH CHECK predicate + FF-7"},
+    {"ac": "AC-8", "covered_by": "scoped uniqueness + anti-decorative + FF-8"},
+    {"ac": "AC-9", "covered_by": "audit_log entity + FF-9"},
+    {"ac": "AC-10", "covered_by": "withTenant fail-closed + FF-10"},
+    {"ac": "AC-11", "covered_by": "validateToken tenant claim + FF-11"},
+    {"ac": "AC-12", "covered_by": "validateToken iss + FF-11"},
+    {"ac": "AC-13", "covered_by": "validateToken aud + FF-11"},
+    {"ac": "AC-14", "covered_by": "UNIQUE(tenant_id,business_key) + FF-12"},
+    {"ac": "AC-15", "covered_by": "NOT NULL no default + FF-12"}
+  ],
+  "runtime_target": "Postgres in a silo docker-compose stack (one tenant per instance) on founder home server (/srv/choros, deploy founder-gated); app connects as non-owner/non-superuser/NOBYPASSRLS choros_app, migrations as choros_migrator; RLS runs at N=1 (one code-path, pooled-ready). Infra dependency NOT built here (Postgres service, pg driver, jobStore->Postgres migration, SQL DDL/migrations/RLS bodies, DB-role provisioning) = T-0053 (E0.3). T-0013 design-only. Server/DB host provisioning is founder gate GT-4.",
+  "adr_artifact_path": "docs/design/T-0013-tenant-isolation.adr.md",
+  "escalation": ""
+}
