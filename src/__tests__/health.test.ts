@@ -1,6 +1,21 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import * as http from "node:http";
 import { EventEmitter } from "node:events";
+import os from "node:os";
+import fs from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Pin static dist to an empty temp directory to make 404 assertions deterministic.
+ * This ensures AC-2 (GET /unknown) and AC-3 (POST /health) always 404 regardless
+ * of whether web/dist exists in the worktree. Must set env var BEFORE importing
+ * server.js, since the static handler reads env at router-construction time
+ * (module load of server.js builds _defaultRouter at line 64).
+ */
+const EMPTY_DIST = fs.mkdtempSync(join(os.tmpdir(), "choros-empty-dist-"));
+process.env["CHOROS_WEB_DIST"] = EMPTY_DIST;
+
+// Now import handleRequest after env is set
 import { handleRequest } from "../server.js";
 
 /**
@@ -75,5 +90,9 @@ describe("handleRequest", () => {
     const { res, capture } = makeRes();
     handleRequest(req, res);
     expect(capture.headers["content-type"]).toContain("application/json");
+  });
+
+  afterAll(() => {
+    fs.rmSync(EMPTY_DIST, { recursive: true, force: true });
   });
 });
