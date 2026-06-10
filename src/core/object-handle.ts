@@ -353,13 +353,59 @@ function validateAndReconstructRef(raw: Record<string, unknown>): ResourceRef {
 }
 
 /**
- * Parses a serialized handle string back to an ObjectHandle.
- * Re-brands the parsed object; parseHandle(serializeHandle(h)) deep-equals h.
+ * Validates a raw facet object and reconstructs it from ONLY the known shape
+ * { fields: string[] }. Any extra key, any non-array fields, any non-string
+ * element in the array, or any payload-bearing key throws MalformedHandleError.
  *
- * Fail-closed: the ref is validated and reconstructed from identity-only fields.
- * Any unknown/extra key or payload-carrying key (data/fields/payload/view) on
- * the ref throws MalformedHandleError. A handle produced by
- * serializeHandle(makeHandle(...)) always round-trips correctly (AC-7).
+ * This closes the R-2 opacity bypass: the facet field cannot carry arbitrary
+ * key/value payload through the wire any more than the ref field can.
+ */
+function validateAndReconstructFacet(raw: Record<string, unknown>): Facet {
+  // Only the single key "fields" is allowed on a Facet
+  const knownKeys = new Set(["fields"]);
+  for (const k of Object.keys(raw)) {
+    if (!knownKeys.has(k)) {
+      throw new MalformedHandleError(
+        `malformed handle: facet has unexpected key "${k}"`,
+      );
+    }
+  }
+
+  const fields = raw["fields"];
+  if (!Array.isArray(fields)) {
+    throw new MalformedHandleError(
+      "malformed handle: facet.fields must be an array of strings",
+    );
+  }
+  for (const f of fields) {
+    if (typeof f !== "string") {
+      throw new MalformedHandleError(
+        "malformed handle: facet.fields must contain only strings",
+      );
+    }
+  }
+
+  return { fields: fields as string[] };
+}
+
+/**
+ * Parses a serialized handle string back to an ObjectHandle.
+ *
+ * Generalised invariant: parseHandle MUST be at least as strict as makeHandle.
+ * Any wire string that makeHandle would refuse MUST be refused by parseHandle too.
+ * Implementation: after independently validating the wire JSON structure, the
+ * validated components (ref, tenantId, facet) are fed into makeHandle — the same
+ * invariant core used during construction. This single path guarantees:
+ *   1. facet is validated to exactly { fields: string[] } (R-2, closes payload-in-facet).
+ *   2. cross-tenant ref (ref.tenantId != envelope tenantId) throws CrossTenantHandleError
+ *      (R-3, closes the makeHandle/parseHandle strictness gap).
+ *   3. Any future invariant added to makeHandle is automatically inherited here.
+ *
+ * After reconstruction via makeHandle the derived handleId is compared against the
+ * wire handleId; a mismatch throws MalformedHandleError (tampered/stale id on wire).
+ *
+ * A handle produced by serializeHandle(makeHandle(...)) always round-trips correctly
+ * (AC-7): the same inputs produce the same deterministic handleId.
  */
 export function parseHandle(s: string): ObjectHandle {
   const parsed = JSON.parse(s) as Record<string, unknown>;
@@ -370,31 +416,42 @@ export function parseHandle(s: string): ObjectHandle {
   const facet = parsed["facet"];
 
   if (typeof tenantId !== "string") {
-    throw new Error("parseHandle: missing or invalid tenantId");
+    throw new MalformedHandleError("malformed handle: missing or invalid tenantId");
   }
   if (typeof handleId !== "string") {
-    throw new Error("parseHandle: missing or invalid handleId");
+    throw new MalformedHandleError("malformed handle: missing or invalid handleId");
   }
   if (ref === null || typeof ref !== "object" || Array.isArray(ref)) {
-    throw new Error("parseHandle: missing or invalid ref");
+    throw new MalformedHandleError("malformed handle: missing or invalid ref");
   }
 
-  // Validate and reconstruct ref from identity fields only — fail-closed.
-  // This is the fix for the payload-smuggling vulnerability (R-1).
+  // Step 1: validate ref — fail-closed reconstruction (closes R-1, maintains ref strictness)
   const validatedRef = validateAndReconstructRef(ref as Record<string, unknown>);
 
-  const typedFacet: Facet | undefined =
-    facet !== undefined && facet !== null ? (facet as Facet) : undefined;
+  // Step 2: validate facet — fail-closed reconstruction (closes R-2, facet payload bypass)
+  let validatedFacet: Facet | undefined;
+  if (facet !== undefined && facet !== null) {
+    if (typeof facet !== "object" || Array.isArray(facet)) {
+      throw new MalformedHandleError("malformed handle: facet must be an object");
+    }
+    validatedFacet = validateAndReconstructFacet(facet as Record<string, unknown>);
+  }
 
-  const h = Object.freeze(
-    Object.assign(Object.create(null) as object, {
-      [_RUNTIME_BRAND]: true,
-      tenantId,
-      ref: validatedRef,
-      handleId,
-      ...(typedFacet !== undefined ? { facet: typedFacet } : {}),
-    }),
-  ) as unknown as ObjectHandle;
+  // Step 3: route through makeHandle — enforces ALL construction invariants including
+  // cross-tenant binding (closes R-3). This is the generalised fix: parseHandle cannot
+  // produce a handle that makeHandle would refuse.
+  // makeHandle throws CrossTenantHandleError if ref.tenantId !== tenantId.
+  const h = makeHandle(validatedRef, tenantId, validatedFacet);
+
+  // Step 4: verify the wire handleId matches the deterministic id makeHandle derived.
+  // Honest wire strings always carry the correct id (serializeHandle emits it);
+  // a tampered or stale id on the wire indicates a malformed / replayed handle.
+  if (h.handleId !== handleId) {
+    throw new MalformedHandleError(
+      `malformed handle: wire handleId "${handleId}" does not match derived handleId "${h.handleId}"`,
+    );
+  }
+
   return h;
 }
 

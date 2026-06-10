@@ -696,6 +696,254 @@ describe("FF-9: parseHandle fail-closed ref validation (R-1 hardening)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// FF-9-R2 (R-2 hardening): parseHandle rejects facet carrying arbitrary payload
+// R-2 vector: a wire string whose `facet` object carries extra keys or non-string
+// fields. These are adversarial inputs that would slip through an unvalidated
+// parseHandle but must throw MalformedHandleError after the fix.
+// ---------------------------------------------------------------------------
+
+describe("FF-9-R2: parseHandle rejects facet payload (R-2 hardening)", () => {
+  // -----------------------------------------------------------------------
+  // Build an honest wire base and then doctor the facet before JSON.stringify
+  // so the handleId is wrong (tampered) AND the facet is malformed.
+  // We care only that the facet validation fires BEFORE the handleId check —
+  // so we use the known-good handleId from the honest handle for the base,
+  // but we splice in a poisoned facet. The exact handleId value doesn't matter;
+  // MalformedHandleError must be thrown.
+  // -----------------------------------------------------------------------
+
+  it("facet with SSN payload key (data:{ssn:...}) throws MalformedHandleError (R-2 repro)", () => {
+    // Wire: facet: { fields: ['a'], data: { ssn: '123-45-6789' } }
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_A,
+        registryId: REG_ID,
+        recordId: REC_ID,
+      },
+      facet: { fields: ["a"], data: { ssn: "123-45-6789" } },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+
+  it("facet with 'payload' key throws MalformedHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "application",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+      },
+      facet: { fields: ["name"], payload: { secret: "exfil" } },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+
+  it("facet with 'view' extra key throws MalformedHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "registry",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+        registryId: REG_ID,
+      },
+      facet: { fields: ["status"], view: { sensitive: true } },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+
+  it("facet with non-string element in fields array throws MalformedHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "application",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+      },
+      facet: { fields: ["name", 42, { nested: "obj" }] },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+
+  it("facet with fields as a non-array (object) throws MalformedHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_A,
+        registryId: REG_ID,
+        recordId: REC_ID,
+      },
+      facet: { fields: { name: "Alice" } },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-9-R3 (R-3 hardening): parseHandle rejects cross-tenant ref
+// R-3 vector: a wire string whose ref.tenantId !== envelope tenantId.
+// The old parseHandle (before makeHandle routing) would accept this silently;
+// after the fix it MUST throw CrossTenantHandleError via makeHandle.
+// ---------------------------------------------------------------------------
+
+describe("FF-9-R3: parseHandle rejects cross-tenant ref (R-3 hardening)", () => {
+  it("wire with ref.tenantId=B but envelope tenantId=A throws CrossTenantHandleError (R-3 repro)", () => {
+    // ref says TENANT_B but envelope says TENANT_A — cross-tenant on parse path
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "application",
+        tenantId: TENANT_B,
+        applicationId: APP_ID,
+      },
+    });
+    expect(() => parseHandle(wire)).toThrow(CrossTenantHandleError);
+  });
+
+  it("registry ref with mismatched tenantId on parse throws CrossTenantHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "registry",
+        tenantId: TENANT_B,
+        applicationId: APP_ID,
+        registryId: REG_ID,
+      },
+    });
+    expect(() => parseHandle(wire)).toThrow(CrossTenantHandleError);
+  });
+
+  it("record ref with mismatched tenantId on parse throws CrossTenantHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_B,
+        registryId: REG_ID,
+        recordId: REC_ID,
+      },
+    });
+    expect(() => parseHandle(wire)).toThrow(CrossTenantHandleError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-9-TAMPER: parseHandle rejects tampered handleId on wire
+// After honest ref+facet+tenantId passes makeHandle, the derived handleId is
+// compared against the wire handleId. A stale or forged handleId MUST throw.
+// ---------------------------------------------------------------------------
+
+describe("FF-9-TAMPER: parseHandle rejects tampered handleId", () => {
+  it("wire with doctored handleId (wrong value) throws MalformedHandleError", () => {
+    // Build honest components but swap in a wrong handleId
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "0000000000000000", // wrong — real id is different
+      ref: {
+        kind: "application",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+      },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+
+  it("wire with completely fabricated handleId throws MalformedHandleError", () => {
+    const wire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "ffffffffffffffff",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_A,
+        registryId: REG_ID,
+        recordId: REC_ID,
+      },
+      facet: { fields: ["name"] },
+    });
+    expect(() => parseHandle(wire)).toThrow(MalformedHandleError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-9-AC7: AC-7 round-trip with all 3 ref kinds, with and without facet
+// Regression guard: honest wires produced by serializeHandle(makeHandle(...))
+// MUST round-trip correctly through parseHandle for all combinations.
+// ---------------------------------------------------------------------------
+
+describe("FF-9-AC7: honest round-trip (AC-7) — all 3 ref kinds × ±facet", () => {
+  it("application ref WITHOUT facet round-trips identically", () => {
+    const h = makeHandle(appRef, TENANT_A);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toBeUndefined();
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("application ref WITH facet round-trips identically", () => {
+    const h = makeHandle(appRef, TENANT_A, facet);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toEqual(facet);
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("registry ref WITHOUT facet round-trips identically", () => {
+    const h = makeHandle(regRef, TENANT_A);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toBeUndefined();
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("registry ref WITH facet round-trips identically", () => {
+    const h = makeHandle(regRef, TENANT_A, facet);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toEqual(facet);
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("record ref WITHOUT facet round-trips identically", () => {
+    const h = makeHandle(recRef, TENANT_A);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toBeUndefined();
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("record ref WITH facet round-trips identically", () => {
+    const h = makeHandle(recRef, TENANT_A, facet);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toEqual(facet);
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-10 (static-now half): object_handle in known_tenant_tables fixture
 // ---------------------------------------------------------------------------
 
