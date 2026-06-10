@@ -23,7 +23,8 @@ if [[ ! -f "${COMPOSE}" ]]; then
 fi
 
 # Allowed dev-default tokens (the only credential literals permitted in-repo).
-ALLOWED_DEV_DEFAULTS='choros_dev_pw|choros_app_dev_pw'
+# choros_kc_dev_pw added by T-0054 (KEYCLOAK_ADMIN_PASSWORD dev default).
+ALLOWED_DEV_DEFAULTS='choros_dev_pw|choros_app_dev_pw|choros_kc_dev_pw'
 
 # ---- Check 1: POSTGRES_PASSWORD is env-driven with a dev default -----------
 if grep -Eq 'POSTGRES_PASSWORD:[[:space:]]*\$\{POSTGRES_PASSWORD:-[A-Za-z0-9_]+\}' "${COMPOSE}"; then
