@@ -21,8 +21,12 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { type Job, JobState, type Clock, systemClock } from "../types.js";
-import type { CompleteResult, FailResult } from "../jobStoreTypes.js";
+import type { CompleteResult, FailResult, SweepResult } from "../jobStoreTypes.js";
 import { assertVariableValue } from "../object-handle.js";
+import type { PostgresOutboxStore } from "./pgOutboxStore.js";
+
+// UUID validation regex (образец pgOutboxStore claimBatch — R-3 defence).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------------------
 // Row shape from Postgres (snake_case DB → camelCase TS)
@@ -392,14 +396,23 @@ export class PostgresJobStore {
   }
 
   // ---------------------------------------------------------------------------
-  // Health metrics — queue depth and oldest available lag
+  // Health metrics — queue depth, oldest available lag, workerIncidents (T-0063)
   // ---------------------------------------------------------------------------
   /**
-   * Returns queue depth (CREATED rows with available_at<=now) and
-   * oldestAvailableLagMs. Used by GET /health (ADR §3.7/§4.5).
-   * Returns { depth: 0, oldestAvailableLagMs: null } on connection error.
+   * Returns queue depth (CREATED rows with available_at<=now), oldestAvailableLagMs,
+   * and workerIncidents (count of outbox rows with event_type='worker_lock_expired'
+   * in state 'pending' or 'dead'). Used by GET /health (ADR §3.7/§4.5).
+   *
+   * workerIncidents uses a raw SELECT to choros.outbox on the same pool (option b from
+   * ADR §4.4 — no circular dependency). Wrapped in independent try/catch: error → 0.
+   * getQueueHealth executes WITHOUT per-tenant GUC (like getOutboxHealth — aggregates
+   * all tenants using the migrator pool or a BYPASSRLS-capable pool).
    */
-  async getQueueHealth(): Promise<{ depth: number; oldestAvailableLagMs: number | null }> {
+  async getQueueHealth(): Promise<{
+    depth: number;
+    oldestAvailableLagMs: number | null;
+    workerIncidents: number;
+  }> {
     const now = this.clock.now();
     const { rows } = await this.pool.query<{
       depth: string;
@@ -416,6 +429,159 @@ export class PostgresJobStore {
       rows[0].oldest_available_at != null
         ? now - Number(rows[0].oldest_available_at)
         : null;
-    return { depth, oldestAvailableLagMs };
+
+    // workerIncidents: independent try/catch — error → 0, not 500.
+    let workerIncidents = 0;
+    try {
+      const inc = await this.pool.query<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM choros.outbox
+         WHERE event_type = 'worker_lock_expired'
+           AND state IN ('pending', 'dead')`
+      );
+      workerIncidents = Number(inc.rows[0].cnt);
+    } catch {
+      // degraded — caller will set status='degraded' if needed
+    }
+
+    return { depth, oldestAvailableLagMs, workerIncidents };
+  }
+
+  // ---------------------------------------------------------------------------
+  // getLockedExpiredBuckets — cross-tenant phase-1 aggregate (T-0063)
+  // ---------------------------------------------------------------------------
+  /**
+   * Calls SECURITY DEFINER choros.job_locked_expired_buckets(p_before) to discover
+   * which tenants have expired LOCKED jobs. Executes WITHOUT GUC (образец
+   * pgOutboxStore.pendingBuckets — no RLS filter needed, SECURITY DEFINER bypasses).
+   */
+  async getLockedExpiredBuckets(
+    before: number
+  ): Promise<Array<{ tenantId: string; expiredCount: number }>> {
+    const { rows } = await this.pool.query<{
+      tenant_id: string;
+      expired_count: string;
+    }>(
+      `SELECT tenant_id, expired_count
+       FROM choros.job_locked_expired_buckets($1)`,
+      [before]
+    );
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      expiredCount: Number(r.expired_count),
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // sweepExpiredLocks — active lock-reclaim + incident outbox (T-0063, E1.3)
+  // ---------------------------------------------------------------------------
+  /**
+   * Atomically reclaims LOCKED jobs with lock_expiry <= sweepDurationMs (the clock
+   * snapshot at call time) within a single tenant. For each expired job:
+   *   - retries > 0 → state='CREATED', retries--, available_at=now (immediate retry)
+   *   - retries = 0 → state='FAILED' (terminal)
+   *   - enqueueInTx an outbox incident (event_type='worker_lock_expired') in the SAME
+   *     transaction (atomicity — образец T-0062).
+   *
+   * Idempotency: idempotency_key='lock_expired:'+jobId+':'+lockExpiry combined with
+   * ON CONFLICT DO NOTHING in enqueueInTx guarantees no duplicate incident row on
+   * repeated sweep of the same lock event.
+   *
+   * Concurrent-safe: FOR UPDATE SKIP LOCKED — two parallel sweepers don't double-reclaim.
+   *
+   * R-3: tenantId is UUID-validated before interpolation into SET LOCAL.
+   */
+  async sweepExpiredLocks(
+    outboxStore: PostgresOutboxStore,
+    tenantId: string
+  ): Promise<SweepResult> {
+    if (!UUID_RE.test(tenantId)) {
+      throw new Error(`sweepExpiredLocks: invalid tenantId '${tenantId}'`);
+    }
+
+    // FF-14: use this.clock.now() — not Date.now() directly (Clock injection for tests).
+    const now = this.clock.now();
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+
+      // Atomic CTE: capture expired LOCKED jobs, update state + retries atomically.
+      // FOR UPDATE SKIP LOCKED: concurrent sweepers skip rows already locked by another.
+      // 'now' from this.clock.now() is used as the "before" threshold (FF-14).
+      const { rows } = await client.query<{
+        id: string;
+        topic: string;
+        retries_after: string;
+        lock_owner_before: string | null;
+        lock_expiry_before: string;
+        new_state: string;
+      }>(
+        `WITH expired AS (
+           SELECT id, topic, retries, lock_owner, lock_expiry
+           FROM choros.job
+           WHERE state = 'LOCKED' AND lock_expiry <= $1
+           FOR UPDATE SKIP LOCKED
+         ),
+         updated AS (
+           UPDATE choros.job j
+           SET
+             state        = CASE WHEN (SELECT retries FROM expired WHERE id = j.id) > 0
+                                 THEN 'CREATED' ELSE 'FAILED' END,
+             retries      = GREATEST((SELECT retries FROM expired WHERE id = j.id) - 1, 0),
+             lock_owner   = NULL,
+             lock_expiry  = NULL,
+             available_at = $1
+           FROM expired
+           WHERE j.id = expired.id
+           RETURNING j.id,
+                     j.topic,
+                     j.retries AS retries_after,
+                     (SELECT lock_owner FROM expired WHERE id = j.id) AS lock_owner_before,
+                     (SELECT lock_expiry FROM expired WHERE id = j.id) AS lock_expiry_before,
+                     j.state AS new_state
+         )
+         SELECT * FROM updated`,
+        [now]
+      );
+
+      let reclaimed = 0;
+      let failed = 0;
+      let incidents = 0;
+
+      for (const row of rows) {
+        if (row.new_state === "CREATED") {
+          reclaimed += 1;
+        } else {
+          failed += 1;
+        }
+
+        const idempotencyKey =
+          "lock_expired:" + row.id + ":" + String(row.lock_expiry_before);
+
+        // enqueueInTx runs on the SAME client (same transaction = atomicity).
+        // ON CONFLICT DO NOTHING (via enqueueInTx) handles idempotency.
+        await outboxStore.enqueueInTx(client, {
+          aggregateKind: "job",
+          aggregateId: row.id,
+          eventType: "worker_lock_expired",
+          payload: {
+            topic: row.topic,
+            lockOwner: row.lock_owner_before,
+            lockExpiry: Number(row.lock_expiry_before),
+            retriesLeft: Number(row.retries_after),
+          },
+          idempotencyKey,
+        });
+        incidents += 1;
+      }
+
+      await client.query("COMMIT");
+      return { reclaimed, failed, incidents };
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {/* ignore */});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 }
