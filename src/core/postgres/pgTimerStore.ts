@@ -76,6 +76,14 @@ export class PostgresTimerStore {
   // ---------------------------------------------------------------------------
   // enqueue — INSERT state='pending'; caller must have SET GUC choros.tenant_id.
   // Fail-closed: current_setting('choros.tenant_id', false) raises if GUC absent.
+  //
+  // R-4 note: `tenantId` is accepted as a parameter for interface consistency
+  // with cancel() / done() / fetchAndFire(), but the actual tenant_id stored in
+  // the row is taken from the GUC `current_setting('choros.tenant_id', false)`
+  // (same pattern as pgJobStore.enqueue, ADR §8). The parameter is NOT used in
+  // the SQL.  Callers MUST SET choros.tenant_id before calling enqueue(); the GUC
+  // is the authoritative source of truth, and mismatching tenantId vs. GUC is a
+  // caller bug (fail-closed: INSERT will raise on missing GUC).
   // ---------------------------------------------------------------------------
   async enqueue(
     tenantId: string,
@@ -106,6 +114,11 @@ export class PostgresTimerStore {
   //
   // RLS auto-filters to tenantId via GUC (AC-6, AC-7).
   // FOR UPDATE SKIP LOCKED = concurrent-safe (AC-8, FF-T6).
+  //
+  // R-3 defence: tenantId is UUID-validated before interpolation into SET LOCAL.
+  // pg simple-query protocol allows multi-statement; a non-UUID tenantId could
+  // in theory inject SQL. Even though callers always supply a DB-sourced UUID,
+  // explicit validation makes the method safe in isolation.
   // ---------------------------------------------------------------------------
   async fetchAndFire(
     tenantId: string,
@@ -113,6 +126,9 @@ export class PostgresTimerStore {
     limit: number
   ): Promise<AppTimer[]> {
     if (limit <= 0) return [];
+    // R-3: Validate tenantId is a UUID before interpolating into SET LOCAL.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(tenantId)) throw new Error(`fetchAndFire: invalid tenantId '${tenantId}'`);
     const now = this.clock.now();
 
     const client = await this.pool.connect();
@@ -151,15 +167,21 @@ export class PostgresTimerStore {
   }
 
   // ---------------------------------------------------------------------------
-  // cancel — UPDATE state='cancelled' WHERE id=$id AND state='pending'.
+  // cancel — UPDATE state='cancelled' WHERE tenant_id=$1 AND id=$2 AND state='pending'.
   // Returns true if a row was updated (false = not found or not pending).
-  // Caller must have SET GUC (RLS enforces tenant isolation).
+  //
+  // R-1 fix: explicit `tenant_id = $1` predicate added for defense-in-depth.
+  // RLS via GUC already enforces tenant isolation for choros_app connections,
+  // but without an explicit SQL predicate a BYPASSRLS connection (e.g. migrator
+  // or future ops-catalog admin script) would silently ignore tenantId and could
+  // cancel a timer belonging to any tenant.
   // ---------------------------------------------------------------------------
   async cancel(tenantId: string, timerId: string, reason?: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(
       `UPDATE choros.app_timer
        SET state = 'cancelled', cancel_reason = $3
-       WHERE id = $2
+       WHERE tenant_id = $1
+         AND id = $2
          AND state = 'pending'`,
       [tenantId, timerId, reason ?? null]
     );
@@ -167,15 +189,19 @@ export class PostgresTimerStore {
   }
 
   // ---------------------------------------------------------------------------
-  // done — UPDATE state='done' WHERE id=$id AND state='firing'.
+  // done — UPDATE state='done' WHERE tenant_id=$1 AND id=$2 AND state='firing'.
   // Returns true if a row was updated (false = not found or not firing).
-  // Caller must have SET GUC (RLS enforces tenant isolation).
+  //
+  // R-2 fix: explicit `tenant_id = $1` predicate added for defense-in-depth.
+  // Same rationale as cancel() (R-1): without explicit predicate a BYPASSRLS
+  // connection would ignore tenantId and transition any tenant's timer to 'done'.
   // ---------------------------------------------------------------------------
   async done(tenantId: string, timerId: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(
       `UPDATE choros.app_timer
        SET state = 'done'
-       WHERE id = $2
+       WHERE tenant_id = $1
+         AND id = $2
          AND state = 'firing'`,
       [tenantId, timerId]
     );

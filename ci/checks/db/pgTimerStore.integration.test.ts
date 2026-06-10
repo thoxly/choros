@@ -522,3 +522,128 @@ describe("Migration count: 012 migrations recorded after T-0116", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-5: cancel() integration tests
+// ---------------------------------------------------------------------------
+describe("cancel(): state transitions and false-return on wrong state", () => {
+  it("cancel pending timer → state becomes 'cancelled', returns true", async () => {
+    const now = Date.now();
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now + 60000, state: "pending" });
+
+    await runAsTenant(appPool, TENANT_A, makeFixedClock(now), async (store) => {
+      const result = await store.cancel(TENANT_A, id, "test reason");
+      expect(result, "cancel must return true when row was updated").toBe(true);
+    });
+
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state, cancel_reason FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "timer must be cancelled").toBe("cancelled");
+      expect(rows[0].cancel_reason, "cancel_reason must be stored").toBe("test reason");
+    });
+  });
+
+  it("cancel non-pending timer (state='firing') → returns false, state unchanged", async () => {
+    const now = Date.now();
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now - 1000, state: "firing" });
+
+    await runAsTenant(appPool, TENANT_A, makeFixedClock(now), async (store) => {
+      const result = await store.cancel(TENANT_A, id);
+      expect(result, "cancel of non-pending timer must return false").toBe(false);
+    });
+
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "firing timer must remain firing after failed cancel").toBe("firing");
+    });
+  });
+
+  it("cancel with wrong tenantId (R-1 fix) → returns false, TENANT_A timer unchanged", async () => {
+    const now = Date.now();
+    // Seed a pending timer for TENANT_A
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now + 60000, state: "pending" });
+
+    // TENANT_B context tries to cancel TENANT_A's timer — must get 0 rows
+    await runAsTenant(appPool, TENANT_B, makeFixedClock(now), async (store) => {
+      const result = await store.cancel(TENANT_B, id);
+      expect(result, "cancel with wrong tenant must return false").toBe(false);
+    });
+
+    // TENANT_A's timer must still be pending
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "TENANT_A timer must remain pending after cross-tenant cancel attempt").toBe("pending");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-5: done() integration tests
+// ---------------------------------------------------------------------------
+describe("done(): state transitions and false-return on wrong state", () => {
+  it("done firing timer → state becomes 'done', returns true", async () => {
+    const now = Date.now();
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now - 1000, state: "firing" });
+
+    await runAsTenant(appPool, TENANT_A, makeFixedClock(now), async (store) => {
+      const result = await store.done(TENANT_A, id);
+      expect(result, "done must return true when row was updated").toBe(true);
+    });
+
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "timer must be done").toBe("done");
+    });
+  });
+
+  it("done non-firing timer (state='pending') → returns false, state unchanged", async () => {
+    const now = Date.now();
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now + 60000, state: "pending" });
+
+    await runAsTenant(appPool, TENANT_A, makeFixedClock(now), async (store) => {
+      const result = await store.done(TENANT_A, id);
+      expect(result, "done of non-firing timer must return false").toBe(false);
+    });
+
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "pending timer must remain pending after failed done").toBe("pending");
+    });
+  });
+
+  it("done with wrong tenantId (R-2 fix) → returns false, TENANT_A timer unchanged", async () => {
+    const now = Date.now();
+    // Seed a firing timer for TENANT_A
+    const id = await seedTimer({ tenantId: TENANT_A, dueAt: now - 1000, state: "firing" });
+
+    // TENANT_B context tries to mark TENANT_A's timer done — must get 0 rows
+    await runAsTenant(appPool, TENANT_B, makeFixedClock(now), async (store) => {
+      const result = await store.done(TENANT_B, id);
+      expect(result, "done with wrong tenant must return false").toBe(false);
+    });
+
+    // TENANT_A's timer must still be firing
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT state FROM choros.app_timer WHERE id = $1`,
+        [id]
+      );
+      expect(rows[0].state, "TENANT_A timer must remain firing after cross-tenant done attempt").toBe("firing");
+    });
+  });
+});
