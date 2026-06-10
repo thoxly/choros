@@ -152,7 +152,7 @@ fi
 # Resolve the base ref to diff against. Prefer the dev base the worktree branched
 # from; fall back to the merge-base with origin/dev, else to HEAD (uncommitted).
 BASE_REF=""
-for cand in "99d6612" "origin/dev"; do
+for cand in "dev" "origin/dev"; do  # rebase-reconciliation rt-choros-s8: динамический merge-base вместо захардкоженного base-sha (после ребейза старый sha ловил чужие легитимные изменения)
   if git -C "${PROJECT_ROOT}" rev-parse --verify --quiet "${cand}^{commit}" >/dev/null 2>&1; then
     mb="$(git -C "${PROJECT_ROOT}" merge-base "${cand}" HEAD 2>/dev/null || true)"
     if [[ -n "${mb}" ]]; then
