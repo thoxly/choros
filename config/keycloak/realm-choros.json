@@ -1,9 +1,8 @@
 {
-  "_comment": "DEV ONLY — Choros dev realm fixture. All passwords and secrets below are non-production dev-only defaults. DO NOT reuse in prod (RL-1). Prod realm config is founder-held and injected at deploy (E0.7).",
   "realm": "choros",
+  "displayName": "Choros (DEV ONLY — non-production dev fixture, RL-1)",
   "enabled": true,
   "accessTokenLifespan": 300,
-  "directAccessGrantsEnabled": true,
   "resetPasswordAllowed": true,
   "sslRequired": "none",
   "registrationAllowed": false,
@@ -68,7 +67,36 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "secret": "agent-orchestrator-dev-secret",
-      "attributes": {}
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "agent-recon",
@@ -82,7 +110,36 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "secret": "agent-recon-dev-secret",
-      "attributes": {}
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "agent-invoice",
@@ -96,7 +153,36 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "secret": "agent-invoice-dev-secret",
-      "attributes": {}
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     },
     {
       "clientId": "agent-triage",
@@ -110,7 +196,36 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "secret": "agent-triage-dev-secret",
-      "attributes": {}
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [

@@ -7,16 +7,18 @@ TOKEN_URL="http://localhost:${PORT}/realms/${REALM}/protocol/openid-connect/toke
 
 echo "[FF-3] Requesting human ROPC token for e-kravtsova..."
 
-RESPONSE=$(curl -sf -w "\n%{http_code}" -X POST "$TOKEN_URL" \
+BODY=$(curl -s -w "" -X POST "$TOKEN_URL" \
   -d "grant_type=password" \
   -d "client_id=choros-api" \
   -d "client_secret=choros-api-dev-secret" \
   -d "username=e-kravtsova" \
   -d "password=dev-pw-kravtsova" \
+  -o /tmp/choros_human_resp.json \
+  -w "%{http_code}" \
   2>/dev/null)
 
-HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+HTTP_STATUS="$BODY"
+BODY=$(cat /tmp/choros_human_resp.json 2>/dev/null || echo "")
 
 if [[ "$HTTP_STATUS" != "200" ]]; then
   echo "[FF-3] FAIL: HTTP $HTTP_STATUS" >&2
