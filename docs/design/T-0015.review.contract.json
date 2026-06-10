@@ -1,11 +1,12 @@
 {
   "task_id": "T-0015",
-  "verdict": "changes_requested",
-  "ci_seen": { "green": true, "total": 375, "passed": 375 },
+  "verdict": "approved",
+  "ci_seen": { "green": true, "total": 384, "passed": 384 },
   "findings": [
     {
       "id": "R-1",
-      "severity": "nit",
+      "severity": "resolved",
+      "resolved_by": "298f97e",
       "axis": 6,
       "location": "src/core/object-handle.ts:269-353 (validateAndReconstructRef) + 364-399 (parseHandle)",
       "issue": "RESOLVED-BY-298f97e. Prior finding: parseHandle cast the parsed `ref` wholesale with no shape validation, so a crafted wire string `{...,ref:{kind:'record',...,data:{ssn}}}` deserialized into a validly-BRANDED ObjectHandle whose `ref` carried a record payload, riding past assertVariableValue (which short-circuits ok:true on isObjectHandle BEFORE structural inspection). Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX closes the ref vector: validateAndReconstructRef() switch-on-kind reconstructs ResourceRef from known identity fields only and throws MalformedHandleError on any payload key (data/fields/payload/view/snapshot), unknown/extra key, kind/field-type mismatch, or unknown kind. Adversarial re-probe of the ref surface (non-forbidden record key, recordId-as-object, __proto__ injection, loose kind with record fields, unknown kind) is REJECTED in every case; no prototype pollution. The exact R-1 repro now throws MalformedHandleError. Honest round-trip (AC-7) preserved for all three ref kinds.",
@@ -31,16 +32,17 @@
     },
     {
       "id": "R-4",
-      "severity": "blocking",
+      "severity": "resolved",
+      "resolved_by": "8d498fb",
       "axis": 6,
-      "location": "src/core/object-handle.ts:231-239 (makeHandle brand assignment) + 467-470 (isObjectHandle) + 526 (assertVariableValue brand short-circuit)",
-      "issue": "NEW SIBLING — opacity bypass the parse⊆make generalization does NOT touch, because the vector is the IN-MEMORY brand, not the wire. The runtime brand `_RUNTIME_BRAND` is attached via Object.assign as an ENUMERABLE own symbol property. Enumerable own symbols are copied by object spread and Object.assign. Therefore `{ ...genuineHandle }` produces a NON-frozen object that STILL carries the brand and STILL passes isObjectHandle — i.e. the brand IS forgeable outside the module (not by inventing the symbol, but by copying it off any legitimately-held handle). An attacker/connector then attaches a record payload onto the spread-clone and it rides past the runtime opacity edge. Repro (verified live, rt-choros 2026-06-10): const h=makeHandle({kind:'record',tenantId:T,registryId:T,recordId:T},T); const forged={...h}; forged.data={ssn:'123-45-6789'}; isObjectHandle(forged)===true; assertVariableValue(forged)==={ok:true}; forged now has a .data accessor carrying record content. This directly violates the brand's own documented contract (line 64-66 'un-forgeable outside this module'), FR-2/AC-2 ('the handle exposes no field accessor', 'branded/nominal opaque type'), and the runtime opacity invariant (assertVariableValue line 526 trusts the brand and short-circuits ok:true BEFORE any record-shape inspection — identical short-circuit R-1/R-2 exploited). `{...handle, ...}` is an everyday clone idiom in engine/connector/EL code, so this is not merely theoretical: any spread of a handle yields a payload-capable carrier the variable guard blesses. The existing suite is green only because no test asserts brand non-enumerability / spread-clone rejection.",
-      "suggestion": "Make the brand a NON-ENUMERABLE own property so spread / Object.assign / JSON do not copy it: Object.defineProperty(h, _RUNTIME_BRAND, { value: true, enumerable: false, writable: false, configurable: false }) before freezing (and keep the explicit identity keys enumerable for serializeHandle's field reads, which read named props directly, not via enumeration — round-trip unaffected). Locally-verified: with a non-enumerable brand, `isObjectHandle({...h})===false` and Object.assign({},h) is not a handle, while genuine makeHandle/parseHandle handles still pass. Add an FF-9 test: a spread-clone of a real handle (with a .data attached) must fail isObjectHandle AND assertVariableValue must reject it; genuine handles still pass. Apply in both makeHandle and (inherited via makeHandle) parseHandle."
+      "location": "src/core/object-handle.ts:229-245 (makeHandle: Object.create(null) + named identity props + Object.defineProperty non-enumerable brand) + 472-475 (isObjectHandle) + FF-A2 tests src/__tests__/object-handle.test.ts:888-955",
+      "issue": "RESOLVED-BY-8d498fb. Prior finding: the runtime brand `_RUNTIME_BRAND` was attached via Object.assign as an ENUMERABLE own symbol property, so `{...genuineHandle}` / Object.assign({},h) copied the brand and the clone still passed isObjectHandle while being mutable, letting an attacker attach a record payload that rode past the variable guard. Independent final re-verification (run rt-choros-T0015-final, 2026-06-10) confirms the FIX: makeHandle now builds the handle on Object.create(null) with only the named identity props enumerable, and attaches the brand via Object.defineProperty(h,_RUNTIME_BRAND,{value:true,enumerable:false,writable:false,configurable:false}) before Object.freeze. Adversarial re-probe (live throwaway, not committed): isObjectHandle({...h})===false; isObjectHandle(Object.assign({},h))===false; isObjectHandle(JSON.parse(JSON.stringify(h)))===false (brand is a symbol, never serialized); a spread-clone with .data appended is REJECTED by assertVariableValue ({ok:false}) — caught as a raw record object, not blessed. Regression: genuine makeHandle(...) handles still pass isObjectHandle for all 3 ref kinds ±facet; serializeHandle→parseHandle round-trips identity-equal for all 3 kinds ±facet (the non-enumerable brand did NOT break serialize, which reads named props directly, not via enumeration). The only remaining theoretical vector is deliberate Object.getOwnPropertySymbols + Object.defineProperty forgery by code already running in-process, which is OUT of the operative threat model (enforcement.md §7: drift, not an in-process adversary) — any in-process code can do anything. The everyday-idiom opacity-bypass class (spread / Object.assign / JSON clone) is CLOSED.",
+      "suggestion": "Resolved. Keep the brand non-enumerable/non-writable/non-configurable and the FF-A2 spread/assign/json-clone tests wired into npm run ci so regressions are caught."
     }
   ],
   "acceptance_coverage": [
     { "ac": "AC-1", "covered": true },
-    { "ac": "AC-2", "covered": false, "note": "R-4: brand is enumerable, so a spread-clone forges the brand and can carry a .data accessor — violates 'no payload accessor' / 'un-forgeable nominal brand'. Re-true once the brand is non-enumerable." },
+    { "ac": "AC-2", "covered": true, "note": "R-4 resolved (8d498fb): brand is now non-enumerable, so spread/Object.assign/JSON clone cannot copy it — the nominal-opacity invariant holds in-memory. FF-A2 tests assert spread-clone/Object.assign-clone fail isObjectHandle and a spread+data clone is rejected by assertVariableValue." },
     { "ac": "AC-3", "covered": true },
     { "ac": "AC-4", "covered": true },
     { "ac": "AC-5", "covered": true },
