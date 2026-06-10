@@ -124,6 +124,37 @@ Realm `choros` выдаёт токены со следующими свойст�
 | `dev` (по умолчанию) | Хедер `x-dev-user` активен; JWT не требуется. Все существующие тесты проходят без изменений. |
 | `keycloak` | Хедер `x-dev-user` отключён; сервер ожидает Bearer JWT. Требует живой Keycloak с realm. Реализует T-0060. |
 
+---
+
+## 7. choros-app — переменные окружения (T-0061, E0.6)
+
+choros-app (Node.js) запускается через Docker Compose (`choros` сервис).
+Dev-значения ниже — **DEV ONLY**; prod-значения инжектятся фаундером через `.env.prod` при деплое (E0.7, RL-1/RL-3).
+
+| Переменная | По умолчанию (dev) | Назначение |
+|---|---|---|
+| `DATABASE_URL` | `postgres://choros_migrator:choros_dev_pw@postgres:5432/choros` | Строка подключения (хост = `postgres` внутри compose) |
+| `CHOROS_AUTH_MODE` | `dev` | Режим аутентификации: `dev` = x-dev-user-stub; `keycloak` = Bearer JWT (T-0060) |
+| `KEYCLOAK_PORT` | `8180` | Порт Keycloak HTTP (для внешних клиентов; сервер-сайд KC_ISSUER использует имя сервиса) |
+| `KEYCLOAK_REALM` | `choros` | Имя realm Keycloak |
+| `KC_ISSUER` | `http://keycloak:8180/realms/choros` | OIDC issuer (внутренний хост compose для server-side валидации JWT) |
+| `NODE_ENV` | `development` | Режим Node (`development` / `production`); prod overlay устанавливает `production` |
+| `PORT` | `3000` | Внутренний порт приложения (EXPOSE 3000 в Dockerfile) |
+| `APP_PORT` | `3000` | Хост-порт маппинга (`${APP_PORT:-3000}:3000`); не конфликтует с 55432/8180/9000/8082 |
+
+### Запуск prod-стека
+
+```bash
+# 1. Скопировать .env.prod.example → .env.prod и заполнить все REPLACE_* значения
+cp .env.prod.example .env.prod
+# ... отредактировать .env.prod ...
+
+# 2. Запустить prod-стек
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d
+```
+
+`.env.prod` находится в `.gitignore` — никогда не коммитить (RL-3).
+
 ### Как добавить пользователя или агентский клиент
 
 Все изменения realm — только через `config/keycloak/realm-choros.json` (декларативно):

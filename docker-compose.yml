@@ -121,5 +121,42 @@ services:
       retries: 24
       start_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # choros-app — Node.js silo runtime (T-0061, E0.6)
+  #
+  # Built from the multi-stage Dockerfile in the repo root (web-builder →
+  # app-builder → runtime). All env params have DEV-ONLY defaults; prod values
+  # are injected by founder via .env.prod at deploy (E0.7, RL-1/RL-3).
+  #
+  # Internal KC issuer uses compose service name 'keycloak' (not localhost).
+  # DATABASE_URL internal host = 'postgres' (compose service name).
+  # EXPOSE 3000; host port default APP_PORT=3000 (no collision: 55432/8180/9000/8082).
+  # depends_on: all three substrates must be healthy before choros-app starts.
+  choros:
+    build: .
+    environment:
+      DATABASE_URL:     ${DATABASE_URL:-postgres://choros_migrator:choros_dev_pw@postgres:5432/choros}
+      CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:-dev}
+      KEYCLOAK_PORT:    ${KEYCLOAK_PORT:-8180}
+      KEYCLOAK_REALM:   ${KEYCLOAK_REALM:-choros}
+      KC_ISSUER:        ${KC_ISSUER:-http://keycloak:8180/realms/choros}
+      NODE_ENV:         ${NODE_ENV:-development}
+      PORT:             ${PORT:-3000}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      flowable:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:${PORT:-3000}/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
 volumes:
   choros_pgdata: {}

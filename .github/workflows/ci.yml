@@ -109,3 +109,42 @@ jobs:
       - name: Stop Flowable (leave Postgres intact)
         if: always()
         run: docker compose stop flowable
+
+  # T-0061 · E0.6 · dev full-stack integration (FF-T61-12 / AC-13):
+  # Starts the complete 4-service dev stack (postgres + keycloak + flowable + choros)
+  # and verifies all services are healthy. Requires docker build (may take ~5 min on
+  # first run without layer cache). This job is the integration-honest gate for AC-13.
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - name: Build choros image and start full dev stack (FF-T61-12)
+        run: docker compose up -d --wait
+        timeout-minutes: 10
+      - name: Verify all 4 services are healthy/running (AC-13)
+        run: |
+          set -euo pipefail
+          # Assert each expected service is present and healthy/running
+          for SVC in postgres keycloak flowable choros; do
+            STATUS=$(docker compose ps --format json \
+              | python3 -c "import json,sys; rows=[json.loads(l) for l in sys.stdin if l.strip()]; \
+                svc=[r for r in rows if r.get('Service','').lower() == '${SVC}']; \
+                print(svc[0].get('Health', svc[0].get('State', 'missing')) if svc else 'missing')")
+            echo "${SVC}: ${STATUS}"
+            if [[ "${STATUS}" != "healthy" && "${STATUS}" != "running" ]]; then
+              echo "FAIL: ${SVC} is not healthy/running (status=${STATUS})"
+              docker compose logs "${SVC}" | tail -50
+              exit 1
+            fi
+          done
+          echo "PASS: all 4 services are healthy/running (FF-T61-12)"
+      - name: Stop stack
+        if: always()
+        run: docker compose down
