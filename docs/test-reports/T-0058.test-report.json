@@ -1,0 +1,152 @@
+{
+  "task_id": "T-0058",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 34,
+    "passed": 34,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "FF-FL-1 (live): wait-ready.sh → HTTP 200 after 5s",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "FF-FL-4a/4b (static): pinned image flowable/flowable-rest:7.1.0, no ENTERPRISE/LICENSE env",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "FF-FL-5a/5b (static): exactly 1 postgres: image, SPRING_DATASOURCE_URL → postgres:5432",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "FF-FL-12 (live, smoke.sh step 4): 56 act_* tables in flowable schema, 0 ACT_* in public schema",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "FF-FL-7a/7b/7c (static): all passwords use ${VAR:-dev_default} form; defaults in allowed list",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "FF-FL-6 (static): port 8082 unique to flowable; no collision with 55432/8180/9000/3000",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "FF-FL-2 (live, smoke.sh step 1): POST /repository/deployments → HTTP 201, deployment ID extracted",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "FF-FL-3 (live, smoke.sh step 2): POST /runtime/process-instances → HTTP 201",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "FF-FL-3 (live, smoke.sh step 3): GET /runtime/process-instances?processDefinitionKey=chorosSmoke → total=3 ≥ 1",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "FF-FL-10a/10b (static): BPMN contains flowable:type=\"external\" + flowable:topic=\"smoke-topic\"",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "FF-G3 (live + adversarial probe-c): flowable-bridge-contract.sh exits 0; activates correctly on flowable_probe.ts injection",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "FF-FL-8 (static): flowable.depends_on.postgres.condition = service_healthy (yaml + grep fallback)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "ci-workflow-lint + ci.yml flowable job: postgres+flowable compose up, wait-ready, static, smoke, FF-G3 steps present",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "FF-FL-9a/9b (static): FLOWABLE_ENABLE_HISTORY_CLEANING=true, FLOWABLE_HISTORY_CLEANING_CYCLE=0 0 0 1 1 ?",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "FF-FL-11a/11b (static): postgres + keycloak blocks byte-identical to baseline 2f749a9",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_probes": [
+    {
+      "id": "probe-a",
+      "description": "Deploy malformed BPMN XML (no closing tag, garbage attributes) via REST",
+      "expected": "HTTP != 201 (error response); engine healthcheck remains HTTP 200",
+      "actual": "HTTP 500 with XMLStreamException; engine health HTTP 200 — engine did not crash",
+      "result": "pass"
+    },
+    {
+      "id": "probe-b-no-auth",
+      "description": "REST GET /management/engine with no Authorization header",
+      "expected": "HTTP 401",
+      "actual": "HTTP 401",
+      "result": "pass"
+    },
+    {
+      "id": "probe-b-wrong-creds",
+      "description": "REST GET /management/engine with wrong credentials (admin:wrongpassword123)",
+      "expected": "HTTP 401",
+      "actual": "HTTP 401",
+      "result": "pass"
+    },
+    {
+      "id": "probe-c-activate",
+      "description": "Create src/core/flowable_probe.ts (no assertVariableValue / no resolveFor), run FF-G3",
+      "expected": "FF-G3 activates, exits 1 with 2 violations (FF-G3-1 + FF-G3-2)",
+      "actual": "Exactly that — 2 violation lines, exit 1",
+      "result": "pass"
+    },
+    {
+      "id": "probe-c-clean",
+      "description": "Delete flowable_probe.ts, re-run FF-G3",
+      "expected": "FF-G3 dormant, exits 0",
+      "actual": "Exit 0 — 'no bridge path found'",
+      "result": "pass"
+    },
+    {
+      "id": "probe-d-red",
+      "description": "Remove ?currentSchema=flowable from SPRING_DATASOURCE_URL in docker-compose.yml, run static-checks.sh",
+      "expected": "FF-FL-5c FAIL, static-checks.sh exits 1",
+      "actual": "FAIL FF-FL-5c, exit 1 — check correctly detects missing schema isolation",
+      "result": "pass"
+    },
+    {
+      "id": "probe-d-restore",
+      "description": "Restore docker-compose.yml (put currentSchema=flowable back), re-run static-checks.sh",
+      "expected": "All static checks green, exit 0",
+      "actual": "Exit 0 — all FF-FL-4..11 pass",
+      "result": "pass"
+    }
+  ],
+  "integration_honesty_d056": {
+    "assessment": "HONEST",
+    "detail": "CI flowable job uses 'docker compose up -d postgres flowable' — fresh named volume per CI runner job; 002-flowable-schema.sql runs automatically via docker-entrypoint-initdb.d on first postgres init, creating the flowable schema before Flowable's Liquibase run. wait-ready.sh polls with 120s timeout (5s intervals) — adequate for the 5s observed startup time. No mocking, no stub services, no ambient state dependency. Pattern mirrors db job (D-056 rule: live fitness = fresh infra, not ambient).",
+    "timings_adequate": true,
+    "fresh_volume_on_ci": true,
+    "init_script_002_fires": true
+  },
+  "notes": [
+    "Review nit R-1 (FF-FL-7c unconditional PASS print) was fixed in ee8eb24 — verified: code now tracks ERRORS_BEFORE_7C and guards the PASS line",
+    "Review nit R-2 (FF-FL-8 grep fallback scope) was addressed — yaml path is primary; grep fallback is noted as minor ambiguity acceptable",
+    "Review nit R-3 (FF-FL-5c missing) was implemented in ee8eb24 and confirmed working by probe-d adversarial test",
+    "Live run: probe total counts (total=3) reflect prior runs from reviewer session — this is expected with a non-ephemeral local volume; CI always gets fresh volume"
+  ]
+}
