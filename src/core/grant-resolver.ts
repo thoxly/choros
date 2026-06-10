@@ -50,6 +50,14 @@ import {
   deriveClearance,
   readFacetVersion,
 } from "./data-classification.js";
+import {
+  type EffectSource,
+  type EffectDeclaration,
+  type EffectDeniedView,
+  type EffectVerifyResult,
+  classifyTool,
+  verifyEffectGrants,
+} from "./effect-resource.js";
 
 // ---------------------------------------------------------------------------
 // Injected ports (pure static-now; Postgres + RLS DAO in T-0053)
@@ -92,6 +100,16 @@ export interface ResolverDeps {
    * the reader is not cleared for is masked (never widened) — fail-closed.
    */
   classifications?: ClassificationSource;
+  /**
+   * T-0034 (E4.4) — external-effect resource verification port. OPTIONAL: when
+   * absent the gateway degrades to the pre-T-0034 grant-only enforcement floor
+   * (backward-compatible, NF-2, AC-8). When present, every `invoke`-path call
+   * to `resolveFor` additionally verifies that the subject holds a grant covering
+   * every `EffectDeclaration` in the tool's `declares` blob (step 3.5, ADR §4.4).
+   * Denial reason: `"no_effect_grant"`. Pure static-now; the Postgres DAO lands
+   * in T-0053 (mirrors GrantSource/RecordSource/ClassificationSource).
+   */
+  effects?: EffectSource;
   now?: () => number;
 }
 
@@ -302,6 +320,20 @@ export function visibleFields(
 // ---------------------------------------------------------------------------
 
 /**
+ * Optional invoke context: carries the tool's `declares` blob at invoke-time
+ * (T-0034 step 3.5). This is an ADDITIVE optional 5th argument — callers that
+ * omit it compile unchanged and the effect-verification path is not entered
+ * (backward-compatible, NF-2, AC-8).
+ *
+ * The `declares` field is the raw `mcp_tool.declares` jsonb value (a serialized
+ * `EffectDeclaration[]`). T-0034 ADR §4.4 option 2: accept it as an additive
+ * optional param rather than hoisting a record fetch.
+ */
+export interface InvokeContext {
+  declares: unknown; // raw jsonb from mcp_tool.declares; parsed + validated inside
+}
+
+/**
  * The operation-parameterized decision core (ADR §4.2 / §4.4). `resolveHandle`
  * (op=`read`) and the engine write-path callers (op ∈ create/update/delete/
  * approve/transition) BOTH go through this single core. It is NOT a second
@@ -313,6 +345,10 @@ export function visibleFields(
  *  3. Filter to covering grants: same tenant ∧ operation match ∧ isEffective(now)
  *     ∧ isNarrowerOrEqual(handleScope, grant.scope, ancestry).
  *  4. Fail closed if none ⇒ `no_grant`.
+ * [3.5] When op=`invoke` AND deps.effects is present: parse the tool's `declares`
+ *     blob; deny fail-closed if malformed; run verifyEffectGrants; deny on first
+ *     uncovered declaration (reason: `"no_effect_grant"`). This step is INSIDE
+ *     this single resolveFor body — no second resolver edge (FR-8, AC-13).
  *  5. Fetch the record (ONLY now): null ⇒ `not_found`.
  *  6. Project ONCE and return `{ denied:false, ref, fields }`.
  */
@@ -321,7 +357,8 @@ export async function resolveFor(
   handle: ObjectHandle,
   subject: ResolveSubject,
   op: Operation,
-): Promise<ResolvedView> {
+  invokeCtx?: InvokeContext,
+): Promise<ResolvedView | EffectDeniedView> {
   // 1. Tenant-gate, fail-closed, before any grant/record read (NF-3, AC-2).
   if (handle.tenantId !== subject.tenantId) {
     return { denied: true, reason: "cross_tenant" };
@@ -346,6 +383,53 @@ export async function resolveFor(
   // 4. Fail closed if no covering grant (FR-5, AC-1).
   if (covering.length === 0) {
     return { denied: true, reason: "no_grant" };
+  }
+
+  // [step 3.5] T-0034 — invoke-path effect-grant verification.
+  // Active ONLY when op === "invoke" AND deps.effects is present (NF-2, AC-8).
+  // When EffectSource is absent the entire block is skipped — pre-T-0034 behavior
+  // (grant-only enforcement floor, backward-compatible).
+  if (op === "invoke" && deps.effects !== undefined) {
+    const effectSource = deps.effects;
+    // Parse the declares blob via classifyTool.
+    // classifyTool returns { pure: true } for empty [], { pure: false, effects: [...] }
+    // for valid non-empty declarations, or { pure: false, effects: [] } for malformed.
+    // Malformed input: effects[] is empty but pure is false → indicates parse failure.
+    // We must distinguish "empty declares (pure tool)" from "malformed declares (fail-closed)".
+    // Strategy: classifyTool on the raw blob; if raw is an array and classifyTool says
+    // pure:true → no declarations to check (AC-2); if raw is malformed or unknown-kind →
+    // classifyTool returns pure:false with effects:[] → deny fail-closed (AC-9/FR-6).
+    //
+    // IMPORTANT: do NOT use `?? []` — null is a valid "provided but malformed" value that
+    // must trigger fail-closed (AC-9). `?? []` would make `null` behave as `[]` (pure-compute),
+    // defeating the fail-closed invariant. Use `undefined` as the "not provided" sentinel only.
+    const declares: unknown = invokeCtx !== undefined ? invokeCtx.declares : [];
+    const profile = classifyTool(declares);
+    // Pure-compute tool (empty declares): no effect verification needed — proceed (AC-8 compat, AC-6).
+    // Malformed: profile.pure=false but effects=[] when raw is not a valid array or has bad kinds.
+    // Distinguish: if raw array is empty → profile.pure=true → skip. If raw is non-empty
+    // and valid → profile.pure=false, effects non-empty. If raw is malformed → profile.pure=false, effects=[].
+    let declarations: EffectDeclaration[];
+    if (profile.pure) {
+      // Empty, valid declares → no effect verification needed.
+      declarations = [];
+    } else if (profile.effects.length === 0) {
+      // Malformed input → fail-closed (AC-9, FR-6, NF-3).
+      return { denied: true, reason: "no_effect_grant" };
+    } else {
+      declarations = profile.effects;
+    }
+    // All declarations covered → proceed; any uncovered → deny (AC-5, AC-7, FF-ER5).
+    const result: EffectVerifyResult = verifyEffectGrants(
+      declarations,
+      all, // pass ALL grants so verifyEffectGrants can check effect_resource grants
+      now,
+      effectSource,
+      subject.tenantId,
+    );
+    if (!result.ok) {
+      return { denied: true, reason: "no_effect_grant" };
+    }
   }
 
   // 5. Fetch the record — only after a covering grant is found (AC-9).
@@ -404,7 +488,12 @@ export function makeGrantResolver(deps: ResolverDeps): HandleResolver {
       handle: ObjectHandle,
       subject: ResolveSubject,
     ): Promise<ResolvedView> {
-      return resolveFor(deps, handle, subject, "read");
+      // op="read" never reaches the invoke-path effect check (step 3.5 is
+      // `op === "invoke"` guarded); the return type is always `ResolvedView`.
+      // The cast is safe: EffectDeniedView is structurally { denied: true } and
+      // HandleResolver.resolveHandle is typed Promise<ResolvedView>, so we cast
+      // the widened return down — the read path never emits "no_effect_grant".
+      return resolveFor(deps, handle, subject, "read") as Promise<ResolvedView>;
     },
   };
 }
