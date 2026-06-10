@@ -42,10 +42,11 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
       throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
     }
 
-    const { topic, variables, retries } = body as {
+    const { topic, variables, retries, idempotencyKey } = body as {
       topic: unknown;
       variables: unknown;
       retries: unknown;
+      idempotencyKey: unknown;
     };
 
     if (!isNonEmptyString(topic)) {
@@ -75,10 +76,30 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
       }
     }
 
+    // T-0062: optional idempotencyKey (string ≤255). Additive — existing clients
+    // that omit it keep the current always-new-job behavior.
+    if (idempotencyKey !== undefined && idempotencyKey !== null) {
+      if (typeof idempotencyKey !== "string" || idempotencyKey.length === 0) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "idempotencyKey must be a non-empty string if provided"
+        );
+      }
+      if (idempotencyKey.length > 255) {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          "idempotencyKey must be at most 255 characters"
+        );
+      }
+    }
+
     const job = store.enqueue(
       topic,
       (variables as Record<string, unknown>) ?? {},
-      (retries as number) ?? 0
+      (retries as number) ?? 0,
+      (idempotencyKey as string | undefined) ?? undefined
     );
 
     res.statusCode = 201;

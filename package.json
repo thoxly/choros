@@ -14,7 +14,7 @@
     "fitness:kc": "bash ci/checks/kc/wait-ready.sh && bash ci/checks/kc/realm-ready.sh && bash ci/checks/kc/human-token.sh && bash ci/checks/kc/agent-token.sh && bash ci/checks/kc/jwt-claims.sh",
     "fitness:flowable": "bash ci/checks/flowable/wait-ready.sh && bash ci/checks/flowable/deploy-bpmn.sh && bash ci/checks/flowable/smoke.sh",
     "fitness:flowable:ext": "bash ci/checks/flowable/wait-ready.sh && bash ci/checks/flowable/external-task-smoke.sh",
-    "fitness:db": "vitest run --dir ci/checks/db",
+    "fitness:db": "vitest run --dir ci/checks/db --no-file-parallelism",
     "ci": "tsc --noEmit && eslint src && npm run fitness && vitest run"
   },
   "dependencies": {

@@ -17,3 +17,4 @@ data_classification
 role
 role_assignment
 effect_resource
+outbox

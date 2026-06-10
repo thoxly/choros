@@ -15,6 +15,12 @@ import { assertVariableValue } from "./object-handle.js";
 export class InMemoryJobStore {
   /** Frozen canonical records — external code cannot mutate store state. */
   readonly jobs: Map<string, Job> = new Map();
+  /**
+   * Idempotency index (T-0062): idempotencyKey → jobId. The Postgres store keys
+   * by (tenant_id, key); this single-process test double has no tenant, so the
+   * key alone is the dedup identity (parity for the JobStore type surface).
+   */
+  private readonly byIdempotencyKey: Map<string, string> = new Map();
   private readonly clock: Clock;
 
   constructor(clock?: Clock) {
@@ -25,12 +31,24 @@ export class InMemoryJobStore {
    * Create a new Job with state CREATED and store it.
    * available_at = createdAt (immediately eligible).
    * Returns a defensive copy; the internal record is frozen.
+   *
+   * T-0062 idempotency parity: when `idempotencyKey` is provided and a job with
+   * the same key already exists, returns the EXISTING job (no duplicate, AC-2).
+   * Undefined key = current behavior (always a new job, AC-3).
    */
   enqueue(
     topic: string,
     variables: Record<string, unknown>,
-    retries: number
+    retries: number,
+    idempotencyKey?: string
   ): Job {
+    if (idempotencyKey !== undefined) {
+      const existingId = this.byIdempotencyKey.get(idempotencyKey);
+      if (existingId !== undefined) {
+        const existing = this.jobs.get(existingId);
+        if (existing !== undefined) return { ...existing };
+      }
+    }
     const now = this.clock.now();
     const job: Job = Object.freeze({
       id: randomUUID(),
@@ -44,6 +62,9 @@ export class InMemoryJobStore {
       available_at: now,
     });
     this.jobs.set(job.id, job);
+    if (idempotencyKey !== undefined) {
+      this.byIdempotencyKey.set(idempotencyKey, job.id);
+    }
     return { ...job };
   }
 

@@ -64,28 +64,77 @@ export class PostgresJobStore {
   }
 
   // ---------------------------------------------------------------------------
-  // enqueue
+  // enqueue — idempotency-key extension (T-0062, ADR §4.1)
   // ---------------------------------------------------------------------------
+  /**
+   * 4th optional parameter `idempotencyKey` (≤255). Backward-compatible:
+   *   - undefined → current behavior: unconditional INSERT with a fresh UUID (AC-3).
+   *   - present   → INSERT … ON CONFLICT (tenant_id, idempotency_key)
+   *                   WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING …;
+   *                 on empty RETURNING (conflict) → SELECT-back the existing row.
+   *                 Returns the EXISTING job, no duplicate (AC-1/AC-2).
+   *
+   * The conflict target carries the partial-index predicate
+   * (WHERE idempotency_key IS NOT NULL) — mandatory to match
+   * job_idempotency_key_uq (migration 023).
+   *
+   * RLS: tenant_id is taken from the GUC (current behavior); the SELECT-back adds
+   * an explicit `tenant_id = current_setting(...)` predicate as defense-in-depth.
+   */
   async enqueue(
     topic: string,
     variables: Record<string, unknown>,
-    retries: number
+    retries: number,
+    idempotencyKey?: string
   ): Promise<Job> {
     const id = randomUUID();
     const now = this.clock.now();
-    const { rows } = await this.pool.query<JobRow>(
+
+    if (idempotencyKey === undefined) {
+      const { rows } = await this.pool.query<JobRow>(
+        `INSERT INTO choros.job
+           (tenant_id, id, topic, variables, state, retries,
+            lock_owner, lock_expiry, created_at, available_at, idempotency_key)
+         VALUES
+           (current_setting('choros.tenant_id', false)::uuid,
+            $1, $2, $3::jsonb, 'CREATED', $4,
+            NULL, NULL, $5, $5, NULL)
+         RETURNING id, topic, variables, state, retries,
+                   lock_owner, lock_expiry, created_at, available_at`,
+        [id, topic, JSON.stringify(variables), retries, now]
+      );
+      return rowToJob(rows[0]);
+    }
+
+    // Idempotent path: INSERT … ON CONFLICT DO NOTHING, then SELECT-back on conflict.
+    const ins = await this.pool.query<JobRow>(
       `INSERT INTO choros.job
          (tenant_id, id, topic, variables, state, retries,
-          lock_owner, lock_expiry, created_at, available_at)
+          lock_owner, lock_expiry, created_at, available_at, idempotency_key)
        VALUES
          (current_setting('choros.tenant_id', false)::uuid,
           $1, $2, $3::jsonb, 'CREATED', $4,
-          NULL, NULL, $5, $5)
+          NULL, NULL, $5, $5, $6)
+       ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+       DO NOTHING
        RETURNING id, topic, variables, state, retries,
                  lock_owner, lock_expiry, created_at, available_at`,
-      [id, topic, JSON.stringify(variables), retries, now]
+      [id, topic, JSON.stringify(variables), retries, now, idempotencyKey]
     );
-    return rowToJob(rows[0]);
+    if (ins.rows.length > 0) {
+      return rowToJob(ins.rows[0]);
+    }
+
+    // Conflict → the row already exists for this (tenant, key). Return it as-is.
+    const sel = await this.pool.query<JobRow>(
+      `SELECT id, topic, variables, state, retries,
+              lock_owner, lock_expiry, created_at, available_at
+       FROM choros.job
+       WHERE tenant_id = current_setting('choros.tenant_id', false)::uuid
+         AND idempotency_key = $1`,
+      [idempotencyKey]
+    );
+    return rowToJob(sel.rows[0]);
   }
 
   // ---------------------------------------------------------------------------

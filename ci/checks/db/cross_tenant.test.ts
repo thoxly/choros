@@ -278,6 +278,24 @@ async function seedAppTimer(c: pg.Client, tenantId: string): Promise<string> {
 }
 
 /**
+ * Seed one row into choros.outbox (T-0062). Minimal valid row: state defaults to
+ * 'pending', idempotency_key is NOT NULL (unique per row to avoid any accidental
+ * collision), created_at/available_at = 0. aggregate_id is opaque (no FK).
+ */
+async function seedOutboxRow(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.outbox
+       (tenant_id, id, aggregate_kind, aggregate_id, event_type, payload,
+        idempotency_key, created_at, available_at)
+     VALUES ($1, $2, 'ct-test', $3, 'ct-event', '{}'::jsonb, $4, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, uuid(), `ct-outbox-${id.slice(0, 8)}`],
+  );
+  return id;
+}
+
+/**
  * Seed one row into choros.data_classification (T-0033). PK is
  * (tenant_id, resource_type, facet_field, facet_schema_version); a per-tenant
  * unique facet_field keeps both tenants' seeds independent under their own RLS.
@@ -445,6 +463,8 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     case 'effect_resource':
       await seedEffectResource(c, tenantId);
+    case 'outbox':
+      await seedOutboxRow(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
