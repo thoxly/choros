@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0016",
+  "status": "pr_open",
+  "branch": "task/T-0016-audit-floor",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": false,
+    "fitness": false
+  },
+  "files_changed": [
+    "docs/specs/T-0016-audit-floor.spec.md",
+    "docs/specs/T-0016.spec.contract.json",
+    "docs/design/T-0016-audit-floor.adr.md",
+    "docs/design/T-0016.adr.contract.json",
+    "docs/design/T-0016.review.contract.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN-ONLY architecture task: diff is docs/ only, zero source files (audit DDL/triggers/codec/verifier deferred to T-0053). ci_local build/lint/types=true mean UNAFFECTED; tests/fitness=false (fitness functions specified in ADR, activate at T-0053 impl).",
+    "REVIEW approved with 4 non-blocking nits (R-1..R-4) — ALL resolved in a DESIGN-FIX commit (retry semantics, head-advance trigger/prose reconciled to seq-only, audit_head DELETE upgraded to MUST dual-mechanism, T-0016 supersedes T-0013 §3.3 audit_log). Contract re-validated 0 errors.",
+    "No remote PR: local branch only; founder reviews via dev. PAT (GT-4) not in env."
+  ],
+  "blocked_reason": "",
+  "friction_events": [
+    "FE-2026-W24-0006"
+  ]
+}
