@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0062",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/postgres/pgOutboxStore.ts:262",
+      "issue": "markRetry возвращает 'pending' | 'dead' | 'noop', тогда как ADR §4.2 фиксирует сигнатуру как Promise<'pending'|'dead'>. Расхождение контракта с дизайном.",
+      "suggestion": "Расширение АДДИТИВНОЕ и корректное — 'noop' честно обрабатывает гонку, когда строку уже забрал параллельный диспетчер (UPDATE WHERE state='dispatching' → 0 строк). Это улучшение, а не дефект; реальный диспетчер (outboxDispatcher.ts:109) ветку 'noop' уже учитывает. Привести бы формулировку ADR §4.2 к коду при следующем касании дока — не блокирующе."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/outboxDispatcher.ts:69",
+      "issue": "runOutboxOnce берёт now из Date.now() напрямую, тогда как PostgresOutboxStore инжектит Clock (NF-5). Лёгкая несогласованность с дисциплиной инъекции часов.",
+      "suggestion": "На тестируемость не влияет (юнит-тесты подменяют сам store, а не время диспетчера), на прод-поведение тоже — now здесь лишь фильтр pendingBuckets(now). Если захочется детерминированно тестировать окно available_at на уровне диспетчера — проброс Clock в opts. Не блокирующе."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true },
+    { "ac": "AC-19", "covered": true },
+    { "ac": "AC-20", "covered": true }
+  ],
+  "role_gap_evidence": [],
+  "_review_notes": {
+    "phase": "REVIEW",
+    "object": "BUILD commits 4069c24 + d11ad61 (diff vs dev base 8fe7acf)",
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0062 @ d11ad61913f3cbebb7bf890c657aa02b3a87bf2f",
+    "gate": {
+      "npm_run_ci": "green: tsc --noEmit clean, eslint src clean, npm run fitness (all static FF green), vitest run 577 passed / 5 skipped (integration)",
+      "isolated_db": "Postgres 16.14 on port 55455 (own volume choros_t0062_review_vol, torn down after run); migrations run x2 → run1 applied 21 files incl. 023/024/025, run2 'nothing to apply' (AC-19 idempotent live); npm run fitness:db = 203 passed / 203 (incl. 28 new pgOutboxStore.integration + 41 cross_tenant with outbox seeder + FF-5 EXPLAIN no-Seq-Scan). --no-file-parallelism did not inflate CI time (fitness:db total 6.53s)."
+    },
+    "independent_negative_probes": {
+      "probe_a_AC5_failclosed": "INSERT into choros.outbox as choros_app WITHOUT GUC → ERROR: new row violates row-level security policy (fail-closed) — live confirmed.",
+      "probe_g_AC6_cross_tenant": "choros_app in TENANT_A context: SELECT count(*) of TENANT_B outbox rows = 0 — live confirmed.",
+      "probe_d_state_machine": "dispatched row UPDATE ... WHERE state='dispatching' → 0 rows affected, final state remains 'dispatched' (no dispatched→pending revert); outbox_dispatched_at_iff CHECK rejects dispatched row with NULL dispatched_at — live confirmed."
+    },
+    "transactional_integrity_focus": {
+      "enqueue_idempotency_race": "ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING + SELECT-back is race-safe: each enqueue is a single auto-commit pool.query (no surrounding tx holding the winner uncommitted), so the losing INSERT observes a COMMITTED conflicting row and the SELECT-back always finds it — no null window. partial-unique predicate exact (tenant_id leading, WHERE NOT NULL) verified live.",
+      "backward_compat": "enqueue 4th param optional; externalWorker.ts additive (idempotencyKey validated ≤255, optional); InMemoryJobStore gained parity (byIdempotencyKey Map). FF-9 confirmed: pgJobStore diff is enqueue-only, complete/fail bodies byte-identical to T-0114.",
+      "outbox_atomicity": "enqueueInTx(client, row) runs on the CALLER's pg.PoolClient and opens NO transaction of its own → domain mutation + outbox INSERT commit/rollback together (AC-8). Contract is enforced by the API shape (method REQUIRES a PoolClient arg) — a consumer cannot accidentally split them across connections.",
+      "two_phase_dispatcher_T0116_parity": "Phase-1 SECURITY DEFINER outbox_pending_buckets(p_before) → exactly 2 cols (tenant_id, pending_count), no GUC, search_path pinned (choros, pg_catalog), REVOKE ALL FROM PUBLIC + EXECUTE-only to choros_app — verified live via pg_proc.prosecdef/proconfig/proacl. Phase-2 claimBatch: UUID-validated SET LOCAL, FOR UPDATE SKIP LOCKED, BEGIN/COMMIT/ROLLBACK. 1:1 with T-0116 next_due_buckets/fetchAndFire.",
+      "no_rollback_invariant": "State transitions monotonic-forward; no SQL path emits dispatched→pending or attempts decrement (claimBatch only state='pending'; markDispatched/markRetry only WHERE state='dispatching'). BUILD claim re-verified live (probe_d)."
+    },
+    "test_infra": {
+      "singleClientPool": "Honest pattern: wraps one GUC-scoped PoolClient as a pg.Pool so store methods calling both this.pool.query and this.pool.connect land on the same connection that already SET LOCAL choros.tenant_id inside an open tx — reproduces prod 'method executes on a GUC connection'. getOutboxHealth/pendingBuckets tests correctly use migratorPool (BYPASSRLS, no GUC), exactly the prod role semantics for those two cross-tenant/health methods.",
+      "no_file_parallelism": "Global package.json fitness:db change is justified (D-056, shared-PG races); did NOT mask concurrent defects — AC-12 parallel-claimBatch SKIP-LOCKED test runs concurrent assertions INSIDE its file and passes; CI time unaffected (6.53s).",
+      "prod_guc_for_outbox_methods": "getOutboxHealth/pendingBuckets run on a pool WITHOUT GUC by design — mirrors pre-existing getTimerHealth/createTimerStore (T-0116) verbatim. Relies on DATABASE_URL being migrator/BYPASSRLS-roled, identical to timer health precedent — a consistent deployment assumption, not a T-0062 regression."
+    },
+    "fall_through_fix_4069c24": "Minimal: exactly +1 line (break; on case 'actor_event_seq' in cross_tenant.test.ts) fixing a pre-existing pre-T-0062 fall-through into data_classification. Necessary because the new 'outbox' case sits in the same switch. Verified single-line via git show.",
+    "health_block": "GET /health gains outbox:{pendingLagMs:number|null, deadCount:number} additively, independent try/catch → status='degraded' (not 500) on PG error (AC-16). Existing queue/timer fields unchanged — backward-compatible.",
+    "schema_validation": "Validated against schemas/review.schema.json via python3 schemas/validate.py (stdlib validate_file) — 0 errors."
+  }
+}
