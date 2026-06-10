@@ -1,0 +1,88 @@
+{
+  "task_id": "T-0028",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "pass",
+    "eslint": "pass",
+    "vitest": "pass (490 tests, 20 test files)",
+    "fitness": "pass (mutation-gateway-isolation.sh + flowable-bridge-contract.sh + all pre-existing checks)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/postgres/pgJobStore.ts:207-217",
+      "issue": "PostgresJobStore.complete validates payload BEFORE the ownership-gate DB round-trip, reversing the ADR §4.4 step order (ownership gate → payload validation). InMemoryJobStore correctly applies ownership gate first (step 1 per ADR), then payload validation (step 2). The Postgres path means an unauthorized caller (wrong workerId, expired lock, unknown job) who passes an invalid payload gets RECORD_IN_PAYLOAD instead of NOT_OWNER / NOT_FOUND / LOCK_EXPIRED. Minor information leak; not a correctness bug (job state is still not advanced) but deviates from ADR §4.4 algorithm and ADV-12 gate-precedence contract.",
+      "suggestion": "Either (a) move payload validation in pgJobStore.ts to after the CTE ownership verdict check (replicate InMemoryJobStore ordering: return NOT_FOUND/NOT_LOCKED/etc. before RECORD_IN_PAYLOAD), or (b) explicitly document in the ADR that the Postgres path is permitted to short-circuit before the DB round-trip for performance, acknowledging the ordering deviation. The ADV-12 test currently only covers InMemoryJobStore — add a note or a separate test double covering the Postgres ordering, even if integration-only."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/mutation-gateway-isolation.sh:67-75",
+      "issue": "The G6-additive check uses `git diff --quiet HEAD --` against the current commit. This correctly verifies frozen exports are unchanged in the working tree vs HEAD. However, AC-7 requires checking that this task's commit did NOT touch those files compared to the base (dev 8472256). The check is currently a working-tree lint, not a commit-range check. In practice this is always true post-commit (frozen files are clean), but the check would not catch if a hypothetical intermediate commit on this branch had dirtied and then cleaned those files. Minimal risk since CI runs on the committed state.",
+      "suggestion": "Non-blocking. For completeness, the check could diff against the task's base: `git diff --quiet <base_sha> HEAD -- ${f}`, where base_sha is parameterized. Not required for this task's acceptance."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/variable-guard.test.ts:346-357",
+      "issue": "The `enqueueAndLock` helper uses a private-internal Map access cast: `(store as unknown as { jobs: Map<string, unknown> }).jobs`. This is a test-internal coupling to `InMemoryJobStore`'s private storage. If the jobs field is renamed or made truly private in T-0053+ refactors, this helper silently breaks. The store should have a way to advance state without reaching into internals, e.g. via `fetchAndLock` (the proper acquire path).",
+      "suggestion": "Replace `enqueueAndLock` helper with `store.enqueue(...)` + `store.fetchAndLock('worker-1', ['test-topic'], 1, 999000)` to acquire lock without casting internals. This also more accurately represents the real usage path (enqueue → fetchAndLock → complete). The helper pattern is reasonable for test brevity but fragile."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/postgres/pgJobStore.ts:204",
+      "issue": "Comment says \"result persistence to DB is deferred to T-0053+ (no result column in schema yet)\" — this is accurate and intentional. However, a caller using PostgresJobStore who calls complete() with a valid payload gets `{ ok: true }` and the payload is validated, but if they subsequently call getById() they will not see a `result` field (it's not stored in Postgres). This silent asymmetry between InMemoryJobStore and PostgresJobStore could surprise future integrators. ADR §2 states the payload is \"stored alongside the job update\" as part of the success contract.",
+      "suggestion": "Non-blocking for this task (explicitly deferred to T-0053+, ADR §4.5 callout is clear). Recommend adding a TODO comment at the getById() path or in the type annotation that `result` is always absent from pgJobStore-sourced Jobs until T-0053 lands, so future integrators are not surprised."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "evidence": "mutation-gateway-isolation.sh passes: no writable record accessor symbols outside grant-resolver.ts (G1/G6 checks)"},
+    {"ac": "AC-2", "covered": true, "evidence": "variable-guard.test.ts ADV-1 + ADV-2: raw record in payload returns RECORD_IN_PAYLOAD, job remains LOCKED"},
+    {"ac": "AC-3", "covered": true, "evidence": "variable-guard.test.ts ADV-4..ADV-8 + no-payload-regression: clean payloads advance to COMPLETED, 2-arg form byte-identical"},
+    {"ac": "AC-4", "covered": true, "evidence": "variable-guard.test.ts ADV-3: one invalid + N valid values → RECORD_IN_PAYLOAD, all-or-nothing"},
+    {"ac": "AC-5", "covered": true, "evidence": "mutation-gateway-isolation.sh G2: assertVariableValue present in both inMemoryJobStore.ts and pgJobStore.ts, both import from object-handle.ts"},
+    {"ac": "AC-6", "covered": true, "evidence": "mutation-gateway-isolation.sh G1/G6: no *mutate*/*write*/*persist* symbols outside gateway composition"},
+    {"ac": "AC-7", "covered": true, "evidence": "git diff confirms object-handle.ts/grant-lattice.ts/grant-resolver.ts untouched; ErrorCode has 5 codes (RECORD_IN_PAYLOAD added to original 4); tsc passes"},
+    {"ac": "AC-8", "covered": true, "evidence": "ci/checks/flowable-bridge-contract.sh present, exits 0 (bridge absent); spec §2 FR-6 states contract; ADR §8 seals it"},
+    {"ac": "AC-9", "covered": true, "evidence": "All pre-existing fitness functions green in npm run fitness output"},
+    {"ac": "AC-10", "covered": true, "evidence": "resolveFor usage in flowable-bridge-contract.sh references Operation type; no ad-hoc strings introduced; tsc --noEmit passes"}
+  ],
+  "adversarial_coverage": [
+    {"adv": "ADV-1", "covered": true, "location": "variable-guard.test.ts:363-391"},
+    {"adv": "ADV-2", "covered": true, "location": "variable-guard.test.ts:396-409"},
+    {"adv": "ADV-3", "covered": true, "location": "variable-guard.test.ts:414-433"},
+    {"adv": "ADV-4", "covered": true, "location": "variable-guard.test.ts:438-455"},
+    {"adv": "ADV-5", "covered": true, "location": "variable-guard.test.ts:460-471"},
+    {"adv": "ADV-6", "covered": true, "location": "variable-guard.test.ts:476-492"},
+    {"adv": "ADV-7", "covered": true, "location": "variable-guard.test.ts:497-510"},
+    {"adv": "ADV-8", "covered": true, "location": "variable-guard.test.ts:515-528"},
+    {"adv": "ADV-9", "covered": true, "location": "variable-guard.test.ts:533-546"},
+    {"adv": "ADV-10", "covered": true, "location": "variable-guard.test.ts:551-564"},
+    {"adv": "ADV-11", "covered": true, "evidence": "mutation-gateway-isolation.sh structural grep; no new writable accessor patterns found"},
+    {"adv": "ADV-12", "covered": true, "location": "variable-guard.test.ts:569-607", "note": "Coverage is for InMemoryJobStore only. PostgresJobStore reverses ownership/payload gate order (R-1 nit); not a blocker."}
+  ],
+  "three_layer_compliance": {
+    "layer_A": "PASS — mutation-gateway-isolation.sh implements G1/G2/G6; structural isolation confirmed by CI",
+    "layer_B": "PASS — assertVariableValue called at complete() boundary in both InMemoryJobStore and PostgresJobStore; RECORD_IN_PAYLOAD fail-closed; all-or-nothing; Job.result field additive in types.ts",
+    "layer_C": "PASS — flowable-bridge-contract.sh exits 0 (bridge absent); probe activates on T-0058+ bridge path; contract sealed in ADR §8"
+  },
+  "scope_check": {
+    "no_scope_creep": true,
+    "no_regression": true,
+    "frozen_exports_unchanged": true,
+    "new_deps": false,
+    "notes": "object-handle.ts, grant-lattice.ts, grant-resolver.ts unchanged. No new npm dependencies. ErrorCode extended additively. Job.result optional additive field. completeResult/FailResult union shape unchanged."
+  },
+  "role_gap_evidence": [],
+  "reviewer": "claude-sonnet-4-6 (reviewer role, T-0028 REVIEW)",
+  "reviewed_commit": "f6c4ed2",
+  "base_commit": "8472256",
+  "review_date": "2026-06-10"
+}
