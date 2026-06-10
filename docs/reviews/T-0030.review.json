@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0030",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/server.ts:160,166 / src/http/rights.ts:171 / src/http/grants.ts:341",
+      "issue": "GET /api/rights/dictionaries is unreachable due to two compounding defects. (a) Route conflict: the router uses first-match dispatch; registerRightsRoutes (line 160) registers GET /api/rights/:roleId BEFORE registerGrantsRoutes (line 166) registers GET /api/rights/dictionaries. Every request to /api/rights/dictionaries is captured by the param route with roleId='dictionaries' and returns 404 'role not found'. (b) DATABASE_URL gate: even if the conflict were fixed, registerGrantsRoutes is only called when grantsPool != null (line 165), so the dictionaries route — which is explicitly seed-backed and DB-free per ADR §2.1 — is silently unregistered in any dev environment without DATABASE_URL. Verified live: both with and without DATABASE_URL the endpoint returns 404. AC-16 FAILS.",
+      "suggestion": "Fix (a): move GET /api/rights/dictionaries registration into rights.ts (before the :roleId catch-all) or register it from grants.ts before registerRightsRoutes is called. Fix (b): extract the GET /api/rights/dictionaries handler out of the if(grantsPool) block — it needs no pool; register it unconditionally in server.ts alongside the other seed-backed rights routes."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/http/grants.ts:408-409",
+      "issue": "NF-1 is violated: freeform scope is stored with delegable unchanged from the request body (defaults to true). Spec NF-1: 'Free-form scopes are accepted only if isGenesisOwner === true (and are forced delegable: false)'. The handler reads delegable = body.delegable ?? true at line 408 and inserts it verbatim — no override when isFreeform is true. A genesis owner can therefore persist a freeform grant row with delegable=true. Although validateNarrowing's Gate 2 (freeform parent => free_form_non_delegable) blocks runtime chaining, the data model invariant is broken and subsequent tools (T-0039, external readers) must not assume the DB enforces it.",
+      "suggestion": "Add: if (isFreeform) { delegable = false; } immediately after the delegable assignment at line 409, before building childGrant."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/grants.ts:372-377 and 442",
+      "issue": "Double loadAdminContext call in POST /api/grants freeform path: line 373 calls loadAdminContext to check isGenesisOwner for freeform admission, then line 442 calls it again to build the admin context for validateAdminDelegation. This is wasteful (3 extra DB round-trips per genesis-owner freeform request) but not a correctness issue — both loads are from DB, so isGenesisOwner is DB-resolved both times.",
+      "suggestion": "Hoist the loadAdminContext call before the freeform check; reuse the result for both the freeform admission guard and the gate call."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/grants.ts:94-113",
+      "issue": "withTenantTx does not call assertUuid on tenantId before string-interpolating it into SET LOCAL choros.tenant_id = '${tenantId}'. The org.ts withTenant helper calls assertUuid(tenantId, 'tenantId') as a defence-in-depth guard. Since tenantId in T-0030 comes from DEV_TENANT_ID (env var), the practical risk is low; but the inconsistency with the established pattern (T-0013 / T-0116 R-3) leaves the door open if the tenant-resolution seam changes.",
+      "suggestion": "Add assertUuidShape(tenantId, 'tenantId') at the top of withTenantTx, mirroring org.ts:84."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-01", "covered": true },
+    { "ac": "AC-02", "covered": true },
+    { "ac": "AC-03", "covered": true },
+    { "ac": "AC-04", "covered": true },
+    { "ac": "AC-05", "covered": true },
+    { "ac": "AC-06", "covered": true },
+    { "ac": "AC-07", "covered": true },
+    { "ac": "AC-08", "covered": true },
+    { "ac": "AC-09", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": false },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true },
+    { "ac": "AC-19", "covered": true },
+    { "ac": "AC-20", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "SEED_ORACLE assessment: FAIL-CLOSED for unknown nodes. isDescendantOrSelfSeed(unknownId, ancestorId) returns false (ORG_SEED_CHILDREN[unknownId] ?? [] = []) — a grant scoped to a node not in the seed tree is not considered a descendant of any known admin scope, triggering scope_widens deny. Genesis owner bypasses the oracle entirely (step-3 short-circuit). No scope-extension hole.",
+    "isGenesisOwner DB-only resolution confirmed: loadAdminContext always queries role_assignment JOIN role WHERE slug='tenant-owner' AND confirmed_by IS NOT NULL AND validity window. Sending isGenesisOwner:true or admin:{isGenesisOwner:true} in the request body has no effect — confirmed via adversarial probe (e-mironov + injected body field -> 403 ADMIN_GATE_REJECTED no_admin_authority).",
+    "Rollback atomicity confirmed live (AC-12/FF-6): fitness:db rollback test passes (274/274). Both grant INSERT and audit_event INSERT are inside withTenantTx; ROLLBACK removes both rows.",
+    "Fitness:db isolated-DB run: 274/274 pass on fresh Postgres with run.mjs migration runner. Grant-editor.test.ts: 14/14 pass (FF-1..FF-9 static checks + AC-01/07/09/11/12/13/14/15/19/20 live probes).",
+    "npm run ci (no DATABASE_URL): 686 tests pass. Web build: clean (Vite, 0 errors)."
+  ]
+}
