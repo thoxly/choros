@@ -1,0 +1,160 @@
+{
+  "task_id": "T-0058",
+  "status": "ready",
+  "decision": "Deploy flowable/flowable-rest:7.1.0 (Apache 2.0, pinned) as an additive 'flowable' service in docker-compose.yml, connected to the existing shared Postgres instance via JDBC with ACT_* tables isolated in a dedicated 'flowable' schema (init-script config/postgres/002-flowable-schema.sql, mirroring the Keycloak pattern). BPMN deployment uses the REST API exclusively (POST /flowable-rest/service/repository/deployments multipart — spike-proven). A committed smoke BPMN (config/flowable/processes/choros-smoke.bpmn20.xml, key chorosSmoke, external-task topic smoke-topic) is the CI fitness target. Host port 8082 (FLOWABLE_PORT env). No src/ files touched; FF-G3 (T-0028) stays dormant.",
+  "rejected_alternatives": [
+    {
+      "option": "Filesystem volume auto-deploy (flowable.process.definition-location-prefix)",
+      "why_not": "Implicit deploy at startup leaves the REST path untested by default, which is the path T-0064 will use. REST deploy is already spike-proven and must be CI-exercised explicitly."
+    },
+    {
+      "option": "Rely on ACT_ name-prefix uniqueness in public schema instead of dedicated schema",
+      "why_not": "Naming convention is not a hard boundary; future migration naming mistakes would silently collide. The dedicated schema pattern (same as Keycloak's keycloak schema) provides a verifiable hard boundary."
+    },
+    {
+      "option": "Second Postgres container for Flowable",
+      "why_not": "Hard red-line from stack ADR §1 (NF-3): one Postgres instance per contour. Rejected immediately."
+    },
+    {
+      "option": "Operaton 1.0.0 instead of Flowable 7.1.0",
+      "why_not": "Stack ADR and founder ratification (2026-06-10) chose Flowable 7 primary based on dedicated deadletter-move REST semantic (action=move). Operaton remains documented de-risked fallback."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "FlowableComposeService",
+      "fields": [
+        {"name": "image", "type": "string — flowable/flowable-rest:7.1.0 (pinned)"},
+        {"name": "FLOWABLE_PORT", "type": "env int, default 8082"},
+        {"name": "SPRING_DATASOURCE_URL", "type": "env string, default jdbc:postgresql://postgres:5432/choros"},
+        {"name": "SPRING_DATASOURCE_USERNAME", "type": "env string, default choros_migrator"},
+        {"name": "SPRING_DATASOURCE_PASSWORD", "type": "env string, default choros_dev_pw (RL-1)"},
+        {"name": "SPRING_DATASOURCE_SCHEMA", "type": "env string, value flowable"},
+        {"name": "SPRING_DATASOURCE_DRIVER_CLASS_NAME", "type": "env string, value org.postgresql.Driver"},
+        {"name": "FLOWABLE_REST_APP_ADMIN_USER_ID", "type": "env string, default admin"},
+        {"name": "FLOWABLE_REST_APP_ADMIN_PASSWORD", "type": "env string, default choros_flowable_dev_pw (RL-1)"},
+        {"name": "FLOWABLE_ENABLE_HISTORY_CLEANING", "type": "env string, value true"},
+        {"name": "FLOWABLE_HISTORY_CLEANING_CYCLE", "type": "env string, value 0 0 0 1 1 ? (yearly cron)"},
+        {"name": "FLOWABLE_HISTORY_CLEANING_AFTER", "type": "env string, value 1 (days)"},
+        {"name": "depends_on", "type": "postgres: condition: service_healthy"},
+        {"name": "healthcheck", "type": "wget GET /flowable-rest/service/management/engine with basic-auth, interval 5s, retries 24, start_period 30s"}
+      ]
+    },
+    {
+      "entity": "SmokeBpmn",
+      "fields": [
+        {"name": "path", "type": "string — config/flowable/processes/choros-smoke.bpmn20.xml"},
+        {"name": "processKey", "type": "string — chorosSmoke"},
+        {"name": "externalTaskTopic", "type": "string — smoke-topic"},
+        {"name": "structure", "type": "startEvent → serviceTask(external, topic=smoke-topic) → endEvent"}
+      ]
+    },
+    {
+      "entity": "PostgresFlowableSchema",
+      "fields": [
+        {"name": "initScript", "type": "string — config/postgres/002-flowable-schema.sql"},
+        {"name": "schemaName", "type": "string — flowable"},
+        {"name": "tables", "type": "ACT_* (Liquibase-managed by Flowable engine on first start)"},
+        {"name": "owner", "type": "choros_migrator (POSTGRES_USER)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "Flowable REST base URL (internal): http://flowable:8082/flowable-rest/service",
+    "Flowable REST base URL (host/CI): http://localhost:${FLOWABLE_PORT:-8082}/flowable-rest/service",
+    "Deploy BPMN: POST /flowable-rest/service/repository/deployments multipart/form-data field=deployment → HTTP 201 JSON {id: string}",
+    "Start instance: POST /flowable-rest/service/runtime/process-instances {processDefinitionKey: 'chorosSmoke'} → HTTP 201",
+    "List instances: GET /flowable-rest/service/runtime/process-instances?processDefinitionKey=chorosSmoke → HTTP 200 {total: int ≥ 1}",
+    "Readiness probe: GET /flowable-rest/service/management/engine -u admin:${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw} → HTTP 200",
+    "Smoke process key: chorosSmoke (consumed by T-0064 as first REST-client integration target)",
+    "External-task topic: smoke-topic (consumed by T-0067 as first external-task mapping target)",
+    "no-committed-secret.sh ALLOWED_DEV_DEFAULTS gains: choros_flowable_dev_pw (additive)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-FL-1",
+      "rule": "After docker compose up flowable, GET /flowable-rest/service/management/engine with admin basic-auth returns HTTP 200 within 120s",
+      "ci_check": "bash ci/checks/flowable/wait-ready.sh"
+    },
+    {
+      "id": "FF-FL-2",
+      "rule": "POST /flowable-rest/service/repository/deployments with choros-smoke.bpmn20.xml returns HTTP 201 with a deployment ID in the JSON body",
+      "ci_check": "bash ci/checks/flowable/deploy-bpmn.sh"
+    },
+    {
+      "id": "FF-FL-3",
+      "rule": "After deploy, POST .../runtime/process-instances {processDefinitionKey:chorosSmoke} returns HTTP 201; GET .../runtime/process-instances?processDefinitionKey=chorosSmoke returns total >= 1",
+      "ci_check": "bash ci/checks/flowable/smoke.sh"
+    },
+    {
+      "id": "FF-FL-4",
+      "rule": "docker-compose.yml flowable service uses exactly image flowable/flowable-rest:7.1.0 (no :latest); no *LICENSE*, *ENTERPRISE*, or *ACTIVATION* env var is set",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-4 section)"
+    },
+    {
+      "id": "FF-FL-5",
+      "rule": "docker-compose.yml contains exactly one postgres image line; flowable SPRING_DATASOURCE_URL contains 'postgres:5432' (shared instance)",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-5 section)"
+    },
+    {
+      "id": "FF-FL-6",
+      "rule": "All host-side port values in docker-compose.yml are unique; FLOWABLE_PORT default 8082 does not appear in non-flowable service port mappings",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-6 section)"
+    },
+    {
+      "id": "FF-FL-7",
+      "rule": "SPRING_DATASOURCE_PASSWORD and FLOWABLE_REST_APP_ADMIN_PASSWORD in compose use ${VAR:-dev_default} form; only choros_dev_pw and choros_flowable_dev_pw appear as password literals",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-7 section) + updated ci/checks/no-committed-secret.sh"
+    },
+    {
+      "id": "FF-FL-8",
+      "rule": "flowable service block in docker-compose.yml declares depends_on.postgres.condition: service_healthy",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-8 section)"
+    },
+    {
+      "id": "FF-FL-9",
+      "rule": "Compose flowable environment contains FLOWABLE_ENABLE_HISTORY_CLEANING: true and FLOWABLE_HISTORY_CLEANING_CYCLE with a non-empty value",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-9 section)"
+    },
+    {
+      "id": "FF-FL-10",
+      "rule": "config/flowable/processes/choros-smoke.bpmn20.xml contains a serviceTask with flowable:type=\"external\" and a non-empty flowable:topic attribute",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-10 section)"
+    },
+    {
+      "id": "FF-FL-11",
+      "rule": "The postgres and keycloak service blocks in docker-compose.yml are byte-identical to the T-0054 baseline (git show 2f749a9:docker-compose.yml)",
+      "ci_check": "bash ci/checks/flowable/static-checks.sh (FF-FL-11 section: diff against baseline)"
+    },
+    {
+      "id": "FF-FL-12",
+      "rule": "After compose up, Postgres flowable schema contains ACT_* tables; public schema contains choros_* tables; intersection of table names is empty",
+      "ci_check": "bash ci/checks/flowable/smoke.sh or dedicated schema-isolation.sh via docker compose exec postgres psql"
+    },
+    {
+      "id": "FF-G3",
+      "rule": "src/bridge/ and src/core/flowable*.ts do not exist (T-0028 bridge-contract probe exits 0; T-0058 must not create these paths)",
+      "ci_check": "bash ci/checks/flowable-bridge-contract.sh (already in fitness chain)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-FL-1 (wait-ready.sh), compose healthcheck definition in §3.1"},
+    {"ac": "AC-2", "covered_by": "FF-FL-4 (static-checks.sh image pin + no enterprise key)"},
+    {"ac": "AC-3", "covered_by": "FF-FL-5 (static-checks.sh single postgres + SPRING_DATASOURCE_URL points to postgres service)"},
+    {"ac": "AC-4", "covered_by": "FF-FL-12 (schema-isolation: ACT_* in flowable schema, choros_* in public, zero intersection); 002-flowable-schema.sql init-script"},
+    {"ac": "AC-5", "covered_by": "FF-FL-7 (static-checks.sh password form check); updated no-committed-secret.sh"},
+    {"ac": "AC-6", "covered_by": "FF-FL-6 (static-checks.sh port uniqueness)"},
+    {"ac": "AC-7", "covered_by": "FF-FL-2 (deploy-bpmn.sh REST POST → HTTP 201)"},
+    {"ac": "AC-8", "covered_by": "FF-FL-3 (smoke.sh start-instance → HTTP 201)"},
+    {"ac": "AC-9", "covered_by": "FF-FL-3 (smoke.sh GET runtime/process-instances total≥1)"},
+    {"ac": "AC-10", "covered_by": "FF-FL-10 (static-checks.sh grep flowable:type=external + flowable:topic in smoke BPMN)"},
+    {"ac": "AC-11", "covered_by": "FF-G3 (flowable-bridge-contract.sh exits 0; no src/bridge/ or src/core/flowable*.ts in T-0058 scope)"},
+    {"ac": "AC-12", "covered_by": "FF-FL-8 (static-checks.sh depends_on service_healthy)"},
+    {"ac": "AC-13", "covered_by": "New CI job 'flowable' in .github/workflows/ci.yml (§6); fitness:flowable target in package.json"},
+    {"ac": "AC-14", "covered_by": "FF-FL-9 (static-checks.sh FLOWABLE_ENABLE_HISTORY_CLEANING + FLOWABLE_HISTORY_CLEANING_CYCLE)"},
+    {"ac": "AC-15", "covered_by": "FF-FL-11 (static-checks.sh diff postgres+keycloak blocks against 2f749a9 baseline)"}
+  ],
+  "runtime_target": "контейнер (docker-compose) — локально и CI; продовый деплой = E0.7 (founder-gated, GT-4)",
+  "adr_artifact_path": "docs/design/T-0058-flowable-service.adr.md",
+  "escalation": ""
+}
