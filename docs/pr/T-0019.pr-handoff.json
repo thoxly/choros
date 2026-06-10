@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0019",
+  "status": "pr_open",
+  "branch": "task/T-0019-actor-event-ledger",
+  "pr_url": null,
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/actor_event_append_only.sh",
+    "ci/checks/actor_event_no_global_seq.sh",
+    "ci/checks/actor_event_vocab_pinned.sh",
+    "ci/checks/db/actor-event.test.ts",
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/pgTimerStore.integration.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "docs/design/T-0019-actor-event-ledger.adr.md",
+    "docs/design/T-0019.adr.contract.json",
+    "docs/pr/T-0019.pr-handoff.json",
+    "docs/reviews/T-0019.review.json",
+    "docs/specs/T-0019-actor-event-ledger.spec.md",
+    "docs/specs/T-0019.spec.contract.json",
+    "docs/test-reports/T-0019.test-report.json",
+    "migrations/018_actor_event.sql",
+    "package.json",
+    "src/__tests__/actor-event.test.ts",
+    "src/core/actor-event.ts"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [
+    "F-T0019-1 (medium, product-surface, for T-0021/E4.2): PROBE-E seq-rollback — choros_app holds GRANT UPDATE ON actor_event_seq, which it needs to advance next_seq. As choros_app, rolling next_seq BACKWARD into an unused lower slot succeeds; an actor_event row can then be INSERTed at that lower seq, landing ORDER BY seq BEFORE an already-committed row and inverting apparent SoD order (approve before submit). UNIQUE(tenant_id,seq) blocks reusing an occupied slot but NOT backfilling a lower gap. The append-only ROW guarantee and all 22 AC structural invariants are intact. Classification: WRITER threat surface (FR-7/§6.2 Out-of-Scope). Forward obligation for T-0021: add EITHER a BEFORE UPDATE trigger on actor_event_seq that rejects NEW.next_seq < OLD.next_seq (decrement guard), OR a writer-side assert inside appendActorEvent that the assigned seq > MAX(seq) for the (tenant_id, object) before the INSERT. Flag in T-0021 threat model.",
+    "F-T0019-2 (nit, tooling-gap, non-blocking): review nits R-2 (ci/checks/db/actor-event.test.ts appendRow hardcodes ts/vocab_version literals 0,1) and R-3 (cross_tenant seedActorEventSeq best-effort ON CONFLICT DO NOTHING). Both confirmed cosmetic; R-1 closed by PROBE-A (reader deny-stub runtime behaviour verified). Optional cleanup, not gating."
+  ],
+  "merge_target": "dev",
+  "merge_policy": "auto-merge D-053 — orchestrator rebases task/T-0019-actor-event-ledger onto current dev HEAD, then merges; migration 018 is non-overlapping with any in-flight parallel branches (017 reserved for T-0033, 018 sorts after 016 employee so employee FK target exists); known_tenant_tables.txt additive merge applies cleanly.",
+  "rebase_note": "dev has advanced since branch-point a90f78d (T-0064 and others merged by orchestrator per commit log). Orchestrator must rebase task/T-0019-actor-event-ledger onto current dev HEAD before merge. Migration numbering is non-overlapping by design.",
+  "ci_gate_detail": {
+    "tsc": "clean (0 errors)",
+    "eslint": "clean (src, 0 errors)",
+    "vitest_unit": "505/505 (21 files, incl. src/__tests__/actor-event.test.ts 15)",
+    "fitness_static": "all static checks green — actor_event_append_only.sh (FF-4), actor_event_no_global_seq.sh (FF-6), actor_event_vocab_pinned.sh (FF-16) — plus full pre-existing suite",
+    "fitness_db_isolated": "163/163 on isolated Postgres port 55443 (own volume t0019-test_choros_pgdata, torn down after run; shared 55432/55433 untouched); 8 files: actor-event.test.ts 30, cross_tenant.test.ts 37, schema 16, org-structure 8, two_tenant 4, behavior 7, pgTimerStore 25, pgJobStore 36",
+    "migrate_pass1": "applied 17 file(s) (001-016 + 018; 017 correctly reserved/absent; 018 sorts after 016 employee, FK target exists)",
+    "migrate_pass2": "idempotent — 'nothing to apply (17 already recorded, 17 files)'"
+  },
+  "test_coverage": {
+    "ac_total": 22,
+    "ac_passed": 22,
+    "adversarial_probes": 5,
+    "adversarial_pass": 5,
+    "adversarial_finding": "PROBE-E (F-T0019-1 above) — not a T-0019 defect, forward obligation for T-0021"
+  },
+  "promote_guide_GT3": {
+    "what_to_verify_in_dev": [
+      "Run migrations: 'npm run migrate' (or server start) — migration 018_actor_event.sql applies after 016_employee.sql.",
+      "psql: \\dt choros.* — verify choros.actor_event and choros.actor_event_seq are present.",
+      "psql as choros_app: verify SELECT,INSERT on actor_event; UPDATE on actor_event_seq; no UPDATE/DELETE on actor_event.",
+      "psql: test that UPDATE actor_event SET event='approve' WHERE FALSE (trivial no-op that should fail privilege/trigger) → confirm error.",
+      "psql: test append via appendActorEvent writer (T-0021 will wire the full path; manual INSERT as choros_app with valid tenant GUC works).",
+      "npm run ci — full gate should be green (tsc + eslint + fitness:static + vitest + fitness:db isolated).",
+      "docker compose down -v && docker compose up — fresh stack: migration 018 applies cleanly in sequence after 017 slot skip."
+    ],
+    "known_limitations": [
+      "appendActorEvent writer (T-0021/E4.2): the write contract is frozen (src/core/actor-event.ts notImplementedActorEventWriter exported and tested for reject behaviour), but the live DB writer is not implemented in T-0019 — that is T-0021's scope.",
+      "SoD query layer (T-0032/E4.2): read contract shapes are frozen, but sod_constraint evaluation and action-time SoD block are out of T-0019 scope.",
+      "role_at_event FK deferred: role_at_event is NOT NULL uuid but carries no FK to a role table (mirrors grant.role_id); FK wired in T-0022.",
+      "FORWARD OBLIGATION for T-0021 (F-T0019-1/seq-rollback): choros_app can decrement actor_event_seq.next_seq and backfill a lower unused seq slot, inverting ORDER BY seq SoD trail order without violating UNIQUE(tenant_id,seq). T-0021's writer implementation MUST guard against this. Preferred fix: BEFORE UPDATE trigger on actor_event_seq rejecting NEW.next_seq < OLD.next_seq. Fallback: writer-side assert seq > MAX(seq) for (tenant_id, object) at append time."
+    ]
+  },
+  "forward_obligations": [
+    {
+      "task": "T-0021",
+      "epic": "E4.2",
+      "id": "FO-T0019-1",
+      "severity": "medium",
+      "title": "actor_event_seq no-decrement guard",
+      "description": "choros_app holds GRANT UPDATE ON actor_event_seq (necessary to advance next_seq). As-is, a call rolling next_seq BACKWARD into a lower unused slot succeeds, allowing a forged actor_event row to appear ORDER BY seq BEFORE a legitimately earlier row, inverting SoD order without violating UNIQUE(tenant_id,seq). T-0019's ledger shape is correct and all 22 AC pass. The gap is in the WRITER's perimeter (FR-7/§6.2).",
+      "required_fix": "T-0021 MUST implement at least one of: (A) BEFORE UPDATE trigger on actor_event_seq that raises EXCEPTION when NEW.next_seq < OLD.next_seq (decrement forbidden at DB layer, always-on); OR (B) writer-side assert inside appendActorEvent that the seq returned by the FOR UPDATE counter read is strictly greater than MAX(seq) for the (tenant_id, object_kind, <component_id>) scope before the INSERT. Option A is preferred (structural, CI-visible diff to defeat).",
+      "threat_model_entry": "seq-rollback attack: choros_app rolls next_seq backward, inserts approve@seq=970000 after submit@seq=970001 already committed; trail reads approve-before-submit; UNIQUE(tenant_id,seq) only blocks occupied slot, not gap backfill."
+    }
+  ],
+  "verdict_payload": {
+    "spec_commit": "1abbc88",
+    "design_commit": "b87fb5b",
+    "build_commits": ["0c5f94f", "bf301ef"],
+    "review_approved_commit": "c7e7ffc",
+    "test_commit": "6ad746e",
+    "review_verdict": "approved",
+    "review_nits": [
+      {"id": "R-1", "status": "CLOSED by PROBE-A — reader deny-stub runtime behaviour verified"},
+      {"id": "R-2", "status": "cosmetic, non-blocking, optional cleanup"},
+      {"id": "R-3", "status": "cosmetic, non-blocking, not gating"}
+    ],
+    "base_dev_sha": "a90f78d",
+    "branch_tip_sha": "6ad746e0640ce3df84217bccec52a70a42c890d3"
+  }
+}
