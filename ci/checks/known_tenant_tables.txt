@@ -11,3 +11,5 @@ tenant
 department
 position
 employee
+actor_event
+actor_event_seq
