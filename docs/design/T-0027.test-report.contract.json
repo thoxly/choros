@@ -1,0 +1,139 @@
+{
+  "task_id": "T-0027",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 473,
+    "passed": 473,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "bpmn-linter.test.ts › AC-1 — handle-only and primitive bindings pass (3 tests: handle-only.bpmn, primitive-bindings.bpmn, empty-process.bpmn)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "bpmn-linter.test.ts › AC-2 — serviceTask raw-object binding (2 tests: fixture + inline); elementKind='serviceTask', elementId='task1'/'st1' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "bpmn-linter.test.ts › AC-3 — userTask raw-object binding (1 test: raw-object-user-task.bpmn); elementKind='userTask' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "bpmn-linter.test.ts › AC-4 — conditionExpression raw-object (2 tests: fixture + inline payload key); elementKind='conditionExpression' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "bpmn-linter.test.ts › AC-5 — dataObject raw-object binding (1 test: raw-object-data-object.bpmn); elementKind='dataObject' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "bpmn-linter.test.ts › AC-6 — malformed XML fails closed (3 tests: file fixture, inline unclosed tag, invariant loop); type='malformed_xml', elementKind='malformed_xml' verified. Note R-1: 'not xml at all' in invariant test returns ok:true (no binding sites) — semantically correct; test loop is defensive (asserts violations.length>0 only if ok:false)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "bpmn-linter.test.ts › AC-7 — valid handles are not false-positives (2 tests: serialized handle round-trip, handle-only.bpmn); parseHandle integration confirmed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "bpmn-linter.test.ts › AC-8 — adversarial: raw object in attribute value (2 tests: adversarial-attr-value.bpmn fixture + inline stringValue attribute); type='raw_object_binding' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "bpmn-linter.test.ts › AC-9 — adversarial: raw object in CDATA section (1 test: adversarial-cdata.bpmn); type='raw_object_binding' verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "bpmn-linter.test.ts › AC-10 — EL expressions without raw-object pattern pass (3 tests: el-expression.bpmn, inline ${approved==true}, inline plain string); ok:true confirmed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "bpmn-linter.test.ts › AC-11 — LintViolation shape (3 tests: all required fields present, elementId='' when id absent, malformed_xml violation shape); typeof checks pass",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "ci/checks/bpmn-linter-isolation.sh (FF-5/FF-9): no forbidden imports (jobStore, node:http, node:fs, node:net, pg) in bpmn-linter.ts or bpmn-xml-parser.ts; no xml/bpmn runtime deps in package.json → PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "ci/checks/bpmn-linter-isolation.sh (FF-6): git diff --quiet on object-handle.ts, grant-resolver.ts, grant-lattice.ts, types.ts, jobStore.ts — all unmodified → PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "bpmn-linter.test.ts › AC-14 — CLI exit codes (2 library-proxy tests). Manual binary verification (node dist/cli/lint-bpmn.js): exit 0 on handle-only.bpmn ✓; exit 1 + JSON stderr on raw-object-service-task.bpmn ✓; exit 1 + JSON stderr on malformed-unclosed-tag.xml ✓; exit 0 on empty-process.bpmn ✓; exit 1 + JSON stderr on adversarial-cdata.bpmn ✓. Nit R-2 (library-proxy, not binary test) noted — manual verification covers the gap.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "bpmn-linter.test.ts › AC-15 — mock deploy gate contract (3 tests): mockDeploy rejects raw-object BPMN, accepts handle-only BPMN, rejects malformed XML → deploy-gate invariants (a)-(d) verified against mock",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "CLI binary manual invocation: node dist/cli/lint-bpmn.js on 5 fixtures (handle-only, raw-object-service-task, malformed-unclosed-tag, empty-process, adversarial-cdata)",
+      "result": "pass",
+      "note": "вторично, ручная верификация; закрывает нит R-2 ревью (library-proxy vs binary test). Бинарная проверка пройдена после npm run build. Результаты: exit 0 на чистых фикстурах, exit 1 + валидный JSON-массив в stderr на всех violating/malformed входах."
+    }
+  ],
+  "failures": [],
+  "review_nits": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "status": "accepted-as-is",
+      "note": "AC-6 invariant test: 'not xml at all' → ok:true (семантически корректно: нет BPMN-элементов = нет binding sites = нет violations). Тест не даёт ложного PASS — он правильно разрешает ok:true для non-XML строк. Дефекта продукта нет."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "status": "mitigated-by-manual-verification",
+      "note": "AC-14: unit-тест является library-proxy. Ручная бинарная верификация (5 фикстур) проведена в рамках TEST-фазы и задокументирована в secondary_ux. Полноценный ci/checks/bpmn-linter-cli.sh рекомендован для следующего цикла (не blocking для verdict)."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "status": "informational",
+      "note": "bpmn-xml-parser.ts экспортирует Attr, tokenize, decodeEntities — сверх ADR §5.2 (internal-only). Не создаёт security risk. Не blocking."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "status": "informational",
+      "note": "ctx.inExtension не сбрасывается при </extensionElements>. Практический security impact = nil (text после extensionElements внутри serviceTask не является binding location в Flowable). Не blocking."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "status": "informational",
+      "note": "callActivity/subProcess in/out variable passing не в SCOPED_ELEMENTS. Деферрировано в T-0028 (runtime guard). Не blocking для E2.6."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "status": "informational",
+      "note": "Теоретический ZWSP-bypass: практический impact = nil (данные с ZWSP в ключах не функциональны как record reference). Не blocking."
+    }
+  ],
+  "ci_run": {
+    "tsc_noEmit": "green",
+    "eslint": "green",
+    "fitness": "green",
+    "vitest": "green (473/473)",
+    "total_test_files": 19
+  }
+}

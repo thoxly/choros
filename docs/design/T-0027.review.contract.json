@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0027",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/bpmn-linter.test.ts:189-203",
+      "issue": "AC-6 test 'never returns ok: true for XML it cannot parse' has a weak assertion loop: the test asserts only that IF ok=false THEN violations.length > 0. It does NOT assert that 'not xml at all' returns ok=false. In practice, a plain-text document returns ok=true (no XML elements → no binding violations → no malformed_xml). This is semantically correct (no binding sites, no violations), but the test description creates a false invariant claim. The invariant that matters — malformed BPMN cannot contain binding violations — holds; but the assertion is misleading.",
+      "suggestion": "Either remove 'not xml at all' from the malformed inputs list (it is not malformed XML, it is not-XML), or change the assertion to explicitly allow ok=true for that input with a comment explaining the semantic."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/bpmn-linter.test.ts:386-406",
+      "issue": "AC-14 CLI test is a library-proxy test, not a binary integration test. The test explicitly acknowledges this limitation ('full binary integration test requires compiled output'). The actual CLI binary was manually verified to work correctly (exit 0 on clean BPMN, exit 1 with JSON violations on stderr), but the test cannot be relied upon to catch CLI regressions (e.g., a broken import path in lint-bpmn.ts that only manifests after compilation).",
+      "suggestion": "Add an integration test step in CI that compiles the project (npm run build) and invokes the binary with at least one clean and one violating fixture, asserting exit codes. Can be done in a separate ci/checks/bpmn-linter-cli.sh check."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/bpmn-xml-parser.ts:31-61",
+      "issue": "ADR §5.2 designates Attr, OpenTagToken, CloseTagToken, SelfCloseToken, TextToken, ParseErrorToken as internal types 'not exported'. In the actual implementation, Attr, tokenize, and decodeEntities are all exported. These exports are used only by bpmn-linter.ts (the linter's own sibling module), not exposed via the public API of bpmn-linter.ts. However, they technically widen the module's surface beyond what the ADR specifies.",
+      "suggestion": "Non-blocking as-is: the extra exports don't create security risk because they are not callable through the public lintBpmn() API. However, for strict ADR compliance, consider marking tokenize/decodeEntities as non-exported and moving them into an internal helper, or updating ADR §5.2 to reflect the actual export surface."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/bpmn-linter.ts:398",
+      "issue": "The close-tag flush for extension containers (else if branch) flushes ctx.textBuffer only when ctx.inExtension is true AND ctx.textBuffer.trim().length > 0. After this flush, ctx.inExtension is NEVER reset to false. Consequently, any text that appears AFTER </extensionElements> but still inside the scoped element (e.g. inside </serviceTask>) will accumulate in textBuffer but will never be flushed, because the scoped-element close handler only flushes for isConditionExpression/isDataObject (not serviceTask). This means a raw object placed after </extensionElements> but before </serviceTask> is not scanned. This text position is not a valid BPMN binding location in practice (Flowable ignores text nodes directly inside serviceTask), so the practical security impact is nil. Documented for clarity.",
+      "suggestion": "Either: (a) reset ctx.inExtension to false when </extensionElements> fires, and flush textBuffer at </serviceTask> for all inExtension=true cases regardless; OR (b) add a comment to the code explaining the invariant: 'text content directly inside serviceTask/userTask/sendTask (outside extensionElements) is not a binding location in Flowable and is intentionally not scanned'."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/bpmn-linter.ts:54-76",
+      "issue": "Scope gap for callActivity variable-passing (flowable:in / flowable:out). A <callActivity> element with <extensionElements><flowable:in sourceExpression='{...}'> can pass a raw-object expression into a subprocess variable at deploy time. callActivity is NOT in SCOPED_ELEMENTS per spec FR-2/FR-3, and the spec does not list it as out-of-scope in §8. In practice, this is mitigated by T-0028 (runtime guard) and by the EL expression evaluation semantics (a string expression that produces an object is only dangerous if the runtime guard misses it). The spec scope boundary (serviceTask/userTask/sendTask) is a reasonable E2.6 first-cut, but the gap is worth documenting for T-0028 / a future T-0027 extension.",
+      "suggestion": "Add a JSDoc comment on SCOPED_ELEMENTS documenting that callActivity/subProcess in/out variable passing is out of scope for E2.6 and deferred to T-0028 (runtime guard). This makes the scope decision explicit in code."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/bpmn-linter.ts:82-90",
+      "issue": "Theoretical ZWSP (zero-width space, U+200B) bypass: an attacker who inserts U+200B into ALL record-identity key names (e.g. 'regi​stryId' instead of 'registryId') produces a JSON object that passes JSON.parse but whose keys do not match the RAW_OBJECT_KEYS set. Example: {'regi​stryId':'r','re​cordId':'c'} → ok=true. Practical impact is very low: (a) the resulting variable has keys with ZWSP that no downstream code would recognize as registryId/recordId; (b) assertVariableValue (T-0015) uses the same exact-key matching and would also not detect it; (c) the gateway cannot be routed around with data that has unrecognized keys. The bypass is theoretical (the data is not functional as a record reference). Documented for completeness.",
+      "suggestion": "Non-blocking. If defense-in-depth is desired, add a Unicode normalization step (NFC/NFD or NFKC) on candidate JSON keys before comparison, or add zero-width-space stripping. This is proportionate only if ZWSP-keyed objects are ever recognized downstream."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "Security gate reviewer role should be a separate named role in the factory (current: reviewer role doubles as security-gate reviewer; suggestion: dedicated security-gate-reviewer for deploy-boundary tasks like T-0027, with explicit XML/injection and scope-analysis axes). This is a systems-level gap, not specific to T-0027 findings."
+  ]
+}
