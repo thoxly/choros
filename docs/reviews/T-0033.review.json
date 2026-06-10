@@ -1,47 +1,60 @@
 {
   "task_id": "T-0033",
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "review_round": "rev-2 re-review (R-1 fix at 402e285; supersedes the rev-1 changes_requested verdict)",
   "ci_seen": {
     "green": true,
     "detail": {
-      "tsc": "pass (exit 0)",
+      "tsc": "pass (tsc --noEmit, exit 0)",
       "eslint": "pass (exit 0)",
-      "fitness_shell": "pass (exit 0, 0 FAIL lines; mutation-gateway G1/G2/G6, data-classification-isolation DC8/9/10/17, single-resolver, grant-resolver-isolation, bpmn-linter-isolation all green)",
-      "vitest_pure": "pass 527/527",
-      "isolated_db": "pass — fitness:db 123/123 on a dedicated compose project (POSTGRES_PORT=55437, own volume, torn down). schema.test 16/16: the 2 'pre-existing env failures' from the BUILD report DISAPPEARED on the isolated DB ⇒ confirmed env pollution of shared 55432, NOT a branch defect.",
-      "migrations": "017_data_classification applies cleanly; second pass idempotent (nothing to apply). Branch jumps 012→017 (013–016 = T-0017, not merged here) per ADR RUN SEAM.",
-      "negative_probe_replayed": "confirmed — weakening selectTransform (gap===2 redact→reveal) turned 4 masking tests RED including the end-to-end resolveFor leak (raw '123456789' instead of '[redacted]'); restored, tree clean, green again."
+      "fitness_shell": "pass (npm run fitness, exit 0): single-resolver green, mutation-gateway-isolation FF-G1/G2/G6 green, data-classification-isolation FF-DC8/9/10/17 green, plus bpmn-linter-isolation / grant-resolver-isolation / cross-tenant / kc checks all green.",
+      "vitest_pure": "pass 529/529 (was 527 in rev-1; +2 = the new fail-closed isolation tests FF-DC4a/4b/DC12 split). data-classification.test 34 tests, grant-resolver.test 48 tests.",
+      "isolated_db": "pass — fitness:db 123/123 on a dedicated compose project (POSTGRES_PORT=55442, COMPOSE_PROJECT_NAME=t0033rev2, own volume t0033rev2_choros_pgdata; container+volume+network torn down after). data_classification.test 8/8, schema.test 16/16 (the rev-1 'env-pollution' phantom failures stay absent on an isolated DB — confirmed not a branch defect), cross_tenant 27/27 (AC-2 RLS), two_tenant 4/4.",
+      "migrations": "017_data_classification applies cleanly on pass 1 (012->017 jump per ADR RUN SEAM, 013-016 = T-0017 not merged here); pass 2 idempotent ('nothing to apply, 13 already recorded'). Migration files UNTOUCHED by the fix (402e285 changed only 2 src + 2 test files; migration 017 last touched in the original BUILD commit 3c704ff).",
+      "negative_probe_replayed": "confirmed — reverted the maskFields `cls === undefined` governed-fork back to rev-1 raw fall-through (out[key]=raw); 6 tests went RED, including FF-DC12 (governed@v2, facet v1, clearance='restricted' MAXIMAL) which leaked raw '123456789' purely on the VERSION axis with clearance held non-null, and FF-DC4b (governed, empty-version rows, clearance='restricted'). Restored; tree clean; HEAD still 402e285; green again. The version mechanism is now isolated from the null-clearance lever exactly as R-1's second demand required."
     }
   },
-  "findings": [
-    {
-      "id": "R-1",
-      "severity": "blocking",
-      "axis": 4,
-      "location": "src/core/data-classification.ts:356-385 (maskFields) + :191-193 (readFacetVersion doc) + src/__tests__/data-classification.test.ts:229-249",
-      "issue": "Fail-closed hole at the version/missing-row boundary (spec AC-4/AC-12, NF-3; ADR §4.2). maskFields treats a field as 'classified' ONLY if a classification row exists for (resourceType, facetField, facetSchemaVersion). When the handle facet's schema version has NO rows at all (or a field that SHOULD be classified has no row for its version), every field falls into the `cls === undefined` branch and is returned RAW (line 367-370). The build's own test documents this: ctx([],'public') over RAW returns all three fields raw (test line 234-237, comment: 'classified fields fall through as unclassified (kept raw)'). The spec AC-4 demands the opposite: 'a classified facet whose facet_schema_version has no matching data_classification rows yields MAXIMAL masking ... the field does not leak raw', and ADR §4.2 says 'facetSchemaVersion has no rows at all for that version ⇒ the whole classified facet is max-masked (NOT widened to whole-resource)'. The readFacetVersion doc-comment (line 191-193) explicitly CLAIMS this fail-closed policy 'lives in maskFields' — but maskFields does not implement it. Root cause is architectural: TypedFacet = {fields, schemaVersion} carries NO signal of WHICH fields are classified independent of row-presence, so 'genuinely unclassified field (raw is correct)' is indistinguishable from 'classified field whose rows are missing (must fail-closed)'. The v2-mismatch test (line 240-249) only drops ssn because clearance is null, NOT because of the version mechanism — the version-boundary fail-closed AC is not actually exercised in isolation. Bounded blast radius: visibility is still capped by the grant facet upstream (visibleFields), so this cannot widen beyond grant-conferred fields; but on a security-узел the red-line is 'doubt resolves to zero visibility', and a value-suppressing AC that the code inverts is a spec-vs-code divergence, not a nit.",
-      "suggestion": "Architect-level: give the model a way to know a field is classified-in-this-facet independent of a present row — e.g. a per-(resourceType, schemaVersion) 'declared classified field set' from the ClassificationSource, so a declared-classified field with NO row for its version fails closed to drop/redact instead of falling through raw; OR have TypedFacet/handle declare which fields are classified. Then add a fitness test that isolates the version-boundary (rows exist for version N, handle is version M≠N, NON-null clearance ⇒ classified field max-masked, raw never present) — the current FF-DC4/DC12 test leans on null clearance and does not prove the version mechanism. Until then the readFacetVersion doc-comment overstates the implemented guarantee."
-    }
-  ],
+  "findings": [],
+  "r1_closure": {
+    "verdict": "closed",
+    "evidence": [
+      "maskFields (src/core/data-classification.ts:390-403): the `cls === undefined` branch now forks on `ctx.governed` exactly per ADR rev-2 §10.3 normative code — governed:true => `continue` (drop, key omitted, NEVER raw); governed:false => out[key]=raw (legacy state-U floor). Identical to the corrupt-class drop path (truth-table row 6).",
+      "ClassificationLookup {governed, rows} (data-classification.ts:171-184): one port read carries both the resource-level governance bit and the per-(type,version) row slice — no second query, no second store (rights-derived-only / AC-8 preserved). Port return type widened ClassificationRow[] -> ClassificationLookup; this symbol was introduced by T-0033 so it trips no FE-W23-0008 frozen import surface (resolveFor/makeGrantResolver/projectFields/visibleFields unchanged; FF-DC17 green).",
+      "In-memory source governed-computation (grant-resolver.test.ts:588-597 staticClassifications): `governed: rows.some(r => r.resourceType === resourceType)` — honest any-row-for-resource-type at ANY version, matching ADR §10.4 in-memory contract. Whole-facet fail-closed is reachable independent of the requested version.",
+      "buildMaskContext (grant-resolver.ts:175-185): threads lookup.governed + lookup.rows into MaskContext from the single getClassifications read — no recompute, desync-proof."
+    ]
+  },
+  "negative_probe_isolated": {
+    "FF-DC12": "isolates the version mechanism with NON-null MAXIMAL clearance ('restricted'); governed@v2, facet v1, ssn classified only at v2 => ssn absent under v1 AND raw '123456789' nowhere in output. Reverting §10.3 turns this RED on the version axis with clearance held maximal — the rev-1 test's reliance on the null-clearance lever is gone.",
+    "FF-DC4a_state_U": "governed:false, zero rows => raw floor (legacy back-compat anchor) — passes.",
+    "FF-DC4b_state_G": "governed:true, empty-version rows, clearance='restricted' => whole facet drops, raw absent, no widening — passes; reverting => RED.",
+    "result": "confirmed"
+  },
+  "blast_radius_assessment": {
+    "verdict": "correct semantics per ADR rev-2 §10.1/§10.3 truth-table — NOT an over-reach",
+    "changed_asserts": "FF-DC3 (`name` now absent for both readers), FF-DC7 masked-value test (`name` absent), FF-DC7 null-clearance test (`name` absent), and the maskFields null-clearance test (`name` absent). In every one of these the resource is GOVERNED (a classified field like ssn/card is present), and `name` has no classification row for the requested version.",
+    "adjudication": "ADR §10.1 row 4 (governed, version has rows but not for f) and the binding decision rule in §10.1 ('In state G, a field with no resolvable class for the handle's version fails closed to maximal masking ... the version boundary is fail-closed for the WHOLE facet') REQUIRE exactly this: under governance, a no-row field drops, it is not kept raw. So `name` dropping is the ADR-mandated answer, not a coder over-reach. The over-reach hypothesis (governed should bite ONLY classified fields, leaving non-classified raw) is the very ambiguity §10.1 names as the R-1 root cause: the model has NO per-field is-classified signal independent of row-presence, so 'genuinely unclassified field (raw correct)' is structurally indistinguishable from 'classified field whose row is missing for this version (must fail-closed)'. Resolving that doubt toward raw is the original bug; resolving it toward drop is fail-closed (NF-3).",
+    "spec_vs_adr_alignment": "ALIGNED, not divergent. SPEC AC-4 ('a classified facet whose facet_schema_version has no matching rows yields maximal masking; the field does not leak raw') + AC-12 (version boundary = AC-4) + the spec §1 red-line and FR/NF text 'a facet whose schema version has no classification rows is fail-closed (treated as maximally-masked), never widened' and 'a facet-schema-version mismatch resolves to MORE masking, never less'. The spec frames the unit as the FACET (treated as maximally-masked), and 'does not leak raw' is the value-suppression intent the rev-1 code inverted. Whole-governed-facet fail-closed satisfies AC-4/AC-12 strictly more conservatively and never widens beyond the grant-conferred visibleFields (the upstream grant facet still caps the field set). No spec AC is violated by the wider drop; the additive-floor compatibility for genuinely ungoverned resources is preserved by state U (FF-DC4a). Conclusion: the blast radius is principle-consistent and in-bounds."
+  },
   "deviations_assessment": [
     {
       "id": "FE-T0033-1",
-      "ref": "ci/checks/bpmn-linter-isolation.sh FROZEN_FILES — grant-resolver.ts thawed (ADR §2.1 named only mutation-gateway-isolation.sh G6)",
-      "verdict": "legitimate",
-      "rationale": "The spec/ADR REQUIRE editing grant-resolver.ts to fold in value-aware masking. bpmn-linter-isolation.sh (a T-0027 check) independently froze the same file in its own FROZEN_FILES array; leaving it frozen would red the gate on a legitimately-mandated edit. The thaw is a principle-consistent EXTENSION of the ADR's explicit thaw rationale to every check that froze the file, not a weakening. Verified: the other four files (object-handle.ts, grant-lattice.ts, types.ts, jobStore.ts) remain frozen in that array AND stay byte-unchanged (fitness PASS confirms; git diff of those files vs base = empty). The edit is purely additive (ResolverDeps gains optional classifications; projectFields an optional 4th arg). Documented inline with cross-reference."
+      "ref": "ci/checks/bpmn-linter-isolation.sh + mutation-gateway-isolation.sh FROZEN sets — grant-resolver.ts thawed (ADR §2.1)",
+      "verdict": "legitimate (carried from rev-1; unchanged by rev-2 fix)",
+      "rationale": "Spec/ADR REQUIRE editing grant-resolver.ts to fold in value-aware masking; the freeze on that file is thawed where it was set, the other frozen files stay byte-unchanged (fitness PASS). rev-2 added no new frozen-file deviation — the only signature change (getClassifications return type) is internal to the T-0033-introduced port and touches no frozen import surface (FF-DC17 green)."
     },
     {
       "id": "FE-T0033-2",
-      "ref": "deriveClearance reads grant.constraint FIRST, grant.resourceFacet as fallback (ADR §4.3 said resourceFacet OR constraint)",
-      "verdict": "legitimate (arguably a correctness improvement over the ADR's loose 'OR')",
-      "rationale": "A whole-resource grant MUST keep resourceFacet strictly absent — that is the ONLY widen path (grant-resolver.test.ts:450-460; a present-but-malformed resourceFacet fails closed to zero fields per R-1). If clearance had to ride on resourceFacet, a whole-resource grant could never carry clearance (placing {clearance} there would make resourceFacet present-malformed ⇒ zero fields). constraint-first is therefore NECESSARY for whole-resource + clearance-bearing grants, which FF-DC7 (grant-resolver.test.ts:596-621) explicitly exercises. Grant semantics not broken: a whole-resource grant without resourceFacet correctly reads clearance from constraint; a no-clearance whole-resource grant over a classified field correctly drops it (test line 662-676, fail-closed)."
+      "ref": "deriveClearance reads grant.constraint first, resourceFacet as fallback (ADR §4.3 'resourceFacet OR constraint')",
+      "verdict": "legitimate (carried from rev-1; unaffected by rev-2)",
+      "rationale": "constraint-first is necessary so a whole-resource grant (resourceFacet strictly absent — the only widen path) can still carry clearance; FF-DC7 exercises it. Unchanged by the R-1 fix."
     }
   ],
   "acceptance_coverage": [
     {"ac": "AC-1", "covered": true},
     {"ac": "AC-2", "covered": true},
     {"ac": "AC-3", "covered": true},
-    {"ac": "AC-4", "covered": false},
+    {"ac": "AC-4", "covered": true},
     {"ac": "AC-5", "covered": true},
     {"ac": "AC-6", "covered": true},
     {"ac": "AC-7", "covered": true},
@@ -49,13 +62,20 @@
     {"ac": "AC-9", "covered": true},
     {"ac": "AC-10", "covered": true},
     {"ac": "AC-11", "covered": true},
-    {"ac": "AC-12", "covered": false},
+    {"ac": "AC-12", "covered": true},
     {"ac": "AC-13", "covered": true},
     {"ac": "AC-14", "covered": true},
     {"ac": "AC-15", "covered": true},
     {"ac": "AC-16", "covered": true}
   ],
+  "regressions_checked": [
+    "single-projection: single-resolver.sh green; AC-7 FF-DC7 still folds masking into the one resolveFor projection (no second handle->fields export).",
+    "purity/isolation: grant-resolver-isolation.sh Check 1/3 green; data-classification.ts imports no pg/fs/net/http; frozen modules object-handle.ts/grant-lattice.ts byte-unchanged.",
+    "rights-derived-only: AC-8 governed bit computed from the same ClassificationSource read, no parallel field-ACL store; data-classification-isolation.sh FF-DC8 green.",
+    "FF-DC17 (import-surface stability): green — resolveFor/makeGrantResolver/projectFields/visibleFields signatures preserved (only ResolverDeps optional field + projectFields optional 4th arg).",
+    "migration 017: untouched by the fix; applies + idempotent on isolated DB."
+  ],
   "role_gap_evidence": [
-    "Security-узел review surfaced an architectural fail-closed gap (R-1) that the build's own fitness test documents in a comment yet does not catch as red — the FF-DC4/DC12 test leans on null clearance and never isolates the version-boundary mechanism, so a green gate masked a security-AC inversion. Candidate evidence for ledgers/role-gaps.md: fitness checks for fail-closed ACs should be required to isolate the failing mechanism (here: version mismatch with NON-null clearance), not satisfy the assertion via an adjacent lever (null clearance)."
+    "RESOLVED in rev-2: the rev-1 role-gap evidence (a fail-closed AC satisfiable via an adjacent lever — null clearance — so a green gate masked a security-AC inversion) is now closed by the §10.7 isolating tests. FF-DC12 forces the failure onto the version axis with clearance held maximal, and the negative probe confirms reverting §10.3 reds it on that axis alone. Standing evidence for ledgers/role-gaps.md remains valid as a GENERAL rule (not a T-0033 defect): fitness checks for fail-closed/security ACs should be required to isolate the failing mechanism rather than satisfy the assertion through an adjacent lever — this re-review is the worked example of why."
   ]
 }
