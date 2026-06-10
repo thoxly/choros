@@ -1,0 +1,171 @@
+{
+  "task_id": "T-0031",
+  "status": "ready",
+  "decision": "Ship three new source modules — src/core/audit-grant-encoder.ts (pure IO-free encoder for GrantAuditEvent→AuditEventInput and AssignmentAuditEvent→AuditEventInput), src/db/audit-grant-trail.ts (RLS-scoped queryGrantTrail that reads audit_event rows where type IN the four grant-family types inside withTenant), src/http/grant-trail.ts (GET /api/grant-trail with limit/cursor validation and static-seed fallback) — plus additive UI wiring in ra-grant-trail.jsx, with zero new DDL migrations. All grant and assignment change events are recorded as rows in the existing audit_event floor by T-0030's call-sites importing and calling the encoder. The trail is read via GET /api/grant-trail backed by audit_event (RLS-scoped, cursor-paginated). No new tenant table; known_tenant_tables.txt unchanged.",
+  "rejected_alternatives": [
+    {
+      "option": "Separate grant_log table",
+      "why_not": "T-0016 ADR §2 explicitly rejected this: two tables means two append-only/chain/isolation code-paths and two 152-FZ/GDPR narratives. New event types are rows in audit_event, never new tables."
+    },
+    {
+      "option": "Encode GrantAuditEvent inline inside T-0030 HTTP handlers",
+      "why_not": "Duplicates mapping logic across multiple call-sites. If AuditEventInput shape evolves, every T-0030 call-site must change independently. A single encoder module is the single source of truth for the mapping contract."
+    },
+    {
+      "option": "Re-define GrantAuditEvent in the encoder module",
+      "why_not": "Violates NF-2 and FE-W23-0008 compatibility: GrantAuditEvent is exported from grant-lattice.ts (T-0018 FR-7). A re-definition silently diverges the two types. The encoder imports verbatim."
+    },
+    {
+      "option": "Separate assignment_log for assignment events",
+      "why_not": "Same objection as grant_log. assignment.create/assignment.revoke are two more event types in audit_event. encodeAssignmentAuditEvent provides the encoder for assignment write call-sites in T-0030."
+    },
+    {
+      "option": "Hard dependency on T-0030 migration 030 (proposed_by/confirmed_by on grant table)",
+      "why_not": "The encoder maps values from the GrantAuditEvent object (supplied by T-0030's HTTP handler from its request body), not from the grant table directly. queryGrantTrail reads only audit_event columns (all present since migration 006). No order-of-merge constraint needed."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "AuditEventInput",
+      "fields": [
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"},
+        {"name": "actor", "type": "string"},
+        {"name": "subject", "type": "string | null"},
+        {"name": "scope", "type": "unknown | null"},
+        {"name": "via", "type": "string | null"},
+        {"name": "proposed_by", "type": "string | null"},
+        {"name": "confirmed_by", "type": "string | null"},
+        {"name": "payload", "type": "unknown"},
+        {"name": "occurred_at", "type": "number"}
+      ]
+    },
+    {
+      "entity": "AssignmentAuditEvent",
+      "fields": [
+        {"name": "kind", "type": "\"assignment.create\" | \"assignment.revoke\""},
+        {"name": "actor", "type": "string"},
+        {"name": "employeeId", "type": "string"},
+        {"name": "roleId", "type": "string"},
+        {"name": "orgScope", "type": "unknown"},
+        {"name": "proposedBy", "type": "string | undefined"},
+        {"name": "confirmedBy", "type": "string | undefined"}
+      ]
+    },
+    {
+      "entity": "GrantTrailRow",
+      "fields": [
+        {"name": "seq", "type": "number"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"},
+        {"name": "actor", "type": "string"},
+        {"name": "subject", "type": "string | null"},
+        {"name": "scope", "type": "unknown | null"},
+        {"name": "proposed_by", "type": "string | null"},
+        {"name": "confirmed_by", "type": "string | null"},
+        {"name": "payload", "type": "unknown"},
+        {"name": "occurred_at", "type": "number"}
+      ]
+    },
+    {
+      "entity": "QueryGrantTrailOpts",
+      "fields": [
+        {"name": "roleId", "type": "string | undefined"},
+        {"name": "actor", "type": "string | undefined"},
+        {"name": "subject", "type": "string | undefined"},
+        {"name": "limit", "type": "number"},
+        {"name": "beforeSeq", "type": "number | undefined"}
+      ]
+    }
+  ],
+  "contracts": [
+    "encodeGrantAuditEvent(e: GrantAuditEvent, nowMs: number, idOverride?: string): AuditEventInput — pure IO-free; maps kind→type, actor, subjectRoleId→subject, scope, proposedBy→proposed_by, confirmedBy→confirmed_by, capability→payload (with optional resourceFacet), nowMs→occurred_at; id from idOverride or crypto.randomUUID(); NO chain columns in output.",
+    "encodeAssignmentAuditEvent(e: AssignmentAuditEvent, nowMs: number, idOverride?: string): AuditEventInput — pure IO-free; maps kind→type, actor, employeeId→subject, orgScope→scope, roleId→payload.roleId, proposedBy→proposed_by, confirmedBy→confirmed_by, nowMs→occurred_at.",
+    "queryGrantTrail(pool: pg.Pool, tenantId: string, opts: QueryGrantTrailOpts): Promise<{rows: GrantTrailRow[]; hasMore: boolean}> — always runs inside withTenant; WHERE type IN ('grant.create','grant.revoke','assignment.create','assignment.revoke'); ORDER BY seq DESC; roleId filter: subject=$roleId OR payload->>'roleId'=$roleId; limit default 100 max 500; beforeSeq cursor; hasMore = limit+1 probe.",
+    "registerGrantTrailRoutes(router: Router, pool?: pg.Pool): void — registers GET /api/grant-trail; validates limit (1-500, default 100) and before_seq (non-negative integer); throws HttpError(400,'INVALID_PARAM') on invalid params; returns {rows: GrantTrailRow[], hasMore: boolean}; static seed fallback when pool absent or DATABASE_URL not set.",
+    "server.ts buildRouter: additive import and call registerGrantTrailRoutes(router, pool) — no other changes to server.ts.",
+    "ra-grant-trail.jsx UI wiring: useEffect fetch('/api/grant-trail') on mount; TRAIL from ra-data.jsx becomes initial/fallback state; filter tabs remain client-side; load-more uses before_seq cursor.",
+    "T-0030 seam (frozen): import {encodeGrantAuditEvent, encodeAssignmentAuditEvent} from '../core/audit-grant-encoder.js'; call before appendAuditEvent at each grant/assignment write call-site; additive only — no encoder changes needed.",
+    "Migration seam: T-0031 ships no DDL; any seed is numbered 031_*, INSERT-only into audit_event, ON CONFLICT DO NOTHING; known_tenant_tables.txt unchanged."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-0031-01",
+      "rule": "src/core/audit-grant-encoder.ts contains no pg, fetch, http, https, net, or child_process import",
+      "ci_check": "ci/checks/grant-trail-encoder-isolation.sh Check-1: grep -E 'from.*[\"'](pg|node:http|node:https|node:net|node:child_process|http|https|net|child_process)[\"']' src/core/audit-grant-encoder.ts — must be empty (static-now)"
+    },
+    {
+      "id": "FF-0031-02",
+      "rule": "src/core/grant-lattice.ts is not edited by T-0031 — no new exports, no mutations",
+      "ci_check": "ci/checks/grant-trail-encoder-isolation.sh Check-2: git diff --quiet HEAD -- src/core/grant-lattice.ts (static-now)"
+    },
+    {
+      "id": "FF-0031-03",
+      "rule": "src/core/audit-grant-encoder.ts imports GrantAuditEvent and Scope from grant-lattice (not redefined locally)",
+      "ci_check": "ci/checks/grant-trail-encoder-isolation.sh Check-3: grep -E 'import.*GrantAuditEvent.*grant-lattice' src/core/audit-grant-encoder.ts must match (static-now)"
+    },
+    {
+      "id": "FF-0031-04",
+      "rule": "Encoder unit tests demonstrate T-0030 seam: at least one test contains both encodeGrantAuditEvent and a mocked appendAuditEvent call",
+      "ci_check": "ci/checks/grant-trail-encoder-isolation.sh Check-4: grep -c 'appendAuditEvent' src/__tests__/audit-grant-encoder.test.ts must be >= 1 (static-now)"
+    },
+    {
+      "id": "FF-0031-05",
+      "rule": "known_tenant_tables.txt is unchanged by T-0031",
+      "ci_check": "ci/checks/grant-trail-no-new-table.sh Check-1: git diff --quiet HEAD -- ci/checks/known_tenant_tables.txt (static-now)"
+    },
+    {
+      "id": "FF-0031-06",
+      "rule": "No migration >= 031 shipped by T-0031 contains CREATE TABLE",
+      "ci_check": "ci/checks/grant-trail-no-new-table.sh Check-2: grep -l 'CREATE TABLE' migrations/03[1-9]_*.sql migrations/0[4-9][0-9]_*.sql 2>/dev/null must be empty (static-now)"
+    },
+    {
+      "id": "FF-0031-07",
+      "rule": "Any seed migration >= 031 shipped by T-0031 is idempotent (contains ON CONFLICT DO NOTHING)",
+      "ci_check": "ci/checks/grant-trail-no-new-table.sh Check-3: for each new seed SQL file added by T-0031 in migrations/, grep -q 'ON CONFLICT' must pass (static-now)"
+    },
+    {
+      "id": "FF-0031-08",
+      "rule": "GET /api/grant-trail?limit=600 returns HTTP 400 INVALID_PARAM",
+      "ci_check": "src/__tests__/grant-trail.e2e.test.ts AC-16: in-memory server, no DATABASE_URL needed (static-now)"
+    },
+    {
+      "id": "FF-0031-09",
+      "rule": "GET /api/grant-trail?before_seq=abc returns HTTP 400 INVALID_PARAM",
+      "ci_check": "src/__tests__/grant-trail.e2e.test.ts AC-17: in-memory server, no DATABASE_URL needed (static-now)"
+    },
+    {
+      "id": "FF-0031-10",
+      "rule": "queryGrantTrail returns only rows with type IN the four grant-family types; a row with type='approve' is NOT returned",
+      "ci_check": "src/__tests__/grant-trail.db.test.ts AC-20: live Postgres required; skipped when DATABASE_URL absent; wired into db-isolation CI job (live-T-0053)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-01", "covered_by": "encodeGrantAuditEvent field mapping §4.1; unit test audit-grant-encoder.test.ts"},
+    {"ac": "AC-02", "covered_by": "encodeGrantAuditEvent proposed_by/confirmed_by passthrough §4.1; unit test"},
+    {"ac": "AC-03", "covered_by": "encodeGrantAuditEvent type←e.kind §4.1; unit test"},
+    {"ac": "AC-04", "covered_by": "encodeGrantAuditEvent payload conditional resourceFacet §4.1; unit test"},
+    {"ac": "AC-05", "covered_by": "encodeAssignmentAuditEvent §3.2 mapping §4.1; unit test"},
+    {"ac": "AC-06", "covered_by": "encodeAssignmentAuditEvent type←e.kind §4.1; unit test"},
+    {"ac": "AC-07", "covered_by": "AuditEventInput §3.1 chain columns absent; unit test asserts no seq/prev_hash/row_hash/vocab_version keys in output"},
+    {"ac": "AC-08", "covered_by": "idOverride parameter in encoder signature §4.1; unit test with fixed id produces deterministic output"},
+    {"ac": "AC-09", "covered_by": "FF-0031-01 static lint on encoder imports"},
+    {"ac": "AC-10", "covered_by": "FF-0031-02 (grant-lattice.ts unchanged) + FF-0031-03 (import source is grant-lattice)"},
+    {"ac": "AC-11", "covered_by": "FF-0031-04 seam test with mocked appendAuditEvent"},
+    {"ac": "AC-12", "covered_by": "HTTP route §4.3 response shape; e2e test AC-12"},
+    {"ac": "AC-13", "covered_by": "queryGrantTrail roleId filter §4.2 (subject OR payload->>'roleId'); e2e test"},
+    {"ac": "AC-14", "covered_by": "queryGrantTrail actor filter §4.2; e2e test"},
+    {"ac": "AC-15", "covered_by": "queryGrantTrail limit + hasMore §4.2 (limit+1 probe); e2e test"},
+    {"ac": "AC-16", "covered_by": "FF-0031-08 (400 INVALID_PARAM for limit>500)"},
+    {"ac": "AC-17", "covered_by": "FF-0031-09 (400 INVALID_PARAM for non-integer before_seq)"},
+    {"ac": "AC-18", "covered_by": "Static fallback §4.3 when DATABASE_URL absent; e2e test without DB"},
+    {"ac": "AC-19", "covered_by": "RLS via withTenant §4.2; existing cross_tenant.test.ts covers audit_event (no new table = no new fixture entry needed)"},
+    {"ac": "AC-20", "covered_by": "FF-0031-10 type IN filter; db test"},
+    {"ac": "AC-21", "covered_by": "UI wiring §4.6; manual smoke test (useEffect fetch, .chs-trailrow elements render)"},
+    {"ac": "AC-22", "covered_by": "FF-0031-05 + FF-0031-06 (known_tenant_tables.txt unchanged, no CREATE TABLE in 031+ migrations)"},
+    {"ac": "AC-23", "covered_by": "FF-0031-07 (ON CONFLICT DO NOTHING in any seed migration)"}
+  ],
+  "runtime_target": "локально / контейнер — Node.js HTTP server на home server основателя (/srv/choros docker-compose, Tailscale). Никаких новых внешних ресурсов. Encoder — чистый; DB query — существующий Postgres (T-0053). GT-4 не требуется.",
+  "adr_artifact_path": "docs/design/T-0031-grant-trail.adr.md",
+  "escalation": ""
+}
