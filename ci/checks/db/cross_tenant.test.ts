@@ -135,6 +135,19 @@ async function seedJobRow(c: pg.Client, tenantId: string): Promise<string> {
   return id;
 }
 
+/** Seed one row into choros.app_timer. Returns the timer id. */
+async function seedAppTimer(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  const now = Date.now();
+  await c.query(
+    `INSERT INTO choros.app_timer
+       (tenant_id, id, due_at, state, kind, payload, created_at)
+     VALUES ($1, $2, $3, 'pending', 'ct-test', '{}'::jsonb, $3)`,
+    [tenantId, id, now + 60000],
+  );
+  return id;
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -191,6 +204,9 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     case 'job':
       await seedJobRow(c, tenantId);
+      break;
+    case 'app_timer':
+      await seedAppTimer(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
