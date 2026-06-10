@@ -1,8 +1,8 @@
 # Addendum to stack-and-fleet-ops ADR — Flowable OSS-boundary spike (T-0117)
 
-**Status: addendum, awaiting ratification (founder).**
+**Status: RATIFIED by founder, 2026-06-10.**
 Ratification is a founder gate (GT/RL-2); this document records the spike's measured
-result and a recommendation — it does not itself change the ratified stack ADR.
+result and a recommendation — ratified, it amends the stack ADR (see §8).
 
 - Spike: `docs/specs/T-0117-flowable-oss-spike.spec.md` (15 AC) +
   `docs/design/T-0117-flowable-oss-spike.adr.md`.
@@ -172,3 +172,25 @@ demonstrated to work under the same probes, should Flowable maturity/maintenance
    (faster-cleanup) Operaton? The spike's recommendation says yes.
 3. Ratify Flowable 7 (primary) / Operaton (fallback) for the integration task ("Порядок
    работ" п.5), unblocking it.
+
+---
+
+## 8. Ratification (founder, 2026-06-10)
+
+Ratified by the founder on 2026-06-10 (recorded by the stabilization copilot on the
+founder's explicit instruction; control.db audit entry under session
+`founder-ratification-2026-06-10`). Answers to §7:
+
+1. **Extrapolation assumptions accepted** (`contour_fraction=0.2`, `dev_factor=0.5`,
+   nightly 8h window) — conservative; both engines pass even with all assumptions dropped.
+2. **Confirmed:** dedicated deadletter *move* semantics are decisive; Flowable stays
+   primary over the faster-cleanup Operaton.
+3. **Ratified: Flowable 7 primary / Operaton fallback.** Engine-integration tasks
+   (T-0058+) are unblocked by this ratification.
+
+Consequence for the backlog: **T-0055 (S-1 engine recommendation) is closed as
+superseded** — its deliverable is this addendum (produced by T-0117); an independent
+second assessment was declined as armchair re-analysis of an already-measured result.
+The re-confirmation items stay live: cleanup against engine-produced history incl.
+child tables, and autovacuum tuning for history tables (§4 note, §5) — owned by the
+engine-integration task.
