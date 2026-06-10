@@ -28,6 +28,12 @@ export interface Job {
   readonly lockExpiry: number | undefined;
   /** Unix epoch ms at the time the job was enqueued, sourced from the injected Clock. */
   readonly createdAt: number;
+  /**
+   * Unix epoch ms at which this job becomes eligible for fetchAndLock.
+   * Set to createdAt on enqueue; updated to clock.now()+retryTimeoutMs on fail-with-retry.
+   * T-0114: previously recorded-only — now actively enforced by fetchAndLock.
+   */
+  readonly available_at: number;
 }
 
 /** Clock abstraction — injection seam for deterministic time in tests. */
