@@ -1,0 +1,141 @@
+{
+  "task_id": "T-0040",
+  "status": "ready",
+  "decision": "Build one new pure module src/core/role-criticality.ts — zero IO, zero migration, zero new authority store — owning the frozen RoleCriticality record (the T-0044 seam) and a family of total, deterministic functions that fold a role's already-fetched Grant[] into the three signed D-A=A3 bits + a derived level. axis a (approve_or_transition) = an effective grant with operation in {approve, transition} (grant-lattice Operation set + isEffective); axis b (external_invoke) = the exact T-0034 predicate resourceType==='effect_resource' AND operation==='invoke' on an effective grant; axis c (sensitive_read) = deriveClearance(effective read grants, nowMs) (imported from data-classification.ts, constraint-first) compared against a single named SENSITIVE_READ_THRESHOLD: DataClass = 'confidential' whose rank is read off the frozen DATA_CLASS_ORDER. DataClass/deriveClearance are imported (never redeclared); Grant/Operation/ResourceType/isEffective are imported. DB access is deferred behind an injected port RoleGrantSource.getRoleGrants(tenantId, roleId): Promise<Grant[]> (mirrors GrantSource/ClassificationSource/EffectSource; Postgres DAO → T-0053). No migration, no new table, no new column: role_criticality is a pure computation over existing rows (derived-not-stored, spec §6-B). A new structural fitness gate ci/checks/role-criticality-isolation.sh (banned-token + no-IO-import + no-Date.now + export-seam + frozen-foundation + no-migration) is appended to npm run fitness. The gate/diff-application/audit are deliberately left to the consumer T-0044 — T-0040 owns ONLY the computation, the record shape, and criticalityDiff.",
+  "rejected_alternatives": [
+    {
+      "option": "Materialize role_criticality as a grant/role column or a new role_criticality table (+ migration 030)",
+      "why_not": "Duplicates authority state already living in grant + data_classification (violates rights-derived-only, NF-2) and forces a write-path re-derivation hook on every grant/classification change — strictly worse than recompute-on-read. Spec §6-B rules it out; materialization is a T-0053 concern only if perf ever demands it."
+    },
+    {
+      "option": "A second 'criticality' authority algebra (critFlags/criticalityAcl/field-visibility token computed independently of grants)",
+      "why_not": "A parallel authority subsystem that drifts from the grant table — the exact anti-pattern data-classification-isolation.sh / effect-resource-isolation.sh ban. Every bit MUST derive from Grant rows + DataClass only (NF-2)."
+    },
+    {
+      "option": "Recompute the three bits independently inside T-0044",
+      "why_not": "Splits the source of truth: the gate and the computation could diverge silently. FR-7 fixes the seam — T-0040 owns the computation + record + criticalityDiff; T-0044 consumes them and must not recompute."
+    },
+    {
+      "option": "Inline the fold into grant-resolver.ts (no separate module)",
+      "why_not": "Couples the resolver to the criticality contract + the T-0044 diff helper, bloating its boundary and forcing an edit to a near-frozen hot file. A separate pure module keeps the seam self-contained and re-importable by T-0044 (same reasoning T-0034 used for effect-resource.ts)."
+    },
+    {
+      "option": "Let the core call Date.now() / read clearance via a field-name lookup",
+      "why_not": "Breaks purity/determinism (NF-1/NF-7): nowMs is a parameter so equal inputs ⇒ equal output. Clearance rides on the existing opaque grant.constraint marker via deriveClearance (T-0033 constraint-first) — no field-ACL store, no Grant schema change."
+    },
+    {
+      "option": "deriveClearance over ALL grants (not just read grants)",
+      "why_not": "Axis (c) is specifically read of sensitive data above a threshold. Filtering Ge to operation==='read' before deriveClearance keeps a clearance marker sitting on a non-read grant from raising the read-sensitivity bit (AC-9)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "RoleCriticalityLevel",
+      "fields": [
+        {"name": "routine", "type": "string literal — T-0044 single-scoped-approver path"},
+        {"name": "critical", "type": "string literal — T-0044 two-distinct-approver path"}
+      ]
+    },
+    {
+      "entity": "RoleCriticality (frozen T-0044 record)",
+      "fields": [
+        {"name": "approve_or_transition", "type": "boolean — axis a: effective grant with operation in {approve, transition}"},
+        {"name": "external_invoke", "type": "boolean — axis b: effective resourceType==='effect_resource' AND operation==='invoke'"},
+        {"name": "sensitive_read", "type": "boolean — axis c: deriveClearance(effective read grants) rank >= rank(SENSITIVE_READ_THRESHOLD)"},
+        {"name": "level", "type": "RoleCriticalityLevel — 'critical' iff any axis true (the single-approver carveout)"}
+      ]
+    },
+    {
+      "entity": "CriticalityDiff (T-0044 diff seam)",
+      "fields": [
+        {"name": "expanded", "type": "{ approve_or_transition: boolean; external_invoke: boolean; sensitive_read: boolean } — bit expanded iff to===true && from===false"},
+        {"name": "escalates", "type": "boolean — to.level==='critical' && from.level!=='critical' (routine→critical; ≡ any expanded bit)"}
+      ]
+    },
+    {
+      "entity": "RoleGrantSource (injected port — Postgres DAO → T-0053)",
+      "fields": [
+        {"name": "getRoleGrants", "type": "(tenantId: string, roleId: string) => Promise<Grant[]> — grants pre-scoped to one tenant; the function does no IO"}
+      ]
+    },
+    {
+      "entity": "SENSITIVE_READ_THRESHOLD (constant)",
+      "fields": [
+        {"name": "value", "type": "DataClass = 'confidential' — day-1 threshold, tunable within the closed DataClass axis (FR-4, spec §7)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "export type RoleCriticalityLevel = \"routine\" | \"critical\";",
+    "export interface RoleCriticality { approve_or_transition: boolean; external_invoke: boolean; sensitive_read: boolean; level: RoleCriticalityLevel; }",
+    "export const SENSITIVE_READ_THRESHOLD: DataClass = \"confidential\";",
+    "export interface RoleGrantSource { getRoleGrants(tenantId: string, roleId: string): Promise<Grant[]>; }",
+    "export function combineCriticality(grants: Grant[], nowMs: number): RoleCriticality; // PURE, sync, no IO — the atomic fold",
+    "export function roleCriticality(source: RoleGrantSource, tenantId: string, roleId: string, nowMs: number): Promise<RoleCriticality>; // only async/IO-bearing seam (via port)",
+    "export function criticalityLevel(c: { approve_or_transition: boolean; external_invoke: boolean; sensitive_read: boolean }): RoleCriticalityLevel;",
+    "export interface CriticalityDiff { expanded: { approve_or_transition: boolean; external_invoke: boolean; sensitive_read: boolean }; escalates: boolean; }",
+    "export function criticalityDiff(from: RoleCriticality, to: RoleCriticality): CriticalityDiff;",
+    "import { Grant, Operation, isEffective } from \"./grant-lattice\"; // imported, not redeclared",
+    "import { DataClass, DATA_CLASS_ORDER, deriveClearance } from \"./data-classification\"; // imported, not redeclared"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-RC1",
+      "rule": "No second authority store: role-criticality.ts contains no parallel-authority token (_acl, criticalityRights, critFlags, criticalityAcl, field_visibility, fieldVisibility) in non-comment code — every bit derives from Grant rows + DataClass only (NF-2, AC-15).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — banned-token grep with comment lines excluded; wired into `npm run fitness` (and thus `npm run ci`)."
+    },
+    {
+      "id": "FF-RC2",
+      "rule": "Purity / no IO: role-criticality.ts imports no pg/fs/net/http; DB access only via the injected RoleGrantSource port (NF-1, AC-15).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — forbidden-import grep (mirror of data-classification-isolation.sh DC9 / effect-resource-isolation.sh ER-ISO2)."
+    },
+    {
+      "id": "FF-RC3",
+      "rule": "No Date.now in core: role-criticality.ts contains no `Date.now(` / `new Date(` — nowMs is a parameter (determinism, NF-7/FR-6).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — grep for `Date.now(` and `new Date(` in non-comment code."
+    },
+    {
+      "id": "FF-RC4",
+      "rule": "T-0044 export seam: the module exports RoleCriticality, RoleCriticalityLevel, RoleGrantSource, roleCriticality, combineCriticality, criticalityLevel, criticalityDiff, SENSITIVE_READ_THRESHOLD; DataClass/deriveClearance are imported from data-classification.ts (not redeclared) (FR-9, AC-18).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — assert each export symbol present + assert an `import ... from \"./data-classification\"` line + assert NO local `type DataClass` redeclaration; plus tsc --noEmit in `npm run ci`."
+    },
+    {
+      "id": "FF-RC5",
+      "rule": "Frozen foundation (byte-level): the commit does not edit grant-lattice.ts, data-classification.ts, effect-resource.ts, grant-resolver.ts, object-handle.ts, or any migrations/*.sql (NF-5, AC-16).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — `git diff --name-only <base>...HEAD` fails if any frozen path appears; plus tsc --noEmit."
+    },
+    {
+      "id": "FF-RC6",
+      "rule": "No migration / tenant-table set unchanged: no new migrations/*.sql added; ci/checks/known_tenant_tables.txt byte-unchanged; the cross-tenant fitness set unchanged (derived, not stored) (NF-6, AC-17).",
+      "ci_check": "ci/checks/role-criticality-isolation.sh — assert `git diff --name-only` adds no migrations/*.sql and no change to known_tenant_tables.txt; existing cross-tenant-fitness.sh stays green untouched."
+    },
+    {
+      "id": "FF-RC7",
+      "rule": "Bit-derivation + threshold carveout + level/diff + effective-window + fail-closed unknown-op + determinism hold (the 14 behavioural ACs).",
+      "ci_check": "src/__tests__/role-criticality.test.ts (vitest, `npm test`) — one assertion per AC-1..AC-14."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4 rule 1 (approve grant) + FF-RC7 role-criticality.test.ts"},
+    {"ac": "AC-2", "covered_by": "§4 rule 1 (transition grant) + FF-RC7"},
+    {"ac": "AC-3", "covered_by": "§4 rule 1 (read/create/update/delete only ⇒ false) + FF-RC7"},
+    {"ac": "AC-4", "covered_by": "§4 rule 2 (effect_resource ∧ invoke) + FF-RC7"},
+    {"ac": "AC-5", "covered_by": "§4 rule 2 (non-effect invoke ⇒ false) + FF-RC7"},
+    {"ac": "AC-6", "covered_by": "§4 rule 2 (effect_resource non-invoke ⇒ false) + FF-RC7"},
+    {"ac": "AC-7", "covered_by": "§4 rule 3 (deriveClearance + threshold; confidential/restricted) + FF-RC7"},
+    {"ac": "AC-8", "covered_by": "§4 rule 3 (threshold carveout; public/internal/none) + FF-RC7"},
+    {"ac": "AC-9", "covered_by": "§4 rule 3 (R filtered to operation==='read') + FF-RC7"},
+    {"ac": "AC-10", "covered_by": "§4 rule 4 / criticalityLevel + FF-RC7"},
+    {"ac": "AC-11", "covered_by": "§4 Ge filter (isEffective) + deriveClearance(nowMs) + FF-RC7"},
+    {"ac": "AC-12", "covered_by": "§4 rule 5 / criticalityDiff + FF-RC7"},
+    {"ac": "AC-13", "covered_by": "§4 rule 1 fail-closed note (NF-3) + FF-RC7"},
+    {"ac": "AC-14", "covered_by": "§4 determinism note + FF-RC7 + FF-RC2/FF-RC3"},
+    {"ac": "AC-15", "covered_by": "FF-RC1 + FF-RC2 (role-criticality-isolation.sh)"},
+    {"ac": "AC-16", "covered_by": "FF-RC5 (frozen foundation git-diff + tsc --noEmit)"},
+    {"ac": "AC-17", "covered_by": "FF-RC6 (no migration / known_tenant_tables byte-unchanged)"},
+    {"ac": "AC-18", "covered_by": "FF-RC4 (export seam + DataClass/deriveClearance imported)"}
+  ],
+  "runtime_target": "локально (library code) — in-process pure TS, no runtime of its own; executes wherever the resolver/T-0044 gate runs (Choros app process). No external resource, no migration ⇒ no founder gate (GT-4). Postgres RoleGrantSource DAO deferred to T-0053.",
+  "adr_artifact_path": "docs/design/T-0040-role-criticality.adr.md",
+  "escalation": ""
+}
