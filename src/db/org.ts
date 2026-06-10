@@ -1,13 +1,16 @@
 /**
  * src/db/org.ts
  *
- * DB access layer for org structure queries (T-0017 ADR §3.6).
- * Backed by the choros_app role; all queries execute inside SET LOCAL transactions
- * following the T-0013 tenant_id GUC pattern.
+ * DB access layer for org structure queries (T-0017 ADR §3.6) plus
+ * the admin-context helpers introduced by T-0030 (write-path only).
  *
- * Exports: listOrgTree, findEmployeeById, listHumanEmployees
+ * Exports:
+ *   listOrgTree, findEmployeeById, listHumanEmployees   (T-0017)
+ *   isGenesisOwnerForTenant, loadAdminContext           (T-0030)
  */
 import pg from "pg";
+import type { Grant, ScopeElement } from "../core/grant-lattice.js";
+import type { AdminContext } from "../core/scoped-admin.js";
 
 const { Pool } = pg;
 
@@ -250,5 +253,177 @@ export async function listHumanEmployees(
       position: row.position_title ?? "",
       department: row.department_name ?? "",
     }));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// isGenesisOwnerForTenant — T-0030 AC-15 / NF-3
+//
+// Returns true iff the actor holds the tenant-owner role via a confirmed,
+// in-window role_assignment. isGenesisOwner is ALWAYS resolved from the DB
+// — never assumed or derived from a JWT claim (NF-3).
+// ---------------------------------------------------------------------------
+
+export async function isGenesisOwnerForTenant(
+  pool: pg.Pool,
+  tenantId: string,
+  actorEmployeeId: string,
+  nowMs: number,
+): Promise<boolean> {
+  return withTenant(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT ra.id
+         FROM choros.role_assignment ra
+         JOIN choros.role r
+              ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE ra.tenant_id = $1
+          AND ra.employee_id = (
+                SELECT id FROM choros.employee
+                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+              )
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+        LIMIT 1`,
+      [tenantId, actorEmployeeId, nowMs],
+    );
+    return rows.length > 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// loadAdminContext — T-0030 FR-2
+//
+// Builds the AdminContext needed by validateAdminDelegation.
+// Three-query sequence inside one withTenant call:
+//   1. isGenesisOwner (via isGenesisOwnerForTenant helper, re-using the
+//      already-acquired client to stay in the same transaction scope).
+//   2. All confirmed, in-window role_assignment rows for the actor.
+//   3. For each assignment, all confirmed, in-window, delegable=true grants
+//      on the assigned role where resource_type starts with mgmt_object:.
+// ---------------------------------------------------------------------------
+
+export async function loadAdminContext(
+  pool: pg.Pool,
+  tenantId: string,
+  actorEmployeeId: string,
+  nowMs: number,
+): Promise<AdminContext> {
+  return withTenant(pool, tenantId, async (client) => {
+    // Step 1: resolve isGenesisOwner from DB (AC-15 / NF-3).
+    const { rows: ownerRows } = await client.query<{ id: string }>(
+      `SELECT ra.id
+         FROM choros.role_assignment ra
+         JOIN choros.role r
+              ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE ra.tenant_id = $1
+          AND ra.employee_id = (
+                SELECT id FROM choros.employee
+                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+              )
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+        LIMIT 1`,
+      [tenantId, actorEmployeeId, nowMs],
+    );
+    const isGenesisOwner = ownerRows.length > 0;
+
+    // Step 2: load confirmed, in-window assignments for the actor.
+    const { rows: raRows } = await client.query<{
+      id: string;
+      role_id: string;
+      org_scope: unknown;
+    }>(
+      `SELECT ra.id, ra.role_id, ra.org_scope
+         FROM choros.role_assignment ra
+        WHERE ra.tenant_id = $1
+          AND ra.employee_id = (
+                SELECT id FROM choros.employee
+                 WHERE tenant_id = $1 AND slug = $2 LIMIT 1
+              )
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+      [tenantId, actorEmployeeId, nowMs],
+    );
+
+    // Step 3: for each assignment, load delegable mgmt_object:* grants on its role.
+    const adminGrantsList: Grant[] = [];
+    for (const ra of raRows) {
+      const { rows: grantRows } = await client.query<{
+        id: string;
+        role_id: string;
+        resource_type: string;
+        resource_facet: unknown;
+        operation: string;
+        scope: unknown;
+        constraint: unknown;
+        delegable: boolean;
+        granted_by: string;
+        valid_from: string | null;
+        valid_until: string | null;
+        created_at: string;
+      }>(
+        `SELECT g.id, g.role_id, g.resource_type, g.resource_facet,
+                g.operation, g.scope, g."constraint", g.delegable,
+                g.granted_by, g.valid_from, g.valid_until, g.created_at
+           FROM choros."grant" g
+          WHERE g.tenant_id = $1
+            AND g.role_id = $2
+            AND g.resource_type LIKE 'mgmt_object:%'
+            AND g.delegable = true
+            AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
+            AND (g.valid_until IS NULL OR g.valid_until  > $3)`,
+        [tenantId, ra.role_id, nowMs],
+      );
+
+      for (const g of grantRows) {
+        adminGrantsList.push({
+          tenantId,
+          id: g.id,
+          roleId: g.role_id,
+          resourceType: g.resource_type as Grant["resourceType"],
+          resourceFacet: g.resource_facet ?? undefined,
+          operation: g.operation as Grant["operation"],
+          scope: g.scope as Grant["scope"],
+          constraint: g.constraint ?? undefined,
+          delegable: g.delegable,
+          grantedBy: g.granted_by,
+          validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
+          validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
+          createdAt: Number(g.created_at),
+        });
+      }
+    }
+
+    // Construct adminOrgScope: union of assignment org_scope values.
+    // Single assignment → use its org_scope directly.
+    // Multiple assignments → wrap in a set (the lattice supports sets of atoms).
+    let adminOrgScope: ScopeElement;
+    if (raRows.length === 0) {
+      // No assignments → bottom (empty set = no org authority).
+      adminOrgScope = { kind: "set", members: [] };
+    } else if (raRows.length === 1) {
+      adminOrgScope = raRows[0].org_scope as ScopeElement;
+    } else {
+      // Collect all unique members; if any member is already a set, flatten it.
+      const members: Array<Exclude<ScopeElement, { kind: "set" }>> = [];
+      for (const ra of raRows) {
+        const s = ra.org_scope as ScopeElement;
+        if (s.kind === "set") {
+          for (const m of s.members) {
+            members.push(m);
+          }
+        } else {
+          members.push(s as Exclude<ScopeElement, { kind: "set" }>);
+        }
+      }
+      adminOrgScope = { kind: "set", members };
+    }
+
+    return { isGenesisOwner, adminGrants: adminGrantsList, adminOrgScope };
   });
 }
