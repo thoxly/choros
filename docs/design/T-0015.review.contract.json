@@ -1,15 +1,31 @@
 {
   "task_id": "T-0015",
-  "verdict": "approved",
+  "verdict": "changes_requested",
   "ci_seen": { "green": true },
   "findings": [
     {
       "id": "R-1",
       "severity": "nit",
       "axis": 6,
-      "location": "src/core/object-handle.ts:251-282 (parseHandle) + 339-396 (assertVariableValue)",
-      "issue": "parseHandle casts the parsed `ref` wholesale (`ref as ResourceRef`) with NO shape validation — it copies whatever object sits under the `ref` key. A crafted/tampered wire string `{tenantId,handleId,ref:{kind:'record',...,data:{ssn:'secret'}}}` deserializes into a validly-BRANDED ObjectHandle whose `ref` carries a record payload, and serializeHandle re-emits it intact. Because assertVariableValue short-circuits to ok:true on isObjectHandle(value) BEFORE any structural inspection, that forged-but-branded handle smuggles the payload past the variable-write guard. This is a latent opacity-bypass for any UNTRUSTED wire input. It is a nit, not blocking, because: (a) no exported AC/FF claims parseHandle validates tampered input — AC-7 only asserts the honest serialize->parse round-trip of well-formed handles, which holds; (b) parseHandle has zero consumers in this static-now module (no untrusted-input path exists yet); (c) all in-scope invariants hold. But the wire form is exactly the cross-trust-boundary representation the opacity invariant must eventually survive, and T-0021/T-0027 (which consume the wire form) would inherit this gap silently.",
-      "suggestion": "Harden parseHandle to reconstruct `ref` from validated identity components only (switch on kind, copy exactly the known UUID fields, reject unknown keys / a `data`/`fields`/`payload`/`view` sibling), OR have makeHandle/parseHandle strip `ref` to its known identity fields, AND/OR have assertVariableValue inspect handle.ref structurally even for branded handles. Add an adversarial round-trip test asserting an injected ref.data is stripped or rejected. Tracked as a spawned follow-up so T-0021 does not inherit it."
+      "location": "src/core/object-handle.ts:269-353 (validateAndReconstructRef) + 364-399 (parseHandle)",
+      "issue": "RESOLVED-BY-298f97e. Prior finding: parseHandle cast the parsed `ref` wholesale with no shape validation, so a crafted wire string `{...,ref:{kind:'record',...,data:{ssn}}}` deserialized into a validly-BRANDED ObjectHandle whose `ref` carried a record payload, riding past assertVariableValue (which short-circuits ok:true on isObjectHandle BEFORE structural inspection). Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX closes the ref vector: validateAndReconstructRef() switch-on-kind reconstructs ResourceRef from known identity fields only and throws MalformedHandleError on any payload key (data/fields/payload/view/snapshot), unknown/extra key, kind/field-type mismatch, or unknown kind. Adversarial re-probe of the ref surface (non-forbidden record key, recordId-as-object, __proto__ injection, loose kind with record fields, unknown kind) is REJECTED in every case; no prototype pollution. The exact R-1 repro now throws MalformedHandleError. Honest round-trip (AC-7) preserved for all three ref kinds.",
+      "suggestion": "Resolved. Keep validateAndReconstructRef as the single ref-deserialization chokepoint."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "src/core/object-handle.ts:386-387,394-395 (parseHandle facet handling)",
+      "issue": "SAME OPACITY-BYPASS CLASS AS R-1, ON THE SIBLING FIELD — NOT CLOSED by the hardening. parseHandle hardens `ref` but still casts `facet` WHOLESALE: `const typedFacet = facet !== undefined && facet !== null ? (facet as Facet) : undefined;` and assigns it onto the branded handle with no shape validation. Repro (verified live, rt-choros 2026-06-10): wire string `{tenantId,handleId,ref:{kind:'record',...valid uuids...},facet:{fields:['a'],data:{ssn:'in-facet'}}}` parses into a validly-BRANDED ObjectHandle whose `facet` carries `{ssn:'in-facet'}`; assertVariableValue(handle) returns {ok:true} (short-circuits on the brand exactly as in R-1); and serializeHandle re-emits the smuggled ssn intact across the wire. This is the identical cross-trust-boundary opacity bypass R-1 was filed to close — the fix shut the `ref` door and left the `facet` door open. T-0021/T-0027 (wire-form consumers) inherit it. The hardening therefore does NOT fully close the finding it claims to.",
+      "suggestion": "Apply the same fail-closed reconstruction to `facet`: if present, validate it is exactly `{ fields: string[] }` (fields is an array of strings, no other keys), else throw MalformedHandleError. Add an adversarial FF-9 test: a wire facet carrying `data`/extra keys must throw, and the honest `{fields:[...]}` facet must still round-trip."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "src/core/object-handle.ts:364-399 (parseHandle) vs 212-241 (makeHandle)",
+      "issue": "STRICTNESS GAP — parseHandle is NOT at least as strict as makeHandle (an explicit acceptance requirement of this hardening). makeHandle enforces tenant binding: if any tenant-scoped ref component !== supplied tenantId it throws CrossTenantHandleError (AC-6). parseHandle performs NO such check — verified live (rt-choros 2026-06-10): wire `{tenantId:T, ref:{kind:'record', tenantId:'<other-tenant>', registryId, recordId}}` is ACCEPTED, minting a branded handle whose ref.tenantId differs from the envelope tenantId. makeHandle throws on the identical input; parseHandle does not. This lets untrusted wire input deserialize a cross-tenant handle that construction would refuse — the wire path becomes a strictly weaker minter than makeHandle, which is precisely the property the hardening was meant to guarantee.",
+      "suggestion": "After validateAndReconstructRef, run the same tenant-binding check makeHandle uses (refTenantIds(validatedRef) every component === envelope tenantId, else throw CrossTenantHandleError or MalformedHandleError). Add an FF-9 test asserting a cross-tenant wire ref throws and parity with makeHandle's rejection."
     }
   ],
   "acceptance_coverage": [
@@ -18,7 +34,7 @@
     { "ac": "AC-3", "covered": true },
     { "ac": "AC-4", "covered": true },
     { "ac": "AC-5", "covered": true },
-    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-6", "covered": false },
     { "ac": "AC-7", "covered": true },
     { "ac": "AC-8", "covered": true },
     { "ac": "AC-9", "covered": true },

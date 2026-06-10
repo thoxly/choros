@@ -1,15 +1,15 @@
 {
   "task_id": "T-0015",
-  "verdict": "pass",
-  "deterministic": { "total": 349, "passed": 349, "failed": 0 },
+  "verdict": "fail",
+  "deterministic": { "total": 359, "passed": 359, "failed": 0 },
   "coverage_by_ac": [
     { "ac": "AC-1", "test": "FF-1: Handle identity-only shape (no data/fields/payload/view/snapshot member; frozen)", "result": "pass" },
-    { "ac": "AC-2", "test": "FF-2: Opacity nominal brand (isObjectHandle discriminates; brand not forgeable via Symbol.for/string-key — verified adversarially) + tsc @ts-expect-error fixture (non-vacuous: brand removal => TS2578, tsc exit 2)", "result": "pass" },
+    { "ac": "AC-2", "test": "FF-2: Opacity nominal brand (isObjectHandle discriminates; brand not forgeable via Symbol.for/string-key) + tsc @ts-expect-error fixture (non-vacuous)", "result": "pass" },
     { "ac": "AC-3", "test": "FF-3: assertVariableValue rejects record-ref + payload, record-kind ref, data/fields/payload/view objects, nested in array/object", "result": "pass" },
     { "ac": "AC-4", "test": "FF-4: denyAllResolver fails closed (denied:true, reason no_grant, never fields) for any subject incl. privileged", "result": "pass" },
     { "ac": "AC-5", "test": "FF-5: makeHandle reference-only, deterministic handleId, no field reveal", "result": "pass" },
-    { "ac": "AC-6", "test": "FF-6: tenant-bound, cross-tenant => CrossTenantHandleError, UUID-only ref", "result": "pass" },
-    { "ac": "AC-7", "test": "FF-7: serialize/parse round-trip identity (well-formed handles); serialized form has only identity keys, no payload", "result": "pass" },
+    { "ac": "AC-6", "test": "FF-6: makeHandle tenant-bound, cross-tenant => CrossTenantHandleError (PASS for makeHandle). COVERAGE GAP (R-3): no test asserts parseHandle enforces the same cross-tenant invariant — independent verification (rt-choros 2026-06-10) shows parseHandle ACCEPTS a wire ref whose tenantId != envelope tenantId, which makeHandle throws on. The AC-6 invariant is broken on the wire-deserialization path and uncovered.", "result": "fail" },
+    { "ac": "AC-7", "test": "FF-7 / FF-9: serialize/parse round-trip identity (well-formed handles, all 3 ref kinds); serialized form has only identity keys for ref. Re-verified live: honest round-trip identity-preserving, no regression.", "result": "pass" },
     { "ac": "AC-8", "test": "FF-8: single chokepoint — no .data/.fields/.payload accessor; denyAllResolver only exported resolver", "result": "pass" },
     { "ac": "AC-9", "test": "FF-A3 lint object-handle-isolation.sh: no forbidden imports, frozen files unmodified", "result": "pass" },
     { "ac": "AC-10", "test": "AC-10 static-now: object_handle in known_tenant_tables fixture, no payload column", "result": "pass" }
@@ -17,6 +17,19 @@
   "secondary_ux": [
     { "check": "none — pure-TS authority core, no web UX surface", "result": "n/a", "note": "D-025: deterministic CI is the only signal here; no browser/LLM check applicable" }
   ],
-  "failures": [],
+  "failures": [
+    {
+      "id": "R-2",
+      "test": "MISSING (no test exists). Adversarial probe (rt-choros 2026-06-10): a wire string whose `facet` carries a record payload must throw or be stripped. parseHandle facet field is cast wholesale (facet as Facet) with no validation — same opacity-bypass class as R-1, on the sibling field. Wire facet:{fields:[...],data:{ssn}} mints a branded ObjectHandle carrying the payload; assertVariableValue returns ok:true (brand short-circuit) and serializeHandle re-emits the ssn. FF-9 covers only the ref vector, not facet. The suite is green only because the vector is untested. Repro: parseHandle(JSON.stringify({tenantId:T,handleId:'x',ref:{kind:'record',tenantId:T,registryId:REG,recordId:REC},facet:{fields:['a'],data:{ssn:'in-facet'}}})) -> handle.facet.data.ssn==='in-facet'; assertVariableValue(handle)==={ok:true}; serializeHandle(handle) contains 'in-facet'.",
+      "is_product_defect": true,
+      "root_class": "product-defect"
+    },
+    {
+      "id": "R-3",
+      "test": "MISSING (no test exists). parseHandle does not enforce the cross-tenant binding that makeHandle enforces (AC-6). Wire ref with tenantId != envelope tenantId is accepted by parseHandle but rejected by makeHandle with CrossTenantHandleError, making parseHandle a strictly weaker minter than makeHandle on the untrusted-wire path. No FF-9 test covers parseHandle tenant strictness. Repro: parseHandle(JSON.stringify({tenantId:T,ref:{kind:'record',tenantId:'<other>',registryId:REG,recordId:REC},handleId:'x'})) -> accepted; makeHandle({kind:'record',tenantId:'<other>',...},T) -> throws CrossTenantHandleError.",
+      "is_product_defect": true,
+      "root_class": "product-defect"
+    }
+  ],
   "blocked_reason": ""
 }
