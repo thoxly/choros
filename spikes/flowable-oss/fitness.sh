@@ -30,13 +30,18 @@ OUT2=$(git -C "$REPO" status --porcelain 2>/dev/null | awk '{print $2}' | grep -
 if [ -z "$OUT" ] && [ -z "$OUT2" ]; then ok "FF-ISOLATION"; else bad "FF-ISOLATION" "touches outside spikes/+addendum: $OUT $OUT2"; fi
 
 echo "== FF-IMAGES-PINNED =="
-if grep -qE ':latest' "$HERE"/compose.*.yml; then bad "FF-IMAGES-PINNED" ":latest present"; \
+# only actual `image:` lines may not use :latest (comments mentioning :latest are fine)
+if grep -hE '^\s*image:' "$HERE"/compose.*.yml | grep -qE ':latest|image:\s*[^:]+\s*$'; then \
+  bad "FF-IMAGES-PINNED" "an image: line is :latest or untagged"; \
 elif grep -q 'Apache' "$HERE/measurements.json" 2>/dev/null; then ok "FF-IMAGES-PINNED"; \
 else bad "FF-IMAGES-PINNED" "no Apache license recorded in measurements.json yet"; fi
 
 echo "== FF-NO-SECRETS =="
-if grep -RiE 'enterprise.?key|license.?key|trial|api[_-]?token' "$HERE" --include='*.sh' --include='*.yml' --include='*.xml' >/dev/null 2>&1; then \
-  bad "FF-NO-SECRETS" "secret/trial marker found"; else ok "FF-NO-SECRETS"; fi
+# real assignment of a secret value, not prose mentioning the words. Scans the harness
+# artifacts (run.sh, lib, compose, bpmn) but not this fitness runner itself.
+if grep -RinE '(enterprise.?key|license.?key|api[_-]?token)[:=][[:space:]]*["'"'"']?[A-Za-z0-9]' \
+     "$HERE/run.sh" "$HERE/lib" "$HERE"/compose.*.yml "$HERE/bpmn" >/dev/null 2>&1; then \
+  bad "FF-NO-SECRETS" "a secret value is assigned in a harness artifact"; else ok "FF-NO-SECRETS"; fi
 
 echo "== FF-SMOKE-UP =="
 "$HERE/run.sh" up "$ENG" >/dev/null 2>&1

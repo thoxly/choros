@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-06-10T15:35:03.743712+00:00",
+  "generated_at": "2026-06-10T15:41:23.703935+00:00",
   "engines": [
     {
       "engine": "flowable",
@@ -11,10 +11,10 @@
       "n_history_target": 300000,
       "n_history_actual": 300000,
       "cleanup_present_in_oss": true,
-      "cleanup_throughput_rps": 7894.74,
-      "cleanup_duration_s": 38,
+      "cleanup_throughput_rps": 5454.55,
+      "cleanup_duration_s": 55,
       "cleanup_deleted": 300000,
-      "table_size_before_bytes": 73490432,
+      "table_size_before_bytes": 73482240,
       "table_size_after_bytes": 73490432,
       "degradation_ok": true,
       "extrapolation": {
@@ -23,7 +23,7 @@
         "dev_factor": 0.5,
         "window": "nightly 8h batch window",
         "fits_70m": true,
-        "headroom_factor": 2963.91
+        "headroom_factor": 2047.79
       },
       "deadletter": {
         "list": {
