@@ -15,4 +15,10 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # Собрать web ДО гейта: тесты статик-раздачи/SPA-fallback зависят от наличия
+      # web/dist. Без этого ветка гоняется в состоянии «dist нет», а dev — «dist
+      # есть» → зелёный на ветке ≠ зелёный на dev (FE-2026-W24-0004). Гейт обязан
+      # гонять в интеграционно-честном окружении.
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
       - run: npm run ci
