@@ -1,0 +1,20 @@
+{
+  "task_id": "T-0013",
+  "status": "pr_open",
+  "branch": "task/T-0013-tenant-isolation",
+  "ci_local": {"build": true, "lint": true, "types": true, "tests": false, "fitness": false},
+  "files_changed": [
+    "docs/specs/T-0013-tenant-isolation.spec.md",
+    "docs/specs/T-0013.spec.contract.json",
+    "docs/design/T-0013-tenant-isolation.adr.md",
+    "docs/design/T-0013.adr.contract.json",
+    "docs/design/T-0013.review.contract.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN-ONLY architecture task: no source code produced — diff is docs/ only (verified: zero source files touched). ci_local build/lint/types=true mean UNAFFECTED by this change, not that a build was run; tests/fitness=false because the 13 fitness functions are SPECIFIED in the ADR but cannot run until Postgres exists (T-0053) — static-now lint scripts and live SQL probes are authored at implementation time.",
+    "Reviewer nit R-1 (non-blocking, NOT looped per dev-loop nit policy): the ADR's 'today/authored now' wording about ci/checks/*.sh should be made explicit at impl about whether the static-now lint scripts are owned by this foundation work or by T-0053. Carry into T-0053.",
+    "No remote PR opened: committed to local branch only (local-review-handoff). Opening a GitHub PR on thoxly/choros requires the scoped agent PAT (GT-4) which is not confirmed in this environment — founder reviews the branch locally / via dev-env."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}
