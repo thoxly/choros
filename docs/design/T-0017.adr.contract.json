@@ -1,0 +1,121 @@
+{
+  "task_id": "T-0017",
+  "status": "ready",
+  "decision": "Adjacency-list tree for department (parent_id FK, cycle guard in app layer), single employee table polymorphic on kind ∈ {human,agent} (service fixture type maps to 'agent'), dev-seed block inside migrations 013-016 sourced from ORG_SEED, new DB access layer src/db/org.ts (listOrgTree, findEmployeeById, listHumanEmployees) behind existing src/http/org.ts exports (findEmployee/listSelectableUsers signatures preserved for frozen callers auth.ts/inbox.ts). Three test seams break and are owned by coder/BUILD: two_tenant.test.ts migration count 10→16, schema.test.ts FK pairs assertion expanded from 2 to 6, cross_tenant.test.ts seedRowForTable gains 4 new cases.",
+  "rejected_alternatives": [
+    {"option": "ltree extension for department tree", "why_not": "Requires non-standard CREATE EXTENSION; tests must run on vanilla PG. Adjacency-list + recursive CTE is zero-extension and proportional to expected depth (<=5)."},
+    {"option": "Closure-table for department tree", "why_not": "Adds a second table and multi-row write protocol for every department mutation. Over-engineering at expected scale; adjacency-list with recursive CTE is sufficient."},
+    {"option": "Separate human_employee + agent_employee tables", "why_not": "Violates spec invariant FR-4 and analyst decision (§6); doubles T-0022 join surface; finer AI-vs-connector distinction belongs in agent_card (T-0020). Rejected by spec."},
+    {"option": "Employee kind as boolean is_human", "why_not": "Less extensible than kind text CHECK; if a third kind is added, boolean becomes a migration. text CHECK is spec-mandated shape."},
+    {"option": "Separate seed script (not in migration)", "why_not": "Creates a second bring-up path violating T-0053 NF-4 one-path principle. Seeds stay in migrations 013-016 behind ON CONFLICT DO NOTHING."},
+    {"option": "DB module under src/core/ (alongside pgJobStore)", "why_not": "src/core/ holds domain logic and store abstractions; org queries are HTTP-layer I/O. src/db/ is the correct layer for DB query modules backing HTTP routes."},
+    {"option": "Generate new UUIDs for employee IDs (replace slugs)", "why_not": "Breaks Keycloak JWT→employee resolution chain (T-0054: employee.slug = jwt.preferred_username). Slugs are frozen identity keys."},
+    {"option": "Position hierarchy (positions hang off other positions)", "why_not": "Explicitly out of scope per spec §4. Positions hang off departments only."}
+  ],
+  "object_model": [
+    {"entity": "tenant", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column; equals id (self-anchoring)"},
+      {"name": "id", "type": "uuid NOT NULL; PK (tenant_id, id)"},
+      {"name": "slug", "type": "text NOT NULL UNIQUE globally"},
+      {"name": "display_name", "type": "text NOT NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL epoch-ms"}
+    ]},
+    {"entity": "department", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column; FK → tenant(tenant_id, id)"},
+      {"name": "id", "type": "uuid NOT NULL; PK (tenant_id, id)"},
+      {"name": "parent_id", "type": "uuid NULL; FK → department(tenant_id, id) self-ref; NULL = root"},
+      {"name": "slug", "type": "text NOT NULL; UNIQUE (tenant_id, slug)"},
+      {"name": "display_name", "type": "text NOT NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL epoch-ms"},
+      {"name": "updated_at", "type": "bigint NOT NULL epoch-ms"}
+    ]},
+    {"entity": "position", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column"},
+      {"name": "id", "type": "uuid NOT NULL; PK (tenant_id, id)"},
+      {"name": "department_id", "type": "uuid NOT NULL; FK → department(tenant_id, id)"},
+      {"name": "slug", "type": "text NOT NULL; UNIQUE (tenant_id, department_id, slug)"},
+      {"name": "title", "type": "text NOT NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL epoch-ms"},
+      {"name": "updated_at", "type": "bigint NOT NULL epoch-ms"}
+    ]},
+    {"entity": "employee", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL leading PK column"},
+      {"name": "id", "type": "uuid NOT NULL; PK (tenant_id, id)"},
+      {"name": "position_id", "type": "uuid NULL; FK → position(tenant_id, id) nullable"},
+      {"name": "kind", "type": "text NOT NULL CHECK (kind IN ('human', 'agent'))"},
+      {"name": "slug", "type": "text NOT NULL; UNIQUE (tenant_id, slug); = Keycloak preferred_username for humans"},
+      {"name": "display_name", "type": "text NOT NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL epoch-ms"},
+      {"name": "updated_at", "type": "bigint NOT NULL epoch-ms"}
+    ]},
+    {"entity": "OrgDbAccessLayer", "fields": [
+      {"name": "listOrgTree(pool, tenantId)", "type": "Promise<OrgDepartment[]> — full tree with departments, positions, employees"},
+      {"name": "findEmployeeById(pool, tenantId, slug)", "type": "Promise<(OrgPerson & { position: string; department: string }) | null>"},
+      {"name": "listHumanEmployees(pool, tenantId)", "type": "Promise<Array<{ id, name, position, department }>> — kind='human' only"}
+    ]},
+    {"entity": "DevSeedEmployees", "fields": [
+      {"name": "e-kravtsova", "type": "human | fin-ctrl"},
+      {"name": "a-recon", "type": "agent | fin-ctrl"},
+      {"name": "a-invoice", "type": "agent | fin-appr"},
+      {"name": "e-mironov", "type": "human | fin-appr"},
+      {"name": "e-larina", "type": "human | fin-cfo"},
+      {"name": "a-triage", "type": "agent | cs-l1"},
+      {"name": "e-orlov", "type": "human | cs-l1"},
+      {"name": "e-savina", "type": "human | cs-l1"},
+      {"name": "e-petrov", "type": "human | cs-l2"},
+      {"name": "e-belov", "type": "human | plat-int"},
+      {"name": "s-ledger", "type": "agent | plat-svc"},
+      {"name": "s-ocr", "type": "agent | plat-svc"}
+    ]}
+  ],
+  "contracts": [
+    "Migration 013: CREATE TABLE choros.tenant (tenant_id uuid NOT NULL, id uuid NOT NULL, slug text NOT NULL, display_name text NOT NULL, created_at bigint NOT NULL, PRIMARY KEY (tenant_id, id), UNIQUE (slug)); RLS USING (id = current_setting('choros.tenant_id', true)::uuid); dev seed slug='dev'.",
+    "Migration 014: CREATE TABLE choros.department (..., parent_id uuid NULL, FOREIGN KEY (tenant_id, parent_id) REFERENCES choros.department(tenant_id, id), FOREIGN KEY (tenant_id, id) REFERENCES choros.tenant(tenant_id, id)); RLS; dev seed 3 root departments.",
+    "Migration 015: CREATE TABLE choros.position (..., FOREIGN KEY (tenant_id, department_id) REFERENCES choros.department(tenant_id, id)); RLS; dev seed 8 positions.",
+    "Migration 016: CREATE TABLE choros.employee (..., kind text NOT NULL CHECK (kind IN ('human', 'agent')), FOREIGN KEY (tenant_id, position_id) REFERENCES choros.position(tenant_id, id)); RLS; dev seed 12 employees.",
+    "ci/checks/known_tenant_tables.txt += 'tenant', 'department', 'position', 'employee' (additive, 4 new lines).",
+    "src/db/org.ts exports: listOrgTree(pool, tenantId), findEmployeeById(pool, tenantId, slug), listHumanEmployees(pool, tenantId) — async, use SET LOCAL choros.tenant_id inside transactions.",
+    "src/http/org.ts: findEmployee(id) and listSelectableUsers() signatures preserved; internally delegate to src/db/org.ts when DATABASE_URL set. No import-path changes for auth.ts/inbox.ts.",
+    "GET /api/org response shape: { departments: [{ id, name, positions: [{ id, title, people: [{ id, name, type }] }] }] }. type = employee.kind ('human' | 'agent').",
+    "GET /api/me dev-auth resolves against real employee table via slug lookup; unknown slug → 401.",
+    "Coder BUILD-phase seam fixes: two_tenant.test.ts line 58 toBe(10)→toBe(16); schema.test.ts FK pairs array expanded to 6 pairs; cross_tenant.test.ts seedRowForTable gains case 'tenant', 'department', 'position', 'employee'."
+  ],
+  "fitness_functions": [
+    {"id": "FF-ORG-1", "rule": "FORCE RLS on all four new tables (tenant, department, position, employee)", "ci_check": "ci/checks/db/schema.test.ts FF-RLS describe-block iterates KNOWN_TENANT_TABLES dynamically — automatic once the 4 tables are added to known_tenant_tables.txt. Zero new test code required."},
+    {"id": "FF-ORG-2", "rule": "known_tenant_tables.txt contains exactly the T-0017 additions (department, employee, position, tenant) after merge", "ci_check": "ci/checks/db/schema.test.ts 'no choros base table missing from fixture' — asserts inDb == known sorted. Fails if any table in DB is absent from txt or vice versa."},
+    {"id": "FF-ORG-3", "rule": "All FK constraints from new tables lead with tenant_id", "ci_check": "ci/checks/db/schema.test.ts FF-LEAD 'every composite FK leads with tenant_id' — iterates KNOWN_TENANT_TABLES. Automatic once 4 tables in txt."},
+    {"id": "FF-ORG-4", "rule": "schema.test.ts FK pairs assertion updated from 2 to 6 pairs after T-0017 migrations applied", "ci_check": "coder updates expect(pairs).toEqual([...]) to include 'department->tenant', 'department->department', 'position->department', 'employee->position' alongside existing 2. BUILD-phase coder fix."},
+    {"id": "FF-ORG-5", "rule": "two_tenant.test.ts migration count 10 updated to 16 after migrations 011-016 land", "ci_check": "coder updates expect(n).toBe(10) to toBe(16) (or >= 16). BUILD-phase coder fix."},
+    {"id": "FF-ORG-6", "rule": "cross_tenant.test.ts seedRowForTable covers all 4 new tables", "ci_check": "coder adds case 'tenant', 'department', 'position', 'employee' with FK-order seeding to seedRowForTable switch. AC-6 cross-tenant probe then passes for all 12 KNOWN_TENANT_TABLES."},
+    {"id": "FF-ORG-7", "rule": "No second actor-table in migrations 013-016", "ci_check": "grep -E 'CREATE TABLE.*(human_employee|agent_employee|org_user)' migrations/01[3-6]_*.sql → zero matches. Add to npm run fitness:static."},
+    {"id": "FF-ORG-8", "rule": "employee.kind CHECK constraint rejects values outside {human, agent}", "ci_check": "New test in ci/checks/db/org-structure.test.ts: INSERT ... kind='robot' → rejects with PG error code 23514. Also covers AC-9 cycle guard (INSERT cycle A.parent=B, B.parent=A → app-layer or trigger rejection)."},
+    {"id": "FF-ORG-9", "rule": "Dev seed is idempotent (ON CONFLICT DO NOTHING)", "ci_check": "ci/checks/db/two_tenant.test.ts FF-2 idempotency re-run — already tests runner twice. Seeds use ON CONFLICT DO NOTHING; re-run leaves row count unchanged."},
+    {"id": "FF-ORG-10", "rule": "GET /api/org reads real DB tables after migration 016, not ORG_SEED", "ci_check": "ci/checks/db/ org-structure.e2e.test.ts (new file, db CI job): call GET /api/org with real DB seeded, assert departments match DB data. Or extend org.e2e.test.ts to assert against DB-backed counts when DATABASE_URL is set."},
+    {"id": "FF-ORG-11", "rule": "Cross-tenant FK rejection: department with wrong tenant_id is rejected by Postgres FK constraint", "ci_check": "New test in org-structure.test.ts: INSERT department (tenant_id=TENANT_A) FK referencing tenant row of TENANT_B → FK violation error code 23503."},
+    {"id": "FF-ORG-12", "rule": "src/http/org.ts exports findEmployee and listSelectableUsers with unchanged TypeScript signatures", "ci_check": "TypeScript compilation tsc --noEmit → error if signatures change. Static grep: 'from ./org' still resolves in auth.ts and inbox.ts. No frozen-test symbol deletion (FE-W23-0008)."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "known_tenant_tables.txt + FF-ORG-2; schema.test.ts FF-RLS dynamic iteration"},
+    {"ac": "AC-2", "covered_by": "same as AC-1 for department"},
+    {"ac": "AC-3", "covered_by": "same as AC-1 for position"},
+    {"ac": "AC-4", "covered_by": "same as AC-1 for employee"},
+    {"ac": "AC-5", "covered_by": "FF-ORG-1; ENABLE+FORCE RLS DDL; behavior.test.ts FF-DENY default-DENY (no GUC → 0 rows)"},
+    {"ac": "AC-6", "covered_by": "FF-ORG-6; cross_tenant.test.ts with 4 new seed cases for new tables"},
+    {"ac": "AC-7", "covered_by": "FF-ORG-3; schema.test.ts FF-LEAD iterates all KNOWN_TENANT_TABLES"},
+    {"ac": "AC-8", "covered_by": "FF-ORG-11; behavioral test: cross-tenant FK insert rejected with 23503"},
+    {"ac": "AC-9", "covered_by": "§1.1 cycle guard (app-layer pre-insert path ancestry walk); FF-ORG-8 covers the rejection assertion"},
+    {"ac": "AC-10", "covered_by": "FF-ORG-8; CHECK (kind IN ('human', 'agent')) DDL constraint; test INSERT kind='robot' → 23514"},
+    {"ac": "AC-11", "covered_by": "FF-ORG-9; ON CONFLICT DO NOTHING; two_tenant.test.ts idempotency re-run"},
+    {"ac": "AC-12", "covered_by": "UNIQUE (tenant_id, slug) on employee; existing FF-SCOPE pattern in behavior.test.ts"},
+    {"ac": "AC-13", "covered_by": "§5 API seam; FF-ORG-10; org.e2e.test.ts updated to assert DB-backed data"},
+    {"ac": "AC-14", "covered_by": "§5 API seam; findEmployeeById backed by real DB query; 404 for unknown slug"},
+    {"ac": "AC-15", "covered_by": "§5 API seam; listHumanEmployees filters kind='human'; agent employees excluded"},
+    {"ac": "AC-16", "covered_by": "§5 API seam; GET /api/me dev-auth slug lookup against real employee table; unknown slug → 401"},
+    {"ac": "AC-17", "covered_by": "§3.5 seed (5 agent rows: a-recon, a-invoice, a-triage, s-ledger, s-ocr); absent from GET /api/users (humans only)"},
+    {"ac": "AC-18", "covered_by": "FF-ORG-7; grep check on migrations 013-016 for forbidden table names"},
+    {"ac": "AC-19", "covered_by": "FF-ORG-2; known_tenant_tables.txt exact-set check in schema.test.ts anti-decorative assertion"}
+  ],
+  "runtime_target": "Postgres in silo docker-compose stack (T-0053, already running). choros_app (NOBYPASSRLS, non-owner) executes org queries. Dev-seed tenant UUID hardcoded in migration 013. Production tenant provisioned at silo-setup time (founder-gated GT-4). No new infrastructure beyond T-0053.",
+  "adr_artifact_path": "docs/design/T-0017-org-structure.adr.md",
+  "escalation": ""
+}
