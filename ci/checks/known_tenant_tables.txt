@@ -18,3 +18,4 @@ role
 role_assignment
 effect_resource
 outbox
+sod_constraint

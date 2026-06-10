@@ -332,6 +332,23 @@ async function seedEffectResource(c: pg.Client, tenantId: string): Promise<void>
   );
 }
 
+/**
+ * Seed one row into choros.sod_constraint (T-0032). PK is (tenant_id, id);
+ * a fresh uuid id per call keeps both tenants' seeds independent under RLS. A
+ * valid `dynamic` row (self_record separation) needs no role pair, so it is
+ * self-contained — no FK to role (role_a/role_b carry no FK).
+ */
+async function seedSodConstraint(c: pg.Client, tenantId: string): Promise<void> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.sod_constraint
+       (tenant_id, id, kind, role_a, role_b, self_record, scope, detail, created_at)
+     VALUES ($1, $2, 'dynamic', NULL, NULL, true, '{}'::jsonb, NULL, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -469,6 +486,9 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       await seedEffectResource(c, tenantId);
     case 'outbox':
       await seedOutboxRow(c, tenantId);
+      break;
+    case 'sod_constraint':
+      await seedSodConstraint(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
