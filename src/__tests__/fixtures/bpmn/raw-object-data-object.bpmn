@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="rawDataObjectProcess" name="Raw Object Data Object" isExecutable="true">
+    <dataObject id="data1" name="Record Data">
+      <extensionElements>
+        <initialValue>{"applicationId":"a","registryId":"b"}</initialValue>
+      </extensionElements>
+    </dataObject>
+  </process>
+</definitions>

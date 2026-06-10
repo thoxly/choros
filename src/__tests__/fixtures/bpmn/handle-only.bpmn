@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="handleOnlyProcess" name="Handle Only Process" isExecutable="true">
+    <serviceTask id="task1" name="Lookup Task">
+      <extensionElements>
+        <flowable:field name="handleRef">
+          <flowable:string>{"tenantId":"t1","ref":{"kind":"record","tenantId":"t1","registryId":"r1","recordId":"rc1"},"handleId":"266b8623a9e0fcef","facet":{"fields":["name"]}}</flowable:string>
+        </flowable:field>
+      </extensionElements>
+    </serviceTask>
+  </process>
+</definitions>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="adversarialAttrProcess" name="Adversarial Attr Value" isExecutable="true">
+    <serviceTask id="task1" name="Attack Task">
+      <extensionElements>
+        <flowable:field name="badAttr" value='{"registryId":"x","recordId":"y"}'/>
+      </extensionElements>
+    </serviceTask>
+  </process>
+</definitions>

@@ -1,0 +1,3 @@
+Deep nesting fixture is generated inline in the test file (201 levels of nested elements)
+because writing 201 nested XML elements in a static file is impractical.
+See bpmn-linter.test.ts for the inline generator.
