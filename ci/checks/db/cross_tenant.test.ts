@@ -293,6 +293,21 @@ async function seedDataClassification(c: pg.Client, tenantId: string): Promise<v
   );
 }
 
+/**
+ * Seed one row into choros.effect_resource (T-0034). PK is (tenant_id, id);
+ * a fresh uuid id per call keeps both tenants' seeds independent under RLS.
+ */
+async function seedEffectResource(c: pg.Client, tenantId: string): Promise<void> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.effect_resource
+       (tenant_id, id, kind, scope, metadata, created_at)
+     VALUES ($1, $2, 'integration_endpoint', '{}'::jsonb, NULL, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -424,8 +439,12 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
     }
     case 'actor_event_seq':
       await seedActorEventSeq(c, tenantId);
+      break;
     case 'data_classification':
       await seedDataClassification(c, tenantId);
+      break;
+    case 'effect_resource':
+      await seedEffectResource(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);

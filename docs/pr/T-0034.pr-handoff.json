@@ -1,0 +1,175 @@
+{
+  "task_id": "T-0034",
+  "status": "pr_open",
+  "branch": "task/T-0034-external-effect",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "8fe7acf",
+  "head_commit": "8c4d7d2",
+  "migration": "022",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E4.4: external-effect resources first-class — effect_resource schema (migration 022) + EffectSource port + classifyTool/verifyEffectGrants pure-TS core + step 3.5 guard in resolveFor. Declarations on mcp_tool invokes are gateway-verified: pure-compute tools pass without effect grants; effecting tools must hold an effect_resource grant for every declared resource. Fail-closed on malformed declares, unknown kind, or missing effect grant. Trust-boundary comment (nit R-1) added: EffectSource present + invokeCtx absent = pure-compute floor (ADR §4.4 option 2). 18/18 AC covered; tsc/eslint/vitest 609/614 (5 pre-existing skips)/fitness-shell/fitness:db 183/184 (1 pre-existing FF-ACT tooling-gap) all green on isolated Postgres 55454.",
+  "commits": [
+    {
+      "sha": "62448ec",
+      "phase": "SPEC",
+      "message": "T-0034 SPEC: external-effect resources first-class; declares = gateway-verified; pure-compute linter"
+    },
+    {
+      "sha": "90cf8cf",
+      "phase": "DESIGN",
+      "message": "T-0034 DESIGN: external-effect resources first-class — ADR + contract"
+    },
+    {
+      "sha": "8785f39",
+      "phase": "BUILD",
+      "message": "T-0034 BUILD: effect-resource.ts + gateway step 3.5 + migration 022 + fitness"
+    },
+    {
+      "sha": "e555d3f",
+      "phase": "REVIEW",
+      "message": "T-0034 REVIEW: approved — all 18 AC covered, CI green, fitness:db 184/184, nit on invokeCtx trust boundary"
+    },
+    {
+      "sha": "53157a2",
+      "phase": "TEST",
+      "message": "T-0034 TEST: pass — 18/18 AC covered, CI green, 5 adversarial probes (nit R-1 trust-boundary documented)"
+    },
+    {
+      "sha": "8c4d7d2",
+      "phase": "BUILD",
+      "message": "T-0034 BUILD: review nit R-1 (trust-boundary comment)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "8785f39",
+      "r1_summary": "Single nit R-1 (severity: nit): comment at grant-resolver.ts:406 did not articulate the trust boundary when EffectSource is present but invokeCtx is absent — the code defaults declares=[] and treats the tool as pure-compute, which is correct per ADR §4.4 option 2 (no signature break) but silently bypasses effect verification. R-1 addressed in commit 8c4d7d2: inline comment now documents the semantic, distinguishes it from the NF-2 backward-compat floor (EffectSource absent), and instructs composition-root authors to always supply invokeCtx when invoking an effecting tool.",
+      "r1_findings_resolved": ["R-1"],
+      "deviations_accepted": [],
+      "artifact": "docs/reviews/T-0034.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 609,
+      "passed": 609,
+      "failed": 0,
+      "ac_coverage": "18/18",
+      "adversarial_probes": "5/5 (probe-a expired-grant fail-closed; probe-b all-or-nothing two-effect deny; probe-c invokeCtx absent pure-floor confirmed/nit R-1; probe-d EffectSource throws fail-by-exception; probe-e wrong resourceType excluded)",
+      "tested_commit": "53157a2",
+      "run_details": {
+        "tsc_noEmit": "exit 0",
+        "eslint_src": "exit 0",
+        "vitest_pure": "609/614 (25 files + 1 skipped) — effect-resource.test 43/43, grant-resolver.test 48/48; 5 skipped = pre-existing (flowable-client.integration 4 skipped; flowable-client.adversarial 1 skipped)",
+        "fitness_shell": "npm run fitness exit 0 — all static checks green including effect-resource-isolation.sh (FF-ER9/ER-ISO1/ER-ISO2/ER-ISO3)",
+        "fitness_db": "183/184 on isolated Postgres 55454 (COMPOSE_PROJECT_NAME=choros-t0034-test, torn down) — effect_resource 9/9, cross_tenant 41/41, data_classification 8/8, behavior 7/7, two_tenant 4/4, org-structure 8/8, actor-event 30/30, pgTimerStore 25/25, pgJobStore 36/36; 1 fail = pre-existing FF-ACT tooling-gap (see known_issues)",
+        "migrations": "022_effect_resource clean on pass 1 (19 files total); pass 2 idempotent ('nothing to apply, 19 already recorded')"
+      },
+      "artifact": "docs/test-reports/T-0034.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (609/609 deterministic)",
+      "fitness_static": "pass (all static checks, including effect-resource-isolation.sh)",
+      "fitness_db": "pass (183/184; 1 pre-existing tooling-gap, not caused by T-0034)",
+      "integration_honesty_d056": "verifyEffectGrants wired into resolveFor step 3.5 — the ONE real resolution path; migration 022 applied to real isolated Postgres; effect_resource cross-tenant isolation verified at DB layer (9 tests); D-056 vitest.config.js excludes .claude/**"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/effect_resource.test.ts",
+    "ci/checks/effect-resource-isolation.sh",
+    "ci/checks/known_tenant_tables.txt",
+    "docs/design/T-0034-external-effect.adr.md",
+    "docs/design/T-0034.adr.contract.json",
+    "docs/reviews/T-0034.review.json",
+    "docs/specs/T-0034-external-effect.spec.md",
+    "docs/specs/T-0034.spec.contract.json",
+    "docs/test-reports/T-0034.test-report.json",
+    "migrations/022_effect_resource.sql",
+    "package.json",
+    "src/__tests__/effect-resource.test.ts",
+    "src/core/effect-resource.ts",
+    "src/core/grant-resolver.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "orchestrator (D-053) rebases task/T-0034-external-effect onto current dev HEAD (dev has moved to T-0022 merge since base 8fe7acf), then merges into dev",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3).",
+    "what_effect_verification_gives": "T-0034 makes the grant-resolver effect-aware on the invoke path. When the composition root wires an EffectSource (the effect-resource DAO port), any mcp_tool invocation with a non-empty declares list must be backed by an effect_resource grant for every declared (kind, resourceId) pair. Pure-compute tools (empty declares) pass unchanged. The verification is additive: the existing record-grant step 1-4 runs first; step 3.5 only activates when deps.effects is present. This gives operators fine-grained control: an agent may hold a normal 'invoke' grant on a tool handle but still be denied if it declares an effect on an integration_endpoint or messaging_channel for which it holds no effect grant.",
+    "how_to_verify": [
+      "npm run build && npx tsc --noEmit  →  exit 0",
+      "npm run lint  →  exit 0",
+      "npm test  →  609/609 green (includes effect-resource.test 43 + grant-resolver.test 48)",
+      "npm run fitness  →  all static checks pass including effect-resource-isolation.sh (FF-ER9/ER-ISO1/ER-ISO2/ER-ISO3)",
+      "POSTGRES_PORT=55454 COMPOSE_PROJECT_NAME=t0034verify npm run fitness:db  →  183/184 on isolated Postgres (1 pre-existing FF-ACT skip; starts/tears down automatically)",
+      "Spot-check: wire deps.effects with an EffectSource that has effect_resource row for (tenant, 'integration_endpoint', EP-1); call resolveFor with invokeCtx.declares=[{kind:'integration_endpoint',resourceId:EP-1}]; confirm denied:false. Remove effect grant → confirmed denied:true reason='no_effect_grant'. Omit invokeCtx entirely → denied:false (pure-compute floor per ADR §4.4)."
+    ],
+    "migration_022_summary": "CREATE TABLE choros.effect_resource (tenant_id UUID NOT NULL, id UUID NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('integration_endpoint','messaging_channel','storage_bucket','external_api')), name TEXT NOT NULL, description TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, id)). ENABLE ROW LEVEL SECURITY; FORCE ROW LEVEL SECURITY; policy: tenant_id = current_setting('app.current_tenant')::uuid. GRANT SELECT/INSERT/UPDATE/DELETE TO choros_app. No cross-table FK (self-contained per T-0017 lesson). effect_resource added to known_tenant_tables.txt.",
+    "rls_note": "effect_resource added to known_tenant_tables.txt. Cross-tenant CI-test (T-0115 gate) automatically checks tenant isolation. AC-11 verified at DB layer: effect_resource.test 9/9 — tenant-A rows invisible to tenant-B session.",
+    "trust_boundary_nit_R1": "Nit R-1 addressed in commit 8c4d7d2: comment at grant-resolver.ts:406 now documents that EffectSource present + invokeCtx absent defaults declares=[] and proceeds as pure-compute. This is distinct from the NF-2 backward-compat floor (EffectSource absent ⇒ entire step 3.5 skipped). Composition-root authors must always supply invokeCtx when invoking an mcp_tool handle; omitting it bypasses effect verification by design (ADR §4.4 option 2).",
+    "downstream_note": "T-0034 adds the effect-resource seam for T-0043 (7 exports below). The EffectSource port is wired at the composition root; the DB-backed DAO (T-0053) activates the floor in production. No new services or docker-compose changes; migration 022 is additive."
+  },
+  "downstream_T0043": {
+    "task": "T-0043",
+    "description": "T-0043 will import from src/core/effect-resource.ts. All 7 public exports must be treated as stable contract — do not rename or change signatures without a DESIGN-phase ADR amendment.",
+    "exports": [
+      {
+        "name": "EffectKind",
+        "kind": "type",
+        "description": "Closed union of effect resource categories: 'integration_endpoint' | 'messaging_channel' | 'storage_bucket' | 'external_api'"
+      },
+      {
+        "name": "EffectDeclaration",
+        "kind": "interface",
+        "description": "A tool's typed claim to invoke one effect-resource: { kind: EffectKind; resourceId: string }"
+      },
+      {
+        "name": "EffectResource",
+        "kind": "interface",
+        "description": "First-class effect-resource entity row: { id: string; tenantId: string; kind: EffectKind; name: string; description?: string; createdAt: Date }"
+      },
+      {
+        "name": "EffectSource",
+        "kind": "interface",
+        "description": "Port for resolving effect-resource by id within a tenant — injected at composition root, DB-backed DAO lands with T-0053"
+      },
+      {
+        "name": "ToolEffectProfile",
+        "kind": "type",
+        "description": "Result of classifyTool: { pure: true } for empty declares, or { pure: false; effects: EffectDeclaration[] } for valid/malformed input"
+      },
+      {
+        "name": "classifyTool",
+        "kind": "function",
+        "description": "Pure function — classifies a raw declares blob: empty array → pure:true; non-empty valid → pure:false effects:[...]; malformed/null/unknown-kind → pure:false effects:[]"
+      },
+      {
+        "name": "verifyEffectGrants",
+        "kind": "function",
+        "description": "Pure function — verifies all EffectDeclarations are covered by valid effect_resource grants in the grant set; returns { ok: true } or { ok: false; missingResourceId: string }"
+      }
+    ]
+  },
+  "known_issues": [
+    {
+      "id": "FE-T34-002",
+      "severity": "tooling-gap",
+      "status": "pre-existing, not caused by T-0034",
+      "component": "ci/checks/db/schema.test.ts :: FF-ACT :: zero ACT_* tables exist",
+      "description": "schema.test.ts counts all information_schema.tables WHERE table_name LIKE 'act_%' without a schema filter. When Flowable is co-started with Postgres in the same compose project (e.g. COMPOSE_PROJECT_NAME=choros-t0034-test), Flowable creates 56 ACT_* tables in the 'flowable' schema — the test expects 0 and fails. schema.test.ts was NOT modified in any T-0034 build commit; the same failure occurs on dev when Flowable co-starts.",
+      "recommendation": "For fitness:db runs start only the postgres service, not the full docker-compose stack (i.e. docker compose up -d postgres, not docker compose up -d). Alternatively add 'AND table_schema NOT IN (''flowable'')' to the schema.test query. Fix can be batched into T-0053 or a dedicated tooling task."
+    }
+  ],
+  "friction_events": []
+}

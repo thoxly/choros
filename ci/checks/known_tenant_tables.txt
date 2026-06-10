@@ -16,3 +16,4 @@ actor_event_seq
 data_classification
 role
 role_assignment
+effect_resource

@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0034",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/grant-resolver.ts:406",
+      "issue": "When deps.effects is wired (composition root committed to full enforcement per NF-3) but the caller omits invokeCtx entirely, the code defaults declares=[] and the tool is treated as pure-compute, bypassing effect verification. This is distinct from NF-2/AC-8 backward compat (which covers the absent EffectSource port). The spec gives the coder latitude for the 5th-arg absence case (ADR §4.4 option 2: 'no signature break for callers that omit it'), and the in-memory day-1 floor (no Postgres EffectSource DAO until T-0053) means no real enforcement gap exists today. But the comment near line 406 does not articulate the semantic: 'invokeCtx absent + EffectSource present = treats as pure-compute' is an implicit assumption that downstream composition roots should be aware of.",
+      "suggestion": "Add an inline comment at line 406 clarifying: 'invokeCtx absent means caller asserts no mcp_tool.declares context — treated as pure-compute (empty declares). This is distinct from NF-2 backward compat: EffectSource present + invokeCtx absent still trusts the caller; it is the composition root's responsibility to always supply invokeCtx when invoking an mcp_tool handle.' This documents the trust boundary without breaking the interface."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true },
+    { "ac": "AC-8",  "covered": true },
+    { "ac": "AC-9",  "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
