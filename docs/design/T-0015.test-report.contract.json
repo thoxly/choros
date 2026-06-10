@@ -1,0 +1,22 @@
+{
+  "task_id": "T-0015",
+  "verdict": "pass",
+  "deterministic": { "total": 349, "passed": 349, "failed": 0 },
+  "coverage_by_ac": [
+    { "ac": "AC-1", "test": "FF-1: Handle identity-only shape (no data/fields/payload/view/snapshot member; frozen)", "result": "pass" },
+    { "ac": "AC-2", "test": "FF-2: Opacity nominal brand (isObjectHandle discriminates; brand not forgeable via Symbol.for/string-key — verified adversarially) + tsc @ts-expect-error fixture (non-vacuous: brand removal => TS2578, tsc exit 2)", "result": "pass" },
+    { "ac": "AC-3", "test": "FF-3: assertVariableValue rejects record-ref + payload, record-kind ref, data/fields/payload/view objects, nested in array/object", "result": "pass" },
+    { "ac": "AC-4", "test": "FF-4: denyAllResolver fails closed (denied:true, reason no_grant, never fields) for any subject incl. privileged", "result": "pass" },
+    { "ac": "AC-5", "test": "FF-5: makeHandle reference-only, deterministic handleId, no field reveal", "result": "pass" },
+    { "ac": "AC-6", "test": "FF-6: tenant-bound, cross-tenant => CrossTenantHandleError, UUID-only ref", "result": "pass" },
+    { "ac": "AC-7", "test": "FF-7: serialize/parse round-trip identity (well-formed handles); serialized form has only identity keys, no payload", "result": "pass" },
+    { "ac": "AC-8", "test": "FF-8: single chokepoint — no .data/.fields/.payload accessor; denyAllResolver only exported resolver", "result": "pass" },
+    { "ac": "AC-9", "test": "FF-A3 lint object-handle-isolation.sh: no forbidden imports, frozen files unmodified", "result": "pass" },
+    { "ac": "AC-10", "test": "AC-10 static-now: object_handle in known_tenant_tables fixture, no payload column", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "none — pure-TS authority core, no web UX surface", "result": "n/a", "note": "D-025: deterministic CI is the only signal here; no browser/LLM check applicable" }
+  ],
+  "failures": [],
+  "blocked_reason": ""
+}

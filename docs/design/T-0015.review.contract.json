@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0015",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/core/object-handle.ts:251-282 (parseHandle) + 339-396 (assertVariableValue)",
+      "issue": "parseHandle casts the parsed `ref` wholesale (`ref as ResourceRef`) with NO shape validation — it copies whatever object sits under the `ref` key. A crafted/tampered wire string `{tenantId,handleId,ref:{kind:'record',...,data:{ssn:'secret'}}}` deserializes into a validly-BRANDED ObjectHandle whose `ref` carries a record payload, and serializeHandle re-emits it intact. Because assertVariableValue short-circuits to ok:true on isObjectHandle(value) BEFORE any structural inspection, that forged-but-branded handle smuggles the payload past the variable-write guard. This is a latent opacity-bypass for any UNTRUSTED wire input. It is a nit, not blocking, because: (a) no exported AC/FF claims parseHandle validates tampered input — AC-7 only asserts the honest serialize->parse round-trip of well-formed handles, which holds; (b) parseHandle has zero consumers in this static-now module (no untrusted-input path exists yet); (c) all in-scope invariants hold. But the wire form is exactly the cross-trust-boundary representation the opacity invariant must eventually survive, and T-0021/T-0027 (which consume the wire form) would inherit this gap silently.",
+      "suggestion": "Harden parseHandle to reconstruct `ref` from validated identity components only (switch on kind, copy exactly the known UUID fields, reject unknown keys / a `data`/`fields`/`payload`/`view` sibling), OR have makeHandle/parseHandle strip `ref` to its known identity fields, AND/OR have assertVariableValue inspect handle.ref structurally even for branded handles. Add an adversarial round-trip test asserting an injected ref.data is stripped or rejected. Tracked as a spawned follow-up so T-0021 does not inherit it."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
