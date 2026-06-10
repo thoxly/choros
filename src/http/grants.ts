@@ -34,6 +34,12 @@ import {
 } from "../core/scoped-admin.js";
 import type { Grant } from "../core/grant-lattice.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
+import {
+  encodeGrantAuditEvent,
+  encodeAssignmentAuditEvent,
+  type AssignmentAuditEvent,
+  type AuditEventInput,
+} from "../core/audit-grant-encoder.js";
 import { loadAdminContext } from "../db/org.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
@@ -191,17 +197,21 @@ export function parseScopeElement(raw: unknown): ScopeElement | null {
 }
 
 // ---------------------------------------------------------------------------
-// writeGrantAuditEvent — encoding seam: T-0031 will replace with its encoder.
-// Thin local function writing the minimal honest audit_event row.
-// Follows the T-0016 append path: chained SHA-256 hash per tenant.
+// appendAuditEventInput — T-0031 encoder seam integration (T-0030 obligation).
+//
+// Accepts a pre-encoded AuditEventInput (from encodeGrantAuditEvent or
+// encodeAssignmentAuditEvent) and appends it to audit_event within the caller's
+// transaction, maintaining the SHA-256 chained append path (T-0016).
+//
 // Called INSIDE a withTenantTx callback (no own transaction).
+// Chain columns (seq, prev_hash, row_hash, vocab_version) are computed here;
+// all other fields come verbatim from the encoder output (ADR §4.1 / NF-2).
 // ---------------------------------------------------------------------------
 
-async function writeGrantAuditEvent(
+async function appendAuditEventInput(
   client: pg.PoolClient,
   tenantId: string,
-  evt: GrantAuditEvent,
-  nowMs: number,
+  input: AuditEventInput,
 ): Promise<void> {
   // Fetch current audit head for this tenant to maintain hash chain.
   const headRes = await client.query<{
@@ -216,7 +226,6 @@ async function writeGrantAuditEvent(
   let prevHash: Buffer;
 
   if (headRes.rows.length === 0) {
-    // No head yet — initialize.
     prevSeq = 0n;
     prevHash = Buffer.alloc(32); // all-zeros sentinel
   } else {
@@ -225,21 +234,17 @@ async function writeGrantAuditEvent(
   }
 
   const newSeq = prevSeq + 1n;
-  const auditId = randomUUID();
-  const payload = JSON.stringify({ capability: evt.capability });
 
   // row_hash = SHA-256(prevHash || type || actor || subject || occurred_at)
   const rowHash = createHash("sha256")
     .update(prevHash)
-    .update(evt.kind)
-    .update(evt.actor)
-    .update(evt.subjectRoleId ?? "")
-    .update(String(nowMs))
+    .update(input.type)
+    .update(input.actor)
+    .update(input.subject ?? "")
+    .update(String(input.occurred_at))
     .digest();
 
-  const scopeJson = JSON.stringify(evt.scope);
-
-  // Insert audit_event row (AC-12 / FF-1).
+  // Insert audit_event row — fields driven entirely by encoder output (AC-12 / FF-1).
   await client.query(
     `INSERT INTO choros.audit_event
        (tenant_id, seq, id, type, actor, subject, scope, via,
@@ -251,16 +256,16 @@ async function writeGrantAuditEvent(
     [
       tenantId,
       newSeq.toString(),
-      auditId,
-      evt.kind,
-      evt.actor,
-      evt.subjectRoleId,
-      scopeJson,
-      "grant-editor",
-      evt.proposedBy ?? null,
-      evt.confirmedBy ?? null,
-      payload,
-      nowMs.toString(),
+      input.id,
+      input.type,
+      input.actor,
+      input.subject,
+      input.scope !== null ? JSON.stringify(input.scope) : null,
+      input.via ?? "grant-editor",
+      input.proposed_by,
+      input.confirmed_by,
+      JSON.stringify(input.payload),
+      input.occurred_at.toString(),
       prevHash,
       rowHash,
       1,
@@ -272,16 +277,50 @@ async function writeGrantAuditEvent(
     await client.query(
       `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
        VALUES ($1, $2, $3, $4, $5)`,
-      [tenantId, newSeq.toString(), rowHash, nowMs.toString(), 1],
+      [tenantId, newSeq.toString(), rowHash, input.occurred_at.toString(), 1],
     );
   } else {
     await client.query(
       `UPDATE choros.audit_head
           SET seq = $2, row_hash = $3, updated_at = $4, vocab_version = $5
         WHERE tenant_id = $1`,
-      [tenantId, newSeq.toString(), rowHash, nowMs.toString(), 1],
+      [tenantId, newSeq.toString(), rowHash, input.occurred_at.toString(), 1],
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// writeGrantAuditEvent — T-0031 encoder seam integration.
+// Encodes a GrantAuditEvent via encodeGrantAuditEvent (T-0031) and appends
+// to audit_event via appendAuditEventInput.
+// Called INSIDE a withTenantTx callback (no own transaction).
+// ---------------------------------------------------------------------------
+
+async function writeGrantAuditEvent(
+  client: pg.PoolClient,
+  tenantId: string,
+  evt: GrantAuditEvent,
+  nowMs: number,
+): Promise<void> {
+  const input = encodeGrantAuditEvent(evt, nowMs);
+  await appendAuditEventInput(client, tenantId, input);
+}
+
+// ---------------------------------------------------------------------------
+// writeAssignmentAuditEvent — T-0031 encoder seam integration.
+// Encodes an AssignmentAuditEvent via encodeAssignmentAuditEvent (T-0031)
+// and appends to audit_event via appendAuditEventInput.
+// Called INSIDE a withTenantTx callback (no own transaction).
+// ---------------------------------------------------------------------------
+
+async function writeAssignmentAuditEvent(
+  client: pg.PoolClient,
+  tenantId: string,
+  evt: AssignmentAuditEvent,
+  nowMs: number,
+): Promise<void> {
+  const input = encodeAssignmentAuditEvent(evt, nowMs);
+  await appendAuditEventInput(client, tenantId, input);
 }
 
 // ---------------------------------------------------------------------------
@@ -675,20 +714,17 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       );
 
       // Audit emit (AC-12 / FR-6 / FF-6 — same transaction).
-      // role_assignment creates are modelled as assignment-scope mgmt events.
-      const auditEvt: GrantAuditEvent = {
-        kind: "grant.create",
+      // role_assignment creates use encodeAssignmentAuditEvent (T-0031 seam).
+      const auditEvt: AssignmentAuditEvent = {
+        kind: "assignment.create",
         actor: actorId,
-        subjectRoleId: roleId,
-        capability: {
-          resourceType: "mgmt_object:role",
-          operation: "create",
-        },
-        scope: orgScope,
+        employeeId,
+        roleId,
+        orgScope,
         proposedBy: proposedBy ?? undefined,
         confirmedBy: confirmedBy ?? undefined,
       };
-      await writeGrantAuditEvent(client, tenantId, auditEvt, nowMs);
+      await writeAssignmentAuditEvent(client, tenantId, auditEvt, nowMs);
     });
 
     res.statusCode = 201;
@@ -733,17 +769,15 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
           [tenantId, raId, nowMs],
         );
 
-        const auditEvt: GrantAuditEvent = {
-          kind: "grant.revoke",
+        // Audit emit — role_assignment revokes use encodeAssignmentAuditEvent (T-0031 seam).
+        const auditEvt: AssignmentAuditEvent = {
+          kind: "assignment.revoke",
           actor: actorId,
-          subjectRoleId: raRow.roleId,
-          capability: {
-            resourceType: "mgmt_object:role",
-            operation: "delete",
-          },
-          scope: raRow.orgScope,
+          employeeId: raRow.employeeId,
+          roleId: raRow.roleId,
+          orgScope: raRow.orgScope,
         };
-        await writeGrantAuditEvent(client, tenantId, auditEvt, nowMs);
+        await writeAssignmentAuditEvent(client, tenantId, auditEvt, nowMs);
       });
 
       res.statusCode = 200;
@@ -881,7 +915,7 @@ async function fetchRoleAssignmentRow(
   pool: pg.Pool,
   tenantId: string,
   raId: string,
-): Promise<{ id: string; roleId: string; orgScope: ScopeElement }> {
+): Promise<{ id: string; employeeId: string; roleId: string; orgScope: ScopeElement }> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -889,10 +923,11 @@ async function fetchRoleAssignmentRow(
     await client.query("SET LOCAL search_path TO choros");
     const { rows } = await client.query<{
       id: string;
+      employee_id: string;
       role_id: string;
       org_scope: unknown;
     }>(
-      `SELECT id, role_id, org_scope
+      `SELECT id, employee_id, role_id, org_scope
          FROM choros.role_assignment
         WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
       [tenantId, raId],
@@ -904,6 +939,7 @@ async function fetchRoleAssignmentRow(
     const r = rows[0];
     return {
       id: r.id,
+      employeeId: r.employee_id,
       roleId: r.role_id,
       orgScope: r.org_scope as ScopeElement,
     };
