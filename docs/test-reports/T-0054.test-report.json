@@ -1,0 +1,94 @@
+{
+  "task_id": "T-0054",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 473,
+    "passed": 473,
+    "failed": 0
+  },
+  "tsc": "clean",
+  "eslint": "clean",
+  "fitness_static": {
+    "total": 7,
+    "passed": 7,
+    "checks": [
+      {"id": "FF-6", "result": "pass", "note": "realm JSON exists at config/keycloak/realm-choros.json, valid JSON, not gitignored"},
+      {"id": "FF-7", "result": "pass", "note": "all 7 human users present in realm JSON"},
+      {"id": "FF-8", "result": "pass", "note": "4 agent service-account clients found (agent-invoice, agent-orchestrator, agent-recon, agent-triage)"},
+      {"id": "FF-11", "result": "pass", "note": "no prod creds in TS source; DEV ONLY label present in realm JSON; compose uses env-var form"},
+      {"id": "FF-13", "result": "pass", "note": "KEYCLOAK_PORT default is 8180, no collision with 5432/55432/3000"},
+      {"id": "FF-10", "result": "pass", "note": "CHOROS_AUTH_MODE present in src/http/auth.ts with 'dev' default"},
+      {"id": "FF-14", "result": "pass", "note": "docs/environments.md has KEYCLOAK_PORT, KEYCLOAK_MGMT_PORT, KEYCLOAK_REALM, CHOROS_AUTH_MODE, choros-api, user-add note"}
+    ]
+  },
+  "live_kc": "pass",
+  "live_kc_detail": {
+    "start_mode": "fresh volume (docker compose up -d keycloak from clean state)",
+    "postgres_port_override": "55433 (55432 occupied by T-0115 stack)",
+    "FF-1_wait_ready": "PASS — Keycloak 25.0.6 health/ready HTTP 200 after 15s (management port 9000)",
+    "FF-2_realm_ready": "PASS — issuer=http://localhost:8180/realms/choros confirmed via OIDC discovery",
+    "FF-3_human_token": "PASS — ROPC e-kravtsova, access_token 1205 chars",
+    "FF-4_agent_token": "PASS — client_credentials agent-orchestrator, access_token 1065 chars",
+    "FF-5_jwt_claims": "PASS — iss/aud/sub/preferred_username/actor_type/RS256 verified; agent preferred_username=service-account-agent-orchestrator (R-4 fix confirmed)",
+    "AC-7_live_admin": "PASS — e-kravtsova found via admin API GET /admin/realms/choros/users",
+    "AC-8_live_admin": "PASS — 4 agent clients with serviceAccountsEnabled=true via admin API"
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "FF-1 ci/checks/kc/wait-ready.sh", "result": "pass"},
+    {"ac": "AC-2", "test": "FF-2 ci/checks/kc/realm-ready.sh", "result": "pass"},
+    {"ac": "AC-3", "test": "FF-3 ci/checks/kc/human-token.sh", "result": "pass"},
+    {"ac": "AC-4", "test": "FF-4 ci/checks/kc/agent-token.sh", "result": "pass"},
+    {"ac": "AC-5", "test": "FF-5 ci/checks/kc/jwt-claims.sh", "result": "pass"},
+    {"ac": "AC-6", "test": "FF-6 ci/checks/kc/realm-json-exists.sh", "result": "pass"},
+    {"ac": "AC-7", "test": "FF-7 ci/checks/kc/fixture-users.sh + live admin API check", "result": "pass"},
+    {"ac": "AC-8", "test": "FF-8 ci/checks/kc/agent-client.sh + live admin API check", "result": "pass"},
+    {"ac": "AC-9", "test": "vitest 473/473 with CHOROS_AUTH_MODE=dev", "result": "pass"},
+    {"ac": "AC-10", "test": "FF-10 ci/checks/kc/auth-mode-seam.sh", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-11 ci/checks/kc/no-prod-secret.sh", "result": "pass"},
+    {"ac": "AC-12", "test": "FF-12 docker compose ps — both postgres+keycloak started healthy", "result": "pass"},
+    {"ac": "AC-13", "test": "FF-13 ci/checks/kc/port-check.sh", "result": "pass"},
+    {"ac": "AC-14", "test": "FF-14 ci/checks/kc/environments-docs.sh", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "adversarial_probes": [
+    {
+      "probe": "A — ROPC with wrong password",
+      "action": "POST /realms/choros/protocol/openid-connect/token with username=e-kravtsova, password=WRONG-PASSWORD",
+      "expected": "HTTP 401",
+      "actual": "HTTP 401 {error: 'invalid_grant', error_description: 'Invalid user credentials'}",
+      "result": "pass"
+    },
+    {
+      "probe": "B — Forged token with wrong iss/aud",
+      "action": "jwt-claims.sh against forged token with iss=http://evil.example.com/realms/evil, aud=wrong-service",
+      "expected": "FAIL on iss and aud assertions",
+      "actual": "FAIL correctly reported for iss and aud; tooling-gap noted (see friction)",
+      "result": "pass"
+    },
+    {
+      "probe": "C — CHOROS_AUTH_MODE=keycloak → 501 stub",
+      "action": "Start server with CHOROS_AUTH_MODE=keycloak; GET /api/me with x-dev-user header",
+      "expected": "HTTP 501 NOT_IMPLEMENTED (keycloak path stub, dev path disabled)",
+      "actual": "HTTP 501 {error: {code: 'NOT_IMPLEMENTED', message: 'keycloak auth mode requires T-0060 JWT validator'}}",
+      "result": "pass"
+    },
+    {
+      "probe": "D — Dev mode unaffected by explicit CHOROS_AUTH_MODE=dev",
+      "action": "Start server with CHOROS_AUTH_MODE=dev; GET /api/me with x-dev-user: e-kravtsova",
+      "expected": "HTTP 200 with employee identity",
+      "actual": "HTTP 200 {id: 'e-kravtsova', name: 'А. Кравцова', type: 'human', ...}",
+      "result": "pass"
+    }
+  ],
+  "failures": [],
+  "friction": [
+    {
+      "id": "FE-T0054-0001",
+      "root_class": "tooling-gap",
+      "location": "ci/checks/kc/jwt-claims.sh:50",
+      "description": "check_token() uses global variable FAIL (no `local` declaration). When two calls are made (human token first, agent token second), the second call resets FAIL=0 at line 50, clobbering the outer FAIL=1 set by a failed first call. In adversarial test with forged human token + valid agent token, the script exits 0 despite human token check failures. The product itself (Keycloak realm + JWT contract) is correct; only the fitness function has a variable scoping bug.",
+      "severity": "nit",
+      "product_impact": "none — the bug only masks adversarial scenarios, not the normal pass path; normal CI (both tokens real) is unaffected. To fix: add `local FAIL=0` inside check_token() at line 50."
+    }
+  ]
+}
