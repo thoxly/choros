@@ -2,7 +2,7 @@
   "task_id": "T-0019",
   "status": "pr_open",
   "branch": "task/T-0019-actor-event-ledger",
-  "pr_url": null,
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -86,14 +86,26 @@
   "verdict_payload": {
     "spec_commit": "1abbc88",
     "design_commit": "b87fb5b",
-    "build_commits": ["0c5f94f", "bf301ef"],
+    "build_commits": [
+      "0c5f94f",
+      "bf301ef"
+    ],
     "review_approved_commit": "c7e7ffc",
     "test_commit": "6ad746e",
     "review_verdict": "approved",
     "review_nits": [
-      {"id": "R-1", "status": "CLOSED by PROBE-A — reader deny-stub runtime behaviour verified"},
-      {"id": "R-2", "status": "cosmetic, non-blocking, optional cleanup"},
-      {"id": "R-3", "status": "cosmetic, non-blocking, not gating"}
+      {
+        "id": "R-1",
+        "status": "CLOSED by PROBE-A — reader deny-stub runtime behaviour verified"
+      },
+      {
+        "id": "R-2",
+        "status": "cosmetic, non-blocking, optional cleanup"
+      },
+      {
+        "id": "R-3",
+        "status": "cosmetic, non-blocking, not gating"
+      }
     ],
     "base_dev_sha": "a90f78d",
     "branch_tip_sha": "6ad746e0640ce3df84217bccec52a70a42c890d3"
