@@ -1,0 +1,6 @@
+# transient per-run sidecars produced by run.sh subcommands (not evidence; rebuilt each run)
+.license.*
+.seed.*
+.cleanup.*
+.deadletter.*
+# measurements.json is COMMITTED as the spike's evidence (do NOT ignore it)

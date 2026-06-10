@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0117",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "note": "8 fitness functions per ADR §7 (FF-ISOLATION, FF-IMAGES-PINNED, FF-NO-SECRETS, FF-SMOKE-UP, FF-SMOKE-SEED, FF-SMOKE-JSON, FF-SMOKE-DOWN, FF-ADDENDUM). These are the spec-defined test surface for this spike (spec §5: 'manual/fitness by nature'). Product CI (npm run ci, 384/384) also green. Full-run measurements verified by reading committed JSON — Docker-based live re-run not executed by this gate (would require running Docker stacks and would overwrite committed evidence; see test R-2 nit)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "FF-SMOKE-UP + measurements.json inspection",                        "result": "pass"},
+    {"ac": "AC-2",  "test": "FF-IMAGES-PINNED + measurements.json license_ok=true",              "result": "pass"},
+    {"ac": "AC-3",  "test": "FF-SMOKE-SEED (N=1000 smoke) + measurements.json n_history_actual=300000 (full run)", "result": "pass"},
+    {"ac": "AC-4",  "test": "measurements.json cleanup_present_in_oss=true both engines",        "result": "pass"},
+    {"ac": "AC-5",  "test": "measurements.json extrapolation.fits_70m=true + arithmetic cross-check (headroom verified)", "result": "pass"},
+    {"ac": "AC-6",  "test": "measurements.json degradation_ok=true + cleanup_deleted=N (plateau reached)", "result": "pass"},
+    {"ac": "AC-7",  "test": "measurements.json deadletter.list.http=200 both engines",           "result": "pass"},
+    {"ac": "AC-8",  "test": "measurements.json deadletter.retry.http=204 both engines",          "result": "pass"},
+    {"ac": "AC-9",  "test": "measurements.json Flowable move.http=204 dedicated; Operaton move via set-retries parity note", "result": "pass"},
+    {"ac": "AC-10", "test": "measurements.json operaton engine entry with all fields populated",  "result": "pass"},
+    {"ac": "AC-11", "test": "measurements.json operaton license_ok=true Apache 2.0",             "result": "pass"},
+    {"ac": "AC-12", "test": "FF-SMOKE-JSON + JSON structure inspection",                          "result": "pass"},
+    {"ac": "AC-13", "test": "FF-ADDENDUM + addendum structure inspection (per-AC table, status, recommendations, assumptions)", "result": "pass"},
+    {"ac": "AC-14", "test": "FF-ISOLATION: git diff dev...HEAD --stat — only spikes/ + docs/design/T-0117* + addendum, zero src/ changes", "result": "pass"},
+    {"ac": "AC-15", "test": "FF-SMOKE-DOWN: docker ps -a + docker volume ls — zero spike containers/volumes after run", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "Addendum §4 explicit extrapolation assumptions readable and refutable by founder",
+      "result": "pass",
+      "note": "вторично, структурная проверка аддендума; 4 допущения (contour_fraction=0.2, dev_factor=0.5, window=8h, linearity) выписаны явно и помечены как 'opровержимы при ратификации'"
+    }
+  ],
+  "failures": [],
+  "measurements_snapshot": {
+    "flowable": {
+      "n": 300000,
+      "throughput_rps": 5454.55,
+      "headroom": 2047.79,
+      "verdict": "go"
+    },
+    "operaton": {
+      "n": 300000,
+      "throughput_rps": 13636.36,
+      "headroom": 5119.48,
+      "verdict": "go"
+    }
+  },
+  "product_ci": {
+    "command": "npm run ci",
+    "result": "pass",
+    "tests": 384,
+    "note": "Product CI is unaffected by the spike — no src/ changes. 384/384 pass (same baseline as dev)."
+  }
+}

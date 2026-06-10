@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0117",
+  "status": "ready",
+  "decision": "Spike harness in isolated spikes/flowable-oss/: two independent docker-compose stacks (flowable, operaton), each = OSS REST app (pinned Apache-2.0 image) + disposable Postgres 16 with a named volume. A single zero-dep bash entrypoint run.sh with per-AC subcommands (up/license/seed/cleanup/deadletter/measure/down/smoke/all), parameterized by ENGINE and N_HISTORY (default 300000). History is seeded by direct batched INSERT into the engine history tables via psql (generate_series, 10k batches; starting REST instances for 300k would take hours) using a minimal-but-correct completed-instance model. Cleanup is measured on a warm run (warm-up + delete-throughput records/s + table-growth curve before/during/after) with explicitly written 70M/year extrapolation assumptions. Deadletter is created deterministically: deploy a minimal failing-service-task BPMN, drive retries to 0 so the job lands in deadletter, then run list/set-retries/move ONLY through the artifact's public OSS REST and record HTTP code + effect. All measurements go to machine-readable measurements.json per engine. Verdict = docs/design/stack-flowable-oss-spike-addendum.md, status 'addendum, awaiting ratification'. BUILD-phase fitness functions verify the harness works (smoke), not the spike's numbers (those feed the founder ratification gate, not a CI gate). Runtime target: local Docker on the dev machine; no external resource / founder provision (public docker pull of Apache-2.0 images).",
+  "rejected_alternatives": [
+    {"option": "Seed 300k completed instances by starting+completing them through the engine REST API", "why_not": "Hours on a laptop and adds runtime noise to the cleanup throughput measurement; the spike needs history rows in the correct shape, not execution semantics (out-of-scope per spec section 4). Direct batched INSERT into ACT_HI_* is minutes; the assumption 'inserted history deletes like engine-produced history' is written into the journal/addendum and is checked by cleanup actually shrinking the row count (AC-4/AC-6)."},
+    {"option": "Build a thin custom Dockerfile from Flowable maven artifacts for a Flowable 7 REST app", "why_not": "Unnecessary: the official flowable/flowable-rest:7.1.0 OSS image (Apache 2.0) already ships the full REST API + Swagger including /management deadletter endpoints and supports Postgres via SPRING_DATASOURCE_* env. Risk R1 is retired; a custom build would add a non-reproducible moving part."},
+    {"option": "Run the spike as part of the product unit-CI on every push", "why_not": "The spike is manual/fitness by nature (spec section 5): it needs a Docker daemon, pulls hundreds of MB of images, and at full N>=300k runs for minutes per engine. CI-gating prod builds on it violates NF-5 isolation and would couple Choros CI to an engine spike. Fitness functions instead run as a local gate prologue (smoke at small N) and the full run is an explicit BUILD execution step whose output is the journal + addendum read by the founder."},
+    {"option": "One shared compose stack hosting both Flowable and Operaton against one Postgres", "why_not": "Schema collisions (both engines use ACT_* tables) and cross-engine contamination would make license/throughput/deadletter measurements non-attributable and non-idempotent (NF-2). Two fully independent compose projects with separate volumes and host ports keep each engine's verdict clean."}
+  ],
+  "object_model": [
+    {"entity": "EngineResult", "fields": [
+      {"name": "engine", "type": "string (flowable|operaton)"},
+      {"name": "image", "type": "string (pinned coordinate)"},
+      {"name": "image_digest", "type": "string (sha256 RepoDigest)"},
+      {"name": "license", "type": "string"},
+      {"name": "license_ok", "type": "boolean (Apache 2.0, no enterprise key/jar)"},
+      {"name": "n_history_target", "type": "integer"},
+      {"name": "n_history_actual", "type": "integer (counted post-seed)"},
+      {"name": "cleanup_present_in_oss", "type": "boolean"},
+      {"name": "cleanup_throughput_rps", "type": "number (deleted records/s)"},
+      {"name": "cleanup_duration_s", "type": "number"},
+      {"name": "table_size_before_bytes", "type": "integer"},
+      {"name": "table_size_after_bytes", "type": "integer"},
+      {"name": "degradation_ok", "type": "boolean (no unbounded growth/hang, reaches plateau)"},
+      {"name": "extrapolation", "type": "object {linearity, contour_fraction, dev_factor, window, fits_70m, headroom_factor}"},
+      {"name": "deadletter", "type": "object {list:{available,http,count}, retry:{available,http,effect}, move:{available,http,effect}}"},
+      {"name": "verdict_engine", "type": "string (go|no-go|risk)"},
+      {"name": "notes", "type": "string"}
+    ]},
+    {"entity": "MeasurementsLog", "fields": [
+      {"name": "schema_version", "type": "string"},
+      {"name": "generated_at", "type": "string (ISO-8601)"},
+      {"name": "engines", "type": "array<EngineResult>"}
+    ]}
+  ],
+  "contracts": [
+    "run.sh up <engine>            -> bring stack up from pinned public OSS image, wait healthcheck green (AC-1)",
+    "run.sh license <engine>      -> record image coordinate + sha256 digest + license string; license_ok bool (AC-2/11, RL-3 binary)",
+    "run.sh seed <engine> [N=300000] -> batched INSERT into engine history tables, return actual count (AC-3)",
+    "run.sh cleanup <engine>      -> enable OSS history-cleanup, warm-up, measure delete throughput + degradation curve (AC-4/5/6)",
+    "run.sh deadletter <engine>   -> deploy failing BPMN, drive job to deadletter, run list/set-retries/move via OSS REST, record http+effect (AC-7/8/9)",
+    "run.sh measure <engine>      -> assemble EngineResult into measurements.json (AC-12)",
+    "run.sh down <engine>         -> tear down containers + disposable volume (AC-15)",
+    "run.sh smoke <engine>        -> fast BUILD-fitness path: up -> REST 200 -> seed 1000 -> measure writes JSON -> down",
+    "run.sh all <engine> [N]      -> full single-engine run",
+    "measurements.json            -> { schema_version, generated_at, engines: EngineResult[] } (machine-readable, committed as evidence)",
+    "Flowable REST OSS: GET /flowable-rest/service/management/deadletter-jobs ; POST /management/deadletter-jobs/{id} {action:move}",
+    "Operaton REST OSS: GET /engine-rest/job?withException=true ; PUT /engine-rest/job/{id}/retries {retries:n} ; POST /engine-rest/history/cleanup?immediatelyDue=true",
+    "Exact REST paths confirmed against the running artifact's Swagger UI in BUILD, not invented"
+  ],
+  "fitness_functions": [
+    {"id": "FF-ISOLATION", "rule": "Spike touches no src/, prod docker-compose, or prod CI; all changes under spikes/ plus the one docs/design addendum and this ADR (AC-14/NF-5)", "ci_check": "git diff --name-only <base>..HEAD | grep -vE '^(spikes/|docs/design/stack-flowable-oss-spike-addendum\\.md|docs/design/T-0117)' must be empty, else exit 1"},
+    {"id": "FF-SMOKE-UP", "rule": "Each stack comes up from public images and REST answers 200 (AC-1)", "ci_check": "spikes/flowable-oss/run.sh up flowable && curl -fsS localhost:8080/flowable-rest/service/management/engine >/dev/null (and operaton on 8081); exit 0"},
+    {"id": "FF-SMOKE-SEED", "rule": "Generator loads the requested volume and actual count matches target (AC-3, small N in smoke)", "ci_check": "run.sh seed flowable 1000 && test \"$(psql -tA -c 'select count(*) from act_hi_procinst')\" -ge 1000"},
+    {"id": "FF-SMOKE-JSON", "rule": "measure produces measurements.json that is valid JSON with required EngineResult fields (AC-12)", "ci_check": "run.sh measure flowable && python3 -c \"import json;d=json.load(open('spikes/flowable-oss/measurements.json'));assert d['engines'][0]['engine']\""},
+    {"id": "FF-SMOKE-DOWN", "rule": "down removes containers and the disposable volume; a repeat up is clean (AC-15/NF-2)", "ci_check": "run.sh down flowable && ! docker volume ls | grep -q spike_flowable_pg && run.sh up flowable; exit 0"},
+    {"id": "FF-ADDENDUM", "rule": "Addendum present, status 'addendum, awaiting ratification', has explicit go/no-go for both engines + recommendation (AC-13)", "ci_check": "grep -q 'addendum, awaiting ratification' docs/design/stack-flowable-oss-spike-addendum.md && grep -Eq 'go|no-go' docs/design/stack-flowable-oss-spike-addendum.md"},
+    {"id": "FF-IMAGES-PINNED", "rule": "Images pinned (not :latest), Apache 2.0 license recorded in the journal (AC-2/11, NF-2 reproducibility)", "ci_check": "! grep -E ':latest' spikes/flowable-oss/compose.*.yml && grep -q 'Apache' spikes/flowable-oss/measurements.json"},
+    {"id": "FF-NO-SECRETS", "rule": "No trial keys / tokens / registrations in the harness (RL-3)", "ci_check": "! grep -RiE 'enterprise.?key|license.?key|trial|api[_-]?token' spikes/flowable-oss/ ; exit 0"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR section 3 topology + run.sh up + healthcheck; FF-SMOKE-UP"},
+    {"ac": "AC-2", "covered_by": "ADR section 2 pin table + run.sh license; FF-IMAGES-PINNED"},
+    {"ac": "AC-3", "covered_by": "ADR section 3.1 batched seeding + actual count; FF-SMOKE-SEED"},
+    {"ac": "AC-4", "covered_by": "ADR section 3.2 step 5 cleanup_present_in_oss from the public image"},
+    {"ac": "AC-5", "covered_by": "ADR section 3.2 throughput + section 3.3 extrapolation with explicit assumptions"},
+    {"ac": "AC-6", "covered_by": "ADR section 3.2 step 4 degradation (table sizes, dead_tup, plateau)"},
+    {"ac": "AC-7", "covered_by": "ADR section 3.4 list over OSS REST"},
+    {"ac": "AC-8", "covered_by": "ADR section 3.4 retry/set-retries over OSS REST"},
+    {"ac": "AC-9", "covered_by": "ADR section 3.4 move/return over OSS REST"},
+    {"ac": "AC-10", "covered_by": "ADR section 3 second operaton stack, same run.sh subcommands on operaton"},
+    {"ac": "AC-11", "covered_by": "ADR section 2 Operaton pin + run.sh license operaton; FF-IMAGES-PINNED"},
+    {"ac": "AC-12", "covered_by": "ADR section 5 measurements.json EngineResult; FF-SMOKE-JSON"},
+    {"ac": "AC-13", "covered_by": "ADR section 5 addendum structure; FF-ADDENDUM"},
+    {"ac": "AC-14", "covered_by": "ADR section 3 everything under spikes/; FF-ISOLATION"},
+    {"ac": "AC-15", "covered_by": "ADR section 3 disposable volumes + run.sh down; FF-SMOKE-DOWN"}
+  ],
+  "runtime_target": "локально — Docker на машине разработчика (NF-1, Docker 28.3.0 + Compose v2.38.1 verified). Внешних ресурсов нет: публичный docker pull Apache-2.0-образов; founder/GT-4-провижн не требуется.",
+  "adr_artifact_path": "docs/design/T-0117-flowable-oss-spike.adr.md",
+  "escalation": ""
+}

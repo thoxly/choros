@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-06-10T15:41:23.703935+00:00",
+  "engines": [
+    {
+      "engine": "flowable",
+      "image": "flowable/flowable-rest:7.1.0",
+      "image_digest": "flowable/flowable-rest@sha256:b7ae287502cd5c243b577a0ca2894172e1c18cd75aea4fd67dc7d58f1b40db44",
+      "license": "Apache 2.0",
+      "license_ok": true,
+      "n_history_target": 300000,
+      "n_history_actual": 300000,
+      "cleanup_present_in_oss": true,
+      "cleanup_throughput_rps": 5454.55,
+      "cleanup_duration_s": 55,
+      "cleanup_deleted": 300000,
+      "table_size_before_bytes": 73482240,
+      "table_size_after_bytes": 73490432,
+      "degradation_ok": true,
+      "extrapolation": {
+        "linearity": "assumed linear (single N point this run; refutable)",
+        "contour_fraction": 0.2,
+        "dev_factor": 0.5,
+        "window": "nightly 8h batch window",
+        "fits_70m": true,
+        "headroom_factor": 2047.79
+      },
+      "deadletter": {
+        "list": {
+          "available": true,
+          "http": 200,
+          "count": 1
+        },
+        "retry": {
+          "available": true,
+          "http": 204,
+          "effect": "moved out of deadletter (action=move)"
+        },
+        "move": {
+          "available": true,
+          "http": 204,
+          "effect": "moved to executable/timer queue"
+        }
+      },
+      "verdict_engine": "go",
+      "notes": ""
+    },
+    {
+      "engine": "operaton",
+      "image": "operaton/operaton:1.0.0",
+      "image_digest": "operaton/operaton@sha256:74659f07be7815420572a07043d74681aaf8c744bb0f5e4025a156e42d026708",
+      "license": "Apache 2.0",
+      "license_ok": true,
+      "n_history_target": 300000,
+      "n_history_actual": 300000,
+      "cleanup_present_in_oss": true,
+      "cleanup_throughput_rps": 13636.36,
+      "cleanup_duration_s": 22,
+      "cleanup_deleted": 300000,
+      "table_size_before_bytes": 89669632,
+      "table_size_after_bytes": 89669632,
+      "degradation_ok": true,
+      "extrapolation": {
+        "linearity": "assumed linear (single N point this run; refutable)",
+        "contour_fraction": 0.2,
+        "dev_factor": 0.5,
+        "window": "nightly 8h batch window",
+        "fits_70m": true,
+        "headroom_factor": 5119.48
+      },
+      "deadletter": {
+        "list": {
+          "available": true,
+          "http": 200,
+          "count": 2
+        },
+        "retry": {
+          "available": true,
+          "http": 204,
+          "effect": "retries set to 3 (back to active queue)"
+        },
+        "move": {
+          "available": true,
+          "http": 204,
+          "effect": "no dedicated deadletter-move in Camunda-7 REST; return-to-active = set-retries (parity note)"
+        }
+      },
+      "verdict_engine": "go",
+      "notes": ""
+    }
+  ]
+}
