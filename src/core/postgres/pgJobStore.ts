@@ -91,6 +91,17 @@ export class PostgresJobStore {
   // ---------------------------------------------------------------------------
   // getById
   // ---------------------------------------------------------------------------
+  /**
+   * NOTE (T-0028/R-4): Jobs sourced from PostgresJobStore NEVER have a `result` field,
+   * even after a successful complete() call with a payload. The `result` column does not
+   * exist in the schema until T-0053+ lands. Callers who store a result via complete() and
+   * then call getById() will observe `result === undefined` — asymmetric with InMemoryJobStore
+   * which preserves the result in-memory.
+   *
+   * TODO T-0053: once the result column is added (migration 011+), add `result` to the SELECT
+   * list here and to rowToJob(). This comment is the seam marker for that migration.
+   * See: docs/design/T-0028-engine-mutation-guard.adr.md §4.5 / T-0053 (Postgres DAO).
+   */
   async getById(id: string): Promise<Job | undefined> {
     const { rows } = await this.pool.query<JobRow>(
       `SELECT id, topic, variables, state, retries,
@@ -194,19 +205,57 @@ export class PostgresJobStore {
   }
 
   // ---------------------------------------------------------------------------
-  // complete — atomic CTE ownership gate (ADR §4.3) + T-0028 payload guard
+  // complete — ownership gate + T-0028 payload guard (ADR §4.4 ordering)
   // ---------------------------------------------------------------------------
   /**
-   * T-0028 Layer B: validates payload with assertVariableValue before the DB update.
-   * A raw record object in any payload value returns RECORD_IN_PAYLOAD fail-closed;
-   * the job state is NOT advanced. Guard fires before the DB round-trip (gate-then-guard).
-   * The payload is validated in TS (not in SQL); the DB is not contacted for invalid payloads.
-   * Note: result persistence to DB is deferred to T-0053+ (no result column in schema yet);
-   * the guard IS wired and the structural invariant is enforced.
+   * Guard algorithm follows ADR §4.4 step order exactly:
+   *   1. [ownership gate] CTE gate-check → NOT_FOUND/NOT_LOCKED/LOCK_EXPIRED/NOT_OWNER
+   *   2. [payload guard]  assertVariableValue each value → RECORD_IN_PAYLOAD (fail-closed)
+   *   3. [advance state]  conditional UPDATE (same ownership predicate — safe for FF-7)
+   *
+   * Concurrency note (FF-7): The original single-CTE approach advanced state atomically
+   * with the gate. The new two-statement approach introduces a narrow window between
+   * step 1 and step 3. The step-3 UPDATE carries the full ownership predicate, so a
+   * concurrent complete() that sneaks in between will have already set state='COMPLETED';
+   * the step-3 UPDATE matches 0 rows — harmless (job was already completed). The caller
+   * of the sneaking concurrent complete() will have gotten ok:true on its own step 3.
+   * This is acceptable because the integration test (FF-7) validates the one-ok:true
+   * invariant, which still holds: at most one concurrent call whose step-3 UPDATE
+   * actually matches the LOCKED row.
+   *
+   * This ordering mirrors InMemoryJobStore exactly (ADV-12 gate-precedence contract, R-1 fix).
+   *
+   * Note: result persistence to DB is deferred to T-0053+ (no result column in schema yet).
+   * See getById() JSDoc for the asymmetry note. The guard IS wired; the structural invariant
+   * (assertVariableValue called before any result write) is enforced pre-T-0053.
    */
   async complete(workerId: string, jobId: string, payload?: Record<string, unknown>): Promise<CompleteResult> {
-    // T-0028 Layer B: validate payload before the ownership-gate DB round-trip.
-    // This is fail-closed: a bad payload short-circuits without touching the DB.
+    const now = this.clock.now();
+
+    // Step 1 (ADR §4.4): ownership gate — evaluate all conditions in one round-trip.
+    const { rows } = await this.pool.query<{ verdict: string }>(
+      `WITH locked_row AS (
+         SELECT id, state, lock_owner, lock_expiry
+         FROM choros.job
+         WHERE id = $1
+       )
+       SELECT
+         CASE
+           WHEN (SELECT id FROM locked_row) IS NULL           THEN 'NOT_FOUND'
+           WHEN (SELECT state FROM locked_row) <> 'LOCKED'    THEN 'NOT_LOCKED'
+           WHEN (SELECT lock_expiry FROM locked_row) <= $2     THEN 'LOCK_EXPIRED'
+           WHEN (SELECT lock_owner FROM locked_row) <> $3      THEN 'NOT_OWNER'
+           ELSE 'OK'
+         END AS verdict`,
+      [jobId, now, workerId]
+    );
+    const verdict = rows[0].verdict;
+    if (verdict !== "OK") {
+      return { ok: false, code: verdict as "NOT_FOUND" | "NOT_LOCKED" | "LOCK_EXPIRED" | "NOT_OWNER" };
+    }
+
+    // Step 2 (ADR §4.4): payload guard — runs after ownership gate, before state advance.
+    // Fail-closed: a bad payload does NOT advance job state.
     if (payload !== undefined) {
       for (const value of Object.values(payload)) {
         const r = assertVariableValue(value);
@@ -215,45 +264,24 @@ export class PostgresJobStore {
         }
       }
     }
-    // Uses a single atomic UPDATE with re-read for gate verification.
-    // FOR UPDATE in the CTE serializes concurrent complete calls (FF-7):
-    // the second concurrent transaction blocks until the first commits, then
-    // re-reads the already-COMPLETED row and returns NOT_LOCKED.
-    const { rows } = await this.pool.query<{ verdict: string }>(
-      `WITH locked_row AS (
-         SELECT id, state, lock_owner, lock_expiry
-         FROM choros.job
-         WHERE id = $1
-         FOR UPDATE
-       ),
-       gate AS (
-         SELECT
-           id,
-           CASE
-             WHEN id IS NULL         THEN 'NOT_FOUND'
-             WHEN state <> 'LOCKED'  THEN 'NOT_LOCKED'
-             WHEN lock_expiry <= $2  THEN 'LOCK_EXPIRED'
-             WHEN lock_owner  <> $3  THEN 'NOT_OWNER'
-             ELSE 'OK'
-           END AS verdict
-         FROM (
-           SELECT * FROM locked_row
-           UNION ALL
-           SELECT NULL, NULL, NULL, NULL
-           WHERE NOT EXISTS (SELECT 1 FROM locked_row)
-         ) g
-       ),
-       upd AS (
-         UPDATE choros.job
-         SET state='COMPLETED', lock_owner=NULL, lock_expiry=NULL
-         WHERE id = $1 AND (SELECT verdict FROM gate) = 'OK'
-       )
-       SELECT verdict FROM gate`,
-      [jobId, this.clock.now(), workerId]
+
+    // Step 3 (ADR §4.4): advance state with the same ownership conditions.
+    // Check rowCount: if 0, a concurrent complete() won the race — return NOT_LOCKED
+    // (the job is now COMPLETED, not owned by this worker any more).
+    const upd = await this.pool.query(
+      `UPDATE choros.job
+       SET state='COMPLETED', lock_owner=NULL, lock_expiry=NULL
+       WHERE id = $1
+         AND state = 'LOCKED'
+         AND lock_expiry > $2
+         AND lock_owner = $3`,
+      [jobId, now, workerId]
     );
-    const verdict = rows[0].verdict;
-    if (verdict === "OK") return { ok: true };
-    return { ok: false, code: verdict as "NOT_FOUND" | "NOT_LOCKED" | "LOCK_EXPIRED" | "NOT_OWNER" };
+    if (upd.rowCount === 0) {
+      // Race: concurrent complete() already advanced the state between steps 1 and 3.
+      return { ok: false, code: "NOT_LOCKED" };
+    }
+    return { ok: true };
   }
 
   // ---------------------------------------------------------------------------

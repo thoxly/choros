@@ -21,25 +21,29 @@ function makeFixedClock(value: number): Clock {
 }
 
 /**
- * Enqueue + lock a job in one step.
+ * Enqueue + lock a job in one step via the public API path.
+ * Uses enqueue() → fetchAndLock() so no private internals are accessed.
  * Returns the locked job id.
+ *
+ * Note: lockExpiry is controlled indirectly via the clock value and
+ * lockDurationMs passed to fetchAndLock. To simulate a specific lockExpiry
+ * (e.g. expiry=4999 with clock=5000 → already expired), use
+ * enqueueAndLockExpired() instead.
  */
 function enqueueAndLock(
   store: JobStore,
-  clock: Clock & { now(): number },
+  clock: { now(): number },
   lockExpiry: number
 ): string {
+  // lockDurationMs = lockExpiry - clock.now() gives the desired expiry time.
+  // We use fetchAndLock which is the real acquire path: enqueue → fetchAndLock.
   const job = store.enqueue("test-topic", {}, 0);
-  const privateJobs = (store as unknown as { jobs: Map<string, unknown> }).jobs;
-  const raw = privateJobs.get(job.id) as Record<string, unknown>;
-  const locked = Object.freeze({
-    ...raw,
-    state: JobState.LOCKED,
-    lockOwner: "worker-1",
-    lockExpiry,
-  });
-  privateJobs.set(job.id, locked);
-  return job.id;
+  const lockDurationMs = lockExpiry - clock.now();
+  const locked = store.fetchAndLock("worker-1", ["test-topic"], 1, lockDurationMs);
+  if (locked.length === 0) {
+    throw new Error(`enqueueAndLock: fetchAndLock returned no jobs for id=${job.id}`);
+  }
+  return locked[0].id;
 }
 
 // ---------------------------------------------------------------------------

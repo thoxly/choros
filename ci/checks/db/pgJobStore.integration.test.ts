@@ -852,6 +852,69 @@ describe("AC-17: queue_stats returns correct metrics for known seed", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// ADV-12 (PostgresJobStore): ownership gate takes precedence over payload validation
+// Mirrors the InMemoryJobStore gate-precedence tests in variable-guard.test.ts.
+// Confirms R-1 fix: Postgres path now follows ADR §4.4 ordering (gate → payload).
+// ---------------------------------------------------------------------------
+describe("ADV-12 (PostgresJobStore): ownership gate fires before payload validation", () => {
+  it("NOT_FOUND returned for unknown jobId — invalid payload not evaluated", async () => {
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const r = await store.complete("w1", "00000000-0000-0000-0000-000000000000", {
+        rec: { kind: "record", registryId: "r", recordId: "x" },
+      });
+      expect(r).toEqual({ ok: false, code: "NOT_FOUND" });
+    });
+  });
+
+  it("NOT_LOCKED returned for CREATED job — invalid payload not evaluated", async () => {
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const job = await store.enqueue("t", {}, 0);
+      const r = await store.complete("w1", job.id, {
+        rec: { kind: "record", registryId: "r", recordId: "x" },
+      });
+      expect(r).toEqual({ ok: false, code: "NOT_LOCKED" });
+    });
+  });
+
+  it("LOCK_EXPIRED returned for expired lock — invalid payload not evaluated", async () => {
+    let jobId: string;
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const job = await store.enqueue("t", {}, 0);
+      jobId = job.id;
+      await store.fetchAndLock("w1", ["t"], 1, 0); // lockExpiry=1000 (immediately expired)
+    });
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const r = await store.complete("w1", jobId!, {
+        rec: { kind: "record", registryId: "r", recordId: "x" },
+      });
+      expect(r).toEqual({ ok: false, code: "LOCK_EXPIRED" });
+    });
+  });
+
+  it("NOT_OWNER returned for wrong workerId — invalid payload not evaluated", async () => {
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const job = await store.enqueue("t", {}, 0);
+      await store.fetchAndLock("w1", ["t"], 1, 30000);
+      const r = await store.complete("w2", job.id, {
+        rec: { kind: "record", registryId: "r", recordId: "x" },
+      });
+      expect(r).toEqual({ ok: false, code: "NOT_OWNER" });
+    });
+  });
+
+  it("RECORD_IN_PAYLOAD returned for valid owner but invalid payload", async () => {
+    await runAsTenant(TENANT_A, makeFixedClock(1000), async (store) => {
+      const job = await store.enqueue("t", {}, 0);
+      await store.fetchAndLock("w1", ["t"], 1, 30000);
+      const r = await store.complete("w1", job.id, {
+        rec: { kind: "record", registryId: "r", recordId: "x" },
+      });
+      expect(r).toEqual({ ok: false, code: "RECORD_IN_PAYLOAD" });
+    });
+  });
+});
+
 describe("AC-18: ops-operations at bad DATABASE_URL return ok:false", () => {
   it("run_vacuum with bad url → { ok: false, error: non-empty }", async () => {
     const { runVacuum } = await import("../../../ops/catalog/run_vacuum.js");

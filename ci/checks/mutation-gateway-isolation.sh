@@ -102,9 +102,32 @@ fi
 # ---------------------------------------------------------------------------
 # G6 additive: confirm object-handle.ts, grant-lattice.ts, grant-resolver.ts
 #              are not modified in this task's diff (frozen exports unchanged).
+#
+# Audit-grade check: diffs the current HEAD against the merge-base with dev
+# (not just against the working tree).  This catches hypothetical intermediate
+# commits that dirtied and then re-cleaned the frozen files on this branch.
+#
+# BASE is resolved as: merge-base of HEAD with the nearest available ref for
+# dev (remote origin/dev if present, otherwise local dev, otherwise the
+# fallback of HEAD~$(git log --oneline | wc -l) which is the root).
 # ---------------------------------------------------------------------------
 
-echo "[G6-additive] Checking: frozen exports (object-handle.ts, grant-lattice.ts, grant-resolver.ts) unchanged ..."
+echo "[G6-additive] Checking: frozen exports (object-handle.ts, grant-lattice.ts, grant-resolver.ts) unchanged vs merge-base with dev ..."
+
+# Resolve the base commit: prefer origin/dev, then local dev, then first commit.
+BASE_REF=""
+if git -C "${PROJECT_ROOT}" rev-parse --verify origin/dev >/dev/null 2>&1; then
+  BASE_REF="origin/dev"
+elif git -C "${PROJECT_ROOT}" rev-parse --verify dev >/dev/null 2>&1; then
+  BASE_REF="dev"
+fi
+
+if [[ -n "${BASE_REF}" ]]; then
+  BASE_SHA=$(git -C "${PROJECT_ROOT}" merge-base HEAD "${BASE_REF}" 2>/dev/null || true)
+else
+  # No dev branch available (e.g. fresh clone / CI shallow); fall back to working-tree check.
+  BASE_SHA=""
+fi
 
 FROZEN_EXPORTS=(
   "src/core/object-handle.ts"
@@ -117,14 +140,28 @@ for f in "${FROZEN_EXPORTS[@]}"; do
   if [[ ! -f "${full_path}" ]]; then
     continue
   fi
-  if ! git -C "${PROJECT_ROOT}" diff --quiet HEAD -- "${f}" 2>/dev/null; then
-    echo "FAIL [G6-additive]: frozen export file has uncommitted changes: ${f}"
-    ERRORS=$((ERRORS + 1))
+
+  if [[ -n "${BASE_SHA}" ]]; then
+    # Audit-grade: compare committed HEAD state vs merge-base with dev.
+    if ! git -C "${PROJECT_ROOT}" diff --quiet "${BASE_SHA}" HEAD -- "${f}" 2>/dev/null; then
+      echo "FAIL [G6-additive]: frozen export file modified on this branch vs merge-base (${BASE_SHA:0:8}): ${f}"
+      ERRORS=$((ERRORS + 1))
+    fi
+  else
+    # Fallback: working-tree check (no dev ref available).
+    if ! git -C "${PROJECT_ROOT}" diff --quiet HEAD -- "${f}" 2>/dev/null; then
+      echo "FAIL [G6-additive]: frozen export file has uncommitted changes: ${f}"
+      ERRORS=$((ERRORS + 1))
+    fi
   fi
 done
 
 if [[ ${ERRORS} -eq 0 ]]; then
-  echo "PASS [G6-additive]: frozen export files are unmodified"
+  if [[ -n "${BASE_SHA}" ]]; then
+    echo "PASS [G6-additive]: frozen export files unmodified vs merge-base ${BASE_SHA:0:8} (${BASE_REF})"
+  else
+    echo "PASS [G6-additive]: frozen export files are unmodified (working-tree fallback)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
