@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0063",
+  "status": "ready",
+  "summary": "Активный lock-timeout reclaimer (фоновый sweep истёкших локов) + incident-запись в outbox при потере воркера; topic-фильтрация и backoff уже реализованы в T-0114.",
+  "functional": [
+    "FR-1: Фоновый reclaimer периодически находит LOCKED jobs с lock_expiry<=now и переводит их в CREATED (retries>0) или FAILED (retries=0), декрементируя retries на 1.",
+    "FR-2: На каждый реклеймированный job атомарно записывает в outbox строку event_type='worker_lock_expired' с payload {topic, lockOwner, lockExpiry, retriesLeft}.",
+    "FR-3: Новые миграции (если нужны) используют номера начиная с 029 (027/028 заняты T-0032).",
+    "FR-4: GET /health возвращает дополнительное поле queue.workerIncidents — число незакрытых/dead outbox-инцидентов event_type='worker_lock_expired'.",
+    "FR-5: Idempotency-ключ outbox-строки = 'lock_expired:' || jobId || ':' || lockExpiry — повторный sweep не создаёт дубль.",
+    "FR-6: При sweep-reclaim retries декрементируется на 1; при retries=0 job переходит в FAILED; available_at при CREATED = now (без дополнительного backoff)."
+  ],
+  "non_functional": [
+    "NF-1: Только существующие таблицы choros.job + choros.outbox — нет новых таблиц.",
+    "NF-2: UPDATE job + INSERT outbox в одной транзакции (атомарность, образец T-0062).",
+    "NF-3: Concurrent-safe sweep — FOR UPDATE SKIP LOCKED или эквивалент; один job реклеймируется не более одного раза за проход.",
+    "NF-4: RLS-совместимость — sweep работает как choros_app (NOBYPASSRLS) per-tenant GUC по образцу pgOutboxStore.claimBatch.",
+    "NF-5: Clock injection (как pgJobStore/pgTimerStore) для детерминированных тестов.",
+    "NF-6: Poll-режим, Postgres-only — без Redis/Kafka/брокеров."
+  ],
+  "out_of_scope": [
+    "Topic-фильтрация fetchAndLock — уже реализована в T-0114 (WHERE topic = ANY($1::text[])).",
+    "Backoff на fail-пути — уже реализован в T-0114 (available_at = now + retryTimeoutMs).",
+    "Lazy reclaim истёкших локов — уже реализован в T-0114 (fetchAndLock picks up LOCKED AND lock_expiry<=now).",
+    "Dead/FAILED terminal state для job — уже реализован в T-0114 (fail(retries=0) → FAILED).",
+    "Отдельная таблица incidents/worker_stat (новая инфраструктура).",
+    "Push/webhook/SSE-уведомления об инциденте — T-0068 (E6.3).",
+    "Topic-registry / namespace — T-0067 (E6.2).",
+    "Auth воркер-эндпоинтов — T-0064 (E1.4).",
+    "Документация external-worker API — T-0065 (E1.5)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "pgJobStore.sweepExpiredLocks(now) находит job с state='LOCKED' AND lock_expiry<=now, переводит в CREATED (retries>0) или FAILED (retries=0), atomically записывает outbox event_type='worker_lock_expired' в той же транзакции",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Job с retries=2 после sweep: state='CREATED', retries=1, available_at=now (не сдвинут на дополнительный backoff)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Job с retries=0 после sweep: state='FAILED', retries=0; outbox-строка с event_type='worker_lock_expired' записана",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Outbox incident строка содержит aggregate_kind='job', aggregate_id=<jobId>, event_type='worker_lock_expired', payload.lockOwner=<workerId>, payload.retriesLeft=<retries after decrement>",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Idempotency-ключ 'lock_expired:'+jobId+':'+lockExpiry — повторный sweep того же job не создаёт вторую outbox-строку (ON CONFLICT DO NOTHING на idempotency_key)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Sweep не затрагивает job с state='LOCKED' AND lock_expiry > now (активный лок)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Sweep не затрагивает job с state='CREATED', 'COMPLETED', или 'FAILED'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Два конкурирующих sweep-прохода реклеймируют каждый конкретный job ровно один раз — нет двойной outbox-строки при наличии idempotency-key или FOR UPDATE SKIP LOCKED",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "GET /health возвращает queue.workerIncidents: number — аддитивно, не ломает существующие поля queue.depth, queue.oldestAvailableLagMs, timer.timerLagMs, outbox.pendingLagMs, outbox.deadCount",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "queue.workerIncidents = 0 при пустой очереди без инцидентов; queue.workerIncidents = N после N sweep-reclaim'ов с новыми outbox-строками",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Job тенанта B не реклеймируется при sweep в контексте тенанта A (RLS-инвариант, choros_app + GUC per-tenant)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Интеграционный тест: seed 1 LOCKED job с lock_expiry=now-1ms → после sweepExpiredLocks(now) job в CREATED, 1 outbox-строка worker_lock_expired; seed 1 LOCKED job с lock_expiry=now+1000ms → sweep не трогает",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "pgJobStore.integration.test.ts существующие AC-1..AC-18 зелёные после добавления sweep (аддитивность, без регрессий)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "Новые миграции (если есть, номер >=029) идемпотентны — повторный запуск не ломает схему (IF NOT EXISTS / ON CONFLICT DO NOTHING)",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0063-retry-reclaim.spec.md"
+}
