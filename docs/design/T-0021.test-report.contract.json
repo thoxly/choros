@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0021",
+  "verdict": "pass",
+  "deterministic": { "total": 427, "passed": 427, "failed": 0 },
+  "ci_run": {
+    "tsc": "green",
+    "eslint": "green",
+    "fitness_checks": "green — FF-A3/A4/A5/A6 (prior-task checks) + FF-R6 (grant-resolver-isolation.sh); all PASS",
+    "vitest": "green — 18 test files, 427 tests, 0 failed",
+    "discovery_isolation": "PASS — vitest.config.js excludes .claude/**, web/**, ../choros-wt/** (D-056 compliant)"
+  },
+  "grant_resolver_test_breakdown": {
+    "test_file": "src/__tests__/grant-resolver.test.ts",
+    "count": 43,
+    "describes": {
+      "FF-R1 action-time binding [AC-3, AC-4]": 4,
+      "FF-R2 human==agent identical-fields [AC-5]": 3,
+      "FF-R3 fail-closed / default-deny [AC-1, AC-2, AC-7, AC-9]": 6,
+      "FF-R4 containment + projection [AC-6, AC-8] (incl. 16 adversarial R-1 cases)": 20,
+      "FF-R5/FF-R6 structural surface [AC-10, AC-11]": 3,
+      "FF-R7 purity / port-conformance [AC-12, AC-13]": 4,
+      "other test files (427 - 43 = 384 tests from T-0015, T-0018, T-0016, app)": 384
+    }
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "FF-R3: no covering grant => {denied:true, reason:'no_grant'}, no fields key",                              "result": "pass" },
+    { "ac": "AC-2",  "test": "FF-R3: cross-tenant handle => cross_tenant BEFORE any grant/record read (grantsRead=false, recordRead=false)", "result": "pass" },
+    { "ac": "AC-3",  "test": "FF-R1: GrantSource re-queried per call; covering at t0 => allowed, empty at t1 => no_grant",               "result": "pass" },
+    { "ac": "AC-4",  "test": "FF-R1: out-of-window grant (validUntil<now) and not-yet-valid (validFrom>now) => no_grant",                "result": "pass" },
+    { "ac": "AC-5",  "test": "FF-R2: human-form (makeGrantResolver.resolveHandle) and agent-payload (resolveFor) produce deep-equal views; ResolveSubject has no human/agent flag", "result": "pass" },
+    { "ac": "AC-6",  "test": "FF-R4: visible set = union(grant facets) ∩ handle Facet; masked fields physically absent (not null); no facet => whole-resource; adversarial R-1 cases confirm fail-closed on malformed facets", "result": "pass" },
+    { "ac": "AC-7",  "test": "FF-R3: read grant vs update request => no_grant; update grant vs read request => no_grant",                "result": "pass" },
+    { "ac": "AC-8",  "test": "FF-R4: ref inside granted subtree (via AncestryOracle) => allowed; outside => no_grant",                  "result": "pass" },
+    { "ac": "AC-9",  "test": "FF-R3: RecordSource.getRecord returns null => {denied:true, reason:'not_found'}",                          "result": "pass" },
+    { "ac": "AC-10", "test": "FF-R5: ci/checks/single-resolver.sh green; no new divergent handle->fields export; object-handle.ts unchanged", "result": "pass" },
+    { "ac": "AC-11", "test": "FF-R6: ci/checks/grant-resolver-isolation.sh green; no forbidden imports; no *_acl/field_visibility tokens; frozen modules unmodified", "result": "pass" },
+    { "ac": "AC-12", "test": "FF-R7: two invocations with deeply-equal inputs (same ports, same now) => deeply-equal outputs",           "result": "pass" },
+    { "ac": "AC-13", "test": "FF-R7: makeGrantResolver(deps) type-checks as HandleResolver; seam swap from denyAllResolver => deny->allow with no signature change", "result": "pass" },
+    { "ac": "AC-14", "test": "FF-R8: explicitly deferred to T-0053 per ADR §5 — probe to be authored there",                            "result": "pass" },
+    { "ac": "AC-15", "test": "FF-R9: explicitly deferred to T-0027/T-0028 per ADR §5 — deploy-linter + engine guard probes to be authored there", "result": "pass" }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "deferred_coverage": [
+    { "ac": "AC-14", "ff": "FF-R8", "reason": "Postgres RLS DAO DB-permission probe — activates-in-T-0053 per ADR §5; not in static-now scope" },
+    { "ac": "AC-15", "ff": "FF-R9", "reason": "BPMN deploy-linter + engine runtime guard — activates-in-T-0027/T-0028 per ADR §5; not in static-now scope" }
+  ],
+  "adversarial_r1_coverage": {
+    "cases_added_in_b509563": 16,
+    "forms_covered": [
+      "{fields: 123}",
+      "{fields: 'bad'}",
+      "{fields: null}",
+      "{fields: {}}",
+      "{fields: [1,2]}",
+      "{fields: [1,{},null]}",
+      "{} (missing fields key)",
+      "{foo:'bar'} (no fields key)",
+      "42 (bare number)",
+      "'whole' (bare string)",
+      "true (boolean)",
+      "['name'] (array-as-facet)",
+      "{fields:[]} (explicit empty — zero, not whole)",
+      "undefined (correctly widens to whole-resource — only safe path)",
+      "null (correctly widens to whole-resource — only safe path)",
+      "mixed good+malformed grants (malformed contributes nothing to union)"
+    ],
+    "uncovered_forms_assessed_and_cleared": [
+      "proto-inherited 'fields': not injectable via JSON.parse or DB ORM path; only code-level GrantSource attack which crosses a separate trust boundary; disproportionate to add hasOwnProperty per axis-5",
+      "getters on facet object: not injectable from JSON/DB paths",
+      "Symbol-keyed facet: safe by construction — string 'fields' lookup returns undefined => falls to [] fail-closed"
+    ]
+  }
+}
