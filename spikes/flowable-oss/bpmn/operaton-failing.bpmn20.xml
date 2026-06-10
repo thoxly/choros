@@ -5,7 +5,10 @@
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
              targetNamespace="spike">
-  <process id="spikeFailing" name="Spike Failing Process" isExecutable="true">
+  <!-- historyTimeToLive (P1D) is mandatory in Camunda-7/Operaton: deploy fails with
+       ENGINE-12018 without it (it is what drives REMOVAL_TIME_ for history cleanup). -->
+  <process id="spikeFailing" name="Spike Failing Process" isExecutable="true"
+           camunda:historyTimeToLive="P1D">
     <startEvent id="start"/>
     <sequenceFlow id="f1" sourceRef="start" targetRef="failTask"/>
     <serviceTask id="failTask" name="Always Fails"
