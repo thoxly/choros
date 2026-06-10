@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0117",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "note": "npm run ci (tsc+eslint+fitness+vitest): 384/384 tests pass. Spike fitness gate (8/8 FF) is a separate harness run per ADR §7 — its smoke is Docker-dependent and not part of the product CI. Product CI is unaffected by the spike (FF-ISOLATION)."
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/stack-flowable-oss-spike-addendum.md:20,42",
+      "issue": "Headline table and AC-5 row use '~5.5–7.9k rec/s @300k' band; the committed measurements.json records 5,454 rec/s, which is marginally below 5,500 (the band's lower end). The actual value IS stated correctly in §3 ('the committed measurements.json records the last run at 5,454 rec/s'), but the headline table creates a slight inconsistency. Not blocking — the traceability note in §3 correctly explains the band spans multiple runs.",
+      "suggestion": "Change headline band to '~5.5–7.9k' → '~5.5k–7.9k (committed run: 5,454 rec/s)' or adjust the lower bound to '~5.4k–7.9k' to include the committed value without ambiguity."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "spikes/flowable-oss/fitness.sh:55-60 (FF-SMOKE-JSON)",
+      "issue": "FF-SMOKE-JSON calls 'run.sh measure' after a small-N (1000) seed run, which overwrites the Flowable EngineResult in measurements.json with smoke-level data. This is exactly the 'known gнильца' acknowledged in the BUILD commit (6d5aebc: 'Flowable EngineResult restored to N=300k after smoke'). The committed measurements.json is correct (N=300000), but running fitness.sh on a live Docker environment will silently clobber the full-run measurements for the tested engine. No git-safe guard (e.g. git stash/restore) is in place.",
+      "suggestion": "Add a note to fitness.sh (comment near FF-SMOKE-JSON) warning that the smoke run will overwrite the engine's EngineResult in measurements.json with N=1000 data, and that git checkout -- spikes/flowable-oss/measurements.json should be run after fitness.sh to restore the full-run evidence. Alternatively, have FF-SMOKE-JSON write to a separate measurements.smoke.json so the full-run measurements.json is never touched by the smoke."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true,  "evidence": "measurements.json: both engines verdict_engine=go; addendum §1 table; fitness FF-SMOKE-UP"},
+    {"ac": "AC-2",  "covered": true,  "evidence": "measurements.json: flowable license_ok=true, license='Apache 2.0', Bundle-License in jar (no enterprise key); FF-IMAGES-PINNED"},
+    {"ac": "AC-3",  "covered": true,  "evidence": "measurements.json: n_history_actual=300000 for both engines (N=300000, not 1000); seed via batched INSERT in ACT_HI_*"},
+    {"ac": "AC-4",  "covered": true,  "evidence": "measurements.json: cleanup_present_in_oss=true; Flowable driven via OSS REST timer-job move; Operaton via POST /history/cleanup"},
+    {"ac": "AC-5",  "covered": true,  "evidence": "measurements.json: Flowable headroom_factor=2047.79, Operaton=5119.48; arithmetic verified: annual_capacity/(fleet*0.2) matches to <1. Extrapolation assumptions explicitly stated and refutable."},
+    {"ac": "AC-6",  "covered": true,  "evidence": "measurements.json: degradation_ok=true both; cleanup_deleted=300000 reaching count=0; table_size stable (expected — Postgres lazy reclaim, documented in addendum §5)"},
+    {"ac": "AC-7",  "covered": true,  "evidence": "measurements.json: deadletter.list.http=200 for both; Flowable via /management/deadletter-jobs; Operaton via /job?withException=true"},
+    {"ac": "AC-8",  "covered": true,  "evidence": "measurements.json: deadletter.retry.http=204 both; Flowable action=move; Operaton PUT /job/{id}/retries"},
+    {"ac": "AC-9",  "covered": true,  "evidence": "measurements.json: Flowable deadletter.move.http=204 (dedicated action=move); Operaton move.available=true via set-retries (parity note present in both measurements.json and addendum §6 — not hidden as full GO, correctly marked as parity note)"},
+    {"ac": "AC-10", "covered": true,  "evidence": "measurements.json: operaton engine entry present; all AC-1..AC-9 fields populated"},
+    {"ac": "AC-11", "covered": true,  "evidence": "measurements.json: operaton license_ok=true, license='Apache 2.0'; FF-IMAGES-PINNED"},
+    {"ac": "AC-12", "covered": true,  "evidence": "spikes/flowable-oss/measurements.json present, valid JSON, both EngineResult entries with all required fields; arithmetic consistent"},
+    {"ac": "AC-13", "covered": true,  "evidence": "docs/design/stack-flowable-oss-spike-addendum.md present; status 'addendum, awaiting ratification'; per-AC table (15 AC); go/no-go both engines; recommendation Flowable primary / Operaton fallback; explicit refutable extrapolation assumptions in §4; FF-ADDENDUM"},
+    {"ac": "AC-14", "covered": true,  "evidence": "git diff dev...HEAD --stat: only spikes/flowable-oss/ + docs/design/T-0117* + stack-flowable-oss-spike-addendum.md; no src/ or prod CI changes; FF-ISOLATION"},
+    {"ac": "AC-15", "covered": true,  "evidence": "addendum §1: 'Both stacks torn down with down -v after the run (no leftover containers/volumes)'; verified: docker ps -a + docker volume ls show zero spike artifacts; FF-SMOKE-DOWN"}
+  ],
+  "data_integrity_checks": {
+    "flowable_n": 300000,
+    "operaton_n": 300000,
+    "small_n_in_committed_measurements": false,
+    "note": "Confirmed: commit 6ea1043 corrected N from 1000→300000 (full Flowable run); commit 6d5aebc re-ran to produce the final 5454 rec/s result and explicitly states 'Flowable EngineResult restored to N=300k after smoke'. Both engines in committed measurements.json are full-run (N=300000).",
+    "extrapolation_arithmetic_verified": true,
+    "addendum_numbers_match_measurements_json": true,
+    "operaton_move_parity_note_present_not_hidden": true,
+    "seeding_assumption_documented": true,
+    "disk_reclaim_caveat_documented": true,
+    "cascade_depth_caveat_documented": true
+  },
+  "isolation_check": "clean",
+  "rl3_check": "pass — no enterprise keys, trials, or registrations; both images Apache 2.0 confirmed via Bundle-License in engine jar",
+  "role_gap_evidence": []
+}
