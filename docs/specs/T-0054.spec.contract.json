@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0054",
+  "status": "ready",
+  "summary": "Add a Keycloak service to docker-compose with a dedicated silo realm, human dev accounts, agent service accounts, a JWT contract (issuer/audience/claims) fixed for T-0060, and an env-flag migration seam preserving the existing x-dev-user dev-auth layer.",
+  "functional": [
+    "FR-1: Keycloak service defined in docker-compose.yml (Keycloak 24.x/25.x), dev credentials via env vars with non-prod defaults, HTTP port configurable via env, healthcheck/readiness endpoint for compose ordering.",
+    "FR-2: Dedicated realm provisioned via JSON import on start (committed realm JSON at a tracked path); realm configures OIDC, a confidential core-API client, token lifetimes, and iss pattern http://<host>:<port>/realms/<realm-name>.",
+    "FR-3: Human user accounts in the realm matching the dev org fixture (username = employee id, dev password, actor_type=human attribute, email).",
+    "FR-4: At least one agent service account: confidential OIDC client with service_accounts_enabled=true, client_credentials grant, agent- prefix client_id, actor_type=agent attribute.",
+    "FR-5: CHOROS_AUTH_MODE env var (default: dev) controls auth path; dev mode = x-dev-user stub active (no JWT required); keycloak mode = Bearer JWT path active (implemented by T-0060); existing tests unaffected in dev mode.",
+    "FR-6: JWT contract fixed for T-0060 — iss: realm URL, aud: core API client-id, sub: user UUID, preferred_username: employee id or client_id, actor_type claim (human/agent via Keycloak protocol mapper), RS256 signature."
+  ],
+  "non_functional": [
+    "NF-1: Only non-prod credentials committed; prod credentials founder-held (RL-1), injected at E0.7 deploy.",
+    "NF-2: docker compose up provisions realm and fixture users with no manual admin-UI steps; reproducible from a clean volume.",
+    "NF-3: Silo identity model — one realm = one silo contour = one tenant; Keycloak Organizations / shared realm deferred per tenancy ADR §6.",
+    "NF-4: Env vars (KEYCLOAK_PORT, KEYCLOAK_REALM, CHOROS_AUTH_MODE, core API client-id) documented in docs/environments.md; add-user/agent procedure documented.",
+    "NF-5: Existing CI (npm run ci) stays green at CHOROS_AUTH_MODE=dev; any Keycloak-mode CI job is additive."
+  ],
+  "out_of_scope": [
+    "Per-request JWT validation middleware in TS core — T-0060 (E1.4).",
+    "iss/aud/tenant-claim validation on live HTTP handlers — T-0060.",
+    "AD/LDAP IdP brokering — future task.",
+    "Keycloak Organizations / shared realm / pooled SaaS — deferred per tenancy ADR.",
+    "Runtime provisioning of users/clients via Admin REST API — E2/E5 RBAC tasks (T-0020).",
+    "Flowable service (E0.5) — separate founder-gated task.",
+    "Unified multi-service compose (core + Postgres + Keycloak + Flowable) — E0.6.",
+    "Production Keycloak / server provisioning — E0.7, founder-gated.",
+    "Caddy / TLS — E0.6/E0.7.",
+    "RBAC / grant data model changes in Postgres — T-0013/T-0018 (done)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "docker compose up -d keycloak; polling GET /health/ready (or equivalent Keycloak readiness endpoint) returns HTTP 200 within 120 s.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "After fresh docker compose up (no manual admin-UI), GET /realms/<REALM_NAME>/.well-known/openid-configuration returns HTTP 200 with `issuer` matching http://<host>:<port>/realms/<realm-name>.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "POST /realms/<REALM_NAME>/protocol/openid-connect/token with grant_type=password, valid human username/password → HTTP 200, response contains non-empty `access_token`.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "POST /realms/<REALM_NAME>/protocol/openid-connect/token with grant_type=client_credentials, agent client_id/client_secret → HTTP 200, response contains non-empty `access_token`.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Decoded access token payload from AC-3 (human) and AC-4 (agent) MUST contain: `iss` matching the realm URL pattern; `aud` containing the core API client-id; non-empty `sub`; non-empty `preferred_username`; `actor_type` = `human` for human token and `agent` for agent token; JWT header `alg` = RS256 (or ES256 if configured).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "A file matching config/keycloak/realm-*.json (or committed equivalent path) exists in the repository and is valid JSON; it is the authoritative realm definition (not gitignored, not generated).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "For each user-id in the dev org fixture, GET /admin/realms/<REALM_NAME>/users?username=<id> (admin token) returns exactly one user. Minimum: e-kravtsova (or at least one fixture user) is present.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "GET /admin/realms/<REALM_NAME>/clients (admin token) returns at least one client with serviceAccountsEnabled=true, clientId matching agent-* pattern, and service-account user attribute actor_type=agent.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Full test suite run with CHOROS_AUTH_MODE=dev (or default) passes: all tests in auth.e2e.test.ts (X-Dev-User, GET /api/me, GET /api/users) and inbox.e2e.test.ts remain green. Zero new test failures introduced.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Application source reads CHOROS_AUTH_MODE (or documented equivalent); default is `dev`; setting it explicitly to `dev` is identical to the default. Var name and values documented in docs/environments.md.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "grep/git grep for password/secret/clientsecret on committed non-test files produces no match that is a non-dev credential; dev credentials in realm JSON are labeled dev-only.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "docker compose up -d brings up BOTH postgres and keycloak; both healthchecks pass; Keycloak realm endpoint (AC-2) is reachable alongside the existing Postgres service (AC from T-0053).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "Default KEYCLOAK_PORT env var value in docker-compose.yml is not 5432, 55432, or 3000; the chosen default port is documented in docs/environments.md.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "docs/environments.md is updated to include KEYCLOAK_PORT, KEYCLOAK_REALM (or equivalent), CHOROS_AUTH_MODE, the core API client-id used for `aud`, and a reference to the add-user/agent procedure.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0054-keycloak-compose.spec.md"
+}
