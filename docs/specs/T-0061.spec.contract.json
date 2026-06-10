@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0061",
+  "status": "ready",
+  "summary": "Превращает dev-only compose в единый артефакт поставки: choros-app сервис + Dockerfile в docker-compose.yml (dev, non-prod kreды) и docker-compose.prod.yml override (prod, required-форма кредов, отдельные тома, Keycloak start-режим) + .env.prod.example с placeholder-значениями; ни один реальный prod-секрет не коммитится.",
+  "functional": [
+    "docker-compose.yml добавляет сервис choros (choros-app) с dev-дефолтами, depends_on на postgres/keycloak/flowable, хост-порт APP_PORT (дефолт 3000).",
+    "Dockerfile в корне репо — multi-stage (builder: npm ci + tsc; runtime: dist/ + prod deps + node dist/index.js), EXPOSE 3000.",
+    "docker-compose.prod.yml — compose override для prod: required-форма кредов (${VAR} без :-default) для POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, FLOWABLE_REST_APP_ADMIN_PASSWORD и аналогов; prod-тома с суффиксом _prod; Keycloak command: start (не start-dev); NODE_ENV=production для choros-app.",
+    ".env.prod.example — шаблон с placeholder-значениями для всех prod-переменных; коммитится в репо.",
+    ".gitignore содержит .env.prod (реальный prod-файл).",
+    "ci/checks/compose-prod-config.sh — проверяет docker compose config -q для обоих режимов (dev и prod с placeholder env).",
+    "Существующие Keycloak и Flowable смоки продолжают работать на dev-стеке без изменений."
+  ],
+  "non_functional": [
+    "Один артефакт поставки: docker-compose.yml + docker-compose.prod.yml = конфигурация, не fork кода (ratified tenancy-and-delivery.md §7).",
+    "Нет prod-секретов в репо (RL-3): dev-дефолты явно помечены, prod overlay — только required-форма, .env.prod.example — только placeholders.",
+    "Single-Postgres invariant: prod overlay не добавляет второй Postgres-контейнер.",
+    "Физическая изоляция томов: dev-том choros_pgdata, prod-том choros_pgdata_prod — не пересекаются.",
+    "Неатендированный старт: docker compose up поднимает всё без ручных шагов.",
+    "Fitness scripts: bash, set -euo pipefail, PASS/FAIL output, exit 0/1."
+  ],
+  "out_of_scope": [
+    "Провижн home-server фаундера (/srv/choros, Tailscale) — E0.7 (founder-gated).",
+    "Helm / Kubernetes.",
+    "Staging, preview, QA среды.",
+    "Secrets manager (Vault, AWS SM).",
+    "HTTP/HTTPS reverse proxy (nginx, Caddy).",
+    "Изменение src/ кода приложения.",
+    "Flowable TLS / security hardening.",
+    "Новые миграции БД."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "docker compose -f docker-compose.yml config -q (без доп. env) завершается с кодом 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q с placeholder-значениями из .env.prod.example завершается с кодом 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "docker-compose.prod.yml НЕ содержит ${VAR:-default} для POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, FLOWABLE_REST_APP_ADMIN_PASSWORD — только ${VAR} (без :-); static grep на prod override.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "prod-тома в docker-compose.prod.yml не совпадают с именами томов dev (choros_pgdata); prod-том содержит суффикс _prod; static yaml-parse.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": ".env.prod.example присутствует в репо; каждое значение для ключей PASSWORD/SECRET/KEY/TOKEN содержит слово REPLACE или пусто — нет реальных кредов; fitness grep.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": ".gitignore содержит строку .env.prod или паттерн .env.*; grep -E ^\\.env\\.prod$ .gitignore → match.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "docker-compose.yml содержит сервис choros/app с build:., env-переменными c dev-дефолтами, depends_on: postgres/keycloak/flowable service_healthy, port APP_PORT:-3000:3000; static yaml-parse.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "Dockerfile присутствует в корне; docker build . завершается с кодом 0 (multi-stage build, npm ci, tsc); образ запускается без ошибок.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "docker-compose.prod.yml переопределяет command Keycloak на start (без -dev); static grep: наличие start-dev в prod overlay → FAIL.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "После docker compose up (dev): ci/checks/kc/wait-ready.sh, ci/checks/kc/realm-ready.sh, ci/checks/flowable/wait-ready.sh, ci/checks/flowable/smoke.sh — все exits 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Хост-порт APP_PORT (дефолт 3000) не совпадает с POSTGRES_PORT (55432), KEYCLOAK_PORT (8180), KEYCLOAK_MGMT_PORT (9000), FLOWABLE_PORT (8082); static parse всех host-портов из docker-compose.yml — assert уникальность.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "ci/checks/no-committed-secret.sh exits 0 на новых compose-файлах и .env.prod.example.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "docker compose up -d && docker compose ps — все четыре сервиса (postgres, keycloak, flowable, choros) в состоянии healthy/running; полный стек без ручного вмешательства.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0061-dev-prod-stacks.spec.md"
+}
