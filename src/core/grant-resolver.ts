@@ -42,6 +42,14 @@ import {
   isNarrowerOrEqual,
   isEffective,
 } from "./grant-lattice.js";
+import {
+  type ClassificationSource,
+  type MaskContext,
+  type Clearance,
+  maskFields,
+  deriveClearance,
+  readFacetVersion,
+} from "./data-classification.js";
 
 // ---------------------------------------------------------------------------
 // Injected ports (pure static-now; Postgres + RLS DAO in T-0053)
@@ -74,6 +82,16 @@ export interface ResolverDeps {
   grants: GrantSource;
   records: RecordSource;
   ancestry: AncestryOracle;
+  /**
+   * T-0033 (E4.3) — value-aware masking source. OPTIONAL: when absent, the
+   * gateway degrades to the pre-T-0033 all-or-nothing field-presence projection
+   * (backward-compatible). When present, the final projection step folds in the
+   * (class × clearance) value transform — still ONE projection call, no second
+   * handle→fields edge. Pure static-now; the Postgres RLS DAO lands in T-0053
+   * (mirrors GrantSource/RecordSource). A present, classified facet with rows
+   * the reader is not cleared for is masked (never widened) — fail-closed.
+   */
+  classifications?: ClassificationSource;
   now?: () => number;
 }
 
@@ -117,6 +135,48 @@ export function refToScope(ref: ResourceRef): ScopeElement {
   }
 }
 
+/**
+ * Map a handle's ResourceRef kind to its T-0018 `ResourceType` string (the
+ * `resource_type` column the classification rows are keyed on). The three
+ * handle kinds map 1:1 to the three base resource types. Pure.
+ */
+function refToResourceType(ref: ResourceRef): string {
+  switch (ref.kind) {
+    case "application":
+      return "application";
+    case "registry":
+      return "registry";
+    case "record":
+      return "record";
+  }
+}
+
+/**
+ * Build the T-0033 value-aware MaskContext for the ONE projection call, IFF a
+ * `ClassificationSource` is injected. Returns `undefined` when no source is
+ * present (⇒ projectFields uses its legacy raw-copy path — backward-compatible).
+ *
+ * The clearance is DERIVED FROM the already-covering grant rows (rights-derived-
+ * only, AC-8) — not a field-name lookup, not a new store. The facet schema
+ * version comes from the handle's (optionally typed) facet (`0` if unversioned).
+ * The classification rows are read through the injected port for exactly
+ * `(resourceType, facetSchemaVersion)`; a version with no rows yields an empty
+ * `rows` array ⇒ maskFields fails closed (max mask), never widens (AC-4/AC-12).
+ */
+function buildMaskContext(
+  deps: ResolverDeps,
+  handle: ObjectHandle,
+  covering: Grant[],
+): MaskContext | undefined {
+  const source = deps.classifications;
+  if (source === undefined) return undefined;
+  const resourceType = refToResourceType(handle.ref);
+  const facetSchemaVersion = readFacetVersion(handle.facet);
+  const rows = source.getClassifications(resourceType, facetSchemaVersion);
+  const clearance: Clearance = deriveClearance(covering);
+  return { rows, clearance, facetSchemaVersion };
+}
+
 // ---------------------------------------------------------------------------
 // Field projection — THE single projection function (human == agent)
 // ---------------------------------------------------------------------------
@@ -124,20 +184,30 @@ export function refToScope(ref: ResourceRef): ScopeElement {
 /**
  * THE single projection function. The human-form path and the agent-payload
  * path BOTH call it (via resolveFor). Returns a NEW object containing only the
- * visible field names; masked fields are physically ABSENT (not null —
- * capability-not-text). Deterministic; no IO.
+ * visible field names.
+ *
+ * Two modes, ONE function (T-0033 folds value-masking in here — no second
+ * handle→fields export):
+ *  - No `maskCtx` (pre-T-0033 / no ClassificationSource) ⇒ a raw copy of every
+ *    visible key; masked fields are physically ABSENT (not null —
+ *    capability-not-text). The original all-or-nothing floor.
+ *  - With a `maskCtx` ⇒ delegates to `maskFields`, which applies the
+ *    (class × clearance) value transform per visible field: an unclassified
+ *    field stays raw, a classified field is revealed / partially-revealed /
+ *    redacted / hashed / dropped per its class and the reader's clearance.
+ *
+ * Deterministic; no IO (the classification rows are supplied in `maskCtx`; the
+ * injected-port read happened upstream in resolveFor).
  */
 export function projectFields(
   rawFields: Record<string, unknown>,
   visibleFieldSet: ReadonlySet<string>,
+  maskCtx?: MaskContext,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(rawFields)) {
-    if (visibleFieldSet.has(key)) {
-      out[key] = rawFields[key];
-    }
-  }
-  return out;
+  // T-0033: when a mask context is present, fold value-masking into THIS one
+  // projection function (single-projection invariant preserved). When absent,
+  // maskFields(ctx=undefined) is the identical raw-copy of the legacy path.
+  return maskFields(rawFields, visibleFieldSet, maskCtx);
 }
 
 /**
@@ -276,9 +346,14 @@ export async function resolveFor(
     return { denied: true, reason: "not_found" };
   }
 
-  // 6. Project once (FR-4, AC-5, AC-6).
+  // 6. Project once (FR-4, AC-5, AC-6) — the ONE projection point.
   const vis = visibleFields(covering, handle.facet, raw);
-  const fields = projectFields(raw, vis);
+  // T-0033: build the value-aware MaskContext IFF a ClassificationSource is
+  // injected. Classification is read AFTER a covering grant is found (never for
+  // a record we have no grant for). A present, classified facet whose version
+  // has no rows fails closed inside maskFields (max mask), never widened.
+  const maskCtx = buildMaskContext(deps, handle, covering);
+  const fields = projectFields(raw, vis, maskCtx);
   // TODO(T-0053): FR-8 (MAY) — thread the static-now T-0016 AuditObligation
   // shape ({ type, actor, subject, via, decision }) from here once the T-0016
   // ADR fixes its return contract. The durable append is explicitly deferred to
