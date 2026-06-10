@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0027",
+  "status": "ready",
+  "summary": "Specification of the BPMN deploy-time linter (E2.6): a standalone zero-dependency TypeScript library lintBpmn(xml): LintResult that parses BPMN 2.0 XML and rejects any process definition where a variable binding carries a raw-object payload (record identity or data/fields/payload/view key) instead of an opaque handle or primitive; malformed XML is rejected fail-closed; handle-shaped strings (validated via T-0015 parseHandle) and primitives pass. Includes a CLI entry-point for CI use and an explicit deploy-gate deferral contract that T-0058/T-0064 must wire when Flowable integration lands. The linter is the deploy-time complement to the T-0021 runtime gateway and the T-0028 engine mutation guard.",
+  "functional": [
+    "FR-1 lintBpmn(xml: string): LintResult — pure function, no I/O, returns { ok: true } or { ok: false; violations: LintViolation[] }",
+    "FR-2 reject raw-object bindings in serviceTask/sendTask extensionElements: any variable assigned a raw-object literal with record-identity or payload keys (registryId, recordId, applicationId, data, fields, payload, view) is a violation",
+    "FR-3 reject raw-object bindings in userTask extensionElements: same rule as FR-2",
+    "FR-4 reject raw-object bindings in conditionExpression: EL or script expression strings that embed a raw-object literal matching FR-2 shape are violations",
+    "FR-5 reject raw-object bindings in dataObject/dataObjectReference initialValue: raw-object-shaped values are violations",
+    "FR-6 pass handle-shaped string values: strings accepted by T-0015 parseHandle without throwing are not violations; linter imports and calls parseHandle from src/core/object-handle.ts",
+    "FR-7 pass primitive literals: string/number/boolean/null/empty values without record-identity or payload keys are not violations",
+    "FR-8 fail-closed on malformed XML: unparseable XML (unclosed tags, fatal parse error) returns { ok: false, violations: [{ type: 'malformed_xml', ... }] }; never returns ok: true for partially parsed XML",
+    "FR-9 LintViolation carries: type (string enum), elementId (BPMN element id or empty string), elementKind (serviceTask/userTask/conditionExpression/dataObject/malformed_xml/...), message (human-readable)",
+    "FR-10 CLI entry-point src/cli/lint-bpmn.ts: reads BPMN file, calls lintBpmn, exits 0 on pass, exits 1 on violations or malformed XML, prints violations to stderr as JSON",
+    "FR-11 explicit deploy-gate deferral contract exported with stable semantics for T-0058/T-0064: lintBpmn called before deploy, ok:false => HTTP 422 rejection"
+  ],
+  "non_functional": [
+    "NF-1 zero production dependencies: linter library uses only Node.js built-ins; minimal hand-written SAX-style XML parser; no new runtime npm package additions",
+    "NF-2 pure function: lintBpmn is total, side-effect-free, no I/O, no global state mutation, deterministic",
+    "NF-3 TS strict, additive: new files only (src/core/bpmn-linter.ts, src/cli/lint-bpmn.ts, ci/checks/bpmn-linter-isolation.sh); no modification to existing exports of object-handle.ts/grant-resolver.ts/grant-lattice.ts/types.ts/jobStore.ts",
+    "NF-4 fail-closed by default: on parse ambiguity or unknown extension element format, linter rejects rather than silently passing",
+    "NF-5 vitest fitness suite in src/__tests__/bpmn-linter.test.ts covering all AC",
+    "NF-6 CLI exits non-zero on any violation including malformed XML for CI pipeline integration",
+    "NF-7 handle-check reuses T-0015: linter imports parseHandle from src/core/object-handle.ts, does not reimplement handle shape detection"
+  ],
+  "out_of_scope": [
+    "Flowable engine integration / real BPMN deploy endpoint (T-0058, T-0064)",
+    "Runtime engine mutation guard (T-0028/E2.7)",
+    "Full BPMN 2.0 schema validation beyond handle-discipline check",
+    "XML namespace URI validation (local name normalization only)",
+    "IDE / compile-time plugin",
+    "Performance benchmarks for large BPMN files",
+    "Richer facet grammar / value-aware masking (T-0033/E4.3)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "lintBpmn(xml) returns { ok: true } for a BPMN where all variable bindings are valid serialized ObjectHandle strings (accepted by parseHandle) or primitive literals in all serviceTask/userTask/conditionExpression/dataObject elements",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "lintBpmn(xml) returns { ok: false, violations: [...] } for a BPMN where a serviceTask extensionElement assigns a raw-object literal with registryId/recordId to a process variable; violation carries elementKind: 'serviceTask' and the element id",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "lintBpmn(xml) returns { ok: false } for a BPMN where a userTask extensionElement assigns a raw-object with a 'data' key to a variable; violation carries elementKind: 'userTask'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "lintBpmn(xml) returns { ok: false } for a BPMN where a conditionExpression embeds a raw-object literal with 'fields' or 'payload' key in expression content",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "lintBpmn(xml) returns { ok: false } for a BPMN where a dataObject initialValue carries a raw-object with applicationId/registryId identity keys",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "lintBpmn(malformedXml) returns { ok: false, violations: [{ type: 'malformed_xml', ... }] } for XML with unclosed tags; the function never returns ok: true for XML it cannot fully parse (fail-closed invariant)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "lintBpmn(xml) where every variable binding is a valid serialized handle string (accepted by parseHandle without throwing) returns { ok: true } — handle strings are not false-positives",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "lintBpmn(xml) where a serviceTask binding is an inline raw-object in an XML attribute value (adversarial: payload in attribute, not element body) returns { ok: false }",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "lintBpmn(xml) where a raw object is embedded inside a CDATA section of an extensionElement (adversarial: payload in CDATA) returns { ok: false }",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "lintBpmn(xml) where a binding value is a plain EL expression string like '${someVar}' or a plain string with no raw-object pattern returns { ok: true } — non-object EL expressions are not violations",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Every LintViolation in the violations array carries all required fields: type (string), elementId (string, empty string if id absent), elementKind (string), message (string)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "bpmn-linter.ts imports nothing from jobStore, http, pg, fs, net, or any third-party runtime package; ci/checks/bpmn-linter-isolation.sh asserts this (NF-1 zero-dep)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "No existing export of object-handle.ts, grant-resolver.ts, grant-lattice.ts, types.ts, jobStore.ts is modified; git diff --name-only after the build does not touch exported symbols of those files (NF-3 / architect rule 7)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "The CLI lint-bpmn.ts exits 0 on a passing BPMN file and exits 1 on a file with violations or malformed XML; violations are printed to stderr as JSON (NF-6)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "A mock deploy function that calls lintBpmn before accepting a BPMN definition rejects (ok: false) when given a raw-object binding and accepts (ok: true) when given a handle-only BPMN; this test documents the T-0058/T-0064 deploy-gate contract (activates-in-T-0058 for the real endpoint)",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0027-bpmn-deploy-linter.spec.md"
+}
