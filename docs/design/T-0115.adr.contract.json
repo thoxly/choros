@@ -1,0 +1,160 @@
+{
+  "task_id": "T-0115",
+  "status": "ready",
+  "decision": "Два новых тестовых файла + один shell fitness-check. Файл 1: ci/checks/db/cross_tenant.test.ts (новый) — integration-тест AC-1..AC-9; подключается как choros_app через appUrl(); итерирует по KNOWN_TENANT_TABLES из _helpers.ts; seed через migrator; верификация post-condition через migrator. Файл 2: новый describe('T-0115 fail-closed: async paths') в конце ci/checks/db/pgJobStore.integration.test.ts (additive) — AC-7 (enqueue без GUC → reject) и AC-8 (fetchAndLock без GUC → []). Файл 3: ci/checks/cross-tenant-fitness.sh (новый shell-check) — статические grep-проверки AC-10..AC-12; добавляется в npm run fitness. DDL не нужен: фундамент T-0013/T-0053 полный. CI не меняется: fitness:db уже в db job; новый cross_tenant.test.ts подхватывается автоматически через vitest --dir ci/checks/db.",
+  "rejected_alternatives": [
+    {
+      "option": "Добавить cross-tenant тест в behavior.test.ts",
+      "why_not": "behavior.test.ts покрывает FF-DENY/FF-SCOPE/FF-APPEND; cross-tenant — отдельный 152-ФЗ-инвариант с 2 тенантами, итерацией по всем таблицам и migrator-верификацией. Смешивание нарушает single-concern принцип и делает файл монолитным."
+    },
+    {
+      "option": "Отдельные тесты для каждой таблицы вместо цикла по KNOWN_TENANT_TABLES",
+      "why_not": "AC-10 явно требует итерации по known_tenant_tables.txt; хардкод — архитектурный drift: новая таблица добавляется в миграцию и молчаливо выпадает из CI-проверки."
+    },
+    {
+      "option": "Тест через migrator вместо choros_app",
+      "why_not": "NF-2: только choros_app (NOBYPASSRLS) несёт 152-ФЗ-инвариант. Migrator — superuser; FORCE RLS применяется к нему как к владельцу таблицы; он не проверяет сценарий реальной атаки."
+    },
+    {
+      "option": "DDL-изменения (новые политики/функции для fail-closed)",
+      "why_not": "current_setting('choros.tenant_id', false) в DML уже есть в pgJobStore.ts:enqueue (T-0114). Добавление DDL выходит за scope и создаёт риск конфликта миграций; фундамент T-0013/T-0053 полный."
+    },
+    {
+      "option": "Объединить AC-6 и AC-7 в один тест",
+      "why_not": "AC-6 — чистый SQL без store-слоя (проверяет Postgres/GUC напрямую). AC-7 — проверяет store-контракт (PostgresJobStore.enqueue). Разные уровни абстракции; объединение скрывает конкретный failing layer при диагностике."
+    },
+    {
+      "option": "Резервирование миграций 011+ для T-0115",
+      "why_not": "Спека явно: T-0115 не добавляет колонок/политик/таблиц. DDL-фундамент завершён T-0013/T-0053. Номера миграций 011+ не нужны в этом прогоне."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "cross_tenant.test.ts (новый файл)",
+      "fields": [
+        {"name": "location", "type": "ci/checks/db/cross_tenant.test.ts"},
+        {"name": "imports", "type": "KNOWN_TENANT_TABLES, appUrl, migratorUrl, withClient, TENANT_A, TENANT_B, uuid от ./_helpers.js; describe/it/expect/beforeAll от vitest; pg от pg"},
+        {"name": "seedAll", "type": "async (c: pg.Client, tenant: string) => void — seed ≥1 строки для каждой таблицы из KNOWN_TENANT_TABLES через migrator; учитывает FK-порядок: application → registry_def → record"},
+        {"name": "countTenant", "type": "async (url: string, table: string, tenantId: string) => number — migrator SELECT count(*)"},
+        {"name": "describe: cross-tenant SELECT isolation", "type": "AC-1, AC-2 — цикл по KNOWN_TENANT_TABLES, appUrl, BEGIN/SET LOCAL TENANT_A/COMMIT"},
+        {"name": "describe: cross-tenant UPDATE isolation", "type": "AC-3 — choros.application, appUrl TENANT_A context, UPDATE WHERE tenant_id=TENANT_B → 0 affected, migrator verify"},
+        {"name": "describe: cross-tenant DELETE isolation", "type": "AC-4 — choros.application, appUrl TENANT_A context, DELETE WHERE tenant_id=TENANT_B → 0 affected, migrator verify"},
+        {"name": "describe: post-condition integrity", "type": "AC-5 — migrator count после AC-3/AC-4 = seed count"},
+        {"name": "describe: fail-closed DML without GUC", "type": "AC-6 — INSERT choros.job с current_setting('choros.tenant_id',false)::uuid без SET LOCAL → rejects"},
+        {"name": "describe: SET LOCAL scope isolation", "type": "AC-9 — GUC сброшен после COMMIT, SELECT count = 0"}
+      ]
+    },
+    {
+      "entity": "pgJobStore.integration.test.ts (additive append)",
+      "fields": [
+        {"name": "describe: T-0115 fail-closed: async paths", "type": "новый describe-блок в конце файла; не трогает существующие describe-блоки"},
+        {"name": "it: enqueue without tenant context rejects", "type": "AC-7 — makeAppPool(), store = makeStore(), store.enqueue(...) без BEGIN+SET LOCAL → rejects"},
+        {"name": "it: fetchAndLock without tenant context returns empty", "type": "AC-8 — seed через migrator TENANT_A, makeStore() без GUC → fetchAndLock → []"}
+      ]
+    },
+    {
+      "entity": "cross-tenant-fitness.sh (новый shell-check)",
+      "fields": [
+        {"name": "location", "type": "ci/checks/cross-tenant-fitness.sh"},
+        {"name": "check-AC10", "type": "grep -qE 'KNOWN_TENANT_TABLES' ci/checks/db/cross_tenant.test.ts"},
+        {"name": "check-AC11", "type": "grep -qE 'fitness:db' .github/workflows/ci.yml"},
+        {"name": "check-AC12-app", "type": "grep -qE 'appUrl\\(\\)' ci/checks/db/cross_tenant.test.ts"},
+        {"name": "check-AC12-migrator", "type": "grep -qE 'migratorUrl\\(\\)' ci/checks/db/cross_tenant.test.ts"}
+      ]
+    },
+    {
+      "entity": "package.json fitness script (additive)",
+      "fields": [
+        {"name": "change", "type": "добавить 'bash ci/checks/cross-tenant-fitness.sh' в npm run fitness script"},
+        {"name": "no-other-changes", "type": "fitness:db и ci скрипты не изменяются"}
+      ]
+    }
+  ],
+  "contracts": [
+    "// _helpers.ts используется без изменений; все нужные экспорты уже есть:\n// KNOWN_TENANT_TABLES: string[] — из known_tenant_tables.txt (8 таблиц)\n// appUrl(): string — choros_app (NOBYPASSRLS)\n// migratorUrl(): string — choros_migrator (owner/DDL/superuser)\n// withClient<T>(url, fn): Promise<T>\n// TENANT_A = '11111111-1111-1111-1111-111111111111'\n// TENANT_B = '22222222-2222-2222-2222-222222222222'",
+    "// Транзакционный паттерн cross-tenant (AC-1..AC-6, AC-9):\n// withClient(appUrl(), async (c) => {\n//   await c.query('BEGIN');\n//   await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);\n//   // тест\n//   await c.query('COMMIT'); // или ROLLBACK\n// })",
+    "// Seed через migrator (все 8 таблиц; FK-порядок: application→registry_def→record):\n// withClient(migratorUrl(), async (c) => {\n//   await c.query('BEGIN');\n//   // INSERT с SET LOCAL tenant_id (semantic correctness; migrator игнорирует RLS)\n//   await c.query('COMMIT');\n// })",
+    "// AC-7 store без GUC:\n// const pool = makeAppPool(); // choros_app pool\n// const store = makeStore(clock, pool); // PostgresJobStore\n// // НЕТ BEGIN + SET LOCAL\n// await expect(store.enqueue('topic', {}, 3)).rejects.toBeDefined();\n// // Reason: enqueue вызывает current_setting('choros.tenant_id', false)::uuid → Postgres error",
+    "// AC-8 fetchAndLock без GUC:\n// await seedJob({ tenantId: TENANT_A, ... }); // через migrator\n// const pool = makeAppPool();\n// const store = makeStore(clock, pool);\n// // НЕТ BEGIN + SET LOCAL на pool\n// const result = await store.fetchAndLock('w', ['topic'], 5, 30000);\n// expect(result).toEqual([]); // RLS default-DENY: NULL tenant → 0 rows",
+    "// AC-6 fail-closed DML:\n// withClient(appUrl(), async (c) => {\n//   await c.query('BEGIN');\n//   // НЕТ SET LOCAL choros.tenant_id\n//   await expect(c.query(`INSERT INTO choros.job ... VALUES (current_setting('choros.tenant_id',false)::uuid, ...)`)).rejects.toBeDefined();\n//   await c.query('ROLLBACK');\n// })"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-CT1",
+      "rule": "cross-tenant SELECT: choros_app в контексте TENANT_A → 0 строк с tenant_id=TENANT_B для каждой таблицы из KNOWN_TENANT_TABLES (итерация, не хардкод).",
+      "ci_check": "npm run fitness:db → vitest run --dir ci/checks/db → cross_tenant.test.ts (AC-1)"
+    },
+    {
+      "id": "FF-CT2",
+      "rule": "cross-tenant SELECT без WHERE: все возвращённые строки имеют tenant_id=TENANT_A; строк TENANT_B = 0 для каждой таблицы.",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-2)"
+    },
+    {
+      "id": "FF-CT3",
+      "rule": "cross-tenant UPDATE: choros_app в контексте TENANT_A, UPDATE choros.application WHERE tenant_id=TENANT_B → 0 rows affected; migrator-verify: значение не изменилось.",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-3)"
+    },
+    {
+      "id": "FF-CT4",
+      "rule": "cross-tenant DELETE: choros_app в контексте TENANT_A, DELETE choros.application WHERE tenant_id=TENANT_B → 0 rows affected; migrator-verify: строка существует.",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-4)"
+    },
+    {
+      "id": "FF-CT5",
+      "rule": "Post-condition integrity: migrator-count строк TENANT_B после всех cross-tenant попыток совпадает с начальным seed-count (строки не удалены, не повреждены).",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-5)"
+    },
+    {
+      "id": "FF-CT6",
+      "rule": "Fail-closed DML без GUC: choros_app, INSERT INTO choros.job с current_setting('choros.tenant_id',false)::uuid без предшествующего SET LOCAL → Postgres бросает error (GUC не задан). Promise.reject.",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-6)"
+    },
+    {
+      "id": "FF-CT7",
+      "rule": "PostgresJobStore.enqueue без tenant-контекста → Promise.reject / throw; не возвращает успешный Job. Проверяет store-уровень поверх AC-6.",
+      "ci_check": "npm run fitness:db → pgJobStore.integration.test.ts describe(T-0115 fail-closed) (AC-7)"
+    },
+    {
+      "id": "FF-CT8",
+      "rule": "PostgresJobStore.fetchAndLock без tenant-контекста при сидированных джобах TENANT_A → возвращает [] (RLS default-DENY; джобы TENANT_A не утекают). READ-путь fail-closed: 0 строк, не ошибка.",
+      "ci_check": "npm run fitness:db → pgJobStore.integration.test.ts describe(T-0115 fail-closed) (AC-8)"
+    },
+    {
+      "id": "FF-CT9",
+      "rule": "SET LOCAL scope isolation: после COMMIT GUC сброшен; SELECT в новом запросе без SET LOCAL = 0 строк. Session-level SET не создаёт утечку данных между транзакциями.",
+      "ci_check": "npm run fitness:db → cross_tenant.test.ts (AC-9)"
+    },
+    {
+      "id": "FF-CT10",
+      "rule": "Anti-hardcode: исходный код cross_tenant.test.ts импортирует/использует KNOWN_TENANT_TABLES из _helpers, не содержит хардкоженного списка таблиц.",
+      "ci_check": "bash ci/checks/cross-tenant-fitness.sh (grep KNOWN_TENANT_TABLES в cross_tenant.test.ts) (AC-10)"
+    },
+    {
+      "id": "FF-CT11",
+      "rule": "CI gate: .github/workflows/ci.yml содержит fitness:db в db job; провал cross-tenant-теста = non-zero exit vitest = build failure = merge blocked.",
+      "ci_check": "bash ci/checks/cross-tenant-fitness.sh (grep fitness:db в ci.yml) (AC-11)"
+    },
+    {
+      "id": "FF-CT12",
+      "rule": "Role discipline: cross_tenant.test.ts использует appUrl() для мутирующих/cross-tenant запросов и migratorUrl() для seed/верификации.",
+      "ci_check": "bash ci/checks/cross-tenant-fitness.sh (grep appUrl() и migratorUrl() в cross_tenant.test.ts) (AC-12)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-CT1; cross_tenant.test.ts SELECT-цикл по KNOWN_TENANT_TABLES, WHERE tenant_id=TENANT_B → 0"},
+    {"ac": "AC-2", "covered_by": "FF-CT2; cross_tenant.test.ts SELECT tenant_id цикл — только TENANT_A строки"},
+    {"ac": "AC-3", "covered_by": "FF-CT3; cross_tenant.test.ts UPDATE application, 0 affected + migrator-verify значение не изменилось"},
+    {"ac": "AC-4", "covered_by": "FF-CT4; cross_tenant.test.ts DELETE application, 0 affected + migrator-verify строка существует"},
+    {"ac": "AC-5", "covered_by": "FF-CT5; cross_tenant.test.ts post-condition migrator-count совпадает с seed-count"},
+    {"ac": "AC-6", "covered_by": "FF-CT6; cross_tenant.test.ts INSERT без GUC → Postgres error (current_setting false-mode)"},
+    {"ac": "AC-7", "covered_by": "FF-CT7; pgJobStore.integration.test.ts describe(T-0115 fail-closed) — enqueue без SET LOCAL → reject"},
+    {"ac": "AC-8", "covered_by": "FF-CT8; pgJobStore.integration.test.ts describe(T-0115 fail-closed) — fetchAndLock без GUC → []"},
+    {"ac": "AC-9", "covered_by": "FF-CT9; cross_tenant.test.ts SET LOCAL scope isolation — GUC сброшен после COMMIT"},
+    {"ac": "AC-10", "covered_by": "FF-CT10; ci/checks/cross-tenant-fitness.sh grep KNOWN_TENANT_TABLES"},
+    {"ac": "AC-11", "covered_by": "FF-CT11; ci/checks/cross-tenant-fitness.sh grep fitness:db в ci.yml"},
+    {"ac": "AC-12", "covered_by": "FF-CT12; ci/checks/cross-tenant-fitness.sh grep appUrl() и migratorUrl()"}
+  ],
+  "runtime_target": "CI-container (db job) + локально против compose Postgres. Тесты требуют живой Postgres с миграциями 001-010. В CI — сервис-контейнер postgres:16 в db job (уже настроен в .github/workflows/ci.yml). Локально — docker-compose. T-0115 не добавляет новой инфраструктуры.",
+  "adr_artifact_path": "docs/design/T-0115-tenant-rls.adr.md",
+  "escalation": ""
+}
