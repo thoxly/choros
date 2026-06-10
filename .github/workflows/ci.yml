@@ -71,8 +71,19 @@ jobs:
   # volume is ephemeral per CI runner job anyway).
   flowable:
     runs-on: ubuntu-latest
+    env:
+      # bridge-e2e-smoke.sh (FF-T0067-14..16) needs DATABASE_URL to resolve
+      # the genesis tenant UUID from Postgres. Compose default port (55432).
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # bridge-e2e-smoke.sh calls `npm run build` internally (bridge-smoke-runner.js
+      # lives in dist/). Installing deps here keeps the flowable job self-contained.
+      - run: npm ci
       - name: Start Postgres + Flowable via compose
         run: docker compose up -d postgres flowable
       - name: Wait for Flowable readiness (FF-FL-1)
@@ -83,6 +94,14 @@ jobs:
         run: bash ci/checks/flowable/smoke.sh
       - name: External-task round-trip smoke (FF-T0064-6)
         run: bash ci/checks/flowable/external-task-smoke.sh
+        env:
+          FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      # T-0067 · FF-T0067-14..16 (D-056 integration-honest gate):
+      # Full bridge cycle: poll Flowable external tasks → enqueue in JobStore →
+      # outbox deliver → completeTask in Flowable → instance completed.
+      # Idempotency (AC-17) and FF-G3 contract (AC-18) verified inside script.
+      - name: Bridge E2E smoke (FF-T0067-14..16)
+        run: bash ci/checks/flowable/bridge-e2e-smoke.sh
         env:
           FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
       - name: FF-G3 bridge contract (must remain dormant/green)
