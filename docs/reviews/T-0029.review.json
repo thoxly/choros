@@ -1,0 +1,84 @@
+{
+  "task_id": "T-0029",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "pass (tsc --noEmit)",
+    "eslint": "pass",
+    "vitest": "pass (651 tests passed, 5 skipped, 30 files)",
+    "fitness": "pass (all checks incl. scoped-admin-isolation.sh: FF-8/9/9b/10/11/16/17 + AC-12 static count = 17 mgmt-grants)",
+    "isolated_db": "pass (POSTGRES_PORT=55461, own volume, torn down) — migrate x2 idempotent (run2 = nothing to apply), fitness:db 243/243 incl. genesis-owner-seed.test.ts (5) + cross_tenant (47)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0029-scoped-admin.adr.md:121,152",
+      "issue": "ADR prose is internally inconsistent on the mgmt-grant count. Line 121 says '16 delegable mgmt-grants ... plus an invoke grant' (16+1) and the line-152 live-verification block says '16 owner mgmt-grants'. The actual seed (migration 026), the isolation fitness (scoped-admin-isolation.sh:21,180-182 asserts exactly 17), and the spec FR-5 intent (4 kinds x CRUD = 16, PLUS invoke = 17) are all consistently 17. I verified empirically on the isolated Postgres: 17 mgmt-grants (16 CRUD + 1 invoke), 1 genesis assignment, 1 genesis employee, 1 tenant-owner role. The code/migration/fitness are correct and self-consistent at 17; only the ADR's literal '16' (and the '16 owner mgmt-grants' in the live-verification recap) is stale/ambiguous documentation. Not a code defect.",
+      "suggestion": "Documentation-only: reword ADR §3 to '16 CRUD mgmt-grants (4 kinds × create/read/update/delete) + 1 invoke grant on mgmt_object:agent = 17 delegable mgmt-grants', and fix the line-152 recap to '17 owner mgmt-grants'. Do not change code/migration. Nit-only, does not block."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "migrations/026_genesis_owner_seed.sql:15-23,57-77 (forward-compat note)",
+      "issue": "Known forward-limitation (spec is silent, so recording as forward, not blocking): the owner's mgmt-grant scope and the genesis assignment org_scope are an org-set over the three CURRENT roots {fin,cs,plat}. A NEW root department created later (another parent_id NULL node) is NOT covered by this set — the owner's authority would not automatically reach it, because isNarrowerOrEqual(newRoot, {fin,cs,plat}) is false (a sibling root is not ⊑ any member). The ADR §3 chose the org-set over synthesizing a super-root (correctly, to honor additive-only AC-17), but the consequence is that forest-wide owner reach is pinned to the seeded 3-root snapshot. This matches the dev-silo N=1 reality and the spec's 'tenant-root org node ... covers every subtree' is satisfied for the current forest; the gap only appears if the org tree grows a new root. Out of scope for T-0029 (no new-root flow exists yet); the structural-grant editor / write-API is T-0030, which is the natural place to re-broaden owner scope when a root is added.",
+      "suggestion": "No code change for T-0029. Carry forward to T-0030 (write-API) / T-0053 (live getGrants): when a new root department is minted, either re-issue the owner's mgmt-grant org-set to include it, or revisit the super-root decision. Recommend a one-line forward-note in the ADR's forest-root seam section so the limitation is explicit for the sibling tasks."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "evidence": "MGMT_OBJECT_KINDS frozen 4-kind set (scoped-admin.ts:53-58); scoped-admin.test.ts AC-1 + fitness AC-8 lint; tsc compiles fixtures against ResourceType"},
+    {"ac": "AC-2", "covered": true, "evidence": "scoped-admin.test.ts AC-2: child scope ⊑ adminGrant.scope, delegable, non-widening → {ok:true}"},
+    {"ac": "AC-3", "covered": true, "evidence": "scoped-admin.test.ts AC-3: org/scope widening → typed scope_widens / org_scope_widens; never mutates"},
+    {"ac": "AC-4", "covered": true, "evidence": "scoped-admin.adversarial.test.ts: ~9000 LCG fuzz pairs (4000 grant + 2000 assignment + 3000 one-axis) cross-checked vs isNarrowerOrEqual, leak=0; owner-exemption exhaustive. Re-ran in gate: 4 tests pass."},
+    {"ac": "AC-5", "covered": true, "evidence": "scoped-admin.test.ts AC-5: parent_non_delegable, free_form_non_delegable; non-owner freeform mint rejected"},
+    {"ac": "AC-6", "covered": true, "evidence": "scoped-admin.test.ts AC-6: isGenesisOwner=true accepts un-parented (no parent check); =false + no covering grant → no_admin_authority"},
+    {"ac": "AC-7", "covered": true, "evidence": "scoped-admin.test.ts AC-7: subtree-bounded via org AncestryOracle (within S accept, outside S reject)"},
+    {"ac": "AC-8", "covered": true, "evidence": "scoped-admin.fitness.test.ts AC-8 + scoped-admin-isolation.sh FF-8: admin authority = grant rows on mgmt_object:* only; no parallel-authority store token"},
+    {"ac": "AC-9", "covered": true, "evidence": "fitness AC-9 + isolation FF-9/9b: imports validateNarrowing/isNarrowerOrEqual from grant-lattice.js; no parallel containment fn / new ScopeElement kind"},
+    {"ac": "AC-10", "covered": true, "evidence": "isolation FF-10: no pg/fs/net/http imports in scoped-admin.ts; oracle injected; pure determinism (property in adversarial cross-check)"},
+    {"ac": "AC-11", "covered": true, "evidence": "git diff b32d403..HEAD: grant-resolver.ts byte-for-byte unchanged (NONE TOUCHED); isolation FF-11 git-diff-quiet on grant-resolver.ts/grant-lattice.ts/object-handle.ts"},
+    {"ac": "AC-12", "covered": true, "evidence": "isolated DB: migrate x2, run2 = 'nothing to apply'; counts = 17 mgmt-grants / 1 genesis assignment / 1 e-owner employee; genesis-owner-seed.test.ts (5) green. Static half: isolation.sh AC-12 = 17."},
+    {"ac": "AC-13", "covered": true, "evidence": "isolated DB: tenant_owner_roles = 1 (exactly one per tenant); genesis assignment is the single un-parented root (source='genesis'). genesis-owner-seed.test.ts green."},
+    {"ac": "AC-14", "covered": true, "evidence": "scoped-admin.test.ts AC-14: empty adminGrants (revoked/out-of-window) → every delegation rejected (no_admin_authority); capability gone at authority layer"},
+    {"ac": "AC-15", "covered": true, "evidence": "scoped-admin.fitness.test.ts AC-15: mgmt-grant create/revoke emit GrantAuditEvent shape (actor/subject/capability/scope/proposed_by/confirmed_by). Call-site lint is T-0030 surface."},
+    {"ac": "AC-16", "covered": true, "evidence": "vacuous branch: migration 026 has NO CREATE TABLE (isolation FF-16/17); known_tenant_tables.txt unchanged; cross_tenant.test.ts (47) green on isolated DB — mgmt-grants ride registered `grant` table"},
+    {"ac": "AC-17", "covered": true, "evidence": "isolation FF-17: migration numbered 026 (≥026), additive (no prior-migration edit), INSERT-only no DDL, every ON CONFLICT is DO NOTHING (idempotent). T-0013 invariants vacuous (no DDL)."}
+  ],
+  "decision_order_audit": {
+    "fail_open_check": "PASS — no reject-branch returns accept-by-default. Step-5 loop returns {ok:true} only on a clean validateNarrowing; the fallback is `?? {ok:false, reason:'scope_widens'}` (reject-by-default). covering.length===0 → no_admin_authority. Empty-ceiling (⊥) target rejects non-bottom via org gate.",
+    "owner_short_circuit_vs_org_gate": "CORRECT — step 2 (org gate) is guarded by `!isGenesisOwner` and runs BEFORE step 3 (owner short-circuit), so the owner does not 'bypass' the org gate unlawfully: the owner is by-design exempt (un-parented forest root, FR-4), and the gate only ever fires for non-owners. No path where owner short-circuit skips a check a non-owner would face improperly.",
+    "freeform_owner_only": "CORRECT — step 1 accepts freeform child only for owner; non-owner freeform → free_form_non_delegable (before org gate, still a reject). Owner freeform accepted before any check (root). Write-path forces delegable=false (T-0030)."
+  },
+  "genesis_bypass_trust_boundary": {
+    "what_owner_bypasses": "The org-axis gate (step 2) AND the resource-axis parent-subset check (step 5) — i.e. EVERYTHING. With isGenesisOwner=true the function returns {ok:true} for any target (verified exhaustively in adversarial.test.ts:276-285 over SCOPE_POOL²). This is the intended un-parented-root semantics (FR-4), not over-broad: the owner is the delegation root with no parent above it.",
+    "who_sets_the_flag": "isGenesisOwner is an INJECTED boolean (scoped-admin.ts:81-82), never derived inside the lattice/checker. The TRUST BOUNDARY is the caller (T-0030 write-API composition) which must derive owner-identity from the seeded tenant-owner role + confirmed in-window genesis assignment (migration 026). The pure checker correctly stays ignorant of 'owner' — the security of the flag is T-0030's responsibility, contract frozen here (NF-7). No way to set the flag from within T-0029's surface; it is a parameter."
+  },
+  "reviewer_edge_cases": {
+    "ran": true,
+    "leak": 0,
+    "cases": [
+      "E1: empty-set (⊥) targetOrgScope accepted (bottom ⊑ ceiling) for assignment — PASS",
+      "E2: admin ceiling=⊥ rejects non-bottom target org (org_scope_widens) — PASS",
+      "E3: nested-set target org ⊑ admin set ceiling accepted — PASS",
+      "E4: freeform in the org axis (targetOrgScope freeform) rejected for non-owner (org_scope_widens, not fail-open) — PASS",
+      "E5: owner + empty adminGrants + freeform child accepted (root exemption) — PASS"
+    ],
+    "note": "Throwaway test compiled+run against built module, then removed; working tree clean."
+  },
+  "scope_check": {
+    "no_scope_creep": true,
+    "no_regression": true,
+    "frozen_files_byte_identical": true,
+    "new_table": false,
+    "package_json_delta": "+1 fitness check only (scoped-admin-isolation.sh appended); no new dependency",
+    "files_changed": "12 (scoped-admin.ts, migration 026, 3 test files, isolation.sh, db seed test, spec, ADR + contracts, package.json). git diff b32d403..HEAD scoped to T-0029.",
+    "notes": "grant-resolver.ts / grant-lattice.ts / object-handle.ts unchanged. No new tenant table; known_tenant_tables.txt unchanged. validateNarrowing/isNarrowerOrEqual composed verbatim — no parallel subset math."
+  },
+  "role_gap_evidence": [],
+  "reviewer": "claude-opus-4-8 (reviewer role, T-0029 REVIEW)",
+  "reviewed_commit": "7f97441",
+  "base_commit": "b32d403",
+  "review_date": "2026-06-11"
+}
