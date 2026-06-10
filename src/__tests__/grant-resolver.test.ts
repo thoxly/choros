@@ -570,3 +570,108 @@ describe("FF-R7 purity / port-conformance [AC-12, AC-13]", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// FF-DC7 — T-0033 value-aware masking folded into the ONE projection
+//          (human == agent equivalence; single projection preserved) [AC-7]
+// ---------------------------------------------------------------------------
+
+import {
+  type ClassificationSource,
+  type ClassificationRow,
+} from "../core/data-classification.js";
+
+/** A static-now ClassificationSource over a fixed row list. */
+function staticClassifications(rows: ClassificationRow[]): ClassificationSource {
+  return {
+    getClassifications: (resourceType, facetSchemaVersion) =>
+      rows.filter(
+        (r) =>
+          r.resourceType === resourceType &&
+          r.facetSchemaVersion === facetSchemaVersion,
+      ),
+  };
+}
+
+describe("FF-DC7 value-aware masking folds into the single projection [AC-7]", () => {
+  // A whole-resource grant carrying a clearance marker on its opaque CONSTRAINT
+  // surface (NOT resourceFacet — that is the field-narrowing token; a strictly-
+  // absent resourceFacet means whole-resource read). Clearance rides on the
+  // constraint so the grant can be both whole-resource AND clearance-bearing.
+  function clearedGrant(clearance: string): Grant {
+    return grant({ constraint: { clearance } });
+  }
+
+  it("a lesser-cleared reader gets a MASKED value through resolveFor (not raw, not absent)", async () => {
+    const classifications = staticClassifications([
+      { resourceType: "record", facetField: "ssn", facetSchemaVersion: 0, class: "restricted" },
+    ]);
+    // clearance internal vs class restricted ⇒ gap 2 ⇒ redact (present sentinel).
+    const d = deps({
+      grants: staticGrants([clearedGrant("internal")]),
+      records: staticRecord({ name: "Alice", ssn: "123456789" }),
+      classifications,
+    });
+    const v = await resolveFor(d, recordHandle(), subject(), "read");
+    expect(v.denied).toBe(false);
+    if (v.denied === false) {
+      expect(v.fields.ssn).toBe("[redacted]"); // value-level mask
+      expect(v.fields.name).toBe("Alice"); // unclassified stays raw
+    }
+  });
+
+  it("a fully-cleared reader gets the raw value (reveal)", async () => {
+    const classifications = staticClassifications([
+      { resourceType: "record", facetField: "ssn", facetSchemaVersion: 0, class: "confidential" },
+    ]);
+    const d = deps({
+      grants: staticGrants([clearedGrant("restricted")]), // >= confidential
+      records: staticRecord({ name: "Alice", ssn: "123456789" }),
+      classifications,
+    });
+    const v = await resolveFor(d, recordHandle(), subject(), "read");
+    if (v.denied === false) expect(v.fields.ssn).toBe("123456789");
+  });
+
+  it("human (resolveHandle) == agent (resolveFor 'read') masked output is deep-equal", async () => {
+    const classifications = staticClassifications([
+      { resourceType: "record", facetField: "ssn", facetSchemaVersion: 0, class: "restricted" },
+    ]);
+    const d = deps({
+      grants: staticGrants([clearedGrant("internal")]),
+      records: staticRecord({ name: "Alice", ssn: "123456789" }),
+      classifications,
+    });
+    const human = await makeGrantResolver(d).resolveHandle(recordHandle(), subject());
+    const agent = await resolveFor(d, recordHandle(), subject(), "read");
+    expect(human).toEqual(agent); // byte-identical — one projection function
+  });
+
+  it("absent ClassificationSource ⇒ legacy all-or-nothing (backward-compatible)", async () => {
+    // No `classifications` dep: the pre-T-0033 raw projection of visible fields.
+    const d = deps({
+      grants: staticGrants([grant()]),
+      records: staticRecord({ name: "Alice", ssn: "123456789" }),
+    });
+    const v = await resolveFor(d, recordHandle(), subject(), "read");
+    if (v.denied === false) {
+      expect(v.fields).toEqual({ name: "Alice", ssn: "123456789" });
+    }
+  });
+
+  it("classified field with a no-clearance reader is DROPPED (key absent, fail-closed)", async () => {
+    const classifications = staticClassifications([
+      { resourceType: "record", facetField: "ssn", facetSchemaVersion: 0, class: "restricted" },
+    ]);
+    const d = deps({
+      grants: staticGrants([grant()]), // no clearance marker ⇒ clearance null
+      records: staticRecord({ name: "Alice", ssn: "123456789" }),
+      classifications,
+    });
+    const v = await resolveFor(d, recordHandle(), subject(), "read");
+    if (v.denied === false) {
+      expect("ssn" in v.fields).toBe(false); // dropped
+      expect(v.fields.name).toBe("Alice");
+    }
+  });
+});

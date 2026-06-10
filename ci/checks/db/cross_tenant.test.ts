@@ -230,6 +230,22 @@ async function seedAppTimer(c: pg.Client, tenantId: string): Promise<string> {
   return id;
 }
 
+/**
+ * Seed one row into choros.data_classification (T-0033). PK is
+ * (tenant_id, resource_type, facet_field, facet_schema_version); a per-tenant
+ * unique facet_field keeps both tenants' seeds independent under their own RLS.
+ */
+async function seedDataClassification(c: pg.Client, tenantId: string): Promise<void> {
+  const field = `ct-field-${uuid().slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.data_classification
+       (tenant_id, resource_type, facet_field, facet_schema_version, class, created_at, updated_at)
+     VALUES ($1, 'record', $2, 0, 'confidential', 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, field],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -337,6 +353,8 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
     }
     case 'actor_event_seq':
       await seedActorEventSeq(c, tenantId);
+    case 'data_classification':
+      await seedDataClassification(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
