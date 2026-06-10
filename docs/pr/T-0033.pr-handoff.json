@@ -1,0 +1,154 @@
+{
+  "task_id": "T-0033",
+  "status": "pr_open",
+  "branch": "task/T-0033-data-classification",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "8472256",
+  "head_commit": "eb2b9cb",
+  "migration": "017",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E4.3: data-classification schema + value-aware masking folded into the single grant-resolver projection. Migration 017 creates choros.data_classification (FORCE RLS, closed-class CHECK, tenant-isolation policy, no egress column). maskFields()/applyTransform()/deriveClearance() wired into buildMaskContext→projectFields path. Rev-2 governs version-boundary fail-closed (R-1): governed+no-version-rows drops whole facet, never raw. 16/16 AC covered (AC-15 deferred to T-0053 by design); tsc/eslint/vitest 529/529/fitness-shell/fitness:db 123/123 all green on isolated Postgres 55444.",
+  "commits": [
+    {
+      "sha": "4b61d9a",
+      "phase": "SPEC",
+      "message": "T-0033 SPEC: data-classification + value-aware masking + typed facets + from→to guards (E4.3)"
+    },
+    {
+      "sha": "af87ef1",
+      "phase": "DESIGN",
+      "message": "T-0033 DESIGN: value-aware masking folded into single projection + data_classification(017) + typed facets + from→to guard"
+    },
+    {
+      "sha": "3c704ff",
+      "phase": "BUILD",
+      "message": "T-0033 BUILD: data-classification core module + migration 017 + tenant-table fixture"
+    },
+    {
+      "sha": "6713083",
+      "phase": "BUILD",
+      "message": "T-0033 BUILD: fold value-aware masking into the single resolver projection + thaw frozen-checks"
+    },
+    {
+      "sha": "fb7da30",
+      "phase": "BUILD",
+      "message": "T-0033 BUILD: fitness tests (pure-TS FF-DC3..15 + db FF-DC1/DC2) + dynamic migration-count"
+    },
+    {
+      "sha": "5127221",
+      "phase": "REVIEW",
+      "message": "T-0033 REVIEW: changes_requested — version-boundary fail-closed hole (AC-4/AC-12 inverted)"
+    },
+    {
+      "sha": "3bc01f7",
+      "phase": "DESIGN",
+      "message": "T-0033 DESIGN: rev-2 — fail-closed version boundary (R-1)"
+    },
+    {
+      "sha": "402e285",
+      "phase": "BUILD",
+      "message": "T-0033 BUILD: rev-2 governed fail-closed (R-1)"
+    },
+    {
+      "sha": "3648969",
+      "phase": "REVIEW",
+      "message": "T-0033 REVIEW: approved — re-review rev-2"
+    },
+    {
+      "sha": "eb2b9cb",
+      "phase": "TEST",
+      "message": "T-0033 TEST: pass — CI green + fitness:db 123/123 (isolated PG), 16/16 AC, 5 adversarial probes, 2 spec-silent findings"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "402e285",
+      "first_review_commit": "5127221",
+      "r1_summary": "Rev-1 changes_requested: version-boundary raw fall-through — governed=true with no version rows was falling through to raw output, inverting AC-4/AC-12 (fail-closed requirement). Rev-2 DESIGN 3bc01f7 introduced governed-mechanism: maskFields `cls===undefined` branch forks on `ctx.governed` — governed:true => `continue` (key dropped, NEVER raw); governed:false => raw floor (legacy state-U). Rev-2 BUILD 402e285 implemented + isolating tests FF-DC4b/DC12 isolate the version axis from the null-clearance lever. Negative probe replay confirmed reverting §10.3 reds 6 tests including FF-DC12.",
+      "r1_findings_resolved": ["R-1"],
+      "deviations_accepted": ["FE-T0033-1 (grant-resolver.ts thawed per ADR §2.1)", "FE-T0033-2 (deriveClearance constraint-first per ADR §4.3)"],
+      "artifact": "docs/reviews/T-0033.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 652,
+      "passed": 652,
+      "failed": 0,
+      "ac_coverage": "16/16 (AC-15 manual/deferred to T-0053 by design)",
+      "adversarial_probes": "5/5 (probe-a hash-oracle non-blocking; probe-b partial boundary by-design; probe-c fail-closed confirmed; probe-d single-projection verified; probe-e fail-by-exception non-blocking)",
+      "tested_commit": "eb2b9cb",
+      "run_details": {
+        "tsc_noEmit": "exit 0",
+        "eslint_src": "exit 0",
+        "vitest_pure": "529/529 (21 files) — data-classification.test 34, grant-resolver.test 48",
+        "fitness_shell": "npm run fitness exit 0 — single-resolver, grant-resolver-isolation, mutation-gateway-isolation, data-classification-isolation (FF-DC8/9/10/17), bpmn-linter-isolation, cross-tenant, kc checks",
+        "fitness_db": "123/123 on isolated Postgres 55444 (COMPOSE_PROJECT_NAME=t0033, own volume, torn down) — data_classification 8/8, schema 16/16, cross_tenant 27/27, two_tenant 4/4",
+        "migrations": "017_data_classification clean on pass 1 (012→017 ADR RUN SEAM; 013-016=T-0017 not merged here), pass 2 idempotent"
+      },
+      "artifact": "docs/test-reports/T-0033.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (529/529)",
+      "fitness_static": "pass (all static checks)",
+      "fitness_db": "pass (123/123 on isolated Postgres)",
+      "integration_honesty_d056": "maskFields wired into the ONE real projection path (resolveFor/projectFields, lines 49-52/210-218); probe-d verified end-to-end on real grants; migration 017 applied to real isolated Postgres (not mocked)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/bpmn-linter-isolation.sh",
+    "ci/checks/data-classification-isolation.sh",
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/data_classification.test.ts",
+    "ci/checks/db/pgTimerStore.integration.test.ts",
+    "ci/checks/db/two_tenant.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/mutation-gateway-isolation.sh",
+    "docs/design/T-0033-data-classification.adr.md",
+    "docs/design/T-0033.adr.contract.json",
+    "docs/reviews/T-0033.review.json",
+    "docs/specs/T-0033-data-classification.spec.md",
+    "docs/specs/T-0033.spec.contract.json",
+    "docs/test-reports/T-0033.test-report.json",
+    "migrations/017_data_classification.sql",
+    "package.json",
+    "src/__tests__/data-classification.test.ts",
+    "src/__tests__/grant-resolver.test.ts",
+    "src/core/data-classification.ts",
+    "src/core/grant-resolver.ts"
+  ],
+  "deviations_from_adr": [
+    "FE-T0033-1: grant-resolver.ts thawed for T-0033 (ADR §2.1 explicit thaw — masking must fold into the single resolver projection; frozen files bpmn-linter.ts/object-handle.ts/grant-lattice.ts byte-unchanged; FF-DC17 green)",
+    "FE-T0033-2: deriveClearance reads grant.constraint first, resourceFacet as fallback (ADR §4.3 'resourceFacet OR constraint' — constraint-first required for whole-resource grants where resourceFacet is absent; FF-DC7 exercises this path)"
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "orchestrator (D-053) merges feature branch into dev after all gates pass; rebase onto current dev HEAD (557df7c) performed by orchestrator before merge",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3).",
+    "what_masking_gives": "Data-classification makes the grant-resolver projection value-aware: instead of merely filtering which FIELDS a caller sees, it now also controls what VALUE they see for sensitive fields based on the caller's clearance level. The four transforms are: drop (field omitted entirely), redact (replaced with '[redacted]'), partial (last-4 digits/chars shown, rest masked), hash (deterministic 8-byte djb2 digest). Clearance levels map from public → internal → confidential → restricted. The governed flag on the resource determines whether version-boundary failures are fail-closed (governed=true: drop whole facet) or pass raw (governed=false: legacy state-U back-compat floor).",
+    "how_to_verify": [
+      "npm run build && npx tsc --noEmit  →  exit 0",
+      "npm run lint  →  exit 0",
+      "npm test  →  529/529 green (includes data-classification.test 34 + grant-resolver.test 48)",
+      "npm run fitness  →  all static checks pass including data-classification-isolation.sh (FF-DC8/9/10/17)",
+      "POSTGRES_PORT=55444 COMPOSE_PROJECT_NAME=t0033verify npm run fitness:db  →  123/123 on isolated Postgres (starts/tears down automatically)",
+      "Spot-check: grant a principal 'internal' clearance on a resource with ssn=restricted, card=confidential; call resolveFor; confirm ssn is '[redacted]' (gap2 transform) and card shows '****1111' (partial last-4), raw values absent from output."
+    ],
+    "migration_017_summary": "CREATE TABLE choros.data_classification (tenant_id UUID NOT NULL, resource_type TEXT, resource_id UUID, field_name TEXT, data_class TEXT CHECK(data_class IN ('public','internal','confidential','restricted')), facet_schema_version INT, ..., PRIMARY KEY(tenant_id, resource_type, resource_id, field_name, facet_schema_version)). ENABLE ROW LEVEL SECURITY; FORCE ROW LEVEL SECURITY; policy: tenant_id = current_setting('app.current_tenant')::uuid. No egress column (S-1 seam honored). 012→017 jump: migrations 013-016 belong to T-0017 (not merged here); ADR RUN SEAM accommodates this — migrate runner records only applied files.",
+    "rls_note": "data_classification added to known_tenant_tables.txt. Cross-tenant CI-test (T-0115 gate) automatically checks tenant isolation. AC-2 verified at DB layer: cross_tenant.test 27/27 — tenant-A rows invisible to tenant-B session.",
+    "ac_15_db_floor": "AC-15 (DB-permission floor: no raw classified read bypasses masking) is intentionally deferred to T-0053 by design. Spec §4 marks AC-15 '(manual, activates with T-0053)' and §7 S-4 states the Postgres-backed classification DAO + DB-permission floor lands with T-0053, identical to the T-0021 AC-14 deferral pattern. Not a gap — recorded correctly as manual/deferred.",
+    "forward_T-0118": "Follow-up task T-0118 filed in control plane: keyless hash transform is a cross-tenant value-equality oracle (spec-silent design gap, not an AC violation). Two options for architect: (a) per-tenant salt threaded into MaskContext, or (b) explicit ADR note that hash is a deterministic equality-preserving token by design. See test-report finding F-1-hash-equality-oracle for detail.",
+    "downstream_note": "T-0033 completes E4.3 (data-classification + value-aware masking). The classification schema + resolver integration are now the foundation for T-0053 (Postgres DAO — will activate AC-15 DB floor) and any future classification-driven UI. No new services or docker-compose changes; migration 017 is additive."
+  },
+  "friction_events": []
+}
