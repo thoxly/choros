@@ -1,0 +1,24 @@
+{
+  "task_id": "T-0015",
+  "status": "pr_open",
+  "branch": "task/T-0015-object-handles",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/object-handle.ts",
+    "src/__tests__/object-handle.test.ts",
+    "src/__tests__/object-handle.type-check.ts",
+    "ci/checks/object-handle-isolation.sh",
+    "ci/checks/no-record-in-variable.sh",
+    "ci/checks/single-resolver.sh",
+    "ci/checks/handle-uuid-binding.sh",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": []
+}
