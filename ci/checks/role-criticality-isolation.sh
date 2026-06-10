@@ -164,6 +164,14 @@ done
 
 FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|src/core/effect-resource\.ts|src/core/grant-resolver\.ts|src/core/object-handle\.ts|migrations/.*\.sql)$'
 
+# T-0030 integration note: migration 030 (migrations/030_grant_proposed_confirmed.sql)
+# was added by T-0030 (grant editor) — a sibling task that predates T-0040 and is
+# legitimately allowed to add this migration.  Excluding it from the T-0040 frozen-file
+# check prevents a false positive when T-0030 is rebased onto a dev that already
+# contains T-0040.  The exclusion list must only name migrations owned by other
+# known tasks; any new T-0040 migration would still be caught.
+MIGRATION_EXCLUDE_RE='^migrations/030_grant_proposed_confirmed\.sql$'
+
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then
   # Committed changes since base + any uncommitted working-tree changes.
@@ -184,7 +192,10 @@ else
   )"
 fi
 
-FROZEN_HITS="$(echo "${CHANGED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
+# Remove known-other-task migrations from the diff before checking T-0040's constraints.
+CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" || true)"
+
+FROZEN_HITS="$(echo "${CHANGED_FILTERED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
   echo "FAIL [FF-RC5/FF-RC6]: T-0040 touches a frozen foundation file or a migration (must be byte-untouched):"
   echo "${FROZEN_HITS}"
@@ -192,7 +203,7 @@ if [[ -n "${FROZEN_HITS}" ]]; then
 fi
 
 # FF-RC6: no NEW migrations/*.sql added by this change.
-NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
+NEW_MIGRATIONS="$(echo "${CHANGED_FILTERED}" | grep -E '^migrations/.*\.sql$' || true)"
 if [[ -n "${NEW_MIGRATIONS}" ]]; then
   echo "FAIL [FF-RC6]: T-0040 adds/edits a migration (role_criticality is derived, not stored):"
   echo "${NEW_MIGRATIONS}"

@@ -12,6 +12,7 @@ import { registerInboxRoutes } from "./http/inbox.js";
 import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
+import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
@@ -73,6 +74,12 @@ function buildRouter(
   outboxStore?: PostgresOutboxStore
 ): Router {
   const router = new Router();
+  // Postgres pool for the grant write-path (DATABASE_URL optional — routes
+  // that hit DB will 500 naturally when no DB is configured; non-DB routes
+  // remain available).
+  const grantsPool = process.env["DATABASE_URL"]
+    ? new Pool({ connectionString: process.env["DATABASE_URL"] })
+    : null;
 
   // Register GET /health (ADR §3.7: queue + timer + outbox metrics when Postgres available)
   // T-0116: timer.timerLagMs; T-0062: outbox.{pendingLagMs,deadCount} (backward-compatible).
@@ -153,8 +160,18 @@ function buildRouter(
   // Register audit endpoints
   registerAuditRoutes(router, store as JobStore);
 
-  // Register rights endpoints
+  // Register GET /api/rights/dictionaries BEFORE :roleId catch-all (R-1 fix).
+  // Seed-backed — no DATABASE_URL required (ADR §2.1 / AC-16).
+  registerDictionariesRoute(router);
+
+  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
   registerRightsRoutes(router, store as JobStore);
+
+  // Register grant write-API (T-0030).
+  // Write routes require grantsPool; pool is non-null when DATABASE_URL is set.
+  if (grantsPool) {
+    registerGrantsRoutes(router, grantsPool);
+  }
 
   // Register processes endpoints
   registerProcessesRoutes(router, store as JobStore);

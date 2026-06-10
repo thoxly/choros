@@ -1,0 +1,196 @@
+{
+  "task_id": "T-0030",
+  "status": "ready",
+  "decision": "Additive-only write-API over existing grant + role_assignment tables. New module src/http/grants.ts registers POST /api/grants, POST /api/grants/:id/revoke, POST /api/role-assignments, POST /api/role-assignments/:id/revoke — each gated by validateAdminDelegation (imported verbatim from scoped-admin.ts). AdminContext (isGenesisOwner, adminGrants, adminOrgScope) is DB-resolved via two new helpers in src/db/org.ts. Grant INSERT + GrantAuditEvent INSERT run in a single withTenant transaction. Migration 030 adds proposed_by/confirmed_by columns to the existing grant table (no new table). Existing ra-role-editor.jsx is wired via onSubmit handler. GET /api/rights/dictionaries serves seed-backed closed dictionaries.",
+  "rejected_alternatives": [
+    {
+      "option": "Separate admin gateway service",
+      "why_not": "validateAdminDelegation is pure and designed to be called inline before INSERT — a network hop adds latency and deployment complexity with zero semantic benefit."
+    },
+    {
+      "option": "Persist preset expansions in a preset table",
+      "why_not": "Presets are a UI convenience. Expanding them client-side before POST produces identical structural atoms as advanced mode. A separate table contradicts the capability-not-text principle and adds unnecessary DDL (AC-18 / spec §4 out-of-scope)."
+    },
+    {
+      "option": "Use actor_event table for audit emit",
+      "why_not": "actor_event is the SoD substrate for guarded transitions (T-0019). Grant writes are mgmt_object:grant management writes, not guarded transitions. The correct target is audit_event (T-0016 floor) via GrantAuditEvent (T-0018 FR-7, frozen)."
+    },
+    {
+      "option": "Fire-and-forget audit emit after transaction commit",
+      "why_not": "A committed grant row with no audit record is a silent audit gap. Wrapping both INSERTs in one transaction ensures atomicity (T-0062 lesson)."
+    },
+    {
+      "option": "Load admin context via existing grant-resolver.ts (T-0021)",
+      "why_not": "grant-resolver.ts is PDP/read-path code explicitly not edited (T-0029 NF-6). The write-path needs a narrower helper for the acting principal's mgmt-grants only — loadAdminContext in src/db/org.ts is the correct seam."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "GrantWriteRequest",
+      "fields": [
+        { "name": "role_id", "type": "string (UUID)" },
+        { "name": "resource_type", "type": "ResourceType (grant-lattice.ts)" },
+        { "name": "operation", "type": "Operation (grant-lattice.ts)" },
+        { "name": "scope", "type": "unknown — parsed by parseScopeElement → ScopeElement | GrantScope" },
+        { "name": "resource_facet", "type": "unknown | undefined (jsonb, optional)" },
+        { "name": "constraint", "type": "unknown | undefined (jsonb, optional)" },
+        { "name": "delegable", "type": "boolean (default true)" },
+        { "name": "granted_by", "type": "string (actor id)" },
+        { "name": "valid_from", "type": "number | undefined (epoch-ms)" },
+        { "name": "valid_until", "type": "number | undefined (epoch-ms)" },
+        { "name": "proposed_by", "type": "string | undefined (actor id)" },
+        { "name": "confirmed_by", "type": "string | undefined (actor id); absent = PROPOSAL" }
+      ]
+    },
+    {
+      "entity": "RoleAssignmentWriteRequest",
+      "fields": [
+        { "name": "employee_id", "type": "string (UUID)" },
+        { "name": "role_id", "type": "string (UUID)" },
+        { "name": "org_scope", "type": "unknown — parsed by parseScopeElement with hierarchy:org check" },
+        { "name": "source", "type": "string" },
+        { "name": "granted_by", "type": "string (actor id)" },
+        { "name": "valid_from", "type": "number | undefined (epoch-ms)" },
+        { "name": "valid_until", "type": "number | undefined (epoch-ms)" },
+        { "name": "proposed_by", "type": "string | undefined" },
+        { "name": "confirmed_by", "type": "string | undefined; absent = PROPOSAL" }
+      ]
+    },
+    {
+      "entity": "AdminContext (FROZEN — scoped-admin.ts)",
+      "fields": [
+        { "name": "isGenesisOwner", "type": "boolean (DB-resolved, injected — never assumed)" },
+        { "name": "adminGrants", "type": "Grant[] (confirmed, in-window, delegable mgmt_object:* grants)" },
+        { "name": "adminOrgScope", "type": "ScopeElement (hierarchy:org — union of assignment org_scope values)" }
+      ]
+    },
+    {
+      "entity": "GrantAuditEvent (FROZEN — grant-lattice.ts)",
+      "fields": [
+        { "name": "kind", "type": "'grant.create' | 'grant.revoke'" },
+        { "name": "actor", "type": "string (actorEmployeeId)" },
+        { "name": "subjectRoleId", "type": "string (role UUID)" },
+        { "name": "capability", "type": "{ resourceType: string; operation: string; resourceFacet?: unknown }" },
+        { "name": "scope", "type": "Scope (ScopeElement from grant-lattice.ts)" },
+        { "name": "proposedBy", "type": "string | undefined" },
+        { "name": "confirmedBy", "type": "string | undefined" }
+      ]
+    },
+    {
+      "entity": "isGenesisOwnerForTenant (DB helper — src/db/org.ts)",
+      "fields": [
+        { "name": "signature", "type": "(actorEmployeeId: string, tenantId: string, nowMs: number, db: pg.Pool) => Promise<boolean>" },
+        { "name": "query", "type": "SELECT ra.id FROM role_assignment ra JOIN role r ON ... WHERE r.slug='tenant-owner' AND ra.confirmed_by IS NOT NULL AND validity window" }
+      ]
+    },
+    {
+      "entity": "loadAdminContext (DB helper — src/db/org.ts)",
+      "fields": [
+        { "name": "signature", "type": "(actorEmployeeId: string, tenantId: string, nowMs: number, db: pg.Pool) => Promise<AdminContext>" },
+        { "name": "queries", "type": "1) isGenesisOwnerForTenant; 2) confirmed in-window assignments for actor; 3) delegable mgmt_object:* grants for each assignment's role" }
+      ]
+    },
+    {
+      "entity": "parseScopeElement (local helper — src/http/grants.ts)",
+      "fields": [
+        { "name": "signature", "type": "(raw: unknown) => ScopeElement | FreeformScope | null" },
+        { "name": "behavior", "type": "Validates kind in {node,tags,interval,set}; freeform only if genesis owner path; calls normalize(); returns null on invalid input" }
+      ]
+    },
+    {
+      "entity": "migration 030_grant_proposed_confirmed.sql",
+      "fields": [
+        { "name": "statement", "type": "ALTER TABLE choros.\"grant\" ADD COLUMN IF NOT EXISTS proposed_by text NULL, ADD COLUMN IF NOT EXISTS confirmed_by text NULL" },
+        { "name": "new_table", "type": "none — additive ALTER only" }
+      ]
+    }
+  ],
+  "contracts": [
+    "POST /api/grants: body=GrantWriteRequest; 201 {id:string} | 400 {error:{code:INVALID_SCOPE}} | 401 | 403 {error:{code:ADMIN_GATE_REJECTED,reason:<AdminDelegationReason>}} | 404",
+    "POST /api/grants/:id/revoke: 200 {id:string} | 401 | 403 {error:{code:ADMIN_GATE_REJECTED,reason:<AdminDelegationReason>}} | 404",
+    "POST /api/role-assignments: body=RoleAssignmentWriteRequest; 201 {id:string} | 400 {error:{code:INVALID_SCOPE}} | 401 | 403 {error:{code:ADMIN_GATE_REJECTED,...}} | 404",
+    "POST /api/role-assignments/:id/revoke: 200 {id:string} | 401 | 403 {error:{code:ADMIN_GATE_REJECTED,...}} | 404",
+    "GET /api/rights/dictionaries: 200 {resources:[{uri,name}], operations:string[], orgTree:[{id,label,depth,children?}], scopeTags:[{id,label}]}",
+    "isGenesisOwnerForTenant(actorEmployeeId:string, tenantId:string, nowMs:number, db:pg.Pool): Promise<boolean>",
+    "loadAdminContext(actorEmployeeId:string, tenantId:string, nowMs:number, db:pg.Pool): Promise<AdminContext>",
+    "parseScopeElement(raw:unknown): ScopeElement | FreeformScope | null — reuses normalize() from grant-lattice.ts",
+    "validateAdminDelegation IMPORTED verbatim from src/core/scoped-admin.ts — NOT re-implemented",
+    "GrantAuditEvent IMPORTED verbatim from src/core/grant-lattice.ts — NOT re-defined",
+    "All grant/role_assignment INSERTs and UPDATEs run inside withTenant (SET LOCAL choros.tenant_id = $tenantId); tenant_id is always the leading column in parameterized queries",
+    "Grant INSERT and GrantAuditEvent INSERT run in the SAME withTenant transaction (one BEGIN/COMMIT per write handler)",
+    "AdminDelegationReason literals: scope_widens | facet_widens | constraint_widens | parent_non_delegable | free_form_non_delegable | org_scope_widens | no_admin_authority",
+    "HTTP error envelope shape: {error:{code:string, reason?:string, message?:string}} — consistent with existing HttpError / sendErrorEnvelope in router.ts"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "GrantAuditEvent is imported from grant-lattice.ts at every call-site in grants.ts — never locally re-defined",
+      "ci_check": "grep -n 'GrantAuditEvent' src/http/grants.ts | grep 'import' | grep 'grant-lattice'; grep -rn 'GrantAuditEvent' src/ | grep -v 'grant-lattice\\|grants.ts\\|\\.test\\.' must be empty"
+    },
+    {
+      "id": "FF-2",
+      "rule": "isGenesisOwner is never hardcoded to true outside src/db/org.ts",
+      "ci_check": "grep -rn 'isGenesisOwner.*true\\|isGenesisOwner: true' src/ | grep -v 'src/db/org\\.ts' must be empty"
+    },
+    {
+      "id": "FF-3",
+      "rule": "validateAdminDelegation is not re-implemented — no scope_widens / facet_widens / org_scope_widens literals outside scoped-admin.ts and test files",
+      "ci_check": "grep -rn 'scope_widens\\|facet_widens\\|org_scope_widens' src/ | grep -v 'scoped-admin\\.ts\\|grants\\.ts\\|\\.test\\.' must be empty (grants.ts may reference the reason string in error forwarding only)"
+    },
+    {
+      "id": "FF-4",
+      "rule": "Every parameterized INSERT INTO choros.\"grant\" and INSERT INTO choros.role_assignment in grants.ts has tenant_id as the leading ($1) parameter",
+      "ci_check": "Integration tests AC-01 / AC-09 assert tenant_id on inserted row; static: grep -A5 'INSERT INTO choros' src/http/grants.ts | grep -E '\\$1' must match on tenant_id position"
+    },
+    {
+      "id": "FF-5",
+      "rule": "No new tenant table introduced — known_tenant_tables.txt unchanged; grant and role_assignment already listed",
+      "ci_check": "wc -l ci/checks/known_tenant_tables.txt equals 21; grep '^grant$' ci/checks/known_tenant_tables.txt and grep '^role_assignment$' ci/checks/known_tenant_tables.txt both exit 0"
+    },
+    {
+      "id": "FF-6",
+      "rule": "The grant INSERT and the GrantAuditEvent audit_event INSERT are inside the same transaction — client.release() must not appear between them",
+      "ci_check": "grep -n 'client.release\\|COMMIT\\|ROLLBACK' src/http/grants.ts — COMMIT appears exactly once per handler, after both INSERTs; no client.release() between INSERT and audit INSERT"
+    },
+    {
+      "id": "FF-7",
+      "rule": "parseScopeElement calls normalize() from grant-lattice.ts before returning a valid element — no raw ScopeElement returned without normalization",
+      "ci_check": "grep -n 'normalize(' src/http/grants.ts must appear in the parseScopeElement function body; import of normalize from grant-lattice.js present"
+    },
+    {
+      "id": "FF-8",
+      "rule": "No RLS bypass in the grants write-path",
+      "ci_check": "grep -rn 'BYPASS RLS\\|SET ROLE\\|choros_migrator\\|superuser' src/http/grants.ts src/db/org.ts must be empty"
+    },
+    {
+      "id": "FF-9",
+      "rule": "validateAdminDelegation is called and checked before every INSERT — integration tests AC-02/03/04/08/10 assert zero rows inserted on rejection",
+      "ci_check": "Tests for AC-02, AC-03, AC-04, AC-08, AC-10 in the grants test file each assert: DB row count = 0 after rejected write; HTTP status = 403 with ADMIN_GATE_REJECTED"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-01", "covered_by": "POST /api/grants handler (§4); GrantWriteRequest (§3.1); INSERT into grant table with tenant_id; 201 response" },
+    { "ac": "AC-02", "covered_by": "validateAdminDelegation gate in POST /api/grants (§4); 403 ADMIN_GATE_REJECTED + reason scope_widens; FF-9" },
+    { "ac": "AC-03", "covered_by": "validateAdminDelegation org-axis gate (§4); 403 + reason org_scope_widens; FF-9" },
+    { "ac": "AC-04", "covered_by": "validateAdminDelegation step-4 no-authority (§4); 403 + reason no_admin_authority; FF-9" },
+    { "ac": "AC-05", "covered_by": "parseScopeElement returns null → 400 INVALID_SCOPE before gate (§2.3, §4)" },
+    { "ac": "AC-06", "covered_by": "isGenesisOwnerForTenant DB query (§2.2); AdminContext.isGenesisOwner=true → validateAdminDelegation step-3 short-circuit; 201 without parent-subset check" },
+    { "ac": "AC-07", "covered_by": "POST /api/grants/:id/revoke handler (§4): UPDATE valid_until=nowMs; row NOT deleted; 200 response" },
+    { "ac": "AC-08", "covered_by": "Revoke gate: validateAdminDelegation checks mgmt_object:grant authority (§4); 403 ADMIN_GATE_REJECTED on failure" },
+    { "ac": "AC-09", "covered_by": "POST /api/role-assignments handler (§4); RoleAssignmentWriteRequest (§3.2); INSERT with tenant_id; 201 response" },
+    { "ac": "AC-10", "covered_by": "Role-assignment write gate: org_scope_widens → 403 ADMIN_GATE_REJECTED (§4); FF-9" },
+    { "ac": "AC-11", "covered_by": "POST /api/role-assignments/:id/revoke: UPDATE valid_until=nowMs; row not deleted; 200 response (§4)" },
+    { "ac": "AC-12", "covered_by": "GrantAuditEvent emit in grant create handler (§2.4); FF-1 lint asserts import from grant-lattice.ts; audit_event row with kind=grant.create, correct fields" },
+    { "ac": "AC-13", "covered_by": "GrantAuditEvent emit in revoke handler (§2.4); audit_event row with kind=grant.revoke" },
+    { "ac": "AC-14", "covered_by": "proposed_by/confirmed_by in GrantWriteRequest (§3.1); migration 030 adds columns to grant table (§2.5); INSERT preserves confirmed_by=NULL for proposals; confirmation path sets confirmed_by" },
+    { "ac": "AC-15", "covered_by": "isGenesisOwnerForTenant query (§2.2): role_assignment JOIN role WHERE slug=tenant-owner AND confirmed_by IS NOT NULL AND validity window; FF-2 asserts no hardcoded true" },
+    { "ac": "AC-16", "covered_by": "GET /api/rights/dictionaries route (§4): seed-backed response with resources, operations, orgTree, scopeTags" },
+    { "ac": "AC-17", "covered_by": "ra-role-editor.jsx onSubmit handler wiring (§6): POST /api/grants per grant atom; 403 reason displayed inline; 201 updates view" },
+    { "ac": "AC-18", "covered_by": "Preset expansion in §6: presetSel expanded client-side into structural atoms before POST; no preset table; same POST body shape as advanced mode" },
+    { "ac": "AC-19", "covered_by": "FF-5: known_tenant_tables.txt line count unchanged; migration 030 is ALTER-only (no new table)" },
+    { "ac": "AC-20", "covered_by": "withTenant sets tenant GUC; tenant_id leading in all parameterized queries (§2.2, §4); FF-4; FF-8 (no RLS bypass)" }
+  ],
+  "runtime_target": "Node.js on the Choros home server (same process and Docker Compose environment as all existing HTTP routes). No new infrastructure — reuses existing Postgres pool (DATABASE_URL) and withTenant helper.",
+  "adr_artifact_path": "docs/design/T-0030-grant-editor.adr.md",
+  "escalation": ""
+}

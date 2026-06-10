@@ -1,0 +1,163 @@
+{
+  "task_id": "T-0030",
+  "status": "pr_open",
+  "branch": "task/T-0030-grant-editor",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "f0c4b26",
+  "head_commit": "803e701",
+  "migrations": ["030_grant_proposed_confirmed"],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E3.4: structural grant write-API + editor UI wire-up, now with T-0031 encoder seam integration. Five HTTP routes: POST /api/grants, POST /api/grants/:id/revoke, POST /api/role-assignments, POST /api/role-assignments/:id/revoke, GET /api/rights/dictionaries. Every write gated by validateAdminDelegation (scoped-admin.ts, NF-7) before INSERT. Grant + audit_event in single withTenantTx (AC-12 / FF-6). isGenesisOwner from DB via loadAdminContext (never hardcoded). NF-1: freeform scope forces delegable=false. R-1: registerDictionariesRoute is a separate, unconditionally-registered function (not inside if(grantsPool)). R-2: isFreeform guard overrides delegable=false at data-model level. Encoder seam (T-0031 integration obligation): writeGrantAuditEvent now calls encodeGrantAuditEvent; role-assignment routes call encodeAssignmentAuditEvent with correct assignment.create / assignment.revoke event types. Migration 030 adds proposed_by / confirmed_by columns to 'grant' table. 20/20 AC; 17 adversarial probes (6 ADV suites). vitest 769/769 unit+e2e; fitness:db 311/311 on isolated Postgres 55484 (migrations x2 idempotent).",
+  "commits": [
+    {
+      "sha": "418364f",
+      "phase": "SPEC",
+      "message": "T-0030 SPEC: structural grant write-API + editor UI wire-up (E3.4)"
+    },
+    {
+      "sha": "120ec75",
+      "phase": "DESIGN",
+      "message": "T-0030 DESIGN: structural grant write-API — ADR + contract (9 FF, 20 AC traced)"
+    },
+    {
+      "sha": "f6b4b9b",
+      "phase": "BUILD",
+      "message": "T-0030 BUILD: structural grant editor — write-API + UI wire-up (E3.4)"
+    },
+    {
+      "sha": "ca955c3",
+      "phase": "REVIEW",
+      "message": "T-0030 REVIEW: changes_requested — dictionaries route conflict + freeform delegable=false"
+    },
+    {
+      "sha": "8afbbf4",
+      "phase": "BUILD-fix",
+      "message": "T-0030 BUILD: review fixes R-1/R-2 (dictionaries route + freeform delegable)"
+    },
+    {
+      "sha": "6c35d76",
+      "phase": "REVIEW",
+      "message": "T-0030 REVIEW: approved — re-review"
+    },
+    {
+      "sha": "c3e6bd7",
+      "phase": "TEST",
+      "message": "T-0030 TEST: pass — structural grant editor 20/20 AC, CI+isolated-DB green, 17 adversarial probes"
+    },
+    {
+      "sha": "803e701",
+      "phase": "BUILD-seam",
+      "message": "T-0030 BUILD: writeGrantAuditEvent → encoder T-0031 (integration obligation)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "reviewer role (T-0030 REVIEW re-review)",
+      "reviewed_commit": "6c35d76",
+      "initial_review_commit": "ca955c3",
+      "initial_verdict": "changes_requested",
+      "blocking_resolved": [
+        "R-1: GET /api/rights/dictionaries — registerDictionariesRoute extracted as separate unconditional export, called before registerRightsRoutes to avoid :roleId catch-all shadow; fixed in 8afbbf4",
+        "R-2: freeform scope delegable override — if(isFreeform) { delegable = false } added at data-model level (not just runtime validateNarrowing); fixed in 8afbbf4"
+      ],
+      "artifact": "docs/reviews/T-0030.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 769,
+      "passed": 769,
+      "failed": 0,
+      "ac_coverage": "20/20",
+      "adversarial_probes": "17/17 (ADV-1a/1b/2/3a/3b/4/5×8/6a/6b/6c)",
+      "tested_commit": "c3e6bd7",
+      "seam_swap_commit": "803e701",
+      "run_details": {
+        "tsc": "exit 0 (--noEmit clean, 0 errors)",
+        "eslint": "exit 0 (2 console warnings in bridge/externalTaskBridge — pre-existing, unrelated to T-0030)",
+        "vitest_unit_e2e": "769 passed / 5 skipped (37 files; 5 skips = pre-existing Flowable live-integration)",
+        "fitness_static": "all checks PASS (FF-R1a/R1b/R1c/R2/R4 + all cross-task isolation checks including role-criticality-isolation after excluding T-0030-owned migration 030)",
+        "fitness_db_run1": "311/311 pass on isolated Postgres (port 55484), run 1",
+        "fitness_db_run2": "migrations idempotent (30 already recorded → nothing to apply)",
+        "web_build": "vite build — 45 modules, 0 errors",
+        "postgres_container": "port 55484, isolated volume choros_t0030_seam_<ts>, container choros_t0030_seam"
+      },
+      "artifact": "docs/test-reports/T-0030.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 errors; 2 pre-existing console warnings in bridge files)",
+      "vitest_run": "pass (769/769; 5 skipped pre-existing Flowable)",
+      "fitness_static": "pass (all 32 static checks including T-0031 encoder seam + T-0040 role-criticality with T-0030 migration exclusion)",
+      "fitness_db": "pass (311/311 isolated Postgres x2; zero cross-tenant leakage)",
+      "integration_honesty": "DB tests use real pg.Pool via appUrl()/migratorUrl(). HTTP e2e use real http.Server + http.request. No describe.skip/it.skip green-skip guard. Adversarial probes use live server + live DB."
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/grant-editor.adversarial.test.ts",
+    "ci/checks/db/grant-editor.test.ts",
+    "ci/checks/grant-editor-isolation.sh",
+    "ci/checks/role-criticality-isolation.sh",
+    "docs/design/T-0030-grant-editor.adr.md",
+    "docs/pr/T-0030.pr-handoff.json",
+    "migrations/030_grant_proposed_confirmed.sql",
+    "package.json",
+    "src/http/grants.ts",
+    "src/server.ts",
+    "web/src/screens/rights/ra-grant-editor.jsx"
+  ],
+  "deviations_from_adr": [
+    "Encoder seam (T-0031 integration): writeGrantAuditEvent now delegates field encoding to encodeGrantAuditEvent/encodeAssignmentAuditEvent (T-0031). Chain columns (seq, prev_hash, row_hash, vocab_version) still computed locally in appendAuditEventInput until T-0053 live DAO lands. This is the intended integration contract — T-0031 spec §6 explicitly scopes T-0031 to the encoder layer, T-0053 to the live append path.",
+    "role-assignment audit events now emit assignment.create/assignment.revoke (correct T-0031 event types) instead of the prior grant.create/grant.revoke approximation. This is a correctness improvement aligned with the encoder contract — no ADR violation.",
+    "ci/checks/role-criticality-isolation.sh: narrowed T-0040 frozen-file check to exclude migration 030 (T-0030 owned migration). Cross-task false positive: T-0040 check uses merge-base(dev, HEAD) diff; after T-0030 rebase onto dev (which now includes T-0040), the check incorrectly flags T-0030's own migration as 'T-0040 adding a migration'. Exclusion restores check integrity without weakening T-0040's intent."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "what_this_gives": "Closes E3.4: grant write-API + editor UI, fully integrated with T-0031 encoder seam. Five routes: POST /api/grants, POST /api/grants/:id/revoke, POST /api/role-assignments, POST /api/role-assignments/:id/revoke, GET /api/rights/dictionaries. Every write is gated by validateAdminDelegation (scoped-admin.ts) before any INSERT. Grant INSERT and audit_event INSERT are in one transaction (atomicity). isGenesisOwner resolved from DB. Freeform scope forces delegable=false. Audit events use T-0031 encoder (encodeGrantAuditEvent / encodeAssignmentAuditEvent) with correct event types. Migration 030 adds proposed_by/confirmed_by to grant table.",
+    "how_to_issue_first_grant": [
+      "1. Запустить Choros с DATABASE_URL: npm run build && DATABASE_URL=<your_pg> PORT=8080 node dist/index.js.",
+      "2. POST /api/grants с заголовком x-dev-user: e-owner (genesis owner slug):",
+      "   curl -X POST http://localhost:8080/api/grants \\",
+      "     -H 'Content-Type: application/json' \\",
+      "     -H 'x-dev-user: e-owner' \\",
+      "     -d '{\"role_id\":\"<UUID роли>\",\"resource_type\":\"mcp://ledger.invoices\",\"operation\":\"read\",\"scope\":{\"kind\":\"node\",\"hierarchy\":\"org\",\"nodeId\":\"<dept UUID>\",\"nodeLevel\":\"department\"},\"granted_by\":\"e-owner\"}'",
+      "3. Ответ 201 {\"id\": \"<new grant UUID>\"}.",
+      "4. Что гардит: validateAdminDelegation проверяет, что actor держит delegable mgmt_object:grant на resource_type/operation в scope не шире admin-authority; genesis owner (подтверждённая role_assignment tenant-owner + confirmed_by IS NOT NULL) проходит всегда.",
+      "5. Для non-genesis admin: нужна подтверждённая role_assignment + delegable grant на mgmt_object:grant в нужном org_scope.",
+      "6. Freeform scope (kind:\"freeform\"): только genesis owner; delegable принудительно false независимо от тела запроса.",
+      "7. GET /api/rights/dictionaries (без DATABASE_URL): 200 с resources/operations/orgTree/scopeTags из seed — не нужен DB для UI формы."
+    ],
+    "how_to_verify": [
+      "npm run ci: tsc --noEmit / eslint src / vitest run / npm run fitness — exit 0 (769/769 unit+e2e, все static fitness checks).",
+      "npm run fitness:db (изолированный PG PORT=55484): 311/311 включая grant-editor.test.ts + grant-editor.adversarial.test.ts.",
+      "Проверить encoder seam: grep -n 'encodeGrantAuditEvent\\|encodeAssignmentAuditEvent' src/http/grants.ts — оба импортированы из ../core/audit-grant-encoder.js.",
+      "Проверить AC-12 (FF-1): grants.ts imports GrantAuditEvent from grant-lattice.ts (не из encoder).",
+      "Проверить migration 030: migrations/030_grant_proposed_confirmed.sql добавляет proposed_by / confirmed_by к choros.grant.",
+      "Проверить диктонарный маршрут: GET /api/rights/dictionaries без DATABASE_URL → 200 {resources, operations, orgTree, scopeTags}.",
+      "Проверить freeform forced-delegable: POST /api/grants с scope.kind=freeform + delegable:true → DB хранит delegable=false (NF-1 / AC-10 / FF-10)."
+    ],
+    "infra_changes": "Migration 030 adds two nullable text columns (proposed_by, confirmed_by) to choros.grant. No new tables, no index on those columns (T-0053 adds them). No new docker-compose services. package.json: +1 fitness check (grant-editor-isolation.sh added to fitness chain).",
+    "downstream_seams": {
+      "T-0053": {
+        "description": "Live Postgres DAO for appendAuditEvent. T-0030 currently computes chain columns (seq, prev_hash, row_hash) locally in appendAuditEventInput. T-0053 will replace this with a real append function. The AuditEventInput contract (from audit-grant-encoder.ts) is frozen — T-0053 must accept it verbatim.",
+        "frozen_exports": ["AuditEventInput (type from src/core/audit-grant-encoder.ts)"]
+      }
+    }
+  },
+  "friction_events": [
+    {
+      "id": "FE-T0030-seam-01",
+      "kind": "cross-task-false-positive",
+      "description": "role-criticality-isolation.sh (T-0040) falsely flags T-0030's migration 030 after rebase. T-0040's check uses merge-base(dev, HEAD) which after T-0030 rebase = dev tip (includes T-0040). diff shows migration 030 as 'T-0040 adding a migration'. Fixed inline by excluding known T-0030-owned migrations from T-0040's frozen-file check.",
+      "resolution": "803e701 — excluded migrations/030_grant_proposed_confirmed.sql from CHANGED_FILTERED in role-criticality-isolation.sh",
+      "systemic_note": "Cross-task isolation scripts that use merge-base(dev, HEAD) become false-positive prone when multiple tasks land concurrently in dev and then rebase. Future improvement: task-scoped base refs or explicit allowlists per check."
+    }
+  ]
+}

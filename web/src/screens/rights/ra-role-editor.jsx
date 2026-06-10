@@ -153,6 +153,54 @@ function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
   );
 }
 
+/* --- helpers: map UI grant state → GrantWriteRequest structural atoms --- */
+
+/** Convert a UI org-node slug (e.g. "fin-approve") to a ScopeElement. */
+function nodeToScope(nodes, range) {
+  const elements = [];
+  for (const n of nodes) {
+    elements.push({ kind: "node", hierarchy: "org", nodeId: n, nodeLevel: "department" });
+  }
+  if (range && /\d/.test(range)) {
+    const amount = Number(range.replace(/[^\d]/g, ""));
+    if (!isNaN(amount)) {
+      elements.push({ kind: "interval", axis: "amount_rub", lo: 0, hi: amount });
+    }
+  }
+  if (elements.length === 0) return { kind: "set", members: [] };
+  if (elements.length === 1) return elements[0];
+  return { kind: "set", members: elements };
+}
+
+/** Map UI op labels → canonical Operation literals. */
+function mapOp(op) {
+  if (op === "write") return "update";
+  if (op === "exec") return "invoke";
+  return op;
+}
+
+/**
+ * Post a single GrantWriteRequest to POST /api/grants.
+ * Returns { ok: true, id } or { ok: false, reason }.
+ */
+async function postGrant(atom, actorId) {
+  try {
+    const resp = await fetch("/api/grants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-dev-user": actorId },
+      body: JSON.stringify(atom),
+    });
+    if (resp.status === 201) {
+      const data = await resp.json();
+      return { ok: true, id: data.id };
+    }
+    const err = await resp.json().catch(() => ({}));
+    return { ok: false, reason: err?.error?.reason || err?.error?.code || String(resp.status) };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message || e) };
+  }
+}
+
 /* ---------------- Экран ---------------- */
 function RoleEditorScreen() {
   const [mode, setMode] = useState("advanced");
@@ -162,6 +210,13 @@ function RoleEditorScreen() {
   const [llmText, setLlmText] = useState("Агент-помощник согласования: читает счёт и договор, распознаёт суммы со сканов, готовит решение до ₽50 000. Платежи не инициирует.");
   const [proposed, setProposed] = useState([]);
   const [proposedShown, setProposedShown] = useState(false);
+  // Submit state: null | "loading" | { errors: [{ uri, reason }], success: number }
+  const [submitResult, setSubmitResult] = useState(null);
+
+  // Static role UUID for the dev silo "Согласующий счетов ≤ ₽50 000" (seed role).
+  // In a DB-backed scenario this would come from the selected role context.
+  const EDITOR_ROLE_ID = "e0000000-0000-0000-0000-000000000002";
+  const ACTOR_ID = "e-owner"; // dev silo actor (genesis owner, confirmed by seed)
 
   const axes = axesFromGrants(grants);
 
@@ -177,13 +232,81 @@ function RoleEditorScreen() {
   const togglePreset = (id) => setPresetSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const presetGrantCount = presetSel.reduce((n, id) => n + (PRESETS.find((p) => p.id === id)?.grants.length || 0), 0);
 
+  /** Expand preset selection into structural grant atoms (AC-18: client-side, no preset table). */
+  function expandPresets() {
+    const atoms = [];
+    for (const presetId of presetSel) {
+      const preset = PRESETS.find((p) => p.id === presetId);
+      if (!preset) continue;
+      for (const g of preset.grants) {
+        for (const op of g.ops) {
+          atoms.push({
+            uri: g.uri,
+            ops: [op],
+            nodes: g.scopeOwn ? ["fin-approve"] : ["fin"],
+            tags: [],
+            range: g.scopeRange || "",
+          });
+        }
+      }
+    }
+    return atoms;
+  }
+
+  /**
+   * "Запросить применение" — submit handler (AC-17 / FR-7).
+   * Advanced mode: submits each grant atom.
+   * Simple mode: expands presets first (AC-18), then submits.
+   */
+  const handleSubmit = async () => {
+    setSubmitResult("loading");
+    const sourceGrants = mode === "simple" ? expandPresets() : grants;
+    const errors = [];
+    let successCount = 0;
+
+    for (const g of sourceGrants) {
+      for (const op of g.ops) {
+        const scope = nodeToScope(g.nodes || [], g.range || "");
+        const atom = {
+          role_id: EDITOR_ROLE_ID,
+          resource_type: g.uri, // URI used as resource_type identifier
+          operation: mapOp(op),
+          scope,
+          granted_by: ACTOR_ID,
+          confirmed_by: ACTOR_ID, // direct submission = confirmed
+          delegable: true,
+        };
+        const result = await postGrant(atom, ACTOR_ID);
+        if (result.ok) {
+          successCount++;
+        } else {
+          errors.push({ uri: g.uri, op, reason: result.reason });
+        }
+      }
+    }
+    setSubmitResult({ errors, success: successCount });
+  };
+
   const propose = () => {
     setProposed(LLM_PROPOSALS.map((p) => ({ ...p, status: "pending" })));
     setProposedShown(true);
   };
   const setProposal = (i, status) => setProposed((ps) => ps.map((p, j) => (j === i ? { ...p, status } : p)));
-  const confirmProposed = (i) => {
+  const confirmProposed = async (i) => {
     const p = proposed[i];
+    // Post as proposal (proposed_by=llm, confirmed_by=ACTOR_ID — AC-14/FR-7).
+    const scope = nodeToScope(p.nodes || [], p.range || "");
+    const atom = {
+      role_id: EDITOR_ROLE_ID,
+      resource_type: p.uri,
+      operation: mapOp(p.ops[0] || "read"),
+      scope,
+      granted_by: ACTOR_ID,
+      proposed_by: "llm",
+      confirmed_by: ACTOR_ID,
+      delegable: true,
+    };
+    await postGrant(atom, ACTOR_ID);
     setGrants((gs) => [...gs, { uri: p.uri, ops: p.ops, nodes: p.nodes, tags: p.tags, range: p.range }]);
     setProposal(i, "confirmed");
   };
@@ -209,9 +332,30 @@ function RoleEditorScreen() {
               </div>
             </div>
             <div className="chs-roledetail__actions">
-              <Button variant="ghost" size="sm">Отмена</Button>
-              <Button variant="primary" size="sm">Запросить применение</Button>
+              <Button variant="ghost" size="sm" onClick={() => setSubmitResult(null)}>Отмена</Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={submitResult === "loading"}
+                onClick={handleSubmit}
+              >
+                {submitResult === "loading" ? "Отправка…" : "Запросить применение"}
+              </Button>
             </div>
+            {submitResult && submitResult !== "loading" && (
+              <div className="chs-submit-result" style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
+                {submitResult.success > 0 && (
+                  <span style={{ color: "var(--chs-color-success, green)" }}>
+                    ✓ {submitResult.success} грант(ов) применено
+                  </span>
+                )}
+                {submitResult.errors.length > 0 && submitResult.errors.map((e, i) => (
+                  <div key={i} style={{ color: "var(--chs-color-danger, red)", marginTop: "var(--chs-space-1)" }}>
+                    ✕ {e.uri} [{e.op}]: {e.reason}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* переключатель режима */}
