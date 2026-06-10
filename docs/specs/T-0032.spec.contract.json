@@ -1,0 +1,142 @@
+{
+  "task_id": "T-0032",
+  "status": "ready",
+  "summary": "Implement Separation-of-Duties (SoD) as queries over existing state: a per-tenant sod_constraint(kind ∈ {static,dynamic}, role_a, role_b|self_record, scope) table; static SoD as a query over effective role_assignment rows; dynamic SoD as a query over the actor_event ledger (attribution by COALESCE(on_behalf_of, actor)); approve/transition as a first-class guarded class enforced via an additive step-3.6 SoD guard inside resolveFor, which on a passing op appends exactly one actor_event row; implement the frozen T-0019 ActorEventReader and ActorEventWriter; close FO-T0019-1 with a no-decrement trigger on actor_event_seq.",
+  "functional": [
+    "FR-1: sod_constraint(kind ∈ {static,dynamic}, role_a, role_b|self_record, scope) is a first-class per-tenant table (migration 027); kind is a closed CHECK set {static,dynamic}",
+    "FR-2: static SoD is a query over EFFECTIVE role_assignment rows (confirmed_by IS NOT NULL ∧ in validity-window ∧ org_scope containment) — violation = same employee_id holds both role_a and role_b within the constraint scope; no new derived state",
+    "FR-3: dynamic SoD is a query over actor_event via the T-0019 read contract; attribution uses the principal COALESCE(on_behalf_of, actor) (actorEventPrincipal); no new approval-state table",
+    "FR-4: the frozen T-0019 ActorEventReader (trail / didPrincipalPerform / rolesThatActed) is IMPLEMENTED by T-0032, replacing notImplementedActorEventReader, without changing the port shape",
+    "FR-5: the frozen T-0019 ActorEventWriter.appendActorEvent is IMPLEMENTED by T-0032 (replacing notImplementedActorEventWriter): append-only single INSERT advancing actor_event_seq under SELECT … FOR UPDATE, validated by the existing validateActorEventInput first",
+    "FR-6: resolveFor gains an additive step-3.6 SoD guard, active iff op ∈ {approve, transition} AND deps.sod is present; a SoD violation returns { denied: true, reason: 'sod_violation' } (fail-closed); absent deps.sod ⇒ step skipped (backward-compatible)",
+    "FR-7: on a passing guarded op the gateway appends EXACTLY ONE actor_event row; on any denial (no_grant / sod_violation / not_found) ZERO rows are written",
+    "FR-8: DSoD-1 self-approval — a principal who submitted object X cannot approve X",
+    "FR-9: DSoD-2 multi-level — approve_L1 ≠ approve_L2: the same principal cannot perform two distinct approve_level values on the same object",
+    "FR-10: static-SoD standalone query — given a candidate (employee, role) assignment, report whether confirming it would create a static-SoD violation against the principal's existing effective assignments",
+    "FR-11: a BEFORE UPDATE trigger on actor_event_seq rejects NEW.next_seq < OLD.next_seq (FO-T0019-1 closed structurally at the DB layer)",
+    "FR-12: src/core/sod.ts exports SodConstraint/SodKind types, the SodSource loader port, the static-SoD query, the dynamic-SoD decision functions, and the guarded-transition writer factory — consumable by grant-resolver.ts and downstream (E4.6) without re-declaration"
+  ],
+  "non_functional": [
+    "NF-1: src/core/sod.ts imports no pg/fs/net/http; all DB access behind injected ports (SodSource, T-0019 ActorEventReader/ActorEventWriter); static/dynamic decision functions are pure (equal inputs ⇒ equal output); Postgres DAO is T-0053",
+    "NF-2: ResolverDeps.sod is OPTIONAL; callers without it compile unchanged and the SoD step is skipped (backward-compatible, mirrors deps.effects)",
+    "NF-3: fail-closed — any doubt (malformed constraint, unreadable ledger, ambiguous attribution) denies the guarded op, never silently allows",
+    "NF-4: no new npm dependencies",
+    "NF-5: single-chokepoint preserved — the SoD guard is inside the one resolveFor core; no second handle→fields path, no second authorization subsystem; ci/checks/single-resolver.sh stays green",
+    "NF-6: grant-lattice.ts, object-handle.ts, actor-event.ts (frozen contract shapes), and migrations/008_grant.sql are NOT edited; grant-resolver.ts import surface preserved additively (only an optional sod?: SodSource on ResolverDeps)",
+    "NF-7: migration numbers ≥ 027 (027 = sod_constraint, 028 = the seq trigger); sod_constraint added to ci/checks/known_tenant_tables.txt and covered by the cross-tenant fitness case",
+    "NF-8: append-only ledger discipline intact — the writer never UPDATE/DELETEs actor_event; the T-0019 immutability triggers and choros_app SELECT,INSERT-only grant are unchanged"
+  ],
+  "out_of_scope": [
+    "Assignment-time block workflow (refusing to confirm a conflicting assignment) and the E4.6 dual-control gate — T-0032 ships the static-SoD query (FR-10), enforcement on the assignment write-path is E4.6 (T-0039)",
+    "role_criticality computation (E4.5 / T-0040) and confirmation_flag (E4.6 / T-0039)",
+    "Postgres DAO for SodSource / ActorEventReader / ActorEventWriter — deferred to T-0053 (this task ships ports + in-memory implementations + migrations only)",
+    "BPMN/engine wiring of the guarded class into Flowable transitions (the engine-side caller); the engine state-mutation guard (T-0028) is the caller, not re-specified here",
+    "Editing grant-lattice.ts, object-handle.ts, actor-event.ts, or migrations/008_grant.sql",
+    "Substitutions/absences SoD interactions (E4.7 / T-0035)",
+    "Any new approval-state or SoD-cache table — SoD is queries-only by construction"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "sod_constraint.kind is a closed CHECK set: a migration-027 row with kind NOT IN ('static','dynamic') is rejected by the DB; the SodKind TS type has exactly those two members",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Static-SoD detection: given a static constraint (role_a, role_b, scope) and one employee holding effective (confirmed, in-window, scope-overlapping) assignments to BOTH role_a and role_b, the static-SoD query reports a violation; holding only one of the pair reports none",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Static-SoD respects effectiveness: an assignment with confirmed_by IS NULL (proposal), or outside its validity window, or whose org_scope does not intersect the constraint scope, does NOT count toward a static-SoD violation",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "DSoD-1 self-approval blocked: didPrincipalPerform(ref,'submit',P) true at an approve op by principal P ⇒ resolveFor returns { denied: true, reason: 'sod_violation' }; a different principal approving is permitted (grant permitting)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "DSoD-2 multi-level: the principal who performed approve at level n is blocked from performing approve at level m≠n on the same object; the same principal repeating the same level, or distinct principals at distinct levels, do not collide",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "on_behalf_of attribution: an act performed by X on_behalf_of P is attributed to P (COALESCE(on_behalf_of, actor) = P) in every SoD query; X's own self-acts are attributed to X; two acts attributed to the same principal collide regardless of performer",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Delegated-act collision: P submits directly, then X approves on_behalf_of P on the same object ⇒ dynamic-SoD blocks (both attributed to P); X approving on its own behalf (no on_behalf_of) does not collide with P's submit",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Guarded class gating: the SoD guard (step 3.6) runs in resolveFor IFF op ∈ {approve, transition} AND deps.sod is present; op ∈ {read, create, update, delete, invoke} never enters the SoD step",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "SoD denial shape: a SoD violation on a guarded op returns { denied: true, reason: 'sod_violation' }; the reason is distinct from 'no_grant', 'cross_tenant', 'not_found', and 'no_effect_grant'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Exactly-one-row on pass, zero on deny: a guarded op that passes covering-grant AND SoD appends exactly one actor_event row (matching actor, on_behalf_of, role_at_event, event, approve_level); a guarded op denied for any reason (no_grant / sod_violation / not_found) appends zero actor_event rows",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Backward-compat: resolveFor without deps.sod behaves exactly as pre-T-0032 for approve/transition ops (covering-grant decision only, no SoD step); all existing resolver tests pass unchanged",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "ActorEventReader implemented: trail(ref) returns the object's rows ORDER BY seq; didPrincipalPerform(ref,event,principal) matches on COALESCE(on_behalf_of, actor); rolesThatActed(ref,events?) returns the distinct role_at_event set (optionally verb-filtered). The three replace notImplementedActorEventReader without changing the frozen port shape",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "ActorEventWriter implemented append-only: appendActorEvent inserts exactly one actor_event row, assigning seq from actor_event_seq under SELECT … FOR UPDATE (counter advanced by +1), with no UPDATE/DELETE of any prior actor_event row; it replaces notImplementedActorEventWriter without changing the frozen port shape",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "Writer precondition: appendActorEvent validates its input via the existing validateActorEventInput BEFORE the INSERT and rejects (no row written) on any validation failure (unknown_verb, approve_level_required/forbidden/lt_1, object_component_mismatch, missing_actor, missing_role)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "sod_constraint is a T-0013 tenant table: migration 027 creates choros.sod_constraint with tenant_id-leading PK, ENABLE+FORCE RLS, a default-DENY isolation policy on choros.tenant_id, a DML grant to choros_app, and the table listed in ci/checks/known_tenant_tables.txt",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "FO-T0019-1 closed: a BEFORE UPDATE trigger on actor_event_seq raises (rejects the UPDATE) when NEW.next_seq < OLD.next_seq; advancing next_seq forward succeeds; an attempt by choros_app to roll next_seq backward fails",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "Cross-tenant isolation for sod_constraint: a sod_constraint row under tenant A is invisible (0 rows) to a session bound to tenant B; the cross_tenant.test.ts case (KNOWN_TENANT_TABLES-driven, appUrl()/migratorUrl() role discipline) covers it",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "Single-chokepoint preserved: ci/checks/single-resolver.sh remains green after T-0032's commit; no second handle→fields path and no second authorization subsystem is introduced; the SoD decision lives in src/core/sod.ts called from the one resolveFor core",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "Frozen surfaces intact: grant-lattice.ts, object-handle.ts, actor-event.ts, and migrations/008_grant.sql carry no edits in T-0032's commit; grant-resolver.ts import surface (resolveFor, makeGrantResolver, projectFields, visibleFields, refToScope) is preserved and ResolverDeps gains only an optional sod?: SodSource; tsc --noEmit passes",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-20",
+      "text": "Purity & isolation of sod.ts: src/core/sod.ts imports no pg/fs/net/http; the static/dynamic decision functions are deterministic (twice with same inputs ⇒ deep-equal output); all DB access is behind the injected SodSource/ActorEventReader/ActorEventWriter ports",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0032-sod-constraints.spec.md"
+}
