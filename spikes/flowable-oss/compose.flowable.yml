@@ -32,11 +32,12 @@ services:
       # default admin for REST basic-auth (no enterprise key — RL-3)
       FLOWABLE_REST_APP_ADMIN_USER_ID: admin
       FLOWABLE_REST_APP_ADMIN_PASSWORD: test
-      # history cleanup enabled in OSS artifact (AC-4/5)
+      # history cleanup enabled in OSS artifact (AC-4/5). Cleanup is a SCHEDULED timer-job;
+      # the auto-cron is set rare (yearly) so it never fires mid-seed — we drive it
+      # deterministically via REST (move the *-history-cleanup timer-job to executable)
+      # in run.sh when we want to MEASURE throughput.
       FLOWABLE_ENABLE_HISTORY_CLEANING: "true"
-      # run cleanup frequently so the immediate trigger has a near cycle; we also
-      # drive deletion directly via the management API in run.sh
-      FLOWABLE_HISTORY_CLEANING_CYCLE: "0 0/1 * * * ?"
+      FLOWABLE_HISTORY_CLEANING_CYCLE: "0 0 0 1 1 ?"
       FLOWABLE_HISTORY_CLEANING_AFTER: "1"
     ports:
       - "${FLOWABLE_REST_PORT:-18080}:8080"
