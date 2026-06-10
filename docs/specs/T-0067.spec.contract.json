@@ -1,0 +1,142 @@
+{
+  "task_id": "T-0067",
+  "status": "ready",
+  "summary": "Реализовать бридж External Task ↔ JobStore: poll-цикл Flowable fetchAndLock → enqueue в JobStore (idempotency_key=task.id) → внешний воркер делает работу → complete/fail в JobStore → completeTask/failTask в Flowable — полный pull-цикл с outbox-доставкой.",
+  "functional": [
+    "FR-1: Poll Flowable fetchAndLock по сконфигурированным топикам и enqueue каждого ExternalTask в pgJobStore с idempotency_key=task.id",
+    "FR-2: Topic-маппинг 1:1 по строковому значению (Flowable topic = JobStore topic); конфигурационный override-map опционален",
+    "FR-3: assertVariableValue на всех переменных ExternalTask перед enqueue (FF-G3 Layer C); провал guard — job не создаётся, инцидент, продолжение",
+    "FR-4: По завершению job (complete) — вызвать FlowableClient.completeTask; NOT_FOUND → idempotentSuccess, ENGINE_UNAVAILABLE → outbox retry",
+    "FR-5: По провалу job (fail) — вызвать FlowableClient.failTask; NOT_FOUND → idempotentSuccess",
+    "FR-6: Связь jobId ↔ externalTaskId хранится персистентно и восстанавливается после рестарта бриджа",
+    "FR-7: deliver(row: OutboxRow) реализует DispatchResult-контракт T-0062; неизвестный eventType → { ok: true } (no-op)",
+    "FR-8: Deliver для worker_lock_expired (T-0063) — не бросает, возвращает валидный DispatchResult",
+    "FR-9: Параллельный запуск двух бридж-инстансов безопасен (idempotency_key + Flowable lock)",
+    "FR-10: Poll-loop паттерн — setInterval с инъектируемыми часами и setIntervalFn; stop() для graceful shutdown"
+  ],
+  "non_functional": [
+    "NF-1: Zero new npm dependencies",
+    "NF-2: Аддитивность — externalWorker.ts и существующие сигнатуры не изменяются",
+    "NF-3: FF-G3 compliance — assertVariableValue + resolveFor в bridge-файлах; flowable-bridge-contract.sh exit 0",
+    "NF-4: Инъектируемые зависимости (FlowableClient, pgJobStore, pgOutboxStore, Clock, setIntervalFn)",
+    "NF-5: Tenant isolation — GUC choros.tenant_id установлен для всех операций JobStore/OutboxStore; cross_tenant.test.ts зелёный",
+    "NF-6: Миграции ≥030 если нужны; новые таблицы в known_tenant_tables.txt + cross_tenant case"
+  ],
+  "out_of_scope": [
+    "T-0068: lifecycle инстанса + audit_event/actor_event (onDispatched seam зарезервирован, не заполняется)",
+    "E8.2: деплой BPMN из модельера",
+    "E1.4: auth эндпоинтов воркера (Keycloak)",
+    "Agent Task (Stage 2): агентский рантайм не входит в бридж",
+    "User Task / inbox (E7)",
+    "Шардирование / multi-instance бриджа на уровне архитектуры"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "runBridgeOnce с mock-FlowableClient (2 ExternalTask, topic='invoice-process') создаёт ровно 2 job с topic='invoice-process' в JobStore",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Повторный runBridgeOnce с теми же ExternalTask ID — JobStore содержит по-прежнему 2 job (идемпотентность, 0 дублей)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "ExternalTask с переменной-RecordRef в variables → job не создаётся для этого task; остальные tasks в batch обрабатываются",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "job.topic == externalTask.topic; job.variables == externalTask.variables (без трансформации)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "После enqueue и simulate-restart: по jobId восстанавливается externalTaskId — совпадает с исходным",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "После JobStore.complete() → { ok: true }: FlowableClient.completeTask вызван ровно 1 раз с корректными externalTaskId, workerId, payload",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "completeTask → NOT_FOUND: outboxDispatcher получает { ok: false, idempotentSuccess: true } → строка в dispatched, не в dead",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "completeTask → ENGINE_UNAVAILABLE: строка в pending/backoff; после maxAttempts → dead",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Bridge-файл содержит assertVariableValue и resolveFor; flowable-bridge-contract.sh exit 0 (FF-G3)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "После JobStore.fail() → { ok: true }: FlowableClient.failTask вызван ровно 1 раз с корректными аргументами",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "failTask → NOT_FOUND: idempotentSuccess: true → dispatched",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "deliver(row) с event_type='worker_lock_expired': возвращает валидный DispatchResult, нет unhandled rejection",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "startBridgePollLoop с инъектируемым setIntervalFn: первый проход через один интервал, не немедленно",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "stop() прекращает дальнейшие вызовы FlowableClient; нет unhandledRejection после stop",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "fetchAndLock → ENGINE_UNAVAILABLE: poll-loop продолжает работу на следующем интервале без краша",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "ci/checks/flowable/bridge-e2e-smoke.sh: deploy → start → runBridgeOnce → job в JobStore → /external-task/:id/complete → deliver → completeTask в Flowable → инстанс завершён; exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "В E2E smoke: job.idempotency_key = externalTask.id; повторный poll до complete → 0 новых job",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "В E2E smoke: complete с payload { approved: true } проходит FF-G3 (assertVariableValue + resolveFor присутствуют; flowable-bridge-contract.sh exit 0)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "cross_tenant.test.ts зелёный после T-0067; если добавлена новая таблица — в known_tenant_tables.txt",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-20",
+      "text": "tsc --noEmit exit 0; eslint src/ exit 0; vitest run — 0 регрессий существующих тестов",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-21",
+      "text": "node migrations/run.mjs дважды: второй прогон 'nothing to apply' (если есть миграции ≥030)",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0067-external-task-mapping.spec.md"
+}
