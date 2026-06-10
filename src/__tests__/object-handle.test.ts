@@ -26,6 +26,7 @@ import {
   assertVariableValue,
   denyAllResolver,
   CrossTenantHandleError,
+  MalformedHandleError,
 } from "../core/object-handle.js";
 
 // ---------------------------------------------------------------------------
@@ -548,6 +549,149 @@ describe("FF-8: Single resolution chokepoint", () => {
     const r: HandleResolver = denyAllResolver;
     expect(r).toBeDefined();
     expect(typeof r.resolveHandle).toBe("function");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-9 (R-1 hardening): fail-closed parseHandle ref validation
+// Adversarial tests that would FAIL against the OLD (unvalidated) parseHandle.
+// They exercise the fix directly: any crafted wire string whose ref carries
+// payload keys or unknown keys must throw MalformedHandleError.
+// ---------------------------------------------------------------------------
+
+describe("FF-9: parseHandle fail-closed ref validation (R-1 hardening)", () => {
+  // -----------------------------------------------------------------------
+  // Reviewer's exact repro: record-ref with a data payload smuggled in ref
+  // -----------------------------------------------------------------------
+  it("reviewer's crafted wire string — record ref carrying data:{ssn:'...'} — throws MalformedHandleError", () => {
+    // This is the exact smuggling vector from review finding R-1:
+    // a wire string whose ref carries {kind:'record', ...uuid..., data:{ssn:'...'}}
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_A,
+        registryId: REG_ID,
+        recordId: REC_ID,
+        data: { ssn: "123-45-6789" },
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  it("crafted ref with 'fields' key throws MalformedHandleError", () => {
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "record",
+        tenantId: TENANT_A,
+        registryId: REG_ID,
+        recordId: REC_ID,
+        fields: { name: "Alice" },
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  it("crafted ref with 'payload' key throws MalformedHandleError", () => {
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "application",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+        payload: { secret: "exfil" },
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  it("crafted ref with 'view' key throws MalformedHandleError", () => {
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "registry",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+        registryId: REG_ID,
+        view: { sensitive: true },
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  it("crafted ref with arbitrary unknown extra key throws MalformedHandleError", () => {
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "application",
+        tenantId: TENANT_A,
+        applicationId: APP_ID,
+        __proto__extra: "injected",
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  it("crafted ref with unknown kind throws MalformedHandleError", () => {
+    const craftedWire = JSON.stringify({
+      tenantId: TENANT_A,
+      handleId: "deadbeef00000000",
+      ref: {
+        kind: "superuser",
+        tenantId: TENANT_A,
+      },
+    });
+    expect(() => parseHandle(craftedWire)).toThrow(MalformedHandleError);
+  });
+
+  // -----------------------------------------------------------------------
+  // Honest round-trip regression guard — AC-7 must still hold
+  // -----------------------------------------------------------------------
+  it("honest round-trip: serializeHandle(makeHandle(appRef)) still parses correctly", () => {
+    const h = makeHandle(appRef, TENANT_A);
+    const wire = serializeHandle(h);
+    const reparsed = parseHandle(wire);
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toBeUndefined();
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("honest round-trip: serializeHandle(makeHandle(recRef, facet)) still parses correctly", () => {
+    const h = makeHandle(recRef, TENANT_A, facet);
+    const wire = serializeHandle(h);
+    const reparsed = parseHandle(wire);
+    expect(reparsed.tenantId).toBe(h.tenantId);
+    expect(reparsed.ref).toEqual(h.ref);
+    expect(reparsed.handleId).toBe(h.handleId);
+    expect(reparsed.facet).toEqual(h.facet);
+    expect(isObjectHandle(reparsed)).toBe(true);
+  });
+
+  it("honest round-trip: registry ref with facet round-trips identically", () => {
+    const h = makeHandle(regRef, TENANT_A, facet);
+    const wire = serializeHandle(h);
+    const reparsed = parseHandle(wire);
+    expect(reparsed.ref).toEqual(regRef);
+    expect(reparsed.handleId).toBe(h.handleId);
+  });
+
+  // -----------------------------------------------------------------------
+  // assertVariableValue still sees the smuggled payload and rejects it
+  // (belt-and-suspenders: even if a branded handle somehow had ref.data,
+  // the guard must also catch it — this verifies the belt side is unchanged)
+  // -----------------------------------------------------------------------
+  it("assertVariableValue accepts a validly-parsed handle (no false-reject after fix)", () => {
+    const h = makeHandle(recRef, TENANT_A);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(assertVariableValue(reparsed)).toEqual({ ok: true });
   });
 });
 

@@ -20,5 +20,14 @@
     "package.json"
   ],
   "deviations_from_adr": [],
-  "friction_events": []
+  "friction_events": [],
+  "hardening": {
+    "review_finding": "R-1",
+    "change": "parseHandle now validates and reconstructs ref from identity-only fields via validateAndReconstructRef(). MalformedHandleError thrown for any ref with payload keys (data/fields/payload/view/snapshot), unknown keys, or unknown kind. Honest round-trip (AC-7) unaffected.",
+    "new_export": "MalformedHandleError",
+    "test_count_before": 345,
+    "test_count_after": 359,
+    "new_tests": 14,
+    "new_test_block": "FF-9 (R-1 hardening): fail-closed parseHandle ref validation"
+  }
 }

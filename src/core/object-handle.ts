@@ -130,6 +130,19 @@ export class CrossTenantHandleError extends Error {
   }
 }
 
+/**
+ * Thrown by parseHandle when the deserialized ref carries unexpected/extra keys
+ * or a record-payload (data/fields/payload/view), i.e. the wire string does not
+ * represent a well-formed, identity-only ResourceRef.
+ */
+export class MalformedHandleError extends Error {
+  constructor(message?: string) {
+    super(message ?? "malformed handle: ref fails identity-only shape validation");
+    this.name = "MalformedHandleError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -245,8 +258,108 @@ export function serializeHandle(h: ObjectHandle): string {
 }
 
 /**
+ * Validates a raw (deserialized) ref object and reconstructs it from ONLY the
+ * known identity fields for its kind. This is fail-closed: any unknown key,
+ * any payload-carrying key (data/fields/payload/view), or an unknown kind causes
+ * a MalformedHandleError. The reconstructed ref contains exactly the same fields
+ * that makeHandle would accept — no more, no less.
+ *
+ * This guarantees parseHandle cannot smuggle a record payload past the brand.
+ */
+function validateAndReconstructRef(raw: Record<string, unknown>): ResourceRef {
+  // Reject any ref that carries record-payload keys (the smuggling vector)
+  const payloadKeys = ["data", "fields", "payload", "view", "snapshot"] as const;
+  for (const k of payloadKeys) {
+    if (k in raw) {
+      throw new MalformedHandleError(
+        `malformed handle: ref carries forbidden payload key "${k}"`,
+      );
+    }
+  }
+
+  const kind = raw["kind"];
+
+  if (kind === "application") {
+    const tenantId = raw["tenantId"];
+    const applicationId = raw["applicationId"];
+    if (typeof tenantId !== "string" || typeof applicationId !== "string") {
+      throw new MalformedHandleError(
+        "malformed handle: application ref missing required identity fields",
+      );
+    }
+    // Reject extra keys beyond the known set
+    const knownKeys = new Set(["kind", "tenantId", "applicationId"]);
+    for (const k of Object.keys(raw)) {
+      if (!knownKeys.has(k)) {
+        throw new MalformedHandleError(
+          `malformed handle: application ref has unexpected key "${k}"`,
+        );
+      }
+    }
+    return { kind: "application", tenantId, applicationId };
+  }
+
+  if (kind === "registry") {
+    const tenantId = raw["tenantId"];
+    const applicationId = raw["applicationId"];
+    const registryId = raw["registryId"];
+    if (
+      typeof tenantId !== "string" ||
+      typeof applicationId !== "string" ||
+      typeof registryId !== "string"
+    ) {
+      throw new MalformedHandleError(
+        "malformed handle: registry ref missing required identity fields",
+      );
+    }
+    const knownKeys = new Set(["kind", "tenantId", "applicationId", "registryId"]);
+    for (const k of Object.keys(raw)) {
+      if (!knownKeys.has(k)) {
+        throw new MalformedHandleError(
+          `malformed handle: registry ref has unexpected key "${k}"`,
+        );
+      }
+    }
+    return { kind: "registry", tenantId, applicationId, registryId };
+  }
+
+  if (kind === "record") {
+    const tenantId = raw["tenantId"];
+    const registryId = raw["registryId"];
+    const recordId = raw["recordId"];
+    if (
+      typeof tenantId !== "string" ||
+      typeof registryId !== "string" ||
+      typeof recordId !== "string"
+    ) {
+      throw new MalformedHandleError(
+        "malformed handle: record ref missing required identity fields",
+      );
+    }
+    const knownKeys = new Set(["kind", "tenantId", "registryId", "recordId"]);
+    for (const k of Object.keys(raw)) {
+      if (!knownKeys.has(k)) {
+        throw new MalformedHandleError(
+          `malformed handle: record ref has unexpected key "${k}"`,
+        );
+      }
+    }
+    return { kind: "record", tenantId, registryId, recordId };
+  }
+
+  throw new MalformedHandleError(
+    `malformed handle: unknown ref kind "${String(kind)}"`,
+  );
+}
+
+/**
  * Parses a serialized handle string back to an ObjectHandle.
  * Re-brands the parsed object; parseHandle(serializeHandle(h)) deep-equals h.
+ *
+ * Fail-closed: the ref is validated and reconstructed from identity-only fields.
+ * Any unknown/extra key or payload-carrying key (data/fields/payload/view) on
+ * the ref throws MalformedHandleError. A handle produced by
+ * serializeHandle(makeHandle(...)) always round-trips correctly (AC-7).
  */
 export function parseHandle(s: string): ObjectHandle {
   const parsed = JSON.parse(s) as Record<string, unknown>;
@@ -262,9 +375,13 @@ export function parseHandle(s: string): ObjectHandle {
   if (typeof handleId !== "string") {
     throw new Error("parseHandle: missing or invalid handleId");
   }
-  if (ref === null || typeof ref !== "object") {
+  if (ref === null || typeof ref !== "object" || Array.isArray(ref)) {
     throw new Error("parseHandle: missing or invalid ref");
   }
+
+  // Validate and reconstruct ref from identity fields only — fail-closed.
+  // This is the fix for the payload-smuggling vulnerability (R-1).
+  const validatedRef = validateAndReconstructRef(ref as Record<string, unknown>);
 
   const typedFacet: Facet | undefined =
     facet !== undefined && facet !== null ? (facet as Facet) : undefined;
@@ -273,7 +390,7 @@ export function parseHandle(s: string): ObjectHandle {
     Object.assign(Object.create(null) as object, {
       [_RUNTIME_BRAND]: true,
       tenantId,
-      ref: ref as ResourceRef,
+      ref: validatedRef,
       handleId,
       ...(typedFacet !== undefined ? { facet: typedFacet } : {}),
     }),
