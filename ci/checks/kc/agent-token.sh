@@ -7,14 +7,15 @@ TOKEN_URL="http://localhost:${PORT}/realms/${REALM}/protocol/openid-connect/toke
 
 echo "[FF-4] Requesting agent client_credentials token for agent-orchestrator..."
 
-RESPONSE=$(curl -sf -w "\n%{http_code}" -X POST "$TOKEN_URL" \
+HTTP_STATUS=$(curl -s -X POST "$TOKEN_URL" \
   -d "grant_type=client_credentials" \
   -d "client_id=agent-orchestrator" \
   -d "client_secret=agent-orchestrator-dev-secret" \
+  -o /tmp/choros_agent_resp.json \
+  -w "%{http_code}" \
   2>/dev/null)
 
-HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+BODY=$(cat /tmp/choros_agent_resp.json 2>/dev/null || echo "")
 
 if [[ "$HTTP_STATUS" != "200" ]]; then
   echo "[FF-4] FAIL: HTTP $HTTP_STATUS" >&2

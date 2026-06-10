@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # FF-1 (live-kc): Poll GET /health/ready until HTTP 200 or timeout (120 s).
+# In Keycloak 25 start-dev mode, the management interface (health) runs on port 9000
+# (KEYCLOAK_MGMT_PORT, default 9000) while the main server runs on KEYCLOAK_PORT (8180).
 set -euo pipefail
-PORT="${KEYCLOAK_PORT:-8180}"
+MGMT_PORT="${KEYCLOAK_MGMT_PORT:-9000}"
 TIMEOUT=120
 INTERVAL=5
 ELAPSED=0
-URL="http://localhost:${PORT}/health/ready"
+URL="http://localhost:${MGMT_PORT}/health/ready"
 
 echo "[FF-1] Waiting for Keycloak readiness at $URL (timeout: ${TIMEOUT}s)..."
 
