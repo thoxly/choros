@@ -1,7 +1,7 @@
 {
   "task_id": "T-0015",
   "verdict": "changes_requested",
-  "ci_seen": { "green": true },
+  "ci_seen": { "green": true, "total": 375, "passed": 375 },
   "findings": [
     {
       "id": "R-1",
@@ -13,28 +13,38 @@
     },
     {
       "id": "R-2",
-      "severity": "blocking",
+      "severity": "resolved",
       "axis": 6,
-      "location": "src/core/object-handle.ts:386-387,394-395 (parseHandle facet handling)",
-      "issue": "SAME OPACITY-BYPASS CLASS AS R-1, ON THE SIBLING FIELD — NOT CLOSED by the hardening. parseHandle hardens `ref` but still casts `facet` WHOLESALE: `const typedFacet = facet !== undefined && facet !== null ? (facet as Facet) : undefined;` and assigns it onto the branded handle with no shape validation. Repro (verified live, rt-choros 2026-06-10): wire string `{tenantId,handleId,ref:{kind:'record',...valid uuids...},facet:{fields:['a'],data:{ssn:'in-facet'}}}` parses into a validly-BRANDED ObjectHandle whose `facet` carries `{ssn:'in-facet'}`; assertVariableValue(handle) returns {ok:true} (short-circuits on the brand exactly as in R-1); and serializeHandle re-emits the smuggled ssn intact across the wire. This is the identical cross-trust-boundary opacity bypass R-1 was filed to close — the fix shut the `ref` door and left the `facet` door open. T-0021/T-0027 (wire-form consumers) inherit it. The hardening therefore does NOT fully close the finding it claims to.",
-      "suggestion": "Apply the same fail-closed reconstruction to `facet`: if present, validate it is exactly `{ fields: string[] }` (fields is an array of strings, no other keys), else throw MalformedHandleError. Add an adversarial FF-9 test: a wire facet carrying `data`/extra keys must throw, and the honest `{fields:[...]}` facet must still round-trip."
+      "resolved_by": "4df5c4b",
+      "location": "src/core/object-handle.ts:363-389 (validateAndReconstructFacet) + 431-438 (parseHandle facet step)",
+      "issue": "RESOLVED-BY-4df5c4b. Prior finding: parseHandle cast `facet` wholesale, so a wire facet `{fields:['a'],data:{ssn}}` rode into a branded handle. Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX: parseHandle now routes facet through validateAndReconstructFacet(), which rejects any key other than `fields`, any non-array `fields`, and any non-string element, throwing MalformedHandleError. Adversarial re-probe (facet with data/payload/view keys, object element in fields, non-array fields, facet:null) is rejected/normalized in every case; the honest `{fields:[...]}` facet still round-trips (AC-7). The R-2 facet-payload vector is closed.",
+      "suggestion": "Resolved. Keep validateAndReconstructFacet as the single facet-deserialization chokepoint."
     },
     {
       "id": "R-3",
+      "severity": "resolved",
+      "axis": 6,
+      "resolved_by": "4df5c4b",
+      "location": "src/core/object-handle.ts:440-444 (parseHandle routes through makeHandle)",
+      "issue": "RESOLVED-BY-4df5c4b. Prior finding: parseHandle did not enforce makeHandle's cross-tenant binding, so a wire ref whose tenantId != envelope tenantId minted a cross-tenant handle. Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX: parseHandle now feeds the validated (ref, tenantId, facet) into makeHandle, which throws CrossTenantHandleError when any tenant-scoped ref component != envelope tenantId. Adversarial re-probe (record/registry/application wire ref with mismatched tenantId) throws CrossTenantHandleError in every case, at parity with makeHandle. The generalization (parseHandle ⊆ makeHandle) holds for the wire-structural surface: every parsed component is forced through makeHandle, so parseHandle returns only handles makeHandle could have produced. R-3 closed.",
+      "suggestion": "Resolved. Keep parseHandle routing all components through makeHandle so future makeHandle invariants are inherited automatically."
+    },
+    {
+      "id": "R-4",
       "severity": "blocking",
       "axis": 6,
-      "location": "src/core/object-handle.ts:364-399 (parseHandle) vs 212-241 (makeHandle)",
-      "issue": "STRICTNESS GAP — parseHandle is NOT at least as strict as makeHandle (an explicit acceptance requirement of this hardening). makeHandle enforces tenant binding: if any tenant-scoped ref component !== supplied tenantId it throws CrossTenantHandleError (AC-6). parseHandle performs NO such check — verified live (rt-choros 2026-06-10): wire `{tenantId:T, ref:{kind:'record', tenantId:'<other-tenant>', registryId, recordId}}` is ACCEPTED, minting a branded handle whose ref.tenantId differs from the envelope tenantId. makeHandle throws on the identical input; parseHandle does not. This lets untrusted wire input deserialize a cross-tenant handle that construction would refuse — the wire path becomes a strictly weaker minter than makeHandle, which is precisely the property the hardening was meant to guarantee.",
-      "suggestion": "After validateAndReconstructRef, run the same tenant-binding check makeHandle uses (refTenantIds(validatedRef) every component === envelope tenantId, else throw CrossTenantHandleError or MalformedHandleError). Add an FF-9 test asserting a cross-tenant wire ref throws and parity with makeHandle's rejection."
+      "location": "src/core/object-handle.ts:231-239 (makeHandle brand assignment) + 467-470 (isObjectHandle) + 526 (assertVariableValue brand short-circuit)",
+      "issue": "NEW SIBLING — opacity bypass the parse⊆make generalization does NOT touch, because the vector is the IN-MEMORY brand, not the wire. The runtime brand `_RUNTIME_BRAND` is attached via Object.assign as an ENUMERABLE own symbol property. Enumerable own symbols are copied by object spread and Object.assign. Therefore `{ ...genuineHandle }` produces a NON-frozen object that STILL carries the brand and STILL passes isObjectHandle — i.e. the brand IS forgeable outside the module (not by inventing the symbol, but by copying it off any legitimately-held handle). An attacker/connector then attaches a record payload onto the spread-clone and it rides past the runtime opacity edge. Repro (verified live, rt-choros 2026-06-10): const h=makeHandle({kind:'record',tenantId:T,registryId:T,recordId:T},T); const forged={...h}; forged.data={ssn:'123-45-6789'}; isObjectHandle(forged)===true; assertVariableValue(forged)==={ok:true}; forged now has a .data accessor carrying record content. This directly violates the brand's own documented contract (line 64-66 'un-forgeable outside this module'), FR-2/AC-2 ('the handle exposes no field accessor', 'branded/nominal opaque type'), and the runtime opacity invariant (assertVariableValue line 526 trusts the brand and short-circuits ok:true BEFORE any record-shape inspection — identical short-circuit R-1/R-2 exploited). `{...handle, ...}` is an everyday clone idiom in engine/connector/EL code, so this is not merely theoretical: any spread of a handle yields a payload-capable carrier the variable guard blesses. The existing suite is green only because no test asserts brand non-enumerability / spread-clone rejection.",
+      "suggestion": "Make the brand a NON-ENUMERABLE own property so spread / Object.assign / JSON do not copy it: Object.defineProperty(h, _RUNTIME_BRAND, { value: true, enumerable: false, writable: false, configurable: false }) before freezing (and keep the explicit identity keys enumerable for serializeHandle's field reads, which read named props directly, not via enumeration — round-trip unaffected). Locally-verified: with a non-enumerable brand, `isObjectHandle({...h})===false` and Object.assign({},h) is not a handle, while genuine makeHandle/parseHandle handles still pass. Add an FF-9 test: a spread-clone of a real handle (with a .data attached) must fail isObjectHandle AND assertVariableValue must reject it; genuine handles still pass. Apply in both makeHandle and (inherited via makeHandle) parseHandle."
     }
   ],
   "acceptance_coverage": [
     { "ac": "AC-1", "covered": true },
-    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-2", "covered": false, "note": "R-4: brand is enumerable, so a spread-clone forges the brand and can carry a .data accessor — violates 'no payload accessor' / 'un-forgeable nominal brand'. Re-true once the brand is non-enumerable." },
     { "ac": "AC-3", "covered": true },
     { "ac": "AC-4", "covered": true },
     { "ac": "AC-5", "covered": true },
-    { "ac": "AC-6", "covered": false },
+    { "ac": "AC-6", "covered": true, "note": "R-3 resolved: parseHandle now inherits makeHandle's cross-tenant rejection." },
     { "ac": "AC-7", "covered": true },
     { "ac": "AC-8", "covered": true },
     { "ac": "AC-9", "covered": true },
