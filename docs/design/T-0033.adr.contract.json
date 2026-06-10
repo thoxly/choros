@@ -1,0 +1,120 @@
+{
+  "task_id": "T-0033",
+  "status": "ready",
+  "decision": "Value-aware masking is folded into the existing single T-0021 projection by (a) a NEW pure additive module src/core/data-classification.ts owning the DataClass enum (public|internal|confidential|restricted), the closed Transform vocabulary (reveal|partial|redact|hash|drop), the ClassificationSource injected port (mirrors GrantSource; in-memory now, Postgres RLS DAO in T-0053), the TypedFacet={fields,schemaVersion} additive widening of T-0015 Facet, the (class x clearance)->transform selector selectTransform, the pure applyTransform, the masking fold maskFields, the from->to guard evaluateReclassification, and the ClassificationAuditObligation shape; and (b) surgical ADDITIVE edits to src/core/grant-resolver.ts: ResolverDeps gains optional classifications?: ClassificationSource and projectFields gains an optional 4th MaskContext param, so resolveFor's single projection step calls projectFields(raw, vis, ctx) when a source is present (legacy 2-arg behaviour when absent) -- still ONE projection, ONE core, no second handle->fields export. data_classification migration is number 017 (run-seam: 011/012=T-0116, 013-016=T-0017), per-tenant (tenant_id, resource_type, facet_field, facet_schema_version, class) with PK (tenant_id, resource_type, facet_field, facet_schema_version), CHECK on the closed class set, ENABLE+FORCE RLS, tenant-isolation policy, choros_app DML grant, appended to known_tenant_tables.txt, NO cross-table FK (resource_type is a kind and facet_field is a JSONB key name -- no relational target; mirrors 008_grant.role_id deferred-FK). Mask is value-aware: partial/redact/hash yield a PRESENT transformed value; drop omits the key (the old all-or-nothing maximal mask). Selection is (class x clearance) derived from covering grant rows, never by field name and never via a parallel field-ACL store. Fail-closed: missing rows / version mismatch / unknown class / null clearance all resolve to maximal masking, never widened to whole-resource. Reclassification is a guarded transition/approve op via resolveFor, direction-aware (down==widening==privileged). FROZEN-FILE TENSION resolved: object-handle.ts and grant-lattice.ts stay byte-frozen; the coder MUST drop grant-resolver.ts from mutation-gateway-isolation.sh G6-additive FROZEN_EXPORTS so the legitimate additive masking edit lands, preserving every G1/G2/G6 isolation invariant and the resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields import surface (FE-W23-0008).",
+  "rejected_alternatives": [
+    {"option": "A second projection function maskProjectFields parallel to projectFields.", "why_not": "Opens a second handle->fields edge -> single-resolver.sh red; human/agent divergence becomes writable. The fold must be the one function (AC-7, non-negotiable)."},
+    {"option": "Edit object-handle.ts so Facet carries schemaVersion + class.", "why_not": "Breaks the frozen-module invariant (grant-resolver-isolation.sh Check 3) and ripples through parseHandle/serializeHandle wire validation. TypedFacet as an additive widening in the new module is non-breaking."},
+    {"option": "Add a class lattice kind to grant-lattice.ts / a second authority subsystem for clearance.", "why_not": "NF-2: lattice math stays in T-0018; a second authority subsystem is exactly what grant-resolver-isolation.sh Check 2 forbids. Clearance is derived from existing grant rows, not a new algebra."},
+    {"option": "FK (tenant_id, resource_type, facet_field) -> registry_def.", "why_not": "Not expressible: resource_type is a kind, facet_field is a JSONB key name, not a row id. An impossible FK fails to apply = BUILD bounce (T-0017 lesson). Logical descriptor, no FK -- like 008_grant.role_id."},
+    {"option": "Bake an egress/allowed_endpoint column into data_classification.", "why_not": "S-1: egress_policy is T-0041's table; T-0033 only fixes class as the join axis (AC-14). Pre-baking egress couples two tasks and pre-empts T-0041's schema."},
+    {"option": "Mask by field name (hard-coded password->redact).", "why_not": "AC-6 forbids per-field-name transforms; selection is (class x grant). Field-name rules would be a parallel non-rights-derived store."},
+    {"option": "Store masking decisions / clearance in a field_visibility table.", "why_not": "FR-8 / AC-8: a parallel field-ACL store is banned; decision is grant-rows + data_classification only."},
+    {"option": "Reversible encryption/tokenization for hash with key custody.", "why_not": "Out of scope per spec 6-A #12 (gold-plating); hash is a pure non-reversible digest, no key management."}
+  ],
+  "object_model": [
+    {"entity": "data_classification (migrations/017_data_classification.sql)", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (PK col 1)"},
+      {"name": "resource_type", "type": "text NOT NULL (T-0018 ResourceType; logical, NO FK)"},
+      {"name": "facet_field", "type": "text NOT NULL (record-schema field name; logical, NO FK)"},
+      {"name": "facet_schema_version", "type": "integer NOT NULL (registry record-schema version classified)"},
+      {"name": "class", "type": "text NOT NULL CHECK in ('public','internal','confidential','restricted')"},
+      {"name": "created_at", "type": "bigint NOT NULL"},
+      {"name": "updated_at", "type": "bigint NOT NULL"},
+      {"name": "PRIMARY KEY", "type": "(tenant_id, resource_type, facet_field, facet_schema_version)"}
+    ]},
+    {"entity": "DataClass (src/core/data-classification.ts) -- shared axis, AC-14", "fields": [
+      {"name": "DataClass", "type": "\"public\" | \"internal\" | \"confidential\" | \"restricted\" (string-literal union, ordered most->least visible)"},
+      {"name": "DATA_CLASS_ORDER", "type": "readonly DataClass[]"}
+    ]},
+    {"entity": "Transform (closed value-transform vocabulary)", "fields": [
+      {"name": "Transform", "type": "\"reveal\" | \"partial\" | \"redact\" | \"hash\" | \"drop\""}
+    ]},
+    {"entity": "ClassificationRow (mirror of the table row)", "fields": [
+      {"name": "resourceType", "type": "string"},
+      {"name": "facetField", "type": "string"},
+      {"name": "facetSchemaVersion", "type": "number"},
+      {"name": "class", "type": "DataClass"}
+    ]},
+    {"entity": "ClassificationSource (injected port; Postgres DAO -> T-0053)", "fields": [
+      {"name": "getClassifications", "type": "(resourceType: string, facetSchemaVersion: number) => ClassificationRow[]"}
+    ]},
+    {"entity": "TypedFacet (additive widening of T-0015 Facet)", "fields": [
+      {"name": "fields", "type": "string[]"},
+      {"name": "schemaVersion", "type": "number (readFacetVersion default 0 when omitted)"}
+    ]},
+    {"entity": "MaskContext", "fields": [
+      {"name": "rows", "type": "ClassificationRow[] (for (resourceType, facetSchemaVersion))"},
+      {"name": "clearance", "type": "Clearance = DataClass | null"},
+      {"name": "facetSchemaVersion", "type": "number"}
+    ]},
+    {"entity": "ReclassDecision (from->to guard output)", "fields": [
+      {"name": "allowed", "type": "boolean"},
+      {"name": "direction", "type": "\"up\" | \"down\" | \"lateral\" (down == widening visibility == privileged)"},
+      {"name": "reason", "type": "\"ok\" | \"no_op_grant\" | \"direction_forbidden\" | \"unknown_class\""}
+    ]},
+    {"entity": "ClassificationAuditObligation (MAY emit; durable append -> T-0053)", "fields": [
+      {"name": "type", "type": "\"mask_decision\" | \"reclassification\""},
+      {"name": "actor", "type": "string"},
+      {"name": "subject", "type": "string"},
+      {"name": "via", "type": "\"grant_resolver\" | \"classification\""},
+      {"name": "decision", "type": "unknown"}
+    ]},
+    {"entity": "ResolverDeps (src/core/grant-resolver.ts -- additive)", "fields": [
+      {"name": "classifications", "type": "ClassificationSource | undefined (NEW optional; absent => legacy all-or-nothing)"}
+    ]}
+  ],
+  "contracts": [
+    "src/core/data-classification.ts: export type DataClass = 'public'|'internal'|'confidential'|'restricted'; export const DATA_CLASS_ORDER: readonly DataClass[];",
+    "export type Transform = 'reveal'|'partial'|'redact'|'hash'|'drop';",
+    "export interface ClassificationSource { getClassifications(resourceType: string, facetSchemaVersion: number): ClassificationRow[]; }",
+    "export interface TypedFacet { fields: string[]; schemaVersion: number; } export function readFacetVersion(facet: {fields:string[]; schemaVersion?:number} | undefined): number;",
+    "export type Clearance = DataClass | null; export function selectTransform(fieldClass: DataClass, clearance: Clearance): Transform;",
+    "export function applyTransform(value: unknown, transform: Transform): unknown; // pure, deterministic, no key custody",
+    "export function maskFields(rawFields: Record<string,unknown>, visibleFieldSet: ReadonlySet<string>, ctx: MaskContext | undefined): Record<string,unknown>; // undefined ctx => legacy projectFields behaviour",
+    "export function classifyDirection(from: DataClass, to: DataClass): 'up'|'down'|'lateral'; export function evaluateReclassification(from: DataClass, to: DataClass, op: Operation, coveringGrants: Grant[]): ReclassDecision;",
+    "src/core/grant-resolver.ts (additive): ResolverDeps gains classifications?: ClassificationSource; projectFields(raw, visibleSet, maskCtx?: MaskContext) gains optional 4th param; resolveFor's single projection step delegates to maskFields when deps.classifications present. Import surface resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields PRESERVED (FE-W23-0008).",
+    "migrations/017_data_classification.sql: tenant table per 008_grant contract; PK (tenant_id, resource_type, facet_field, facet_schema_version); CHECK class IN (closed set); ENABLE+FORCE RLS + data_classification_tenant_isolation policy; GRANT to choros_app; NO cross-table FK; append 'data_classification' to ci/checks/known_tenant_tables.txt.",
+    "CODER MUST: drop grant-resolver.ts from mutation-gateway-isolation.sh G6-additive FROZEN_EXPORTS (keep object-handle.ts, grant-lattice.ts); add ci/checks/data-classification-isolation.sh (ban pg/fs/net/http imports + _acl/field_visibility/record_rights/fieldVisibility tokens + writable Classification accessor outside gateway); reconcile db/two_tenant.test.ts migration-count assertion to the post-T-0017/T-0033 number."
+  ],
+  "fitness_functions": [
+    {"id": "FF-DC1", "rule": "data_classification is a tenant table: tenant_id-leading PK, ENABLE+FORCE RLS, isolation policy, choros_app grant, listed in known_tenant_tables.txt.", "ci_check": "ci/checks/db/force_rls.sql + tenant_id_leading.sql return 0 rows with the table present; db/schema.test.ts anti-decorative check green after appending data_classification."},
+    {"id": "FF-DC2", "rule": "Cross-tenant isolation: a class row under tenant A is invisible to a session bound to tenant B.", "ci_check": "db/two_tenant.test.ts-style probe: insert under A, SET choros.tenant_id=B, SELECT returns 0 rows (red without RLS, green with FORCE)."},
+    {"id": "FF-DC3", "rule": "Class-driven divergence: two subjects whose grants differ on a classified field get divergent output for the same (record, now).", "ci_check": "pure-TS fitness: maskFields output differs by clearance only."},
+    {"id": "FF-DC4", "rule": "Fail-closed on missing/mismatched classification: a classified facet whose facet_schema_version has no rows yields max masking, never whole-resource.", "ci_check": "pure-TS fitness: maskFields with empty rows for the version => classified keys dropped/redacted, raw never present."},
+    {"id": "FF-DC5", "rule": "Value-aware: a non-dropping class yields a present, transformed value (deep-diff from raw, not absent).", "ci_check": "pure-TS fitness: applyTransform(v,'partial'|'redact'|'hash') present and !== v."},
+    {"id": "FF-DC6", "rule": "Transform selected by (class, clearance), not field name: two differently-named fields same class+clearance => same transform; reclassify => different transform.", "ci_check": "pure-TS fitness over selectTransform/maskFields."},
+    {"id": "FF-DC7", "rule": "Human==agent equivalence + single projection: both call-sites deep-equal; exactly one projection function; no second handle->fields export.", "ci_check": "ci/checks/single-resolver.sh stays green; pure-TS deep-equal of two resolveFor call-paths."},
+    {"id": "FF-DC8", "rule": "Rights-derived-only: masking computed from grant rows + data_classification only; no parallel field-ACL store in the new code.", "ci_check": "grant-resolver-isolation.sh Check 2 green + new ci/checks/data-classification-isolation.sh bans _acl/field_visibility/record_rights/fieldVisibility tokens."},
+    {"id": "FF-DC9", "rule": "Purity/isolation: classification-aware code imports no pg/fs/net/http; frozen object-handle.ts/grant-lattice.ts unmodified.", "ci_check": "grant-resolver-isolation.sh Check 1+3 green (those two files byte-frozen); data-classification-isolation.sh import ban."},
+    {"id": "FF-DC10", "rule": "Guarded reclassification: class change routes through resolveFor(.., op in {transition,approve}); rejected without the op-grant; no direct-write path to data_classification.class.", "ci_check": "data-classification-isolation.sh structural: no mutate*/write*Classification accessor outside the gateway path (mutation-gateway-isolation.sh G1/G6 analogue); pure-TS test of evaluateReclassification rejection."},
+    {"id": "FF-DC11", "rule": "Direction-aware guard: down-classification rejected for an up-only subject; decision exposes from->to direction (E4.6 dual-control floor).", "ci_check": "pure-TS fitness over classifyDirection/evaluateReclassification."},
+    {"id": "FF-DC12", "rule": "Typed-facet honors schema version: vN facet resolves vN rows; bumping version without rows fails closed.", "ci_check": "TS unit (AC-12): maskFields with facet_schema_version mismatch => max mask."},
+    {"id": "FF-DC13", "rule": "Determinism: deeply-equal inputs => deeply-equal masked output (no IO outside injected ports).", "ci_check": "pure-TS fitness: double-invoke maskFields/applyTransform('hash'), deep-equal."},
+    {"id": "FF-DC14", "rule": "Shared-axis contract: DataClass is a stable named type; the same symbol is the join shape S-1/S-3 read (implements neither egress nor criticality).", "ci_check": "TS type-level contract test importing DataClass/DATA_CLASS_ORDER and asserting the class column shape."},
+    {"id": "FF-DC15", "rule": "Audit obligation shape: a value-suppressing mask and a reclassification each produce a well-formed obligation (via set, actor/subject present); durable append -> T-0053.", "ci_check": "pure-TS fitness over the returned ClassificationAuditObligation."},
+    {"id": "FF-DC16", "rule": "DB-permission floor (manual, activates with T-0053): the Postgres class DAO is reachable only via the gateway; no choros_app raw read of a classified value bypasses masking.", "ci_check": "manual; activates with T-0053 (mirror of T-0021 AC-14 deferral)."},
+    {"id": "FF-DC17", "rule": "grant-resolver.ts import surface preserved (FE-W23-0008): resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields still exported; only additive optional params.", "ci_check": "grep export-symbol presence in grant-resolver.ts; grant-resolver.test.ts compiles/passes unchanged."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR 3.3 DDL + FF-DC1"},
+    {"ac": "AC-2", "covered_by": "FF-DC2 two-tenant probe"},
+    {"ac": "AC-3", "covered_by": "ADR 2.5/4.1 + FF-DC3"},
+    {"ac": "AC-4", "covered_by": "ADR 4.2 fail-closed ladder + FF-DC4"},
+    {"ac": "AC-5", "covered_by": "ADR 4.1 partial/redact/hash present-value + FF-DC5"},
+    {"ac": "AC-6", "covered_by": "ADR 2.5 selectTransform (class x clearance, not name) + FF-DC6"},
+    {"ac": "AC-7", "covered_by": "ADR 2/3.2 single fold + single-resolver.sh / FF-DC7"},
+    {"ac": "AC-8", "covered_by": "ADR 4.3 clearance-from-grants + FF-DC8 (data-classification-isolation.sh)"},
+    {"ac": "AC-9", "covered_by": "ADR 4.4 purity + FF-DC9"},
+    {"ac": "AC-10", "covered_by": "ADR 2.7 guard via resolveFor + FF-DC10"},
+    {"ac": "AC-11", "covered_by": "ADR 2.7 classifyDirection + FF-DC11"},
+    {"ac": "AC-12", "covered_by": "ADR 4.2 version boundary + FF-DC12"},
+    {"ac": "AC-13", "covered_by": "ADR 4.4 determinism + FF-DC13"},
+    {"ac": "AC-14", "covered_by": "ADR 2.1 DataClass shared axis + FF-DC14"},
+    {"ac": "AC-15", "covered_by": "S-4 / ADR 8 deferral + FF-DC16 (manual, T-0053)"},
+    {"ac": "AC-16", "covered_by": "ADR 2.8 obligation shape + FF-DC15"}
+  ],
+  "runtime_target": "локально / in-process TS (pure static-now), идентично T-0021. Внешний ресурс не вводится: Postgres-backed ClassificationSource DAO + RLS + DB-permission floor (AC-15) уходят в T-0053. Гейт фаундера T-0033 не вводит.",
+  "adr_artifact_path": "docs/design/T-0033-data-classification.adr.md",
+  "escalation": ""
+}
