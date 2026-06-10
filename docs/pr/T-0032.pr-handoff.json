@@ -1,0 +1,214 @@
+{
+  "task_id": "T-0032",
+  "status": "pr_open",
+  "branch": "task/T-0032-sod-constraints",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "9409a75",
+  "head_commit": "9057692",
+  "migrations": ["027_sod_constraint", "028_actor_event_seq_no_decrement"],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E4.3 compliance core: Separation-of-Duties enforcement as ledger queries. sod_constraint tenant table (migration 027, T-0013 pattern: tenant-leading PK + ENABLE/FORCE RLS + kind CHECK). Static SoD queries effective role_assignment rows; dynamic SoD queries actor_event ledger with COALESCE(on_behalf_of,actor) attribution. Additive step 3.6 inside resolveFor (active iff op∈{approve,transition} AND deps.sod present). On pass: exactly one actor_event row appended (step 6.5). On any denial: zero rows. FO-T0019-1 closed structurally: BEFORE UPDATE no-decrement trigger on actor_event_seq (migration 028). Frozen surfaces (grant-lattice.ts, object-handle.ts, actor-event.ts, 008_grant.sql) byte-identical to base 9409a75. 20/20 AC covered; static CI (tsc+eslint+30 fitness checks+639 tests) EXIT 0; isolated-DB job (migrations x2 idempotent + 225 db tests) EXIT 0; 7 adversarial probes via real resolveFor/makeGrantResolver entrypoints EXIT 0.",
+  "commits": [
+    {
+      "sha": "cdf621d",
+      "phase": "SPEC",
+      "message": "T-0032 SPEC: SoD constraints (static/dynamic) as ledger queries + guarded approve/transition class"
+    },
+    {
+      "sha": "0a2812f",
+      "phase": "DESIGN",
+      "message": "T-0032 DESIGN: SoD as ledger/role queries + additive resolveFor step 3.6 + guarded writer + no-decrement trigger"
+    },
+    {
+      "sha": "347ed66",
+      "phase": "BUILD",
+      "message": "T-0032 BUILD: migrations 027 sod_constraint + 028 actor_event_seq no-decrement trigger"
+    },
+    {
+      "sha": "598ad5e",
+      "phase": "BUILD",
+      "message": "T-0032 BUILD: sod.ts (static/dynamic decision + ports) + in-memory store + resolver step 3.6/6.5"
+    },
+    {
+      "sha": "741b809",
+      "phase": "BUILD",
+      "message": "T-0032 BUILD: fitness — sod-isolation.sh, db sod.test.ts, sod unit suite, known_tenant_tables + cross_tenant case"
+    },
+    {
+      "sha": "0753f6f",
+      "phase": "REVIEW",
+      "message": "T-0032 REVIEW: approved — SoD static+dynamic guard (step 3.6/6.5), no-decrement trigger, writer; CI green, isolated-DB pass, 20/20 AC"
+    },
+    {
+      "sha": "9057692",
+      "phase": "TEST",
+      "message": "T-0032 TEST: pass — SoD static+dynamic guard 20/20 AC, CI+isolated-DB green, 7 adversarial probes"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "0753f6f",
+      "findings": [
+        {
+          "id": "R-1",
+          "severity": "nit",
+          "location": "ci/checks/db/cross_tenant.test.ts:354-355,360-361",
+          "issue": "Duplicate empIdA/empIdB keys in seedState object — stale-base artifact from T-0022 build (8a44900), NOT introduced by T-0032. esbuild warns 'Duplicate key' on fitness:db runs. Harmless at runtime. Canonical dev fix b32d403 already de-duplicated; orchestrator rebase onto dev resolves it automatically.",
+          "action": "No coder action required — rebase onto dev resolves."
+        },
+        {
+          "id": "R-2",
+          "severity": "nit",
+          "location": "ci/checks/sod-isolation.sh:150",
+          "issue": "SOD-ISO4 frozen-file check diffs against HEAD not merge-base; a committed-edit case relies on CI's external diff. Pre-existing convention (matches grant-resolver-isolation/effect-resource-isolation pattern). All four frozen files independently verified byte-identical to base 9409a75.",
+          "action": "Optional hardening filed for separate fitness-hardening task — not blocking T-0032."
+        }
+      ],
+      "deviations_accepted": [],
+      "artifact": "docs/reviews/T-0032.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 871,
+      "passed": 871,
+      "failed": 0,
+      "ac_coverage": "20/20",
+      "adversarial_probes": "7/7 (ADV-a positive control 3-actor approval; ADV-b delegated submit collides with direct approve; ADV-c unconfirmed assignment inert at action-time; ADV-d SoD port throws fail-closed; ADV-e repeated passing approve append-only second row; ADV-f read path never appends)",
+      "tested_commit": "9057692",
+      "run_details": {
+        "tsc_noEmit": "exit 0",
+        "eslint_src": "exit 0",
+        "vitest_pure": "639 passed / 5 skipped — sod.test.ts 30/30 (FF-SOD7/9/10/11/12/13), grant-resolver.test.ts 48/48 (backward-compat AC-11)",
+        "fitness_shell": "npm run fitness exit 0 — 30 checks incl. sod-isolation.sh (FF-SOD1/2/3/4), single-resolver.sh (FF-SOD5), actor_event_append_only.sh, actor_event_no_global_seq.sh",
+        "fitness_db": "225 passed on isolated Postgres 16 (COMPOSE_PROJECT_NAME=t0032test, POSTGRES_PORT=55466, own volume, torn down with -v after run) — sod.test.ts 15/15 (FF-SOD7/SOD8 schema+RLS+isolation+no-decrement trigger), cross_tenant.test.ts incl. case 'sod_constraint', migrations run x2 idempotent",
+        "migrations": "027_sod_constraint + 028_actor_event_seq_no_decrement applied on pass 1 (24 files total); pass 2 idempotent no-op"
+      },
+      "artifact": "docs/test-reports/T-0032.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (639/639 deterministic)",
+      "fitness_static": "pass (all 30 static checks incl. sod-isolation.sh, single-resolver.sh, actor_event_append_only.sh, actor_event_no_global_seq.sh)",
+      "fitness_db": "pass (225/225 on isolated Postgres; pre-existing parallel flake FR-T0032-1 NOT caused by T-0032; resolved with --no-file-parallelism)",
+      "integration_honesty_d056": "SoD guard wired into resolveFor step 3.6 via the REAL resolveFor/makeGrantResolver entrypoints (7 adversarial probes, not mocks of the resolver). Migrations 027/028 applied to real isolated Postgres (live FF-SOD7/SOD8). D-056 vitest.config.js excludes .claude/**. Honest-deferred: deps.sod injection and guardCtx by a production caller deferred to T-0053 (DAO) + T-0068 (engine wiring) — per spec §6 + ADR §2.1/§10."
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/sod.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/sod-isolation.sh",
+    "docs/design/T-0032-sod-constraints.adr.md",
+    "docs/design/T-0032.adr.contract.json",
+    "docs/reviews/T-0032.review.json",
+    "docs/specs/T-0032-sod-constraints.spec.md",
+    "docs/specs/T-0032.spec.contract.json",
+    "docs/test-reports/T-0032.test-report.json",
+    "migrations/027_sod_constraint.sql",
+    "migrations/028_actor_event_seq_no_decrement.sql",
+    "package.json",
+    "src/__tests__/sod.test.ts",
+    "src/core/actor-event-store.ts",
+    "src/core/grant-resolver.ts",
+    "src/core/sod.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "orchestrator (D-053) rebases task/T-0032-sod-constraints onto current dev HEAD then merges into dev",
+    "known_rebase_reconciliations": [
+      "cross_tenant.test.ts: dev-canon has b32d403 empIdA/empIdB dedupe fix (R-1 stale-base nit) — the rebase picks up dev's clean version, which is already compatible with T-0032's seedSodConstraint (only touches sod_constraint table, no application-row conflict). Accept dev's version.",
+      "seedState dedupe: dev already has the dedupe; T-0032's cross_tenant.test.ts adds only the 'sod_constraint' case in the switch — no conflict.",
+      "cross_tenant 'cross_tenant' fix: dev-canon has the fixed cross_tenant handler from another task; T-0032's cross_tenant.test.ts adds seedSodConstraint — should be a clean merge, but verify the switch block merges correctly."
+    ],
+    "founder_gate_GT3": "dev→main promotion is founder-gated (GT-3). SoD is compliance-core — review the promote_guide below before promoting.",
+    "what_sod_gives": "T-0032 makes the grant-resolver SoD-aware on the approve/transition path. When the composition root wires a SodSource (deps.sod port — Postgres DAO in T-0053), any approve or transition op on an object covered by a sod_constraint is checked: (1) static SoD — does the performing principal hold two conflicting roles simultaneously within the constraint scope? (2) dynamic SoD — did the principal already submit/approve at a conflicting level on this specific object? On violation: { denied: true, reason: 'sod_violation' }, zero actor_event rows written. On pass: exactly one actor_event row appended, attribution by COALESCE(on_behalf_of, actor). The guard is additive and fail-open-by-absence: without deps.sod the entire step 3.6 is skipped (pre-T-0032 behavior).",
+    "honest_deferred": {
+      "T-0053": "Postgres SodSource/ActorEventReader/ActorEventWriter DAO — live queries against choros.sod_constraint and choros.actor_event. Until T-0053 lands, deps.sod is never injected by a production caller (in-memory implementations exist and are tested; the guard is reachable but not activated in production). Also owns FF-SOD8 atomicity obligation: SoD read + actor_event append over the SAME withTenant(pool,tenant,fn) PoolClient (one BEGIN..COMMIT) for TOCTOU safety.",
+      "T-0022_confirmed_by_filter": "AC-3 / R-2 T-0022: effectiveness filter (confirmed_by IS NOT NULL, in-validity-window, scope-overlap) is the DAO's responsibility. The in-memory SodSource used in tests accepts pre-filtered assignments; the Postgres DAO in T-0053 must apply the confirmed_by IS NOT NULL + window + scope filter when implementing effectiveAssignmentsOf.",
+      "T-0068": "Engine-side wiring of the guarded caller (deps.sod injection into resolveFor + guardCtx construction from the lifecycle engine context). T-0032 owns the gateway guard; T-0068 owns the caller that activates it in the running Flowable engine."
+    },
+    "migration_027_summary": "CREATE TABLE choros.sod_constraint (tenant_id UUID NOT NULL, id UUID NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('static','dynamic')), role_a UUID NULL, role_b UUID NULL, self_record BOOLEAN NOT NULL DEFAULT false, scope JSONB NOT NULL, detail JSONB NULL, created_at BIGINT NOT NULL, PRIMARY KEY (tenant_id, id), CONSTRAINT sod_constraint_static_shape CHECK(kind <> 'static' OR (role_a IS NOT NULL AND role_b IS NOT NULL))). ENABLE ROW LEVEL SECURITY; FORCE ROW LEVEL SECURITY; isolation policy on choros.tenant_id GUC. GRANT SELECT,INSERT,UPDATE,DELETE TO choros_app. sod_constraint added to ci/checks/known_tenant_tables.txt.",
+    "migration_028_summary": "CREATE TRIGGER actor_event_seq_no_decrement BEFORE UPDATE FOR EACH ROW ON choros.actor_event_seq EXECUTE FUNCTION choros.prevent_seq_decrement(). Raises restrict_violation (23001) when NEW.next_seq < OLD.next_seq for all roles incl. owner and choros_migrator. Forward +1 advance under SELECT..FOR UPDATE passes. Closes FO-T0019-1 structurally at the DB layer.",
+    "how_to_verify": [
+      "npm run build && npx tsc --noEmit  →  exit 0",
+      "npm run lint  →  exit 0",
+      "npm test  →  639/639 green (includes sod.test.ts 30/30 + grant-resolver.test.ts 48/48)",
+      "npm run fitness  →  all 30 static checks pass including sod-isolation.sh (FF-SOD1/2/3/4), single-resolver.sh (FF-SOD5), actor_event_append_only.sh, actor_event_no_global_seq.sh",
+      "POSTGRES_PORT=55466 COMPOSE_PROJECT_NAME=t0032verify npm run fitness:db -- --no-file-parallelism  →  225/225 on isolated Postgres (--no-file-parallelism required to avoid pre-existing cross-file parallel race FR-T0032-1, not caused by T-0032)",
+      "Spot-check static SoD: wire SodSource with two effective assignments for same employee over overlapping scope (role_a + role_b of a static constraint); call resolveFor op=approve with deps.sod + guardCtx; confirm { denied: true, reason: 'sod_violation' }. No assignments → pass (grant permitting).",
+      "Spot-check dynamic SoD DSoD-1: seed actor_event with a 'submit' row attributed to principal P; call resolveFor op=approve for same object with actor=P + deps.sod + guardCtx; confirm { denied: true, reason: 'sod_violation' }.",
+      "Spot-check no-decrement trigger: UPDATE choros.actor_event_seq SET next_seq = next_seq - 1 WHERE ... → ERROR 23001.",
+      "Spot-check backward-compat: call resolveFor op=approve WITHOUT deps.sod; confirm same behavior as pre-T-0032 (no sod_violation, existing grant decision only)."
+    ],
+    "rls_note": "sod_constraint added to known_tenant_tables.txt. Cross-tenant CI test automatically checks tenant isolation (AC-17: TENANT_A row invisible (0) to TENANT_B session). FF-SOD6/7 verified live in isolated-DB job.",
+    "scope_widening_note": "T-0032 honestly widened scope to own the guarded-transition writer (appendActorEvent + in-memory ActorEventStore + ActorEventReader impl) and the FO-T0019-1 no-decrement debt (migration 028), because the guarded class cannot record its act without the writer and the writer had no T-0021 owner. Surfaced by analyst+architect, confirmed by reviewer. Writer + trigger are present, tested, CI-green.",
+    "downstream_note": "T-0032 exports from src/core/sod.ts (SodConstraint, SodKind, SodSource, SodDecision, SodDeniedView, detectStaticConflict, wouldCreateStaticConflict, evaluateDynamicSod, evaluateSod, ActorEventObjectRef, GuardContext) and from src/core/actor-event-store.ts (InMemoryActorEventStore). T-0053 will replace the in-memory store with the Postgres DAO — it must implement the same ActorEventReader/ActorEventWriter/SodSource ports without changing their shapes."
+  },
+  "forward_obligations": [
+    {
+      "task": "T-0053",
+      "title": "Postgres SodSource / ActorEventReader / ActorEventWriter DAO + FF-SOD8 atomicity",
+      "mandatory": true,
+      "why": "Until T-0053 lands, SoD enforcement is NOT active on live transitions (deps.sod is never injected in production). T-0053 must: (1) implement SodSource.constraintsFor via SELECT on choros.sod_constraint; (2) implement SodSource.effectiveAssignmentsOf with confirmed_by IS NOT NULL + validity-window + scope-overlap filter (AC-3, R-2 T-0022); (3) implement ActorEventReader (trail/didPrincipalPerform/rolesThatActed) and ActorEventWriter (appendActorEvent) against choros.actor_event; (4) construct reader/writer/source over the SAME withTenant PoolClient so the SoD check and append are one atomic transaction (FF-SOD8, NF-8).",
+      "fitness_obligation": "FF-SOD8 atomicity must be enforced at the DAO layer (one BEGIN..COMMIT per guarded resolveFor call covering both the SoD read and the actor_event append)."
+    },
+    {
+      "task": "T-0068",
+      "title": "Engine-side wiring: deps.sod injection + guardCtx construction in Flowable lifecycle engine",
+      "mandatory": true,
+      "why": "T-0032 owns the gateway guard (step 3.6/6.5 in resolveFor). T-0068 owns the caller: constructing GuardContext from the engine's execution context (actor, onBehalfOf, roleAtEvent, verb, approveLevel) and injecting deps.sod (the T-0053 DAO) into resolveFor on approve/transition events. Without T-0068, the SoD guard is reachable in tests but is never activated by the running engine."
+    },
+    {
+      "task": "T-0022 / R-2",
+      "title": "confirmed_by filter in effectiveAssignmentsOf (T-0053 DAO)",
+      "mandatory": true,
+      "why": "AC-3 and R-2 from T-0022 spec require that effectiveAssignmentsOf (the SodSource port) returns only confirmed (confirmed_by IS NOT NULL), in-validity-window, scope-overlapping assignments. The in-memory SodSource used in T-0032 tests accepts pre-filtered inputs; the T-0053 Postgres DAO must apply the filter in its SELECT query."
+    }
+  ],
+  "known_issues": [
+    {
+      "id": "FR-T0032-1",
+      "severity": "tooling-gap",
+      "status": "pre-existing, not caused by T-0032",
+      "component": "ci/checks/db — default parallel vitest forks on fresh Postgres",
+      "description": "ci/checks/db runs test files in parallel forks against ONE shared Postgres. On a FRESH DB the default-parallel npm run fitness:db can intermittently fail AC-4/FF-CT4 (cross_tenant.test.ts DELETE-count race seeded by a sibling file). T-0032's seedSodConstraint touches only sod_constraint, not application rows — cannot cause the race. Green 225/225 with --no-file-parallelism. Real CI (fresh per-run Postgres, default forks) CAN go intermittently red. Candidate fix (T-0062 or separate task): fileParallelism:false or per-file tenant-id namespacing for the db suite.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-2",
+      "severity": "tooling-gap",
+      "status": "pre-existing, not caused by T-0032; resolved by rebase onto dev",
+      "component": "ci/checks/db/cross_tenant.test.ts:360-361",
+      "description": "Duplicate empIdA/empIdB keys in seedState introduced by T-0022 build (8a44900), already fixed on dev at b32d403. esbuild warns on fitness:db runs; harmless at runtime. Orchestrator rebase onto dev resolves it automatically.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-3",
+      "severity": "expected-forward-dep",
+      "status": "honest-deferred by spec §6 + ADR §2.1/§10",
+      "component": "resolveFor step 3.6 / deps.sod / guardCtx",
+      "description": "The SoD guard branch in resolveFor (step 3.6/6.5) is REAL and reachable — exercised end-to-end through the actual resolveFor/makeGrantResolver entrypoints by 30 unit + 7 adversarial tests. But it is not yet wired into a running request path: (a) deps.sod is never injected by a production caller, (b) flowable-client.ts references resolveFor only as `void resolveFor` (FF-G3 grep-satisfier, comment 'no runtime auth call yet (T-0068)'). Postgres SodSource/DAO deferred to T-0053. Engine-side guarded caller deferred to T-0068. T-0032's owned boundary (gateway guard + writer + ports + migrations + in-memory impl) is complete and tested.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-4",
+      "severity": "scope-widening",
+      "status": "accepted — confirmed legitimate by reviewer",
+      "component": "appendActorEvent writer + migration 028",
+      "description": "T-0032 expanded beyond 'implement 3 reader stubs' to own the guarded-transition writer (appendActorEvent + InMemoryActorEventStore) and the FO-T0019-1 no-decrement debt (migration 028). Writer was tagged 'T-0021/E4.2' with no T-0021 ownership; the guarded class cannot record its act without the writer. Widening in spec §8 / ADR §2.2. Writer + trigger both present, tested, CI-green.",
+      "is_t0032_defect": false
+    }
+  ],
+  "friction_events": []
+}

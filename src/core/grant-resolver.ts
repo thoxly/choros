@@ -58,6 +58,19 @@ import {
   classifyTool,
   verifyEffectGrants,
 } from "./effect-resource.js";
+import {
+  type SodSource,
+  type SodDeniedView,
+  type GuardedAct,
+  type EffectiveAssignment,
+  evaluateSod,
+} from "./sod.js";
+import {
+  type ActorEventInput,
+  type ActorEventObjectRef,
+  type ActorEventVerb,
+  actorEventPrincipal,
+} from "./actor-event.js";
 
 // ---------------------------------------------------------------------------
 // Injected ports (pure static-now; Postgres + RLS DAO in T-0053)
@@ -110,6 +123,17 @@ export interface ResolverDeps {
    * in T-0053 (mirrors GrantSource/RecordSource/ClassificationSource).
    */
   effects?: EffectSource;
+  /**
+   * T-0032 (E4.2) — Separation-of-Duties guard port. OPTIONAL: when absent the
+   * gateway degrades to the pre-T-0032 covering-grant-only floor (backward-
+   * compatible, NF-2, AC-11), exactly like `effects`/`classifications`. When
+   * present, every `approve`/`transition`-path call to `resolveFor` additionally
+   * (i) evaluates static + dynamic SoD (step 3.6, ADR §4.5) and (ii) on a PASS
+   * appends EXACTLY ONE actor_event row via the writer (step 6.5). Denial reason:
+   * `"sod_violation"`. Pure static-now; the Postgres DAO lands in T-0053
+   * (mirrors GrantSource/RecordSource/ClassificationSource/EffectSource).
+   */
+  sod?: SodSource;
   now?: () => number;
 }
 
@@ -334,6 +358,78 @@ export interface InvokeContext {
 }
 
 /**
+ * Optional guard context for the SoD step (T-0032 step 3.6). Carries the
+ * action-time attribution the SoD guard needs but that `ResolveSubject` does
+ * NOT (and must not — object-handle.ts is frozen): the performer, the principal
+ * (`onBehalfOf`), the resolved role, the verb, and (for `approve`) the level.
+ *
+ * This is an ADDITIVE optional 6th argument on `resolveFor` (mirroring T-0034's
+ * optional `invokeCtx?` 5th arg). A guarded op with `deps.sod` present but
+ * `guardCtx` ABSENT is FAIL-CLOSED → `sod_violation`: an unattributable
+ * transition cannot be proven SoD-clean (NF-3). This is the SoD analogue of
+ * T-0034's trust-boundary note, but fail-CLOSED (T-0034 treats a missing
+ * invokeCtx as pure-compute; SoD treats a missing guardCtx as a denial).
+ */
+export interface GuardContext {
+  actor: string; // the performer (employee id)
+  onBehalfOf?: string | null; // the principal when ≠ performer
+  roleAtEvent: string; // the role the gateway resolved the actor under
+  verb: ActorEventVerb; // the verb recorded on the act
+  approveLevel?: number; // required iff verb === 'approve'
+}
+
+/**
+ * Map a handle's identity-only ResourceRef to the actor_event object ref the
+ * SoD reader / writer key on. The three handle kinds map 1:1; pure.
+ */
+function refToActorEventRef(ref: ResourceRef): ActorEventObjectRef {
+  switch (ref.kind) {
+    case "application":
+      return { objectKind: "application", applicationId: ref.applicationId };
+    case "registry":
+      return { objectKind: "registry", registryId: ref.registryId };
+    case "record":
+      return { objectKind: "record", recordId: ref.recordId };
+  }
+}
+
+/**
+ * Build the GuardedAct the SoD layer evaluates and the writer records, from the
+ * handle's ref + the action-time GuardContext. Pure. `approveLevel` is threaded
+ * only for `approve` (validateActorEventInput rejects a level on a non-approve
+ * verb, and a missing level on approve — fail-closed at the writer).
+ */
+function buildGuardedAct(handle: ObjectHandle, guardCtx: GuardContext): GuardedAct {
+  return {
+    ref: refToActorEventRef(handle.ref),
+    actor: guardCtx.actor,
+    onBehalfOf: guardCtx.onBehalfOf ?? null,
+    roleAtEvent: guardCtx.roleAtEvent,
+    event: guardCtx.verb,
+    approveLevel: guardCtx.approveLevel,
+  };
+}
+
+/** Project a GuardedAct into the frozen T-0019 ActorEventInput (the writer's input). */
+function toActorEventInput(act: GuardedAct): ActorEventInput {
+  const base = {
+    actor: act.actor,
+    onBehalfOf: act.onBehalfOf ?? null,
+    roleAtEvent: act.roleAtEvent,
+    event: act.event,
+    ...(act.approveLevel !== undefined ? { approveLevel: act.approveLevel } : {}),
+  };
+  switch (act.ref.objectKind) {
+    case "application":
+      return { objectKind: "application", applicationId: act.ref.applicationId, ...base };
+    case "registry":
+      return { objectKind: "registry", registryId: act.ref.registryId, ...base };
+    case "record":
+      return { objectKind: "record", recordId: act.ref.recordId, ...base };
+  }
+}
+
+/**
  * The operation-parameterized decision core (ADR §4.2 / §4.4). `resolveHandle`
  * (op=`read`) and the engine write-path callers (op ∈ create/update/delete/
  * approve/transition) BOTH go through this single core. It is NOT a second
@@ -358,7 +454,8 @@ export async function resolveFor(
   subject: ResolveSubject,
   op: Operation,
   invokeCtx?: InvokeContext,
-): Promise<ResolvedView | EffectDeniedView> {
+  guardCtx?: GuardContext,
+): Promise<ResolvedView | EffectDeniedView | SodDeniedView> {
   // 1. Tenant-gate, fail-closed, before any grant/record read (NF-3, AC-2).
   if (handle.tenantId !== subject.tenantId) {
     return { denied: true, reason: "cross_tenant" };
@@ -442,10 +539,53 @@ export async function resolveFor(
     }
   }
 
+  // [step 3.6] T-0032 — SoD guard. Active ONLY when op ∈ {approve, transition}
+  // AND deps.sod is present (NF-2 backward-compat floor when absent). On a
+  // violation → { denied:true, reason:"sod_violation" }, short-circuiting BEFORE
+  // the record fetch and BEFORE the writer — ZERO actor_event rows (AC-10).
+  const isGuardedOp = op === "approve" || op === "transition";
+  let guardedAct: GuardedAct | undefined;
+  if (isGuardedOp && deps.sod !== undefined) {
+    // A guarded op with deps.sod present but guardCtx absent ⇒ fail-closed
+    // (an unattributable transition cannot be proven SoD-clean — NF-3).
+    if (guardCtx === undefined) {
+      return { denied: true, reason: "sod_violation" };
+    }
+    const sod = deps.sod;
+    guardedAct = buildGuardedAct(handle, guardCtx);
+    const principal = actorEventPrincipal({
+      actor: guardCtx.actor,
+      onBehalfOf: guardCtx.onBehalfOf,
+    });
+    let principalAssignments: EffectiveAssignment[];
+    let decision;
+    try {
+      principalAssignments = await sod.effectiveAssignmentsOf(principal);
+      decision = await evaluateSod(sod, deps.ancestry, guardedAct, principalAssignments);
+    } catch {
+      return { denied: true, reason: "sod_violation" }; // fail-closed (NF-3).
+    }
+    if (decision.violated) {
+      return { denied: true, reason: "sod_violation" }; // zero actor_event rows.
+    }
+  }
+
   // 5. Fetch the record — only after a covering grant is found (AC-9).
   const raw = await deps.records.getRecord(handle.ref);
   if (raw === null) {
-    return { denied: true, reason: "not_found" };
+    return { denied: true, reason: "not_found" }; // still zero actor_event rows.
+  }
+
+  // [step 6.5] T-0032 — on a guarded op that PASSED grant ∧ SoD ∧ record fetch,
+  // append EXACTLY ONE actor_event row recording the act (AC-10).
+  // validateActorEventInput runs INSIDE the writer (AC-14); a rejection there is
+  // fail-closed (the act cannot be recorded ⇒ the transition is denied).
+  if (isGuardedOp && deps.sod !== undefined && guardedAct !== undefined) {
+    try {
+      await deps.sod.writer.appendActorEvent(toActorEventInput(guardedAct));
+    } catch {
+      return { denied: true, reason: "sod_violation" }; // fail-closed (NF-3).
+    }
   }
 
   // 6. Project once (FR-4, AC-5, AC-6) — the ONE projection point.

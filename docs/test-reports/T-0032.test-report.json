@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0032",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 871,
+    "passed": 871,
+    "failed": 0
+  },
+  "gate": {
+    "static_ci": "tsc --noEmit + eslint src + npm run fitness (30 checks incl. sod-isolation FF-SOD1..4, single-resolver, actor_event_append_only, actor_event_no_global_seq) + vitest run — EXIT 0; 639 passed / 5 skipped",
+    "db_job": "isolated Postgres 16 (compose project t0032test, POSTGRES_PORT=55466, own volume, torn down with -v after run; 55432 untouched) — node migrations/run.mjs x2 (run1 applied 24 files incl. 027_sod_constraint + 028_actor_event_seq_no_decrement; run2 idempotent no-op) then vitest run --dir ci/checks/db --no-file-parallelism — EXIT 0; 225 passed (db sod.test.ts 15/15: FF-SOD7 schema+RLS+isolation, FF-SOD8 no-decrement trigger). --no-file-parallelism used per the known pre-existing AC-4/FF-CT4 cross-file race (dev-fixed T-0062); the SoD suites themselves are race-free.",
+    "adversarial": "7 throwaway probes via the REAL resolveFor/makeGrantResolver entrypoints (not mocks of them) — EXIT 0; file deleted after the run, working tree clean."
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "ci/checks/db/sod.test.ts::kind CHECK (static|dynamic) + sod.ts isSodKind/SodKind (FF-SOD7)", "result": "pass" },
+    { "ac": "AC-2",  "test": "src/__tests__/sod.test.ts::FF-SOD12 detectStaticConflict same-principal-two-roles", "result": "pass" },
+    { "ac": "AC-3",  "test": "src/__tests__/sod.test.ts::FF-SOD12 non-overlapping-scope + ADV-c proposal-inert (confirmed_by NULL ⇒ empty effective set)", "result": "pass" },
+    { "ac": "AC-4",  "test": "src/__tests__/sod.test.ts::FF-SOD11 DSoD-1 self-approval blocked / different principal allowed", "result": "pass" },
+    { "ac": "AC-5",  "test": "src/__tests__/sod.test.ts::FF-SOD11 DSoD-2 approve_L1!=L2; same-level same-principal does not collide (ADV-e)", "result": "pass" },
+    { "ac": "AC-6",  "test": "src/__tests__/sod.test.ts::FF-SOD11 COALESCE(on_behalf_of,actor) attribution", "result": "pass" },
+    { "ac": "AC-7",  "test": "src/__tests__/sod.test.ts::FF-SOD11 delegated-act collision + ADV-b (X on_behalf_of B; B approve ⇒ block)", "result": "pass" },
+    { "ac": "AC-8",  "test": "src/__tests__/sod.test.ts::FF-SOD9 read/create/update/delete/invoke never enter step 3.6", "result": "pass" },
+    { "ac": "AC-9",  "test": "src/__tests__/sod.test.ts::FF-SOD9/SOD10 reason 'sod_violation' distinct from no_grant/cross_tenant/not_found/no_effect_grant", "result": "pass" },
+    { "ac": "AC-10", "test": "src/__tests__/sod.test.ts::FF-SOD10 exactly-one-on-pass / zero-on-deny (no_grant, sod_violation, not_found) + ADV-e append-only", "result": "pass" },
+    { "ac": "AC-11", "test": "src/__tests__/sod.test.ts::FF-SOD9 absent deps.sod ⇒ pre-T-0032 behavior; 48 existing grant-resolver tests pass unchanged", "result": "pass" },
+    { "ac": "AC-12", "test": "src/__tests__/sod.test.ts + ci/checks/db/actor-event.test.ts::InMemoryActorEventStore trail/didPrincipalPerform/rolesThatActed (frozen ports)", "result": "pass" },
+    { "ac": "AC-13", "test": "src/__tests__/sod.test.ts::FF-SOD10 append-only single-INSERT, +1 counter, prior rows untouched", "result": "pass" },
+    { "ac": "AC-14", "test": "src/__tests__/sod.test.ts::FF-SOD10 validateActorEventInput precondition (approve w/o level rejected, empty actor rejected)", "result": "pass" },
+    { "ac": "AC-15", "test": "ci/checks/db/sod.test.ts::FF-SOD7 tenant_id-leading PK + ENABLE/FORCE RLS + isolation policy + choros_app DML grant; known_tenant_tables.txt += sod_constraint; schema.test.ts strict set-equality", "result": "pass" },
+    { "ac": "AC-16", "test": "ci/checks/db/sod.test.ts::FF-SOD8 no-decrement trigger: forward +1 passes; backward UPDATE raises 23001 for BOTH choros_migrator and choros_app", "result": "pass" },
+    { "ac": "AC-17", "test": "ci/checks/db/sod.test.ts::FF-SOD7 + cross_tenant.test.ts case 'sod_constraint': TENANT_A row invisible (0) to TENANT_B session", "result": "pass" },
+    { "ac": "AC-18", "test": "ci/checks/single-resolver.sh + ci/checks/sod-isolation.sh SOD-ISO1 (no parallel-authority token) + ADV-f (one decision core, read-facade never appends)", "result": "pass" },
+    { "ac": "AC-19", "test": "tsc --noEmit + ci/checks/sod-isolation.sh SOD-ISO3 (import surface) + SOD-ISO4 (frozen files: grant-lattice/object-handle/actor-event/008_grant byte-identical to base 9409a75)", "result": "pass" },
+    { "ac": "AC-20", "test": "ci/checks/sod-isolation.sh SOD-ISO2 (no pg/fs/net/http) + src/__tests__/sod.test.ts FF-SOD13 call-twice deep-equal determinism", "result": "pass" }
+  ],
+  "adversarial_probes": [
+    { "id": "ADV-a", "scenario": "Positive control: submit -> approveL1 -> approveL2 by THREE DISTINCT actors (alice/bob/carol)", "expected": "all three pass (SoD not over-strict), 3 actor_event rows", "result": "pass", "note": "confirms the guard is not pathologically over-blocking a legitimate multi-actor approval chain" },
+    { "id": "ADV-b", "scenario": "A submit on_behalf_of B; then B approves directly", "expected": "submit attributed to principal B via COALESCE(on_behalf_of,actor); B's later approve collides (DSoD-1) -> denied sod_violation", "result": "pass", "note": "matches spec 3.2 — delegated submit's principal is B; no COALESCE collision-with-self loophole. Only the submit row persists (1)." },
+    { "id": "ADV-c", "scenario": "Actor with NO effective assignment (confirmed_by NULL proposal) in a static-SoD constraint", "expected": "static conflict does NOT fire (DAO returns [] effective assignments) -> approve passes (grant permitting)", "result": "pass", "note": "matches spec 3.1 / AC-3 — effectiveness filter is the DAO's job; a proposal is inert at action-time." },
+    { "id": "ADV-d", "scenario": "Guarded approve, deps.sod + guardCtx present, but the injected ledger reader THROWS on every method", "expected": "fail-closed -> denied sod_violation, ZERO actor_event rows", "result": "pass", "note": "matches NF-3 — unreadable ledger can never PROVE SoD-clean; evaluateSod try/catch + resolver try/catch both deny." },
+    { "id": "ADV-e", "scenario": "Repeated IDENTICAL passing guarded approve (same principal, same level)", "expected": "second call still passes; writer appends a SECOND row (append-only, no silent dedup)", "result": "pass", "note": "legal per AC-5 ('same principal repeating the same level do not collide') + AC-13 append-only. The ledger is append-only by construction; dedup is NOT in the contract and correctly absent. The operation genuinely repeated, so a second row is honest." },
+    { "id": "ADV-f", "scenario": "Human/read path single-projection: resolveHandle (op=read) vs the approve entrypoint", "expected": "resolveHandle never enters step 3.6 and never appends; the ONLY approve entrypoint is resolveFor(op=approve) which fail-closes without guardCtx", "result": "pass", "note": "matches AC-18 — one decision core (resolveFor); resolveHandle is a read-only facade over it; there is no second un-guarded projection a human approve could slip through." }
+  ],
+  "secondary_ux": [
+    { "check": "web-front UX", "result": "n/a", "note": "T-0032 is a core/DB/gateway task (src/core/sod.ts + migrations + fitness); no web surface — secondary LLM/browser check not applicable (D-025)" }
+  ],
+  "failures": [],
+  "friction": [
+    {
+      "id": "FR-T0032-1",
+      "root_class": "tooling-gap",
+      "summary": "Pre-existing db-suite cross-file concurrency flake (NOT a T-0032 defect): ci/checks/db runs files in parallel forks against ONE shared Postgres. On a FRESH DB the default-parallel `npm run fitness:db` can intermittently fail AC-4/FF-CT4 (cross_tenant.test.ts DELETE-count race seeded by a sibling file). Verified green 225/225 with --no-file-parallelism and on a 2nd run vs a non-empty DB. T-0032's seedSodConstraint touches only sod_constraint, so it cannot cause the application-row race. Real CI (fresh per-run Postgres, default forks) CAN go intermittently red on this path. Candidate harness fix (separate task, dev-tracked as T-0062): fileParallelism:false or per-file tenant-id namespacing for the db suite.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-2",
+      "root_class": "tooling-gap",
+      "summary": "R-1 stale-base artifact (reviewer-flagged, independently confirmed): cross_tenant.test.ts has a duplicate empIdA/empIdB key (lines 360-361) introduced by 8a449007 (T-0022 BUILD), NOT by this T-0032 coder. esbuild emits 'Duplicate key' warnings on every fitness:db run; harmless at runtime, NOT type-checked (tsconfig include excludes ci/checks). Canonical dev fix b32d403 already de-duplicated it; the orchestrator's rebase onto dev resolves it.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-3",
+      "root_class": "expected-forward-dep",
+      "summary": "Integration honesty (D-056): the SoD guard branch in resolveFor (step 3.6/6.5) is REAL and reachable — exercised end-to-end through the actual resolveFor/makeGrantResolver entrypoints by 30 unit + 7 adversarial tests (not a mock of the resolver). BUT it is not yet wired into a running request path: (a) deps.sod is never injected by a production caller, and (b) flowable-client.ts references resolveFor only as `void resolveFor;` (a structural FF-G3 grep-satisfier with the explicit comment 'no runtime auth call yet (T-0068)'). This is HONESTLY scoped, not a hidden stub: spec 6 + ADR 10/2.1 explicitly defer the Postgres SodSource/reader/writer DAO to T-0053 and the engine-side guarded caller to T-0028/T-0068. T-0032's owned boundary (gateway guard + writer + ports + migrations + in-memory impl) is complete and tested. Recorded so the orchestrator tracks that SoD is not yet enforced on a live transition until T-0053 (DAO) + T-0068 (lifecycle wiring) land.",
+      "is_t0032_defect": false
+    },
+    {
+      "id": "FR-T0032-4",
+      "root_class": "scope-widening",
+      "summary": "Surfaced honestly by analyst+architect, confirmed by reviewer: T-0032 expanded beyond 'implement the 3 reader stubs' to also OWN the guarded-transition writer (appendActorEvent) + the FO-T0019-1 no-decrement debt, because the guarded class cannot record its act without the writer (the writer was tagged 'T-0021/E4.2' with no T-0021 ownership). Verified the widening is correct and in scope (writer + 028 trigger both present, tested, CI-green)."
+    }
+  ],
+  "notes": "All 20 AC covered and green. Static CI (tsc+eslint+30 fitness checks+639 tests) EXIT 0; isolated-DB job (migrations x2 idempotent + 225 db tests incl. live sod_constraint RLS/CHECK + no-decrement trigger for both roles) EXIT 0; 7 adversarial probes through the real entrypoints EXIT 0. Frozen surfaces (grant-lattice.ts, object-handle.ts, actor-event.ts, 008_grant.sql) byte-identical to base 9409a75. No product defect found; the implementation matches spec 3.1/3.2/3.3/3.4 and the ADR step-3.6/6.5 design exactly. The only open items are tooling-gap flakes (not T-0032's) and an honestly-declared forward-dependency on T-0053/T-0068 for live wiring."
+}
