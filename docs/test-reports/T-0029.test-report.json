@@ -1,0 +1,97 @@
+{
+  "task_id": "T-0029",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 899,
+    "passed": 894,
+    "failed": 0
+  },
+  "gate": {
+    "ci_green": true,
+    "tsc": "pass (tsc --noEmit)",
+    "eslint": "pass (eslint src)",
+    "fitness": "pass (full chain incl. scoped-admin-isolation.sh: FF-8/9/9b/10/11/16/17 + AC-12 static = 17 mgmt-grants)",
+    "vitest_unit": "pass — 651 passed, 5 skipped, 30 files (incl. scoped-admin.test.ts 21, scoped-admin.adversarial.test.ts 4, scoped-admin.fitness.test.ts 6)",
+    "db_job": "pass — ISOLATED Postgres (compose project t0029test, POSTGRES_PORT=55462, own volume, torn down -v after; 55432 untouched): node migrations/run.mjs x2 (run2 = 'nothing to apply' → idempotent), npm run fitness:db = 243/243 incl. genesis-owner-seed.test.ts (5) + cross_tenant.test.ts (47)",
+    "deterministic_note": "deterministic.total/passed = 651 unit (+5 skipped) + 243 db = 894 passed across the two vitest jobs; 5 skipped (flowable integration, not runnable without flowable container — pre-existing, not T-0029)."
+  },
+  "db_evidence": {
+    "mgmt_grants_on_tenant_owner": 17,
+    "genesis_assignments": 1,
+    "tenant_owner_roles": 1,
+    "genesis_employee": 1,
+    "dev_tenant_root_departments": "3 (fin/cs/plat, all parent_id NULL) — confirms the ADR 3-root-forest finding; the other 11 parent_id-NULL roots seen in the DB belong to OTHER test tenants seeded by fitness:db cross-tenant/role fixtures, not the dev tenant a0000000-…-0001",
+    "idempotency_layer_1_bookkeeping": "version 026 recorded in schema_migrations → file SQL SKIPPED on re-run; a row deleted post-seed is NOT restored by a normal re-run (idempotency = stable counts when seed intact, NOT reconciliation/self-heal)",
+    "idempotency_layer_2_on_conflict": "only engages if 026 is forced pending (bookkeeping row cleared): file re-executes, ON CONFLICT DO NOTHING re-asserts the deleted row (→17) and creates NO duplicates (17, not 33)"
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "scoped-admin.test.ts AC-1 + scoped-admin.fitness.test.ts AC-8 + tsc fixture vs ResourceType union; MGMT_OBJECT_KINDS frozen 4-kind set", "result": "pass"},
+    {"ac": "AC-2", "test": "scoped-admin.test.ts AC-2 — child scope ⊑ adminGrant.scope, delegable, non-widening → {ok:true}", "result": "pass"},
+    {"ac": "AC-3", "test": "scoped-admin.test.ts AC-3 — org/scope widening → typed scope_widens / org_scope_widens, never mutates; reconfirmed by adversarial probes (b)/(b2)", "result": "pass"},
+    {"ac": "AC-4", "test": "scoped-admin.adversarial.test.ts — LCG fuzz (grant+assignment+one-axis) cross-checked vs isNarrowerOrEqual, leak=0; 4 tests green standalone + in gate", "result": "pass"},
+    {"ac": "AC-5", "test": "scoped-admin.test.ts AC-5 — parent_non_delegable / free_form_non_delegable; non-owner freeform mint rejected (reconfirmed by probe c3)", "result": "pass"},
+    {"ac": "AC-6", "test": "scoped-admin.test.ts AC-6 — isGenesisOwner=true accepts un-parented (no parent check); =false + no covering grant → no_admin_authority; reconfirmed by probes a1/c1/c2", "result": "pass"},
+    {"ac": "AC-7", "test": "scoped-admin.test.ts AC-7 — subtree-bounded via org AncestryOracle (within S accept, outside S reject); reconfirmed by probes a2/a3", "result": "pass"},
+    {"ac": "AC-8", "test": "scoped-admin.fitness.test.ts AC-8 + ci/checks/scoped-admin-isolation.sh FF-8 — admin authority = mgmt_object grant rows only, no parallel-authority store", "result": "pass"},
+    {"ac": "AC-9", "test": "fitness AC-9 + isolation FF-9/9b — imports validateNarrowing/isNarrowerOrEqual/AncestryOracle from grant-lattice.js; no parallel containment fn / new ScopeElement kind", "result": "pass"},
+    {"ac": "AC-10", "test": "isolation FF-10 — no pg/fs/net/http imports in scoped-admin.ts; oracle injected; determinism property in adversarial cross-check", "result": "pass"},
+    {"ac": "AC-11", "test": "isolation FF-11 git-diff-quiet — grant-resolver.ts / grant-lattice.ts / object-handle.ts byte-for-byte unchanged (verified: working tree clean, no edits)", "result": "pass"},
+    {"ac": "AC-12", "test": "db-job: migrate x2 (run2 = nothing to apply), counts = 17 mgmt-grants / 1 genesis assignment / 1 e-owner; genesis-owner-seed.test.ts (5) green; isolation.sh static AC-12 = 17", "result": "pass"},
+    {"ac": "AC-13", "test": "db-job: tenant_owner_roles = 1 (exactly one per tenant); genesis assignment is the single source='genesis' un-parented root; genesis-owner-seed.test.ts green", "result": "pass"},
+    {"ac": "AC-14", "test": "scoped-admin.test.ts AC-14 — empty adminGrants (revoked/out-of-window) → every delegation rejected (no_admin_authority); capability gone at authority layer", "result": "pass"},
+    {"ac": "AC-15", "test": "scoped-admin.fitness.test.ts AC-15 — mgmt-grant create/revoke emit GrantAuditEvent shape (actor/subject/capability/scope/proposed_by/confirmed_by); call-site lint is T-0030 surface", "result": "pass"},
+    {"ac": "AC-16", "test": "vacuous branch — migration 026 has NO CREATE TABLE (isolation FF-16/17); known_tenant_tables.txt unchanged; cross_tenant.test.ts (47) green on isolated DB; mgmt-grants ride registered `grant` table", "result": "pass"},
+    {"ac": "AC-17", "test": "isolation FF-17 — migration numbered 026 (>=026), additive (no prior-migration edit), INSERT-only no DDL, every ON CONFLICT DO NOTHING; T-0013 invariants vacuous (no DDL)", "result": "pass"}
+  ],
+  "adversarial_probes": [
+    {
+      "id": "ADV-a",
+      "name": "R-2 live: genesis-owner org-set does NOT reach a NEW root department",
+      "setup": "Added a 4th root (newroot, parent_id NULL) to the org oracle; the seed's owner org-set ceiling is {fin,cs,plat}.",
+      "result": "behavior pinned — three honest framings recorded for handoff",
+      "findings": "a1: owner (isGenesisOwner=true) delegating onto newroot is ACCEPTED — the owner short-circuit (FR-4) BYPASSES the org gate, so owner reach is NOT limited by the seeded set; the set only bounds DOWNSTREAM admins. a2: a delegated (non-owner) admin whose ceiling is {fin,cs,plat} is REJECTED (org_scope_widens) on newroot — this is the real R-2 limitation: forest-wide reach delegated FROM the owner is pinned to the 3-root snapshot. a3: resource-axis — a child grant whose scope=newroot is NOT ⊑ the owner's {fin,cs,plat} grant-set (scope_widens). HANDOFF: R-2 is a genuine forward-limitation for T-0030/T-0053 (re-broaden owner grant-set or revisit super-root when a new root is minted), but NOT a self-elevation hole: the owner himself, being the un-parented root, can always mint authority on a new root; only authority he has already DELEGATED down stays pinned. No code defect.",
+      "verdict": "expected / by-design; R-2 confirmed as forward-limitation, not a defect"
+    },
+    {
+      "id": "ADV-b",
+      "name": "Set-widening: one member wider, rest already-covered → reject (no averaging)",
+      "setup": "Admin grant/ceiling scope = org-set {fin,cs}; child delegation org-set = {fin,plat} (fin covered, plat escapes).",
+      "result": "rejected on BOTH axes — no partial/average acceptance",
+      "findings": "org-axis: {fin,plat} not ⊑ {fin,cs} → org_scope_widens (fires first). With ceiling widened to isolate the resource axis: child grant-set {fin,plat} not ⊑ admin grant-set {fin,cs} → scope_widens. The WHOLE set is rejected when ANY single member escapes; the subset gate has no notion of 'most members fit'.",
+      "verdict": "expected / by-design — set containment is all-members, no averaging"
+    },
+    {
+      "id": "ADV-c",
+      "name": "isGenesisOwner=true + garbage target — trust-boundary honesty",
+      "setup": "Owner flag injected true; targets = freeform child with a FOREIGN tenant_id in the field + empty-set org; and a bogus resourceType 'mgmt_object:NONSENSE' onto an unknown org node.",
+      "result": "owner bypass is TOTAL and is the FLAG, not the input — trust boundary is the caller",
+      "findings": "c1/c2: with isGenesisOwner=true the checker returns {ok:true} for freeform-garbage and for bogus-resourceType/unknown-node children alike — it validates NOTHING once the owner flag is set (intended un-parented-root semantics, FR-4). c3: the SAME bogus child as a NON-owner is rejected (org_scope_widens) — proving the bypass is driven by the injected flag, not by anything in the target. TRUST BOUNDARY (handoff): the pure checker is correctly ignorant of 'owner'; the security of isGenesisOwner rests ENTIRELY on the CALLER (T-0030 write-API) deriving it from the seeded tenant-owner role + confirmed in-window genesis assignment. A caller that sets the flag from untrusted input would be a full self-elevation hole — but that surface is T-0030, not T-0029. The checker also does NOT validate childGrant.tenantId against the admin's tenant — cross-tenant safety is enforced by RLS at the DB write-path (T-0030/T-0053), not the pure checker. Honest, documented boundary; no defect in T-0029's surface.",
+      "verdict": "honest bypass / boundary documented — no hole in T-0029; flag-derivation security is T-0030's contract (frozen NF-7)"
+    },
+    {
+      "id": "ADV-d",
+      "name": "Seed re-entrancy: delete a mgmt-grant, re-run migrations → NOT restored",
+      "setup": "On the isolated DB after a clean seed (17 grants), manually DELETE one mgmt-grant (the invoke grant e1000000-…-0011), then re-run node migrations/run.mjs.",
+      "result": "NOT restored — count stays 16 after re-run",
+      "findings": "The runner records version '026_genesis_owner_seed' in schema_migrations and SKIPS already-recorded versions — the file SQL is never re-executed on a normal re-run, so a row deleted AFTER seeding is NOT reconciled back. This is BY DESIGN and consistent with the spec: FR-5/AC-12 promise 're-running the migration set yields identical row counts' (true: a normal re-run is a no-op, counts unchanged), NOT self-healing of post-seed drift. Layer-2 probe (ADV-d-bis): clearing the bookkeeping row forces 026 pending → file re-executes, ON CONFLICT DO NOTHING re-asserts the missing grant (→17) and creates NO duplicates. So 'idempotency' here = (1) bookkeeping skip on normal re-run + (2) ON CONFLICT safety on forced replay; it is explicitly NOT reconciliation. Matches runner contract (migrations/run.mjs header) and spec intent.",
+      "verdict": "expected / by-design — idempotency != reconciliation; spec-consistent, no defect"
+    }
+  ],
+  "integration_honesty": {
+    "d056_pass": true,
+    "evidence": "vitest.config excludes .claude/**, web/**, ../choros-wt/** (sibling worktrees) and ci/checks/db/** → the `ci` gate (651 unit) does not pick up stale-worktree tests or DB tests (directly addresses FE-W24-0005). dist/ is gitignored and the working tree stayed clean after my throwaway tsc build (no ambient-artifact leak into the gate; addresses FE-W24-0004). The pure checker has zero DB/ambient dependency (FF-10). The db-job ran on an ISOLATED Postgres equivalent to dev's `db` CI job (migrate x2 + fitness:db). 'Green on branch == green on dev' holds for T-0029."
+  },
+  "secondary_ux": [
+    {"check": "web/browser UX", "result": "n/a", "note": "T-0029 ships a pure TS checker + idempotent seed migration; no web surface (write-API/UI is T-0030). No LLM/browser check applicable (tester.md rule 2 — secondary only for web UX)."}
+  ],
+  "failures": [],
+  "review_nits_status": {
+    "R-1": "CONFIRMED documentation-only — DB reality is 17 mgmt-grants (16 CRUD + 1 invoke); ADR §3 prose still says '16' in two spots (lines 121, 152). Code/migration/fitness are consistently 17. Not a code defect; carries forward as an ADR doc fix (does not block TEST).",
+    "R-2": "CONFIRMED LIVE as a forward-limitation (ADV-a): the seeded owner org-set {fin,cs,plat} pins DOWNSTREAM-delegated forest reach to the current 3-root snapshot; a new root department is not covered for delegated admins. The OWNER himself is not blocked (un-parented root short-circuits the org gate). Out of scope for T-0029; carry to T-0030 (write-API: re-broaden owner grant-set on new-root mint) / T-0053. Not a defect."
+  },
+  "friction": [],
+  "tester": "claude-opus-4-8 (tester role, T-0029 TEST)",
+  "tested_commit": "23f203a",
+  "base_commit": "b32d403",
+  "test_date": "2026-06-11"
+}

@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0029",
+  "status": "ready",
+  "decision": "Activate administration as ordinary delegable grants on the reserved mgmt_object:* resource-type (no separate admin subsystem) and ship a single new pure module src/core/scoped-admin.ts exporting validateAdminDelegation(adminCtx, child, oracle) — a thin composition that reuses T-0018 grant-lattice.ts verbatim along BOTH narrowing axes: (1) the resource/org-scope axis via validateNarrowing(adminGrant, childGrant, oracle) over the covering mgmt-grant, and (2) the org/admin-boundary axis via isNarrowerOrEqual(targetOrgScope, adminAssignmentOrgScope, oracle) using the existing AncestryOracle over hierarchy:org. Genesis-owner identity is an INJECTED boolean (adminCtx.isGenesisOwner): when true, the owner-minted write is accepted without a parent-subset check (the un-parented root, per T-0018 ADR genesis-owner identity); when false with no covering delegable mgmt-grant, the write is rejected with a distinct typed reason. The typed-rejection union AdminDelegationResult extends T-0018 NarrowingResult with admin-axis reasons (org_scope_widens, no_admin_authority). The module is pure/IO-free (oracle injected) — the DB write-path that calls it before INSERT is T-0030. Admin authority is seeded into the EXISTING grant + role_assignment tables (no new tenant table): one additive idempotent migration 026_genesis_owner_seed.sql wires the already-seeded grant-less tenant-owner role to delegable mgmt_object:{role,agent,process,grant} grants (CRUD + invoke for agent) scoped over the org forest-roots and one confirmed genesis assignment binding a seeded genesis-owner employee. grant-resolver.ts and grant-lattice.ts are NOT edited (additive-only).",
+  "rejected_alternatives": [
+    {"option": "A separate mgmt_grant / admin_role / admin_acl table (a dedicated admin subsystem)", "why_not": "Violates the ratified no-second-authority-subsystem decision (NF-1, mirrors T-0018 AC-11). Admin is the PATTERN 'hold a delegable grant on mgmt_object:X', not a mechanism. mgmt_object:* is already reserved in the T-0018 ResourceType union; the grant/role/role_assignment spine already carries every field needed. A parallel store would be a divergent source of truth and a second narrowing path."},
+    {"option": "A new ScopeElement kind or a parallel org-containment function for the admin/org axis", "why_not": "Violates NF-2 (no new scope algebra). role_assignment.org_scope is already a grant-lattice ScopeElement of hierarchy:org, and isNarrowerOrEqual/AncestryOracle already decide org-subtree containment. A second algebra would risk divergence from the proven, adversarially-fuzzed lattice and break the single-source-of-truth for narrowing."},
+    {"option": "Deriving 'is genesis owner' inside the lattice (e.g. a sentinel role slug or an owner-typed scope)", "why_not": "T-0018 ADR fixes that the algebra relies ONLY on the owner's existence as an INJECTED boolean at the write path, never a lattice concern (keeps the algebra ignorant of 'owner', preserves closure/decidability). Deriving it inside would couple the pure algebra to seed identity and to DB lookups."},
+    {"option": "Re-parent fin/cs/plat under a synthetic single tenant-root department to give the owner a single-node scope", "why_not": "The dev org is a 3-root forest (fin/cs/plat, parent_id NULL — live-verified). Introducing a synthetic root requires EDITING migration 014's existing seeds (re-parenting) — forbidden (additive-only, AC-17). The lattice already supports a scope-SET over the three roots; an org-set {kind:set,members:[fin,cs,plat]} covers every subtree with zero DDL edit and no new algebra. Chosen instead."},
+    {"option": "Ship the HTTP write-routes / grant-editor UI that call the checker before INSERT in T-0029", "why_not": "Out of scope by the ratified backlog read: E3.4 (T-0030) IS the write-API/editor consumer. The day-1 ACs are provable WITHOUT an HTTP route (pure checker + adversarial fitness + live seed probe). Duplicating routes here is the wrong seam; the checker contract is frozen here for T-0030 to consume."},
+    {"option": "Edit grant-resolver.ts to resolve mgmt_object handles on the read path", "why_not": "Admin narrowing is a WRITE-path invariant (rejection before persistence). The read-path PDP (grant-resolver.ts) maps only application/registry/record handles; mgmt_object handles are not a read-path concern day-1. NF-4/AC-11 require grant-resolver.ts byte-for-byte unchanged."}
+  ],
+  "object_model": [
+    {
+      "entity": "AdminContext (NEW, scoped-admin.ts) — the administering principal's authority slice, assembled by the caller (T-0030) from the resolver",
+      "fields": [
+        {"name": "isGenesisOwner", "type": "boolean — INJECTED; true => owner-minted writes accepted without parent-subset check (un-parented root)"},
+        {"name": "adminGrants", "type": "Grant[] (from grant-lattice.ts) — the covering, confirmed, in-window, delegable mgmt_object:* grants reachable through the admin's assignments; empty => no admin authority"},
+        {"name": "adminOrgScope", "type": "ScopeElement (hierarchy:org) — the org-scope ceiling: the union/SET of the administering assignment(s) org_scope; the admin/org-boundary axis ceiling"}
+      ]
+    },
+    {
+      "entity": "DelegationTarget (NEW, scoped-admin.ts) — the downstream object being minted/edited (a child grant OR a role-assignment)",
+      "fields": [
+        {"name": "kind", "type": "\"grant\" | \"assignment\" — discriminator"},
+        {"name": "childGrant", "type": "Grant (when kind=grant) — the mgmt-grant being delegated; its resourceType is a mgmt_object:* value, its scope an org ScopeElement"},
+        {"name": "targetOrgScope", "type": "ScopeElement (hierarchy:org) — the org context of the child: the child grant's org scope, or the assignment's org_scope; must be ⊑ adminOrgScope"}
+      ]
+    },
+    {
+      "entity": "AdminDelegationResult (NEW, scoped-admin.ts) — discriminated typed result; extends T-0018 NarrowingResult reasons with admin-axis reasons",
+      "fields": [
+        {"name": "ok:true", "type": "accepted"},
+        {"name": "ok:false; reason", "type": "\"scope_widens\" | \"facet_widens\" | \"constraint_widens\" | \"parent_non_delegable\" | \"free_form_non_delegable\" (reused from NarrowingResult) | \"org_scope_widens\" (admin/org-boundary axis breach) | \"no_admin_authority\" (non-owner with no covering delegable mgmt-grant)"}
+      ]
+    },
+    {
+      "entity": "MGMT_OBJECT_KINDS (NEW const, scoped-admin.ts) — the frozen day-1 mgmt-object kind set",
+      "fields": [
+        {"name": "value", "type": "readonly [\"mgmt_object:role\",\"mgmt_object:agent\",\"mgmt_object:process\",\"mgmt_object:grant\"] (each assignable to the T-0018 ResourceType union mgmt_object:${string})"}
+      ]
+    },
+    {
+      "entity": "grant rows on tenant-owner (SEEDED into EXISTING choros.grant via migration 026 — no schema change)",
+      "fields": [
+        {"name": "role_id", "type": "uuid = e0000000-0000-0000-0000-000000000001 (the seeded tenant-owner)"},
+        {"name": "resource_type", "type": "text in {mgmt_object:role, mgmt_object:agent, mgmt_object:process, mgmt_object:grant}"},
+        {"name": "operation", "type": "text in {create,read,update,delete} for all four kinds, plus invoke for mgmt_object:agent"},
+        {"name": "scope", "type": "jsonb org-SET {kind:set,members:[{node,org,fin},{node,org,cs},{node,org,plat}]} — covers every org subtree"},
+        {"name": "delegable", "type": "boolean = true (the owner's grants are subset-checked parents once delegated)"},
+        {"name": "id", "type": "uuid, stable prefix e1000000-* (idempotency key via PK)"}
+      ]
+    },
+    {
+      "entity": "role_assignment (genesis) — SEEDED into EXISTING choros.role_assignment via migration 026",
+      "fields": [
+        {"name": "id", "type": "uuid = f0000000-0000-0000-0000-0000000000ff (stable)"},
+        {"name": "employee_id", "type": "uuid = d0000000-0000-0000-0000-0000000000ff (NEW seeded genesis-owner employee e-owner, kind=human, position_id NULL)"},
+        {"name": "role_id", "type": "uuid = tenant-owner e0000000-...-0001"},
+        {"name": "org_scope", "type": "jsonb org-SET over fin/cs/plat (the owner's admin ceiling)"},
+        {"name": "confirmed_by", "type": "text = 'seed' (NOT NULL => CONFIRMED/effective per T-0022 contract)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "export function validateAdminDelegation(admin: AdminContext, target: DelegationTarget, oracle: AncestryOracle): AdminDelegationResult — PURE, IO-free, never mutates/persists/reads IO; oracle injected.",
+    "Decision order (frozen for T-0030/T-0039): (1) if target.kind=='grant' and target.childGrant.scope is freeform: accept ONLY if admin.isGenesisOwner, and the seed/write-path forces delegable=false on it (reuses T-0018 FR-6); a non-owner freeform mint => free_form_non_delegable. (2) ORG-AXIS GATE (always, owner included is exempt): if NOT admin.isGenesisOwner and NOT isNarrowerOrEqual(target.targetOrgScope, admin.adminOrgScope, oracle) => org_scope_widens. (3) if admin.isGenesisOwner: accept (un-parented root; no parent-subset check). (4) else if admin.adminGrants has no delegable mgmt-grant covering target => no_admin_authority. (5) RESOURCE-AXIS GATE: for kind=='grant', return validateNarrowing(coveringAdminGrant, target.childGrant, oracle) (its reasons surface verbatim: scope_widens/facet_widens/constraint_widens/parent_non_delegable/free_form_non_delegable). For kind=='assignment', the org-axis gate (step 2) is the whole check (an assignment delegates org reach, not a resource grant).",
+    "Covering-grant selection: a covering admin grant is one in admin.adminGrants whose resourceType === target.childGrant.resourceType (same mgmt_object kind) AND whose operation === target.childGrant.operation AND delegable===true; validateNarrowing is run against it. If multiple cover, accept-if-ANY covers a valid narrowing (most-specific not required day-1).",
+    "validateAdminDelegation imports {Grant, ScopeElement, AncestryOracle, NarrowingResult, validateNarrowing, isNarrowerOrEqual} from ./grant-lattice.js and adds NO new ScopeElement kind and NO parallel containment function (NF-2/AC-9).",
+    "Frozen surfaces for siblings (NF-7): MGMT_OBJECT_KINDS, AdminContext.isGenesisOwner (injected boolean), AdminDelegationResult discriminated union — consumed by T-0030 (write-API/UI) and T-0039 (LLM-proposes). Names/shapes fixed here.",
+    "Audit obligation (AC-15): every mgmt-grant create/revoke call site (in T-0030, the write-API) MUST emit a T-0018 GrantAuditEvent carrying actor, subjectRoleId, capability {resourceType,operation,resourceFacet}, scope, and proposed_by/confirmed_by when present. T-0029 ships the obligation contract + a static lint stub; the call sites live in T-0030.",
+    "Seed migration: migrations/026_genesis_owner_seed.sql — additive (no edit to 001-021/022-025), idempotent (stable UUIDs + ON CONFLICT DO NOTHING), FK-ordered (employee -> role(existing) -> grant; employee -> assignment). Keeps T-0013 invariants vacuously (INSERT-only into existing FORCE-RLS tables; no new DDL). LIVE-VERIFIED on an isolated Postgres (001-021 + 026, double-run idempotent: 16 owner grants, 1 confirmed genesis assignment, stable counts)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "mgmt_object:* is a first-class lattice-resident resource-type: a Grant fixture with resourceType in {mgmt_object:role|agent|process|grant} compiles against the T-0018 ResourceType union; MGMT_OBJECT_KINDS is exactly the day-1 four-kind set (AC-1).", "ci_check": "tsc --noEmit over a fixture asserting `const g: Grant = {...resourceType:'mgmt_object:role'...}` type-checks + vitest asserting MGMT_OBJECT_KINDS deep-equals the four-kind array (src/__tests__/scoped-admin.test.ts)."},
+    {"id": "FF-2", "rule": "Checker ACCEPTS a delegated mgmt-grant whose org-scope ⊑ adminGrant.scope with delegable parent and non-widening facet/constraint => {ok:true} (AC-2).", "ci_check": "vitest run src/__tests__/scoped-admin.test.ts — positive case over the org AncestryOracle."},
+    {"id": "FF-3", "rule": "Checker REJECTS (never mutates) a child whose org-scope WIDENS the admin's — ancestor/sibling/escape — with distinct typed reason scope_widens or org_scope_widens (AC-3).", "ci_check": "vitest negative cases; assert reason field; a frozen-object input (Object.freeze) proves no mutation."},
+    {"id": "FF-4", "rule": "No self-elevation (adversarial): seeded-LCG fuzz over mgmt_object:* node/tag/interval/set/org-subtree parent/child pairs — a child widening ANY axis is ALWAYS rejected; only genuine subsets accepted (AC-4, mirrors grant-lattice.adversarial.test.ts).", "ci_check": "vitest run src/__tests__/scoped-admin.adversarial.test.ts — deterministic LCG, leakCount===0 assertion."},
+    {"id": "FF-5", "rule": "Non-delegable parent => parent_non_delegable; freeform parent => free_form_non_delegable; non-owner minting a freeform mgmt-grant rejected (AC-5).", "ci_check": "vitest cases asserting the exact reason strings, reusing validateNarrowing's outputs verbatim + the isGenesisOwner=false freeform-mint branch."},
+    {"id": "FF-6", "rule": "Genesis owner is the un-parented root: isGenesisOwner=true => owner-minted grant accepted with NO parent-subset check; isGenesisOwner=false with empty adminGrants => no_admin_authority (AC-6).", "ci_check": "vitest two-branch test on the injected boolean."},
+    {"id": "FF-7", "rule": "Delegated admin bounded to subtree: admin assigned mgmt_object:role within subtree S accepts a target whose org context ⊑ S and rejects one outside S, via the existing org AncestryOracle (AC-7).", "ci_check": "vitest with an org-tree oracle: within-subtree (accept) + escaping-subtree (org_scope_widens) cases."},
+    {"id": "FF-8", "rule": "No second authority subsystem: admin authority is expressed ONLY as grant rows on mgmt_object:* — no admin-specific table/flag/role-kind/ACL store in model or migration (AC-8, mirrors T-0018 AC-11).", "ci_check": "ci/checks/scoped-admin-isolation.sh — greps scoped-admin.ts + migrations/026* for forbidden tokens (admin_role, admin_acl, mgmt_grant table, is_admin flag, role_kind) and asserts migration 026 contains NO `CREATE TABLE`."},
+    {"id": "FF-9", "rule": "No new scope algebra: scoped-admin.ts imports isNarrowerOrEqual/validateNarrowing/AncestryOracle from grant-lattice.ts and defines NO new ScopeElement kind and NO parallel containment function (AC-9).", "ci_check": "ci/checks/scoped-admin-isolation.sh — asserts the import line is present and greps for forbidden re-declarations (`kind:` new literals not in the lattice union, a local `function .*NarrowerOrEqual`/`function .*[Cc]ontain`)."},
+    {"id": "FF-10", "rule": "Checker is pure (IO-free): scoped-admin.ts performs no DB/network/LLM IO and accepts an injected oracle; equal inputs => equal output (AC-10).", "ci_check": "ci/checks/scoped-admin-isolation.sh — forbidden-import grep (pg/fs/net/http/jobStore/fetch) (mirrors grant-resolver-isolation.sh check 1) + a vitest determinism property test (same inputs twice => deep-equal results)."},
+    {"id": "FF-11", "rule": "grant-resolver.ts byte-for-byte unchanged by this task (read-path untouched) (AC-11).", "ci_check": "ci/checks/scoped-admin-isolation.sh — `git -C <root> diff --quiet HEAD~..HEAD -- src/core/grant-resolver.ts` against the task base (mirrors grant-resolver-isolation.sh check 3 frozen-files pattern); also asserts grant-lattice.ts unchanged."},
+    {"id": "FF-12", "rule": "Genesis seed present + idempotent: after migrate + double-run, exactly the seeded mgmt-grants attach to tenant-owner and exactly one confirmed genesis assignment wires the genesis-owner employee -> tenant-owner; re-run yields identical counts (AC-12).", "ci_check": "live (T-0053 db job): vitest in ci/checks/db asserts 16 owner grants + 1 confirmed assignment after running migrations twice (LIVE-VERIFIED in DESIGN on isolated PG). static-now: a count-lint on migrations/026 asserting 16 grant VALUES rows + 1 assignment + ON CONFLICT DO NOTHING on every INSERT."},
+    {"id": "FF-13", "rule": "Exactly one genesis owner per tenant: the tenant-owner role is unique per tenant (019 UNIQUE(tenant_id,slug)) and the genesis assignment is the single un-parented root (NF-6/AC-13).", "ci_check": "static-now: a grep-lint asserting migration 026 seeds exactly ONE role_assignment to tenant-owner; live (T-0053): SELECT count(*) FROM role WHERE slug='tenant-owner' GROUP BY tenant_id = 1, and count of genesis assignments = 1."},
+    {"id": "FF-14", "rule": "Removing the role removes the capability: a subject whose tenant-owner/delegated-admin assignment is revoked or out-of-window confers ZERO mgmt authority — validateAdminDelegation rejects every delegation for them (capability gone at the authority layer) (AC-14).", "ci_check": "vitest: with isGenesisOwner=false and adminGrants=[] (assignment revoked => resolver yields no covering grant), every delegation => no_admin_authority; with an out-of-window covering grant (isEffective=false filtered out by the caller) => same. Models the T-0021/T-0022 resolution contract."},
+    {"id": "FF-15", "rule": "Audit obligation on mgmt-grant issuance/revocation: every mgmt-grant create/revoke call site emits a GrantAuditEvent with actor, subjectRoleId, capability, scope, proposed_by/confirmed_by (AC-15, reuses T-0018 FR-7).", "ci_check": "static lint (the call sites land in T-0030): T-0029 ships the GrantAuditEvent obligation re-export/type alias + a documented lint hook; the call-site lint is activated when T-0030 adds the write-path. A vitest asserts the emit-shape helper builds a valid GrantAuditEvent for a mgmt-grant."},
+    {"id": "FF-16", "rule": "Tenant-table / cross-tenant harness coherence: T-0029 adds NO new tenant table (mgmt-grant seeds ride the already-registered grant + role_assignment tables) so known_tenant_tables.txt is unchanged and the existing seedRowForTable cases for grant/role/role_assignment suffice (AC-16, vacuous branch).", "ci_check": "static-now: a check asserting migrations/026* contains NO `CREATE TABLE` and that `grant`, `role`, `role_assignment` are already present in ci/checks/known_tenant_tables.txt (no diff to that file from this task). live: the existing cross_tenant.test.ts (iterates KNOWN_TENANT_TABLES) stays green."},
+    {"id": "FF-17", "rule": "Migration numbering seam: the seed migration is numbered >= 026 (022/023-025 reserved by T-0034/T-0062 in flight), is additive (no edit to prior migrations), and keeps T-0013 invariants on any DDL (AC-17).", "ci_check": "ci/checks/scoped-admin-isolation.sh — asserts the only new migration file matches ^026_ (or higher), asserts `git diff` touches no migrations/0[0-2][0-5]_*.sql, and (since 026 ships INSERT-only, no DDL) the FORCE-RLS/default-DENY invariants hold vacuously on the existing tables."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "MGMT_OBJECT_KINDS const + Grant fixture (FF-1); object_model 'MGMT_OBJECT_KINDS' + grant rows entity"},
+    {"ac": "AC-2", "covered_by": "validateAdminDelegation resource-axis gate (step 5) via validateNarrowing; FF-2"},
+    {"ac": "AC-3", "covered_by": "org-axis gate (step 2, org_scope_widens) + resource-axis gate (scope_widens); FF-3; AdminDelegationResult union"},
+    {"ac": "AC-4", "covered_by": "scoped-admin.adversarial.test.ts (FF-4); composition over the already-fuzzed validateNarrowing"},
+    {"ac": "AC-5", "covered_by": "resource-axis gate reasons parent_non_delegable/free_form_non_delegable + freeform-mint owner-only branch (step 1); FF-5"},
+    {"ac": "AC-6", "covered_by": "isGenesisOwner injected-boolean branch (steps 3-4); FF-6; AdminContext.isGenesisOwner"},
+    {"ac": "AC-7", "covered_by": "org-axis gate via isNarrowerOrEqual(targetOrgScope, adminOrgScope, oracle); FF-7"},
+    {"ac": "AC-8", "covered_by": "scoped-admin-isolation.sh no-second-subsystem grep + migration-026 no-CREATE-TABLE (FF-8)"},
+    {"ac": "AC-9", "covered_by": "scoped-admin-isolation.sh import-presence + no-parallel-algebra grep (FF-9); contracts 'imports {...} from ./grant-lattice.js'"},
+    {"ac": "AC-10", "covered_by": "scoped-admin-isolation.sh forbidden-import grep + determinism property test (FF-10); validateAdminDelegation purity"},
+    {"ac": "AC-11", "covered_by": "scoped-admin-isolation.sh git-diff-quiet on grant-resolver.ts (FF-11)"},
+    {"ac": "AC-12", "covered_by": "migrations/026_genesis_owner_seed.sql + live double-run db test + static count-lint (FF-12); LIVE-VERIFIED in DESIGN"},
+    {"ac": "AC-13", "covered_by": "019 UNIQUE(tenant_id,slug) on tenant-owner + single genesis assignment in 026 (FF-13)"},
+    {"ac": "AC-14", "covered_by": "no_admin_authority on empty adminGrants / revoked assignment (FF-14); AdminContext.adminGrants empty => reject"},
+    {"ac": "AC-15", "covered_by": "GrantAuditEvent obligation re-export + emit-shape helper + activated-in-T-0030 lint (FF-15)"},
+    {"ac": "AC-16", "covered_by": "no new tenant table (migration 026 INSERT-only) => known_tenant_tables.txt unchanged, existing seedRowForTable cases suffice (FF-16); vacuous branch confirmed live"},
+    {"ac": "AC-17", "covered_by": "026 numbering + additive + no-DDL invariants (FF-17)"}
+  ],
+  "runtime_target": "локально/контейнер — pure-TS module runs in npm run ci (tsc/eslint/vitest/fitness, no external resource); the migration seed runs against the silo Postgres (docker-compose, T-0053) — no founder/GT-4 external resource required (dev silo). Live seed idempotency was DESIGN-verified on a throwaway isolated Postgres (POSTGRES_PORT=55456, torn down).",
+  "adr_artifact_path": "docs/design/T-0029-scoped-admin.adr.md",
+  "escalation": ""
+}
