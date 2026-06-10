@@ -271,6 +271,7 @@ describe("public surface imports (AC-10, FF-11)", () => {
       lockOwner: undefined,
       lockExpiry: undefined,
       createdAt: 0,
+      available_at: 0, // T-0114: new required field (ADR §3.1 compat-check — coder update)
     };
     expect(_clockCheck.now()).toBe(0);
     expect(_jobCheck.state).toBe(JobState.CREATED);

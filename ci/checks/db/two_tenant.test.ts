@@ -51,9 +51,10 @@ describe('FF-2: runner is idempotent (re-run applies nothing)', () => {
     expect(out).toMatch(/nothing to apply/);
   });
 
-  it('all 9 baseline files (001–009) are recorded', async () => {
+  it('all 10 migration files (001–010) are recorded', async () => {
+    // T-0114 adds 010_job_available_at; updated from 9 to 10.
     const n = await countMigrations();
-    expect(n).toBe(9);
+    expect(n).toBe(10);
   });
 });
 
