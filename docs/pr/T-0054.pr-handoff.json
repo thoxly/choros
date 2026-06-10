@@ -1,0 +1,151 @@
+{
+  "task_id": "T-0054",
+  "status": "pr_open",
+  "branch": "task/T-0054-keycloak-compose",
+  "pr_url": "https://github.com/thoxly/choros/pull/4",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/kc/agent-client.sh",
+    "ci/checks/kc/agent-token.sh",
+    "ci/checks/kc/auth-mode-seam.sh",
+    "ci/checks/kc/environments-docs.sh",
+    "ci/checks/kc/fixture-users.sh",
+    "ci/checks/kc/human-token.sh",
+    "ci/checks/kc/jwt-claims.sh",
+    "ci/checks/kc/no-prod-secret.sh",
+    "ci/checks/kc/port-check.sh",
+    "ci/checks/kc/realm-json-exists.sh",
+    "ci/checks/kc/realm-ready.sh",
+    "ci/checks/kc/wait-ready.sh",
+    "ci/checks/no-committed-secret.sh",
+    "config/keycloak/realm-choros.json",
+    "config/postgres/001-keycloak-schema.sql",
+    "docker-compose.yml",
+    "docs/design/T-0054-keycloak-compose.adr.md",
+    "docs/design/T-0054.adr.contract.json",
+    "docs/environments.md",
+    "docs/reviews/T-0054.review.json",
+    "docs/specs/T-0054-keycloak-compose.spec.md",
+    "docs/specs/T-0054.spec.contract.json",
+    "docs/test-reports/T-0054.test-report.json",
+    "src/http/auth.ts"
+  ],
+  "deviations_from_adr": [
+    "Keycloak management/health port (9000) exposed via KEYCLOAK_MGMT_PORT env var (added in nit-fix 6ae4c75 per R-1): the ADR specified healthcheck on KEYCLOAK_PORT (8180) but KC 25 start-dev splits http (8180) and management (9000) interfaces. Resolution: introduced KEYCLOAK_MGMT_PORT=9000; ADR updated in the same commit to document the KC 25 port-split. Zero product-contract impact.",
+    "JWT preferred_username for agent service accounts: ADR §3 originally stated 'preferred_username = client_id (e.g. agent-orchestrator)'. KC 25 actually emits 'service-account-<clientId>' (e.g. service-account-agent-orchestrator) as the service account user's username. Corrected in nit-fix 6ae4c75 per R-4: both spec (FR-6 table) and ADR JWT contract table now reflect actual KC 25 behavior. T-0060 must expect 'service-account-<clientId>', not bare client_id. This is a clarification of the frozen contract, not a scope change."
+  ],
+  "friction_events": [
+    "FE-T0054-0001 (tooling-gap, nit): ci/checks/kc/jwt-claims.sh:50 — check_token() uses global FAIL variable (no 'local'); second call resets FAIL=0 clobbering outer failure. Affects adversarial probe B only (forged token); normal CI pass path unaffected. Product impact: none. Fix: add 'local FAIL=0' inside check_token() at line 50. Not fixed in scope (nit, no product impact)."
+  ],
+  "verdict_payload": {
+    "review_verdict": "approved",
+    "review_commit": "d31b89d",
+    "nit_fix_commit": "6ae4c75",
+    "findings_resolved": [
+      {
+        "id": "R-1",
+        "severity": "nit",
+        "issue": "Port 9000 (KC 25 management interface) hardcoded without KEYCLOAK_MGMT_PORT env var; absent from docs/environments.md",
+        "status": "resolved",
+        "commit": "6ae4c75",
+        "resolution": "Introduced KEYCLOAK_MGMT_PORT env var (default 9000); parameterized healthcheck curl; documented in docs/environments.md"
+      },
+      {
+        "id": "R-2",
+        "severity": "nit",
+        "issue": "ADR §3.6 healthcheck snippet still referenced KEYCLOAK_PORT (8180) after 08d43da fixed it to port 9000 in compose",
+        "status": "resolved",
+        "commit": "6ae4c75",
+        "resolution": "ADR updated to show port 9000 (KEYCLOAK_MGMT_PORT) with explanatory note on KC 25 http/management port split"
+      },
+      {
+        "id": "R-3",
+        "severity": "nit",
+        "issue": "Stale comment on docker-compose.yml:40 referenced KC_DB_URL ?currentSchema parameter that was replaced by KC_DB_SCHEMA env var",
+        "status": "resolved",
+        "commit": "6ae4c75",
+        "resolution": "Comment corrected to: 'KC_DB_SCHEMA=keycloak (separate env var, not a JDBC query param)'"
+      },
+      {
+        "id": "R-4",
+        "severity": "nit",
+        "issue": "JWT contract table in ADR+spec stated preferred_username=client_id for agents (e.g. agent-orchestrator); KC 25 actually emits service-account-<clientId>",
+        "status": "resolved",
+        "commit": "6ae4c75",
+        "resolution": "Corrected in both docs/specs/T-0054-keycloak-compose.spec.md FR-6 and docs/design/T-0054-keycloak-compose.adr.md JWT contract table to reflect actual KC 25 behavior: preferred_username=service-account-<clientId>"
+      }
+    ],
+    "test_verdict": "pass",
+    "test_commit": "d833d2a",
+    "ac_coverage": 14,
+    "ac_passed": 14,
+    "deterministic_tests": {
+      "total": 473,
+      "passed": 473,
+      "failed": 0
+    },
+    "fitness_static": {
+      "total": 7,
+      "passed": 7
+    },
+    "live_kc_pass": true,
+    "live_kc_detail": {
+      "keycloak_version": "25.0.6",
+      "FF-1_wait_ready": "PASS — health/ready HTTP 200 after 15s (management port 9000)",
+      "FF-2_realm_ready": "PASS — issuer=http://localhost:8180/realms/choros",
+      "FF-3_human_token": "PASS — ROPC e-kravtsova, access_token 1205 chars",
+      "FF-4_agent_token": "PASS — client_credentials agent-orchestrator, access_token 1065 chars",
+      "FF-5_jwt_claims": "PASS — iss/aud/sub/preferred_username/actor_type/RS256 all verified (agent preferred_username=service-account-agent-orchestrator confirmed)"
+    },
+    "adversarial_probes": [
+      {"probe": "A — ROPC wrong password", "result": "pass — HTTP 401 invalid_grant"},
+      {"probe": "B — Forged token iss/aud", "result": "pass — iss/aud assertions failed correctly (tooling scoping nit noted as FE-T0054-0001)"},
+      {"probe": "C — CHOROS_AUTH_MODE=keycloak → x-dev-user rejected", "result": "pass — HTTP 501 NOT_IMPLEMENTED"},
+      {"probe": "D — CHOROS_AUTH_MODE=dev explicit → dev-auth unaffected", "result": "pass — HTTP 200 employee identity"}
+    ]
+  },
+  "merge_target": "dev",
+  "merge_policy": "auto-merge D-053 (orchestrator merges after rebase onto current dev HEAD; PR #4 will be closed by the local auto-merge, same pattern as PR #2/#3)",
+  "rebase_note": "dev has advanced since branch-point 8472256 (T-0028 and T-0115 merged); orchestrator must rebase task/T-0054-keycloak-compose onto current dev HEAD before merge",
+  "promote_guide_GT3": {
+    "what_to_verify_manually": [
+      "docker compose up keycloak  — wait for 'Running the server in development mode' in logs or health/ready 200 on http://localhost:9000/health/ready",
+      "Admin console: http://localhost:8180 (or KEYCLOAK_PORT) — login with KC_BOOTSTRAP_ADMIN_USERNAME/PASSWORD (env default: admin/admin); verify 'choros' realm exists",
+      "Human login test: POST http://localhost:8180/realms/choros/protocol/openid-connect/token with grant_type=password, client_id=choros-api, client_secret=<dev_secret>, username=e-kravtsova, password=<dev_password> — expect 200 + access_token",
+      "Agent token test: POST /realms/choros/protocol/openid-connect/token with grant_type=client_credentials, client_id=agent-orchestrator, client_secret=<dev_secret> — expect 200 + access_token",
+      "Decode access_token (base64 middle segment): verify iss=http://localhost:8180/realms/choros, aud contains 'choros-api', actor_type='human' or 'agent'",
+      "Dev-auth still works: CHOROS_AUTH_MODE=dev (default) — GET /api/me with X-Dev-User: e-kravtsova returns 200"
+    ],
+    "not_in_scope": [
+      "Per-request JWT validation middleware in live HTTP handlers — T-0060 (E1.4) owns this",
+      "iss/aud/tenant-claim enforcement on API routes — T-0060",
+      "Production Keycloak deploy or connecting to corporate AD/LDAP — E0.7 (founder-gated, RL-1)",
+      "Keycloak Organizations (pooled SaaS) — deferred per tenancy ADR §6",
+      "Runtime provisioning of users/clients via Admin REST API — E2/E5 RBAC tasks",
+      "Unified multi-service compose (core + Postgres + Keycloak + Flowable) — E0.6",
+      "TLS / Caddy reverse proxy — E0.6 / E0.7"
+    ],
+    "key_env_vars": {
+      "KEYCLOAK_PORT": "8180 (HTTP interface)",
+      "KEYCLOAK_MGMT_PORT": "9000 (management/health interface, KC 25 split)",
+      "KEYCLOAK_REALM": "choros",
+      "KC_BOOTSTRAP_ADMIN_USERNAME": "admin",
+      "KC_BOOTSTRAP_ADMIN_PASSWORD": "admin (dev only — change at E0.7)",
+      "CHOROS_AUTH_MODE": "dev (default) | keycloak"
+    },
+    "t0060_contract_frozen": {
+      "iss": "http://<keycloak-host>:<KEYCLOAK_PORT>/realms/<KEYCLOAK_REALM>",
+      "aud": "choros-api",
+      "actor_type": "human | agent",
+      "preferred_username_human": "<employee-id> (e.g. e-kravtsova)",
+      "preferred_username_agent": "service-account-<clientId> (e.g. service-account-agent-orchestrator)",
+      "signature_algorithm": "RS256"
+    }
+  }
+}
