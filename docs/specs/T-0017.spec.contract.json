@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0017",
+  "status": "ready",
+  "summary": "Specification of the four org-structure tables — tenant, department(tree via parent_id), position, employee(kind ∈ {human,agent}) — that form the polymorphic executor backbone of Choros. Agents and humans share one employee table (no schema fork); agent_card (T-0020) is a thin extension on top. All four tables satisfy T-0013 tenant-isolation invariants (FORCE RLS, default-DENY, tenant_id leading). Migrations 013–016; known_tenant_tables.txt gains 4 entries. Fixture seam: dev ORG_SEED (src/http/org.ts) is superseded by real DB; /api/org, /api/users, /api/me dev-auth path all migrated to real tables. 19 CI-checkable acceptance criteria.",
+  "functional": [
+    "FR-1 tenant table: tenancy root, slug+display_name, RLS self-referential policy, dev silo seed row",
+    "FR-2 department table: tree via nullable parent_id (self-FK tenant-scoped), slug uniqueness per tenant, unbounded depth, acyclic invariant",
+    "FR-3 position table: belongs to one department (tenant-scoped FK), title, slug uniqueness per (tenant_id, department_id)",
+    "FR-4 employee table: kind ∈ {human,agent} (CHECK), optional position_id FK, slug uniqueness per tenant; service workers map to kind=agent; NO second table for agents",
+    "FR-5 known_tenant_tables.txt gains tenant/department/position/employee (additive, orchestrator merges with T-0116)",
+    "FR-6 dev fixture seed: migrations 013-016 include ON CONFLICT DO NOTHING seeds matching current ORG_SEED (3 depts, 9 positions, 10 employees: 7 human + 3 agent), idempotent",
+    "FR-7 /api/org seam: after migration 016 applied, GET /api/org + /api/org/employee/:id + GET /api/users + GET /api/me (x-dev-user) all read real Postgres tables, not ORG_SEED"
+  ],
+  "non_functional": [
+    "NF-1 T-0013 invariants: tenant_id NOT NULL leading PK, no default, FORCE RLS default-DENY, choros_app NOBYPASSRLS, SET LOCAL GUC pattern",
+    "NF-2 tenant-scoped FKs: department self-FK, position→department FK, employee→position FK all include tenant_id on both sides",
+    "NF-3 single executor source: ORG_SEED becomes migration seed source only; no runtime code reads from it after T-0017",
+    "NF-4 forward compatibility: department.id and position.id are org_scope SET values for T-0022 assignment; employee.id is agent_card FK for T-0020; PK shape (tenant_id, id) is fixed",
+    "NF-5 migration numbers 013-016 (011-012 reserved for T-0116)"
+  ],
+  "out_of_scope": [
+    "agent_card columns (T-0020 / E5.1): llm_endpoint, secret_handle, autonomy_threshold, budget_policy_id, escalation_rule_id",
+    "role and assignment tables (T-0022 / E3.2)",
+    "actor_event table (T-0019 / E4.1)",
+    "Flowable ACT_ID_* identity tables",
+    "Keycloak user provisioning (already done in T-0054)",
+    "multi-tenant pooled provisioning (silo N=1 only)",
+    "delete/soft-delete/archival semantics for org rows",
+    "position hierarchy within department (positions hang off departments, not off positions)",
+    "tenant CRUD API (tenant row is seeded by migration)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "tenant in known_tenant_tables.txt; cross-tenant probe: context=dev-tenant → count ≥ 1; no-GUC → count 0 (default-DENY)", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "department in known_tenant_tables.txt; cross-tenant probe passes (tenant-A context → 0 tenant-B rows)", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "position in known_tenant_tables.txt; cross-tenant probe passes", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "employee in known_tenant_tables.txt; cross-tenant probe passes", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "FORCE RLS on all 4 tables: pg_class.relrowsecurity=true AND relforcerowsecurity=true; choros_app without GUC → SELECT count=0 on each", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "cross_tenant.test.ts iterates KNOWN_TENANT_TABLES including the 4 new tables; all pass (seed tenant-A and tenant-B rows via migrator, probe via app URL in tenant-A context → 0 tenant-B rows)", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "tenant_id leading column on all 4 tables: static fitness check (tenant_id_leading.sql or equivalent) passes for tenant/department/position/employee", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "FK tenant-scoping: department self-FK, position→department FK, employee→position FK all include tenant_id on both sides; cross-tenant FK insert rejected", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "department tree acyclicity: inserting a cycle (A.parent=B, B.parent=A) is rejected (via trigger, check constraint, or app-layer pre-check)", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "employee.kind CHECK: INSERT with kind='robot' (or any non-{human,agent} value) → CHECK constraint violation", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "dev seed idempotency: running migrations 013-016 twice (ON CONFLICT DO NOTHING) produces same row count as once; no duplicates, no error", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "employee slug uniqueness per tenant: two employees with same (tenant_id, slug) → unique constraint violation; same slug in different tenants is allowed", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "GET /api/org reads real tables: after migration 016 applied+seeded, response has ≥3 departments, each with ≥1 position, each with ≥1 employee; in-memory ORG_SEED is not the source", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "GET /api/org/employee/e-kravtsova → 200 from DB; non-existent ID → 404", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "GET /api/users returns only kind=human employees from DB; no kind=agent row appears", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "GET /api/me with x-dev-user:e-kravtsova resolves against real employee table → 200; unknown ID → 401", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "agent employees in DB: ≥3 rows with kind=agent (a-recon, a-invoice, a-triage); appear in GET /api/org; absent from GET /api/users", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "static lint: no second employee-equivalent table (human_employee, agent_employee, org_user, etc.) in migrations 013-016; agents and humans share one table", "verifiable_as": "fitness"},
+    {"id": "AC-19", "text": "known_tenant_tables.txt after T-0017 merge contains exactly the 8 pre-existing tables plus tenant/department/position/employee (12 total for T-0017's additions; T-0116 additions merged separately)", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0017-org-structure.spec.md"
+}
