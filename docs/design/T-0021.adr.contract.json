@@ -1,0 +1,73 @@
+{
+  "task_id": "T-0021",
+  "status": "ready",
+  "decision": "Build src/core/grant-resolver.ts: a thin, pure-TS PDP that implements T-0015's HandleResolver port (exported via makeGrantResolver(deps)), replacing denyAllResolver at the seam without changing the port's shape. On every resolveHandle(handle, subject) it (1) tenant-gates the handle vs the subject fail-closed; (2) resolves the subject's grant set AT CALL TIME via an injected GrantSource (never a mint-time snapshot), keeping grants that are isEffective(g, now) (T-0018), whose operation matches the requested op, and whose scope contains the handle's ResourceRef (mapped to a resource-hierarchy ScopeElement) under isNarrowerOrEqual(handleScope, g.scope, ancestry); (3) fails closed ({denied:true, reason}) on no covering grant / cross-tenant / out-of-window / absent record, reason drawn only from the fixed T-0015 union no_grant|cross_tenant|not_found; (4) on success fetches the raw record via an injected RecordSource and returns {denied:false, ref, fields} where fields comes from exactly ONE pure projectFields(rawFields, visibleFieldSet), visibleFieldSet = covering grants' facets intersected with the handle's optional Facet. ResolveSubject is identity-only (no human/agent flag), so the human-form and agent-payload paths are the same call reaching the same projection -> byte-identical fields by construction, not by test. The authority math (containment, validity, meet) stays in T-0018; the resolver orchestrates. Postgres-backed ports + RLS DAO ('no direct DAO path' as a DB fact) defer to T-0053; deploy/runtime guards to T-0027/T-0028.",
+  "rejected_alternatives": [
+    {"option": "Bake the grant set / a capability token into the handle at mint time (resolve from the handle's own grants).", "why_not": "Binds rights at task-creation -> the TOCTOU hazard 6-A #6 forbids; a grant revoked between mint and resolve would still authorize. T-0015 already rejected a baked-in capability. Authority must be re-derived live from subject + current grants per call."},
+    {"option": "Cache the resolved view / write it back into the variable.", "why_not": "A cached view is a payload in the variable map (re-opens the T-0015 leak) and serves stale, unfiltered data after the grant narrows. Resolution is action-time, stateless per call; any future cache is keyed by subject+grant behind the gateway, never on the handle."},
+    {"option": "Two filter paths (a UI/form filter and an agent/payload filter).", "why_not": "Exactly the divergence the hypothesis warns turns the thesis into theater (1 caveat): two filters drift; a field visible to one but not the other is a silent leak/denial. There is ONE projectFields; both callers are the same identity-only resolveHandle call."},
+    {"option": "A second authority subsystem (a record-ACL / field-visibility table consulted alongside grants).", "why_not": "Two sources of truth that drift. Hypothesis 3 Q5 / 6-A #2 and T-0018 NF-1: record-rights and masked fields are DERIVED from grant rows in one table. FF-A4 forbids a parallel store; the resolver derives the field set from grants only."},
+    {"option": "Resolver re-implements the lattice (its own containment/interval math).", "why_not": "A second copy of the authority math drifts from T-0018 and violates proportionality (axis 5). The resolver CALLS isNarrowerOrEqual/isEffective/meet; it owns only the handle->scope mapping, the grant-filter orchestration, and the projection."},
+    {"option": "Resolve fields directly from a DAO inside the resolver now (no RecordSource port).", "why_not": "Couples the pure core to a record store that does not exist and pre-empts the T-0053 RLS DAO. The record read is a port (in-memory now, Postgres+RLS in T-0053) -> that is where 'no direct DAO path' becomes a DB-permission fact; keeping it a port keeps the core pure and testable today."},
+    {"option": "Make resolveHandle synchronous (drop the Promise).", "why_not": "T-0015 froze the port as Promise<ResolvedView> (live grant/record reads are async behind a DB in T-0053). Changing to sync breaks the port contract (architect rule 7). Static-now ports return resolved promises; the signature is preserved."}
+  ],
+  "object_model": [
+    {"entity": "GrantSource", "fields": [
+      {"name": "getGrants", "type": "(subject: ResolveSubject, nowMs: number) => Promise<Grant[]>"}
+    ]},
+    {"entity": "RecordSource", "fields": [
+      {"name": "getRecord", "type": "(ref: ResourceRef) => Promise<Record<string, unknown> | null>"}
+    ]},
+    {"entity": "ResolverDeps", "fields": [
+      {"name": "grants", "type": "GrantSource"},
+      {"name": "records", "type": "RecordSource"},
+      {"name": "ancestry", "type": "AncestryOracle (T-0018, injected resource-hierarchy fact)"},
+      {"name": "now", "type": "(() => number) | undefined (defaults to Date.now; test-overridable)"}
+    ]},
+    {"entity": "ResolvedView (T-0015, unchanged — reused not redefined)", "fields": [
+      {"name": "denied:true variant", "type": "{ denied: true; reason: 'no_grant' | 'cross_tenant' | 'not_found' }"},
+      {"name": "denied:false variant", "type": "{ denied: false; ref: ResourceRef; fields: Record<string, unknown> }"}
+    ]}
+  ],
+  "contracts": [
+    "export interface GrantSource { getGrants(subject: ResolveSubject, nowMs: number): Promise<Grant[]>; }",
+    "export interface RecordSource { getRecord(ref: ResourceRef): Promise<Record<string, unknown> | null>; }",
+    "export interface ResolverDeps { grants: GrantSource; records: RecordSource; ancestry: AncestryOracle; now?: () => number; }",
+    "export function refToScope(ref: ResourceRef): ScopeElement; // pure handle->scope adapter (the leaf grant scope must contain)",
+    "export function projectFields(rawFields: Record<string, unknown>, visibleFieldSet: ReadonlySet<string>): Record<string, unknown>; // THE single projection; masked fields absent (not null)",
+    "export function visibleFields(coveringGrants: Grant[], handleFacet: Facet | undefined, rawFields: Record<string, unknown>): Set<string>; // union of grant facets, then intersect handle Facet; no facet => whole-resource",
+    "export function resolveFor(deps: ResolverDeps, handle: ObjectHandle, subject: ResolveSubject, op: Operation): Promise<ResolvedView>; // operation-parameterized single decision core",
+    "export function makeGrantResolver(deps: ResolverDeps): HandleResolver; // resolveHandle = resolveFor(.., 'read'); swaps in for denyAllResolver, signature unchanged"
+  ],
+  "fitness_functions": [
+    {"id": "FF-R1", "rule": "Action-time binding (revoke->deny): covering grant at t0, empty at t1 => resolve at t0 {denied:false}, at t1 {denied:true,'no_grant'}; out-of-window grant => no_grant; no mint-time snapshot cached.", "ci_check": "vitest run src/__tests__/grant-resolver.test.ts -t \"action-time\" (AC-3, AC-4)"},
+    {"id": "FF-R2", "rule": "Human==agent identical-fields: for one (grants, ref, record) a human-form and an agent-payload call-site return deep-equal {denied:false, ref, fields}; exactly one projectFields invoked by both.", "ci_check": "vitest run src/__tests__/grant-resolver.test.ts -t \"human==agent\" (AC-5)"},
+    {"id": "FF-R3", "rule": "Default-deny / fail-closed: no covering grant => no_grant; cross-tenant => cross_tenant (before any grant/record read); absent record => not_found; op-mismatch => no_grant; no {denied:false} without a covering grant.", "ci_check": "vitest run src/__tests__/grant-resolver.test.ts -t \"fail-closed\" (AC-1, AC-2, AC-7, AC-9)"},
+    {"id": "FF-R4", "rule": "Scope containment + projection: ref inside granted subtree resolves, outside => no_grant; visible field set = covering-grant facets ∩ handle Facet; masked fields absent (not null) from fields.", "ci_check": "vitest run src/__tests__/grant-resolver.test.ts -t \"containment|projection\" (AC-6, AC-8)"},
+    {"id": "FF-R5", "rule": "Single chokepoint (structural): resolveHandle stays the sole handle->fields port; single-resolver.sh green; object-handle.ts unchanged; no new export maps a handle to fields with a shape diverging from ResolvedView.", "ci_check": "bash ci/checks/single-resolver.sh && bash ci/checks/grant-resolver-isolation.sh (AC-10)"},
+    {"id": "FF-R6", "rule": "No second authority subsystem / additive: grant-resolver.ts imports nothing from pg/fs/net/http/jobStore; no *_acl/field_visibility/record_rights store; decision & field set from T-0018 grant rows only; edits no existing export of object-handle.ts/grant-lattice.ts/types.ts.", "ci_check": "ci/checks/grant-resolver-isolation.sh: grep forbidden imports + parallel-authority tokens; git diff --name-only asserts no frozen export touched (AC-11)"},
+    {"id": "FF-R7", "rule": "Purity / port-conformance: two invocations with deeply-equal inputs (same port data, same injected now) return deeply-equal outputs; makeGrantResolver(deps) type-checks as HandleResolver and replaces denyAllResolver at the seam with no signature change.", "ci_check": "vitest run src/__tests__/grant-resolver.test.ts -t \"pure|port-conformance\" + tsc --noEmit (AC-12, AC-13)"},
+    {"id": "FF-R8", "rule": "No-direct-DAO-path (DB-enforced): outside the gateway no Postgres role can SELECT record fields; RLS + role-permissions make the RecordSource the only read path.", "ci_check": "live-DB probe authored in T-0053 (AC-14) — gating: activates-in-T-0053"},
+    {"id": "FF-R9", "rule": "Engine carries only handles & mutates only via gateway: BPMN linter rejects raw-object bindings at deploy; engine guard blocks direct object mutation at runtime, routing all reads/writes through makeGrantResolver.", "ci_check": "deploy-linter check (T-0027) + runtime guard test (T-0028) (AC-15) — gating: activates-in-T-0027/T-0028"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR 4.4 step 4 (no covering grant => no_grant); FF-R3"},
+    {"ac": "AC-2", "covered_by": "ADR 4.4 step 1 (tenant-gate first, no grant/record read); FF-R3"},
+    {"ac": "AC-3", "covered_by": "ADR 2 + 4.4 step 2 (grants at call-time via GrantSource); 3 (rejected baked-in/snapshot); FF-R1"},
+    {"ac": "AC-4", "covered_by": "ADR 4.4 step 3 (isEffective(g, now)); FF-R1"},
+    {"ac": "AC-5", "covered_by": "ADR 4.5 (one projection, identity-only subject, structural equivalence); FF-R2"},
+    {"ac": "AC-6", "covered_by": "ADR 4.4 step 6 + visibleFields rule (facet ∩ handle Facet; absent not null); FF-R4"},
+    {"ac": "AC-7", "covered_by": "ADR 4.4 step 3 (g.operation === op) + 4.2 op-aware resolveFor; FF-R3"},
+    {"ac": "AC-8", "covered_by": "ADR 4.4 step 3 (isNarrowerOrEqual(handleScope, g.scope)) + 4.3 refToScope; FF-R4"},
+    {"ac": "AC-9", "covered_by": "ADR 4.4 step 5 (getRecord === null => not_found); FF-R3"},
+    {"ac": "AC-10", "covered_by": "ADR 4.2 note (single decision core) + 5 (no new divergent edge); FF-R5"},
+    {"ac": "AC-11", "covered_by": "ADR 3 (rejected second subsystem) + 4.4 (field set from grants only); FF-R6"},
+    {"ac": "AC-12", "covered_by": "ADR 4.1 (IO behind ports, now injectable) + NF-1; FF-R7"},
+    {"ac": "AC-13", "covered_by": "ADR 2 + 4.3 (makeGrantResolver(deps): HandleResolver, port unchanged); FF-R7"},
+    {"ac": "AC-14", "covered_by": "ADR 5 defers (T-0053 RLS DAO / DB role-perms); FF-R8"},
+    {"ac": "AC-15", "covered_by": "ADR 5 defers (T-0027 deploy linter / T-0028 engine guard); FF-R9"}
+  ],
+  "runtime_target": "локально / in-process (static-now): pure TS module, vitest fitness suite under npm run ci, no external resource. Postgres-backed ports + RLS DAO defer to T-0053 (container, GT-4) — not requested here.",
+  "adr_artifact_path": "docs/design/T-0021-grant-resolver-pdp.adr.md",
+  "escalation": ""
+}
