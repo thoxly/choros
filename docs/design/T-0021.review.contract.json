@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0021",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "iteration": 2,
+  "iteration_history": [
+    {
+      "iteration": 1,
+      "commit": "00933a0",
+      "verdict": "changes_requested",
+      "blocking": ["R-1: grantFacetFields present-but-malformed facet widened to whole-resource (fail-closed violation)"],
+      "nits": [
+        "R-2: isLatticeScope enumerated four kinds instead of discriminating on freeform",
+        "R-3: FR-8 audit gap not documented with TODO"
+      ]
+    },
+    {
+      "iteration": 2,
+      "commit": "b509563",
+      "verdict": "approved",
+      "changes": "R-1 closed: grantFacetFields now returns undefined ONLY for strictly-absent facet (undefined/null); present-but-malformed returns [] fail-closed. R-2 closed: isLatticeScope discriminates on scope.kind !== 'freeform'. R-3 closed: TODO(T-0053) comment added to resolveFor. 16 adversarial test cases added covering all malformed facet forms."
+    }
+  ],
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/core/grant-resolver.ts:162-175 (pre-fix at dc6b9b2)",
+      "issue": "CLOSED (b509563): grantFacetFields returned undefined (whole-resource) for present-but-malformed resourceFacet ({fields:123}, {fields:'bad'}, etc.). Fixed: undefined returned ONLY for strictly-absent (undefined/null); present-but-malformed fails closed to [].",
+      "suggestion": "RESOLVED — grantFacetFields at b509563:162-175 implements the two-case distinction exactly per ADR §4.4."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/grant-resolver.ts:303-305 (post-fix)",
+      "issue": "CLOSED (b509563): isLatticeScope now discriminates on scope.kind !== 'freeform', structurally tied to T-0018 GrantScope union — no silent divergence if T-0018 adds a fifth lattice kind.",
+      "suggestion": "RESOLVED"
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/grant-resolver.ts:282-286 (post-fix)",
+      "issue": "CLOSED (b509563): TODO(T-0053) comment added to resolveFor marking the intentional FR-8 AuditObligation static-now gap.",
+      "suggestion": "RESOLVED"
+    }
+  ],
+  "adversarial_analysis": {
+    "proto_inherited_fields": "Not a realistic threat in T-0021 threat model: Grant.resourceFacet arrives from JSON.parse (Object.prototype only, no custom proto chain) in both static-now (in-memory fixture) and T-0053 (DB JSON) paths. A proto-polluted facet object requires code-level attack on the GrantSource port itself — a separate trust boundary violation. Adding hasOwnProperty guards is theoretically tighter but disproportionate (axis-5) for this vector with no realistic injection path.",
+    "getter_on_facet": "Getters pass through the current code, but getters are not injectable from JSON.parse or DB ORM output — purely a code-level attack path on GrantSource, not a T-0021 surface.",
+    "symbol_keys": "Safe by construction: (facet as Record<string,unknown>)['fields'] uses a string key; Symbol-keyed properties are invisible to string lookup, so result is undefined => falls through to [] (fail-closed).",
+    "deeply_nested_junk": "Safe: {fields: {nested:[...]}} fails Array.isArray => returns [].",
+    "array_subclass": "Safe: Array.isArray returns true for subclasses; string filter applied regardless."
+  },
+  "frozen_modules_check": {
+    "object_handle_ts": "UNCHANGED — git diff 2fa6f00..b509563 -- src/core/object-handle.ts: 0 bytes",
+    "grant_lattice_ts": "UNCHANGED — git diff 2fa6f00..b509563 -- src/core/grant-lattice.ts: 0 bytes",
+    "types_ts": "UNCHANGED — git diff 2fa6f00..b509563 -- src/core/types.ts: 0 bytes"
+  },
+  "adr_compliance": {
+    "adr_4_4_visibleFields_rule": "PASS — grantFacetFields implements two-case distinction (absent=undefined/null => whole-resource; present-but-malformed => []); visibleFields correctly dispatches.",
+    "adr_4_2_single_chokepoint": "PASS — resolveHandle => resolveFor(.., 'read'); no second handle->fields export of divergent shape.",
+    "adr_9_compat": "PASS — makeGrantResolver(deps): HandleResolver; object-handle.ts exports denyAllResolver unchanged; no frozen export edited."
+  },
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": false, "note": "deferred to T-0053 per ADR §5 — activates-in-T-0053" },
+    { "ac": "AC-15", "covered": false, "note": "deferred to T-0027/T-0028 per ADR §5 — activates-in-T-0027/T-0028" }
+  ],
+  "role_gap_evidence": []
+}
