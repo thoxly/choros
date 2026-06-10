@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0033",
+  "status": "ready",
+  "summary": "E4.3 — a per-tenant data_classification(resource_type, facet, class) table + typed schema-versioned facets + value-aware grant-driven masking folded into the single T-0021 gateway projection, with classification mutation as a guarded from→to transition; fail-closed, rights-derived-only, human==agent identical.",
+  "functional": [
+    "FR-1: per-tenant data_classification(resource_type, facet_field, class, facet_schema_version) table exists; a registry record-schema field can be assigned a class; queryable by (resource_type, facet_field, facet_schema_version).",
+    "FR-2: field visibility at the gateway depends on (field class × reader's grant) — the same record yields different surviving fields for two subjects whose grants differ on a classified field.",
+    "FR-3: masking is value-aware — for at least one class a lesser-granted reader gets a transformed value (redacted/partial/hashed), not raw and not a dropped key; transform selected by class+grant, not per field name.",
+    "FR-4: typed facets carry facet_schema_version; the gateway resolves classification rows for the matching version; a version with no rows / a registry-version mismatch is fail-closed (maximally masked), never silently widened to whole-resource.",
+    "FR-5: classification is mutable only via a guarded from→to transition — a transition/approve op routed through resolveFor, not an ordinary record write; no unguarded direct mutation path exists.",
+    "FR-6: the from→to guard is direction-aware — down-classification (widening visibility) requires at least the authority of up-classification, and the two cases are distinguishable (floor for E4.6 dual-control).",
+    "FR-7: single-projection preserved — human-form and agent-payload reads produce byte-identical masked output via the one projectFields/projection function; no second handle→fields export.",
+    "FR-8: rights-derived-only preserved — masking derives solely from T-0018 grant rows + data_classification; no parallel field-ACL / field-visibility store.",
+    "FR-9: a value-suppressing masking decision and a reclassification each MAY emit a T-0016 audit-obligation shape (via=grant_resolver / via=classification); durable append deferred to T-0053.",
+    "FR-10 (contract seam, not implemented): class is the shared axis E4.8 egress_policy(class, allowed_endpoint) (T-0041) and E4.5 role_criticality sensitive_read (T-0040) consume; T-0033 defines class as a stable enumerable named value and implements neither egress nor criticality."
+  ],
+  "non_functional": [
+    "NF-1: gateway masking core stays pure/static-now — classification via injected port; no pg/fs/net/http import in grant-resolver.ts (grant-resolver-isolation.sh Check 1 green); DB port → T-0053.",
+    "NF-2: additive to the frozen authority core where possible — resolver-isolation 'frozen modules unmodified' stays satisfied; lattice math stays in T-0018 (no second authority subsystem).",
+    "NF-3: fail-closed by construction — absent rows, unknown class, or facet-schema-version mismatch all resolve to more masking, never less.",
+    "NF-4: tenant-isolated — data_classification carries tenant_id leading + RLS; cross-tenant classification read impossible.",
+    "NF-5: determinism — same (grants, record, classification, now) ⇒ deeply-equal masked output (extends T-0021 NF-1 purity to the masking path)."
+  ],
+  "out_of_scope": [
+    "UI / admin screens for managing classifications or facet schemas (not day-1).",
+    "Runtime BYO-LLM egress gate at agent call-time — egress_policy enforcement is E5.10 / Stage-2; only the shared class axis is contracted (FR-10).",
+    "The E4.8 egress_policy table itself (T-0041) — separate task; T-0033 only fixes that class is the join key.",
+    "E4.5 role_criticality computation (T-0040) — consumes this table; not built here.",
+    "E4.4 external-effect resources (T-0034) — parallel E4 task; gateway facet/masking interface points are declared as seams, not implemented.",
+    "Postgres-backed classification DAO + RLS DAO wiring → T-0053 (same deferral as T-0021's GrantSource/RecordSource).",
+    "Cryptographic key custody for hash/tokenize transforms — the transform contract is in scope; key management is not (gold-plating per §6-A #12)."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "A 013_data_classification migration applies and the table is a tenant table — ci/checks/db/tenant_id_leading.sql and force_rls.sql pass with it present, and it is listed in known_tenant_tables.txt.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "Cross-tenant isolation: a classification row written under tenant A is invisible to a session bound to tenant B (cross-tenant DB test red without RLS, green with it).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Class-driven divergence: given a classified field and two subjects whose grants differ on it, the gateway returns the field (raw or masked) for the higher-granted subject and masks/omits it for the lower — same record and now, divergent output keyed only by grant×class.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "Fail-closed on missing/mismatched classification: a classified facet whose facet_schema_version has no matching data_classification rows yields maximal masking (no widening to whole-resource); the field does not leak raw.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "Value-aware: for a non-dropping class a lesser-granted reader receives a transformed value (deeply-different from raw, e.g. redacted/partial), not the raw value and not silently absent — masking is value-level, not only key-presence.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "Transform selected by (class, grant), not field name: two differently-named fields sharing a class+reader-grant get the same transform; one field re-classified to a different class gets a different transform.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "Human==agent masking equivalence: human-form and agent-payload call-sites produce deep-equal masked output for the same (grant-set, record, classification, now); exactly one projection function invoked (single-resolver.sh green; no second handle→fields export).", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "Rights-derived-only: masking computed solely from T-0018 grant rows + data_classification; grant-resolver-isolation.sh Check 2 stays green and a sibling data-classification-isolation.sh asserts no parallel field-ACL store in the new code.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "Purity/isolation preserved: classification-aware gateway code imports no pg/fs/net/http (classification via injected port); grant-resolver-isolation.sh Check 1 + Check 3 (frozen modules unmodified) stay green.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Guarded reclassification: changing a field's class routes through resolveFor(.., op∈{transition,approve}) and is rejected for a subject lacking that op-grant; no direct-write path to data_classification.class bypasses the gateway op-check (structural, analogous to mutation-gateway-isolation.sh).", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "Direction-aware guard: a down-classification (widening visibility) is rejected for a subject permitted only up-classification; the guard decision exposes the from→to direction so E4.6 can key dual-control on it.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "Typed facet honors schema version: a facet descriptor at version vN resolves against vN classification rows; bumping the registry record-schema version without rows for the new version fails closed (AC-4 at the version boundary).", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "Determinism: two invocations with deeply-equal (grants, record, classification, now) return deeply-equal masked output (no IO outside injected ports).", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "Shared-axis contract: class is a stable enumerable type referenced by name; a fitness assertion proves the same class symbol is the join-column shape E4.8/E4.5 will read (a typed contract test implementing neither).", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "DB-permission floor (activates with T-0053): the Postgres classification DAO is reachable only via the gateway path — no direct choros_app read of a raw classified field value that bypasses masking (role-grants + RLS once the DB port lands; same deferral as T-0021 AC-14).", "verifiable_as": "manual"},
+    {"id": "AC-16", "text": "Audit obligation shape: a value-suppressing masking decision and a reclassification each produce a well-formed T-0016 audit-obligation object (via set, actor/subject present); durable append asserted under T-0053 (matches T-0021 FR-8 deferral).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0033-data-classification.spec.md"
+}
