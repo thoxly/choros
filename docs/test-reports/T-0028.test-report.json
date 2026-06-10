@@ -1,0 +1,93 @@
+{
+  "task_id": "T-0028",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 490,
+    "passed": 490,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "bash ci/checks/mutation-gateway-isolation.sh (G1/G6 checks): no writable record accessor symbols outside grant-resolver.ts; npm run fitness green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "variable-guard.test.ts — ADV-1 (raw record single field), ADV-2 (nested record), ADV-9 (array with record), ADV-10 (object with data key): all return RECORD_IN_PAYLOAD, job stays LOCKED",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "variable-guard.test.ts — ADV-4 (valid handle), ADV-5 (empty payload), ADV-6 (primitives), ADV-7 (no-payload 2-arg form), ADV-8 (JSON string): all return ok:true, job advances to COMPLETED",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "variable-guard.test.ts — ADV-3 (one handle + one raw record): returns RECORD_IN_PAYLOAD all-or-nothing; job stays LOCKED",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "bash ci/checks/mutation-gateway-isolation.sh (G2 check): assertVariableValue present in both inMemoryJobStore.ts and pgJobStore.ts, imported from object-handle.ts",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "bash ci/checks/mutation-gateway-isolation.sh (G1/G6 checks): no *mutate*/*write*/*persist* function names outside gateway composition",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "git diff origin/dev HEAD -- src/core/object-handle.ts src/core/grant-lattice.ts src/core/grant-resolver.ts: 0 lines diff; jobStoreTypes.ts has 5 codes (original 4 + RECORD_IN_PAYLOAD); tsc --noEmit: 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "bash ci/checks/flowable-bridge-contract.sh: exits 0 (bridge absent); spec §2 FR-6 states contract; ADR §8 seals it; FF-G3 probe present in ci/checks/",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "npm run fitness: single-resolver.sh, no-record-in-variable.sh, object-handle-isolation.sh, grant-resolver-isolation.sh, audit_append_only.sh — all green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "tsc --noEmit: Operation type from grant-lattice.ts used in grant-resolver.ts resolveFor signature; no ad-hoc strings in write-op positions; 0 errors",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_probes": [
+    {
+      "what": "Live RECORD_IN_PAYLOAD via real InMemoryJobStore.complete() path (ADV-1 + ADV-3): enqueue→fetchAndLock→complete() with raw record payload and with mixed payload (inert + record). Both rejected fail-closed; job stays LOCKED. Clean payload on same job succeeds and advances state.",
+      "result": "pass — { ok: false, code: 'RECORD_IN_PAYLOAD' } for raw record and mixed, { ok: true } for clean payload; job.result stored correctly"
+    },
+    {
+      "what": "Structural isolation check catches forbidden import outside gateway: created temp file src/__probe_temp__.ts importing 'mutateRecord', ran mutation-gateway-isolation.sh — exited non-zero. File removed after check.",
+      "result": "pass — isolation check correctly detected violation (exit code 1)"
+    }
+  ],
+  "integration_honesty": {
+    "worktree_exclusion": "vitest.config.js excludes .claude/**, ../choros-wt/**, web/**, ci/checks/db/** — confirmed D-056 compliant",
+    "ci_yml_db_job": "fitness:db has own postgres:16 service container; not in ambient ci job",
+    "no_ambient_build_dependency": "npm run ci (tsc --noEmit && eslint src && npm run fitness && vitest run) requires no external resources; all 490 tests pass in-process"
+  },
+  "review_nits_addressed": {
+    "R-1": "PostgresJobStore.complete() step order now mirrors ADR §4.4 — ownership gate (step 1) before payload validation (step 2); ADV-12 gate-precedence contract now holds for both stores",
+    "R-2": "G6-additive check uses merge-base vs origin/dev commit-range diff (not just working-tree); confirmed in mutation-gateway-isolation.sh lines 118-157",
+    "R-3": "enqueueAndLock helper in variable-guard.test.ts uses store.fetchAndLock() public API (no private Map cast); fragility eliminated",
+    "R-4": "getById() JSDoc in pgJobStore.ts has TODO T-0053 comment documenting result-field asymmetry between InMemoryJobStore and PostgresJobStore"
+  },
+  "ci_gate_run": {
+    "tsc_noEmit": "pass (0 errors)",
+    "eslint_src": "pass (0 warnings)",
+    "fitness_all_checks": "pass (12/12 fitness scripts green)",
+    "vitest_run": "pass (490/490 tests, 20 test files, 1.29s)"
+  },
+  "tester": "claude-sonnet-4-6 (tester role, T-0028 TEST)",
+  "tested_commit": "0406cb8",
+  "test_date": "2026-06-10"
+}
