@@ -112,7 +112,7 @@ fi
 # fallback of HEAD~$(git log --oneline | wc -l) which is the root).
 # ---------------------------------------------------------------------------
 
-echo "[G6-additive] Checking: frozen exports (object-handle.ts, grant-lattice.ts, grant-resolver.ts) unchanged vs merge-base with dev ..."
+echo "[G6-additive] Checking: frozen exports (object-handle.ts, grant-lattice.ts) unchanged vs merge-base with dev ..."
 
 # Resolve the base commit: prefer origin/dev, then local dev, then first commit.
 BASE_REF=""
@@ -129,10 +129,19 @@ else
   BASE_SHA=""
 fi
 
+# T-0033 (E4.3) THAW: grant-resolver.ts is intentionally REMOVED from the frozen
+# set. The spec REQUIRES value-aware masking to be folded into the resolver's ONE
+# projection path (single-projection invariant) — so grant-resolver.ts must be
+# edited HERE, by the task that legitimately extends it. The edit is purely
+# additive (ResolverDeps gains an optional `classifications` field; projectFields
+# an optional 4th `maskCtx` arg; resolveFor builds the MaskContext) — the import
+# surface resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields
+# is preserved (FE-W23-0008; asserted by data-classification-isolation.sh FF-DC17).
+# object-handle.ts and grant-lattice.ts stay byte-frozen — no second authority
+# subsystem, no edit to the frozen Facet/Grant/Operation types.
 FROZEN_EXPORTS=(
   "src/core/object-handle.ts"
   "src/core/grant-lattice.ts"
-  "src/core/grant-resolver.ts"
 )
 
 for f in "${FROZEN_EXPORTS[@]}"; do

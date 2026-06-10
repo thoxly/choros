@@ -5,8 +5,9 @@
 #  1. src/core/bpmn-linter.ts and src/core/bpmn-xml-parser.ts import nothing
 #     from jobStore, node:http, node:pg, node:fs, node:net, or any package
 #     outside existing devDependencies.
-#  2. No existing export in the five frozen files is modified:
-#     object-handle.ts, grant-resolver.ts, grant-lattice.ts, types.ts, jobStore.ts
+#  2. No existing export in the frozen files is modified:
+#     object-handle.ts, grant-lattice.ts, types.ts, jobStore.ts
+#     (grant-resolver.ts is THAWED by T-0033/E4.3 — see the FROZEN_FILES note.)
 #  3. No new entry in package.json "dependencies" (only devDependencies allowed).
 #
 # Exit 0 on clean, non-zero on violation.
@@ -52,9 +53,17 @@ fi
 
 # ---- Check 2: frozen files are unmodified ----------------------------------
 
+# T-0033 (E4.3) THAW: grant-resolver.ts is REMOVED from the frozen set here, for
+# the SAME reason it is removed from mutation-gateway-isolation.sh's G6 — the
+# spec REQUIRES value-aware masking to be folded into the resolver's ONE
+# projection path, so this task legitimately extends grant-resolver.ts. The edit
+# is additive-only (ResolverDeps gains optional `classifications`; projectFields
+# an optional 4th arg). object-handle.ts / grant-lattice.ts / types.ts /
+# jobStore.ts stay byte-frozen. (The ADR §2.1 named mutation-gateway-isolation.sh
+# explicitly; this T-0027 check froze the same file and is thawed consistently —
+# recorded as a deviation in the BUILD handoff.)
 FROZEN_FILES=(
   "src/core/object-handle.ts"
-  "src/core/grant-resolver.ts"
   "src/core/grant-lattice.ts"
   "src/core/types.ts"
   "src/core/jobStore.ts"
@@ -74,7 +83,7 @@ for f in "${FROZEN_FILES[@]}"; do
 done
 
 if [[ ${ERRORS} -eq 0 ]]; then
-  echo "PASS: frozen files (object-handle.ts, grant-resolver.ts, grant-lattice.ts, types.ts, jobStore.ts) are unmodified"
+  echo "PASS: frozen files (object-handle.ts, grant-lattice.ts, types.ts, jobStore.ts) are unmodified"
 fi
 
 # ---- Check 3: no new runtime dependencies ----------------------------------
