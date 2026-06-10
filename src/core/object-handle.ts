@@ -226,18 +226,23 @@ export function makeHandle(
 
   const handleId = deriveHandleId(ref, tenantId, facet);
 
-  // Build the handle. We assign the runtime brand key explicitly so
-  // isObjectHandle() can check it, and mark [HANDLE_BRAND] as the typed brand.
-  const h = Object.freeze(
-    Object.assign(Object.create(null) as object, {
-      [_RUNTIME_BRAND]: true,
-      tenantId,
-      ref,
-      handleId,
-      ...(facet !== undefined ? { facet } : {}),
-    }),
-  ) as unknown as ObjectHandle;
-  return h;
+  // Build the handle. The runtime brand is attached as a NON-ENUMERABLE own
+  // property so that object-spread ({...h}) and Object.assign({}, h) cannot
+  // copy it — closing the everyday-idiom forgery path (R-4).
+  const h = Object.assign(Object.create(null) as object, {
+    tenantId,
+    ref,
+    handleId,
+    ...(facet !== undefined ? { facet } : {}),
+  });
+  Object.defineProperty(h, _RUNTIME_BRAND, {
+    value: true,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  Object.freeze(h);
+  return h as unknown as ObjectHandle;
 }
 
 /**

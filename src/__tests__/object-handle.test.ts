@@ -876,6 +876,85 @@ describe("FF-9-TAMPER: parseHandle rejects tampered handleId", () => {
 });
 
 // ---------------------------------------------------------------------------
+// FF-A2 (R-4 hardening): brand non-enumerable — object-spread/Object.assign
+// cannot clone the brand, closing the everyday-idiom forgery path.
+//
+// Attack: const forged = { ...makeHandle(...) }  => isObjectHandle(forged) === true
+// (before fix). After fix the brand is non-enumerable so spread/assign omit it.
+//
+// These tests FAIL against the old enumerable brand and PASS after the fix.
+// ---------------------------------------------------------------------------
+
+describe("FF-A2: R-4 — brand non-enumerable (spread/assign cannot forge)", () => {
+  it("object-spread of a genuine handle fails isObjectHandle (brand not copied)", () => {
+    const h = makeHandle(appRef, TENANT_A);
+    const spread = { ...h };
+    expect(isObjectHandle(spread)).toBe(false);
+  });
+
+  it("Object.assign({}, handle) fails isObjectHandle (brand not copied)", () => {
+    const h = makeHandle(appRef, TENANT_A);
+    const assigned = Object.assign({}, h);
+    expect(isObjectHandle(assigned)).toBe(false);
+  });
+
+  it("spread-clone with appended .data field is rejected by assertVariableValue", () => {
+    // This was the full attack: spread (to steal the brand) then inject data.
+    // After fix the brand is gone from the spread, so assertVariableValue sees a
+    // plain object — and if it carries a record-ref + data it must be rejected.
+    const h = makeHandle(recRef, TENANT_A);
+    const forged = {
+      ...(h as unknown as Record<string, unknown>),
+      data: { ssn: "123-45-6789" },
+    };
+    // forged is not a recognised handle (no brand) — assertVariableValue must
+    // catch it as a record-payload (record-ref + data key present).
+    expect(isObjectHandle(forged)).toBe(false);
+    const result = assertVariableValue(forged);
+    expect(result.ok).toBe(false);
+  });
+
+  // Regression: genuine handles remain valid and all ref kinds round-trip.
+  it("genuine handle (appRef) still passes isObjectHandle after the fix", () => {
+    const h = makeHandle(appRef, TENANT_A);
+    expect(isObjectHandle(h)).toBe(true);
+  });
+
+  it("genuine handle (regRef) still passes isObjectHandle after the fix", () => {
+    const h = makeHandle(regRef, TENANT_A);
+    expect(isObjectHandle(h)).toBe(true);
+  });
+
+  it("genuine handle (recRef) still passes isObjectHandle after the fix", () => {
+    const h = makeHandle(recRef, TENANT_A);
+    expect(isObjectHandle(h)).toBe(true);
+  });
+
+  it("genuine handle (appRef + facet) still passes isObjectHandle after the fix", () => {
+    const h = makeHandle(appRef, TENANT_A, facet);
+    expect(isObjectHandle(h)).toBe(true);
+  });
+
+  it("genuine handle round-trips serialize→parse intact (regression — all 3 kinds)", () => {
+    for (const ref of [appRef, regRef, recRef] as ResourceRef[]) {
+      const h = makeHandle(ref, TENANT_A);
+      const reparsed = parseHandle(serializeHandle(h));
+      expect(isObjectHandle(reparsed)).toBe(true);
+      expect(reparsed.tenantId).toBe(h.tenantId);
+      expect(reparsed.ref).toEqual(h.ref);
+      expect(reparsed.handleId).toBe(h.handleId);
+    }
+  });
+
+  it("genuine handle with facet round-trips serialize→parse intact (regression)", () => {
+    const h = makeHandle(recRef, TENANT_A, facet);
+    const reparsed = parseHandle(serializeHandle(h));
+    expect(isObjectHandle(reparsed)).toBe(true);
+    expect(reparsed.facet).toEqual(facet);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FF-9-AC7: AC-7 round-trip with all 3 ref kinds, with and without facet
 // Regression guard: honest wires produced by serializeHandle(makeHandle(...))
 // MUST round-trip correctly through parseHandle for all combinations.

@@ -42,5 +42,13 @@
       "FF-9-TAMPER: parseHandle rejects tampered handleId",
       "FF-9-AC7: honest round-trip (AC-7) — all 3 ref kinds × ±facet"
     ]
+  },
+  "hardening_r4": {
+    "review_finding": "R-4",
+    "change": "Brand symbol _RUNTIME_BRAND is now attached via Object.defineProperty with enumerable:false, writable:false, configurable:false. Object.assign in makeHandle no longer includes the brand in enumerable own properties, so object-spread ({...h}) and Object.assign({}, h) cannot copy the brand. isObjectHandle on any spread/assign clone returns false. serializeHandle is unaffected (reads named props explicitly, not by enumeration). Object.freeze is preserved.",
+    "test_count_before": 375,
+    "test_count_after": 384,
+    "new_tests": 9,
+    "new_test_block": "FF-A2: R-4 — brand non-enumerable (spread/assign cannot forge)"
   }
 }
