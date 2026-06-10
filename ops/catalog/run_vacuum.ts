@@ -13,69 +13,12 @@
  */
 import pg from "pg";
 import { parseArgs } from "node:util";
-
-interface VacuumResult {
-  ok: true;
-  tableVacuumed: string;
-} | {
-  ok: false;
-  error: string;
-}
-
-async function main(): Promise<void> {
-  let dbUrl: string | undefined;
-
-  // Accept --db as CLI arg or fall back to DATABASE_URL
-  try {
-    const { values } = parseArgs({
-      options: { db: { type: "string" } },
-      strict: false,
-    });
-    dbUrl = (values.db as string | undefined) ?? process.env["DATABASE_URL"];
-  } catch {
-    dbUrl = process.env["DATABASE_URL"];
-  }
-
-  if (!dbUrl) {
-    const result: VacuumResult = { ok: false, error: "DATABASE_URL not set and --db not provided" };
-    process.stdout.write(JSON.stringify(result) + "\n");
-    process.exit(0);
-    return;
-  }
-
-  const pool = new pg.Pool({ connectionString: dbUrl });
-
-  try {
-    // VACUUM ANALYZE cannot run inside a transaction block.
-    // Use a direct client to ensure autocommit semantics.
-    const client = await pool.connect();
-    try {
-      await client.query("VACUUM ANALYZE choros.job");
-    } finally {
-      client.release();
-    }
-    const result: VacuumResult = { ok: true, tableVacuumed: "job" };
-    process.stdout.write(JSON.stringify(result) + "\n");
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    const result: VacuumResult = { ok: false, error: message };
-    process.stdout.write(JSON.stringify(result) + "\n");
-  } finally {
-    await pool.end();
-  }
-
-  process.exit(0);
-}
-
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
-  process.exit(0);
-});
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Programmatic API — for use in integration tests without subprocess spawn
 // ---------------------------------------------------------------------------
+
 export interface VacuumOk {
   ok: true;
   tableVacuumed: string;
@@ -93,6 +36,7 @@ export type VacuumResult = VacuumOk | VacuumFail;
 export async function runVacuum(dbUrl: string): Promise<VacuumResult> {
   const pool = new pg.Pool({ connectionString: dbUrl });
   try {
+    // VACUUM ANALYZE cannot run inside a transaction block; use a client directly.
     const client = await pool.connect();
     try {
       await client.query("VACUUM ANALYZE choros.job");
@@ -101,9 +45,52 @@ export async function runVacuum(dbUrl: string): Promise<VacuumResult> {
     }
     return { ok: true, tableVacuumed: "job" };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: message };
+    const message = err instanceof Error
+      ? (err.message || err.toString() || `${err.constructor?.name ?? "Error"}`)
+      : String(err);
+    return { ok: false, error: message || "connection failed" };
   } finally {
-    await pool.end();
+    await pool.end().catch(() => {/* ignore close errors */});
   }
+}
+
+// ---------------------------------------------------------------------------
+// CLI entry point — only runs when this file is the main module
+// ---------------------------------------------------------------------------
+
+async function cli(): Promise<void> {
+  let dbUrl: string | undefined;
+
+  try {
+    const { values } = parseArgs({
+      options: { db: { type: "string" } },
+      strict: false,
+    });
+    dbUrl = (values.db as string | undefined) ?? process.env["DATABASE_URL"];
+  } catch {
+    dbUrl = process.env["DATABASE_URL"];
+  }
+
+  if (!dbUrl) {
+    process.stdout.write(JSON.stringify({ ok: false, error: "DATABASE_URL not set and --db not provided" }) + "\n");
+    process.exit(0);
+    return;
+  }
+
+  const result = await runVacuum(dbUrl);
+  process.stdout.write(JSON.stringify(result) + "\n");
+  process.exit(0);
+}
+
+// Guard: only run CLI when invoked directly (not when imported by tests)
+const isMain = process.argv[1] &&
+  (process.argv[1] === fileURLToPath(import.meta.url) ||
+   process.argv[1].endsWith("run_vacuum.js"));
+
+if (isMain) {
+  cli().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
+    process.exit(0);
+  });
 }
