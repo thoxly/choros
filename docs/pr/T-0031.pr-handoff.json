@@ -1,0 +1,163 @@
+{
+  "task_id": "T-0031",
+  "status": "pr_open",
+  "branch": "task/T-0031-grant-trail",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "0de43cc",
+  "head_commit": "6bffdb9",
+  "migrations": [],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E3.6: grant trail encoder + read API. Новый pure-модуль src/core/audit-grant-encoder.ts (encodeGrantAuditEvent / encodeAssignmentAuditEvent — IO-free, GrantAuditEvent импортирован verbatim из grant-lattice.ts). Новый DB слой src/db/audit-grant-trail.ts (queryGrantTrail: RLS-enforced via withTenant + assertUuid; cursor pagination; type-filter только grant-family событий). HTTP-роут GET /api/grant-trail (limit ≤ 500, before_seq, role_id, actor — всё с INVALID_PARAM validation). UI компонент web/src/screens/rights/ra-grant-trail.jsx (fetch на /api/grant-trail, TRAIL_SEED статический fallback без DATABASE_URL, load-more). 7 fitness-гейтов (FF-0031-01..07): no-IO в encoder, grant-lattice.ts неизменён, GrantAuditEvent импорт из него, appendAuditEvent-шов в encoder-тестах, known_tenant_tables.txt неизменён, нет CREATE TABLE в 031+ миграциях, нет seed-миграции. 23/23 AC; 5 adversarial-проб (а: hash-chain integrity, б: encoder fail-closed, в: HTTP boundary, г: tenant assertUuid SQL-injection guard, д: UI fallback honesty); vitest 732/732 + fitness:db 277/277 × 2 прогона (идемпотентность подтверждена) на изолированном Postgres 55479. Ноль DDL-изменений, ноль новых tenant-таблиц.",
+  "commits": [
+    {
+      "sha": "b5288da",
+      "phase": "SPEC",
+      "message": "T-0031 SPEC: grant trail encoder contract + read API for grant events in unified audit"
+    },
+    {
+      "sha": "5ce5356",
+      "phase": "DESIGN",
+      "message": "T-0031 DESIGN: grant trail encoder + read API (E3.6)"
+    },
+    {
+      "sha": "d634c95",
+      "phase": "BUILD",
+      "message": "T-0031 BUILD: grant trail encoder + read API (E3.6)"
+    },
+    {
+      "sha": "296afd8",
+      "phase": "REVIEW",
+      "message": "T-0031 REVIEW: changes_requested — pagination test non-idempotent (R-1 blocking)"
+    },
+    {
+      "sha": "49367b5",
+      "phase": "BUILD-fix",
+      "message": "T-0031 BUILD: review fixes R-1..R-3 (idempotent pagination probe)"
+    },
+    {
+      "sha": "c8bbc96",
+      "phase": "REVIEW",
+      "message": "T-0031 REVIEW: approved — re-review"
+    },
+    {
+      "sha": "6bffdb9",
+      "phase": "TEST",
+      "message": "T-0031 TEST: pass — 23/23 AC green, 5 adversarial probes pass, 277/277 DB fitness ×2"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "reviewer role (T-0031 REVIEW re-review)",
+      "reviewed_commit": "c8bbc96",
+      "initial_review_commit": "296afd8",
+      "initial_verdict": "changes_requested",
+      "blocking_resolved": ["R-1 (pagination probe idempotency) — fixed in 49367b5, per-run actor slug PAGE_ACTOR=page-actor-${SEQ_BASE}; verified 277/277 on persistent volume run 1 AND run 2"],
+      "nits_closed": ["R-2 (withTenant duplication comment added)", "R-3 (spurious roleId:null removed from TRAIL_SEED)", "R-4 (GrantAuditEvent cross-spec ambiguity documented inline, deferred to T-0030 merge review)"],
+      "artifact": "docs/reviews/T-0031.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 775,
+      "passed": 775,
+      "failed": 0,
+      "ac_coverage": "23/23",
+      "adversarial_probes": "5/5",
+      "tested_commit": "6bffdb9",
+      "run_details": {
+        "tsc": "exit 0 (--noEmit clean, 0 errors)",
+        "eslint": "exit 0 (src clean)",
+        "vitest_unit_e2e": "732 passed / 5 skipped (35 files; 5 skips = pre-existing Flowable live-integration, unrelated to T-0031)",
+        "fitness_static": "all static checks PASS (FF-0031-01..07: encoder no IO imports, grant-lattice.ts unchanged, GrantAuditEvent import from grant-lattice, appendAuditEvent seam, known_tenant_tables.txt unchanged, no CREATE TABLE in 031+ migrations, no seed migration)",
+        "fitness_db_run1": "277/277 pass on isolated Postgres (port 55479), run 1",
+        "fitness_db_run2": "277/277 pass on same persistent volume, run 2 — idempotency confirmed",
+        "web_build": "vite build — 45 modules, 0 errors (531ms)",
+        "postgres_container": "port 55479, isolated volume choros-test-T0031-vol, container choros-test-T0031"
+      },
+      "artifact": "docs/test-reports/T-0031.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (732/732; 5 skipped pre-existing Flowable)",
+      "fitness_static": "pass (FF-0031-01..07)",
+      "fitness_db": "pass (277/277 isolated Postgres ×2; zero cross-tenant leakage)",
+      "integration_honesty_d056": "DB tests (fitness:db) use real pg.Pool against live isolated Postgres via appUrl()/migratorUrl() — no vi.mock on DB layer. Encoder unit tests mock only appendAuditEvent (T-0053 not yet implemented — explicitly out of scope per spec §4). HTTP e2e tests use real http.Server + real Node.js http.request. Adversarial live probes (а/г) use real pg.Pool against 55479. No describe.skip/it.skip green-skip guard."
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/grant-trail.db.test.ts",
+    "ci/checks/grant-trail-encoder-isolation.sh",
+    "ci/checks/grant-trail-no-new-table.sh",
+    "docs/design/T-0031-grant-trail.adr.md",
+    "docs/design/T-0031.adr.contract.json",
+    "docs/reviews/T-0031.review.json",
+    "docs/specs/T-0031-grant-trail.spec.md",
+    "docs/specs/T-0031.spec.contract.json",
+    "docs/test-reports/T-0031.test-report.json",
+    "package.json",
+    "src/__tests__/audit-grant-encoder.test.ts",
+    "src/__tests__/grant-trail.adversarial.test.ts",
+    "src/__tests__/grant-trail.e2e.test.ts",
+    "src/core/audit-grant-encoder.ts",
+    "src/db/audit-grant-trail.ts",
+    "src/http/grant-trail.ts",
+    "src/server.ts",
+    "web/src/screens/rights/ra-grant-trail.jsx"
+  ],
+  "deviations_from_adr": [
+    "R-4 (nit, closed): GrantAuditEvent re-exported from audit-grant-encoder.ts for T-0030 convenience — creates spec cross-ambiguity with T-0030 AC-12 (fitness lint asserting import from grant-lattice.ts). Resolution deferred to T-0030 merge review per reviewer guidance. No code correctness issue: both modules re-export the same type from grant-lattice.ts. Documented inline at src/core/audit-grant-encoder.ts:22-30.",
+    "R-2 (nit, closed): withTenant helper duplicated between src/db/audit-grant-trail.ts and src/db/org.ts. org.ts does not export withTenant (private helper). Inline comment documents extraction risk and defers to future cleanup task (src/db/tenant.ts). Byte-for-byte identical implementations."
+  ],
+  "integration_obligation_t0030": {
+    "summary": "T-0031 ships encodeGrantAuditEvent (src/core/audit-grant-encoder.ts). T-0030 is in-flight and its coder MUST import encodeGrantAuditEvent from audit-grant-encoder.ts (not redefine it). writeGrantAuditEvent (T-0030) → encodeGrantAuditEvent (T-0031). This seam is FROZEN on T-0031's side. Orchestrator resolves integration on whichever merge lands second: if T-0031 merges first, T-0030 coder must already import from audit-grant-encoder.ts; if T-0030 merges first, orchestrator must ensure no redefinition conflicts at T-0031 merge.",
+    "T-0030_import_required": "import { encodeGrantAuditEvent, AuditEventInput } from '../core/audit-grant-encoder.js'",
+    "frozen_exports": [
+      "encodeGrantAuditEvent(e: GrantAuditEvent, nowMs: number, idOverride?: string): AuditEventInput",
+      "encodeAssignmentAuditEvent(e: AssignmentAuditEvent, nowMs: number, idOverride?: string): AuditEventInput",
+      "AuditEventInput (type)",
+      "AssignmentAuditEvent (type)"
+    ],
+    "orchestrator_note": "Разрешить на втором из двух мержей (T-0030 / T-0031). Если возникает конфликт в encoder-сигнатуре — DESIGN-возврат, не молчаливая правка."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "what_this_gives": "Закрывает E3.6: grant trail encoder + read API. Три новых компонента: (1) pure encoder src/core/audit-grant-encoder.ts — IO-free, опора для T-0030 writeGrantAuditEvent; (2) DB слой src/db/audit-grant-trail.ts — RLS-enforced cursor pagination над audit_event для grant-family событий; (3) HTTP GET /api/grant-trail — с фильтрацией role_id/actor/before_seq и INVALID_PARAM валидацией. UI rights-экран получает компонент ra-grant-trail.jsx с TRAIL_SEED статическим fallback. Аддитивно: 0 разломов существующих API, 0 DDL, 0 новых tenant-таблиц. grant-lattice.ts байт-в-байт не тронут.",
+    "how_to_see_trail_on_rights_screen": [
+      "1. Запустить Choros: npm run build && PORT=8080 node dist/index.js (или npm run dev).",
+      "2. Открыть http://localhost:8080 в браузере.",
+      "3. В левом меню перейти на вкладку 'Rights' (иконка / раздел прав).",
+      "4. Найти компонент 'Grant Trail' (ra-grant-trail.jsx) — отображает таблицу событий grant.create / grant.revoke / assignment.create / assignment.revoke.",
+      "5. Без DATABASE_URL: отображаются 10 строк TRAIL_SEED (статические демо-данные, прозрачный fallback — поле is_seed отсутствует в ответе).",
+      "6. С DATABASE_URL (live Postgres): GET /api/grant-trail возвращает реальные строки из audit_event с типами ∈ {grant.create, grant.revoke, assignment.create, assignment.revoke}, отфильтрованные по текущему tenant (X-Dev-User header → withTenant RLS).",
+      "7. Кнопка 'Load more' появляется при hasMore=true (limit=100 по умолчанию). Клик отправляет следующий запрос с before_seq=<последний seq>.",
+      "8. Фильтры: ?role_id=<UUID> — события по роли (subject или payload.roleId); ?actor=<string> — события по инициатору; ?limit=<1..500> — размер страницы; ?before_seq=<int> — курсор для пагинации."
+    ],
+    "how_to_verify": [
+      "npm run ci: tsc --noEmit / eslint src / vitest run — всё зелёное (732/732 unit+e2e, все fitness checks).",
+      "npm run fitness:db (изолированный PG): 277/277 включая grant-trail.db.test.ts cross-tenant + pagination.",
+      "Проверить нет новых миграций: git diff 0de43cc..HEAD -- 'migrations/*.sql' пусто.",
+      "Проверить frozen foundation нетронута: git diff 0de43cc..HEAD -- 'src/core/grant-lattice.ts' — diff пуст.",
+      "Проверить fitness-гейты: bash ci/checks/grant-trail-encoder-isolation.sh (все CHECK PASS) + bash ci/checks/grant-trail-no-new-table.sh (PASS).",
+      "Проверить encoder IO-free: grep -E 'import.*(pg|fetch|http|https|net|child_process)' src/core/audit-grant-encoder.ts — пусто."
+    ],
+    "infra_changes": "Нет. Ни одной Postgres-миграции, нет новых сервисов, нет docker-compose изменений. package.json: +2 fitness checks (grant-trail-encoder-isolation.sh, grant-trail-no-new-table.sh, grant-trail.db.test.ts); нет новых npm-зависимостей.",
+    "downstream_seams": {
+      "T-0030": {
+        "description": "writeGrantAuditEvent (T-0030, in-flight) ДОЛЖЕН импортировать encodeGrantAuditEvent из src/core/audit-grant-encoder.ts (T-0031). Контракт на стороне T-0031 заморожен. Разрешается оркестратором на втором из двух мержей.",
+        "frozen_exports": ["encodeGrantAuditEvent", "encodeAssignmentAuditEvent", "AuditEventInput", "AssignmentAuditEvent"]
+      },
+      "T-0053": {
+        "description": "Live Postgres DAO для queryGrantTrail. T-0031 определяет queryGrantTrail(pool, params) — T-0053 может расширить/заменить на connection-pool factory. Контракт возврата { rows: GrantTrailRow[], hasMore: boolean } заморожен."
+      }
+    }
+  },
+  "friction_events": []
+}
