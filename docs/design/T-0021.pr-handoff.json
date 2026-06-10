@@ -1,0 +1,118 @@
+{
+  "task_id": "T-0021",
+  "status": "pr_open",
+  "branch": "task/T-0021-grant-resolver-pdp",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/grant-resolver.ts",
+    "src/__tests__/grant-resolver.test.ts",
+    "ci/checks/grant-resolver-isolation.sh",
+    "docs/specs/T-0021-grant-resolver-pdp.spec.md",
+    "docs/specs/T-0021.spec.contract.json",
+    "docs/design/T-0021-grant-resolver-pdp.adr.md",
+    "docs/design/T-0021.adr.contract.json",
+    "docs/design/T-0021.review.contract.json",
+    "docs/design/T-0021.test-report.contract.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "No deviations — ADR fully complied, all acceptance criteria 1-13 verified, AC-14/AC-15 explicitly deferred per ADR §5 to T-0053 (Postgres RLS DAO) and T-0027/T-0028 (deploy-linter + engine guard) respectively.",
+    "Review iteration 1 (00933a0) blocked on R-1 (fail-closed violation on malformed facet); iteration 2 (b509563) closed R-1/R-2/R-3 with verdicts approved (2aa4da6); all 427 fitness tests green.",
+    "No remote GitHub PR opened: local branch only (local-review-handoff); opening a GitHub PR requires scoped agent PAT (GT-4) not yet confirmed in this environment — founder reviews via local dev-env."
+  ],
+  "hardening_r1_fix": {
+    "review_finding": "R-1",
+    "severity": "blocking",
+    "issue": "grantFacetFields returned undefined (whole-resource) for present-but-malformed resourceFacet ({fields:123}, {fields:'bad'}, etc.), violating fail-closed principle in authority core.",
+    "fix_commit": "b509563",
+    "fix_summary": "grantFacetFields now returns undefined ONLY for strictly-absent facet (undefined/null); present-but-malformed returns [] fail-closed. Two-case distinction ensures no field widening on malformed input.",
+    "test_count_before": 27,
+    "test_count_after": 43,
+    "new_tests": 16,
+    "adversarial_forms_covered": [
+      "{fields: 123}", "{fields: 'bad'}", "{fields: null}", "{fields: {}}", "{fields: [1,2]}",
+      "{fields: [1,{},null]}", "{} (missing fields key)", "{foo:'bar'} (no fields key)",
+      "42 (bare number)", "'whole' (bare string)", "true (boolean)", "['name'] (array-as-facet)",
+      "{fields:[]} (explicit empty — zero, not whole)", "undefined (correctly widens)",
+      "null (correctly widens)", "mixed good+malformed grants (malformed contributes nothing)"
+    ]
+  },
+  "hardening_r2_r3": {
+    "review_findings": ["R-2", "R-3"],
+    "r2_change": "isLatticeScope now discriminates on scope.kind !== 'freeform' instead of enumerating all kinds — structurally tied to T-0018 GrantScope union; no silent divergence if T-0018 adds a fifth lattice kind.",
+    "r3_change": "TODO(T-0053) comment added to resolveFor marking the intentional FR-8 AuditObligation static-now gap (durable append deferred to T-0053)."
+  },
+  "test_coverage": {
+    "total": 427,
+    "passed": 427,
+    "failed": 0,
+    "grant_resolver_specific": 43,
+    "test_file": "src/__tests__/grant-resolver.test.ts",
+    "coverage_breakdown": {
+      "FF-R1 action-time binding [AC-3, AC-4]": 4,
+      "FF-R2 human==agent identical-fields [AC-5]": 3,
+      "FF-R3 fail-closed / default-deny [AC-1, AC-2, AC-7, AC-9]": 6,
+      "FF-R4 containment + projection [AC-6, AC-8] (incl. 16 adversarial R-1 cases)": 20,
+      "FF-R5/FF-R6 structural surface [AC-10, AC-11]": 3,
+      "FF-R7 purity / port-conformance [AC-12, AC-13]": 4
+    },
+    "ci_green": true,
+    "tsc": "green",
+    "eslint": "green",
+    "fitness_checks": "green — FF-R1..R7 (grant-resolver + prior T-0015/T-0018/T-0016 checks)"
+  },
+  "acceptance_coverage": {
+    "ac_1": {"text": "resolveHandle(handle, subject) with NO covering grant returns {denied:true, reason:'no_grant'}", "verified": true},
+    "ac_2": {"text": "Handle tenantId != subject.tenantId returns cross_tenant BEFORE any grant/record read", "verified": true},
+    "ac_3": {"text": "Grants re-queried per call: covering at t0 {denied:false}, empty at t1 {denied:true,'no_grant'}", "verified": true},
+    "ac_4": {"text": "Out-of-window grant (isEffective false) yields {denied:true,'no_grant'}", "verified": true},
+    "ac_5": {"text": "Human==agent equivalence: same inputs → deep-equal outputs; one projectFields function both invoke", "verified": true},
+    "ac_6": {"text": "Visible field set = union of covering grants' facet fields intersected with handle Facet; masked fields absent (not null)", "verified": true},
+    "ac_7": {"text": "Read grant does not satisfy update request; operation mismatch => {denied:true,'no_grant'}", "verified": true},
+    "ac_8": {"text": "Handle ref not isNarrowerOrEqual grant scope => {denied:true,'no_grant'}; inside subtree => resolved", "verified": true},
+    "ac_9": {"text": "RecordSource reports ref absent => {denied:true, reason:'not_found'}; no fabricated fields", "verified": true},
+    "ac_10": {"text": "Single chokepoint: resolveHandle stays the only handle->fields export; ci/checks/single-resolver.sh green", "verified": true},
+    "ac_11": {"text": "No second authority subsystem: decision and field set from grant rows only (T-0018); no parallel ACL", "verified": true},
+    "ac_12": {"text": "Pure: two invocations with deeply-equal inputs return deeply-equal outputs; no IO outside injected ports", "verified": true},
+    "ac_13": {"text": "Type-checks as const grantResolver: HandleResolver; can replace denyAllResolver at seam with no signature change", "verified": true},
+    "ac_14": {"text": "DB enforcement (activates later): 'no direct DAO path' enforced by Postgres role-permissions + RLS", "deferred_to": "T-0053"},
+    "ac_15": {"text": "Deploy/runtime enforcement (activates later): engine variables carry only handles; engine mutates only via gateway", "deferred_to": "T-0027/T-0028"}
+  },
+  "frozen_modules_check": {
+    "object_handle_ts": "UNCHANGED — no edits to src/core/object-handle.ts (0 bytes diff)",
+    "grant_lattice_ts": "UNCHANGED — no edits to src/core/grant-lattice.ts (0 bytes diff)",
+    "types_ts": "UNCHANGED — no edits to src/core/types.ts (0 bytes diff)",
+    "denyAllResolver": "Frozen export in object-handle.ts, unchanged; grantResolver is additive via makeGrantResolver factory"
+  },
+  "merge_target": "dev",
+  "merge_strategy": "auto-merge via orchestrator (D-053)",
+  "promotion_path": "dev → main (founder-gated, one-click review/promote in dev-env)",
+  "friction_events": [],
+  "risk_assessment": {
+    "summary": "LOW — self-contained authority core module; well-specified by GT-1 hypothesis; no production DB coupling; all fitness verified; two review iterations closed all blocking findings.",
+    "deferred_and_documented": [
+      "AC-14 (FF-R8): Postgres RLS DAO / DB role-permissions enforcement → T-0053 (activates-in-T-0053)",
+      "AC-15 (FF-R9): BPMN deploy-linter + engine runtime guard → T-0027/T-0028 (activates-in-T-0027/T-0028)"
+    ],
+    "dependencies": [
+      "T-0015 (object-handle module): frozen foundation — provides ObjectHandle/ResolveSubject/ResolvedView/Facet/HandleResolver types",
+      "T-0018 (grant-authority algebra): consumed core — resolver calls isNarrowerOrEqual/isEffective/meet, injects AncestryOracle",
+      "T-0016 (audit floor): types only — FR-8 audit obligation shape static-now specified, durable append deferred"
+    ]
+  },
+  "commit_history": {
+    "spec_phase": "9215ee1 — T-0021 SPEC: grant_resolver PDP spec (single chokepoint, action-time binding, human==agent view)",
+    "design_phase": "2fa6f00 — T-0021 DESIGN: grant_resolver ADR + fitness (implements T-0015 resolveHandle over T-0018 lattice)",
+    "build_phase_1": "7bae38c — T-0021 BUILD: grant_resolver PDP core (refToScope/visibleFields/projectFields/resolveFor/makeGrantResolver) over T-0018 lattice + T-0015 port",
+    "build_phase_2": "dc6b9b2 — T-0021 BUILD: fitness suite (FF-R1..R7) + isolation check + wire into fitness gate",
+    "review_phase": "00933a0 — T-0021 REVIEW: changes_requested — R-1 blocking (malformed facet widens to whole-resource, violates fail-closed)",
+    "fix_phase": "b509563 — T-0021 BUILD: fix R-1 fail-closed malformed facet (+R-2/R-3) per review",
+    "final_phase": "2aa4da6 — T-0021 REVIEW+TEST: approved — R-1/R-2/R-3 closed, 427 tests green"
+  }
+}
