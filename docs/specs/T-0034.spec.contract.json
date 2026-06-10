@@ -1,0 +1,126 @@
+{
+  "task_id": "T-0034",
+  "status": "ready",
+  "summary": "Make external-effect resources (integration_endpoint, messaging_channel, external_account) first-class grant-model objects; verify a tool's declared effects at the gateway (resolveFor) via an injected EffectSource port; provide a pure-compute linter (classifyTool) that statically distinguishes pure tools from effecting ones.",
+  "functional": [
+    "FR-1: effect_resource is a first-class resource_type in the grant table; invoking an external endpoint requires a proper grant row for (resource_type='effect_resource', operation='invoke')",
+    "FR-2: EffectResource entity carries id, tenantId, kind ∈ {integration_endpoint, messaging_channel, external_account}, scope, metadata; kind is a closed set",
+    "FR-3: mcp_tool.declares is a typed EffectDeclaration[] = {resourceId, kind}; free-text effect descriptions are not accepted",
+    "FR-4: gateway (resolveFor, op='invoke') verifies that the subject holds a grant covering every EffectDeclaration via an injected EffectSource port; missing grant → denied fail-closed",
+    "FR-5: classifyTool(declares) pure-compute linter returns { pure: true } for empty declares, { pure: false, effects } for ≥1 declaration; pure, deterministic, no I/O",
+    "FR-6: missing or malformed declares field → gateway denies fail-closed; classifyTool returns { pure: false }",
+    "FR-7: effect_resource rows are per-tenant; grant in tenant A does not cover effect-resource in tenant B",
+    "FR-8: effect-grant verification is folded into the existing resolveFor core as an additive step; single-resolver.sh stays green",
+    "FR-9: EffectDeclaration, EffectKind, EffectResource, EffectSource, ToolEffectProfile, classifyTool, verifyEffectGrants exported from src/core/effect-resource.ts; T-0043 imports them without re-declaration"
+  ],
+  "non_functional": [
+    "NF-1: src/core/effect-resource.ts imports no pg/fs/net/http; all DB access behind injected EffectSource port (in-memory now, Postgres DAO in T-0053)",
+    "NF-2: ResolverDeps.effects is optional; callers without it compile unchanged; absence skips effect-verification (backward compatible)",
+    "NF-3: fail-closed — any doubt resolves to denial; once EffectSource is wired, full verification is enforced",
+    "NF-4: no new npm dependencies",
+    "NF-5: migration number is 022 (017=T-0033, 018=T-0019, 019-021=T-0022)"
+  ],
+  "out_of_scope": [
+    "Runtime execution of integration connectors or live HTTP calls to external endpoints",
+    "BYO-connector framework, webhook subscriptions, messaging-channel adapters",
+    "Postgres EffectSource DAO — deferred to T-0053",
+    "role_criticality.external_invoke computation — T-0040 (depends on T-0034)",
+    "egress_policy — T-0041",
+    "Editing object-handle.ts, grant-lattice.ts, or migrations/008_grant.sql",
+    "Stage-2 A2A call-graph breakers or agent-runtime enforcement"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "EffectKind is a closed set: classifyTool and verifyEffectGrants reject any EffectDeclaration whose kind is not in {integration_endpoint, messaging_channel, external_account} — treated as malformed, fail-closed",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "classifyTool([]) === { pure: true }: a tool with an empty declares array is classified pure-compute",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "classifyTool([...]) === { pure: false, effects: [...] }: a tool with ≥1 valid EffectDeclaration is classified effecting; the effects array equals the input",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "classifyTool(malformed) === { pure: false }: null, non-array, or array with malformed declarations → { pure: false } (fail-closed, not pure)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Gateway denies invoke when subject lacks an effect-resource grant: resolveFor with EffectSource wired and tool declaring effect E, subject holds no grant for E → { denied: true, reason: 'no_effect_grant' }",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Gateway permits invoke when subject holds all declared effect-resource grants: resolveFor returns { denied: false, ... } when subject holds a covering grant for every EffectDeclaration",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "All-or-nothing effect-grant check: tool declares 2 effects, subject holds grant for 1 of 2 → denied fail-closed",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Absent EffectSource port skips effect verification (backward compat): resolveFor without effects in ResolverDeps behaves exactly as pre-T-0034; existing tests pass unchanged",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Malformed declares denies fail-closed at gateway: when EffectSource is wired and tool's declares is null or not a valid EffectDeclaration[], resolveFor returns { denied: true, reason: 'no_effect_grant' }",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "effect_resource table is a tenant table: 022_effect_resource.sql creates choros.effect_resource with tenant_id leading PK, ENABLE+FORCE RLS, isolation policy, GRANT to choros_app, and table listed in ci/checks/known_tenant_tables.txt",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Cross-tenant isolation for effect resources: a query for an effect_resource row under tenant A in a session bound to tenant B returns 0 rows",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Isolation check — no parallel effect-ACL store: ci/checks/effect-resource-isolation.sh exits 0; no _acl/effect_visibility/effectRights/effectAcl token in effect-resource.ts; no pg/fs/net/http import",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Single projection seam maintained: ci/checks/single-resolver.sh remains green after T-0034's commit; no second handle→fields path introduced",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "grant-resolver.ts import surface preserved (FE-W23-0008): resolveFor, makeGrantResolver, projectFields, visibleFields, grantFacetFields, refToScope remain exported; ResolverDeps gains only optional effects?: EffectSource; all existing callers compile unchanged",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "grant-lattice.ts and object-handle.ts are byte-frozen: T-0034's commit does not include edits to those files; tsc --noEmit passes",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "T-0043 seam exports present: src/core/effect-resource.ts exports EffectKind, EffectDeclaration, EffectResource, EffectSource, ToolEffectProfile, classifyTool, verifyEffectGrants; a consumer module importing all symbols compiles with no cast",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "Determinism and purity: classifyTool and verifyEffectGrants called twice with same inputs yield deep-equal outputs; no IO outside the EffectSource injected port",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-18",
+      "text": "No regression on pre-existing fitness checks: single-resolver.sh, no-record-in-variable.sh, object-handle-isolation.sh, grant-resolver-isolation.sh, mutation-gateway-isolation.sh, audit_append_only.sh, bpmn-linter-isolation.sh all remain green",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0034-external-effect.spec.md"
+}
