@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0016",
+  "status": "ready",
+  "decision": "One append-only, per-tenant, hash-chained audit floor: an ordinary T-0013 tenant table audit_event (FORCE-RLS, default-DENY, tenant_id leading PK, withTenant access) plus a per-tenant forward-only head audit_head. Four structural guarantees: (1) append-only at the DB layer enforced by TWO independent mechanisms held simultaneously - app role choros_app granted only SELECT,INSERT on audit_event (no UPDATE/DELETE) AND a no-mutate trigger raising on UPDATE/DELETE for all roles, so a privilege misconfig still fails closed; (2) per-tenant dense monotonic seq (+1, first=GENESIS_SEQ=1, UNIQUE(tenant_id,seq)) assigned under a per-tenant append serialization pinned to SELECT...FROM audit_head WHERE tenant_id=... FOR UPDATE (never a global sequence/lock); (3) per-tenant hash chain prev_hash=row_hash(seq-1) with genesis prev_hash=32 zero bytes, row_hash=SHA-256(canonical_preimage); (4) per-tenant head audit_head (PK tenant_id, one row/tenant) advanced forward-only +1 atomically in the same transaction as the append, shaped to be externally anchorable. Canonical preimage is pinned: fixed field set/order, each field framed as 1-byte TAG + 4-byte big-endian LEN + body, distinct NULL marker (TAG 0x00 LEN 0), big-endian fixed-width integers, RFC8785/JCS canonical JSON for jsonb, all bound to vocab_version=1 (any change = vocab bump + chain-format migration). A stateless per-tenant verifier replays rows + genesis constants + optional anchored head and detects all 7 defect classes (tamper/reorder/insert/delete/gap/dup/fork). Proportional: standard Postgres primitives only - no custom ledger engine, no external anchoring, no HSM, no signed bundles (tier-gated, excluded day-1). Design-only: DDL/triggers/grants/append-path/verifier/snapshot-job land in T-0053.",
+  "rejected_alternatives": [
+    {"option": "Separate grant_log / per-domain audit tables", "why_not": "E3.6/hypothesis 6-A#8 fix grant-issuance events as first-class rows in THIS floor (AC-20). A second log = a second isolation/append-only/chain code-path and a second 152-FZ/GDPR narrative (T-0013 NF-3 drift). New event types add rows, never tables."},
+    {"option": "seq from a global Postgres SEQUENCE or one global advisory lock for ordering", "why_not": "Couples every tenant's write throughput onto one contention point (violates NF-2 per-tenant zero-contention). A global sequence is sparse under rollback, defeating the dense-seq delete/gap signal (FR-2). Caught by audit_no_global_seq lint + concurrency probe (AC-6)."},
+    {"option": "MAX(seq)+1 without per-tenant serialization", "why_not": "Two concurrent appends in one tenant read the same MAX, compute the same seq+prev_hash -> UNIQUE abort (lost write) or, absent the constraint, a fork (two children of one parent). Race-unsafe."},
+    {"option": "Per-tenant advisory lock (pg_advisory_xact_lock on hashed tenant_id) as the serialization primitive", "why_not": "Viable but: it is a second source of truth for the head separate from the audit_head row we must read anyway (skew); advisory-lock keys live in one global int8 space so hash collisions reintroduce cross-tenant contention (soft NF-2 violation, invisible until it bites); extra lock round-trip. We must read audit_head for prev_hash/seq regardless, so locking THAT row FOR UPDATE collapses the serialization point and the chain-state read into one op. Pinned FOR UPDATE instead (acceptable-but-rejected)."},
+    {"option": "No DB trigger - rely only on revoking UPDATE/DELETE from the app role", "why_not": "A single privilege misconfig (a future migration grants UPDATE, or runtime connects as a more-privileged role) silently re-opens history mutation. Spec handoff is explicit: keep BOTH mechanisms (FR-1, AC-3)."},
+    {"option": "No privilege revoke - rely only on the trigger", "why_not": "A dropped/DISABLEd trigger silently re-opens mutation. Defense-in-depth needs the orthogonal privilege guard too. Both kept (FR-1)."},
+    {"option": "Recompute row_hash lazily at read/verify time instead of storing it", "why_not": "Nothing immutable to tamper-detect against - the hash would always match whatever the (mutated) row currently says. row_hash/prev_hash are stored content of the immutable row so an in-place edit diverges from the stored hash (defect tamper)."},
+    {"option": "Raw jsonb text / row_to_json as preimage for scope/payload", "why_not": "Postgres jsonb does not preserve key order and may re-serialize numbers/whitespace across writes -> two byte-equal logical rows hash differently -> false tamper reports (NF-5). RFC8785/JCS canonical JSON is mandatory."},
+    {"option": "Unframed concatenation of fields for the preimage", "why_not": "Field-boundary ambiguity / canonicalization collision (actor='ab',subject='c' vs actor='a',subject='bc' share a preimage). Length-prefixing every field + a distinct NULL marker removes it (NF-5)."},
+    {"option": "External hash-anchoring to a third-party ledger / RFC-3161 TSA now", "why_not": "Tier-gated gold-plating, NOT day-1 (hypothesis 6-A#12, spec 6.6). The head is shaped to be anchorable and the verifier supports an anchored cross-check, but the anchoring job/authority is out of scope."},
+    {"option": "HSM custody / hardware key management; signed audit or policy bundles", "why_not": "Tier-gated, NOT day-1 (6-A#12, spec 6.7/6.8). SHA-256 over a canonical preimage needs no key material; signing/HSM is a later tier, not a foundation invariant."}
+  ],
+  "object_model": [
+    {"entity": "audit_event", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL no default; leading PK column; RLS key (T-0013 inheritance)"},
+      {"name": "seq", "type": "bigint NOT NULL; per-tenant dense monotonic (+1, first=GENESIS_SEQ=1); UNIQUE(tenant_id,seq); PK is (tenant_id,seq)"},
+      {"name": "id", "type": "uuid NOT NULL; stable row identity for references; UNIQUE(tenant_id,id)"},
+      {"name": "type", "type": "text NOT NULL; event type, open vocabulary (grant.create/grant.revoke/role.assign/approve/agent.invoke/budget.reserve)"},
+      {"name": "actor", "type": "text NOT NULL; who performed the event"},
+      {"name": "subject", "type": "text NULL; affected principal/object"},
+      {"name": "scope", "type": "jsonb NULL; event scope; JCS-canonicalized in preimage"},
+      {"name": "via", "type": "text NULL; path/channel/tool"},
+      {"name": "proposed_by", "type": "text NULL; LLM proposer identity"},
+      {"name": "confirmed_by", "type": "text NULL; human confirmer identity"},
+      {"name": "payload", "type": "jsonb NOT NULL; structured event detail; JCS-canonicalized in preimage"},
+      {"name": "occurred_at", "type": "bigint NOT NULL; unix epoch ms"},
+      {"name": "prev_hash", "type": "bytea NOT NULL; row_hash of (tenant_id,seq-1), or GENESIS_PREV_HASH (32 zero bytes) at genesis"},
+      {"name": "row_hash", "type": "bytea NOT NULL; = SHA-256(canonical_preimage); chain link; never part of its own preimage"},
+      {"name": "vocab_version", "type": "smallint NOT NULL; pins preimage rules + H + genesis constants; per-row"}
+    ]},
+    {"entity": "audit_head", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL; PK (tenant_id) - exactly one head row per tenant; RLS key"},
+      {"name": "seq", "type": "bigint NOT NULL; latest committed seq for this tenant (chain head seq)"},
+      {"name": "row_hash", "type": "bytea NOT NULL; row_hash of (tenant_id,seq) - the chain head"},
+      {"name": "updated_at", "type": "bigint NOT NULL; unix epoch ms of last forward advance"},
+      {"name": "vocab_version", "type": "smallint NOT NULL; vocab_version of the head row"}
+    ]},
+    {"entity": "ChainVocabulary(vocab_version=1)", "fields": [
+      {"name": "H", "type": "SHA-256 (32-byte digest); pinned"},
+      {"name": "GENESIS_SEQ", "type": "1; pinned"},
+      {"name": "GENESIS_PREV_HASH", "type": "32 zero bytes (0x00 x32); pinned"},
+      {"name": "preimage_rules", "type": "field set/order + 1-byte TAG + 4-byte big-endian LEN + body framing + distinct NULL marker + JCS for jsonb; pinned; any change = vocab bump"}
+    ]},
+    {"entity": "choros_app (runtime role, T-0013 inheritance)", "fields": [
+      {"name": "audit_event_grants", "type": "SELECT, INSERT only (NO UPDATE, NO DELETE) - FR-1a privilege guard"},
+      {"name": "audit_head_grants", "type": "SELECT, INSERT, UPDATE (NO DELETE); every UPDATE constrained to NEW.seq=OLD.seq+1 by trigger"},
+      {"name": "role_attrs", "type": "NOSUPERUSER, NOBYPASSRLS, not table owner (T-0013)"}
+    ]},
+    {"entity": "choros_migrator (owner/DDL role)", "fields": [
+      {"name": "ownership", "type": "owns audit_event/audit_head; holds DDL; never used at runtime"},
+      {"name": "cannot_mutate_audit", "type": "even the owner cannot UPDATE/DELETE audit_event - the no-mutate trigger fires regardless of role (AC-3); only a CI-visible DISABLE/DROP TRIGGER diff lifts it"}
+    ]}
+  ],
+  "contracts": [
+    "appendAuditEvent(tx, e): ONLY sanctioned audit write. Runs inside withTenant (T-0013): (1) SELECT...FROM audit_head WHERE tenant_id=GUC FOR UPDATE - per-tenant serialization + chain-state read in one op; seq = head ? head.seq+1 : GENESIS_SEQ; prevHash = head ? head.row_hash : GENESIS_PREV_HASH; (2) preimage = canonicalPreimage(field set + prevHash + vocab); rowHash = sha256(preimage); (3) INSERT audit_event + upsert audit_head forward-only, SAME transaction. Returns {seq,rowHash}.",
+    "canonicalPreimage(row, vocab_version): deterministic byte string. v=1: field order [tenant_id,seq,id,type,actor,subject,scope,via,proposed_by,confirmed_by,payload,occurred_at,prev_hash,vocab_version] (row_hash excluded). Each field = TAG(1 byte) || LEN(4-byte big-endian uint32) || BODY. uuid TAG 0x01 16 raw bytes; bigint TAG 0x02 8-byte big-endian; smallint TAG 0x03 2-byte big-endian; text TAG 0x04 UTF-8; jsonb TAG 0x05 RFC8785/JCS then UTF-8; bytea TAG 0x06 raw; NULL = TAG 0x00 LEN 0 no body (distinct from empty text TAG 0x04 LEN 0 and JSON null). row_hash = SHA-256(preimage). PINNED single source of truth for coder.",
+    "verifyAuditChain(rows, anchoredHead?): stateless per-tenant. Inputs ONLY: this tenant's RLS-scoped rows ORDER BY seq, genesis constants, row.vocab_version, optional anchored head. Replays: genesis prev_hash check; per row dup(6)/gap|delete(5,4)/reorder(2)/insert(3) via seq+prev_hash linkage; tamper(1) via sha256(preimage(r))!=row_hash; fork(7) via live-head!=anchored-head at same seq. No DB/network/global state (NF-4). Per-tenant; cross-tenant = N independent runs.",
+    "Structural enforcement (T-0053 SQL): (A) GRANT SELECT,INSERT ON audit_event TO choros_app (no UPDATE/DELETE); (B1) BEFORE UPDATE/DELETE no-mutate trigger on audit_event RAISEs for ALL roles; (B2) BEFORE UPDATE head-advance trigger on audit_head enforces NEW.seq=OLD.seq+1. (A) and (B1) held SIMULTANEOUSLY - defeating append-only needs a CI-visible diff that BOTH grants UPDATE/DELETE AND drops/disables the trigger.",
+    "Per-tenant append serialization PINNED to audit_head...FOR UPDATE (not advisory lock, not global). Invariant (non-negotiable): per-tenant, race-free, +1 dense seq, no global lock/sequence. First append upserts the head via INSERT...ON CONFLICT(tenant_id) (no pre-seeded empty head, no seq=0 sentinel)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Append-only is structural: app role never holds UPDATE/DELETE on audit_event AND a no-mutate trigger exists (both mechanisms simultaneously)", "ci_check": "static-now: ci/checks/audit_append_only.sh over migration SQL FAILs if any GRANT (UPDATE|DELETE) ON audit_event TO choros_app appears OR no BEFORE UPDATE/DELETE trigger on audit_event present. live-T-0053: app-role UPDATE/DELETE on a seeded row fails (privilege OR trigger); owner UPDATE/DELETE fails (trigger). [AC-1/2/3/4]"},
+    {"id": "FF-2", "rule": "Per-tenant append serialization is audit_head...FOR UPDATE; no global sequence/advisory lock for audit ordering", "ci_check": "static-now: ci/checks/audit_no_global_seq.sh FAILs if a global CREATE SEQUENCE feeds audit_event.seq or pg_advisory*lock with a non-tenant-derived key orders audit; asserts the append path locks audit_head FOR UPDATE keyed on the tenant. live-T-0053 (concurrency): N concurrent appends in tenant-A yield N distinct dense seq; A and B appends do not block on a shared lock. [AC-6]"},
+    {"id": "FF-3", "rule": "seq is per-tenant dense and unique; UNIQUE(tenant_id,seq) present", "ci_check": "static-now: lint asserts UNIQUE(tenant_id,seq) and PK(tenant_id,seq) on audit_event in migration DDL. live-T-0053: append K for A, M for B; A's seq=1..K dense (no gap/dup), B independent; manual duplicate-seq insert rejected. [AC-5]"},
+    {"id": "FF-4", "rule": "Genesis + chain linkage: seq=1 row has prev_hash=GENESIS_PREV_HASH; every n>1 has prev_hash=row_hash[n-1]", "ci_check": "live-T-0053: assert genesis prev_hash = 32 zero bytes; for every n>1, prev_hash = row_hash of (tenant_id,n-1); any mismatch fails. static-now (unit): a built fixture chain satisfies the linkage. [AC-7/8]"},
+    {"id": "FF-5", "rule": "row_hash=SHA-256(canonical_preimage); preimage deterministic, length-unambiguous, NULL-distinct, JCS-canonical", "ci_check": "static-now (unit) auditPreimage.test.ts: build the preimage for a fixture row, assert sha256(preimage)=pinned golden digest; assert determinism, NULL != empty != JSON null, reordered jsonb keys yield identical preimage (JCS). live-T-0053: for each persisted row recomputed sha256(preimage(row))=stored row_hash. [AC-9]"},
+    {"id": "FF-6", "rule": "Preimage/hash/genesis vocabulary pinned to vocab_version; a change forces an explicit bump", "ci_check": "static-now: ci/checks/audit_vocab_pinned.sh + auditPreimage.test.ts assert (a) every row carries vocab_version, (b) the preimage builder dispatches on vocab_version, (c) a golden-digest snapshot of the vocab=1 rules - changing field set/order/TAG/LEN/encoding/H/genesis flips the digest and FAILs CI until vocab_version is bumped. [AC-10]"},
+    {"id": "FF-7", "rule": "Stateless per-tenant verifier detects all 7 defect classes (tamper/reorder/insert/delete/gap/dup/fork); clean chain verifies ok", "ci_check": "static-now (unit) auditVerify.test.ts: feed seven crafted row-sets + one clean chain; assert each defect reported with the right class and the clean chain ok; assert the genesis check fires when prev_hash != GENESIS_PREV_HASH. [AC-11]"},
+    {"id": "FF-8", "rule": "Verifier is stateless and per-tenant (inputs only: rows, constants, vocab, optional anchored head; no DB/network/global)", "ci_check": "static-now (unit): verifier signature takes only those inputs; tenant-A rows verify ok while tenant-B rows are tampered (and vice-versa) in independent runs; no DB/network import in the verifier unit. [AC-12]"},
+    {"id": "FF-9", "rule": "Exactly one head row per tenant; head names latest (seq,row_hash); append+head advance atomic", "ci_check": "live-T-0053: audit_head PK(tenant_id) (one row/tenant); after append to seq=n, audit_head.(seq,row_hash)=(n,row_hash of seq=n); after ROLLBACK of an append neither row nor head advance visible; after COMMIT both. static-now: lint asserts PK(tenant_id) on audit_head and append writes both in one transaction. [AC-13/15]"},
+    {"id": "FF-10", "rule": "Head advances forward-only; backward/skip UPDATE rejected", "ci_check": "static-now: lint asserts a BEFORE UPDATE head-advance trigger on audit_head exists. live-T-0053: an UPDATE setting audit_head.seq <= current, or != old+1, is rejected by the trigger; a normal append advances by exactly +1. [AC-14]"},
+    {"id": "FF-11", "rule": "Head is externally anchorable; verifier fork-check flags live-head != anchored-head at same seq", "ci_check": "static-now (unit): the head (tenant_id,seq,row_hash) is a copyable tuple; auditVerify.test.ts feeds an anchored snapshot diverging from the live head at the same seq and asserts a fork defect; identical anchored head verifies ok. (snapshot job out of scope.) [AC-16]"},
+    {"id": "FF-12", "rule": "audit_event and audit_head are FORCE-RLS default-DENY tenant tables in the known-tenant-tables fixture (reuses T-0013 probes)", "ci_check": "static-now: ci/checks/known_tenant_tables.txt contains audit_event and audit_head (so both flow into T-0013 FF-2/FF-3/FF-6/FF-7). live-T-0053 (reuse T-0013 probes): no context => count 0 on both; context=A => WHERE tenant_id=B = 0; both have relrowsecurity AND relforcerowsecurity. [AC-17]"},
+    {"id": "FF-13", "rule": "tenant_id is the leading column of every PK/composite index/FK on both tables (reuses T-0013 tenant_id_leading.sql)", "ci_check": "static-now: lint over migration DDL asserts PK(tenant_id,seq) on audit_event, PK(tenant_id) on audit_head, tenant_id first on any composite index/FK. live-T-0053: reuse T-0013 tenant_id_leading.sql over both tables. [AC-18]"},
+    {"id": "FF-14", "rule": "Governance fields are first-class columns AND in the preimage (editing any is tamper-detectable); grant events are ordinary rows", "ci_check": "static-now (unit): the audit_event object-model fixture includes type/actor/subject/scope/via/proposed_by/confirmed_by/payload/occurred_at; the preimage includes all of them; a unit alters confirmed_by in a fixture and asserts the recomputed row_hash differs. A grant.create/grant.revoke event maps onto the columns with NO schema change (grant events are rows in this floor). [AC-19/20]"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "S3.4 grant SELECT,INSERT only + S4.6(A)/(B1) + FF-1"},
+    {"ac": "AC-2", "covered_by": "S3.4 no DELETE grant + S4.6(A)/(B1) + FF-1"},
+    {"ac": "AC-3", "covered_by": "S4.6(B1) no-mutate trigger fires regardless of role + FF-1"},
+    {"ac": "AC-4", "covered_by": "S1.1 dual mechanism + S4.6 + FF-1"},
+    {"ac": "AC-5", "covered_by": "S3.1 UNIQUE(tenant_id,seq)/PK + S4.3 dense +1 + FF-3"},
+    {"ac": "AC-6", "covered_by": "S4.2 audit_head FOR UPDATE (pinned) + FF-2"},
+    {"ac": "AC-7", "covered_by": "S3.3 GENESIS_PREV_HASH + S4.1(3) + FF-4"},
+    {"ac": "AC-8", "covered_by": "S1.3 chain + S4.3 append + FF-4"},
+    {"ac": "AC-9", "covered_by": "S4.1 canonical preimage (pinned) + FF-5"},
+    {"ac": "AC-10", "covered_by": "S3.3 vocab constants + S4.1(4)/S4.5 dispatch + FF-6"},
+    {"ac": "AC-11", "covered_by": "S4.4 verifier + defect map + FF-7"},
+    {"ac": "AC-12", "covered_by": "S4.4 inputs-only signature + FF-8"},
+    {"ac": "AC-13", "covered_by": "S3.2 audit_head PK + S4.3 advance + FF-9"},
+    {"ac": "AC-14", "covered_by": "S3.2 forward-only + S4.6(B2) trigger + FF-10"},
+    {"ac": "AC-15", "covered_by": "S1.4/S4.3 same-transaction atomicity + FF-9"},
+    {"ac": "AC-16", "covered_by": "S3.2 anchorable tuple + S4.4 fork branch (7) + FF-11"},
+    {"ac": "AC-17", "covered_by": "S3.1 T-0013 inheritance + FF-12"},
+    {"ac": "AC-18", "covered_by": "S3.1/S3.2 PKs + FF-13"},
+    {"ac": "AC-19", "covered_by": "S3.1 columns + S4.1(1) preimage field set + FF-14"},
+    {"ac": "AC-20", "covered_by": "S2 (rejected separate grant_log) + S3.1 type open vocab + FF-14"}
+  ],
+  "runtime_target": "Postgres in the silo docker-compose stack (one tenant/instance) on the founder home server (/srv/choros, deploy founder-gated) - same target as T-0013/T-0014. App connects as choros_app (NOSUPERUSER/NOBYPASSRLS/non-owner; SELECT,INSERT on audit_event, SELECT,INSERT,UPDATE on audit_head); migrations as choros_migrator. Runs at N=1 (one code-path, pooled-ready; silo=pooled audit narrative NF-3). Infra dependency NOT built here = T-0053: SQL DDL/migrations for audit_event+audit_head, no-mutate + head-advance triggers, privilege grants, appendAuditEvent + FOR UPDATE serialization, verifyAuditChain + db-isolation CI wiring, head-snapshot-to-object-storage job. External anchoring/HSM/signed bundles tier-gated and EXCLUDED day-1 (6-A#12). Server/DB provisioning is founder gate GT-4.",
+  "adr_artifact_path": "docs/design/T-0016-audit-floor.adr.md",
+  "escalation": ""
+}
