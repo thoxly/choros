@@ -1,0 +1,158 @@
+{
+  "task_id": "T-0032",
+  "status": "ready",
+  "decision": "SoD enforcement is an additive 'step 3.6' inside the one resolveFor decision core, active iff op in {approve, transition} AND an optional injected deps.sod port is present (the exact structural analogue of T-0034's invoke-path step 3.5 behind deps.effects). The SoD decision logic lives in a new pure module src/core/sod.ts (static/dynamic decision functions + the SodSource constraint-loading port), imported by grant-resolver.ts as effect-resource.ts is. Static SoD is a query over EFFECTIVE role_assignment rows; dynamic SoD is recomputed from the actor_event ledger at action-time (attribution = COALESCE(on_behalf_of, actor)); no new derived state. On a guarded op that passes covering-grant AND SoD AND record-fetch, the gateway appends exactly one actor_event row via the injected T-0019 ActorEventWriter (implemented now over an in-memory store; Postgres DAO is T-0053); on any denial (no_grant / sod_violation / not_found) zero rows are written. A violation returns { denied: true, reason: 'sod_violation' } (fail-closed). The new sod_constraint table (migration 027) is a T-0013 tenant table; the FO-T0019-1 forward debt is closed by a BEFORE UPDATE no-decrement trigger on actor_event_seq (migration 028). The SoD-read + actor_event-write on a guarded op are ONE transaction, bound to the same withTenant PoolClient at the T-0053 DAO layer (pinned as fitness obligation FF-SOD8); in static-now the testable surrogate is exactly-one-row-on-pass / zero-on-deny.",
+  "rejected_alternatives": [
+    {"option": "Separate SoD authorization module (a la T-0029 scoped-admin) invoked around resolveFor", "why_not": "Breaks the single-chokepoint invariant (NF-5) and creates a second action-time authority path that can diverge from the covering-grant decision. T-0029 is legitimately separate because it pre-filters which management ops a scoped admin may attempt (a different axis); SoD is inherently an action-time query over the per-object ledger at the transition instant, so it belongs at the same gateway step where the covering grant is decided. Step 3.6 keeps ONE decision core."},
+    {"option": "A derived approval_state / SoD-decision-cache table updated on each transition", "why_not": "A second source of truth that can drift from the ledger and reintroduces the read-modify-write the ledger was built to avoid. SoD is recomputable from actor_event + role_assignment at action-time (TOCTOU-safe like the grant check). Spec section 3.2/6 forbid it."},
+    {"option": "Software-only no-decrement guard validating next_seq monotonicity in the TS writer", "why_not": "Defeatable by any other caller and invisible to CI. The structural fix (a BEFORE UPDATE trigger on actor_event_seq) is always-on, role-agnostic (rejects even the owner), and requires a CI-visible DDL diff to defeat (spec section 3.4 option A, the preferred fix)."},
+    {"option": "Make deps.sod a required field on ResolverDeps", "why_not": "A breaking change to every existing caller and to the frozen-test import surface (NF-6, FE-W23-0008). Must be optional, mirroring deps.effects / deps.classifications."},
+    {"option": "Encode static-SoD as a DB CHECK / EXCLUDE constraint on role_assignment", "why_not": "That is the assignment-time block (E4.6 / T-0039), explicitly out of scope. T-0032 enforces SoD only on the action-time approve/transition path plus ships the standalone query (FR-10). A DB constraint would also edit a frozen table's write-path."},
+    {"option": "Single migration 027 holding both the sod_constraint table and the seq trigger", "why_not": "Permitted by spec (section 3.5 'MAY collapse') but kept as two files (027 table, 028 trigger) because the trigger targets a different table (actor_event_seq, T-0019's) than the new sod_constraint; cleaner separation. Either is acceptable; the run-seam requirement is only >=027, lexicographically after 022."}
+  ],
+  "object_model": [
+    {
+      "entity": "SodConstraint (TS, src/core/sod.ts; mirror of choros.sod_constraint)",
+      "fields": [
+        {"name": "tenantId", "type": "string (uuid)"},
+        {"name": "id", "type": "string (uuid)"},
+        {"name": "kind", "type": "SodKind = 'static' | 'dynamic'"},
+        {"name": "roleA", "type": "string | null (role uuid; non-null for static)"},
+        {"name": "roleB", "type": "string | null (role uuid; non-null for static)"},
+        {"name": "selfRecord", "type": "boolean (dynamic self-record separation flag)"},
+        {"name": "scope", "type": "unknown (ScopeElement-shaped jsonb; opaque to loader)"},
+        {"name": "detail", "type": "Record<string,unknown> | null (optional)"}
+      ]
+    },
+    {
+      "entity": "EffectiveAssignment (TS; static-SoD input, effectiveness pre-filtered by the DAO)",
+      "fields": [
+        {"name": "employeeId", "type": "string (uuid)"},
+        {"name": "roleId", "type": "string (uuid)"},
+        {"name": "orgScope", "type": "unknown (ScopeElement-shaped; intersected with constraint scope via AncestryOracle)"}
+      ]
+    },
+    {
+      "entity": "SodSource (TS injected port; in-memory now, Postgres DAO in T-0053)",
+      "fields": [
+        {"name": "constraintsFor", "type": "(ref: ActorEventObjectRef) => Promise<SodConstraint[]>"},
+        {"name": "effectiveAssignmentsOf", "type": "(principal: string) => Promise<EffectiveAssignment[]>"},
+        {"name": "reader", "type": "ActorEventReader (T-0019 frozen port, implemented now)"},
+        {"name": "writer", "type": "ActorEventWriter (T-0019 frozen port, implemented now)"}
+      ]
+    },
+    {
+      "entity": "GuardContext (TS; additive optional resolveFor param, carries actor/principal/role/verb/level)",
+      "fields": [
+        {"name": "actor", "type": "string (performer employee id)"},
+        {"name": "onBehalfOf", "type": "string | null (principal when != performer)"},
+        {"name": "roleAtEvent", "type": "string (role uuid the gateway resolved the actor under)"},
+        {"name": "verb", "type": "ActorEventVerb (e.g. 'approve')"},
+        {"name": "approveLevel", "type": "number | undefined (required iff verb==='approve', >=1)"}
+      ]
+    },
+    {
+      "entity": "SodDecision (TS; pure result)",
+      "fields": [
+        {"name": "violated", "type": "boolean"},
+        {"name": "constraintId", "type": "string (present when violated)"},
+        {"name": "rule", "type": "'static' | 'dsod1' | 'dsod2' (present when violated)"}
+      ]
+    },
+    {
+      "entity": "SodDeniedView (TS; widens resolveFor return, like T-0034 EffectDeniedView)",
+      "fields": [
+        {"name": "denied", "type": "true"},
+        {"name": "reason", "type": "'sod_violation'"}
+      ]
+    },
+    {
+      "entity": "ResolverDeps.sod (additive optional field on the existing interface)",
+      "fields": [
+        {"name": "sod", "type": "SodSource | undefined (OPTIONAL; mirrors effects? / classifications?)"}
+      ]
+    },
+    {
+      "entity": "sod_constraint (SQL, migrations/027_sod_constraint.sql; T-0013 tenant table)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL (PK-leading)"},
+        {"name": "id", "type": "uuid NOT NULL"},
+        {"name": "kind", "type": "text NOT NULL CHECK (kind IN ('static','dynamic'))"},
+        {"name": "role_a", "type": "uuid NULL (no FK to role; non-null for static via shape CHECK)"},
+        {"name": "role_b", "type": "uuid NULL (no FK to role; non-null for static via shape CHECK)"},
+        {"name": "self_record", "type": "boolean NOT NULL DEFAULT false"},
+        {"name": "scope", "type": "jsonb NOT NULL (ScopeElement-shaped)"},
+        {"name": "detail", "type": "jsonb NULL"},
+        {"name": "created_at", "type": "bigint NOT NULL"},
+        {"name": "PRIMARY KEY", "type": "(tenant_id, id)"},
+        {"name": "sod_constraint_static_shape", "type": "CHECK (kind <> 'static' OR (role_a IS NOT NULL AND role_b IS NOT NULL))"},
+        {"name": "RLS", "type": "ENABLE + FORCE; policy on choros.tenant_id GUC; GRANT SELECT,INSERT,UPDATE,DELETE TO choros_app"}
+      ]
+    },
+    {
+      "entity": "actor_event_seq_no_decrement (SQL, migrations/028; BEFORE UPDATE trigger on actor_event_seq, closes FO-T0019-1)",
+      "fields": [
+        {"name": "trigger", "type": "BEFORE UPDATE FOR EACH ROW on choros.actor_event_seq"},
+        {"name": "predicate", "type": "RAISE restrict_violation WHEN NEW.next_seq < OLD.next_seq (all roles incl. owner)"},
+        {"name": "compat", "type": "forward +1 advance under SELECT..FOR UPDATE passes; no new grant; append_only + no_global_seq checks stay green"}
+      ]
+    }
+  ],
+  "contracts": [
+    "resolveFor(deps, handle, subject, op, invokeCtx?, guardCtx?): Promise<ResolvedView | EffectDeniedView | SodDeniedView> — additive optional guardCtx 6th arg (mirrors invokeCtx); guarded op with deps.sod present but guardCtx absent => fail-closed sod_violation (NF-3, unattributable transition cannot be proven SoD-clean)",
+    "Step 3.6 (inside resolveFor, after step 3.5, before record-fetch): if op in {approve,transition} AND deps.sod present => evaluateSod; on violated or any thrown port error => return { denied:true, reason:'sod_violation' } (zero actor_event rows). Absent deps.sod => step skipped (pre-T-0032 behavior, NF-2).",
+    "Step 6.5 (inside resolveFor, after record-fetch, on PASS of a guarded op): deps.sod.writer.appendActorEvent(toActorEventInput(act)) appends EXACTLY ONE row (AC-10).",
+    "detectStaticConflict(assignments, constraints, ancestry): SodDecision — pure; same principal holds role_a AND role_b with both org_scopes intersecting the constraint scope (AncestryOracle, no new scope algebra).",
+    "wouldCreateStaticConflict(existing, candidate, constraints, ancestry): SodDecision — FR-10 standalone assignment-conflict query.",
+    "evaluateDynamicSod(reader, constraints, act): Promise<SodDecision> — DSoD-1 self-approval block (didPrincipalPerform(ref,'submit',P)); DSoD-2 approve_L1 != L2; attribution COALESCE(onBehalfOf, actor) via actorEventPrincipal.",
+    "evaluateSod(source, ancestry, act, principalAssignments): Promise<SodDecision> — top-level guard combining static + dynamic; fail-closed on any port error.",
+    "ActorEventReader implemented (T-0019 frozen port, AC-12): trail(ref) ORDER BY seq; didPrincipalPerform(ref,event,principal) matches COALESCE(onBehalfOf,actor); rolesThatActed(ref,events?) distinct role_at_event set.",
+    "ActorEventWriter.appendActorEvent implemented (T-0019 frozen port, AC-13/AC-14): validateActorEventInput BEFORE append (reject on failure, no row); append-only single INSERT advancing per-tenant counter +1; never UPDATE/DELETE a prior row.",
+    "SodDeniedView = { denied: true; reason: 'sod_violation' } defined in sod.ts; resolveFor return type widened; reason distinct from no_grant/cross_tenant/not_found/no_effect_grant (AC-9).",
+    "ResolverDeps gains only optional sod?: SodSource; every existing export of grant-resolver.ts preserved (resolveFor, makeGrantResolver, projectFields, visibleFields, refToScope, private grantFacetFields) — FE-W23-0008 / AC-19.",
+    "NOT edited (frozen): grant-lattice.ts, object-handle.ts, actor-event.ts, migrations/008_grant.sql. The in-memory ActorEventReader/Writer store IMPLEMENTS actor-event.ts's frozen ports (may live in a new src/core/actor-event-store.ts; sod.ts re-exports it so FR-12 holds).",
+    "Migration 027 (sod_constraint tenant table) + 028 (actor_event_seq no-decrement trigger); sod_constraint added to ci/checks/known_tenant_tables.txt; cross_tenant.test.ts gains case 'sod_constraint' in seedRowForTable (else default:throw).",
+    "T-0053 DAO obligation (FF-SOD8): the Postgres SodSource/ActorEventReader/ActorEventWriter for one guarded resolveFor call are constructed over the SAME withTenant(pool,tenant,fn) PoolClient (one BEGIN..COMMIT) so the SoD read and the append are atomic/TOCTOU-safe."
+  ],
+  "fitness_functions": [
+    {"id": "FF-SOD1", "rule": "src/core/sod.ts (and the store module if split) imports no pg/fs/net/http; DB access only via injected ports (NF-1, AC-20).", "ci_check": "ci/checks/sod-isolation.sh (grep, mirrors effect-resource-isolation ER-ISO2), wired into npm run fitness"},
+    {"id": "FF-SOD2", "rule": "No parallel SoD-authority store token in sod.ts (_acl, sod_visibility, sodRights, sodAcl) in non-comment code (AC-18, NF-5).", "ci_check": "ci/checks/sod-isolation.sh (grep, mirrors ER-ISO1)"},
+    {"id": "FF-SOD3", "rule": "grant-resolver.ts import surface preserved: resolveFor/makeGrantResolver/projectFields/visibleFields/refToScope exported, grantFacetFields present, ResolverDeps gains only optional sod? (AC-19, NF-6).", "ci_check": "ci/checks/sod-isolation.sh (grep, mirrors ER-ISO3)"},
+    {"id": "FF-SOD4", "rule": "Frozen files carry no diff in T-0032's commit: grant-lattice.ts, object-handle.ts, actor-event.ts, migrations/008_grant.sql (AC-19, NF-6).", "ci_check": "git diff --quiet HEAD -- <each> inside sod-isolation.sh"},
+    {"id": "FF-SOD5", "rule": "single-resolver.sh stays green: no second handle->fields export on object-handle.ts (AC-18, NF-5).", "ci_check": "bash ci/checks/single-resolver.sh (existing, unchanged)"},
+    {"id": "FF-SOD6", "rule": "sod_constraint in known_tenant_tables.txt; schema.test.ts strict set-equality passes; cross_tenant.test.ts has case 'sod_constraint' seeding one valid row (AC-15, AC-17, NF-7).", "ci_check": "vitest run --dir ci/checks/db (schema.test.ts + cross_tenant.test.ts)"},
+    {"id": "FF-SOD7", "rule": "sod_constraint is a T-0013 tenant table: tenant-leading PK + ENABLE+FORCE RLS + isolation policy + closed kind CHECK; kind NOT IN (static,dynamic) rejected; TB session reads 0 of TA's rows (AC-1, AC-15, AC-17).", "ci_check": "live asserts in new ci/checks/db/sod.test.ts (mirrors effect_resource.test.ts), run by vitest --dir ci/checks/db; validated live in DESIGN section 8"},
+    {"id": "FF-SOD8", "rule": "actor_event_seq no-decrement trigger: forward +1 advance passes; backward UPDATE raises for choros_app AND choros_migrator; append_only + no_global_seq checks stay green. Plus T-0053 atomicity obligation: SoD read + append over one withTenant PoolClient (AC-16, AC-13, NF-8).", "ci_check": "live asserts in sod.test.ts (trigger) + bash ci/checks/actor_event_append_only.sh && bash ci/checks/actor_event_no_global_seq.sh (unchanged, stay green); validated live in DESIGN section 8"},
+    {"id": "FF-SOD9", "rule": "Step 3.6 gating: SoD guard runs IFF op in {approve,transition} AND deps.sod present; read/create/update/delete/invoke never enter it; absent deps.sod => pre-T-0032 behavior, existing resolver tests pass unchanged (AC-8, AC-11).", "ci_check": "vitest run (src/__tests__/sod.test.ts + existing resolver tests)"},
+    {"id": "FF-SOD10", "rule": "Exactly-one-row-on-pass / zero-on-deny: passing guarded op appends one matching actor_event row; deny for any reason appends zero; writer runs validateActorEventInput first and rejects on failure (AC-10, AC-13, AC-14).", "ci_check": "vitest run (in-memory store assertions)"},
+    {"id": "FF-SOD11", "rule": "Dynamic-SoD attribution: DSoD-1 self-approval block; DSoD-2 approve_L1!=L2; COALESCE(onBehalfOf,actor) attribution; delegated-act collision (X on_behalf_of P collides with P's submit; X self-act does not) (AC-4..AC-7, AC-12).", "ci_check": "vitest run (pure evaluateDynamicSod over a seeded trail)"},
+    {"id": "FF-SOD12", "rule": "Static-SoD: same-principal-two-roles over EFFECTIVE assignments; proposal/out-of-window/non-overlapping-scope do NOT count; the FR-10 standalone wouldCreateStaticConflict query (AC-2, AC-3, FR-10).", "ci_check": "vitest run (pure detectStaticConflict / wouldCreateStaticConflict)"},
+    {"id": "FF-SOD13", "rule": "Determinism/purity: static/dynamic decision functions called twice with identical inputs return deep-equal output (no hidden clock/random; only async is the injected reader) (AC-20).", "ci_check": "vitest run (call-twice deep-equal assertion)"},
+    {"id": "FF-SOD14", "rule": "tsc --noEmit passes after the additive sod? field + widened resolveFor return; no Operation literal cast for the guarded ops (AC-19).", "ci_check": "tsc --noEmit (existing npm run ci)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "section 4.2 CHECK + section 4.1 SodKind; FF-SOD7; live section 8"},
+    {"ac": "AC-2", "covered_by": "section 4.1 detectStaticConflict; FF-SOD12"},
+    {"ac": "AC-3", "covered_by": "SodSource.effectiveAssignmentsOf effectiveness filter (DAO); FF-SOD12"},
+    {"ac": "AC-4", "covered_by": "section 4.1 evaluateDynamicSod + section 4.5 step 3.6; FF-SOD11"},
+    {"ac": "AC-5", "covered_by": "section 4.1 evaluateDynamicSod; FF-SOD11"},
+    {"ac": "AC-6", "covered_by": "actorEventPrincipal (T-0019) + section 4.5; FF-SOD11"},
+    {"ac": "AC-7", "covered_by": "section 4.1 evaluateDynamicSod; FF-SOD11"},
+    {"ac": "AC-8", "covered_by": "section 2 + section 4.5; FF-SOD9"},
+    {"ac": "AC-9", "covered_by": "section 5 SodDeniedView; FF-SOD9"},
+    {"ac": "AC-10", "covered_by": "section 4.5 step 6.5; FF-SOD10"},
+    {"ac": "AC-11", "covered_by": "section 2 NF-2 floor + section 4.4; FF-SOD9"},
+    {"ac": "AC-12", "covered_by": "section 4.1 in-memory store; FF-SOD11"},
+    {"ac": "AC-13", "covered_by": "section 4.1 store + section 4.3; FF-SOD8/SOD10"},
+    {"ac": "AC-14", "covered_by": "section 4.1 store validateActorEventInput precondition; FF-SOD10"},
+    {"ac": "AC-15", "covered_by": "section 4.2; FF-SOD6/SOD7; live section 8"},
+    {"ac": "AC-16", "covered_by": "section 4.3; FF-SOD8; live section 8"},
+    {"ac": "AC-17", "covered_by": "section 4.2; FF-SOD6/SOD7; live section 8"},
+    {"ac": "AC-18", "covered_by": "section 2 + section 6; FF-SOD2/SOD5"},
+    {"ac": "AC-19", "covered_by": "section 4.4 + section 5; FF-SOD3/SOD4/SOD14"},
+    {"ac": "AC-20", "covered_by": "section 6; FF-SOD1/SOD13"}
+  ],
+  "runtime_target": "локально / контейнер — in-memory ports now; Postgres DAO for SodSource/ActorEventReader/ActorEventWriter lands in T-0053 on the single-Postgres substrate. No new external resource, no new npm dependency (NF-4), no founder gate (GT-4).",
+  "adr_artifact_path": "docs/design/T-0032-sod-constraints.adr.md",
+  "escalation": ""
+}
