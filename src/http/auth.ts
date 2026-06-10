@@ -12,7 +12,7 @@
  *                     this branch is a stub until T-0060 activates it.
  */
 import { HttpError, type Router } from "./router.js";
-import { findEmployeeAsync, listSelectableUsersAsync } from "./org.js";
+import { findEmployee, listSelectableUsers } from "./org.js";
 import { JobStore } from "../core/jobStore.js";
 
 // ---------------------------------------------------------------------------
@@ -35,7 +35,7 @@ const AUTH_MODE = (process.env.CHOROS_AUTH_MODE ?? "dev") as "dev" | "keycloak";
 export function registerAuthRoutes(router: Router, _store?: JobStore): void {
   // GET /api/users — return list of selectable users (humans only)
   router.register("GET", "/api/users", async (_req, res) => {
-    const users = await listSelectableUsersAsync();
+    const users = await listSelectableUsers();
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ users }));
@@ -59,7 +59,7 @@ export function registerAuthRoutes(router: Router, _store?: JobStore): void {
       throw new HttpError(401, "UNAUTHENTICATED", "no valid dev identity");
     }
 
-    const employee = await findEmployeeAsync(devUserId);
+    const employee = await findEmployee(devUserId);
     if (!employee) {
       throw new HttpError(401, "UNAUTHENTICATED", "no valid dev identity");
     }

@@ -51,11 +51,11 @@ const INBOX_SEED: InboxItem[] = [
 // Data accessors
 // ---------------------------------------------------------------------------
 
-function findInboxItems(devUserId?: string): InboxItem[] {
-  // Resolve dev-user to person if provided
+async function findInboxItems(devUserId?: string): Promise<InboxItem[]> {
+  // Resolve dev-user to person if provided (findEmployee is async: DB-backed or in-memory)
   let person = null;
   if (devUserId && typeof devUserId === "string") {
-    person = findEmployee(devUserId);
+    person = await findEmployee(devUserId);
   }
 
   // Add mine flag to each item: true if item is assigned to this person
@@ -85,7 +85,7 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
       devUserId = devUserId[0];
     }
 
-    const items = findInboxItems(devUserId);
+    const items = await findInboxItems(devUserId);
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items }));

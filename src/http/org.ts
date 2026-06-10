@@ -123,19 +123,17 @@ function findOrgDataSync(): OrgDepartment[] {
 /**
  * findEmployee — FROZEN SIGNATURE (callers: auth.ts, inbox.ts).
  *
- * Returns employee by id/slug from real DB when DATABASE_URL is set,
- * or from ORG_SEED otherwise. Because the DB path is async, callers that
- * are already inside async route handlers call this via await.
- * The synchronous in-memory fallback is retained for non-DB contexts.
- *
- * NOTE: The signature returns a union of sync result | Promise<result|null>
- * depending on DB availability. HTTP handlers always await the result.
+ * ADR §1.4 / §3.7: delegates to DB layer (findEmployeeById) when DATABASE_URL
+ * is set; falls back to ORG_SEED for dev-no-db path. Callers are always in an
+ * async route handler and await this function.
  */
-export function findEmployee(
+export async function findEmployee(
   employeeId: string,
-): (OrgPerson & { position: string; department: string }) | null {
-  // In-memory path (no DATABASE_URL): synchronous lookup in ORG_SEED.
-  // This preserves the original synchronous contract for non-DB contexts.
+): Promise<(OrgPerson & { position: string; department: string }) | null> {
+  if (hasDb()) {
+    return findEmployeeById(getOrgPool(), DEV_TENANT_ID, employeeId);
+  }
+  // In-memory fallback (no DATABASE_URL).
   for (const department of ORG_SEED) {
     for (const position of department.positions) {
       for (const person of position.people) {
@@ -153,26 +151,22 @@ export function findEmployee(
 }
 
 /**
- * findEmployeeAsync — async wrapper used by route handlers when DB is available.
- * Falls back to findEmployee (sync) when no DATABASE_URL.
+ * listSelectableUsers — FROZEN SIGNATURE (callers: auth.ts, inbox.ts).
+ *
+ * ADR §1.4 / §3.7: delegates to DB layer (listHumanEmployees) when DATABASE_URL
+ * is set; falls back to ORG_SEED for dev-no-db path. Callers are always in an
+ * async route handler and await this function.
  */
-export async function findEmployeeAsync(
-  employeeId: string,
-): Promise<(OrgPerson & { position: string; department: string }) | null> {
-  if (hasDb()) {
-    return findEmployeeById(getOrgPool(), DEV_TENANT_ID, employeeId);
-  }
-  return findEmployee(employeeId);
-}
-
-export function listSelectableUsers(): Array<{
+export async function listSelectableUsers(): Promise<Array<{
   id: string;
   name: string;
   position: string;
   department: string;
-}> {
-  // In-memory fallback — used by inbox.ts which calls this synchronously.
-  // When DATABASE_URL is set, HTTP routes use listSelectableUsersAsync instead.
+}>> {
+  if (hasDb()) {
+    return listHumanEmployees(getOrgPool(), DEV_TENANT_ID);
+  }
+  // In-memory fallback (no DATABASE_URL).
   const users = [];
   for (const department of ORG_SEED) {
     for (const position of department.positions) {
@@ -189,21 +183,6 @@ export function listSelectableUsers(): Array<{
     }
   }
   return users;
-}
-
-/**
- * listSelectableUsersAsync — async wrapper used by /api/users route handler.
- */
-async function listSelectableUsersAsync(): Promise<Array<{
-  id: string;
-  name: string;
-  position: string;
-  department: string;
-}>> {
-  if (hasDb()) {
-    return listHumanEmployees(getOrgPool(), DEV_TENANT_ID);
-  }
-  return listSelectableUsers();
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +205,7 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
 
   // GET /api/org/employee/:id — return details of one employee
   router.register("GET", "/api/org/employee/:id", async (_req, res, params) => {
-    const employee = await findEmployeeAsync(params.id as string);
+    const employee = await findEmployee(params.id as string);
     if (!employee) {
       throw new HttpError(404, "NOT_FOUND", "employee not found");
     }
@@ -240,7 +219,3 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   // To avoid double-registration, /api/users stays in auth.ts; org.ts provides helpers.
 }
 
-// ---------------------------------------------------------------------------
-// Re-exported async helper for auth.ts /api/users route
-// ---------------------------------------------------------------------------
-export { listSelectableUsersAsync };

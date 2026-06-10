@@ -58,6 +58,18 @@ export function getOrgPool(): pg.Pool {
 }
 
 // ---------------------------------------------------------------------------
+// UUID shape guard (defense-in-depth per T-0013 / T-0116 R-3 pattern)
+// ---------------------------------------------------------------------------
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertUuid(value: string, label: string): void {
+  if (!UUID_RE.test(value)) {
+    throw new Error(`${label} must be a valid UUID, got: ${JSON.stringify(value)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: run a query inside a tenant-scoped transaction (SET LOCAL)
 // ---------------------------------------------------------------------------
 
@@ -66,6 +78,7 @@ async function withTenant<T>(
   tenantId: string,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  assertUuid(tenantId, "tenantId");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");

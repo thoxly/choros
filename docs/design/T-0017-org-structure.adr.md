@@ -87,7 +87,7 @@ RLS policy: `USING (id = current_setting('choros.tenant_id', true)::uuid)` — t
 
 | Field | Type | Constraints |
 |---|---|---|
-| `tenant_id` | `uuid NOT NULL` | Leading PK column, FK → `tenant(tenant_id, id)` |
+| `tenant_id` | `uuid NOT NULL` | Leading PK column. No FK to `tenant` — see note below |
 | `id` | `uuid NOT NULL` | PK is `(tenant_id, id)` |
 | `parent_id` | `uuid NULL` | FK → `department(tenant_id, id)` (self-ref, same tenant); NULL = root |
 | `slug` | `text NOT NULL` | UNIQUE `(tenant_id, slug)` |
@@ -95,7 +95,14 @@ RLS policy: `USING (id = current_setting('choros.tenant_id', true)::uuid)` — t
 | `created_at` | `bigint NOT NULL` | epoch-ms |
 | `updated_at` | `bigint NOT NULL` | epoch-ms |
 
-FK constraint bodies: `FOREIGN KEY (tenant_id, id) REFERENCES choros.tenant(tenant_id, id)` (on `tenant_id`) and `FOREIGN KEY (tenant_id, parent_id) REFERENCES choros.department(tenant_id, id)` (self-ref). Cycle guard: application-layer check (ancestor walk before INSERT/UPDATE parent_id).
+> **No FK to `choros.tenant`**: the `department → tenant` FK is intentionally omitted from
+> migration 014. `tenant(tenant_id, id)` has a composite PK where both columns are the same
+> UUID value; adding a FK from `department(tenant_id, id)` to `tenant(tenant_id, id)` would
+> semantically bind `department.id` to `tenant.id`, which is incorrect (a department UUID ≠ a
+> tenant UUID). `tenant_id NOT NULL` + RLS enforces tenant scoping per the T-0013 pattern —
+> the relational invariant is structural, not FK-enforced. See §3.1 note on `tenant_id = id`.
+
+FK constraint bodies: `FOREIGN KEY (tenant_id, parent_id) REFERENCES choros.department(tenant_id, id)` (self-ref only). Cycle guard: application-layer check (ancestor walk before INSERT/UPDATE parent_id).
 
 ### 3.3 `position` table
 
@@ -261,7 +268,7 @@ The dev-tenant GUC is set from `process.env.DEV_TENANT_ID` (defaulting to the ha
 ### FF-ORG-4 — FK pairs updated in `schema.test.ts`
 
 **Rule:** `schema.test.ts` `FF-FK-RESOLVE` "Exactly the two designed FKs" assertion is a known breakage point. After T-0017 the set of FK pairs is: `record→registry_def`, `registry_def→application`, `department→tenant`, `department→department` (self-ref via parent_id), `position→department`, `employee→position`.
-**CI check:** `coder` updates the `expect(pairs).toEqual(...)` assertion to the full 6-element sorted array. This is a BUILD-phase fix, not a design change.
+**CI check:** `coder` updates the `expect(pairs).toEqual(...)` assertion to the 5-element sorted array (department→tenant FK is intentionally omitted; see §3.2 note). This is a BUILD-phase fix, not a design change.
 
 ### FF-ORG-5 — `two_tenant.test.ts` migration count updated
 
