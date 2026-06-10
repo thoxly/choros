@@ -13,8 +13,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import pg from "pg";
-import { TENANT_A, migratorUrl, appUrl, withClient, uuid } from "./_helpers.js";
+import { TENANT_A, TENANT_B, migratorUrl, appUrl, withClient, uuid } from "./_helpers.js";
 import { PostgresJobStore } from "../../../src/core/postgres/pgJobStore.js";
+import { PostgresOutboxStore } from "../../../src/core/postgres/pgOutboxStore.js";
 import { JobState } from "../../../src/core/types.js";
 
 // ---------------------------------------------------------------------------
@@ -977,5 +978,432 @@ describe("T-0115 fail-closed: async paths without tenant context", () => {
     } finally {
       await pool.end();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0063 sweepExpiredLocks — FF-1..FF-10 (integration fitness)
+// ---------------------------------------------------------------------------
+
+/** Seed a LOCKED job directly via migrator (bypasses RLS). */
+async function seedLockedJob(params: {
+  tenantId: string;
+  topic?: string;
+  retries?: number;
+  lockOwner?: string;
+  lockExpiry: number;
+}): Promise<string> {
+  const id = uuid();
+  const now = Date.now();
+  await withClient(migratorUrl(), async (c) => {
+    await c.query(
+      `INSERT INTO choros.job
+         (tenant_id, id, topic, variables, state, retries,
+          lock_owner, lock_expiry, created_at, available_at)
+       VALUES ($1, $2, $3, '{}', 'LOCKED', $4, $5, $6, $7, $7)`,
+      [
+        params.tenantId,
+        id,
+        params.topic ?? "sweep-test",
+        params.retries ?? 1,
+        params.lockOwner ?? "w-sweep",
+        params.lockExpiry,
+        now,
+      ]
+    );
+  });
+  return id;
+}
+
+/** Truncate outbox rows for test isolation. */
+async function truncateOutbox(): Promise<void> {
+  await withClient(migratorUrl(), async (c) => {
+    await c.query("TRUNCATE choros.outbox");
+  });
+}
+
+/** Count outbox rows for a given event_type + aggregate_id (via migrator). */
+async function countOutboxIncidents(jobId: string): Promise<number> {
+  const { rows } = await withClient(migratorUrl(), async (c) => {
+    return c.query<{ cnt: string }>(
+      `SELECT COUNT(*) AS cnt FROM choros.outbox
+       WHERE event_type = 'worker_lock_expired' AND aggregate_id = $1`,
+      [jobId]
+    );
+  });
+  return Number(rows[0].cnt);
+}
+
+/** Fetch outbox row payload for a job (via migrator). */
+async function fetchOutboxPayload(jobId: string): Promise<Record<string, unknown> | null> {
+  const { rows } = await withClient(migratorUrl(), async (c) => {
+    return c.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM choros.outbox
+       WHERE event_type = 'worker_lock_expired' AND aggregate_id = $1
+       LIMIT 1`,
+      [jobId]
+    );
+  });
+  return rows[0]?.payload ?? null;
+}
+
+/**
+ * Create a migrator-pool-backed PostgresJobStore (BYPASSRLS — for health metrics only).
+ * NOTE: do NOT use this for sweepExpiredLocks when testing RLS isolation — use makeAppJobStore.
+ */
+function makeMigratorStore(clock?: { now(): number }): PostgresJobStore {
+  return new PostgresJobStore(new pg.Pool({ connectionString: migratorUrl() }), clock);
+}
+
+/**
+ * Create an app-pool-backed PostgresJobStore (choros_app, NOBYPASSRLS).
+ * Use this for sweepExpiredLocks RLS-isolation tests.
+ */
+function makeAppJobStore(clock?: { now(): number }): PostgresJobStore {
+  return new PostgresJobStore(new pg.Pool({ connectionString: appUrl() }), clock);
+}
+
+/** Create an app-pool-backed PostgresOutboxStore. */
+function makeOutboxStore(clock?: { now(): number }): PostgresOutboxStore {
+  return new PostgresOutboxStore(new pg.Pool({ connectionString: appUrl() }), clock);
+}
+
+describe("T-0063 sweepExpiredLocks: FF-1/AC-1 — atomic sweep + outbox incident", () => {
+  beforeEach(async () => {
+    await truncateJobs();
+    await truncateOutbox();
+  });
+
+  it("expired LOCKED job (retries=2) → state=CREATED, retries=1, 1 outbox incident (AC-1, AC-2)", async () => {
+    const clock = makeFixedClock(1000);
+    const outboxClock = makeFixedClock(1000);
+    // Seed: job locked with lock_expiry=500 < now=1000
+    const jobId = await seedLockedJob({ tenantId: TENANT_A, retries: 2, lockExpiry: 500 });
+
+    const jobStore = makeMigratorStore(clock);
+    const outboxStore = makeOutboxStore(outboxClock);
+    try {
+      const result = await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(result.reclaimed).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(result.incidents).toBe(1);
+
+      // Verify job state
+      const job = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(
+          `SELECT state, retries, available_at FROM choros.job WHERE id = $1`,
+          [jobId]
+        );
+        return rows[0];
+      });
+      expect(job.state).toBe("CREATED");
+      expect(Number(job.retries)).toBe(1);
+      // available_at = now (clock=1000) — immediate retry (no backoff)
+      expect(Number(job.available_at)).toBe(1000);
+
+      // Verify outbox incident
+      expect(await countOutboxIncidents(jobId)).toBe(1);
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("expired LOCKED job (retries=0) → state=FAILED, 1 outbox incident (AC-3)", async () => {
+    const clock = makeFixedClock(1000);
+    const jobId = await seedLockedJob({ tenantId: TENANT_A, retries: 0, lockExpiry: 500 });
+
+    const jobStore = makeMigratorStore(clock);
+    const outboxStore = makeOutboxStore(makeFixedClock(1000));
+    try {
+      const result = await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(result.reclaimed).toBe(0);
+      expect(result.failed).toBe(1);
+      expect(result.incidents).toBe(1);
+
+      const job = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(
+          `SELECT state, retries FROM choros.job WHERE id = $1`, [jobId]
+        );
+        return rows[0];
+      });
+      expect(job.state).toBe("FAILED");
+      expect(Number(job.retries)).toBe(0);
+      expect(await countOutboxIncidents(jobId)).toBe(1);
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("outbox incident payload contains topic, lockOwner, lockExpiry, retriesLeft (AC-4)", async () => {
+    const jobId = await seedLockedJob({
+      tenantId: TENANT_A,
+      topic: "my-topic",
+      retries: 3,
+      lockOwner: "worker-xyz",
+      lockExpiry: 100,
+    });
+
+    const jobStore = makeMigratorStore(makeFixedClock(1000));
+    const outboxStore = makeOutboxStore(makeFixedClock(1000));
+    try {
+      await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      const payload = await fetchOutboxPayload(jobId);
+      expect(payload).not.toBeNull();
+      expect(payload!["topic"]).toBe("my-topic");
+      expect(payload!["lockOwner"]).toBe("worker-xyz");
+      expect(payload!["lockExpiry"]).toBe(100);
+      expect(payload!["retriesLeft"]).toBe(2); // retries=3 → 3-1=2
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("idempotency: second sweep of same expired job → still only 1 outbox incident (AC-5)", async () => {
+    const jobId = await seedLockedJob({ tenantId: TENANT_A, retries: 2, lockExpiry: 500 });
+
+    const jobStore = makeMigratorStore(makeFixedClock(1000));
+    const outboxStore = makeOutboxStore(makeFixedClock(1000));
+    try {
+      // First sweep → reclaims to CREATED
+      await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(await countOutboxIncidents(jobId)).toBe(1);
+
+      // Manually re-LOCK the job to simulate a second lock expiry with the SAME lockExpiry
+      // (edge case: same idempotency key)
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `UPDATE choros.job SET state='LOCKED', lock_owner='w2', lock_expiry=500 WHERE id=$1`,
+          [jobId]
+        );
+      });
+      // Second sweep — same lock_expiry=500, same idempotency key → ON CONFLICT DO NOTHING
+      await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      // Still only 1 incident for the original lock event
+      expect(await countOutboxIncidents(jobId)).toBe(1);
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("active lock (lock_expiry > now) — sweep does NOT touch it (AC-6)", async () => {
+    const jobId = await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: 9999999 });
+
+    const jobStore = makeMigratorStore(makeFixedClock(1000));
+    const outboxStore = makeOutboxStore(makeFixedClock(1000));
+    try {
+      const result = await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(result.reclaimed).toBe(0);
+      expect(result.failed).toBe(0);
+
+      const job = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(
+          `SELECT state FROM choros.job WHERE id = $1`, [jobId]
+        );
+        return rows[0];
+      });
+      expect(job.state).toBe("LOCKED"); // untouched
+      expect(await countOutboxIncidents(jobId)).toBe(0);
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("CREATED/COMPLETED/FAILED jobs — sweep does NOT touch them (AC-7)", async () => {
+    const now = Date.now();
+    // Seed each non-LOCKED state
+    const createdId = await seedJob({ tenantId: TENANT_A, topic: "sw", state: "CREATED", available_at: now - 1 });
+    const completedId = await seedJob({ tenantId: TENANT_A, topic: "sw", state: "COMPLETED", available_at: now - 1 });
+    const failedId = await seedJob({ tenantId: TENANT_A, topic: "sw", state: "FAILED", available_at: now - 1 });
+
+    const jobStore = makeMigratorStore(makeFixedClock(now));
+    const outboxStore = makeOutboxStore(makeFixedClock(now));
+    try {
+      const result = await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(result.reclaimed).toBe(0);
+      expect(result.failed).toBe(0);
+
+      for (const id of [createdId, completedId, failedId]) {
+        expect(await countOutboxIncidents(id)).toBe(0);
+      }
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("concurrent sweep — each job reclaimed exactly once (FOR UPDATE SKIP LOCKED) (AC-8)", async () => {
+    const jobId = await seedLockedJob({ tenantId: TENANT_A, retries: 2, lockExpiry: 500 });
+    const clock = makeFixedClock(1000);
+
+    // Two parallel sweeps with independent pools
+    const [r1, r2] = await Promise.all([
+      (async () => {
+        const js = makeMigratorStore(clock);
+        const os = makeOutboxStore(makeFixedClock(1000));
+        try {
+          return await js.sweepExpiredLocks(os, TENANT_A);
+        } finally {
+          await js["pool"].end();
+          await os["pool"].end();
+        }
+      })(),
+      (async () => {
+        const js = makeMigratorStore(clock);
+        const os = makeOutboxStore(makeFixedClock(1000));
+        try {
+          return await js.sweepExpiredLocks(os, TENANT_A);
+        } finally {
+          await js["pool"].end();
+          await os["pool"].end();
+        }
+      })(),
+    ]);
+
+    // Exactly one of them reclaimed it
+    expect(r1.reclaimed + r2.reclaimed).toBe(1);
+    // Exactly one incident (idempotency via FOR UPDATE SKIP LOCKED + ON CONFLICT DO NOTHING)
+    expect(await countOutboxIncidents(jobId)).toBe(1);
+  });
+
+  it("RLS cross-tenant invariant: sweep(TENANT_A) does NOT touch TENANT_B jobs (AC-11)", async () => {
+    const jobA = await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: 100 });
+    const jobB = await seedLockedJob({ tenantId: TENANT_B, retries: 1, lockExpiry: 100 });
+
+    // Use app pool (NOBYPASSRLS) to validate RLS isolation — migrator BYPASSRLS would see both tenants
+    const jobStore = makeAppJobStore(makeFixedClock(1000));
+    const outboxStore = makeOutboxStore(makeFixedClock(1000));
+    try {
+      // Only sweep TENANT_A
+      await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+
+      // TENANT_A job should be reclaimed
+      const jA = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(`SELECT state FROM choros.job WHERE id=$1`, [jobA]);
+        return rows[0];
+      });
+      expect(jA.state).toBe("CREATED");
+
+      // TENANT_B job should be untouched (still LOCKED)
+      const jB = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(`SELECT state FROM choros.job WHERE id=$1`, [jobB]);
+        return rows[0];
+      });
+      expect(jB.state).toBe("LOCKED"); // not touched by TENANT_A sweep
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+
+  it("FF-10/AC-12 smoke: lock_expiry=now-1 → reclaimed; lock_expiry=now+1000 → untouched", async () => {
+    const now = Date.now();
+    const expiredId = await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: now - 1 });
+    const activeId = await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: now + 1000 });
+
+    const jobStore = makeMigratorStore({ now: () => now });
+    const outboxStore = makeOutboxStore({ now: () => now });
+    try {
+      const result = await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      expect(result.reclaimed).toBe(1);
+
+      const [expired, active] = await withClient(migratorUrl(), async (c) => {
+        const { rows } = await c.query(
+          `SELECT id, state FROM choros.job WHERE id IN ($1, $2)`,
+          [expiredId, activeId]
+        );
+        return [rows.find(r => r.id === expiredId), rows.find(r => r.id === activeId)];
+      });
+      expect(expired!.state).toBe("CREATED");
+      expect(active!.state).toBe("LOCKED");
+      expect(await countOutboxIncidents(expiredId)).toBe(1);
+      expect(await countOutboxIncidents(activeId)).toBe(0);
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0063 workerIncidents in getQueueHealth (FF-7/FF-8/AC-9/AC-10)
+// ---------------------------------------------------------------------------
+describe("T-0063 getQueueHealth.workerIncidents: FF-7/AC-9", () => {
+  beforeEach(async () => {
+    await truncateJobs();
+    await truncateOutbox();
+  });
+
+  it("workerIncidents=0 with empty outbox (AC-10)", async () => {
+    const jobStore = makeMigratorStore();
+    try {
+      const h = await jobStore.getQueueHealth();
+      expect(h).toHaveProperty("workerIncidents");
+      expect(h.workerIncidents).toBe(0);
+    } finally {
+      await jobStore["pool"].end();
+    }
+  });
+
+  it("workerIncidents=N after N sweep reclaims (AC-10)", async () => {
+    // Seed 2 expired LOCKED jobs
+    const now = Date.now();
+    for (let i = 0; i < 2; i++) {
+      await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: now - 1000 });
+    }
+
+    const jobStore = makeMigratorStore({ now: () => now });
+    const outboxStore = makeOutboxStore({ now: () => now });
+    try {
+      await jobStore.sweepExpiredLocks(outboxStore, TENANT_A);
+      const h = await jobStore.getQueueHealth();
+      expect(h.workerIncidents).toBe(2);
+      // Existing fields still present (AC-9)
+      expect(h).toHaveProperty("depth");
+      expect(h).toHaveProperty("oldestAvailableLagMs");
+    } finally {
+      await jobStore["pool"].end();
+      await outboxStore["pool"].end();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0063 migration 029 — SECURITY DEFINER function exists + idempotent (AC-14)
+// ---------------------------------------------------------------------------
+describe("T-0063 FF-12/AC-14: migration 029 idempotent + function exists", () => {
+  it("choros.job_locked_expired_buckets function exists", async () => {
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT routine_name FROM information_schema.routines
+         WHERE routine_schema='choros' AND routine_name='job_locked_expired_buckets'`
+      );
+      expect(rows.length).toBe(1);
+    });
+  });
+
+  it("job_locked_expired_buckets returns tenant_id+expired_count with expired LOCKED jobs", async () => {
+    await truncateJobs();
+    const now = Date.now();
+    // Seed 2 expired LOCKED jobs for TENANT_A, 1 for TENANT_B
+    await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: now - 1000 });
+    await seedLockedJob({ tenantId: TENANT_A, retries: 1, lockExpiry: now - 500 });
+    await seedLockedJob({ tenantId: TENANT_B, retries: 1, lockExpiry: now - 100 });
+
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query<{ tenant_id: string; expired_count: string }>(
+        `SELECT tenant_id, expired_count FROM choros.job_locked_expired_buckets($1) ORDER BY tenant_id`,
+        [now]
+      );
+      expect(rows.length).toBe(2);
+      const a = rows.find(r => r.tenant_id === TENANT_A);
+      const b = rows.find(r => r.tenant_id === TENANT_B);
+      expect(Number(a!.expired_count)).toBe(2);
+      expect(Number(b!.expired_count)).toBe(1);
+    });
   });
 });

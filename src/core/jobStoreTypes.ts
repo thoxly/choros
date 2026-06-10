@@ -2,6 +2,8 @@
  * Shared result-union types for JobStore.complete() and JobStore.fail().
  * Extracted to a separate module so both InMemoryJobStore and PostgresJobStore
  * can import them without circular dependencies (T-0114).
+ *
+ * T-0063: SweepResult added for sweepExpiredLocks return type.
  */
 
 /**
@@ -21,3 +23,15 @@ export type CompleteResult = { ok: true } | { ok: false; code: ErrorCode };
 
 /** Discriminated result union returned by JobStore.fail(). */
 export type FailResult = { ok: true } | { ok: false; code: ErrorCode };
+
+/**
+ * Result of a single sweepExpiredLocks pass (T-0063, E1.3).
+ * reclaimed: job-ов переведено в CREATED (retries > 0 после декремента)
+ * failed:    job-ов переведено в FAILED  (retries = 0)
+ * incidents: outbox-строк вставлено (= reclaimed+failed; <N если ON CONFLICT DO NOTHING)
+ */
+export interface SweepResult {
+  reclaimed: number;
+  failed: number;
+  incidents: number;
+}

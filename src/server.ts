@@ -79,16 +79,18 @@ function buildRouter(
     let status: "ok" | "degraded" = "ok";
     let queueDepth = 0;
     let oldestAvailableLagMs: number | null = null;
+    let workerIncidents = 0;
     let timerLagMs: number | null = null;
     let outboxPendingLagMs: number | null = null;
     let outboxDeadCount = 0;
 
-    // Queue health (T-0114)
+    // Queue health (T-0114 + T-0063 workerIncidents)
     if (store instanceof PostgresJobStore) {
       try {
         const health = await store.getQueueHealth();
         queueDepth = health.depth;
         oldestAvailableLagMs = health.oldestAvailableLagMs;
+        workerIncidents = health.workerIncidents;
       } catch {
         status = "degraded";
       }
@@ -120,6 +122,7 @@ function buildRouter(
       queue: {
         depth: queueDepth,
         oldestAvailableLagMs,
+        workerIncidents,
       },
       timer: {
         timerLagMs,

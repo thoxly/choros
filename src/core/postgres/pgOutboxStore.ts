@@ -128,6 +128,8 @@ export class PostgresOutboxStore {
           $1, $2, $3, $4, $5::jsonb,
           'pending', $6, 0, $7, $8,
           NULL, NULL)
+       ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+       DO NOTHING
        RETURNING ${RETURNING_COLS}`,
       [
         id,
@@ -140,7 +142,18 @@ export class PostgresOutboxStore {
         availableAt,
       ]
     );
-    return rowToOutbox(rows[0]);
+    if (rows.length > 0) {
+      return rowToOutbox(rows[0]);
+    }
+    // ON CONFLICT case: idempotency key already exists — SELECT-back the existing row
+    // (образец pgJobStore.enqueue idempotency, ADR §6).
+    const sel = await client.query<OutboxDbRow>(
+      `SELECT ${RETURNING_COLS} FROM choros.outbox
+       WHERE tenant_id = current_setting('choros.tenant_id', false)::uuid
+         AND idempotency_key = $1`,
+      [row.idempotencyKey]
+    );
+    return rowToOutbox(sel.rows[0]);
   }
 
   // -------------------------------------------------------------------------

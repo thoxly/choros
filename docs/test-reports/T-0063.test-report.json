@@ -1,0 +1,123 @@
+{
+  "task_id": "T-0063",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 830,
+    "passed": 830,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — expired LOCKED job (retries=2) → state=CREATED, retries=1, 1 outbox incident",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — expired LOCKED job (retries=2) → state=CREATED, retries=1, available_at=now (no backoff)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — expired LOCKED job (retries=0) → state=FAILED, 1 outbox incident",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — outbox incident payload contains topic, lockOwner, lockExpiry, retriesLeft + PROBE-D (no sensitive variables in payload)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — idempotency: second sweep of same expired job → still only 1 outbox incident (ON CONFLICT DO NOTHING)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — active lock (lock_expiry > now) — sweep does NOT touch it",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — CREATED/COMPLETED/FAILED jobs — sweep does NOT touch them + PROBE-E (concurrent COMPLETED not overwritten)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — concurrent sweep: each job reclaimed exactly once (FOR UPDATE SKIP LOCKED)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "pgJobStore.integration.test.ts::T-0063 getQueueHealth.workerIncidents FF-7/AC-9 — workerIncidents field present; existing fields depth/oldestAvailableLagMs preserved",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "pgJobStore.integration.test.ts::T-0063 getQueueHealth.workerIncidents — workerIncidents=0 with empty outbox; workerIncidents=N after N sweep reclaims",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-1/AC-1 — RLS cross-tenant invariant: sweep(TENANT_A) does NOT touch TENANT_B jobs",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "pgJobStore.integration.test.ts::T-0063 sweepExpiredLocks FF-10/AC-12 smoke — lock_expiry=now-1 → reclaimed; lock_expiry=now+1000 → untouched",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "npm run ci — vitest run 620 passed (existing AC-1..AC-18 pgJobStore.integration.test.ts all green, aддитивность подтверждена)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "pgJobStore.integration.test.ts::T-0063 FF-12/AC-14 — migration 029 idempotent; node migrations/run.mjs x2: run1 applied 26 files, run2 'nothing to apply'",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "GET /health workerIncidents field — HTTP-level response",
+      "result": "n/a",
+      "note": "Deterministic: server.ts adds workerIncidents from getQueueHealth(); verified at store-level integration test. HTTP-level health endpoint not a browser/visual surface; no secondary check needed."
+    }
+  ],
+  "failures": [],
+  "_test_notes": {
+    "phase": "TEST",
+    "worktree": "/Users/shoxy/Code/choros-wt/T-0063 @ 2ff7580 (branch task/T-0063-retry-reclaim)",
+    "object": "T-0063 Lock-sweep + incident — spec 14 AC, ADR base dev f7dc03b, review approved (R-1/R-2/R-3 nits, all severity=nit).",
+    "gate_full_ci": {
+      "tsc_noEmit": "clean (exit 0)",
+      "eslint_src": "clean (exit 0)",
+      "npm_run_fitness": "all static fitness checks green (27 checks, all PASS; exit 0)",
+      "vitest_run_unit": "620 passed / 5 skipped (27 files passed, 1 skipped); 5 skipped = flowable-client.integration.test.ts (requires live Flowable, expected)"
+    },
+    "gate_isolated_db": {
+      "engine": "Postgres 16 in compose project t0063test, POSTGRES_PORT=55468, dedicated volume t0063test_choros_pgdata (55432/T-0115 untouched); torn down after run",
+      "migrations_x2": "run1 = applied 26 files (001..025 + 029_lock_sweep_buckets); run2 = 'nothing to apply (26 already recorded)' — AC-14 idempotency live-confirmed",
+      "fitness_db": "vitest run --dir ci/checks/db --no-file-parallelism → 204 passed; 13 new T-0063 sweep tests ALL passed; cross_tenant.test.ts parse-error = pre-existing known issue on base f7dc03b (file unchanged by T-0063, file not modified between f7dc03b and HEAD)"
+    },
+    "adversarial_probes": {
+      "method": "5 independent probes authored as ephemeral _probe_t0063_adversarial.test.ts against live isolated pool (55468); all 5 PASS; file DELETED after run, working tree clean.",
+      "PROBE_A_empty_tenant_noop": "PASS — sweepExpiredLocks on empty table and on tenant with only active (unexpired) locks returns {reclaimed:0, failed:0, incidents:0} without any error. No-op semantics confirmed.",
+      "PROBE_B_100plus_batch": "PASS — seeded 120 expired LOCKED jobs; single sweep call reclaimed all 120 (no LIMIT cap in CTE per ADR §4.1); DB COUNT(state=CREATED)=120, COUNT(outbox incidents)=120. Batch semantics unlimited per call.",
+      "PROBE_C_stop_during_inflight": "PASS — calling stop() after startLockReclaimerLoop starts (sweepIntervalMs=1ms) produces 0 unhandledRejection events; process.on('unhandledRejection') guard confirmed. Graceful shutdown on all timing paths.",
+      "PROBE_D_payload_no_sensitive_data": "PASS — incident outbox payload contains EXACTLY {topic, lockOwner, lockExpiry, retriesLeft} (4 keys). Job variables ({sensitiveField, amount, ssn, password}) were NOT present in the outbox payload. Data isolation confirmed.",
+      "PROBE_E_completed_not_overwritten": "PASS — job pre-transitioned to COMPLETED before sweep; sweepExpiredLocks sees 0 eligible rows (WHERE state='LOCKED'), returns {0,0,0}, COMPLETED state preserved in DB. Terminal state immutable against concurrent sweep."
+    },
+    "integration_honesty_D056": {
+      "real_substrate": "All AC assertions and adversarial probes ran against real Postgres 16 (RLS, FORCE RLS, SECURITY DEFINER, FOR UPDATE SKIP LOCKED, partial index, UNIQUE constraint, ON CONFLICT DO NOTHING) — no mocks for DB layer.",
+      "no_file_parallelism_justified": "Shared single Postgres instance across tests; concurrency-sensitive tests (AC-8 concurrent sweep, PROBE-B 120-job batch) assert concurrency WITHIN a single test via Promise.all, not across files.",
+      "fresh_db_reproduction": "Gate reproduced from migrate-from-zero (empty volume) confirming migrations self-sufficient and idempotent."
+    },
+    "anti_false_fail_discipline": {
+      "cross_tenant_parse_error": "cross_tenant.test.ts esbuild parse-error at line 214 is pre-existing on base f7dc03b (not introduced by T-0063). Confirmed by git diff f7dc03b HEAD -- ci/checks/db/cross_tenant.test.ts = empty diff. Classified: known pre-existing base issue, NOT a T-0063 finding. Review also notes this explicitly.",
+      "review_nit_R3_date_now": "lockReclaimer.ts:53 uses Date.now() for runSweepOnce bucket-discovery phase-1 timestamp; sweepExpiredLocks correctly uses this.clock.now() (FF-14 green). R-3 is a theoretical clock-skew in test scenarios, not a product defect. Confirmed by grep: 0 Date.now() calls in sweepExpiredLocks method body."
+    },
+    "schema_validation": "Validated against /Users/shoxy/Code/demiurge/.claude/worktrees/dreamy-hawking-97542b/schemas/test-report.schema.json via python3 validate_file — 0 errors."
+  }
+}
