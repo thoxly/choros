@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0115",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "exit 0 — no src/ changes on branch; branch tsc clean",
+    "eslint": "exit 0",
+    "vitest_unit": "473/473 pass",
+    "fitness_static": "all 11 shell checks pass incl. FF-CT10/CT11/CT12",
+    "fitness_db": "81/81 pass (behavior+schema+two_tenant+cross_tenant+pgJobStore.integration)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/cross_tenant.test.ts:461-475",
+      "issue": "AC-9 second sub-test checks `WHERE tenant_id = TENANT_B → 0` under session-level SET for TENANT_A, but the spec text (§6 AC-9) says `SELECT count(*) → 0` for session-level SET. The spec text is wrong: Postgres session-level GUC correctly surfaces TENANT_A rows (count=23 confirmed live), so asserting count=0 would be a false assertion. The test correctly pivots to the real security invariant (no TENANT_B rows leak under TENANT_A context). However, no comment explains why the full-count assertion was dropped, which may confuse future readers.",
+      "suggestion": "Add a comment above the session-level sub-test: 'Note: session-level SET does make TENANT_A rows visible (correct Postgres behavior). We do NOT assert count=0 here because that would be wrong. The security invariant is: TENANT_B rows must not appear when context=TENANT_A. Spec text §6 AC-9 session-level note is misleading on this point.'"
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/cross_tenant.test.ts:433-458",
+      "issue": "AC-9 first sub-test uses a FRESH second withClient() call to verify count=0 post-GUC, rather than the same-connection post-COMMIT pattern described in the spec (§6 AC-9). The test comment at line 448 documents the reason (Postgres quirk: after SET LOCAL+COMMIT, session GUC becomes '' causing uuid cast error). The security assertion is equivalent and the workaround is valid. Minor: the spec contract AC-9 text says 'в новом запросе' which is consistent with using a fresh connection.",
+      "suggestion": "No code change needed. Consider referencing the specific Postgres issue (session GUC reset to empty string after SET LOCAL+COMMIT) with a link or SQLSTATE reference for future maintainers."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "evidence": "cross_tenant.test.ts lines 242-259: iterates KNOWN_TENANT_TABLES, appUrl(), SET LOCAL TENANT_A, WHERE TENANT_B → 0"},
+    {"ac": "AC-2", "covered": true, "evidence": "cross_tenant.test.ts lines 265-286: iterates KNOWN_TENANT_TABLES, appUrl(), SELECT tenant_id → only TENANT_A rows"},
+    {"ac": "AC-3", "covered": true, "evidence": "cross_tenant.test.ts lines 292-326: appUrl() UPDATE in TENANT_A context → rowCount=0; migrator verifies display_name unchanged"},
+    {"ac": "AC-4", "covered": true, "evidence": "cross_tenant.test.ts lines 332-365: appUrl() DELETE in TENANT_A context → rowCount=0; migrator verifies row exists"},
+    {"ac": "AC-5", "covered": true, "evidence": "cross_tenant.test.ts lines 379-398: migrator count of TENANT_B rows >= 1 after AC-3/AC-4 attempts"},
+    {"ac": "AC-6", "covered": true, "evidence": "cross_tenant.test.ts lines 405-426: INSERT with current_setting('choros.tenant_id',false) without SET LOCAL → rejects.toBeDefined()"},
+    {"ac": "AC-7", "covered": true, "evidence": "pgJobStore.integration.test.ts lines 882-893: makeAppPool() (choros_app), no GUC, store.enqueue() → rejects.toBeDefined()"},
+    {"ac": "AC-8", "covered": true, "evidence": "pgJobStore.integration.test.ts lines 896-916: seed TENANT_A job via migrator, makeAppPool() no GUC, fetchAndLock() → toEqual([])"},
+    {"ac": "AC-9", "covered": true, "evidence": "cross_tenant.test.ts lines 433-475: fresh connection without GUC → count=0; session-level SET TENANT_A → WHERE TENANT_B → 0"},
+    {"ac": "AC-10", "covered": true, "evidence": "cross_tenant.test.ts line 24: imports KNOWN_TENANT_TABLES from _helpers.js; confirmed by fitness shell check AC-10 PASS"},
+    {"ac": "AC-11", "covered": true, "evidence": ".github/workflows/ci.yml lines 62-63: db job runs `npm run fitness:db`; cross_tenant.test.ts auto-picked by vitest --dir ci/checks/db; confirmed by AC-11 PASS"},
+    {"ac": "AC-12", "covered": true, "evidence": "All cross-tenant DML probes use appUrl(); all seed/verification calls use migratorUrl(); confirmed by AC-12a/12b PASS"}
+  ],
+  "role_gap_evidence": [],
+  "negative_probe": {
+    "result": "confirmed",
+    "method": "Dropped policy `application_tenant_isolation` on choros.application via docker exec psql. Ran `npm run fitness:db`. cross_tenant.test.ts FAILED (beforeAll exception cascades; all 23 tests errored/skipped). Restored policy via docker compose restart + volume-persisted migrations. fitness:db returned to 81/81 green.",
+    "conclusion": "Test suite is not decorative — it goes RED when the RLS policy is removed."
+  },
+  "tsc_base_check": "clean",
+  "tsc_base_method": "Branch adds zero src/ changes (confirmed via `git diff 8472256..403b1b3 -- src/` = empty). tsc --noEmit on branch = exit 0. Therefore base was also clean.",
+  "scope_check": {
+    "no_ddl": true,
+    "no_docker_compose": true,
+    "no_ci_yml": true,
+    "pgJobStore_integration_additive_only": true,
+    "package_json_additive": "added bash ci/checks/cross-tenant-fitness.sh to fitness script only"
+  },
+  "notes": [
+    "choros_app confirmed NOBYPASSRLS=true, rolsuper=false via pg_roles live query.",
+    "FORCE RLS confirmed on all 8 tables via pg_class.relforcerowsecurity live query.",
+    "Dead code (withTenantPool, TenantStore, makeGucPool) in pgJobStore.integration.test.ts is PRE-EXISTING (not in T-0115 diff). Out of scope for this review.",
+    "AC-9 spec text §6 has an error in the session-level assertion direction (claims count→0 but Postgres returns N rows for session-level GUC). Coder correctly implemented the real security invariant instead. Nit R-1 documents this for clarity."
+  ]
+}

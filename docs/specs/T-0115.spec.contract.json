@@ -1,0 +1,89 @@
+{
+  "task_id": "T-0115",
+  "status": "ready",
+  "summary": "Блокирующий CI-тест cross-tenant-утечки от реальной app-роли (несущий 152-ФЗ-инвариант) + машинно-проверяемый контракт fail-closed для всех async-путей; DDL-фундамент уже выложен T-0013/T-0053.",
+  "functional": [
+    "FR-1: CI-тест cross-tenant утечки от choros_app (SELECT/UPDATE/DELETE в контексте TENANT_A → 0 строк/0 affected для TENANT_B) для каждой таблицы из known_tenant_tables.txt",
+    "FR-2a: current_setting('choros.tenant_id', false) в DML-INSERT → raise ERROR если GUC не задан (стандартизировано в pgJobStore, верифицировано тестом)",
+    "FR-2b: PostgresJobStore.enqueue без SET LOCAL в транзакции → Promise.reject / throw (не тихий успех)",
+    "FR-3: Единственное имя GUC — choros.tenant_id — подтверждено в cross-tenant-тесте"
+  ],
+  "non_functional": [
+    "NF-1: Cross-tenant-тест блокирует мерж (часть db CI-job; non-zero exit = failure)",
+    "NF-2: Тест использует реальную app-роль choros_app (appUrl), не migrator",
+    "NF-3: Тест итерирует по known_tenant_tables.txt — не хардкодит список таблиц",
+    "NF-4: Fail-closed для async-путей верифицируем как integration-тест над pgJobStore"
+  ],
+  "out_of_scope": [
+    "DDL-изменения схемы — фундамент выложен T-0013/T-0053, T-0115 не добавляет таблиц/колонок/политик",
+    "Keycloak / JWT tenant-claim валидация — отдельные задачи (auth layer)",
+    "Flowable TENANT_ID_ isolation — движок сторонний",
+    "Timer-dispatcher fail-closed — §1 п.3 стека (Подложка-3), отдельная задача",
+    "Pooled-mode — заблокирован founder-решением",
+    "SECURITY DEFINER функции — на текущей кодовой базе нет в async-путях"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "choros_app в контексте TENANT_A: SELECT count(*) FROM choros.<T> WHERE tenant_id = TENANT_B → 0 для каждой таблицы из known_tenant_tables.txt",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "choros_app в контексте TENANT_A: SELECT tenant_id FROM choros.<T> → все строки имеют tenant_id = TENANT_A, ни одна tenant_id = TENANT_B",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "choros_app в контексте TENANT_A: UPDATE choros.application SET display_name='HACKED' WHERE tenant_id=TENANT_B → 0 rows affected; верификация через migrator: значение не изменилось",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "choros_app в контексте TENANT_A: DELETE FROM choros.application WHERE tenant_id=TENANT_B → 0 rows affected; верификация через migrator: строка TENANT_B существует",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "После всех cross-tenant попыток (AC-3/AC-4): migrator-count строк TENANT_B для каждой затронутой таблицы совпадает с начальным seed-count",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "choros_app: INSERT INTO choros.job с current_setting('choros.tenant_id', false)::uuid БЕЗ SET LOCAL в BEGIN → Postgres бросает ошибку (GUC unset / undefined_function)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "PostgresJobStore.enqueue('topic', {}, 3) вызванный без SET LOCAL choros.tenant_id в транзакции → Promise.reject / throw; не возвращает успешный Job",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "PostgresJobStore.fetchAndLock без SET LOCAL choros.tenant_id (контекст TENANT_A сидирован через migrator) → возвращает [] (default-DENY; не утекают джобы TENANT_A)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "choros_app: SET LOCAL choros.tenant_id = TENANT_A после COMMIT → SELECT count(*) в новом запросе без SET LOCAL = 0 (GUC сброшен, утечки нет)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Исходный код cross-tenant-теста читает known_tenant_tables.txt или KNOWN_TENANT_TABLES из _helpers, не содержит хардкоженного списка таблиц",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "GitHub Actions workflow содержит шаг запуска cross-tenant-теста в db CI-job; провал = non-zero exit; мерж заблокирован",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Cross-tenant-тест использует appUrl() (choros_app) для мутирующих запросов и migratorUrl() для верификационных SELECT",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0115-tenant-rls.spec.md"
+}

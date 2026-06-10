@@ -1,0 +1,108 @@
+{
+  "task_id": "T-0115",
+  "status": "pr_open",
+  "branch": "task/T-0115-tenant-rls",
+  "merge_target": "dev",
+  "base_commit": "0424bca",
+  "head_commit": "b8fe2a71f3772f03d9afc424791e3ff298ce0992",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Подложка-2: блокирующий CI-тест cross-tenant-утечки от реальной choros_app-роли (NOBYPASSRLS) — несущий 152-ФЗ-инвариант — плюс проверяемый контракт fail-closed в async-путях (enqueue без GUC → error; fetchAndLock без GUC → []). Чисто тестовая дельта: 2 новых файла (cross_tenant.test.ts, cross-tenant-fitness.sh) + additive describe-блок в pgJobStore.integration.test.ts + fitness-скрипт в package.json. Нет DDL, нет изменений src/, нет изменений ci.yml. Фундамент T-0013/T-0053/T-0114 не затронут. Reviewer подтвердил negative-probe: удаление RLS-политики → тест становится RED (не декоративный). Post-rebase gate: 490 unit + 86 db зелёных.",
+  "commits": [
+    {
+      "sha": "18e7879fcd2e4a034d75ff59dd31feb93ecaee1f",
+      "phase": "SPEC",
+      "message": "T-0115 SPEC: cross-tenant CI-блокер (152-ФЗ) + fail-closed async контракт"
+    },
+    {
+      "sha": "1ca2520c49080de729eab0a5567ab9760af0be7d",
+      "phase": "DESIGN",
+      "message": "T-0115 DESIGN: ADR tenant RLS cross-tenant CI-блокер + fail-closed async"
+    },
+    {
+      "sha": "e515e4fbe97083e0742f3e552afa4dd5a5fbd311",
+      "phase": "BUILD",
+      "message": "T-0115 BUILD: cross-tenant CI-blocker + fail-closed async (AC-1..AC-9, FF-CT1..CT9)"
+    },
+    {
+      "sha": "0b49b23689a3ba1e5bab124a0a67c63862ffe0e9",
+      "phase": "BUILD",
+      "message": "T-0115 BUILD: fail-closed async paths + fitness script in npm run fitness"
+    },
+    {
+      "sha": "00799214076e8a284c64a84e6ad52cb933ca7386",
+      "phase": "REVIEW",
+      "message": "T-0115 REVIEW: approved — 12/12 AC покрыты, negative-probe confirmed, CI зелёный"
+    },
+    {
+      "sha": "b8fe2a71f3772f03d9afc424791e3ff298ce0992",
+      "phase": "TEST",
+      "message": "T-0115 TEST: pass — 554/554, 12/12 AC, 6 adversarial probes, CI blocking confirmed"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "0079921",
+      "nits_addressed": [],
+      "nits_non_blocking": ["R-1", "R-2"],
+      "negative_probe_confirmed": true,
+      "negative_probe_method": "Dropped RLS policy `application_tenant_isolation` on choros.application via docker exec psql. Ran `npm run fitness:db`. cross_tenant.test.ts FAILED (all 23 tests errored/skipped). Restored policy via docker compose restart. fitness:db returned to 81/81 green.",
+      "artifact": "docs/reviews/T-0115.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 554,
+      "passed": 554,
+      "failed": 0,
+      "ac_coverage": "12/12",
+      "fitness_static": "11/11",
+      "adversarial_probes": "6/6",
+      "tested_commit": "b8fe2a7",
+      "run_details": {
+        "tsc": "exit 0 — no src/ changes on branch",
+        "eslint": "exit 0",
+        "vitest_unit": "473/473 pass (19 test files)",
+        "fitness_static_checks": "11/11 shell checks pass (incl. FF-CT10/CT11/CT12)",
+        "fitness_db": "81/81 pass (behavior 7 + schema 16 + two_tenant 4 + cross_tenant 23 + pgJobStore.integration 31)",
+        "postgres_container": "t-0115-postgres-1 (port 55432, healthy), migrations pre-applied (10/10)"
+      },
+      "artifact": "docs/test-reports/T-0115.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors — no src/ changes on branch)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (473/473, 19 test files — unit; 81/81 db integration)",
+      "fitness_all_checks": "pass (11/11 static + 81/81 db)",
+      "post_rebase_gate": "490 unit + 86 db зелёных (оркестратор перегнал после rebase на dev 0424bca)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/cross-tenant-fitness.sh",
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/pgJobStore.integration.test.ts",
+    "docs/design/T-0115-tenant-rls.adr.md",
+    "docs/design/T-0115.adr.contract.json",
+    "docs/reviews/T-0115.review.json",
+    "docs/specs/T-0115-tenant-rls.spec.md",
+    "docs/specs/T-0115.spec.contract.json",
+    "docs/test-reports/T-0115.test-report.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) merges feature branch into dev after all gates pass",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3). Review CI в .github/workflows/ci.yml: fitness:db job запускает cross_tenant.test.ts автоматически при каждом PR в dev/main. Тест — несущий 152-ФЗ-инвариант: провал блокирует мерж. Reviewer подтвердил negative-probe (тест RED при удалении RLS-политики). Для promote: review PR diff на dev (только ci/checks/ + docs/ + package.json), убедиться что тест-файлы присутствуют, one-click promote dev→main когда удовлетворён.",
+    "no_infra_changes": "T-0115 не добавляет новой инфраструктуры. Нет новых Postgres-миграций, нет новых сервисов, нет изменений docker-compose.yml или .github/workflows/ci.yml. Чисто тестовая дельта — безопасно мержить в dev немедленно.",
+    "152_compliance_note": "После мержа этой задачи CI будет блокировать любые будущие изменения, нарушающие tenant isolation. Cross-tenant тест итерирует по known_tenant_tables.txt (8 таблиц): при добавлении новой таблицы её нужно добавить в known_tenant_tables.txt — тогда тест автоматически покроет её.",
+    "downstream_note": "T-0115 — завершение Подложки-2 (stack-and-fleet-ops.md §1 п.2). Подложка-3 (таймер-диспетчер fail-closed) — отдельная задача."
+  },
+  "friction_events": []
+}
