@@ -1,0 +1,395 @@
+{
+  "realm": "choros",
+  "displayName": "Choros (DEV ONLY — non-production dev fixture, RL-1)",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "resetPasswordAllowed": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "internationalizationEnabled": false,
+  "clients": [
+    {
+      "clientId": "choros-api",
+      "name": "Choros Core API",
+      "description": "DEV ONLY — confidential client for the Choros core API server (resource server / audience source)",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "secret": "choros-api-dev-secret",
+      "redirectUris": ["http://localhost:3000/*", "http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:3000", "http://localhost:8080"],
+      "attributes": {
+        "access.token.lifespan": "300"
+      },
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agent-orchestrator",
+      "name": "Agent: Orchestrator",
+      "description": "DEV ONLY — representative agent service-account client (pattern for future agent clients). secret: agent-orchestrator-dev-secret",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "agent-orchestrator-dev-secret",
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agent-recon",
+      "name": "Agent: Recon",
+      "description": "DEV ONLY — recon agent service-account client",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "agent-recon-dev-secret",
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agent-invoice",
+      "name": "Agent: Invoice",
+      "description": "DEV ONLY — invoice agent service-account client",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "agent-invoice-dev-secret",
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "agent-triage",
+      "name": "Agent: Triage",
+      "description": "DEV ONLY — triage agent service-account client",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "secret": "agent-triage-dev-secret",
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "actor-type-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "actor_type",
+            "claim.name": "actor_type",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "choros-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "e-kravtsova",
+      "email": "e-kravtsova@choros.dev",
+      "firstName": "А.",
+      "lastName": "Кравцова",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-kravtsova",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-mironov",
+      "email": "e-mironov@choros.dev",
+      "firstName": "Д.",
+      "lastName": "Миронов",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-mironov",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-larina",
+      "email": "e-larina@choros.dev",
+      "firstName": "Е.",
+      "lastName": "Ларина",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-larina",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-orlov",
+      "email": "e-orlov@choros.dev",
+      "firstName": "К.",
+      "lastName": "Орлов",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-orlov",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-savina",
+      "email": "e-savina@choros.dev",
+      "firstName": "Н.",
+      "lastName": "Савина",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-savina",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-petrov",
+      "email": "e-petrov@choros.dev",
+      "firstName": "И.",
+      "lastName": "Петров",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-petrov",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e-belov",
+      "email": "e-belov@choros.dev",
+      "firstName": "С.",
+      "lastName": "Белов",
+      "enabled": true,
+      "emailVerified": true,
+      "attributes": {
+        "actor_type": ["human"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-pw-belov",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "service-account-agent-orchestrator",
+      "enabled": true,
+      "emailVerified": true,
+      "serviceAccountClientId": "agent-orchestrator",
+      "attributes": {
+        "actor_type": ["agent"]
+      }
+    },
+    {
+      "username": "service-account-agent-recon",
+      "enabled": true,
+      "emailVerified": true,
+      "serviceAccountClientId": "agent-recon",
+      "attributes": {
+        "actor_type": ["agent"]
+      }
+    },
+    {
+      "username": "service-account-agent-invoice",
+      "enabled": true,
+      "emailVerified": true,
+      "serviceAccountClientId": "agent-invoice",
+      "attributes": {
+        "actor_type": ["agent"]
+      }
+    },
+    {
+      "username": "service-account-agent-triage",
+      "enabled": true,
+      "emailVerified": true,
+      "serviceAccountClientId": "agent-triage",
+      "attributes": {
+        "actor_type": ["agent"]
+      }
+    }
+  ]
+}

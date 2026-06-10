@@ -30,6 +30,49 @@ services:
       retries: 30
     volumes:
       - "choros_pgdata:/var/lib/postgresql/data"
+      - "./config/postgres:/docker-entrypoint-initdb.d:ro"
+
+  # ---------------------------------------------------------------------------
+  # Keycloak 25.x — identity substrate (T-0054, E0.4)
+  #
+  # Runs in start-dev mode with realm import-on-start from config/keycloak/.
+  # Internal store = shared Postgres instance (dedicated 'keycloak' schema via
+  # KC_DB_SCHEMA=keycloak). Never collides with choros_* tables.
+  # Admin credentials are DEV-ONLY defaults (RL-1); prod creds are founder-held
+  # and injected at deploy (E0.7).
+  #
+  # Host port 8180 (KEYCLOAK_PORT) — avoids 5432/55432/3000 (AC-13).
+  # KC 25 splits HTTP (8180/KEYCLOAK_PORT) from management/health (9000/KEYCLOAK_MGMT_PORT).
+  # Readiness probe: GET /health/ready on management port (24 × 5s retries = 120 s — AC-1).
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN:          ${KEYCLOAK_ADMIN:-choros_kc_admin}              # DEV default (RL-1)
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-choros_kc_dev_pw}    # DEV default (RL-1)
+      KC_HTTP_PORT:            ${KEYCLOAK_PORT:-8180}
+      KC_DB:                   postgres
+      KC_DB_URL:               jdbc:postgresql://postgres:5432/${POSTGRES_DB:-choros}
+      KC_DB_SCHEMA:            keycloak
+      KC_DB_USERNAME:          ${POSTGRES_USER:-choros_migrator}
+      KC_DB_PASSWORD:          ${POSTGRES_PASSWORD:-choros_dev_pw}
+      KC_HOSTNAME_STRICT:      "false"
+      KC_HTTP_ENABLED:         "true"
+      KC_HEALTH_ENABLED:       "true"
+    ports:
+      - "${KEYCLOAK_PORT:-8180}:8180"
+      - "${KEYCLOAK_MGMT_PORT:-9000}:9000"
+    volumes:
+      - "./config/keycloak:/opt/keycloak/data/import:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_MGMT_PORT:-9000}/health/ready || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
 
 volumes:
   choros_pgdata: {}
