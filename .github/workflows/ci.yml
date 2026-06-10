@@ -81,6 +81,10 @@ jobs:
         run: bash ci/checks/flowable/static-checks.sh
       - name: Deploy + smoke BPMN + schema isolation (FF-FL-2/3/12)
         run: bash ci/checks/flowable/smoke.sh
+      - name: External-task round-trip smoke (FF-T0064-6)
+        run: bash ci/checks/flowable/external-task-smoke.sh
+        env:
+          FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
       - name: FF-G3 bridge contract (must remain dormant/green)
         run: bash ci/checks/flowable-bridge-contract.sh
       - name: Stop Flowable (leave Postgres intact)

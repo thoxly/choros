@@ -99,7 +99,7 @@ type FailTaskResult    = { ok: true }
                        | { ok: false; code: FlowableErrorCode };
 ```
 
-**`ExternalTask`** — wire shape from Flowable `/runtime/external-jobs/acquire`:
+**`ExternalTask`** — wire shape from Flowable `/external-job-api/acquire/jobs` (topic echoed from request; not present in wire response):
 ```ts
 interface ExternalTask {
   readonly id: string;
@@ -202,15 +202,38 @@ if variables provided:
 // engine call proceeds only if guard passes
 ```
 
-### 4.5 HTTP wire details (Flowable 7 REST)
+### 4.5 HTTP wire details (Flowable 7.1.0 REST — live-verified)
+
+> **DEVIATION NOTE (live-verified, Flowable 7.1.0):** External-worker operations are
+> served by a **separate DispatcherServlet** at `/external-job-api/*`, not at
+> `/service/runtime/external-jobs/*` as originally specified. This was confirmed by
+> live smoke test against `flowable/flowable-rest:7.1.0` (POSTGRES_PORT=55436,
+> FLOWABLE_PORT=18083, isolated volume). The implementation in
+> `src/core/flowable-client.ts` reflects the real wire contract below.
+> `extJobUrl = baseUrl.replace('/service', '/external-job-api')` (e.g.
+> `http://flowable:8082/flowable-rest/service` →
+> `http://flowable:8082/flowable-rest/external-job-api`).
+> T-0067 (external-task ↔ JobStore) MUST use this ADR as its contract source of truth.
+
+BPMN/process operations use the main REST servlet (`{baseUrl}` = `.../flowable-rest/service`):
 
 | Operation | Method | Endpoint | Body | Success code |
 |---|---|---|---|---|
-| deployBpmn | POST | `/repository/deployments` | multipart/form-data; field `deployment` = XML | 201; `{ id: string }` |
-| startInstance | POST | `/runtime/process-instances` | `{"processDefinitionKey":"<key>","variables":[...]}` | 201; `{ id: string }` |
-| fetchAndLock | POST | `/runtime/external-jobs/acquire` | `{"topic":"<topic>","lockDuration":<ms>,"workerId":"<id>","maxJobs":<n>}` | 200; `{ data: ExternalTask[] }` |
-| completeTask | POST | `/runtime/external-jobs/<taskId>` | `{"workerId":"<id>","variables":[...]}` | 204; no body |
-| failTask | POST | `/runtime/external-jobs/<taskId>/failed` | `{"workerId":"<id>","errorMessage":"<msg>","retries":<n>,"retryTimeout":<ms>}` | 204; no body |
+| deployBpmn | POST | `{baseUrl}/repository/deployments` | multipart/form-data; field `deployment` = XML | 201; `{ id: string }` |
+| startInstance | POST | `{baseUrl}/runtime/process-instances` | `{"processDefinitionKey":"<key>","variables":[...]}` | 201; `{ id: string }` |
+
+External-worker operations use the separate external-job-api servlet (`{extJobUrl}` = `.../flowable-rest/external-job-api`):
+
+| Operation | Method | Endpoint | Body | Success code |
+|---|---|---|---|---|
+| fetchAndLock | POST | `{extJobUrl}/acquire/jobs` | `{"topic":"<topic>","workerId":"<id>","lockDuration":<ms>,"numberOfTasks":<n>}` | 200; bare JSON array `ExternalTask[]` (NOT `{ data: [...] }`) |
+| completeTask | POST | `{extJobUrl}/acquire/jobs/<taskId>/complete` | `{"workerId":"<id>","variables":[...]}` | 204; no body |
+| failTask | POST | `{extJobUrl}/acquire/jobs/<taskId>/fail` | `{"workerId":"<id>","errorMessage":"<msg>","retries":<n>,"retryTimeout":<ms>}` | 204; no body |
+
+**fetchAndLock response shape:** Flowable 7.1.0 returns a bare JSON array (not a
+`{ data: ExternalTask[] }` envelope). The response objects do **not** include a
+`topic` field — the client echoes the requested topic into the `ExternalTask.topic`
+field.
 
 **Variables wire format:** Flowable uses `[{ name: string; value: unknown; type?: string }]` for variable arrays. The client converts `Record<string, unknown>` to this format and back. Primitive types: `string`, `integer`, `boolean`, `long`, `double`. Other types default to `string` serialization. The client does NOT attempt to infer Flowable-typed metadata beyond primitive types — that is T-0067's domain.
 

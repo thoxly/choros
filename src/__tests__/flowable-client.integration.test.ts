@@ -9,7 +9,7 @@
  *   FLOWABLE_INTEGRATION=1 FLOWABLE_REST_APP_ADMIN_PASSWORD=choros_flowable_dev_pw \
  *   vitest run src/__tests__/flowable-client.integration.test.ts
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,13 +35,8 @@ describe.skipIf(!INTEGRATION)("FlowableClient integration (AC-15..AC-18)", () =>
   let instanceId: string;
   let lockedTaskId: string;
 
-  beforeAll(async () => {
-    // Ensure BPMN is deployed before running instance tests.
-    const xml = readFileSync(BPMN_PATH, "utf-8");
-    await client.deployBpmn(xml);
-  });
-
-  // AC-15
+  // AC-15: deployBpmn is the first test — it deploys the BPMN and subsequent tests
+  // depend on the process definition being available. No separate beforeAll deploy.
   it("AC-15: deployBpmn returns { ok: true, deploymentId }", async () => {
     const xml = readFileSync(BPMN_PATH, "utf-8");
     const result = await client.deployBpmn(xml);

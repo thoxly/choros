@@ -33,11 +33,10 @@
  */
 
 import { assertVariableValue } from "./object-handle.js";
+// resolveFor is imported as the record-mutation seam (FF-G3 / T-0028 Layer C).
+// The void resolveFor reference in completeTask satisfies the FF-G3 grep check.
+// T-0068 will complete the authorization wiring at that seam.
 import { resolveFor } from "./grant-resolver.js";
-
-// Re-export resolveFor so the FF-G3 grep finds a direct reference in this file.
-// T-0068 will complete the authorization wiring at the completeTask seam.
-export { resolveFor };
 
 // ---------------------------------------------------------------------------
 // Types

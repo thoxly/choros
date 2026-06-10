@@ -159,6 +159,8 @@ describe("fetchAndLock", () => {
       expect(result.tasks[0]!.topic).toBe("smoke-topic"); // echoed from request
     }
     const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+    // AC-6 / deviation guard: must use the /external-job-api/ servlet (not /service/)
+    expect(url).toContain("/external-job-api/");
     expect(url).toContain("acquire/jobs");
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body["topic"]).toBe("smoke-topic");
