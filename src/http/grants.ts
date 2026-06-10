@@ -96,6 +96,9 @@ async function withTenantTx<T>(
   tenantId: string,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  // Defence-in-depth: reject non-UUID tenantId before string-interpolating into
+  // SET LOCAL (mirrors org.ts withTenant guard — R-4 / T-0116 R-3 pattern).
+  assertUuidShape(tenantId, "tenantId");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -336,7 +339,12 @@ const DICT_SCOPE_TAGS = [
 // Route registration (ADR §2.6)
 // ---------------------------------------------------------------------------
 
-export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
+/**
+ * Register GET /api/rights/dictionaries UNCONDITIONALLY — seed-backed, no DB
+ * required (ADR §2.1 / AC-16). Must be called BEFORE registerRightsRoutes so
+ * that the literal path "dictionaries" is not captured by :roleId catch-all.
+ */
+export function registerDictionariesRoute(router: Router): void {
   // ---------- GET /api/rights/dictionaries (FR-8 / AC-16) ------------------
   router.register("GET", "/api/rights/dictionaries", async (_req, res) => {
     res.statusCode = 200;
@@ -350,6 +358,9 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       }),
     );
   });
+}
+
+export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
   // ---------- POST /api/grants (FR-1 / FR-2 / FR-6 / AC-01..06) -----------
   router.register("POST", "/api/grants", async (req, res) => {
@@ -359,6 +370,10 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
+
+    // Load admin context once — reused for freeform admission guard and gate
+    // (R-3: hoisted to avoid double DB round-trip in genesis-owner freeform path).
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
 
     // Parse and validate scope (NF-1 / AC-05).
     const rawScope = b["scope"];
@@ -370,7 +385,6 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     let scope: ScopeElement | { kind: "freeform"; predicate: string };
     if (isFreeform) {
       // Freeform is only admitted for genesis owner (ADR §2.3 / NF-1).
-      const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
       if (!admin.isGenesisOwner) {
         throw new HttpError(400, "INVALID_SCOPE", "freeform scope requires genesis owner");
       }
@@ -405,8 +419,13 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "granted_by is required");
     }
 
-    const delegable =
+    let delegable =
       b["delegable"] === undefined ? true : Boolean(b["delegable"]);
+    // NF-1: freeform scopes are forced non-delegable regardless of request body
+    // (R-2: data-model invariant — validateNarrowing runtime check is not enough).
+    if (isFreeform) {
+      delegable = false;
+    }
     const proposedBy =
       typeof b["proposed_by"] === "string" ? b["proposed_by"] : null;
     const confirmedBy =
@@ -437,9 +456,6 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       validUntil: validUntil ?? undefined,
       createdAt: nowMs,
     };
-
-    // Load admin context from DB (NF-3 — isGenesisOwner from DB always).
-    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
 
     // Gate: validateAdminDelegation (FF-9 — called before INSERT).
     const targetOrgScope: ScopeElement =

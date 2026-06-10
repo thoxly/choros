@@ -13,6 +13,7 @@
 //   FF-7  — parseScopeElement calls normalize (static grep)
 //   FF-8  — no RLS bypass (static grep)
 //   FF-9  — validateAdminDelegation before every INSERT (integration AC-02/03/04/08/10)
+//   FF-10 — NF-1: freeform scope forces delegable=false regardless of request body (R-2)
 //
 // Live AC halves:
 //   AC-01 — POST /api/grants happy path: row inserted with correct tenant_id + fields
@@ -24,14 +25,16 @@
 //   AC-13 — revoke emits grant.revoke audit event
 //   AC-14 — proposed_by set, confirmed_by null → proposal row inserted
 //   AC-15 — isGenesisOwner resolved from DB (not hardcoded)
+//   AC-16 — GET /api/rights/dictionaries reachable without DATABASE_URL (R-1)
 //   AC-19 — known_tenant_tables unchanged
 //   AC-20 — tenant_id on all DB writes (RLS enforces cross-tenant isolation)
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { migratorUrl, appUrl, withClient, uuid } from './_helpers.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import * as http from 'node:http';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..', '..', '..');
@@ -521,6 +524,86 @@ describe('AC-09 / AC-11: role_assignment INSERT + revoke', () => {
     // Cleanup
     await withClient(migratorUrl(), async (c) => {
       await c.query(`DELETE FROM choros.role_assignment WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, raId]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-10 (static): freeform delegable forced to false in grants.ts source
+// ---------------------------------------------------------------------------
+describe('FF-10 (static): NF-1 freeform delegable forced false in grants.ts', () => {
+  it('grants.ts contains isFreeform guard that sets delegable = false', () => {
+    const src = readFileSync(join(REPO_ROOT, 'src', 'http', 'grants.ts'), 'utf8');
+    // Must have the forced override: if (isFreeform) { delegable = false; }
+    expect(src).toMatch(/if\s*\(\s*isFreeform\s*\)\s*\{[^}]*delegable\s*=\s*false/s);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-10 (live): NF-1 freeform scope forces delegable=false (R-2)
+// Genesis owner POST /api/grants with freeform+delegable:true → DB row has delegable=false
+// ---------------------------------------------------------------------------
+describe('FF-10 (live): freeform grant INSERT has delegable=false regardless of body', () => {
+  let server: http.Server;
+  let serverPort: number;
+
+  beforeAll(async () => {
+    // Dynamically import createServer to pick up DATABASE_URL set in this process.
+    const { createServer } = await import(join(REPO_ROOT, 'src', 'server.js'));
+    server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, '127.0.0.1', () => resolve());
+      server.once('error', reject);
+    });
+    const addr = server.address() as { port: number };
+    serverPort = addr.port;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('genesis owner POST /api/grants freeform+delegable:true → DB stores delegable=false', async () => {
+    const grantId = await (async () => {
+      // POST with delegable:true in body — handler must force it to false (NF-1).
+      const body = JSON.stringify({
+        role_id: DEV_ROLE_OWNER,
+        resource_type: 'mgmt_object:grant',
+        operation: 'create',
+        scope: { kind: 'freeform', predicate: 'resource.org_unit == "external"' },
+        granted_by: DEV_EMP_OWNER,
+        delegable: true,   // body says true — handler must override to false
+      });
+
+      // x-dev-user is the employee SLUG (loadAdminContext queries by slug, not UUID).
+      const res = await fetch(`http://127.0.0.1:${serverPort}/api/grants`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-dev-user': 'e-owner',    // genesis owner slug
+        },
+        body,
+      });
+
+      expect(res.status, `expected 201 from POST /api/grants, got ${res.status}`).toBe(201);
+      const json = await res.json() as { id?: string };
+      expect(json.id, 'response must include grant id').toBeTruthy();
+      return json.id as string;
+    })();
+
+    // Verify DB row has delegable=false despite body sending delegable:true.
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT delegable FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+        [DEV_TENANT, grantId],
+      );
+      expect(rows.length, 'grant row must exist').toBe(1);
+      expect(rows[0].delegable, 'freeform grant must have delegable=false (NF-1)').toBe(false);
+    });
+
+    // Cleanup
+    await withClient(migratorUrl(), async (c) => {
+      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, grantId]);
     });
   });
 });

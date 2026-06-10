@@ -133,4 +133,16 @@ describe("Rights API E2E", () => {
       }
     }
   });
+
+  // R-1 / AC-16: GET /api/rights/dictionaries must be reachable — no DATABASE_URL
+  // required (seed-backed). Must NOT be captured by :roleId catch-all.
+  it("GET /api/rights/dictionaries returns 200 with seed data (no DATABASE_URL required)", async () => {
+    const result = await makeRequest("GET", "/api/rights/dictionaries");
+    expect(result.statusCode).toBe(200);
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    expect(Array.isArray(data["resources"]), "resources must be an array").toBe(true);
+    expect(Array.isArray(data["operations"]), "operations must be an array").toBe(true);
+    expect(Array.isArray(data["orgTree"]), "orgTree must be an array").toBe(true);
+    expect(Array.isArray(data["scopeTags"]), "scopeTags must be an array").toBe(true);
+  });
 });
