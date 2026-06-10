@@ -28,6 +28,9 @@
  *   DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import pg from "pg";
 import {
   TENANT_A,
@@ -510,15 +513,27 @@ describe("FF-T8: timer_stats ops exits 0 with valid JSON for bad URL and real UR
 });
 
 // ---------------------------------------------------------------------------
-// two_tenant idempotency: 12 migrations recorded after applying 011+012
+// Migration-count idempotency: schema_migrations records every .sql on disk.
+// DYNAMIC count (no hardcoded merge-seam): as new migrations land (013…018…),
+// this never needs editing. The DB may have MORE recorded rows than files in
+// this worktree (parallel-branch migrations recorded in the shared silo), so
+// we assert recorded >= files on disk (same posture as two_tenant.test.ts).
 // ---------------------------------------------------------------------------
-describe("Migration count: 012 migrations recorded after T-0116", () => {
-  it("schema_migrations has 12 rows (001–012)", async () => {
+describe("Migration count: every migration file on disk is recorded", () => {
+  it("schema_migrations rows >= .sql migration files on disk", async () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const migrationsDir = join(here, "..", "..", "..", "migrations");
+    const filesOnDisk = readdirSync(migrationsDir).filter((f) =>
+      /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f)
+    ).length;
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT count(*)::int AS n FROM choros.schema_migrations`
       );
-      expect(rows[0].n).toBe(12);
+      expect(
+        rows[0].n,
+        `schema_migrations rows (${rows[0].n}) must be >= migration files on disk (${filesOnDisk})`
+      ).toBeGreaterThanOrEqual(filesOnDisk);
     });
   });
 });

@@ -173,6 +173,35 @@ async function seedEmployeeRow(c: pg.Client, tenantId: string, positionId: strin
   return id;
 }
 
+/** Seed one row into choros.actor_event (T-0019). Needs a seeded employee (actor FK). */
+async function seedActorEvent(
+  c: pg.Client,
+  tenantId: string,
+  seq: number,
+  actorId: string,
+): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.actor_event
+       (tenant_id, seq, id, object_kind, record_id, actor, role_at_event,
+        event, approve_level, ts, vocab_version)
+     VALUES ($1, $2, $3, 'record', $4, $5, $4, 'submit', NULL, 0, 1)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, seq, id, uuid(), actorId],
+  );
+  return id;
+}
+
+/** Seed the per-tenant counter row choros.actor_event_seq (T-0019). */
+async function seedActorEventSeq(c: pg.Client, tenantId: string): Promise<void> {
+  await c.query(
+    `INSERT INTO choros.actor_event_seq (tenant_id, next_seq)
+     VALUES ($1, 1)
+     ON CONFLICT DO NOTHING`,
+    [tenantId],
+  );
+}
+
 /** Seed one row into choros.job. Returns the job id. */
 async function seedJobRow(c: pg.Client, tenantId: string): Promise<string> {
   const id = uuid();
@@ -220,6 +249,12 @@ const seedState = {
   deptIdB: '',
   posIdA: '',
   posIdB: '',
+  // employee id per tenant (the actor FK target for actor_event)
+  empIdA: '',
+  empIdB: '',
+  // track actor_event seq per tenant to avoid PK collision
+  actorSeqA: 1,
+  actorSeqB: 1,
 };
 
 /**
@@ -286,11 +321,23 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     }
     case 'employee': {
-      // Must seed after position.
+      // Must seed after position. Store emp id for downstream actor_event seed.
       const posId = tenantId === TENANT_A ? seedState.posIdA : seedState.posIdB;
-      await seedEmployeeRow(c, tenantId, posId);
+      const empId = await seedEmployeeRow(c, tenantId, posId);
+      if (tenantId === TENANT_A) seedState.empIdA = empId;
+      else seedState.empIdB = empId;
       break;
     }
+    case 'actor_event': {
+      // Must seed after employee (actor FK). Per-tenant seq avoids PK collision.
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      const seq = tenantId === TENANT_A ? seedState.actorSeqA++ : seedState.actorSeqB++;
+      await seedActorEvent(c, tenantId, seq, empId);
+      break;
+    }
+    case 'actor_event_seq':
+      await seedActorEventSeq(c, tenantId);
+      break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
