@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0068",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true
+  },
+  "ci_detail": {
+    "tsc": "exit 0 (tsc --noEmit)",
+    "eslint": "exit 0 (eslint src)",
+    "fitness_static": "exit 0 — all static checks green incl. the 4 new T-0068 checks (audit_no_global_seq, audit_actor_type_set, audit_writer_isolation, lifecycle_bridge_wiring)",
+    "vitest": "798 pass | 5 skipped (40 files) — incl. audit-preimage(10), lifecycle-audit(13), lifecycle-bridge(3), lifecycle-guard(4); 0 regressions",
+    "fitness_db": "isolated Postgres POSTGRES_PORT=55485 / POSTGRES_USER=choros_migrator (own volume, torn down after): migrations ×2 idempotent (29 applied run#1, 0 run#2 — T-0068 adds NO migration, consistent with zero-migration claim); fitness:db ×2 = 282/282 pass both runs, incl. audit-writer.chain.test.ts (genesis anchor, dense +1 chain, ROLLBACK atomicity, N=8 concurrency, cross-tenant non-block)."
+  },
+  "isolated_db": "pass",
+  "independent_probes": {
+    "FF3_golden_reproduced": "PASS — independent zero-dep reimplementation of the §4.3 length-prefixed/JCS preimage reproduced the pinned golden digest bc1815...45eca byte-for-byte; actorType mutation flips the hash. Determinism + vocab-pin sound.",
+    "live_tamper_detect": "PASS — wrote a real audit_event via makePgAuditWriter against the isolated DB; stored row_hash == canonical recompute (InMemory ≡ Postgres encoding), and mutating payload.actorType makes the recompute diverge from the stored hash. actorType is hash-covered live (AC-12).",
+    "genesis_concurrency_stress": "PASS — N=24 concurrent first-and-onward appends on a fresh tenant via the seed-head ON CONFLICT DO NOTHING + FOR UPDATE path → 24 dense distinct seq (1..24), head.seq=24, 0 failures, 0 dup/gap. The sanctioned deviation (seed-head vs ADR retry-on-unique) is sound."
+  },
+  "deviations_assessment": [
+    {
+      "deviation": "genesis-concurrency: seed-head INSERT ON CONFLICT (tenant_id) DO NOTHING (seq=0/GENESIS_PREV_HASH) then always FOR UPDATE→UPDATE-advance, replacing the ADR §4.2 retry-on-unique-on-event-INSERT.",
+      "verdict": "SOUND / accept",
+      "reasoning": "ADR §4.2 explicitly sanctioned this as the named alternative ('coder chooses; invariant = N dense seq'). The chosen path is strictly safer: it serializes from the very first append via a single FOR UPDATE on a guaranteed-present head row, so there is no dup-PK race on the event-INSERT (which the ADR's retry-on-unique would have had to recover from). Verified live: N=8 (suite) and N=24 (reviewer stress) → dense distinct 1..N, zero failures. The seed row at seq=0 never trips trigger 007 (INSERT, not UPDATE) and is invisible as an audit row (audit_event chain starts at seq=1). InMemory path uses GENESIS_SEQ=1 directly with prev=GENESIS_PREV_HASH — byte-identical first-row hash to the Postgres path (confirmed by live recompute equality)."
+    },
+    {
+      "deviation": "verb='transition' (ADR §4.7 prose) vs the CLOSED ActorEventVerb set {request,prepare,submit,approve,release} (migration 018 / actor-event.ts).",
+      "verdict": "TYPE-SOUND / accept (ADR prose is a nit, not the code)",
+      "reasoning": "The code is correct and type-sound: LifecycleGuardInput.verb is typed as ActorEventVerb (the closed set), and GuardContext.verb: ActorEventVerb (grant-resolver.ts:377). There is NO free-string 'transition' verb anywhere in the actor_event vocabulary — the literal 'transition' that exists in the codebase is Grant.operation (the gated OP-CLASS, op==='approve'||op==='transition'), a DIFFERENT vocabulary from the verb WRITTEN to actor_event. lifecycle-guard.ts:30 documents this correctly ('a transition maps onto one of the closed verbs e.g. submit/release'). The ADR §4.7 wording verb='transition'|'approve' is loose and contradicts its own foundation (T-0019/018); it should read 'verb ∈ ActorEventVerb'. No code change needed; the ADR prose drift is recorded as nit R-3 (architect doc-fix). Migration 018 CHECK stays ('request','prepare','submit','approve','release') and FF-8 confirms employee schema unchanged."
+    }
+  ],
+  "dual_chain_writers_assessment": "CONFLICT-RISK (not a benign forward) — record for orchestrator, blocks the T-0030 forward-obligation, does NOT block T-0068 merge by itself. After dev@91f991e merged T-0030, src/http/grants.ts now carries a LOCAL chain writer appendAuditEventInput() that writes the SAME tables (choros.audit_event / choros.audit_head, vocab_version=1) as T-0068's canonical writer, but with an INCOMPATIBLE preimage: it computes row_hash = SHA-256(prevHash || type || actor || (subject??'') || String(occurred_at)) — a partial, NON-length-prefixed, NON-JCS digest that does NOT cover id, tenant_id, seq, scope, via, proposed_by, confirmed_by, payload, or prev_hash framing. T-0068's canonicalPreimage covers all 14 fields length-prefixed + JCS. Both stamp vocab_version=1, so a verifier (T-0053) recomputing per vocab=1 would FALSE-POSITIVE tamper on every grant-trail row, OR, if grant + lifecycle events interleave in one tenant chain, the two hash rules break chain density verification outright. This is exactly the 'forward false-positive vs conflict' the ADR §3/§4.1 anti-pattern warned against ('развилка стока → два preimage-пути'). T-0030's own commit note ('chain columns computed locally until T-0053') framed it as a placeholder, but the placeholder uses vocab_version=1 (a CLAIM of canonical encoding) rather than an unpinned/0 sentinel, so it is not safely forward-compatible. RECOMMENDED NEXT STEP: when T-0030's documented forward-obligation lands (ADR §9: 'writeGrantAuditEvent must call T-0068 appendAuditEvent — single sink'), grants.ts MUST drop appendAuditEventInput() and route through makePgAuditWriter().appendAuditEvent (the AuditEventInput contract is already compatible — §4.1). Until then, NO production tenant may carry BOTH grant-trail and lifecycle audit rows, or the chain is unverifiable. T-0068 itself is correct (canonical, single-writer per FF-11 within its own branch); the conflict is a dev-integration debt owned by the T-0030↔T-0068 reconciliation, to be triaged before either writer goes live end-to-end.",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/index.ts:27 + src/server/lifecycle-bridge.ts:142-159",
+      "issue": "The lifecycle-audit runtime path is dead in production — NOTHING appends a lifecycle audit row from the wired entry point. (a) index.ts:27 calls startLifecycleBridge() with NO deps, so the guard at lifecycle-bridge.ts:151 (deps.pool===undefined || deps.jobStore===undefined) returns a no-op handle UNCONDITIONALLY, even when FLOWABLE_BASE_URL is set — the bridge can never start from main. (b) Even if deps were passed, buildAuditOnDispatched(...) is only `void`-referenced (line 159) and its onDispatched callback is discarded: startBridgePollLoop (the fetch/lock half) has no onDispatched param (ExternalTaskBridgeConfig carries none), and the outbox dispatcher (runOutboxOnce / makeExternalTaskDeliver — the actual onDispatched firing point) is NOT started anywhere in production (only in bridge-smoke-runner.ts, a CI entrypoint, and there makeExternalTaskDeliver is called WITHOUT the audit callback). (c) auditInstanceStarted has no production call-site. Net: FR-3/FR-4/FR-8 ('путь инстанса виден в аудит-логе' at runtime) is not deliverable; the in-code comment 'the outbox dispatcher consumes the same callback' is false — no prod dispatcher consumes it. The unit tests (AC-7/AC-8 in-memory + direct calls) and FF-9 grep pass over a seam that no runtime path exercises. This is the integration-honesty gate (D-056): BUILD asserts wiring it does not deliver.",
+      "suggestion": "Make the wiring real OR honestly narrow the claim. Minimum to satisfy FR-8 at runtime: (1) index.ts must construct and pass pool + PostgresJobStore (and an outbox store) into startLifecycleBridge; (2) start the OUTBOX dispatcher loop (runOutboxOnce on an interval) with onDispatched=makeAuditOnDispatched(...), since that — not startBridgePollLoop — is where task_completed/task_failed fire; pass the audit callback into makeExternalTaskDeliver(flowableClient, jobStore, auditOnDispatched). (3) Call auditInstanceStarted from the real startInstance call-site (or, if no HTTP route exists yet, state that explicitly in the PR handoff as a named forward-obligation with the route task id, rather than shipping an uncalled wrapper). If the team's position is that live end-to-end is genuinely deferred to a later route task, then the spec/ADR/PR must say the runtime audit path is INERT in this build (seam only) and FR-8's 'loop стартует' claim must be downgraded — do not leave a `void`-ed callback + dep-less startLifecycleBridge() reading as if it works."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/server/lifecycle-bridge.ts:155-159",
+      "issue": "`void buildAuditOnDispatched(deps.pool, deps.resolveActor);` with the comment 'Touch the audit onDispatched wiring so the composition is exercised' — this is dead code whose only effect is to satisfy a reader/linter that the symbol is used. It builds a writer + closure and throws them away. Misleading: it reads as wiring but wires nothing (see R-1).",
+      "suggestion": "Remove the void-touch once R-1 is addressed (the callback will then be passed to a real dispatcher). If kept temporarily, the comment must say it is a NO-OP placeholder, not 'the composition is exercised'."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/T-0068-instance-lifecycle.adr.md:245 (§4.7) + :234 (§4.6 prose)",
+      "issue": "ADR §4.7 specifies buildLifecycleGuardCtx with verb='transition'|'approve', but 'transition' is NOT a member of the closed ActorEventVerb set (migration 018 / actor-event.ts = {request,prepare,submit,approve,release}). The code (lifecycle-guard.ts) correctly types verb: ActorEventVerb and rejects 'transition' at compile time, so the implementation is right and the ADR prose is wrong. Also §4.8 ADR text describes startBridgePollLoop({..., onDispatched: makeAuditOnDispatched(...)}) but startBridgePollLoop has no onDispatched parameter — the ADR mis-specified the firing point (it is the outbox dispatcher, not the poll loop). This ADR mis-spec is the root of R-1: the coder 'implemented' an impossible signature by void-ing the callback instead of flagging the ADR error.",
+      "suggestion": "Architect doc-fix: §4.7 → 'verb ∈ ActorEventVerb (a process transition maps to submit/release)'. §4.8 → onDispatched belongs to makeExternalTaskDeliver/runOutboxOnce (outbox dispatcher), not startBridgePollLoop; correct the composition description so the wiring obligation in R-1 is unambiguous."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/audit-preimage.ts:194",
+      "issue": "JCS key ordering uses Array.prototype.sort() (default lexicographic on UTF-16 code units). RFC 8785 §3.2.3 mandates sorting on UTF-16 code units, which the default sort does provide for the BMP; however the comment at lines 166-167 claims 'sorted by UTF-16 code-unit' which is correct, but there is no test fixture exercising non-ASCII / supratBMP keys to lock this. Choros lifecycle payloads are ASCII today (actorType/instanceId/processKey/aggregateId/errorMessage), so no live risk — but the vocab=1 golden does not pin the non-ASCII key-ordering behavior, so a future payload with unicode keys could drift the encoding without reddening the golden.",
+      "suggestion": "Add one FF-3 fixture row with a non-ASCII jsonb key (and/or a key pair that differs only above U+FFFF) to pin the JCS ordering under vocab=1, so any future change to the sort comparator flips the golden. Low priority (no current non-ASCII keys), but it closes the only unpinned corner of the canonical encoding."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": false},
+    {"ac": "AC-8", "covered": false},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": false},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true}
+  ],
+  "acceptance_notes": "AC-7/AC-8 are covered at the UNIT level (in-memory writer + direct encode) but NOT at runtime — no production path appends instance.started / task.completed / task.failed (R-1). Marked not-covered to reflect end-to-end reality: the static-now unit passes, but the lifecycle audit path is inert from the wired entry point. AC-14 (server-wiring registers the loop with onDispatched + degrades) is only half-met: the degraded no-op start is real (FF-9 unit passes), but the configured path can never start (dep-less call in index.ts) and onDispatched is not registered on any running loop. AC-9/AC-10/AC-11/AC-12 fully sound (no-op branch, exactly-once via real outboxDispatcher double-run, actorType projection + live hash-cover all verified).",
+  "role_gap_evidence": [
+    "SQ11 (security-reviewer candidate): the GUC interpolation in lifecycle-bridge.ts:121 (SET LOCAL choros.tenant_id = '${tenantId.replace(/'/g,\"''\")}') is the ONE place in the codebase that quote-escapes the tenant id before interpolation; pgOutboxStore.ts:202 / pgJobStore.ts:506 / org.ts:86 / audit-grant-trail.ts:92 interpolate raw tenantId with no escaping. Not a T-0068 regression (T-0068 is strictly safer, and tenantId is a trusted UUID), but the systematic raw-interpolation of a GUC across 4+ DAOs is a class-level pattern a security-reviewer should normalize to set_config($1) / parameterized form. Evidence for ledgers/role-gaps.md, not a T-0068 blocker.",
+    "Integration-honesty gate (D-056) caught a real instance here (R-1): coder shipped unit-green + fitness-green over a seam wired into main by a dep-less call + a void-ed callback, with an in-code comment overstating the wiring. The role boundary held (reviewer caught it), but it is evidence the BUILD phase needs a 'does the wired entry point actually exercise the new path' self-check before handoff, not only 'do the unit tests pass'."
+  ]
+}
