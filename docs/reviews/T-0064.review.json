@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0064",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "live_smoke": "pass",
+  "deviation_assessment": "Deviation confirmed legitimate: Flowable 7.1.0 exposes external-worker operations on a separate DispatcherServlet at /external-job-api/* (not /service/runtime/external-jobs/*). Live smoke (POSTGRES_PORT=55436, FLOWABLE_PORT=18083, isolated volume) confirms: acquire=POST /external-job-api/acquire/jobs (bare JSON array response, numberOfTasks body field, no topic field in response), complete=POST /external-job-api/acquire/jobs/{id}/complete, fail=POST /external-job-api/acquire/jobs/{id}/fail. The implementation correctly reflects real Flowable 7.1.0 behavior. However ADR §4.5 still contains the original (incorrect) endpoint table — this reclassifies from nit to blocking because T-0067 (external-task ↔ JobStore) consumes this ADR as its contract source of truth. A downstream implementer reading ADR §4.5 would build against phantom endpoints.",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/design/T-0064-engine-rest-client.adr.md:211-213",
+      "issue": "ADR §4.5 HTTP wire table still describes the original (incorrect) endpoints: fetchAndLock as POST /runtime/external-jobs/acquire with { maxJobs } body and { data: ExternalTask[] } response; completeTask as POST /runtime/external-jobs/<taskId>; failTask as POST /runtime/external-jobs/<taskId>/failed. The live-verified implementation uses /external-job-api/acquire/jobs (numberOfTasks, bare-array response), /acquire/jobs/{id}/complete, /acquire/jobs/{id}/fail. T-0067 (external-task ↔ JobStore mapping) consumes this ADR as its contract — the reclassification ADR-code reclassification is immediately upstream-dangerous.",
+      "suggestion": "Update ADR §4.5 table to show the real Flowable 7.1.0 wire contract: separate servlet prefix (extJobUrl = baseUrl.replace('/service', '/external-job-api')), correct endpoint paths, numberOfTasks body field, bare JSON array response for fetchAndLock, topic echoed from request. Add a signed deviation note citing live verification at Flowable 7.1.0."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 2,
+      "location": ".github/workflows/ci.yml (not modified in this commit)",
+      "issue": "ADR §5 FF-T0064-6 explicitly states: 'CI flowable job calls it [external-task-smoke.sh] after existing smoke.' The script was created and npm run fitness:flowable:ext was wired (package.json), but the flowable job in .github/workflows/ci.yml was NOT updated to invoke external-task-smoke.sh. AC-15..AC-18 are gated on FF-T0064-6 running in CI; without the CI step they are never executed in the integration-honest gate.",
+      "suggestion": "Add a step to the flowable job in .github/workflows/ci.yml after 'Deploy + smoke BPMN + schema isolation': name 'External-task round-trip smoke (FF-T0064-6)' with run 'npm run fitness:flowable:ext' (or 'bash ci/checks/flowable/external-task-smoke.sh' with FLOWABLE_REST_APP_ADMIN_PASSWORD set)."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/flowable-client.ts:40",
+      "issue": "export { resolveFor } re-exports resolveFor from grant-resolver.ts. This is described as needed for FF-G3 grep — but the grep checks for the symbol's presence in the file, which is satisfied by the import on line 36. Re-exporting from the bridge client expands the public surface of flowable-client.ts to include an auth-layer symbol not semantically owned here. The void resolveFor reference on line 449 is already present in the same file, which is sufficient for the grep.",
+      "suggestion": "Remove export { resolveFor } (line 40) — the import on line 36 plus void resolveFor on line 449 already satisfy FF-G3. Optionally add a comment clarifying that the structural reference is intentional."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/flowable-client.integration.test.ts:38-41 + 45-51",
+      "issue": "beforeAll deploys the smoke BPMN unconditionally, and AC-15 deploys it again. This creates two deployments of the same process definition in the integration test run. While Flowable allows multiple deployments (no 409 on same-key re-deploy) and the test still passes, the double-deploy leaves the engine with redundant deployments and slightly muddies the AC-15 verification (AC-15 is testing that deployBpmn works, but BPMN is already deployed by the time the test runs).",
+      "suggestion": "Either remove the beforeAll deploy (rely on the AC-15 test to deploy), or change AC-15 to assert on the deployment created in beforeAll rather than deploying again."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/__tests__/flowable-client.test.ts:162-163",
+      "issue": "AC-6 URL assertion checks that the fetch URL contains 'acquire/jobs' but does not assert the /external-job-api/ servlet prefix. Given that the deviation from ADR §4.5 is precisely the servlet change, an explicit assertion like url.toContain('external-job-api') would make the unit test document and protect the correct endpoint choice.",
+      "suggestion": "Add: expect(url).toContain('/external-job-api/') in the AC-6 test to document and guard the servlet deviation."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true,  "note": "src/core/flowable-client.ts exists; tsc --noEmit passes with 0 new errors (CI green)" },
+    { "ac": "AC-2",  "covered": true,  "note": "unit test: deployBpmn 201 → { ok: true, deploymentId }" },
+    { "ac": "AC-3",  "covered": true,  "note": "unit test: deployBpmn 400 → BAD_BPMN" },
+    { "ac": "AC-4",  "covered": true,  "note": "unit test: startInstance 201 → { ok: true, instanceId }" },
+    { "ac": "AC-5",  "covered": true,  "note": "unit test: record-kind object in variables → RECORD_IN_PAYLOAD, fetch not called" },
+    { "ac": "AC-6",  "covered": true,  "note": "unit test: fetchAndLock 200 with tasks → { ok: true, tasks }; real endpoint verified live" },
+    { "ac": "AC-7",  "covered": true,  "note": "unit test: fetchAndLock 200 empty array → { ok: true, tasks: [] }" },
+    { "ac": "AC-8",  "covered": true,  "note": "unit test: completeTask 204 → { ok: true }" },
+    { "ac": "AC-9",  "covered": true,  "note": "unit test: record-kind object in completeTask variables → RECORD_IN_PAYLOAD, fetch not called" },
+    { "ac": "AC-10", "covered": true,  "note": "unit test: primitive variables pass guard → engine called → { ok: true }" },
+    { "ac": "AC-11", "covered": true,  "note": "unit test: failTask 204 → { ok: true }; verifies errorMessage/retries/retryTimeout" },
+    { "ac": "AC-12", "covered": true,  "note": "unit test: 5xx → retry → success; 5xx × (maxRetries+1) → ENGINE_UNAVAILABLE; network error → ENGINE_UNAVAILABLE" },
+    { "ac": "AC-13", "covered": true,  "note": "unit test: never-resolving fetch → TIMEOUT" },
+    { "ac": "AC-14", "covered": true,  "note": "FF-G3 green: assertVariableValue + resolveFor present in flowable-client.ts; flowable-bridge-contract.sh exits 0" },
+    { "ac": "AC-15", "covered": true,  "note": "live smoke PASS: deployBpmn → HTTP 201, non-empty deploymentId" },
+    { "ac": "AC-16", "covered": true,  "note": "live smoke PASS: startInstance → HTTP 201, non-empty instanceId" },
+    { "ac": "AC-17", "covered": true,  "note": "live smoke PASS: fetchAndLock → HTTP 200, taskId returned on first poll" },
+    { "ac": "AC-18", "covered": true,  "note": "live smoke PASS: completeTask → HTTP 204; runtime query confirms instance no longer running" },
+    { "ac": "AC-19", "covered": true,  "note": "npm run fitness: 509 tests passed, all static fitness checks green; no frozen module modified" },
+    { "ac": "AC-20", "covered": true,  "note": "flowable-client.ts references exactly FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD; no other env vars introduced" }
+  ],
+  "role_gap_evidence": []
+}
