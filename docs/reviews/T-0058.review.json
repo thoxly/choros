@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0058",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "clean (npm run ci — 0 type errors, 0 eslint errors)",
+    "fitness_static": "all static FF green: FF-FL-4a/4b/5a/5b/6/7a/7b/7c/8/9a/9b/10a/10b/11a/11b + all prior fitness checks (FF-A3/A4/A5/A6/R6/PG-ONCE/1/APPEND/CI/5_6_9/G3/G1/G2/G6 + kc FF-6..FF-14 + T-0115)",
+    "live_flowable": "FF-FL-1/2/3/12 all pass",
+    "ff_g3": "dormant/exit-0 (no bridge path)"
+  },
+  "live_flowable_detail": {
+    "FF-FL-1_wait_ready": "PASS — Flowable 7.1.0 management/engine HTTP 200 after 5s (port 8082)",
+    "FF-FL-2_deploy_bpmn": "PASS — POST /repository/deployments HTTP 201, deployment ID confirmed",
+    "FF-FL-3_smoke": "PASS — start instance HTTP 201, runtime query total=2 (>=1)",
+    "FF-FL-12_schema_isolation": "PASS — 56 act_* tables in flowable schema, 0 ACT_* in public schema"
+  },
+  "adr_deviation": {
+    "claimed": "SPRING_DATASOURCE_SCHEMA replaced by JDBC ?currentSchema=flowable",
+    "permitted_by": "ADR §3.1 note explicitly states 'Flowable 7 uses SPRING_DATASOURCE_SCHEMA or the Spring datasource URL schema param'",
+    "verdict": "LEGITIMATE — both paths are ADR-sanctioned; live FF-FL-12 confirms tables land in flowable schema"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/flowable/static-checks.sh:121",
+      "issue": "FF-FL-7c always prints 'PASS FF-FL-7c: all password defaults are allowed dev defaults' unconditionally — even when the while-loop has already incremented ERRORS. The exit code is still correct (ERRORS is counted and the script fails at the end), but the misleading PASS line makes log output confusing when a violation occurs.",
+      "suggestion": "Guard the unconditional PASS print behind a check: if [[ ${ERRORS_BEFORE} -eq ${ERRORS} ]]; then echo PASS; fi (tracking ERRORS before the while loop)."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/flowable/static-checks.sh:147-154",
+      "issue": "FF-FL-8 grep fallback (used when PyYAML is absent) runs 'grep -A5 depends_on: | grep service_healthy' over the whole compose file — this matches ALL services with depends_on (keycloak and flowable both have service_healthy), not specifically the flowable block. If keycloak had service_healthy but flowable did not, the check would still pass.",
+      "suggestion": "Scope the grep to the flowable section: 'sed -n /^  flowable:/,/^  [a-z]/p | grep -A5 depends_on: | grep service_healthy' — or simply accept this as a minor ambiguity since yaml parsing is the primary path."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/flowable/static-checks.sh:62-67 (FF-FL-5b)",
+      "issue": "static-checks.sh has no static check verifying the schema isolation mechanism is configured on the SPRING_DATASOURCE_URL. FF-FL-5b only checks that the URL points to postgres:5432; it does not assert that '?currentSchema=flowable' (or SPRING_DATASOURCE_SCHEMA) is present. If the schema param were accidentally removed, only the live FF-FL-12 check (not static) would catch the regression.",
+      "suggestion": "Add a FF-FL-5c check: grep -qE 'SPRING_DATASOURCE_URL.*currentSchema=flowable|SPRING_DATASOURCE_SCHEMA.*flowable' to provide static-level protection for the isolation mechanism."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "FF-FL-1 wait-ready PASS — HTTP 200 after 5s"},
+    {"ac": "AC-2", "covered": true, "note": "FF-FL-4 static: image flowable/flowable-rest:7.1.0 pinned, no enterprise env"},
+    {"ac": "AC-3", "covered": true, "note": "FF-FL-5 static: exactly 1 postgres image, SPRING_DATASOURCE_URL → postgres:5432"},
+    {"ac": "AC-4", "covered": true, "note": "FF-FL-12 live: 56 act_* tables in flowable schema, 0 in public; zero collision"},
+    {"ac": "AC-5", "covered": true, "note": "no-committed-secret.sh + FF-FL-7 static: all passwords use ${VAR:-dev_default} form"},
+    {"ac": "AC-6", "covered": true, "note": "FF-FL-6 static: port 8082 unique to flowable service"},
+    {"ac": "AC-7", "covered": true, "note": "FF-FL-2 live: POST /repository/deployments → HTTP 201, deployment ID extracted"},
+    {"ac": "AC-8", "covered": true, "note": "FF-FL-3 live: POST /runtime/process-instances → HTTP 201"},
+    {"ac": "AC-9", "covered": true, "note": "FF-FL-3 live: GET /runtime/process-instances?processDefinitionKey=chorosSmoke → total=2 ≥ 1"},
+    {"ac": "AC-10", "covered": true, "note": "FF-FL-10 static: flowable:type=external + flowable:topic=smoke-topic in BPMN"},
+    {"ac": "AC-11", "covered": true, "note": "FF-G3 live: bridge not present → exit 0 (dormant)"},
+    {"ac": "AC-12", "covered": true, "note": "FF-FL-8 static: depends_on postgres condition service_healthy confirmed"},
+    {"ac": "AC-13", "covered": true, "note": "ci.yml extended with flowable job (additive); ci-workflow-lint PASS; static fitness chain extended"},
+    {"ac": "AC-14", "covered": true, "note": "FF-FL-9 static: FLOWABLE_ENABLE_HISTORY_CLEANING=true + FLOWABLE_HISTORY_CLEANING_CYCLE=0 0 0 1 1 ?"},
+    {"ac": "AC-15", "covered": true, "note": "FF-FL-11 static: postgres and keycloak blocks byte-identical to baseline 2f749a9"}
+  ],
+  "role_gap_evidence": []
+}

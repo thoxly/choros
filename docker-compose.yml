@@ -74,5 +74,52 @@ services:
       retries: 24
       start_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # Flowable 7 — process engine substrate (T-0058, E0.5)
+  #
+  # Apache 2.0 OSS image (flowable/flowable-rest:7.1.0, pinned — no :latest,
+  # no enterprise key). Uses the existing shared Postgres instance via JDBC;
+  # ACT_* Liquibase-managed tables land in the dedicated 'flowable' schema
+  # (created by config/postgres/002-flowable-schema.sql on first Postgres init
+  # — the same isolation pattern as Keycloak's 'keycloak' schema).
+  #
+  # BPMN deployment is REST-only (POST /flowable-rest/service/repository/deployments);
+  # no filesystem auto-deploy — keeps the T-0064 REST-client path the sole canonical
+  # deploy mechanism and avoids ordering surprises in CI.
+  #
+  # Host port 8082 (FLOWABLE_PORT) — no collision with Postgres 55432,
+  # Keycloak HTTP 8180, Keycloak mgmt 9000, Node app 3000 (AC-6/NF-5).
+  # Admin credentials are DEV-ONLY defaults (RL-1); prod creds are
+  # founder-held and injected at deploy (E0.7).
+  #
+  # Healthcheck: GET /flowable-rest/service/management/engine with admin
+  # basic-auth → HTTP 200 when engine is fully up. wget ships in the image.
+  flowable:
+    image: flowable/flowable-rest:7.1.0
+    environment:
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      # currentSchema=flowable directs PostgreSQL JDBC to use the 'flowable' schema
+      # as the default search path — Flowable Liquibase creates all ACT_* tables there.
+      # This is the JDBC-level schema isolation (ADR §3.1 "URL schema param" option).
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/${POSTGRES_DB:-choros}?currentSchema=flowable
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-choros_migrator}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-choros_dev_pw}   # DEV default (RL-1)
+      FLOWABLE_REST_APP_ADMIN_USER_ID:   admin
+      FLOWABLE_REST_APP_ADMIN_PASSWORD:  ${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}  # DEV default (RL-1)
+      FLOWABLE_ENABLE_HISTORY_CLEANING:  "true"
+      FLOWABLE_HISTORY_CLEANING_CYCLE:   "0 0 0 1 1 ?"   # yearly — never fires mid-test
+      FLOWABLE_HISTORY_CLEANING_AFTER:   "1"
+    ports:
+      - "${FLOWABLE_PORT:-8082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --user=admin --password=${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw} http://localhost:8080/flowable-rest/service/management/engine || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
 volumes:
   choros_pgdata: {}

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- T-0058: Choros smoke BPMN process for CI fitness (FF-FL-2/3/10/12).
+     Process key: chorosSmoke
+     Contains a startEvent, an external-task serviceTask (smoke-topic), and an endEvent.
+     This is the simplest valid external-task process — the external worker is T-0064.
+     The instance will wait at the serviceTask for a worker to claim + complete it;
+     the CI fitness script only verifies that the instance is created and visible. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://choros.io/bpmn">
+  <process id="chorosSmoke" name="Choros Smoke Process" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="smokeTask"/>
+    <serviceTask id="smokeTask" name="Smoke External Task"
+                 flowable:type="external"
+                 flowable:topic="smoke-topic"/>
+    <sequenceFlow id="f2" sourceRef="smokeTask" targetRef="end"/>
+    <endEvent id="end" name="End"/>
+  </process>
+</definitions>

@@ -61,3 +61,28 @@ jobs:
       # 3. Live probe suite: schema + behavior + idempotency + ≥2-tenant guard
       #    (FF-RLS/DENY/LEAD/SCOPE/ROLE/APPEND/FK-RESOLVE/JSONB/ACT/2TENANT).
       - run: npm run fitness:db
+
+  # T-0058 · E0.5 Flowable engine substrate (FF-FL-1..12):
+  # Starts postgres + flowable via compose (fresh volume → 002-flowable-schema.sql
+  # runs automatically on first init). Waits for Flowable readiness, runs static
+  # checks, deploys smoke BPMN via REST, starts a process instance, queries runtime,
+  # and verifies ACT_* schema isolation from choros_* tables.
+  # Does NOT use docker compose down -v (compose down leaves the named volume intact;
+  # volume is ephemeral per CI runner job anyway).
+  flowable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d postgres flowable
+      - name: Wait for Flowable readiness (FF-FL-1)
+        run: bash ci/checks/flowable/wait-ready.sh
+      - name: Static fitness checks (FF-FL-4..11)
+        run: bash ci/checks/flowable/static-checks.sh
+      - name: Deploy + smoke BPMN + schema isolation (FF-FL-2/3/12)
+        run: bash ci/checks/flowable/smoke.sh
+      - name: FF-G3 bridge contract (must remain dormant/green)
+        run: bash ci/checks/flowable-bridge-contract.sh
+      - name: Stop Flowable (leave Postgres intact)
+        if: always()
+        run: docker compose stop flowable
