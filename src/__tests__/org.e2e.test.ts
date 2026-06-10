@@ -148,17 +148,18 @@ describe("Org API E2E", () => {
     expect(result.statusCode).toBe(404);
   });
 
-  it("GET /api/org/employee/:id works for human and service types", async () => {
+  it("GET /api/org/employee/:id works for human and agent (service) types", async () => {
     // Test human
     let result = await makeRequest("GET", "/api/org/employee/e-kravtsova");
     expect(result.statusCode).toBe(200);
     let data = JSON.parse(result.body) as Record<string, unknown>;
     expect(data.type).toBe("human");
 
-    // Test service
+    // Test service worker — maps to kind='agent' per T-0017 FR-4/§6 spec decision
+    // (service workers are automated actors; 'service' is not a valid kind value)
     result = await makeRequest("GET", "/api/org/employee/s-ledger");
     expect(result.statusCode).toBe(200);
     data = JSON.parse(result.body) as Record<string, unknown>;
-    expect(data.type).toBe("service");
+    expect(data.type).toBe("agent");
   });
 });

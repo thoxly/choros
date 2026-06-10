@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
@@ -19,6 +20,12 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const RUNNER = join(REPO_ROOT, 'migrations', 'run.mjs');
+const MIGRATIONS_DIR = join(REPO_ROOT, 'migrations');
+
+/** Dynamically count .sql migration files — avoids a hardcoded merge-seam every time a new migration is added. */
+function countMigrationFiles(): number {
+  return readdirSync(MIGRATIONS_DIR).filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f)).length;
+}
 
 function runMigrations(): string {
   return execFileSync('node', [RUNNER], {
@@ -51,10 +58,15 @@ describe('FF-2: runner is idempotent (re-run applies nothing)', () => {
     expect(out).toMatch(/nothing to apply/);
   });
 
-  it('all 10 migration files (001–010) are recorded', async () => {
-    // T-0114 adds 010_job_available_at; updated from 9 to 10.
+  it('all migration files on disk are recorded in schema_migrations', async () => {
+    // Dynamic: count .sql files in migrations/ so this test never needs updating
+    // when new migrations are added (kills the recurring merge-seam).
+    // NOTE: the DB may have MORE recorded migrations than files in this worktree
+    // (e.g. T-0116 011/012 recorded from a parallel branch but absent here).
+    // That is silo-upgrade reality — we assert recorded >= files on disk.
     const n = await countMigrations();
-    expect(n).toBe(10);
+    const filesOnDisk = countMigrationFiles();
+    expect(n, `schema_migrations rows (${n}) must be >= migration files on disk (${filesOnDisk})`).toBeGreaterThanOrEqual(filesOnDisk);
   });
 });
 

@@ -6,3 +6,7 @@ audit_event
 audit_head
 grant
 object_handle
+tenant
+department
+position
+employee
