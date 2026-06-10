@@ -7,9 +7,10 @@
 --   3. Creates two partial indexes for fetchAndLock performance (AC-12/NF-2)
 --
 -- tenant_id is the leading column in all composite indexes (T-0013 §3.1 invariant).
--- CONCURRENTLY is safe for the partial indexes since we are in a migration and the
--- table is still empty in new deploys; the migration runner executes outside a
--- multi-statement transaction (migration runner commits each file independently).
+-- CONCURRENTLY is not used: migration runs as a single-phase operation on
+-- an initially empty or small table (back-fill is offline-friendly). The migration
+-- runner executes outside a multi-statement transaction (commits per file independently),
+-- so blocking index creation is acceptable here.
 
 ALTER TABLE choros.job
   ADD COLUMN IF NOT EXISTS available_at bigint NOT NULL DEFAULT 0;

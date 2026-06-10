@@ -10,6 +10,10 @@
  *   - Caller MUST SET choros.tenant_id GUC before any query.
  *   - Rows with tenant_id != current_setting('choros.tenant_id') are invisible.
  *   - This class operates as choros_app (NOBYPASSRLS, non-owner).
+ *   - READ-only methods (getById, listBy*) omit explicit tenant_id predicates
+ *     because RLS+FORCE at table level (choros.job) automatically filters rows.
+ *     The set_config('choros.tenant_id') GUC MUST be set in the transaction
+ *     before any query; RLS enforcement is architecture-level (T-0053).
  *
  * Clock injection: constructor accepts an optional Clock for testable lock expiry
  * and available_at calculation.
