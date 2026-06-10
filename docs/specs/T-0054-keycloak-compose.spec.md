@@ -113,7 +113,7 @@ The following JWT properties are fixed by this spec. T-0060 MUST validate these;
 | `iss` | `http://<keycloak-host>:<port>/realms/<realm-name>` (OIDC standard; uniquely identifies tenant in silo) |
 | `aud` | MUST include the client-id of the Choros core API client (e.g. `choros-api`; exact value committed in realm JSON and documented in `docs/environments.md` or equivalent) |
 | `sub` | Keycloak user UUID (human user) or service-account user UUID (agent) |
-| `preferred_username` | matches `username` in realm (= employee `id` for humans; `client_id` for agents) |
+| `preferred_username` | matches `username` in realm (= employee `id` for humans; `service-account-<clientId>` for agent service accounts, e.g. `service-account-agent-orchestrator`) — Keycloak 25 emits the service-account user's username, not the `clientId` |
 | `actor_type` claim | MUST be included in the access token as a claim (via Keycloak protocol mapper); value: `human` for human users, `agent` for agent service accounts |
 | Signature algorithm | `RS256` (Keycloak default; configurable to `ES256` but RS256 is the minimum) |
 

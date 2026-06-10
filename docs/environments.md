@@ -87,7 +87,8 @@ Prod-креды держит фаундер и инжектит при депл�
 
 | Переменная | По умолчанию (dev) | Назначение |
 |---|---|---|
-| `KEYCLOAK_PORT` | `8180` | Хост-порт Keycloak (не 5432/55432/3000; см. AC-13) |
+| `KEYCLOAK_PORT` | `8180` | Хост-порт Keycloak HTTP (OIDC/auth; не 5432/55432/3000; см. AC-13) |
+| `KEYCLOAK_MGMT_PORT` | `9000` | Хост-порт Keycloak management-интерфейса (health/ready, metrics — отдельный от HTTP-порта в KC 25) |
 | `KEYCLOAK_REALM` | `choros` | Имя realm (закодировано в `config/keycloak/realm-choros.json`) |
 | `KEYCLOAK_ADMIN` | `choros_kc_admin` | **DEV ONLY** — логин admin-консоли Keycloak (RL-1) |
 | `KEYCLOAK_ADMIN_PASSWORD` | `choros_kc_dev_pw` | **DEV ONLY** — пароль admin-консоли Keycloak (RL-1) |
@@ -102,7 +103,7 @@ Realm `choros` выдаёт токены со следующими свойст�
 | `iss` | `http://<host>:<KEYCLOAK_PORT>/realms/<KEYCLOAK_REALM>` (напр. `http://localhost:8180/realms/choros`) |
 | `aud` | включает `choros-api` (client-id core API клиента) |
 | `sub` | UUID пользователя Keycloak (non-empty) |
-| `preferred_username` | id сотрудника для людей (`e-kravtsova` и т.п.) или `client_id` для агентов |
+| `preferred_username` | id сотрудника для людей (`e-kravtsova` и т.п.) или `service-account-<clientId>` для агентов (напр. `service-account-agent-orchestrator`) — KC 25 выдаёт username service-account пользователя, а не сам `client_id` |
 | `actor_type` | `"human"` для людей; `"agent"` для service-account токенов агентов |
 | `alg` (JWT header) | `RS256` (Keycloak default) |
 

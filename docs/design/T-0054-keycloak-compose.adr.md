@@ -224,20 +224,25 @@ keycloak:
     KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-choros_kc_dev_pw}  # DEV default (RL-1)
     KC_HTTP_PORT:            ${KEYCLOAK_PORT:-8180}
     KC_DB:                   postgres
-    KC_DB_URL:               jdbc:postgresql://postgres:5432/${POSTGRES_DB:-choros}?currentSchema=keycloak
+    KC_DB_URL:               jdbc:postgresql://postgres:5432/${POSTGRES_DB:-choros}
+    KC_DB_SCHEMA:            keycloak
     KC_DB_USERNAME:          ${POSTGRES_USER:-choros_migrator}
     KC_DB_PASSWORD:          ${POSTGRES_PASSWORD:-choros_dev_pw}
     KC_HOSTNAME_STRICT:      false
     KC_HTTP_ENABLED:         true
+    KC_HEALTH_ENABLED:       true
   ports:
     - "${KEYCLOAK_PORT:-8180}:8180"
+    - "${KEYCLOAK_MGMT_PORT:-9000}:9000"
   volumes:
     - "./config/keycloak:/opt/keycloak/data/import:ro"
   depends_on:
     postgres:
       condition: service_healthy
   healthcheck:
-    test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_PORT:-8180}/health/ready || exit 1"]
+    # KC 25 exposes health on the management port (9000/KEYCLOAK_MGMT_PORT), NOT on the
+    # HTTP app port (8180/KEYCLOAK_PORT). These are separate interfaces in KC 25.
+    test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_MGMT_PORT:-9000}/health/ready || exit 1"]
     interval: 5s
     timeout: 5s
     retries: 24   # up to 120 s
@@ -248,11 +253,16 @@ keycloak:
 accept `localhost` requests without TLS configuration. These are dev-mode settings only; prod
 Keycloak (E0.7) will use TLS + hostname pinning (Caddy termination).
 
-**Note on `KC_DB_URL` schema parameter:** `currentSchema=keycloak` directs JDBC to the
-`keycloak` schema. Keycloak bootstraps this schema on first start. The `choros_migrator` role
-(which owns the Postgres database) is used here for dev simplicity; in prod, a dedicated
-`choros_keycloak` DB role (with rights only to the `keycloak` schema) is the recommended
-pattern — this is E0.7 scope.
+**Note on KC schema isolation:** Keycloak's schema namespace is set via `KC_DB_SCHEMA=keycloak`
+(a separate env var), not via a JDBC `?currentSchema=keycloak` query parameter. Keycloak
+bootstraps this schema on first start. The `choros_migrator` role (which owns the Postgres
+database) is used here for dev simplicity; in prod, a dedicated `choros_keycloak` DB role
+(with rights only to the `keycloak` schema) is the recommended pattern — this is E0.7 scope.
+
+**Note on KC 25 port split:** Keycloak 25 runs two distinct listeners in `start-dev`:
+- HTTP app port (`KC_HTTP_PORT`, default `8180`) — handles OIDC/auth traffic (`/realms/...`).
+- Management port (always `9000`, configurable via `KEYCLOAK_MGMT_PORT`) — serves
+  `/health/ready`, `/health/live`, `/metrics`. The healthcheck MUST use the management port.
 
 ---
 
@@ -268,7 +278,7 @@ matching them. No T-0054 code change is required for T-0060 to consume the token
 | `iss` | `http://<keycloak-host>:<port>/realms/<realm-name>` (e.g. `http://localhost:8180/realms/choros`) | OIDC standard; uniquely identifies tenant in silo (tenancy ADR §6) |
 | `aud` | MUST include `choros-api` (the committed client-id of the core API client, §3.2) | Set by Keycloak audience mapper on the `choros-api` client |
 | `sub` | Keycloak user UUID (human) or service-account user UUID (agent) — non-empty string | OIDC standard |
-| `preferred_username` | `username` in realm: employee id for humans (e.g. `e-kravtsova`); `client_id` for agent service accounts (e.g. `agent-orchestrator`) | OIDC standard |
+| `preferred_username` | `username` in realm: employee id for humans (e.g. `e-kravtsova`); **`service-account-<clientId>`** for agent service accounts (e.g. `service-account-agent-orchestrator`) — this is the Keycloak 25 service-account user's username, NOT the `clientId` itself | OIDC standard |
 | `actor_type` | `"human"` for human users; `"agent"` for agent service-account tokens | Via `actor-type-mapper` protocol mapper (§3.3) |
 | `alg` (JWT header) | `RS256` (Keycloak default; `ES256` allowed if configured) | Keycloak default; configurable |
 

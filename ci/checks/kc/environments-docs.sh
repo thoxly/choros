@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# FF-14: docs/environments.md updated with KEYCLOAK_PORT, KEYCLOAK_REALM, CHOROS_AUTH_MODE, choros-api.
+# FF-14: docs/environments.md updated with KEYCLOAK_PORT, KEYCLOAK_MGMT_PORT, KEYCLOAK_REALM,
+#        CHOROS_AUTH_MODE, choros-api.
 set -euo pipefail
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -8,6 +9,7 @@ echo "[FF-14] Checking docs/environments.md for required Keycloak documentation.
 
 REQUIRED_TERMS=(
   "KEYCLOAK_PORT"
+  "KEYCLOAK_MGMT_PORT"
   "KEYCLOAK_REALM"
   "CHOROS_AUTH_MODE"
   "choros-api"

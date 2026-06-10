@@ -36,13 +36,14 @@ services:
   # Keycloak 25.x — identity substrate (T-0054, E0.4)
   #
   # Runs in start-dev mode with realm import-on-start from config/keycloak/.
-  # Internal store = shared Postgres instance (dedicated 'keycloak' schema —
-  # KC_DB_URL ?currentSchema=keycloak). Never collides with choros_* tables.
+  # Internal store = shared Postgres instance (dedicated 'keycloak' schema via
+  # KC_DB_SCHEMA=keycloak). Never collides with choros_* tables.
   # Admin credentials are DEV-ONLY defaults (RL-1); prod creds are founder-held
   # and injected at deploy (E0.7).
   #
   # Host port 8180 (KEYCLOAK_PORT) — avoids 5432/55432/3000 (AC-13).
-  # Readiness probe: GET /health/ready (24 × 5s retries = 120 s — AC-1).
+  # KC 25 splits HTTP (8180/KEYCLOAK_PORT) from management/health (9000/KEYCLOAK_MGMT_PORT).
+  # Readiness probe: GET /health/ready on management port (24 × 5s retries = 120 s — AC-1).
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
     command: start-dev --import-realm
@@ -60,14 +61,14 @@ services:
       KC_HEALTH_ENABLED:       "true"
     ports:
       - "${KEYCLOAK_PORT:-8180}:8180"
-      - "9000:9000"
+      - "${KEYCLOAK_MGMT_PORT:-9000}:9000"
     volumes:
       - "./config/keycloak:/opt/keycloak/data/import:ro"
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health/ready || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_MGMT_PORT:-9000}/health/ready || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 24
