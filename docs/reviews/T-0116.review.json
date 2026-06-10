@@ -1,6 +1,6 @@
 {
   "task_id": "T-0116",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": { "green": true },
   "findings": [
     {
@@ -8,40 +8,63 @@
       "severity": "blocking",
       "axis": 3,
       "location": "src/core/postgres/pgTimerStore.ts:158-166",
-      "issue": "cancel(): tenantId принимается как параметр ($1 в массиве params), но ни разу не используется в тексте SQL. WHERE-предикат содержит только `id = $2 AND state = 'pending'` — никакого `tenant_id = $1`. Метод целиком полагается на RLS через GUC, однако если вызывается с пулом migrator (BYPASSRLS), например из ops-catalog или будущего административного скрипта, он молча проигнорирует tenantId и отменит таймер любого тенанта. Это нарушает задекларированный интерфейс: сигнатура `cancel(tenantId, timerId)` семантически гарантирует tenant-scoped операцию, но SQL этого не обеспечивает.",
-      "suggestion": "Добавить `AND tenant_id = $1` в WHERE-предикат: `WHERE tenant_id = $1 AND id = $2 AND state = 'pending'`, params = [tenantId, timerId, reason ?? null]. Это обеспечивает tenant-isolation как в коде, так и через RLS — defense-in-depth."
+      "issue": "cancel(): tenantId принимался как параметр, но не использовался в WHERE-предикате SQL. BYPASSRLS-соединение могло отменить таймер любого тенанта.",
+      "suggestion": "Добавить AND tenant_id = $1 в WHERE-предикат.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "WHERE tenant_id = $1 AND id = $2 AND state = 'pending' — предикат добавлен. Код проверен в pgTimerStore.ts:183-185."
     },
     {
       "id": "R-2",
       "severity": "blocking",
       "axis": 3,
       "location": "src/core/postgres/pgTimerStore.ts:174-182",
-      "issue": "done(): аналогичный баг — tenantId ($1) передаётся в params [tenantId, timerId], но SQL использует только `id = $2 AND state = 'firing'`. tenantId полностью проигнорирован. Та же проблема bypassed RLS: при вызове от migrator-connection done() переведёт в state='done' строку с любым tenant_id.",
-      "suggestion": "Добавить `AND tenant_id = $1` в WHERE: `WHERE tenant_id = $1 AND id = $2 AND state = 'firing'`, params = [tenantId, timerId]. Defense-in-depth аналогично R-1."
+      "issue": "done(): аналогичный баг — tenantId игнорировался в SQL WHERE.",
+      "suggestion": "Добавить AND tenant_id = $1 в WHERE-предикат.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "WHERE tenant_id = $1 AND id = $2 AND state = 'firing' — предикат добавлен. Код проверен в pgTimerStore.ts:201-203."
     },
     {
       "id": "R-3",
       "severity": "nit",
       "axis": 3,
       "location": "src/core/postgres/pgTimerStore.ts:121",
-      "issue": "SET LOCAL выполняется через template-literal без параметризации: `SET LOCAL choros.tenant_id = '${tenantId}'`. pg-драйвер отправляет это через simple query protocol, который допускает multi-statement. Теоретически, tenantId со встроенной кавычкой/точкой с запятой может инжектировать SQL. В текущей архитектуре tenantId всегда исходит из uuid-колонки next_due_buckets() (pg-тип uuid — не содержит мета-символов), поэтому практический риск низкий. Тем не менее, явной UUID-валидации в самом методе нет.",
-      "suggestion": "Добавить UUID-валидацию перед интерполяцией: `const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; if (!UUID_RE.test(tenantId)) throw new Error('invalid tenantId');`. Это явная защита на уровне метода, независимая от caller."
+      "issue": "SET LOCAL выполнялся через template-literal без UUID-валидации tenantId до интерполяции.",
+      "suggestion": "Добавить UUID-валидацию перед интерполяцией.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "UUID_RE regex + throw added before SET LOCAL in fetchAndFire (pgTimerStore.ts:130-131). JSDoc добавлен (строки 118-121)."
     },
     {
       "id": "R-4",
       "severity": "nit",
       "axis": 4,
       "location": "src/core/postgres/pgTimerStore.ts:80-98",
-      "issue": "enqueue(): tenantId принимается как параметр, но INSERT использует `current_setting('choros.tenant_id', false)::uuid` из GUC, а tenantId нигде в SQL не употребляется. ADR §8 это обосновывает (аналог pgJobStore.enqueue), однако параметр в сигнатуре создаёт ложное впечатление, что он влияет на вставку. Код компилируется, но параметр мёртв.",
-      "suggestion": "Документировать явно в JSDoc: «tenantId принимается для консистентности интерфейса, фактически tenant_id берётся из GUC current_setting. Caller ОБЯЗАН установить SET choros.tenant_id до вызова.» Либо убрать параметр из сигнатуры, если это не нарушает интерфейс других потребителей."
+      "issue": "enqueue(): tenantId-параметр мёртв в SQL, но сигнатура не документировала это.",
+      "suggestion": "Добавить JSDoc-комментарий с объяснением.",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "JSDoc-блок добавлен (pgTimerStore.ts:80-87): явно указывает, что tenantId принимается для interface consistency, фактический tenant_id берётся из GUC, caller MUST SET choros.tenant_id перед вызовом."
     },
     {
       "id": "R-5",
       "severity": "nit",
       "axis": 4,
-      "location": "ci/checks/db/pgTimerStore.integration.test.ts (отсутствие тестов)",
-      "issue": "cancel() и done() реализованы (NF-1 требует), но в интеграционном тесте нет ни одного теста их поведения. Нет проверки: (a) cancel переводит state → 'cancelled'; (b) cancel на non-pending строке возвращает false; (c) done переводит state → 'done'; (d) done на non-firing строке возвращает false. При этом именно в этих методах обнаружен баг R-1/R-2 — тесты помогли бы поймать его раньше.",
-      "suggestion": "Добавить интеграционные тесты для cancel() и done() как минимум по двум сценариям каждый (успешный переход + неверное состояние → false). Тесты cross-tenant isolation для cancel/done желательны после фикса R-1/R-2."
+      "location": "ci/checks/db/pgTimerStore.integration.test.ts",
+      "issue": "Отсутствовали тесты cancel() и done().",
+      "suggestion": "Добавить интеграционные тесты cancel/done (успех + неверное состояние + cross-tenant).",
+      "status": "fixed",
+      "fix_commit": "27e25f0",
+      "fix_note": "Добавлено 6 тестов: cancel pending→cancelled (true), cancel non-pending (false), cancel cross-tenant TENANT_B→TENANT_A timer (false); done firing→done (true), done non-firing (false), done cross-tenant (false). Итого 113 DB-тестов (было 107). Все проходят."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/pgTimerStore.integration.test.ts:567-586",
+      "issue": "Новые cross-tenant тесты cancel/done (R-1/R-2 fix) используют appPool (choros_app — RLS активен), а не migratorPool (BYPASSRLS). Это означает, что при мысленном удалении AND tenant_id = $1 из SQL тесты всё равно прошли бы — RLS уже фильтрует строки по GUC. Тесты доказывают корректность при RLS-пути, но не доказывают, что explicit predicate защищает BYPASSRLS-соединение (оригинальный threat model из R-1/R-2). Это нит наблюдения: фикс правильный, но тест не является фальсифицирующим для исходного сценария атаки.",
+      "suggestion": "Для полноты: добавить один тест, использующий migratorPool непосредственно для cancel/done с tenantId = TENANT_B и timerId TENANT_A. Это покрыло бы BYPASSRLS-сценарий. Однако это улучшение — не регрессия; текущих тестов достаточно для approve."
     }
   ],
   "acceptance_coverage": [
@@ -61,15 +84,18 @@
     { "ac": "AC-14", "covered": true  }
   ],
   "role_gap_evidence": [
-    "cancel() и done() — операции изменения состояния без явного tenant-предиката в SQL: потенциальный класс уязвимости 'dead tenantId param bypassed by BYPASSRLS connection'. Если в проекте планируются административные операции через migrator-соединение, потребуется проверка всех store-методов, принимающих tenantId, на наличие explicit WHERE tenant_id = $N в SQL (а не только RLS). Кандидат на запись в ledgers/role-gaps.md как паттерн для будущего security-reviewer (SQ11)."
+    "R-6 (нит): паттерн cross-tenant тестов через appPool (RLS путь) не покрывает BYPASSRLS-сценарий. Если в проекте ожидаются тесты безопасности через migrator-соединение для store-методов, стоит добавить fitness-правило: 'каждый store-метод с tenantId-параметром должен иметь тест через migratorPool с mismatched tenantId'. Кандидат в ledgers/role-gaps.md как паттерн для будущего security-reviewer (SQ11)."
   ],
   "_review_meta": {
     "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
     "date": "2026-06-10",
+    "review_type": "re-review после R-1..R-5 fix",
+    "fix_commit": "27e25f0",
+    "base_review_commit": "9e8d966",
     "ci_static": "green (npm run ci: tsc + eslint + fitness + vitest, 490 tests)",
-    "ci_db": "green (fitness:db: 107 tests, 6 test files, migrations 012 recorded)",
-    "blocking_count": 2,
-    "nit_count": 3,
-    "notes": "SECURITY DEFINER function (012_next_due_buckets.sql) корректна: search_path захардкожен (choros, pg_catalog), REVOKE PUBLIC, только EXECUTE для choros_app. Двухфазный dispatcher реализован точно по ADR §4.2: BEGIN + SET LOCAL + CTE FOR UPDATE SKIP LOCKED LIMIT N + UPDATE firing + COMMIT. AC-8 (параллельные fetchAndFire) протестирован и проходит. Миграции 011/012 идемпотентны. known_tenant_tables.txt обновлён. Clock injection соблюдён в store-методах. timer_stats.ts использует Date.now() — это намеренно (ops-catalog pattern, аналог queue_stats.ts, не требует Clock injection)."
+    "ci_db": "green (fitness:db: 113 tests, 6 test files, migrations 012 recorded — 6 новых тестов cancel/done)",
+    "blocking_count": 0,
+    "nit_count": 4,
+    "notes": "R-1 и R-2 закрыты корректно: AND tenant_id = $1 добавлен в оба WHERE-предиката (cancel и done). R-3 закрыт: UUID_RE валидация добавлена до интерполяции SET LOCAL в fetchAndFire. R-4 закрыт: JSDoc документирует мёртвый параметр и GUC-паттерн. R-5 закрыт: 6 новых интеграционных тестов (cancel/done × 3 сценария каждый). Новый нит R-6: cross-tenant тесты используют appPool (RLS путь), а не BYPASSRLS-соединение — не блокирующий. Все остальные характеристики из первого review подтверждены без изменений."
   }
 }
