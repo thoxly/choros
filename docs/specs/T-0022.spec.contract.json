@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0022",
+  "status": "ready",
+  "summary": "Specification of the two tables that make a role a first-class assignable principal: role (the cross-cutting capability bundle grants attach to) and role_assignment (binds an employee — human or agent — to a role within an org_scope SET of org-tree nodes, over a validity window valid_from/valid_until, recording proposed_by/confirmed_by). Promotes the previously-deferred grant.role_id to a real FK into role(tenant_id, id) (migration 021). org_scope reuses the EXISTING T-0018 grant-lattice.ts org-hierarchy ScopeElement shape (department/position node levels) — no new scope algebra. The role->grant resolution read path is an interface point (DB-backed getGrants wired in T-0053); grant-resolver.ts and grant-lattice.ts are NOT edited here (T-0033 edits the resolver in parallel). Both tables satisfy T-0013 (FORCE RLS, default-DENY, tenant_id leading). Migrations 019-021 (017=T-0033, 018=T-0019 reserved in flight); known_tenant_tables.txt gains role, role_assignment. 22 CI-checkable acceptance criteria. No blocking questions.",
+  "functional": [
+    "FR-1 role table: the principal grants attach to (never a person/agent directly); slug unique per tenant, display_name, description, cross-cutting (no dept/position binding at role level); dev seed includes tenant-owner genesis role + >=1 functional role, idempotent",
+    "FR-2 role_assignment table: binds employee_id (FK employee) to role_id (FK role) within org_scope jsonb NOT NULL + validity window valid_from/valid_until + source NOT NULL + granted_by NOT NULL + proposed_by NULL + confirmed_by NULL; PK (tenant_id,id); no UNIQUE(employee_id,role_id) (overlapping scoped/windowed assignments are legitimate)",
+    "FR-3 org_scope SET shape: stores a grant-lattice.ts ScopeElement of hierarchy 'org' (node {kind:node,hierarchy:org,nodeId:<dept|pos id>,nodeLevel:department|position}) or a set of them; containment via EXISTING AncestryOracle over org hierarchy; DB enforces NOT NULL + valid jsonb only, deeper structural validation is application-layer (mirrors grant.scope jsonb)",
+    "FR-4 proposed_by/confirmed_by day-1 columns, workflow=T-0039: confirmed_by IS NULL => proposal (NOT effective, contributes zero grants); confirmed_by NOT NULL => confirmed/eligible; proposed_by independently nullable",
+    "FR-5 grant.role_id deferred FK: migration 021 promotes grant.role_id (plain uuid NOT NULL today) to FK (tenant_id, role_id) REFERENCES role(tenant_id, id), tenant-scoped; NOT NULL floor unchanged",
+    "FR-6 known_tenant_tables.txt gains role + role_assignment (additive; orchestrator merges with T-0033/T-0019); both pass schema.test.ts FF-2/FF-RLS + cross-tenant probe"
+  ],
+  "non_functional": [
+    "NF-1 T-0013 invariants: tenant_id NOT NULL leading PK no default, ENABLE+FORCE RLS, default-DENY policy on choros.tenant_id GUC, GRANT to choros_app (NOBYPASSRLS), SET LOCAL pattern",
+    "NF-2 no cross-tenant FK: role_assignment->employee, role_assignment->role, grant->role (021) all include tenant_id on both sides; cross-tenant FK insert rejected",
+    "NF-3 org_scope is the SAME shape as the T-0018 lattice org-hierarchy ScopeElement; no second scope grammar/algebra; containment via existing isNarrowerOrEqual/AncestryOracle",
+    "NF-4 forward compatibility frozen keys: role.id (referenced by grant.role_id FK + actor_event.role_at_event point-in-time, NOT live FK) and PK (tenant_id,id) never re-keyed; role_assignment.org_scope name+shape fixed (read by T-0029, T-0032)",
+    "NF-5 migration numbers 019-021 only; 017 (T-0033) and 018 (T-0019) reserved by in-flight branches",
+    "NF-6 resolver untouched: src/core/grant-resolver.ts and src/core/grant-lattice.ts NOT edited (T-0033 edits resolver in parallel); role->grant wiring declared as interface point, implemented in T-0053"
+  ],
+  "out_of_scope": [
+    "proposal/confirmation workflow (T-0039/E3.5): LLM-proposes->human-confirms flow, BYO agent integration, population of proposed_by/confirmed_by via that flow (only columns + effective-vs-proposal semantics in scope)",
+    "scoped administration enforcement (T-0029/E3.3): admin-delegation/subtree-bounding/monotonic-narrowing/mgmt_object:* write path (T-0022 only provides org_scope column)",
+    "SoD evaluation (T-0032/E4.2): computing/forbidding conflicting role combinations (T-0022 only guarantees queryable subject->confirmed in-window roles)",
+    "DB-backed GrantSource.getGrants implementation (role_assignment->grant JOIN under RLS) = T-0053; grant-resolver.ts NOT edited",
+    "role-authoring UI / structural-grant editor (T-0030/E3.4)",
+    "actor_event / role_at_event (T-0019/E4.1): role.id is its point-in-time target but not built/FK'd here",
+    "org-node existence enforcement as DB CHECK on org_scope.nodeId (deferred to app/write-API layer; DB enforces NOT NULL + valid jsonb only)",
+    "UNIQUE(employee_id, role_id) or overlapping-window de-duplication (application concern, not schema invariant)",
+    "multi-tenant pooled provisioning (silo N=1 seeding only)",
+    "delete/soft-delete/archival semantics beyond FK referential integrity"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "role exists in known_tenant_tables.txt + information_schema; cross-tenant probe: tenant-A context -> only tenant-A rows; no-GUC -> count 0 (default-DENY)", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "role_assignment exists in known_tenant_tables.txt + information_schema; cross-tenant probe passes identically to AC-1", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "FORCE RLS on both tables: pg_class.relrowsecurity=true AND relforcerowsecurity=true; choros_app (NOBYPASSRLS) without GUC -> SELECT count=0 on both", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "cross-tenant isolation: schema.test.ts/cross_tenant.test.ts iterating KNOWN_TENANT_TABLES passes for all pre-existing tables AND role + role_assignment (tenant-A context -> 0 tenant-B rows)", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "tenant_id leading column: tenant_id_leading fitness check passes for role and role_assignment (first column AND leading column of every index/FK)", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "role slug uniqueness per tenant: two role rows with same (tenant_id, slug) -> unique violation (23505); same slug in different tenant allowed", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "role_assignment FK (employee): FOREIGN KEY (tenant_id, employee_id) REFERENCES employee(tenant_id, id) exists; absent employee_id -> 23503; cross-tenant employee ref rejected", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "role_assignment FK (role): FOREIGN KEY (tenant_id, role_id) REFERENCES role(tenant_id, id) exists; absent role_id -> 23503; cross-tenant role ref rejected", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "org_scope is jsonb NOT NULL: insert with org_scope=NULL -> 23502; insert with valid org-node jsonb {kind:node,hierarchy:org,nodeId:<dept.id>,nodeLevel:department} and a set jsonb succeeds and round-trips byte-equivalently", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "validity window: valid_from/valid_until are bigint NULL; insertable with both NULL, only-from, only-until, both-set; no DB CHECK forbids valid_from > valid_until (window sanity is app-layer)", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "proposed_by/confirmed_by are text NULL: assignment insertable with confirmed_by IS NULL (proposal) and with it set; proposed_by independently nullable; types/nullability match via information_schema.columns", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "source text NOT NULL + granted_by text NOT NULL: NULL source or NULL granted_by -> 23502; arbitrary non-empty source string (manual/llm-proposed) accepted (no CHECK enum)", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "grant.role_id is a real FK after migration 021: pg_constraint shows FK on grant -> role(tenant_id, id); grant insert with role_id naming no existing role -> 23503 (succeeded before 021 — regression guard)", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "grant.role_id FK tenant-scoped: includes tenant_id both sides; grant in tenant-A referencing role.id existing only in tenant-B -> FK violation", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "dev seed present + idempotent: after 019-021 dev tenant has >=1 role incl tenant-owner genesis + >=1 functional role; re-run (ON CONFLICT DO NOTHING) -> identical row count, no dup, no error", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "assignment seed wires real employee->real role within real org node: >=1 role_assignment whose employee_id resolves to seeded employee, role_id to seeded role, org_scope references a seeded department.id (hierarchy org, nodeLevel department); idempotent on re-seed", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "migrations apply cleanly twice: node migrations/run.mjs on fresh compose Postgres succeeds; 019-021 register in schema_migrations; second run is a no-op (idempotent)", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "migration numbers: task adds exactly 019_role.sql, 020_role_assignment.sql, 021_grant_role_fk.sql and NO file numbered 017 or 018 (reserved T-0033/T-0019); static check over migrations/ confirms file set", "verifiable_as": "fitness"},
+    {"id": "AC-19", "text": "known_tenant_tables.txt gains exactly role + role_assignment relative to base; anti-decorative schema.test.ts guard passes with both present", "verifiable_as": "fitness"},
+    {"id": "AC-20", "text": "resolver/lattice untouched: git diff for this task shows NO change to src/core/grant-resolver.ts and src/core/grant-lattice.ts (diff path-filter check)", "verifiable_as": "fitness"},
+    {"id": "AC-21", "text": "org_scope shape conformance: every seeded role_assignment.org_scope parses as a grant-lattice.ts ScopeElement (node or set) with hierarchy==='org' and nodeLevel in {department, position} — same shape the lattice already understands, no new parser", "verifiable_as": "fitness"},
+    {"id": "AC-22", "text": "no second role/principal table: static lint over 019-021 finds no role-equivalent or person-bound-grant fork (person_grant, agent_role, human_role); roles are one table, both employee kinds bind through single role_assignment", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0022-roles-assignments.spec.md"
+}

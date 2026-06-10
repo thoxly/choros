@@ -169,8 +169,12 @@ describe('FF-LEAD: tenant_id is column 1 of every composite index and FK', () =>
   });
 });
 
-describe('FF-FK-RESOLVE: every FK resolves to a baseline table; grant.role_id has no FK', () => {
-  it('all FKs target baseline tables; none target role/assignment', async () => {
+describe('FF-FK-RESOLVE: every FK resolves to a baseline table; grant.role_id FK → role (T-0022)', () => {
+  it('all FKs target baseline tables (role/role_assignment are now legitimate targets)', async () => {
+    // T-0022 (migration 021) promotes grant.role_id to a real FK → role, and adds
+    // role_assignment→employee / role_assignment→role. `role` and `role_assignment`
+    // are now in KNOWN_TENANT_TABLES (the baseline set), so they are valid FK
+    // targets — the previous `not.toContain('role')` guard is INVERTED and removed.
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT cls.relname AS src, ref.relname AS dst
@@ -183,11 +187,11 @@ describe('FF-FK-RESOLVE: every FK resolves to a baseline table; grant.role_id ha
       const baseline = new Set(KNOWN_TENANT_TABLES);
       for (const r of rows) {
         expect(baseline.has(r.dst), `FK ${r.src} → ${r.dst} not a baseline table`).toBe(true);
-        expect(['role', 'assignment']).not.toContain(r.dst);
       }
       // All designed FKs exist (array expands as migrations add new FKs — use
       // arrayContaining so future tasks can extend without breaking this check).
       // T-0017 adds: department→department (self, parent_id), position→department, employee→position
+      // T-0022 adds: role_assignment→employee, role_assignment→role, grant→role (deferred FK promoted)
       // NOTE: department→tenant FK omitted (tenant.id lacks a standalone UNIQUE constraint;
       // tenancy isolation is enforced by RLS + tenant_id NOT NULL per T-0013).
       const pairs = rows.map((r) => `${r.src}->${r.dst}`).sort();
@@ -198,21 +202,40 @@ describe('FF-FK-RESOLVE: every FK resolves to a baseline table; grant.role_id ha
           'department->department',
           'position->department',
           'employee->position',
+          'role_assignment->employee',
+          'role_assignment->role',
+          'grant->role',
         ]),
       );
     });
   });
 
-  it('grant.role_id carries no FK', async () => {
+  it('grant.role_id carries the named FK grant_role_id_fkey → role(tenant_id, id) (AC-13)', async () => {
+    // POSITIVE assertion: migration 021 promoted the previously-deferred
+    // grant.role_id to a real, tenant-scoped, NAMED FK. (Before 021 this was
+    // `it('grant.role_id carries no FK')` expecting []; that is now inverted.)
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
-        `SELECT con.conname
+        `SELECT con.conname, ref.relname AS dst,
+                array_agg(ca.attname::text ORDER BY u.ord) AS src_cols,
+                array_agg(fa.attname::text ORDER BY u.ord) AS ref_cols
            FROM pg_constraint con
            JOIN pg_class cls ON cls.oid = con.conrelid
+           JOIN pg_class ref ON ref.oid = con.confrelid
            JOIN pg_namespace ns ON ns.oid = cls.relnamespace
-          WHERE ns.nspname='choros' AND cls.relname='grant' AND con.contype='f'`,
+           JOIN LATERAL unnest(con.conkey, con.confkey)
+                  WITH ORDINALITY AS u(ckey, fkey, ord) ON true
+           JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = u.ckey
+           JOIN pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = u.fkey
+          WHERE ns.nspname='choros' AND cls.relname='grant' AND con.contype='f'
+          GROUP BY con.conname, ref.relname`,
       );
-      expect(rows).toEqual([]);
+      expect(rows.length, 'grant must have exactly one FK (grant_role_id_fkey)').toBe(1);
+      expect(rows[0].conname).toBe('grant_role_id_fkey');
+      expect(rows[0].dst).toBe('role');
+      // tenant-scoped on both sides (NF-2): (tenant_id, role_id) → (tenant_id, id)
+      expect(rows[0].src_cols).toEqual(['tenant_id', 'role_id']);
+      expect(rows[0].ref_cols).toEqual(['tenant_id', 'id']);
     });
   });
 });
