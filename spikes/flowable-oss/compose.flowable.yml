@@ -15,9 +15,9 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
-    # host port for direct psql seeding from run.sh
+    # host port for optional direct psql; default high to avoid clashes (override FLOWABLE_PG_PORT)
     ports:
-      - "55432:5432"
+      - "${FLOWABLE_PG_PORT:-55432}:5432"
 
   rest:
     image: flowable/flowable-rest:7.1.0
@@ -39,7 +39,7 @@ services:
       FLOWABLE_HISTORY_CLEANING_CYCLE: "0 0/1 * * * ?"
       FLOWABLE_HISTORY_CLEANING_AFTER: "1"
     ports:
-      - "8080:8080"
+      - "${FLOWABLE_REST_PORT:-18080}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/flowable-rest/docs/ || exit 1"]
       interval: 5s

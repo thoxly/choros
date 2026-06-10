@@ -16,7 +16,7 @@ services:
       timeout: 3s
       retries: 30
     ports:
-      - "55433:5432"
+      - "${OPERATON_PG_PORT:-55433}:5432"
 
   rest:
     image: operaton/operaton:1.0.0
@@ -30,7 +30,7 @@ services:
       DB_PASSWORD: operaton
       WAIT_FOR: pg:5432
     ports:
-      - "8081:8080"
+      - "${OPERATON_REST_PORT:-18081}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/engine-rest/engine || exit 1"]
       interval: 5s

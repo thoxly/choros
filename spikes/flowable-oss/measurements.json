@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-06-10T15:26:36.378898Z",
+  "engines": [
+    {
+      "engine": "flowable",
+      "image": "flowable/flowable-rest:7.1.0",
+      "image_digest": "flowable/flowable-rest@sha256:b7ae287502cd5c243b577a0ca2894172e1c18cd75aea4fd67dc7d58f1b40db44",
+      "license": "Apache 2.0",
+      "license_ok": true,
+      "n_history_target": 300000,
+      "n_history_actual": 1000,
+      "cleanup_present_in_oss": true,
+      "cleanup_throughput_rps": 62.5,
+      "cleanup_duration_s": 16,
+      "cleanup_deleted": 1000,
+      "table_size_before_bytes": 327680,
+      "table_size_after_bytes": 327680,
+      "degradation_ok": true,
+      "extrapolation": {
+        "linearity": "assumed linear (single N point this run; refutable)",
+        "contour_fraction": 0.2,
+        "dev_factor": 0.5,
+        "window": "nightly 8h batch window",
+        "fits_70m": true,
+        "headroom_factor": 23.46
+      },
+      "deadletter": {
+        "list": {
+          "available": true,
+          "http": 200,
+          "count": 1
+        },
+        "retry": {
+          "available": true,
+          "http": 204,
+          "effect": "moved out of deadletter (action=move)"
+        },
+        "move": {
+          "available": true,
+          "http": 204,
+          "effect": "moved to executable/timer queue"
+        }
+      },
+      "verdict_engine": "go",
+      "notes": ""
+    }
+  ]
+}

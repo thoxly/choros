@@ -31,13 +31,13 @@ engine_cfg() {
   case "$1" in
     flowable)
       COMPOSE="$HERE/compose.flowable.yml"; PROJECT="spike_flowable"
-      IMAGE="flowable/flowable-rest:7.1.0"; PORT=8080
-      REST_BASE="http://localhost:8080/flowable-rest/service"
+      IMAGE="flowable/flowable-rest:7.1.0"; PORT="${FLOWABLE_REST_PORT:-18080}"
+      REST_BASE="http://localhost:$PORT/flowable-rest/service"
       AUTH="admin:test" ;;
     operaton)
       COMPOSE="$HERE/compose.operaton.yml"; PROJECT="spike_operaton"
-      IMAGE="operaton/operaton:1.0.0"; PORT=8081
-      REST_BASE="http://localhost:8081/engine-rest"
+      IMAGE="operaton/operaton:1.0.0"; PORT="${OPERATON_REST_PORT:-18081}"
+      REST_BASE="http://localhost:$PORT/engine-rest"
       AUTH="" ;;
     *) echo "unknown engine: $1 (use flowable|operaton)" >&2; exit 2 ;;
   esac
@@ -97,10 +97,19 @@ cmd_license() {
   local digest license_ok="false" license="unknown"
   digest=$(docker image inspect "$IMAGE" --format '{{join .RepoDigests " "}}' 2>/dev/null || echo "")
   [ -z "$digest" ] && digest="$IMAGE (digest unavailable)"
-  # extract a LICENSE marker from the image filesystem; Apache 2.0 is what we assert (no enterprise key)
+  # Assert Apache 2.0 from the artifact itself (no enterprise key). The engine jars carry the
+  # authoritative marker in their OSGi manifest (Bundle-License) / META-INF; LICENSE files at /
+  # are the JDK's, so we read the engine jar manifest instead.
   local lic_text
-  lic_text=$(docker run --rm --entrypoint sh "$IMAGE" -c 'cat $(find / -iname "LICENSE*" 2>/dev/null | head -1) 2>/dev/null | head -20' 2>/dev/null || echo "")
-  if echo "$lic_text" | grep -qiE 'Apache License|Apache-2.0|Version 2.0'; then
+  lic_text=$(docker run --rm --entrypoint sh "$IMAGE" -c '
+    for j in $(find / -name "*engine*.jar" -o -name "*-core-*.jar" 2>/dev/null | head -5); do
+      unzip -p "$j" META-INF/MANIFEST.MF 2>/dev/null | grep -iE "Bundle-License|License"
+    done
+    # also any top-level project LICENSE/NOTICE in the app dirs
+    for f in $(find /app /camunda /opt -maxdepth 3 -iname "LICENSE*" -o -iname "NOTICE*" 2>/dev/null | head -3); do
+      head -5 "$f" 2>/dev/null
+    done' 2>/dev/null || echo "")
+  if echo "$lic_text" | grep -qiE 'Apache.?License|apache.org/licenses/LICENSE-2\.0|Apache-2\.0|Version 2\.0'; then
     license="Apache 2.0"; license_ok="true"
   fi
   # no enterprise key / trial anywhere in the image labels
@@ -110,9 +119,9 @@ cmd_license() {
     license_ok="false"; license="$license (enterprise/trial marker found)"
   fi
   cat > "$HERE/.license.$ENGINE" <<EOF
-IMAGE=$IMAGE
-DIGEST=$digest
-LICENSE=$license
+IMAGE='${IMAGE//\'/}'
+DIGEST='${digest//\'/}'
+LICENSE='${license//\'/}'
 LICENSE_OK=$license_ok
 EOF
   log "license: $license (ok=$license_ok)"
@@ -185,10 +194,30 @@ EOF
 trigger_cleanup() {
   case "$ENGINE" in
     flowable)
-      # OSS management API: history-cleanup batch (no enterprise key).
-      curl_auth -X POST "$REST_BASE/management/history-cleanup" >/dev/null 2>&1 \
-        || curl_auth -X POST -H 'Content-Type: application/json' -d '{}' \
-             "$REST_BASE/management/jobs" >/dev/null 2>&1 || true
+      # Flowable OSS history-cleanup is a SCHEDULED timer-job (enable-history-cleaning=true),
+      # not a REST endpoint. We drive it on demand via REST: move each *-history-cleanup
+      # timer-job to the executable queue (action=move), then poke the async executor by
+      # moving any resulting regular jobs too. All via the public OSS management REST.
+      local tjs jid
+      tjs=$(curl_code "$REST_BASE/management/timer-jobs")
+      for jid in $(echo "$tjs" | sed '$d' | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print("\n".join(j["id"] for j in d.get("data",[]) if "history-cleanup" in (j.get("handlerType") or "")))
+except Exception: pass' 2>/dev/null); do
+        curl_auth -X POST -H 'Content-Type: application/json' -d '{"action":"move"}' \
+          "$REST_BASE/management/timer-jobs/$jid" >/dev/null 2>&1 || true
+      done
+      # execute any history-jobs / regular jobs now queued by the move
+      local hjs
+      hjs=$(curl_code "$REST_BASE/management/history-jobs")
+      for jid in $(echo "$hjs" | sed '$d' | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin); print("\n".join(j["id"] for j in d.get("data",[])))
+except Exception: pass' 2>/dev/null); do
+        curl_auth -X POST -H 'Content-Type: application/json' -d '{"action":"execute"}' \
+          "$REST_BASE/management/history-jobs/$jid" >/dev/null 2>&1 || true
+      done
       ;;
     operaton)
       # Camunda-7 OSS: schedule cleanup job immediately, then execute due jobs.
@@ -277,10 +306,10 @@ LIST_HTTP=$list_http
 LIST_COUNT=$list_count
 RETRY_AVAIL=$retry_avail
 RETRY_HTTP=$retry_http
-RETRY_EFFECT=$retry_effect
+RETRY_EFFECT='${retry_effect//\'/}'
 MOVE_AVAIL=$move_avail
 MOVE_HTTP=$move_http
-MOVE_EFFECT=$move_effect
+MOVE_EFFECT='${move_effect//\'/}'
 EOF
   log "deadletter: list(avail=$list_avail http=$list_http count=$list_count) retry(avail=$retry_avail http=$retry_http) move(avail=$move_avail http=$move_http)"
 }
@@ -427,7 +456,7 @@ try:
 except Exception:
     doc = {"schema_version": "1.0", "generated_at": None, "engines": []}
 doc["schema_version"] = "1.0"
-doc["generated_at"] = datetime.datetime.utcnow().isoformat()+"Z"
+doc["generated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 doc["engines"] = [e for e in doc.get("engines", []) if e.get("engine") != engine]
 doc["engines"].append(frag)
 doc["engines"].sort(key=lambda e: e.get("engine",""))
