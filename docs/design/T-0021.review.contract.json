@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0021",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/core/grant-resolver.ts:152-159",
+      "issue": "grantFacetFields() returns undefined — triggering whole-resource visibility — not only when Grant.resourceFacet is absent, but also when it is PRESENT but malformed (e.g. {fields: 123}, {fields: \"not-array\"}, {fields: null}). ADR §4.4 'visibleFields rule' states ONLY 'if it has NO facet ⇒ whole-resource'; a present-but-ill-typed facet is not the same as an absent one. The current code silently widens the visible field set in that case instead of failing closed, violating the fail-closed principle that is the design discipline of this authority core. Concrete path: a GrantSource returning a grant with resourceFacet = {fields: 42} (valid JSON, parseable by any DB adapter, typed as 'unknown') passes all TypeScript checks but confers whole-resource read visibility rather than zero-field visibility. This is a security-relevant divergence for an authority core where the spec says 'sомнение в безопасности authority-core = blocking'.",
+      "suggestion": "Treat a present-but-malformed facet as fail-closed (zero visibility), not as whole-resource. In grantFacetFields(): return undefined ONLY when resourceFacet is strictly undefined or null (the 'absent' case). If resourceFacet is a non-null object but fields is not a string[], return [] (no fields) instead of undefined. This aligns with ADR §4.4: 'if it has NO facet ⇒ whole-resource' — a structurally-present facet that does not parse to a valid field-list confers no fields. One-line change: after the Array.isArray(fields) guard, return [] instead of undefined when the facet object exists but fields is malformed. Update grantFacetFields return type note accordingly and add a test case for {fields: 42} expecting zero-field visibility."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/grant-resolver.ts:273-280",
+      "issue": "isLatticeScope() is a local type guard that explicitly enumerates the four ScopeElement kinds ('node', 'tags', 'interval', 'set'). T-0018 ScopeElement is a discriminated union of exactly those four. If T-0018 ever adds a fifth lattice kind, isLatticeScope will silently treat it as freeform (fail-closed direction, so safe), but the divergence is invisible to TypeScript — the switch is not exhaustive and the compiler won't warn. This is a maintenance brittleness, not a current security issue.",
+      "suggestion": "Either (a) derive isLatticeScope structurally from the T-0018 type (a TypeScript type predicate that checks scope.kind !== 'freeform' and re-uses the ScopeElement union — a one-liner since ScopeElement already excludes FreeformScope), or (b) add a comment noting the explicit list must be kept in sync with T-0018 ScopeElement. Option (a) is more robust."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/core/grant-resolver.ts — resolveFor not tested for audit obligation (FR-8)",
+      "issue": "SPEC FR-8 states the resolver 'MAY emit a T-0016 audit obligation (type, actor, subject, via, decision)' and 'In static-now the resolver returns/threads the obligation shape'. The current implementation neither returns nor threads any AuditObligation shape from resolveFor — the return type is Promise<ResolvedView> with no audit payload. This is not a blocking issue (FR-8 uses 'MAY', and there is no acceptance criterion covering the static-now audit shape), but the static-now obligation threading described in the spec is silently absent with no TODO or comment. The durable append is explicitly deferred to T-0053 per ADR §5, but the obligation shape itself was intended to be part of the static-now resolver.",
+      "suggestion": "Either (a) add a // TODO(T-0053): thread AuditObligation shape once T-0016 ADR defines the return contract comment in resolveFor to make the intentional gap explicit, or (b) at T-0053 time include the static-now shape as part of that task scope. No code change required for approval — this is a documentation/tracking nit."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": false, "note": "deferred to T-0053 per ADR §5 — not in static-now scope" },
+    { "ac": "AC-15", "covered": false, "note": "deferred to T-0027/T-0028 per ADR §5 — not in static-now scope" }
+  ],
+  "role_gap_evidence": []
+}
