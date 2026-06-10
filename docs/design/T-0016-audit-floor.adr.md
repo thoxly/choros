@@ -22,6 +22,17 @@
 > default-DENY, scoped uniqueness, `withTenant` access) **verbatim**. This floor adds only
 > append-only + per-tenant chain + per-tenant dense `seq` + a forward-only head on top of
 > that convention. No new tenant-isolation code-path is introduced.
+>
+> **Supersession (binding on T-0053): T-0016 SUPERSEDES T-0013 §3.3's `audit_log`
+> placeholder.** T-0013 §3.3 sketched a stub `audit_log` (`actor/action/target/payload/
+> occurred_at`) purely to exercise the tenant-table convention; the **real, day-1 audit
+> table is `audit_event`** (this ADR §3.1) plus `audit_head`. The T-0053 coder **MUST create
+> `audit_event` + `audit_head` and MUST NOT create `audit_log`** — there is exactly one
+> audit table family. T-0013 §3.3's columns map onto `audit_event` (`action`→`type`,
+> `target`→`subject`, `actor`/`payload`/`occurred_at` carry over) plus the chain/governance
+> columns; T-0013's FF-9 (`audit_log` tenant-scoped) is satisfied by this floor's `audit_event`
+> via FF-12 (both tables in the `known_tenant_tables` fixture). The `known_tenant_tables`
+> fixture lists `audit_event`/`audit_head` and **does not** list `audit_log`.
 
 ---
 
@@ -84,6 +95,7 @@ else is convention enforced by the fitness functions.
 | Option | Why not |
 |---|---|
 | **Separate `grant_log` (or per-domain audit tables) instead of one floor** | E3.6 / hypothesis §6-A #8 fixes that grant-issuance events are *first-class rows in this floor*, queryable by `actor`/`subject`/`scope`, not a parallel log (AC-20). A second log = a second isolation/append-only/chain code-path to keep correct, and a second 152-ФЗ/GDPR narrative — exactly the drift T-0013 NF-3 forbids. New event *types* add rows, never tables. |
+| **Keeping (or creating) T-0013 §3.3's `audit_log` alongside `audit_event`** | T-0013 §3.3 `audit_log` is a *placeholder stub* to demonstrate the tenant-table convention; it is **superseded** by `audit_event` (see §1 Supersession). Materializing both would create two audit tables — a second append-only/chain/isolation code-path and a duplicate 152-ФЗ/GDPR narrative (the exact drift forbidden above). T-0053 builds `audit_event` + `audit_head` **only**; `audit_log` is never created. |
 | **`seq` from a global Postgres `SEQUENCE` (or one global advisory lock for ordering)** | Couples every tenant's write throughput onto one contention point and one ordering authority — violates NF-2 (per-tenant, zero cross-tenant contention) and tenant independence. Also a global sequence is *sparse* under rollback (gap-by-design), defeating the dense-`seq` delete/gap signal (FR-2, defect classes 4/5). Defeated by AC-6 (`audit_no_global_seq` lint + concurrency probe). |
 | **`MAX(seq)+1` without per-tenant serialization** | Two concurrent appends in one tenant read the same `MAX`, both compute the same `seq` and the same `prev_hash` → either a `UNIQUE(tenant_id,seq)` abort (lost write) or, absent the constraint, a *fork* (two children of one parent). Race-unsafe; rejected for the explicit serialization of §5. |
 | **Per-tenant advisory lock (`pg_advisory_xact_lock(hashtextextended(tenant_id))`) as the serialization primitive** | A *viable* alternative that satisfies the invariant, but: (a) it is a second source of truth for "the latest head" separate from the `audit_head` row we must read anyway, inviting skew; (b) advisory-lock keys are global `int8` space → hash collisions across tenants reintroduce cross-tenant contention (a soft NF-2 violation that is invisible until it bites); (c) it adds a lock-acquire round-trip on top of the head read. We **must** read `audit_head` for `prev_hash` and the prior `seq` regardless, so locking *that row* `FOR UPDATE` makes the serialization point and the chain-state read the *same* operation. Recorded as rejected-but-acceptable; §5 pins `FOR UPDATE` as the single source of truth. |
@@ -158,8 +170,15 @@ columns and constraints are pinned. Exact DDL is T-0053's to emit from this mode
   with the genesis row, atomically — strictly simpler and still forward-only.)
 - **Forward-only.** Each append sets the head to `(OLD.seq + 1, new row_hash)` in the
   **same transaction** as the `audit_event` `INSERT`. The head-advance trigger (`§4.6`)
-  enforces `NEW.seq = OLD.seq + 1` (no skip, no rewind) and `NEW.row_hash` matches the
-  just-inserted row; the head `seq` MUST never decrease (FR-4, AC-13/14/15).
+  enforces **only `seq` monotonicity** — `NEW.seq = OLD.seq + 1` (no skip, no rewind), so the
+  head `seq` can never decrease or jump (FR-4, AC-13/14/15). The trigger deliberately does
+  **not** re-derive or validate `NEW.row_hash` against the just-inserted `audit_event` row:
+  the head's `row_hash` correctness (that it equals `row_hash` of the row at `(tenant_id,
+  NEW.seq)`) is a property of the **append path** (§4.3 writes both from the same computed
+  `rowHash` in one transaction) and is **verified offline** by the stateless verifier's
+  fork/tamper check (§4.4, defect classes 1/7), not asserted inside the trigger. The DB
+  guarantees forward-only `seq`; the chain-linkage guarantee is owned by the append path +
+  verifier. (See §4.6(B2).)
 - **Anchorable.** `(tenant_id, seq, row_hash)` is a small copyable tuple a periodic job MAY
   snapshot to versioned object storage; comparing a later live head to an anchored one
   detects a same-transaction history rewrite (FR-4, AC-16). The job is T-0053; T-0016 fixes
@@ -183,7 +202,7 @@ row's `vocab_version` to select the rule set (§4.5).
 | Entity | Audit-specific attribute |
 |---|---|
 | `choros_app` (runtime role) | On `audit_event`: granted **`SELECT, INSERT` only** (NOT `UPDATE`/`DELETE`). On `audit_head`: granted `SELECT, INSERT, UPDATE` but the forward-advance trigger constrains every `UPDATE` to `NEW.seq = OLD.seq + 1`. Otherwise as T-0013: `NOSUPERUSER`, `NOBYPASSRLS`, not table owner. |
-| `choros_migrator` (owner/DDL role) | Owns `audit_event`/`audit_head`, holds DDL. Even the owner cannot `UPDATE`/`DELETE` `audit_event` because the no-mutate trigger fires regardless of role (AC-3) — only a `DISABLE TRIGGER` / `DROP TRIGGER` migration diff (CI-visible) could lift it. |
+| `choros_migrator` (owner/DDL role) | Owns `audit_event`/`audit_head`, holds DDL. Even the owner cannot `UPDATE`/`DELETE` `audit_event` (no-mutate trigger, AC-3) **nor `DELETE` an `audit_head` row** (no-delete trigger §4.6(B3)), because the triggers fire regardless of role — only a `DISABLE TRIGGER` / `DROP TRIGGER` migration diff (CI-visible) could lift either. |
 
 ---
 
@@ -261,10 +280,25 @@ on **this tenant's** `audit_head` row. Rationale (vs the rejected advisory-lock 
   and "the head".
 - It is **inherently per-tenant** (the lock is on one tenant's head row), so two tenants
   never contend — NF-2 with no hash-collision caveat.
-- For a tenant's **first** append the head row does not yet exist; the create is serialized
-  by the `UNIQUE`/PK on `audit_head(tenant_id)` via `INSERT … ON CONFLICT (tenant_id) DO
-  UPDATE … RETURNING` (upsert), so a concurrent first-append pair resolves to one genesis +
-  one `seq = 2`, never two genesis rows.
+- For a tenant's **first** append the head row does not yet exist, so the `FOR UPDATE` lock
+  has no row to take. Two concurrent genesis appends therefore both read "no head", both
+  compute `seq = GENESIS_SEQ = 1` and `prev_hash = GENESIS_PREV_HASH`, and both attempt the
+  `audit_event` `INSERT`; the `UNIQUE (tenant_id, seq)` (= PK) **aborts the losing
+  transaction** — never two genesis rows. The genesis `seq = 2` outcome is **not automatic**:
+  the loser MUST **retry `appendAuditEvent` from step 1**, on retry it now finds the winner's
+  committed head (created by the winner's `INSERT … ON CONFLICT (tenant_id)` upsert), takes
+  the `FOR UPDATE` lock on it, and recomputes `seq = 2` / `prev_hash = row_hash(seq=1)`.
+  After the genesis row exists, every subsequent appender is serialized by the per-tenant
+  `audit_head … FOR UPDATE` lock (one in-flight appender per tenant at a time), reads the
+  current head, and computes a dense `+1` `seq` with no `UNIQUE` race; only the
+  head-creating genesis pair can collide, and that collision is resolved by abort + retry.
+
+**Caller retry contract (non-negotiable):** an append that aborts on the
+`UNIQUE (tenant_id, seq)` constraint (only possible for the genesis race above, or under a
+serialization failure) is **retried by re-running `appendAuditEvent` from step 1** — re-read
+the head under `FOR UPDATE`, recompute `seq`/`prev_hash`/`row_hash`, re-insert — so the dense
+`+1` invariant always holds. The retry re-reads committed state; it never reuses a stale
+`seq` or `prev_hash`.
 
 **Invariant (non-negotiable, from the spec handoff):** per-tenant, race-free, `+1` dense
 `seq`, **no global lock or global sequence**. The *primitive* (`FOR UPDATE` here) is pinned
@@ -293,6 +327,11 @@ function appendAuditEvent(tx, e: AuditEventInput): { seq: bigint; rowHash: Buffe
     { tenant_id: TENANT, seq, row_hash: rowHash, updated_at: now(), vocab_version: VOCAB });
   return { seq, rowHash };
 }
+// RETRY CONTRACT (§4.2): if step 3's audit_event INSERT aborts on UNIQUE(tenant_id,seq) —
+//   possible only for the genesis race (no head row yet ⇒ two appenders both compute seq=1)
+//   or a serialization failure — the CALLER MUST re-run appendAuditEvent FROM STEP 1. On
+//   retry the winner's head now exists, the FOR UPDATE lock is taken, and seq/prev_hash/
+//   row_hash are recomputed against committed state (e.g. seq=2). NEVER reuse a stale seq.
 // INVARIANTS held by schema + triggers (NOT by this code being correct):
 //  - choros_app has SELECT,INSERT on audit_event, NO UPDATE/DELETE (FR-1a);
 //  - no-mutate trigger bars UPDATE/DELETE on audit_event for ALL roles (FR-1b);
@@ -375,6 +414,13 @@ CREATE TRIGGER audit_event_no_delete BEFORE DELETE ON audit_event
   FOR EACH ROW EXECUTE FUNCTION audit_event_no_mutate();
 
 -- (B2) HEAD-ADVANCE TRIGGER (FR-4): every audit_head UPDATE must be forward-only +1.
+--      SCOPE: this trigger enforces ONLY seq monotonicity (NEW.seq = OLD.seq + 1). It does
+--      NOT validate NEW.row_hash against the audit_event row at (tenant_id, NEW.seq): head
+--      row_hash correctness is owned by the append path (§4.3 writes both from one computed
+--      rowHash in one txn) and verified offline by the verifier's fork/tamper check (§4.4,
+--      classes 1/7). Prose (§3.2) and this SQL agree: DB ⇒ forward-only seq; append path +
+--      verifier ⇒ chain linkage. (Adding a row_hash cross-check here is a rejected T-0053
+--      option: a SELECT-in-trigger that duplicates the append path's invariant.)
 CREATE FUNCTION audit_head_forward_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.seq <> OLD.seq + 1 THEN
@@ -384,8 +430,16 @@ BEGIN
 END $$;
 CREATE TRIGGER audit_head_advance BEFORE UPDATE ON audit_head
   FOR EACH ROW EXECUTE FUNCTION audit_head_forward_only();
--- DELETE on audit_head is not granted to choros_app and is out of the append path;
--- a no-delete trigger MAY mirror (B1) for defense in depth (T-0053 detail).
+
+-- (B3) NO-DELETE TRIGGER on audit_head (FR-4, MUST — symmetric with audit_event's B1):
+--      bars DELETE of a head row for EVERY role, so the forward-only invariant cannot be
+--      bypassed by deleting the head and letting the next append re-genesis (silent
+--      truncate/fork). Held alongside the privilege guard (audit_head DELETE not granted to
+--      choros_app, A above) — dual mechanism, defeating it needs a CI-visible diff.
+CREATE FUNCTION audit_head_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN  RAISE EXCEPTION 'audit_head is forward-only; head rows cannot be deleted (T-0016 FR-4)';  END $$;
+CREATE TRIGGER audit_head_no_delete_trg BEFORE DELETE ON audit_head
+  FOR EACH ROW EXECUTE FUNCTION audit_head_no_delete();
 ```
 
 Both `audit_event` mechanisms are held **simultaneously**: revoking the privilege does not
@@ -393,6 +447,16 @@ remove the trigger and vice-versa, so a misconfiguration of either alone still f
 (AC-1/2/3/4). Defeating append-only requires a CI-visible diff that *both* grants
 `UPDATE`/`DELETE` to the app role *and* drops/disables the trigger — caught by the
 `audit_append_only` lint (FF-1).
+
+`audit_head` is protected by the same dual-mechanism, fail-closed posture (FR-1b symmetry):
+(i) `choros_app` is **not** granted `DELETE` on `audit_head` (privilege guard, §4.6(A)), and
+(ii) the no-delete trigger (B3) bars head-row deletion for **every** role including the
+owner. Both are held simultaneously, so deleting a head row — which would let the next append
+silently re-genesis and truncate/fork the chain — requires a CI-visible diff that *both*
+grants `DELETE` to the app role *and* drops/disables the no-delete trigger. The
+`audit_append_only` lint (FF-1) asserts the `audit_head` `BEFORE DELETE` trigger is present
+and that no `GRANT … DELETE … ON audit_head TO choros_app` appears, exactly as it does for
+`audit_event`'s no-mutate guard.
 
 ---
 
@@ -408,7 +472,7 @@ silently dropped. Three **new lints** are introduced — `audit_append_only`,
 
 | ID | Rule | ci_check | gating |
 |---|---|---|---|
-| **FF-1** | Append-only is structural: app role never holds `UPDATE`/`DELETE` on `audit_event`, AND a no-mutate trigger exists | `ci/checks/audit_append_only.sh` over the migration SQL: FAIL if any `GRANT … (UPDATE|DELETE) … ON audit_event TO choros_app` appears, OR if no `BEFORE UPDATE`/`BEFORE DELETE` trigger on `audit_event` is present. Live: app-role `UPDATE`/`DELETE` on a seeded row fails (privilege OR trigger); owner `UPDATE`/`DELETE` fails (trigger). | static-now (lint) + live-T-0053 (AC-1/2/3/4) |
+| **FF-1** | Append-only is structural: app role never holds `UPDATE`/`DELETE` on `audit_event`, AND a no-mutate trigger exists; **`audit_head` is delete-protected by the same dual mechanism** (no `DELETE` grant to `choros_app` AND a `BEFORE DELETE` no-delete trigger) | `ci/checks/audit_append_only.sh` over the migration SQL: FAIL if any `GRANT … (UPDATE\|DELETE) … ON audit_event TO choros_app` appears, OR if no `BEFORE UPDATE`/`BEFORE DELETE` trigger on `audit_event` is present, **OR if any `GRANT … DELETE … ON audit_head TO choros_app` appears, OR if no `BEFORE DELETE` trigger on `audit_head` is present**. Live: app-role `UPDATE`/`DELETE` on a seeded `audit_event` row fails (privilege OR trigger); owner `UPDATE`/`DELETE` fails (trigger); **app-role and owner `DELETE` of an `audit_head` row both fail (privilege / trigger)**. | static-now (lint) + live-T-0053 (AC-1/2/3/4) |
 | **FF-2** | Per-tenant append serialization is `audit_head … FOR UPDATE`; no global sequence / global advisory lock for audit ordering | `ci/checks/audit_no_global_seq.sh`: FAIL if a global `CREATE SEQUENCE` feeds `audit_event.seq`, or if `pg_advisory*lock` with a non-tenant-derived key is used for audit ordering; assert the append path locks `audit_head` `FOR UPDATE` keyed on the tenant. Live (concurrency): N concurrent appends in tenant-A yield N distinct dense `seq`; concurrent appends in A and B do not block on a shared lock. | static-now (lint) + live-T-0053 (AC-6) |
 | **FF-3** | `seq` is per-tenant dense & unique; `UNIQUE (tenant_id, seq)` present | Static-now: lint asserts `UNIQUE (tenant_id, seq)` and PK `(tenant_id, seq)` on `audit_event` in the migration DDL. Live: append K rows for A, M for B; A's `seq` = `1..K` dense (no gap/dup), B independent; a manual duplicate-`seq` insert is rejected. | static-now (lint) + live-T-0053 (AC-5) |
 | **FF-4** | Genesis + chain linkage: `seq=1` row has `prev_hash=GENESIS_PREV_HASH`; every `seq=n>1` has `prev_hash = row_hash[n−1]` | Live: assert the genesis row's `prev_hash` = 32 zero bytes; for every `n>1`, `prev_hash` = `row_hash` of `(tenant_id, n−1)`; any mismatch fails. Static-now (unit): a built fixture chain satisfies the linkage. | static-now (unit) + live-T-0053 (AC-7/8) |
