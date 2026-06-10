@@ -1,48 +1,50 @@
 {
   "task_id": "T-0031",
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "re_review": "49367b5",
+  "re_review_note": "Fix commit 49367b5 addresses all findings from initial review (296afd8). R-1 verified by running fitness:db twice on same persistent volume — both runs 277/277. Full npm run ci green (no DATABASE_URL).",
   "ci_seen": {
     "green": true,
     "build": "tsc — 0 errors",
     "test": "732 passed / 5 skipped (unit + e2e, no DATABASE_URL)",
     "fitness": "all checks green — FF-0031-01..07 pass, cross-tenant pass",
     "web_build": "vite build — 45 modules, 0 errors",
-    "isolated_db_migrations": "29 migrations applied + idempotency re-run confirmed",
-    "isolated_db_fitness": "277 tests passed on first run against fresh isolated Postgres (port 55481)"
+    "isolated_db_fitness_run1": "277/277 pass on persistent volume (run 1)",
+    "isolated_db_fitness_run2": "277/277 pass on same persistent volume (run 2 — idempotency confirmed)"
   },
   "isolated_db": "pass",
   "findings": [
     {
       "id": "R-1",
-      "severity": "blocking",
+      "severity": "nit",
       "axis": 2,
-      "location": "ci/checks/db/grant-trail.db.test.ts:193-246",
-      "issue": "Pagination negative probe is NOT idempotent and fails on second invocation. The test seeds 5 rows with actor='page-actor' in TENANT_A each run, using a random SEQ_BASE. However, the query `queryGrantTrail(appPool, TENANT_A, { actor: 'page-actor', limit: 2 })` collects ALL rows with actor='page-actor' in TENANT_A — not scoped to the current run's SEQ_BASE range. On a fresh DB the test passes (5 rows found). On any subsequent re-run, 10 rows are found (then 15, etc.) and `expect(uniqueIds.size).toBe(5)` fails. Verified: first run on clean DB = pass (277/277); second run of just this test = FAIL (expected 5, got 10; then 15 on third run). This means the test cannot be run more than once against a persistent DB — a developer who runs `fitness:db` twice will see a broken test with no code change. CI passes only because it always uses a fresh DB, masking the bug.",
-      "suggestion": "Scope the pagination query to the current run's SEQ_BASE range: add a `beforeSeq: SEQ_BASE + 25 + 1` and lower bound via a `minSeq` filter (or use an afterSeq parameter), or scope by a unique per-run actor slug (e.g. actor=`page-actor-${SEQ_BASE}`), or clean up the seeded rows after the test in an `afterEach` block. The simplest fix is to change the actor in the seed to a unique per-run value: `actor: \\`page-actor-${SEQ_BASE}\\`` and match in the queries."
+      "location": "ci/checks/db/grant-trail.db.test.ts:198",
+      "issue": "CLOSED. Pagination probe was not idempotent on a persistent DB (actor='page-actor' accumulated across runs). Fixed in 49367b5: per-run actor slug PAGE_ACTOR=`page-actor-${SEQ_BASE}` used throughout the probe — seed, queries, and filter. Verified: two consecutive fitness:db runs on the same persistent volume both pass 277/277.",
+      "suggestion": "Closed."
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 4,
-      "location": "src/db/audit-grant-trail.ts:85",
-      "issue": "withTenant is a local copy of the pattern from src/db/org.ts rather than a shared import. Both files have identical implementations (assertUuid + BEGIN + SET LOCAL + COMMIT/ROLLBACK). If the T-0013 pattern ever changes (e.g. adding search_path isolation for a schema rename, or a new security GUC), both copies must be updated. The ADR §4.2 acknowledges this ('imports withTenant pattern from src/db/org.ts (or a shared helper)') but the BUILD chose duplication. At current codebase size this is a low-risk nit; it does not affect correctness.",
-      "suggestion": "Extract withTenant into a shared helper (e.g. src/db/tenant.ts) and import from there in both org.ts and audit-grant-trail.ts. Low urgency — fine to do in a future cleanup task."
+      "location": "src/db/audit-grant-trail.ts:71-83 (comment block)",
+      "issue": "ADDRESSED. Fix 49367b5 adds an inline comment at the withTenant copy site explaining why a shared import is not possible (org.ts does not export withTenant — private helper), documenting the extraction risk, and flagging it as a future cleanup task. Original nit (duplication without comment) is resolved. The two implementations remain byte-for-byte identical; extraction deferred.",
+      "suggestion": "Addressed by documentation comment in 49367b5. Future cleanup: extract to src/db/tenant.ts."
     },
     {
       "id": "R-3",
       "severity": "nit",
       "axis": 1,
-      "location": "src/http/grant-trail.ts:37-39 (TRAIL_SEED payload field roleId: null)",
-      "issue": "The first TRAIL_SEED row (seq: 10) has `payload: { resourceType: 'record', operation: 'exec', roleId: null }`. The roleId field is null — this is a grant.create event, where payload should only have resourceType + operation (+ optional resourceFacet). The roleId field belongs only to assignment event payloads (per ADR §3.2 and FR-1 payload mapping). Including roleId: null in a grant.create seed row is semantically incorrect (though harmless at runtime since the UI reads both fields). Does not affect logic — the type filter correctly distinguishes events.",
-      "suggestion": "Remove the `roleId: null` from the first seed row's payload to keep the seed data semantically accurate with the spec payload shape."
+      "location": "src/http/grant-trail.ts:39",
+      "issue": "CLOSED. Fix 49367b5 removes the spurious `roleId: null` from the TRAIL_SEED grant.create row payload, making the seed data semantically accurate with ADR §3.2 FR-1 payload shape.",
+      "suggestion": "Closed."
     },
     {
       "id": "R-4",
       "severity": "nit",
       "axis": 5,
-      "location": "docs/reviews/ (cross-spec observation, not a T-0031 code defect)",
-      "issue": "T-0030's spec AC-12 states 'Static lint asserts the emit call-site imports GrantAuditEvent from grant-lattice.ts' — this is inconsistent with T-0031 spec §6 which specifies that T-0030 imports encodeGrantAuditEvent from audit-grant-encoder.ts (the contractual seam). T-0030's fitness lint will check for GrantAuditEvent import from grant-lattice, but T-0031's encoder already re-exports GrantAuditEvent (line 22 of audit-grant-encoder.ts), so T-0030's coder could satisfy AC-12 by importing from either source. Low risk but the two specs create ambiguity. Not a T-0031 defect — T-0031 delivers the correct encoder seam.",
-      "suggestion": "When T-0030 is reviewed, flag that its AC-12 fitness lint should additionally assert the encodeGrantAuditEvent import from audit-grant-encoder.ts, not only GrantAuditEvent from grant-lattice.ts."
+      "location": "src/core/audit-grant-encoder.ts:23-29 (comment block)",
+      "issue": "ADDRESSED. Fix 49367b5 adds an inline comment at the GrantAuditEvent re-export in audit-grant-encoder.ts that documents the cross-spec ambiguity (T-0030 AC-12 vs T-0031 §6) and defers resolution to the T-0030 merge review. No code change needed in T-0031.",
+      "suggestion": "Addressed by documentation comment in 49367b5. Flag for T-0030 review as noted."
     }
   ],
   "acceptance_coverage": [
