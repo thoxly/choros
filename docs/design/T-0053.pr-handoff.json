@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0053",
+  "status": "pr_open",
+  "branch": "task/T-0053-postgres-compose",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    ".github/workflows/ci.yml",
+    "ci/checks/audit_append_only.sh",
+    "ci/checks/ci-workflow-lint.sh",
+    "ci/checks/db/_helpers.ts",
+    "ci/checks/db/behavior.test.ts",
+    "ci/checks/db/fk_resolve.sql",
+    "ci/checks/db/force_rls.sql",
+    "ci/checks/db/schema.test.ts",
+    "ci/checks/db/tenant_id_leading.sql",
+    "ci/checks/db/two_tenant.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/no-committed-secret.sh",
+    "ci/checks/pg-single-dep.sh",
+    "docker-compose.yml",
+    "docs/design/T-0053-postgres-compose.adr.md",
+    "docs/design/T-0053.adr.contract.json",
+    "docs/design/T-0053.review.contract.json",
+    "docs/design/T-0053.test-report.contract.json",
+    "docs/specs/T-0053-postgres-compose.spec.md",
+    "docs/specs/T-0053.spec.contract.json",
+    "migrations/001_roles_and_schema.sql",
+    "migrations/002_job.sql",
+    "migrations/003_application.sql",
+    "migrations/004_registry_def.sql",
+    "migrations/005_record.sql",
+    "migrations/006_audit_event.sql",
+    "migrations/007_audit_head.sql",
+    "migrations/008_grant.sql",
+    "migrations/009_object_handle.sql",
+    "migrations/run.mjs",
+    "package-lock.json",
+    "package.json",
+    "vitest.config.js"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "verdict_payload": {
+    "review_verdict": "approved",
+    "review_findings": [
+      {
+        "id": "R-1",
+        "severity": "nit",
+        "issue": "ADR §3.1 incorrectly claims choros_migrator is subject to FORCE RLS; in fact, as a Postgres superuser it bypasses RLS entirely",
+        "status": "resolved",
+        "commit": "2c3f7f6",
+        "resolution": "ADR and test comments corrected to accurately state migrator bypasses FORCE RLS; seeds set choros.tenant_id for semantic correctness"
+      },
+      {
+        "id": "R-2",
+        "severity": "nit",
+        "issue": "Test comment repeated incorrect RLS claim",
+        "status": "resolved",
+        "commit": "2c3f7f6",
+        "resolution": "Comment corrected"
+      },
+      {
+        "id": "R-3",
+        "severity": "nit",
+        "issue": "ci/checks/db/*.ts files lack @types/pg for type safety",
+        "status": "resolved",
+        "commit": "2c3f7f6",
+        "resolution": "Added @types/pg to devDependencies"
+      }
+    ],
+    "test_verdict": "pass",
+    "ac_coverage": 18,
+    "ac_passed": 18,
+    "deterministic_tests": {
+      "total": 411,
+      "passed": 411,
+      "failed": 0
+    }
+  },
+  "docker_compose_baseline": {
+    "service": "postgres:16",
+    "database": "POSTGRES_DB (env default: choros)",
+    "user": "POSTGRES_USER (env default: postgres)",
+    "password": "POSTGRES_PASSWORD (env default: dev_password)",
+    "port": "POSTGRES_PORT (env default: 5432)"
+  },
+  "migration_runner": {
+    "entry": "migrations/run.mjs",
+    "dependencies": ["node:*", "pg"],
+    "baseline_files": 9,
+    "idempotent": true,
+    "tracking_table": "choros.schema_migrations"
+  },
+  "baseline_schema": {
+    "schema": "choros",
+    "owner": "choros_migrator",
+    "tables": [
+      "job",
+      "application",
+      "registry_def",
+      "record",
+      "audit_event",
+      "audit_head",
+      "grant",
+      "object_handle"
+    ],
+    "tenant_convention": "tenant_id uuid NOT NULL (leading PK column, ENABLE+FORCE RLS)",
+    "roles": {
+      "choros_app": "NOSUPERUSER, NOBYPASSRLS, non-owner, per-table DML, audit_event=SELECT+INSERT only, no DDL",
+      "choros_migrator": "owns schema + tables, holds DDL, runs migrations, never used at runtime"
+    }
+  },
+  "ci_gate": {
+    "job": ".github/workflows/ci.yml::db",
+    "postgres_service": "postgres:16",
+    "steps": [
+      "apply migrations (first run)",
+      "prove idempotency (second run)",
+      "seed ≥2 tenants",
+      "run fitness: RLS/role/FK/leading-column probes",
+      "run lints: audit-append-only, CI-workflow, pg-single-dep, no-committed-secret"
+    ]
+  },
+  "act_readiness": {
+    "namespace": "choros (our tables) + ACT_* reserved for Flowable's Liquibase",
+    "collision_mechanism": "schema boundary (choros vs public/ACT_*)",
+    "silo_constraint": "current task (T-0053) silo-only; pooled deferred to T-0114+"
+  }
+}
