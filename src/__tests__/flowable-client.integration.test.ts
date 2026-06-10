@@ -18,7 +18,7 @@ import { makeFlowableClient } from "../core/flowable-client.js";
 const INTEGRATION = !!process.env["FLOWABLE_INTEGRATION"];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const BPMN_PATH = join(__dirname, "../../../config/flowable/processes/choros-smoke.bpmn20.xml");
+const BPMN_PATH = join(__dirname, "../../config/flowable/processes/choros-smoke.bpmn20.xml");
 
 describe.skipIf(!INTEGRATION)("FlowableClient integration (AC-15..AC-18)", () => {
   const client = makeFlowableClient({

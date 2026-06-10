@@ -1,0 +1,166 @@
+{
+  "task_id": "T-0064",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 512,
+    "passed": 512,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "tsc --noEmit (0 new type errors) + flowable-client.ts exists",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "flowable-client.test.ts: deployBpmn HTTP 201 → { ok:true, deploymentId }",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "flowable-client.test.ts: deployBpmn HTTP 400 → BAD_BPMN",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "flowable-client.test.ts: startInstance HTTP 201 → { ok:true, instanceId }",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "flowable-client.test.ts: record-kind object in variables → RECORD_IN_PAYLOAD, fetch not called",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "flowable-client.test.ts: fetchAndLock HTTP 200 → { ok:true, tasks }; URL asserts /external-job-api/ servlet",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "flowable-client.test.ts: fetchAndLock empty array → { ok:true, tasks:[] }",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "flowable-client.test.ts: completeTask HTTP 204 → { ok:true }",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "flowable-client.test.ts + adversarial (a): record-kind object in completeTask variables → RECORD_IN_PAYLOAD, fetch not called",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "flowable-client.test.ts: primitive variables pass guard → engine called → { ok:true }",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "flowable-client.test.ts: failTask HTTP 204 → { ok:true }; errorMessage/retries/retryTimeout in body",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "flowable-client.test.ts: 5xx retry → success; 5xx*(maxRetries+1) → ENGINE_UNAVAILABLE; network error retried",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "flowable-client.test.ts: never-resolving fetch within timeoutMs → TIMEOUT",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "ci/checks/flowable-bridge-contract.sh: FF-G3 assertVariableValue + resolveFor both present → exits 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "flowable-client.integration.test.ts + external-task-smoke.sh: deployBpmn live → HTTP 201, non-empty deploymentId",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "flowable-client.integration.test.ts + external-task-smoke.sh: startInstance live → HTTP 201, non-empty instanceId",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "flowable-client.integration.test.ts + external-task-smoke.sh: fetchAndLock live → tasks[].topic=smoke-topic",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "flowable-client.integration.test.ts + external-task-smoke.sh: completeTask live → HTTP 204; instance no longer in running list",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-19",
+      "test": "npm run ci: all fitness functions green (tsc, eslint, 22 fitness scripts, vitest 512 tests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-20",
+      "test": "grep FLOWABLE_BASE_URL / FLOWABLE_REST_APP_ADMIN_USER_ID / FLOWABLE_REST_APP_ADMIN_PASSWORD in flowable-client.ts → all present; no other env vars introduced",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_probes": [
+    {
+      "id": "adv-a",
+      "description": "completeTask with record-kind ResourceRef in payload → RECORD_IN_PAYLOAD, NO engine call (live + unit)",
+      "result": "pass",
+      "note": "Payload shape: { rec: { kind: 'record', tenantId, registryId, recordId } }. assertVariableValue rejects, fetch not called. Test: flowable-client.adversarial.test.ts probe (a)."
+    },
+    {
+      "id": "adv-b",
+      "description": "bad credentials → UNAUTHORIZED typed code, not raw exception (unit/mock)",
+      "result": "pass",
+      "note": "Mock returns HTTP 401. Result: { ok:false, code:'UNAUTHORIZED' }. No thrown exception. Test: flowable-client.adversarial.test.ts probe (b)."
+    },
+    {
+      "id": "adv-c",
+      "description": "fetchAndLock with engine down (ECONNREFUSED mock) → ENGINE_UNAVAILABLE + maxRetries+1 attempts",
+      "result": "pass",
+      "note": "maxRetries=3, callCount verified=4 (initial+3 retries). No exception thrown. Test: flowable-client.adversarial.test.ts probe (c)."
+    },
+    {
+      "id": "adv-d",
+      "description": "startInstance with nonexistent process key → typed error code (live, flowable returns 404)",
+      "result": "pass",
+      "note": "Live probe against isolated Flowable (POSTGRES_PORT=55439, FLOWABLE_PORT=18084). Flowable returns 404 → { ok:false, code:'NOT_FOUND' }. No exception. Test: flowable-client.adversarial.test.ts probe (d)."
+    }
+  ],
+  "friction": [
+    {
+      "id": "F-1",
+      "description": "Integration test BPMN_PATH computed with '../../../' (3 levels up from src/__tests__/) resolves to choros-wt/config/ instead of choros-wt/T-0064/config/. Fixed to '../../' by tester.",
+      "root_class": "tooling-gap",
+      "resolution": "Fixed BPMN_PATH in flowable-client.integration.test.ts: '../../../' → '../../'."
+    },
+    {
+      "id": "F-2",
+      "description": "Isolated compose stack flowable healthcheck marks container 'unhealthy' because the Alpine wget inside the container does not support --user/--password flags. Service was actually up and responding HTTP 200. Non-blocking: tested via direct curl and npm fitness:flowable:ext.",
+      "root_class": "tooling-gap",
+      "resolution": "Verified service up via curl before running live tests. No code change needed — docker healthcheck false-negative does not affect test validity."
+    }
+  ],
+  "live_gate": {
+    "compose_project": "choros-test-t0064",
+    "postgres_port": 55439,
+    "flowable_port": 18084,
+    "volume": "choros-test-t0064_choros_pgdata",
+    "torn_down_after": true,
+    "smoke_script": "pass",
+    "integration_tests": "4/4 pass"
+  },
+  "integration_honesty": {
+    "d056_check": "pass",
+    "note": "CI flowable job invokes ci/checks/flowable/external-task-smoke.sh (FF-T0064-6). vitest discovery clean — no spurious test files included. Integration tests correctly gated by FLOWABLE_INTEGRATION=1."
+  }
+}
