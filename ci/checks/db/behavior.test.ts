@@ -1,8 +1,8 @@
 // Live behavioral probes over the T-0053 baseline. Covers FF-DENY · FF-SCOPE ·
 // FF-APPEND (live half). Run in the `db` CI job / locally against compose PG.
 //
-// NOTE: choros_migrator is subject to FORCE RLS too, so seeds set
-// choros.tenant_id within the transaction (default-DENY otherwise).
+// NOTE: seeds set choros.tenant_id within the transaction for semantic correctness
+// (to match runtime app behavior), not because RLS filters migrator (it doesn't).
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import pg from 'pg';

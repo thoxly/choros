@@ -168,7 +168,7 @@ single coder-facing list. Postgres types authoritative.
 |---|---|---|
 | `schema_migrations` | `version text PRIMARY KEY`, `applied_at timestamptz NOT NULL DEFAULT now()` | Runner bookkeeping (frozen seam). In `choros` schema. **Not** a tenant table (no `tenant_id`, no RLS) — it is migration metadata, not tenant data; excluded from `known_tenant_tables`. Duplicate `version` ⇒ PK violation (AC-4). |
 | `choros_app` (DB role) | `NOSUPERUSER`, `NOBYPASSRLS`, not owner of any table; `USAGE` on schema `choros`; per-table DML grants (`audit_event` = `SELECT,INSERT` only; `audit_head` = `SELECT,INSERT,UPDATE`, no `DELETE`); **no DDL / no CREATE**. Runtime connection role. | Provisioned in migration `001` (idempotent). Prod password injected at deploy (RL-1). |
-| `choros_migrator` (DB role) | Owns `choros` schema + all baseline tables; holds DDL; runs the runner; never used at runtime. Subject to FORCE RLS (even owner is filtered) — seeds/verifies set `choros.tenant_id` or accept default-DENY. | Provisioned in migration `001`. `DATABASE_URL` for the runner resolves to this role. |
+| `choros_migrator` (DB role) | Owns `choros` schema + all baseline tables; holds DDL; runs the runner; never used at runtime. Postgres superuser (`rolsuper=true`, `rolbypassrls=true`) — RLS does not filter it. Runtime isolation is enforced on `choros_app` (`NOSUPERUSER`, `NOBYPASSRLS`), which cannot escalate to `choros_migrator`. | Provisioned in migration `001`. `DATABASE_URL` for the runner resolves to this role. |
 
 ### 3.2 Tenant tables (the FR-3 ratified set — exactly these eight, no more)
 
