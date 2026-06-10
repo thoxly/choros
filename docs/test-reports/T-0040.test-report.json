@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0040",
+  "verdict": "pass",
+  "deterministic": { "total": 677, "passed": 677, "failed": 0 },
+  "suite_note": "npm run ci green end-to-end: tsc --noEmit (rc=0), eslint src (rc=0), npm run fitness (all checks incl. role-criticality-isolation FF-RC1..RC6 PASS), vitest run = 677 passed / 5 skipped (31 files; the 5 skips are pre-existing Flowable live-integration tests gated on a running engine, unrelated to T-0040). FF-RC7 unit suite src/__tests__/role-criticality.test.ts = 26/26 green. Optional isolated-Postgres db-job (POSTGRES_PORT=55469, own volume, torn down after) = fitness:db 243/243 green on a fresh apply of all 26 migrations — confirms T-0040's no-migration/derived posture broke nothing in the DDL substrate.",
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "FF-RC7 axis a > AC-1 effective approve grant sets approve_or_transition", "result": "pass" },
+    { "ac": "AC-2",  "test": "FF-RC7 axis a > AC-2 effective transition grant sets approve_or_transition", "result": "pass" },
+    { "ac": "AC-3",  "test": "FF-RC7 axis a > AC-3 only read/create/update/delete => approve_or_transition false", "result": "pass" },
+    { "ac": "AC-4",  "test": "FF-RC7 axis b > AC-4 effect_resource AND invoke => external_invoke", "result": "pass" },
+    { "ac": "AC-5",  "test": "FF-RC7 axis b > AC-5 invoke on NON-effect resource => external_invoke false", "result": "pass" },
+    { "ac": "AC-6",  "test": "FF-RC7 axis b > AC-6 effect_resource with NON-invoke op => external_invoke false", "result": "pass" },
+    { "ac": "AC-7",  "test": "FF-RC7 axis c > AC-7 read 'confidential' sets bit; 'restricted' (above threshold) also", "result": "pass" },
+    { "ac": "AC-8",  "test": "FF-RC7 axis c > AC-8 internal/public/no-marker => false + boundary (exact threshold raises, step below does not)", "result": "pass" },
+    { "ac": "AC-9",  "test": "FF-RC7 axis c > AC-9 'confidential' on NON-read op => false; same clearance on a real read grant DOES set bit", "result": "pass" },
+    { "ac": "AC-10", "test": "FF-RC7 level + carveout > AC-10 criticalityLevel 'critical' iff any bit else 'routine'", "result": "pass" },
+    { "ac": "AC-11", "test": "FF-RC7 effective-window > AC-11 out-of-window contributes zero (expired & not-yet-valid); in-window flips bit", "result": "pass" },
+    { "ac": "AC-12", "test": "FF-RC7 criticalityDiff > AC-12 false->true expands+escalates; true->false narrowing & cosmetic same-state do not", "result": "pass" },
+    { "ac": "AC-13", "test": "FF-RC7 fail-closed > AC-13 out-of-vocab operation never clears a real bit; alone raises nothing", "result": "pass" },
+    { "ac": "AC-14", "test": "FF-RC7 determinism/purity > AC-14 combineCriticality + roleCriticality deep-equal across calls; port is only IO seam", "result": "pass" },
+    { "ac": "AC-15", "test": "fitness ci/checks/role-criticality-isolation.sh FF-RC1 (no parallel-authority token) + FF-RC2 (no pg/fs/net/http import)", "result": "pass" },
+    { "ac": "AC-16", "test": "fitness role-criticality-isolation.sh FF-RC5 (frozen-foundation byte-diff vs base 99d6612: grant-lattice/data-classification/effect-resource/grant-resolver/object-handle/migrations untouched) + tsc --noEmit rc=0", "result": "pass" },
+    { "ac": "AC-17", "test": "fitness role-criticality-isolation.sh FF-RC6 (no new migrations/*.sql; known_tenant_tables.txt byte-unchanged; cross-tenant fitness set unchanged)", "result": "pass" },
+    { "ac": "AC-18", "test": "fitness role-criticality-isolation.sh FF-RC4 (all 8 T-0044 seam exports present; DataClass/deriveClearance imported from data-classification.ts, not redeclared) + tsc type-checks the import-all usage in the test consumer", "result": "pass" }
+  ],
+  "adversarial_probes": [
+    {
+      "id": "ADV-a",
+      "name": "R-1 live: corrupt clearance marker on a read grant",
+      "setup": "read grant with constraint.clearance = 'ultrasecret' (not a member of the closed DataClass set), effective at NOW",
+      "observed": "sensitive_read === false, level === 'routine' (UNDER-flag). deriveClearance -> readClearanceMarker -> isDataClass rejects the garbage token to null, so axis c stays false. Monotonicity holds: a corrupt-clearance read grant does NOT clear a sibling real 'confidential' read grant in the same set (bit stays true).",
+      "verdict": "documented, not a defect",
+      "for_T-0044": "Per-task NF-3 'doubt -> MORE criticality' is monotone-EXACT for axes a/b (an OR-fold .some() can only fail to RAISE, never lower), but axis c inherits T-0033 deriveClearance's quiet-null: a corrupt clearance token resolves to null rather than to the maximal class, so a garbage clearance marker under-flags rather than over-flags. Spec-conformant (FR-4/AC-8 define the bit via deriveClearance yielding a DataClass; 'no resolvable clearance marker => false'). Fixing would require editing the FROZEN T-0033 deriveClearance (out of scope, forbidden by NF-5). Cross-task seam for T-0044/T-0033: if a corrupt clearance marker should ELEVATE criticality, that is a clearance-corruption-signal design question on the join, not a T-0040 contract-boundary defect. Confirms reviewer nit R-1 factually."
+    },
+    {
+      "id": "ADV-b",
+      "name": "expired approve window + effective confidential read",
+      "setup": "one approve grant on an EXPIRED window (validUntil = NOW-1) + one effective read grant conferring 'confidential'",
+      "observed": "{ approve_or_transition: false, external_invoke: false, sensitive_read: true, level: 'critical' }",
+      "verdict": "pass — matches expected {a:false, c:true}; effective-window gate (FR-6) correctly drops the expired approve, the live confidential read raises axis c, any-bit => critical"
+    },
+    {
+      "id": "ADV-c",
+      "name": "criticalityDiff escalation direction (contract §5)",
+      "setup": "none -> {c} (confidential read added), then {c} -> {a,c} (approve added on top)",
+      "observed": "none->{c}: escalates=true, expanded={a:false,b:false,c:true} (routine->critical step). {c}->{a,c}: expanded.approve_or_transition=true (newly held), expanded.sensitive_read=false (already held, not an expansion), escalates=false (already critical => no routine->critical step).",
+      "verdict": "pass — 'raising' direction consistent with §5: escalates keys ONLY on routine->critical; a within-critical bit addition expands that bit but does not re-escalate"
+    },
+    {
+      "id": "ADV-d",
+      "name": "10k-grant fold performance smoke (no quadratic blowup)",
+      "setup": "10000 grants (mostly internal-only reads + a sprinkle of effect-invoke and approve), single combineCriticality call",
+      "observed": "1.44ms; output correct (a:true, b:true, c:false (all reads internal), level:'critical'). Linear-fold cost; well under a loose 250ms ceiling.",
+      "verdict": "pass — fold is linear in grant count (filter + .some + .filter + deriveClearance loop), no O(n^2) behaviour"
+    },
+    {
+      "id": "ADV-e",
+      "name": "combineCriticality([]) neutral element",
+      "setup": "empty grant array",
+      "observed": "{ approve_or_transition: false, external_invoke: false, sensitive_read: false, level: 'routine' } (deep-equal)",
+      "verdict": "pass — empty input is the identity/neutral element of the criticality fold (all axes false, routine)"
+    }
+  ],
+  "secondary_ux": [
+    { "check": "no web-front UX surface in scope", "result": "n/a", "note": "vtorичная; T-0040 is a pure core function (src/core/role-criticality.ts); ra-criticality.jsx mockup wiring is explicitly out-of-scope (spec §3). No browser/LLM check applicable." }
+  ],
+  "failures": [],
+  "integration_honesty_D056": "The only importer of role-criticality.ts today is its own test file; there is no production consumer call-site yet. This is BY DESIGN and spec-conformant, NOT dead code: spec §0/FR-7/§3 fix the consumer (T-0044 dual-control gate) as a sibling explicitly NOT built here — T-0040 owns the computation + the frozen T-0044 contract only. The contract is exercised end-to-end through the async port seam roleCriticality(source, tenant, role, nowMs) in AC-14, and the full export surface is asserted reachable by FF-RC4 and type-checked by tsc against an import-all test consumer. Honest seam note, not a friction.",
+  "verdict_basis": "Deterministic CI is green end-to-end (tsc + eslint + fitness + 677/677 vitest); all 18 ACs are covered by a passing deterministic test or fitness check (14 unit + 4 fitness, 26 assertions in FF-RC7); 5 fresh adversarial probes (R-1 live, mixed-window, diff direction, 10k smoke, empty neutral) confirmed expected behaviour with no product defect found; the isolated-Postgres db-job (243/243) confirms the no-migration posture broke nothing. The single under-flag (axis-c corrupt clearance, R-1) is spec-conformant and a frozen-T-0033 inheritance, recorded as a cross-task seam for T-0044, not a T-0040 defect. verdict = pass."
+}
