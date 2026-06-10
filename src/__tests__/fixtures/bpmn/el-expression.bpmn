@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="elProcess" name="EL Expression Process" isExecutable="true">
+    <sequenceFlow id="flow1" sourceRef="start" targetRef="end">
+      <conditionExpression>${someVar == true}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>

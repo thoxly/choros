@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="primitiveProcess" name="Primitive Bindings Process" isExecutable="true">
+    <serviceTask id="task1" name="Simple Task">
+      <extensionElements>
+        <flowable:field name="stringVar">
+          <flowable:string>hello world</flowable:string>
+        </flowable:field>
+        <flowable:field name="numVar">
+          <flowable:string>42</flowable:string>
+        </flowable:field>
+        <flowable:field name="boolVar">
+          <flowable:string>true</flowable:string>
+        </flowable:field>
+      </extensionElements>
+    </serviceTask>
+  </process>
+</definitions>

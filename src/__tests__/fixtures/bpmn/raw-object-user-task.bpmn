@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="rawUserTaskProcess" name="Raw Object User Task" isExecutable="true">
+    <userTask id="task2" name="Review Task">
+      <extensionElements>
+        <flowable:field name="formData">
+          <flowable:string>{"data":{"name":"Alice"}}</flowable:string>
+        </flowable:field>
+      </extensionElements>
+    </userTask>
+  </process>
+</definitions>

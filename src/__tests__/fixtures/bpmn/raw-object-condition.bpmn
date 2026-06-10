@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             targetNamespace="http://www.flowable.org/processdef">
+  <process id="rawConditionProcess" name="Raw Object Condition" isExecutable="true">
+    <sequenceFlow id="flow1" sourceRef="gateway" targetRef="task1">
+      <conditionExpression>{"fields":["name","email"]}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>
