@@ -81,7 +81,7 @@ describe("Static File Serving E2E", () => {
     const result = await makeRequest("GET", "/health");
     expect(result.statusCode).toBe(200);
     const data = JSON.parse(result.body);
-    expect(data).toEqual({ status: "ok" });
+    expect(data.status).toBe("ok"); // T-0114: response now includes queue metrics
   });
 
   it("Regression: GET /api/inbox returns 200 with items", async () => {
