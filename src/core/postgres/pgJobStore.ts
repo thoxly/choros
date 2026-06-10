@@ -192,14 +192,16 @@ export class PostgresJobStore {
   // complete — atomic CTE ownership gate (ADR §4.3)
   // ---------------------------------------------------------------------------
   async complete(workerId: string, jobId: string): Promise<CompleteResult> {
-    // The CTE reads the current row, computes a verdict, then updates only if
-    // verdict='OK'. The final SELECT returns the verdict regardless of whether
-    // the UPDATE ran, so TS can distinguish each gate failure code.
+    // Uses a single atomic UPDATE with re-read for gate verification.
+    // FOR UPDATE in the CTE serializes concurrent complete calls (FF-7):
+    // the second concurrent transaction blocks until the first commits, then
+    // re-reads the already-COMPLETED row and returns NOT_LOCKED.
     const { rows } = await this.pool.query<{ verdict: string }>(
-      `WITH current AS (
+      `WITH locked_row AS (
          SELECT id, state, lock_owner, lock_expiry
          FROM choros.job
          WHERE id = $1
+         FOR UPDATE
        ),
        gate AS (
          SELECT
@@ -212,10 +214,10 @@ export class PostgresJobStore {
              ELSE 'OK'
            END AS verdict
          FROM (
-           SELECT * FROM current
+           SELECT * FROM locked_row
            UNION ALL
            SELECT NULL, NULL, NULL, NULL
-           WHERE NOT EXISTS (SELECT 1 FROM current)
+           WHERE NOT EXISTS (SELECT 1 FROM locked_row)
          ) g
        ),
        upd AS (
@@ -247,10 +249,11 @@ export class PostgresJobStore {
     const newAvailableAt = retries > 0 ? now + retryTimeoutMs : null;
 
     const { rows } = await this.pool.query<{ verdict: string }>(
-      `WITH current AS (
+      `WITH locked_row AS (
          SELECT id, state, lock_owner, lock_expiry, available_at
          FROM choros.job
          WHERE id = $1
+         FOR UPDATE
        ),
        gate AS (
          SELECT
@@ -264,10 +267,10 @@ export class PostgresJobStore {
              ELSE 'OK'
            END AS verdict
          FROM (
-           SELECT * FROM current
+           SELECT * FROM locked_row
            UNION ALL
            SELECT NULL, NULL, NULL, NULL, NULL
-           WHERE NOT EXISTS (SELECT 1 FROM current)
+           WHERE NOT EXISTS (SELECT 1 FROM locked_row)
          ) g
        ),
        upd AS (

@@ -13,7 +13,7 @@
  *
  * Output shape (ADR §4.6):
  *   {
- *     depth: number,          // CREATED with available_at<=now AND LOCKED rows ready
+ *     depth: number,          // CREATED+LOCKED with available_at<=now
  *     lockedCount: number,    // LOCKED rows
  *     failedCount: number,    // FAILED rows
  *     completedCount: number, // COMPLETED rows
@@ -23,10 +23,12 @@
  */
 import pg from "pg";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
 export interface QueueStats {
   depth: number;
   lockedCount: number;
@@ -47,65 +49,62 @@ export interface QueueStatsFail {
 export type QueueStatsResult = QueueStatsOk | QueueStatsFail;
 
 // ---------------------------------------------------------------------------
-// Core query (ADR §4.6)
+// Programmatic API — for use in integration tests without subprocess spawn
 // ---------------------------------------------------------------------------
-async function fetchStats(pool: pg.Pool): Promise<QueueStats> {
-  const now = Date.now();
-  const { rows } = await pool.query<{
-    depth: string;
-    locked_count: string;
-    failed_count: string;
-    completed_count: string;
-    dlq_count: string;
-    oldest_available_at: string | null;
-  }>(
-    `SELECT
-       COUNT(*) FILTER (WHERE state IN ('CREATED','LOCKED') AND available_at <= $1) AS depth,
-       COUNT(*) FILTER (WHERE state = 'LOCKED')                                      AS locked_count,
-       COUNT(*) FILTER (WHERE state = 'FAILED')                                      AS failed_count,
-       COUNT(*) FILTER (WHERE state = 'COMPLETED')                                   AS completed_count,
-       COUNT(*) FILTER (WHERE state = 'FAILED' AND retries = 0)                      AS dlq_count,
-       MIN(available_at) FILTER (WHERE state IN ('CREATED','LOCKED') AND available_at <= $1) AS oldest_available_at
-     FROM choros.job`,
-    [now]
-  );
-  const row = rows[0];
-  const oldestAvailableAt = row.oldest_available_at != null
-    ? Number(row.oldest_available_at)
-    : null;
-  return {
-    depth: Number(row.depth),
-    lockedCount: Number(row.locked_count),
-    failedCount: Number(row.failed_count),
-    completedCount: Number(row.completed_count),
-    dlqCount: Number(row.dlq_count),
-    oldestAvailableLagMs: oldestAvailableAt != null ? now - oldestAvailableAt : null,
-  };
-}
 
-// ---------------------------------------------------------------------------
-// Programmatic API — for use in integration tests
-// ---------------------------------------------------------------------------
 /**
  * Programmatic queue stats runner. Never throws. Returns QueueStatsResult.
  */
 export async function getQueueStats(dbUrl: string): Promise<QueueStatsResult> {
   const pool = new pg.Pool({ connectionString: dbUrl });
   try {
-    const stats = await fetchStats(pool);
+    const now = Date.now();
+    const { rows } = await pool.query<{
+      depth: string;
+      locked_count: string;
+      failed_count: string;
+      completed_count: string;
+      dlq_count: string;
+      oldest_available_at: string | null;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE state IN ('CREATED','LOCKED') AND available_at <= $1) AS depth,
+         COUNT(*) FILTER (WHERE state = 'LOCKED')                                      AS locked_count,
+         COUNT(*) FILTER (WHERE state = 'FAILED')                                      AS failed_count,
+         COUNT(*) FILTER (WHERE state = 'COMPLETED')                                   AS completed_count,
+         COUNT(*) FILTER (WHERE state = 'FAILED' AND retries = 0)                      AS dlq_count,
+         MIN(available_at) FILTER (WHERE state IN ('CREATED','LOCKED') AND available_at <= $1) AS oldest_available_at
+       FROM choros.job`,
+      [now]
+    );
+    const row = rows[0];
+    const oldestAvailableAt = row.oldest_available_at != null
+      ? Number(row.oldest_available_at)
+      : null;
+    const stats: QueueStats = {
+      depth: Number(row.depth),
+      lockedCount: Number(row.locked_count),
+      failedCount: Number(row.failed_count),
+      completedCount: Number(row.completed_count),
+      dlqCount: Number(row.dlq_count),
+      oldestAvailableLagMs: oldestAvailableAt != null ? now - oldestAvailableAt : null,
+    };
     return { ok: true, stats };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: message };
+    const message = err instanceof Error
+      ? (err.message || err.toString() || `${err.constructor?.name ?? "Error"}`)
+      : String(err);
+    return { ok: false, error: message || "connection failed" };
   } finally {
-    await pool.end();
+    await pool.end().catch(() => {/* ignore close errors */});
   }
 }
 
 // ---------------------------------------------------------------------------
-// CLI entry point
+// CLI entry point — only runs when this file is the main module
 // ---------------------------------------------------------------------------
-async function main(): Promise<void> {
+
+async function cli(): Promise<void> {
   let dbUrl: string | undefined;
 
   try {
@@ -135,8 +134,15 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
-  process.exit(0);
-});
+// Guard: only run CLI when invoked directly (not when imported by tests)
+const isMain = process.argv[1] &&
+  (process.argv[1] === fileURLToPath(import.meta.url) ||
+   process.argv[1].endsWith("queue_stats.js"));
+
+if (isMain) {
+  cli().catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
+    process.exit(0);
+  });
+}

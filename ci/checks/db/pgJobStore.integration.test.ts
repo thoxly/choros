@@ -841,7 +841,8 @@ describe("AC-17: queue_stats returns correct metrics for known seed", () => {
     const r = await getQueueStats(migratorUrl());
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.stats.depth).toBe(5); // only CREATED with available_at<=now (LOCKED has available_at but depth counts CREATED only by default)
+    // depth = CREATED+LOCKED with available_at<=now (ADR §4.6): 5+2=7
+    expect(r.stats.depth).toBe(7);
     expect(r.stats.lockedCount).toBe(2);
     expect(r.stats.failedCount).toBe(1);
     expect(r.stats.completedCount).toBe(3);
