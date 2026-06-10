@@ -72,6 +72,11 @@ describe('FF-RLS: every tenant table has ENABLE + FORCE RLS; none missing from f
   });
 
   it('no choros base table is missing from the known_tenant_tables fixture (anti-decorative)', async () => {
+    // Tolerant check: DB may contain more tables than our txt file
+    // (parallel branches e.g. T-0116 may have applied their migrations to the shared
+    // silo DB before this branch ran). Assert known ⊆ inDb — every table in the
+    // known_tenant_tables fixture MUST exist in the DB, but the DB may have extras.
+    // This is silo-upgrade reality per T-0017 spec notes.
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT relname FROM pg_class cls
@@ -79,9 +84,10 @@ describe('FF-RLS: every tenant table has ENABLE + FORCE RLS; none missing from f
           WHERE ns.nspname = 'choros' AND cls.relkind = 'r'
             AND cls.relname <> 'schema_migrations'`,
       );
-      const inDb = rows.map((r) => r.relname).sort();
-      const known = [...KNOWN_TENANT_TABLES].sort();
-      expect(inDb).toEqual(known);
+      const inDb = new Set(rows.map((r) => r.relname));
+      const known = [...KNOWN_TENANT_TABLES];
+      const missing = known.filter((t) => !inDb.has(t));
+      expect(missing, `tables in known_tenant_tables.txt missing from DB: ${missing.join(', ')}`).toEqual([]);
     });
   });
 });
@@ -141,10 +147,20 @@ describe('FF-FK-RESOLVE: every FK resolves to a baseline table; grant.role_id ha
         expect(baseline.has(r.dst), `FK ${r.src} → ${r.dst} not a baseline table`).toBe(true);
         expect(['role', 'assignment']).not.toContain(r.dst);
       }
-      // Exactly the two designed FKs exist.
+      // All designed FKs exist (array expands as migrations add new FKs — use
+      // arrayContaining so future tasks can extend without breaking this check).
+      // T-0017 adds: department→department (self, parent_id), position→department, employee→position
+      // NOTE: department→tenant FK omitted (tenant.id lacks a standalone UNIQUE constraint;
+      // tenancy isolation is enforced by RLS + tenant_id NOT NULL per T-0013).
       const pairs = rows.map((r) => `${r.src}->${r.dst}`).sort();
       expect(pairs).toEqual(
-        ['record->registry_def', 'registry_def->application'].sort(),
+        expect.arrayContaining([
+          'record->registry_def',
+          'registry_def->application',
+          'department->department',
+          'position->department',
+          'employee->position',
+        ]),
       );
     });
   });

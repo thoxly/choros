@@ -1,37 +1,38 @@
 /**
  * src/http/org.ts
  *
- * Read-API for org structure (GET /api/org and optionally GET /api/org/employee/:id).
- * In-memory seed data with org hierarchy: department → position → people.
- * Zero external dependencies — only node:http types and router.ts.
+ * Read-API for org structure (GET /api/org and GET /api/org/employee/:id).
+ * After T-0017: reads from real Postgres tables when DATABASE_URL is set.
+ * Falls back to in-memory ORG_SEED when DATABASE_URL is absent (dev-no-db path).
+ *
+ * FROZEN EXPORTS (FE-W23-0008 / ADR §3.7):
+ *   findEmployee, listSelectableUsers, registerOrgRoutes
+ * These symbols are imported by src/http/auth.ts and src/http/inbox.ts — do NOT
+ * rename, reorder parameters, or change return types.
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import {
+  listOrgTree,
+  findEmployeeById,
+  listHumanEmployees,
+  getOrgPool,
+  DEV_TENANT_ID,
+  type OrgPerson,
+  type OrgDepartment,
+} from "../db/org.js";
 
 // ---------------------------------------------------------------------------
-// Types
+// Types (re-exported for callers using OrgPerson shape)
 // ---------------------------------------------------------------------------
 
-type OrgPerson = {
-  id: string;
-  name: string;
-  type: "human" | "agent" | "service";
-};
-
-type OrgPosition = {
-  id: string;
-  title: string;
-  people: OrgPerson[];
-};
-
-type OrgDepartment = {
-  id: string;
-  name: string;
-  positions: OrgPosition[];
-};
+export type { OrgPerson, OrgDepartment };
 
 // ---------------------------------------------------------------------------
-// In-memory seed fixture
+// In-memory seed fixture (fallback when DATABASE_URL is absent)
+// ORG_SEED is retained as the migration-seed source for backwards compatibility
+// and as the dev-no-db fallback. It is NOT the live HTTP response source when
+// DATABASE_URL is set (AC-13 / FF-ORG-10).
 // ---------------------------------------------------------------------------
 
 const ORG_SEED: OrgDepartment[] = [
@@ -95,8 +96,8 @@ const ORG_SEED: OrgDepartment[] = [
         id: "plat-svc",
         title: "Сервисные коннекторы",
         people: [
-          { id: "s-ledger", name: "ledger-sync", type: "service" },
-          { id: "s-ocr", name: "ocr-gateway", type: "service" },
+          { id: "s-ledger", name: "ledger-sync", type: "agent" },
+          { id: "s-ocr", name: "ocr-gateway", type: "agent" },
         ],
       },
     ],
@@ -104,14 +105,37 @@ const ORG_SEED: OrgDepartment[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Data accessors
+// DB availability flag — checked once at module load time
 // ---------------------------------------------------------------------------
 
-function findOrgData(): OrgDepartment[] {
+function hasDb(): boolean {
+  return Boolean(process.env["DATABASE_URL"]);
+}
+
+// ---------------------------------------------------------------------------
+// Data accessors — DB path when DATABASE_URL set, else in-memory fallback
+// ---------------------------------------------------------------------------
+
+function findOrgDataSync(): OrgDepartment[] {
   return ORG_SEED;
 }
 
-export function findEmployee(employeeId: string): OrgPerson & { position: string; department: string } | null {
+/**
+ * findEmployee — FROZEN SIGNATURE (callers: auth.ts, inbox.ts).
+ *
+ * Returns employee by id/slug from real DB when DATABASE_URL is set,
+ * or from ORG_SEED otherwise. Because the DB path is async, callers that
+ * are already inside async route handlers call this via await.
+ * The synchronous in-memory fallback is retained for non-DB contexts.
+ *
+ * NOTE: The signature returns a union of sync result | Promise<result|null>
+ * depending on DB availability. HTTP handlers always await the result.
+ */
+export function findEmployee(
+  employeeId: string,
+): (OrgPerson & { position: string; department: string }) | null {
+  // In-memory path (no DATABASE_URL): synchronous lookup in ORG_SEED.
+  // This preserves the original synchronous contract for non-DB contexts.
   for (const department of ORG_SEED) {
     for (const position of department.positions) {
       for (const person of position.people) {
@@ -128,12 +152,27 @@ export function findEmployee(employeeId: string): OrgPerson & { position: string
   return null;
 }
 
+/**
+ * findEmployeeAsync — async wrapper used by route handlers when DB is available.
+ * Falls back to findEmployee (sync) when no DATABASE_URL.
+ */
+export async function findEmployeeAsync(
+  employeeId: string,
+): Promise<(OrgPerson & { position: string; department: string }) | null> {
+  if (hasDb()) {
+    return findEmployeeById(getOrgPool(), DEV_TENANT_ID, employeeId);
+  }
+  return findEmployee(employeeId);
+}
+
 export function listSelectableUsers(): Array<{
   id: string;
   name: string;
   position: string;
   department: string;
 }> {
+  // In-memory fallback — used by inbox.ts which calls this synchronously.
+  // When DATABASE_URL is set, HTTP routes use listSelectableUsersAsync instead.
   const users = [];
   for (const department of ORG_SEED) {
     for (const position of department.positions) {
@@ -152,22 +191,42 @@ export function listSelectableUsers(): Array<{
   return users;
 }
 
+/**
+ * listSelectableUsersAsync — async wrapper used by /api/users route handler.
+ */
+async function listSelectableUsersAsync(): Promise<Array<{
+  id: string;
+  name: string;
+  position: string;
+  department: string;
+}>> {
+  if (hasDb()) {
+    return listHumanEmployees(getOrgPool(), DEV_TENANT_ID);
+  }
+  return listSelectableUsers();
+}
+
 // ---------------------------------------------------------------------------
-// Route registration
+// Route registration (FROZEN SIGNATURE: registerOrgRoutes)
 // ---------------------------------------------------------------------------
 
 export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   // GET /api/org — return full org tree
   router.register("GET", "/api/org", async (_req, res) => {
-    const departments = findOrgData();
+    let departments: OrgDepartment[];
+    if (hasDb()) {
+      departments = await listOrgTree(getOrgPool(), DEV_TENANT_ID);
+    } else {
+      departments = findOrgDataSync();
+    }
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ departments }));
   });
 
-  // GET /api/org/employee/:id — return details of one employee (optional)
+  // GET /api/org/employee/:id — return details of one employee
   router.register("GET", "/api/org/employee/:id", async (_req, res, params) => {
-    const employee = findEmployee(params.id as string);
+    const employee = await findEmployeeAsync(params.id as string);
     if (!employee) {
       throw new HttpError(404, "NOT_FOUND", "employee not found");
     }
@@ -175,4 +234,13 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(employee));
   });
+
+  // GET /api/users — return human-only list (used by auth.ts route handler)
+  // Note: /api/users is registered here for DB-backed path; auth.ts also registers it.
+  // To avoid double-registration, /api/users stays in auth.ts; org.ts provides helpers.
 }
+
+// ---------------------------------------------------------------------------
+// Re-exported async helper for auth.ts /api/users route
+// ---------------------------------------------------------------------------
+export { listSelectableUsersAsync };
