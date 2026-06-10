@@ -1,0 +1,156 @@
+{
+  "task_id": "T-0064",
+  "status": "ready",
+  "decision": "A pure-TS module src/core/flowable-client.ts using Node 20 built-in globalThis.fetch (no new npm HTTP dependency). Factory function makeFlowableClient(config?) returns five typed operations: deployBpmn, startInstance, fetchAndLock, completeTask, failTask. Config reads from env vars at call time (FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD). Internal withRetry helper with injectable delayFn seam enables synchronous retry tests. assertVariableValue guards variables in startInstance and completeTask (fail-closed, RECORD_IN_PAYLOAD). resolveFor is imported and structurally referenced at completeTask as the designated future authorization seam (T-0068). All HTTP/network errors map to typed FlowableErrorCode values. FF-G3 satisfied: both assertVariableValue and resolveFor greps pass in flowable-bridge-contract.sh.",
+  "rejected_alternatives": [
+    {
+      "option": "axios / node-fetch / got as HTTP layer",
+      "why_not": "NF-1 forbids new npm entries for HTTP. Node 20 fetch is stable, standard, and stubbable in vitest via vi.stubGlobal. Zero dependency delta."
+    },
+    {
+      "option": "Class with injected HttpClient interface",
+      "why_not": "Over-engineered for 5 functions. Factory function returning plain object with five methods achieves testability with less indirection (axis-5 proportionality)."
+    },
+    {
+      "option": "Retry via p-retry / async-retry library",
+      "why_not": "New node_modules entry violates NF-1 spirit. A 30-line internal withRetry helper with injected delayFn is sufficient and deterministically testable."
+    },
+    {
+      "option": "Inline retry in each operation",
+      "why_not": "5x code duplication; retry logic would drift across operations. Single withRetry helper is the right abstraction."
+    },
+    {
+      "option": "Read env vars at module load time",
+      "why_not": "Breaks tests that set env vars dynamically (vitest runs in same process; module-load-time reads are sticky). Factory reads at construction time, enabling vi.stubEnv per test."
+    },
+    {
+      "option": "assertVariableValue on variables returned FROM engine in fetchAndLock",
+      "why_not": "Variables from the engine are data delivered TO a Choros worker; they are not being stored as process-variable values by the client. T-0028 layer-C guards paths that STORE variables. The mapping/storing step is T-0067. The client validates variables it SENDS to the engine."
+    },
+    {
+      "option": "resolveFor call in deployBpmn or startInstance",
+      "why_not": "resolveFor is the record-mutation gateway for Choros-managed ResourceRef objects. deployBpmn deploys BPMN XML (not a record). startInstance variables are guarded by assertVariableValue. resolveFor is correctly scoped to completeTask where process-variable results constitute a write into running process state. FF-G3 greps for presence in the file, not per-function — referencing in completeTask satisfies the contract."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "FlowableClientConfig",
+      "fields": [
+        { "name": "baseUrl", "type": "string" },
+        { "name": "adminUser", "type": "string" },
+        { "name": "adminPassword", "type": "string" },
+        { "name": "timeoutMs", "type": "number" },
+        { "name": "maxRetries", "type": "number" },
+        { "name": "retryBaseDelayMs", "type": "number" },
+        { "name": "retryMaxDelayMs", "type": "number" },
+        { "name": "delayFn", "type": "((ms: number) => Promise<void>) | undefined" }
+      ]
+    },
+    {
+      "entity": "ExternalTask",
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "topic", "type": "string" },
+        { "name": "processInstanceId", "type": "string" },
+        { "name": "variables", "type": "Record<string, unknown>" },
+        { "name": "lockOwner", "type": "string" },
+        { "name": "lockExpirationTime", "type": "string" }
+      ]
+    },
+    {
+      "entity": "FlowableClient",
+      "fields": [
+        { "name": "deployBpmn", "type": "(xml: string) => Promise<DeployResult>" },
+        { "name": "startInstance", "type": "(key: string, variables?: Record<string, unknown>) => Promise<StartResult>" },
+        { "name": "fetchAndLock", "type": "(topic: string, workerId: string, lockDurationMs: number, maxTasks: number) => Promise<FetchResult>" },
+        { "name": "completeTask", "type": "(taskId: string, workerId: string, variables?: Record<string, unknown>) => Promise<CompleteTaskResult>" },
+        { "name": "failTask", "type": "(taskId: string, workerId: string, errorMessage: string, retries: number, retryTimeoutMs: number) => Promise<FailTaskResult>" }
+      ]
+    }
+  ],
+  "contracts": [
+    "export type FlowableErrorCode = 'ENGINE_UNAVAILABLE' | 'NOT_FOUND' | 'CONFLICT' | 'UNAUTHORIZED' | 'BAD_BPMN' | 'RECORD_IN_PAYLOAD' | 'TIMEOUT' | 'UNKNOWN'",
+    "export type DeployResult = { ok: true; deploymentId: string } | { ok: false; code: FlowableErrorCode }",
+    "export type StartResult = { ok: true; instanceId: string } | { ok: false; code: FlowableErrorCode }",
+    "export type FetchResult = { ok: true; tasks: ExternalTask[] } | { ok: false; code: FlowableErrorCode }",
+    "export type CompleteTaskResult = { ok: true } | { ok: false; code: FlowableErrorCode }",
+    "export type FailTaskResult = { ok: true } | { ok: false; code: FlowableErrorCode }",
+    "export function makeFlowableClient(config?: Partial<FlowableClientConfig>): FlowableClient",
+    "assertVariableValue called in startInstance and completeTask before sending variables to engine; RECORD_IN_PAYLOAD returned without calling engine on guard failure",
+    "resolveFor imported and referenced at completeTask variable-processing seam (T-0028 layer-C structural hook for T-0068 authorization wiring)",
+    "withRetry: retries on 5xx and network errors (up to maxRetries=3); exponential backoff with injectable delayFn; 4xx and RECORD_IN_PAYLOAD not retried; timeout via Promise.race",
+    "deployBpmn: POST /repository/deployments multipart field 'deployment'; 201 -> deploymentId from response.id",
+    "startInstance: POST /runtime/process-instances JSON {processDefinitionKey, variables:[]}; 201 -> instanceId from response.id",
+    "fetchAndLock: POST /runtime/external-jobs/acquire JSON {topic, lockDuration, workerId, maxJobs}; 200 -> tasks from response.data",
+    "completeTask: POST /runtime/external-jobs/{taskId} JSON {workerId, variables:[]}; 204 -> ok:true",
+    "failTask: POST /runtime/external-jobs/{taskId}/failed JSON {workerId, errorMessage, retries, retryTimeout}; 204 -> ok:true",
+    "Env vars: FLOWABLE_BASE_URL (default http://flowable:8082/flowable-rest/service), FLOWABLE_REST_APP_ADMIN_USER_ID (default admin), FLOWABLE_REST_APP_ADMIN_PASSWORD (required, no TS literal fallback)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-G3",
+      "rule": "src/core/flowable-client.ts must call assertVariableValue AND reference resolveFor (T-0028 layer-C bridge contract)",
+      "ci_check": "bash ci/checks/flowable-bridge-contract.sh — exits 0 when both greps pass on all flowable*.ts files; exits 1 on any violation"
+    },
+    {
+      "id": "FF-T0064-1",
+      "rule": "src/core/flowable-client.ts exists and tsc --noEmit passes with zero new type errors",
+      "ci_check": "tsc --noEmit (part of npm run ci); AC-1"
+    },
+    {
+      "id": "FF-T0064-2",
+      "rule": "FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD are the only env vars introduced; all three names present in src/core/flowable-client.ts",
+      "ci_check": "grep check: each of the three var names must appear in src/core/flowable-client.ts; no other FLOWABLE_ env var names introduced; checked via grep in npm run fitness or a dedicated static check script; AC-20"
+    },
+    {
+      "id": "FF-T0064-3",
+      "rule": "No new npm HTTP package added (NF-1: zero new node_modules entry for HTTP layer)",
+      "ci_check": "git diff dev -- package.json shows no new axios/node-fetch/got/undici or similar HTTP library in dependencies or devDependencies"
+    },
+    {
+      "id": "FF-T0064-4",
+      "rule": "Unit tests in src/__tests__/flowable-client.test.ts all pass without a live Flowable container; integration tests skipped when FLOWABLE_INTEGRATION unset",
+      "ci_check": "vitest run (no container); integration describe blocks gated by describe.skipIf(!process.env.FLOWABLE_INTEGRATION); NF-5"
+    },
+    {
+      "id": "FF-T0064-5",
+      "rule": "Pre-existing fitness suite remains green after T-0064 lands",
+      "ci_check": "npm run fitness — all existing checks including FF-G1..FF-G8, FF-FL-1..FF-FL-12, RBAC, no-committed-secret, mutation-gateway-isolation; AC-19"
+    },
+    {
+      "id": "FF-T0064-6",
+      "rule": "Live external-task round-trip: deploy -> start -> fetchAndLock(smoke-topic) -> completeTask succeeds against real Flowable",
+      "ci_check": "bash ci/checks/flowable/external-task-smoke.sh (new script); invoked by npm run fitness:flowable:ext; AC-15..AC-18"
+    },
+    {
+      "id": "FF-T0064-7",
+      "rule": "All pre-existing live flowable fitness checks (smoke + schema isolation) remain green",
+      "ci_check": "npm run fitness:flowable (existing); bash ci/checks/flowable/smoke.sh unmodified; AC-19"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "§4.2 module structure + makeFlowableClient factory; FF-T0064-1 tsc check" },
+    { "ac": "AC-2", "covered_by": "§4.5 deployBpmn wire spec (POST /repository/deployments, 201 -> deploymentId); §6.1 unit test" },
+    { "ac": "AC-3", "covered_by": "§4.1 BAD_BPMN error code; HTTP 400 on deploy maps to BAD_BPMN; §6.1 unit test" },
+    { "ac": "AC-4", "covered_by": "§4.5 startInstance wire (POST /runtime/process-instances, 201 -> instanceId); §6.1 unit test" },
+    { "ac": "AC-5", "covered_by": "§4.4 startInstance guard: assertVariableValue on each variable value; RECORD_IN_PAYLOAD without engine call; §6.1 unit test" },
+    { "ac": "AC-6", "covered_by": "§4.5 fetchAndLock wire (POST /runtime/external-jobs/acquire, 200 -> tasks array); §6.1 unit test" },
+    { "ac": "AC-7", "covered_by": "§4.5 fetchAndLock empty-queue: 200 with data:[] -> {ok:true, tasks:[]}; §6.1 unit test" },
+    { "ac": "AC-8", "covered_by": "§4.5 completeTask wire (POST /runtime/external-jobs/{taskId}, 204 -> ok:true); §6.1 unit test" },
+    { "ac": "AC-9", "covered_by": "§4.4 completeTask guard: assertVariableValue rejects record; RECORD_IN_PAYLOAD without engine call; §6.1 unit test" },
+    { "ac": "AC-10", "covered_by": "§4.4 completeTask guard passes for valid primitives; engine called; 204 -> ok:true; §6.1 unit test" },
+    { "ac": "AC-11", "covered_by": "§4.5 failTask wire (POST /runtime/external-jobs/{taskId}/failed, 204 -> ok:true); §6.1 unit test" },
+    { "ac": "AC-12", "covered_by": "§4.3 withRetry algorithm: 5xx triggers retry up to maxRetries; then ENGINE_UNAVAILABLE; §6.1 unit test with mock HTTP sequence" },
+    { "ac": "AC-13", "covered_by": "§4.3 timeout via Promise.race(fetch, timeoutSignal); TIMEOUT error code; §6.1 unit test with never-resolving mock" },
+    { "ac": "AC-14", "covered_by": "§4.4 FF-G3 compliance: assertVariableValue import + call in startInstance/completeTask; resolveFor import + reference in completeTask; FF-G3 fitness script" },
+    { "ac": "AC-15", "covered_by": "§6.2 integration test; FF-T0064-6 external-task-smoke.sh deploy step" },
+    { "ac": "AC-16", "covered_by": "§6.2 integration test; FF-T0064-6 external-task-smoke.sh start-instance step" },
+    { "ac": "AC-17", "covered_by": "§6.2 integration test; FF-T0064-6 external-task-smoke.sh fetchAndLock step" },
+    { "ac": "AC-18", "covered_by": "§6.2 integration test; FF-T0064-6 external-task-smoke.sh completeTask step + instance completion verification" },
+    { "ac": "AC-19", "covered_by": "§7 compatibility: no frozen modules modified; additive-only exports; FF-T0064-5 and FF-T0064-7 fitness" },
+    { "ac": "AC-20", "covered_by": "§4.2 three env vars read at factory construction; FF-T0064-2 grep fitness" }
+  ],
+  "runtime_target": "контейнер (Choros compose stack — Node 20 app container); клиент достигает Flowable по http://flowable:8082 (internal compose DNS); никаких новых контейнеров или инфра",
+  "adr_artifact_path": "docs/design/T-0064-engine-rest-client.adr.md",
+  "escalation": ""
+}
