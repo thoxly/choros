@@ -1,0 +1,194 @@
+{
+  "task_id": "T-0017",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 592,
+    "passed": 592,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/schema.test.ts — FF-RLS: no known tenant table lacks FORCE RLS (iterates KNOWN_TENANT_TABLES, includes tenant); ci/checks/db/cross_tenant.test.ts — AC-1·FF-CT1: cross-tenant SELECT with explicit WHERE tenant_id=B → 0 rows from app role (table: tenant)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/schema.test.ts — FF-RLS (includes department); ci/checks/db/cross_tenant.test.ts — AC-1·FF-CT1 and AC-2·FF-CT2 for table: department",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/schema.test.ts — FF-RLS (includes position); ci/checks/db/cross_tenant.test.ts — AC-1·FF-CT1 and AC-2·FF-CT2 for table: position",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/schema.test.ts — FF-RLS (includes employee); ci/checks/db/cross_tenant.test.ts — AC-1·FF-CT1 and AC-2·FF-CT2 for table: employee",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "ci/checks/db/schema.test.ts — FF-RLS: relrowsecurity AND relforcerowsecurity=true for all 4 tables; ci/checks/db/behavior.test.ts — FF-DENY: choros_app with no GUC → 0 rows; schema.test.ts FF-ROLE: choros_app is NOBYPASSRLS (rolbypassrls=false, rolsuper=false)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/cross_tenant.test.ts — beforeAll seeds all 12 KNOWN_TENANT_TABLES including tenant/department/position/employee for TENANT_A and TENANT_B; AC-1·FF-CT1 and AC-2·FF-CT2 iterate all 12 tables; TENANT_B rows = 0 from TENANT_A context for all new tables",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/db/schema.test.ts — FF-LEAD: every multi-column index on a tenant table leads with tenant_id; FF-LEAD: every composite FK on a tenant table leads with tenant_id; dynamically iterates KNOWN_TENANT_TABLES including all 4 new tables",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "ci/checks/db/org-structure.test.ts — AC-8: department parent_id referencing a different-tenant dept row is rejected (23503); AC-8: position row with tenant_id referencing non-existent dept (cross-tenant) is rejected (23503)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "ci/checks/db/org-structure.test.ts — AC-9: DB allows B.parent=A when A.parent=B (cycle is app-layer responsibility). Deferral is honestly documented: spec FR-2 'MAY enforce via application-layer check'; ADR §1.1 'application-layer pre-insert check'; test documents DB-layer boundary and rolls back. Consistent across spec/ADR/test. No write routes exist yet (T-0022). Reviewer r2_assessment confirms correct deferral.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ci/checks/db/org-structure.test.ts — AC-10: INSERT employee with kind='robot' is rejected (23514); kind='human' succeeds; kind='agent' succeeds (3 sub-tests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "ci/checks/db/two_tenant.test.ts — FF-2: second run leaves schema_migrations row count unchanged and exits 0 (idempotency); FF-2TENANT: re-running the runner with ≥2 tenants present is still idempotent. Seeds use ON CONFLICT DO NOTHING confirmed live",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "ci/checks/db/org-structure.test.ts — AC-12: duplicate (tenant_id, slug) on employee is rejected (23505); same slug allowed across different tenants (2 sub-tests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "src/__tests__/org.e2e.test.ts — FF-6: GET /api/org returns 200 with valid JSON; AC-3: ≥3 departments each with ≥1 position; adversarial probe (d) confirmed DB is live source (extra ct-dept-* test rows visible that ORG_SEED constant lacks); DB response shape matches {departments:[{id,name,positions:[{id,title,people:[{id,name,type}]}]}]}",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "src/__tests__/org.e2e.test.ts — AC-10: GET /api/org/employee/:id returns employee details; adversarial probe confirmed: GET /api/org/employee/e-kravtsova → 200; GET /api/org/employee/nonexistent-id → 404",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "src/__tests__/auth.e2e.test.ts — GET /api/users; adversarial probe confirmed: /api/users returns 0 agent slugs (a-recon, a-invoice, a-triage, s-ledger, s-ocr absent); all 7 core humans present via listHumanEmployees with kind='human' DB filter",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "src/__tests__/auth.e2e.test.ts — GET /api/me with x-dev-user; adversarial probe (a) confirmed: non-existent employee → 401 UNAUTHENTICATED; no header → 401; e-kravtsova → 200 with correct identity from DB",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "src/__tests__/org.e2e.test.ts — AC-5/FF-5/FF-9: ≥2 agents with type='agent' in /api/org response; direct DB count: 5 agent rows (a-recon, a-invoice, a-triage, s-ledger, s-ocr); /api/users excludes all 5 (kind='human' filter confirmed)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "ci/checks fitness static (npm run fitness) — FF-ORG-7 equivalent: grep -E 'CREATE TABLE.*(human_employee|agent_employee|org_user)' migrations/013-016 → zero matches confirmed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-19",
+      "test": "ci/checks/known_tenant_tables.txt — exact 12 lines: job, application, registry_def, record, audit_event, audit_head, grant, object_handle, tenant, department, position, employee; schema.test.ts FF-RLS 'no choros base table missing from fixture' anti-decorative check passes with CI=true on fresh DB",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_probes": [
+    {
+      "what": "(a) GET /api/me with X-Dev-User: nobody-xyz-fake (non-existent employee)",
+      "expected": "401 or 404, not 500",
+      "result": "PASS — HTTP 401 {code:UNAUTHENTICATED, message:'no valid dev identity'}. DB lookup returns null → 401 via HttpError. Not a 500."
+    },
+    {
+      "what": "(a2) GET /api/me with no X-Dev-User header",
+      "expected": "401, not 500",
+      "result": "PASS — HTTP 401 {code:UNAUTHENTICATED}. Header absent → immediate 401."
+    },
+    {
+      "what": "(b) INSERT employee with kind='human' and duplicate slug in same tenant (e-kravtsova)",
+      "expected": "23505 unique constraint violation",
+      "result": "PASS — ERROR: duplicate key value violates unique constraint 'employee_tenant_id_slug_key'. PG error 23505 confirmed via psql against isolated DB."
+    },
+    {
+      "what": "(b2) INSERT employee with same slug (e-kravtsova) in different tenant (b9999999-...)",
+      "expected": "INSERT should succeed (cross-tenant slug allowed)",
+      "result": "PASS — INSERT 0 1. Same slug in different tenant accepted. Cross-tenant uniqueness invariant confirmed."
+    },
+    {
+      "what": "(c) findEmployeeById with DATABASE_URL pointing to postgres DB (no choros schema — unmigrated)",
+      "expected": "fail-closed with clear error, NOT silent fallback to ORG_SEED",
+      "result": "PASS — DatabaseError: relation 'choros.employee' does not exist (PG code 42P01). Fails closed with clear PG error. No fallback to ORG_SEED. ADR §1.4 states fallback ONLY when DATABASE_URL is ABSENT — when set and DB errors, the error propagates."
+    },
+    {
+      "what": "(c2) HTTP /api/me with DATABASE_URL pointing to wrong password (set but unreachable)",
+      "expected": "HTTP 500 INTERNAL, not silent fallback to ORG_SEED",
+      "result": "PASS — HTTP 500 {code:INTERNAL, message:'internal server error'}. No silent fallback to seed. Fail-closed confirmed."
+    },
+    {
+      "what": "(c3) HTTP /api/me WITHOUT DATABASE_URL (absent, not set)",
+      "expected": "ORG_SEED fallback is LEGAL per ADR §1.4 — 200 with in-memory data",
+      "result": "PASS — HTTP 200 with {id:'e-kravtsova', ...} from ORG_SEED. Legal fallback for dev-no-db path, consistent with ADR §1.4 design."
+    },
+    {
+      "what": "(d) /api/org JSON shape comparison: DB-backed server vs ORG_SEED constant",
+      "expected": "Same JSON structure; DB response contains extra test rows proving real DB is source",
+      "result": "PASS — DB response contains 10 departments (3 core + 7 ct-* test rows seeded by cross_tenant tests). ORG_SEED has only 3 departments. Shape {departments:[{id,name,positions:[{id,title,people:[{id,name,type}]}]}]} identical. Core depts fin/cs/plat present with correct employees. Confirms real DB is source, not ORG_SEED serialization."
+    }
+  ],
+  "friction": [
+    {
+      "id": "FE-T0017-001",
+      "title": "org HTTP pool uses DATABASE_URL (choros_migrator superuser) not choros_app",
+      "detail": "src/db/org.ts getOrgPool() uses DATABASE_URL which in CI maps to choros_migrator (rolsuper=true, rolbypassrls=true). The HTTP org queries therefore bypass RLS. ADR §3.6 states 'Backed by the choros_app role' and spec NF-1 says 'accessed only via choros_app role (NOBYPASSRLS)'. No deterministic test fails because the fitness:db tests explicitly use appUrl() (choros_app) for RLS validation, and no AC test checks the connection role. In dev mode this is a low-risk shortcut; in prod DATABASE_URL should be a non-superuser role. No separate APP_DATABASE_URL env var is wired for the org HTTP pool unlike pgJobStore which supports APP_DATABASE_URL.",
+      "root_class": "tooling-gap",
+      "severity": "low",
+      "blocking": false
+    }
+  ],
+  "ci_run": {
+    "tsc": "clean (0 errors)",
+    "eslint": "clean (0 errors)",
+    "fitness_static": "all 19 static shell checks green",
+    "vitest_unit_e2e": "490/490 pass (20 test files)",
+    "fitness_db_isolated_fresh": "102/102 pass (CI=true, port 55434, fresh DB, no app_timer)",
+    "total_deterministic": 592,
+    "db_tests": {
+      "org-structure.test.ts": 8,
+      "schema.test.ts": 16,
+      "cross_tenant.test.ts": 31,
+      "two_tenant.test.ts": 4,
+      "behavior.test.ts": 7,
+      "pgJobStore.integration.test.ts": 36,
+      "total": 102
+    },
+    "migration_run_1": "14 migrations applied (001-010, 013-016) — OK",
+    "migration_run_2": "nothing to apply (14 already recorded) — idempotency confirmed",
+    "isolated_postgres": "choros-test-t0017 on port 55434, own volume, no app_timer (clean CI simulation)"
+  },
+  "ac9_deferral_assessment": {
+    "spec_allows": "FR-2: 'initial implementation MAY enforce via application-layer check'",
+    "adr_documents": "§1.1: 'Cycle prevention (AC-9) is application-layer pre-insert check'",
+    "test_documents": "org-structure.test.ts AC-9 test proves DB allows cycle → app layer must guard",
+    "reviewer_confirmed": "r2_assessment: 'AC-9 test correctly defers cycle enforcement to app-layer per ADR §1.1'",
+    "no_write_routes": "No department write routes exist yet; T-0022 will add them and must include cycle guard",
+    "consistent": true
+  },
+  "nit_n1_status": {
+    "id": "N-1",
+    "description": "Stale code block in ADR §3.7 showing old synchronous signatures",
+    "status": "documented-nit — code block still shows old sync signatures; prose at §3.7 correctly describes async. No functional impact. Reviewer classified as stale-code nit.",
+    "blocking": false
+  }
+}
