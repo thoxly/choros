@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0058",
+  "status": "pr_open",
+  "branch": "task/T-0058-flowable-service",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    ".github/workflows/ci.yml",
+    "ci/checks/flowable/deploy-bpmn.sh",
+    "ci/checks/flowable/smoke.sh",
+    "ci/checks/flowable/static-checks.sh",
+    "ci/checks/flowable/wait-ready.sh",
+    "ci/checks/no-committed-secret.sh",
+    "config/flowable/processes/choros-smoke.bpmn20.xml",
+    "config/postgres/002-flowable-schema.sql",
+    "docker-compose.yml",
+    "docs/design/T-0058-flowable-service.adr.md",
+    "docs/design/T-0058.adr.contract.json",
+    "docs/reviews/T-0058.review.json",
+    "docs/specs/T-0058-flowable-service.spec.md",
+    "docs/specs/T-0058.spec.contract.json",
+    "docs/test-reports/T-0058.test-report.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "Schema isolation: SPRING_DATASOURCE_SCHEMA env var replaced by JDBC ?currentSchema=flowable URL parameter. ADR §3.1 explicitly permits both paths: 'Flowable 7 uses SPRING_DATASOURCE_SCHEMA or the Spring datasource URL schema param'. Deviation is legitimate — verified by REVIEW (eec00b3) as 'LEGITIMATE' and confirmed live by FF-FL-12 (56 ACT_* tables land in flowable schema, 0 in public). No product-contract impact."
+  ],
+  "friction_events": [],
+  "verdict_payload": {
+    "review_verdict": "approved",
+    "review_commit": "eec00b3",
+    "nit_fix_commit": "ee8eb24",
+    "findings_resolved": [
+      {
+        "id": "R-1",
+        "severity": "nit",
+        "issue": "FF-FL-7c always prints PASS unconditionally even when ERRORS had already been incremented — misleading log output when a violation occurs",
+        "status": "resolved",
+        "commit": "ee8eb24",
+        "resolution": "Introduced ERRORS_BEFORE_7C snapshot before the while-loop; PASS line is now guarded by: if [[ ${ERRORS_BEFORE_7C} -eq ${ERRORS} ]]; then echo PASS; fi"
+      },
+      {
+        "id": "R-2",
+        "severity": "nit",
+        "issue": "FF-FL-8 grep fallback (used when PyYAML absent) scoped to whole file — if keycloak had service_healthy but flowable did not, check would still pass",
+        "status": "accepted-minor",
+        "commit": "ee8eb24",
+        "resolution": "Noted as minor ambiguity; yaml parsing is the primary path. grep fallback scope acknowledged acceptable at nit level"
+      },
+      {
+        "id": "R-3",
+        "severity": "nit",
+        "issue": "No static check verifying ?currentSchema=flowable in SPRING_DATASOURCE_URL — only live FF-FL-12 would catch accidental removal",
+        "status": "resolved",
+        "commit": "ee8eb24",
+        "resolution": "Added FF-FL-5c static check: grep -qE 'SPRING_DATASOURCE_URL.*currentSchema=flowable|SPRING_DATASOURCE_SCHEMA.*flowable'. Confirmed working by adversarial probe-d (removal detected, restore passes)"
+      }
+    ],
+    "test_verdict": "pass",
+    "test_commit": "ec8c768",
+    "ac_coverage": 15,
+    "ac_passed": 15,
+    "deterministic_tests": {
+      "total": 34,
+      "passed": 34,
+      "failed": 0
+    },
+    "adversarial_probes": [
+      {"probe": "probe-a — malformed BPMN deploy", "result": "pass — HTTP 500 XMLStreamException; engine health HTTP 200 (no crash)"},
+      {"probe": "probe-b-no-auth — REST without Authorization", "result": "pass — HTTP 401"},
+      {"probe": "probe-b-wrong-creds — wrong password", "result": "pass — HTTP 401"},
+      {"probe": "probe-c-activate — inject src/core/flowable_probe.ts", "result": "pass — FF-G3 exits 1, 2 violation lines"},
+      {"probe": "probe-c-clean — remove flowable_probe.ts", "result": "pass — FF-G3 dormant, exits 0"},
+      {"probe": "probe-d-red — remove ?currentSchema=flowable from URL", "result": "pass — FF-FL-5c FAIL, static-checks exits 1"},
+      {"probe": "probe-d-restore — restore currentSchema=flowable", "result": "pass — all FF-FL-4..11 green, exit 0"}
+    ],
+    "live_flowable_detail": {
+      "FF-FL-1_wait_ready": "PASS — Flowable 7.1.0 management/engine HTTP 200 after 5s (port 8082)",
+      "FF-FL-2_deploy_bpmn": "PASS — POST /repository/deployments HTTP 201, deployment ID extracted",
+      "FF-FL-3_smoke": "PASS — start instance HTTP 201, runtime query total ≥ 1",
+      "FF-FL-12_schema_isolation": "PASS — 56 act_* tables in flowable schema, 0 ACT_* in public schema"
+    },
+    "integration_honesty_d056": "HONEST — CI job uses 'docker compose up -d postgres flowable' with fresh named volume per run; 002-flowable-schema.sql fires via docker-entrypoint-initdb.d on first Postgres init; wait-ready.sh polls 120s; no mocking, no ambient state"
+  },
+  "merge_target": "dev",
+  "merge_base": "2f749a9",
+  "merge_policy": "auto-merge D-053 (orchestrator rebases task/T-0058-flowable-service onto current dev HEAD before merge; no PR on GitHub per dispatch constraint)",
+  "promote_guide_GT3": {
+    "what_to_verify_manually": [
+      "docker compose up -d postgres flowable  — wait for 'Flowable REST app started' in logs or HTTP 200 on GET http://localhost:8082/flowable-rest/service/management/engine (basic-auth admin:choros_flowable_dev_pw)",
+      "BPMN deploy test: curl -u admin:choros_flowable_dev_pw -F 'deployment=@config/flowable/processes/choros-smoke.bpmn20.xml' http://localhost:8082/flowable-rest/service/repository/deployments — expect HTTP 201 + JSON with 'id' field",
+      "Start process instance: curl -u admin:choros_flowable_dev_pw -H 'Content-Type: application/json' -d '{\"processDefinitionKey\":\"chorosSmoke\"}' http://localhost:8082/flowable-rest/service/runtime/process-instances — expect HTTP 201",
+      "Query running instances: curl -u admin:choros_flowable_dev_pw 'http://localhost:8082/flowable-rest/service/runtime/process-instances?processDefinitionKey=chorosSmoke' — expect total ≥ 1",
+      "Schema isolation check: docker compose exec postgres psql -U choros_migrator -d choros -c \"SELECT table_schema, count(*) FROM information_schema.tables WHERE table_schema IN ('flowable','public') GROUP BY table_schema\" — expect flowable rows (ACT_*), no ACT_* in public",
+      "FF-G3 bridge contract: npm run fitness (includes flowable static checks and FF-G3) — expect all green",
+      "Existing services unbroken: docker compose up -d postgres keycloak — both healthy, existing FF-1..FF-14 kc checks still pass"
+    ],
+    "existing_volume_notice": "IMPORTANT: if running against an existing postgres volume (not fresh), the flowable schema may not exist yet because 002-flowable-schema.sql only runs on first Postgres init. Fix: either (a) docker compose down -v && docker compose up -d postgres flowable (fresh volume), or (b) manually execute: docker compose exec postgres psql -U choros_migrator -d choros -c 'CREATE SCHEMA IF NOT EXISTS flowable;' before starting Flowable. The CI runner always uses a fresh volume — this is a local dev concern only.",
+    "not_in_scope": [
+      "REST client in src/ that calls Flowable — T-0064 (E6.1) owns this",
+      "External-task worker / topic mapping in TS code — T-0067 (E6.2) owns this",
+      "Unified multi-service compose with core Node app — E0.6",
+      "Production Flowable deploy or tuning (JVM heap, connection pool) — E0.7 (founder-gated, RL-1)",
+      "Process definition management UI or catalog — future backlog",
+      "Flowable Enterprise / Flowable Cloud — explicitly rejected in ADR §2d (OSS-only, Apache 2.0)"
+    ],
+    "key_env_vars": {
+      "FLOWABLE_PORT": "8082 (host port)",
+      "SPRING_DATASOURCE_URL": "jdbc:postgresql://postgres:5432/${POSTGRES_DB:-choros}?currentSchema=flowable",
+      "SPRING_DATASOURCE_USERNAME": "${POSTGRES_USER:-choros_migrator}",
+      "SPRING_DATASOURCE_PASSWORD": "${POSTGRES_PASSWORD:-choros_dev_pw}",
+      "FLOWABLE_REST_APP_ADMIN_USER_ID": "admin",
+      "FLOWABLE_REST_APP_ADMIN_PASSWORD": "choros_flowable_dev_pw (dev only)",
+      "FLOWABLE_ENABLE_HISTORY_CLEANING": "true",
+      "FLOWABLE_HISTORY_CLEANING_CYCLE": "0 0 0 1 1 ? (yearly — never fires mid-test)"
+    },
+    "downstream_seams_frozen": {
+      "T-0064_rest_client": {
+        "base_url_internal": "http://flowable:8082/flowable-rest/service",
+        "base_url_host": "http://localhost:8082/flowable-rest/service",
+        "auth": "Basic admin:${FLOWABLE_REST_APP_ADMIN_PASSWORD}",
+        "smoke_process_key": "chorosSmoke"
+      },
+      "T-0067_external_task": {
+        "topic": "smoke-topic",
+        "runtime_endpoint": "GET /flowable-rest/service/runtime/process-instances"
+      }
+    }
+  }
+}
