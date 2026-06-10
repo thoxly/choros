@@ -932,3 +932,50 @@ describe("AC-18: ops-operations at bad DATABASE_URL return ok:false", () => {
     expect(r.error.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0115 fail-closed: async paths (AC-7, AC-8)
+//
+// Verifies that PostgresJobStore used without a tenant GUC:
+//   AC-7: enqueue → Promise.reject (Postgres error from current_setting(..., false))
+//   AC-8: fetchAndLock → [] (RLS default-DENY; no data leaked)
+// ---------------------------------------------------------------------------
+describe("T-0115 fail-closed: async paths without tenant context", () => {
+  // AC-7: enqueue without SET LOCAL → Promise.reject (GUC undefined → Postgres error)
+  it("AC-7: enqueue without tenant context rejects (GUC undefined error)", async () => {
+    // Create a fresh pool as choros_app — no transaction, no SET LOCAL.
+    const pool = makeAppPool();
+    try {
+      const store = makeStore(undefined, pool);
+      // enqueue uses current_setting('choros.tenant_id', false)::uuid in INSERT.
+      // Without SET LOCAL the GUC is undefined → Postgres raises an error.
+      await expect(store.enqueue("ct-async-test", {}, 0)).rejects.toBeDefined();
+    } finally {
+      await pool.end();
+    }
+  });
+
+  // AC-8: fetchAndLock without SET LOCAL → [] (RLS default-DENY; 0 rows)
+  it("AC-8: fetchAndLock without tenant context returns [] (no data leaked)", async () => {
+    // Seed a job under TENANT_A via migrator so there is something that COULD leak.
+    await seedJob({
+      tenantId: TENANT_A,
+      topic: "ct-async-fetchtest",
+      state: "CREATED",
+      available_at: 1,
+      created_at: 1,
+    });
+
+    // Use a fresh pool as choros_app — no transaction, no SET LOCAL.
+    const pool = makeAppPool();
+    try {
+      const store = makeStore(makeFixedClock(Date.now()), pool);
+      // fetchAndLock relies on RLS. Without GUC, current_setting('choros.tenant_id', true)
+      // returns NULL → RLS default-DENY policy yields 0 rows. Must NOT throw.
+      const result = await store.fetchAndLock("ct-worker", ["ct-async-fetchtest"], 10, 5000);
+      expect(result, "fetchAndLock without GUC must return [] (no data leaked)").toEqual([]);
+    } finally {
+      await pool.end();
+    }
+  });
+});
