@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0017",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true,
+    "tsc": "clean",
+    "eslint": "clean",
+    "vitest": "490/490 (20 files)",
+    "fitness_static": "all static checks green",
+    "fitness_db": "94/94 — schema.test.ts 16, cross_tenant.test.ts 31, two_tenant.test.ts 4, behavior.test.ts 7, pgJobStore.integration.test.ts 36"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "src/http/auth.ts:15, src/http/org.ts:134-166",
+      "issue": "ADR §3.7 / FF-ORG-12 declare auth.ts a frozen caller that MUST import without modification: 'Frozen callers (src/http/auth.ts, src/http/inbox.ts) continue to import from ./org.js without modification.' Before T-0017, auth.ts imported { findEmployee, listSelectableUsers }. After T-0017, auth.ts imports { findEmployeeAsync, listSelectableUsersAsync } — the import line was changed. Additionally, ADR §1.4 says findEmployee itself 'delegate[s] to the DB layer' when DATABASE_URL is set, preserving the synchronous contract. Instead, findEmployee (the frozen symbol) remains purely in-memory and never queries the DB. Any future caller that imports findEmployee expecting DB-backed data (per ADR §1.4) will silently receive stale ORG_SEED data. The design contract was violated: two parallel resolution paths now exist (findEmployee = in-memory only; findEmployeeAsync = DB-aware) where ADR specified one unified path.",
+      "suggestion": "Restore auth.ts to import { findEmployee, listSelectableUsers } (the frozen symbols). Implement the ADR §1.4 design: make findEmployee and listSelectableUsers delegate internally to the DB path when DATABASE_URL is set (equivalent to how findEmployeeAsync currently works). This unifies the path and preserves the frozen contract for all current and future callers. findEmployeeAsync/listSelectableUsersAsync can be removed or kept as private helpers, but the frozen symbols must be the DB-delegating entry points."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "ci/checks/db/ (no org-structure behavioral tests present)",
+      "issue": "Three T-0017 acceptance criteria marked 'verifiable_as: test' have no test coverage: AC-8 (FK tenant-scoping: cross-tenant FK insert rejected with PG error 23503), AC-9 (department tree acyclicity: inserting a cycle A.parent=B / B.parent=A is rejected), AC-10 (employee.kind CHECK: kind='robot' rejected with PG error 23514). The ADR nominated an org-structure.test.ts (or additional describe blocks) in FF-ORG-8 and FF-ORG-11, but this file was never created. AC-8 and AC-10 are DB-constraint rejections that require live Postgres; AC-9 requires application-layer enforcement that is documented in ADR §1.1 but not exercised by any test.",
+      "suggestion": "Add a ci/checks/db/org-structure.test.ts (or equivalent describe blocks in behavior.test.ts) covering: (1) AC-8: INSERT department with tenant_id pointing to non-existent tenant FK chain, expect PG 23503; (2) AC-9: seed department A, B; set B.parent_id=A, then attempt to set A.parent_id=B and verify rejection; (3) AC-10: INSERT employee with kind='robot' and expect PG 23514 check constraint violation. AC-12 (employee slug uniqueness) is partially covered by the existing FF-SCOPE pattern but should also be explicitly tested for employee table."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "ci/checks/db/schema.test.ts:74-93",
+      "issue": "The anti-decorative guard was weakened from strict equality (inDb === known) to subset (known ⊆ inDb). The original check prevented a new tenant table from being added to DB without being added to known_tenant_tables.txt (enforcing RLS CI coverage for every live table). The weakened check CANNOT catch a new table present in the DB but absent from known_tenant_tables.txt — the anti-decorative purpose is lost. On a fresh CI DB (e.g., T-0018's branch with only T-0017 migrations), if a coder adds migration 017_foo.sql creating choros.foo but forgets known_tenant_tables.txt, the check passes. The justification (parallel T-0116 tables in shared silo DB) applies only to the shared dev silo, not to a clean CI Postgres. The check should be strict on a fresh DB.",
+      "suggestion": "Restore the strict check for fresh CI, while tolerating silo extras. One approach: add a CI environment flag (e.g., CI=true) that triggers the strict check (inDb === known), while the tolerant check (known ⊆ inDb) runs in the shared dev silo. Alternatively, adjust the check to fail on any inDb table that is NOT in known AND does not match a known parallel-branch exclusion list (e.g., app_timer, which is documented as T-0116's addition)."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0017-org-structure.adr.md:88-98 (§3.2 table and FK body)",
+      "issue": "ADR §3.2 object model table still shows the line 'FK → tenant(tenant_id, id)' for the tenant_id column and the FK constraint body 'FOREIGN KEY (tenant_id, id) REFERENCES choros.tenant(tenant_id, id)'. This FK was intentionally omitted from migration 014 (coder's stated deviation 1). The ADR §3.1 note already explains why the FK is not needed (structural vs. relational invariant), but §3.2 still shows the FK as if it exists. Future readers will be confused: the migration doesn't match the object model table. The FK body as written is also semantically wrong (it binds department.id to tenant.id, which would require every department row to have id = its tenant UUID — nonsensical).",
+      "suggestion": "Update ADR §3.2 table: remove or strike the FK annotation from the tenant_id row. Replace the FK constraint body with a comment explaining why the FK to tenant is intentionally omitted: 'No FK to choros.tenant — tenant_id NOT NULL + RLS enforces tenant scoping per T-0013 pattern (standalone unique on tenant.id does not exist; composite PK covers the two-column form but would bind dept.id to tenant.id semantically incorrectly).' Cross-reference ADR §3.1 note."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/db/org.ts:73",
+      "issue": "withTenant uses string interpolation to set the tenant GUC: `SET LOCAL choros.tenant_id = '${tenantId}'`. While tenantId is currently always a hardcoded UUID from DEV_TENANT_ID env var, the pattern diverges from how test helpers handle this (same pattern, accepted) but the production code should use parameterized form or at minimum validate UUID shape before interpolation. A future caller passing a non-UUID tenantId would silently break the GUC cast (::uuid) in the RLS policy, causing a Postgres error rather than a safe rejection.",
+      "suggestion": "Add a UUID shape guard before the SET LOCAL: validate tenantId matches /^[0-9a-f-]{36}$/i before interpolation, or use a helper that ensures this. This is consistent with T-0013's defense-in-depth principle."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": false},
+    {"ac": "AC-9", "covered": false},
+    {"ac": "AC-10", "covered": false},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": false},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
