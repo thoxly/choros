@@ -1,0 +1,124 @@
+{
+  "task_id": "T-0115",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 554,
+    "passed": 554,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-1 · FF-CT1: cross-tenant SELECT (explicit WHERE tenant_id=B) → 0 rows from app role (8 table subtests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-2 · FF-CT2: cross-tenant SELECT (no WHERE) → only TENANT_A rows visible (8 table subtests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-3 · FF-CT3: cross-tenant UPDATE → 0 rows affected, TENANT_B data intact",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-4 · FF-CT4: cross-tenant DELETE → 0 rows affected, TENANT_B row survives",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-5 · FF-CT5: post-condition integrity — TENANT_B rows unchanged after AC-3/AC-4",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-6 · FF-CT6: fail-closed DML without tenant context → Postgres error (GUC_UNDEFINED)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "ci/checks/db/pgJobStore.integration.test.ts — T-0115 fail-closed: AC-7: enqueue without tenant context rejects",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "ci/checks/db/pgJobStore.integration.test.ts — T-0115 fail-closed: AC-8: fetchAndLock without tenant context returns []",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "ci/checks/db/cross_tenant.test.ts — AC-9 · FF-CT9: SET LOCAL scope isolation (2 sub-tests); reviewer-confirmed spec note mismatch is non-blocking nit (R-1/R-2)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "ci/checks/cross-tenant-fitness.sh — AC-10 PASS: KNOWN_TENANT_TABLES referenced in cross_tenant.test.ts (static grep)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "ci/checks/cross-tenant-fitness.sh — AC-11 PASS: fitness:db in .github/workflows/ci.yml db job (blocking gate)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "ci/checks/cross-tenant-fitness.sh — AC-12a appUrl() + AC-12b migratorUrl() present in cross_tenant.test.ts",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_probes": [
+    {
+      "what": "choros_app INSERT with explicit tenant_id=TENANT_B while GUC=TENANT_A (WITH CHECK gate)",
+      "result": "BLOCKED by RLS — ERROR: new row violates row-level security policy for table 'application'. Confirmed: WITH CHECK rejects cross-tenant INSERT."
+    },
+    {
+      "what": "SET LOCAL choros.tenant_id = '' (empty string) — fail-closed under invalid GUC value",
+      "result": "BLOCKED — ERROR: invalid input syntax for type uuid: ''. RLS policy cast fails; no rows visible, no silent bypass."
+    },
+    {
+      "what": "SET LOCAL outside transaction (treated as session-level SET by Postgres) then SELECT",
+      "result": "Rows visible for own tenant (TENANT_A) only — this is correct Postgres behavior. With session-level GUC=TENANT_A, TENANT_B rows return 0 (confirmed). Consistent with AC-9 reviewer notes R-1/R-2."
+    },
+    {
+      "what": "GUC set to syntactically valid but non-existent tenant UUID (ffffffff-...) via SET LOCAL",
+      "result": "SAFE — 0 rows returned (RLS default-DENY). No data from any real tenant leaked."
+    },
+    {
+      "what": "DML INSERT with current_setting('choros.tenant_id', false) and NO GUC set (fail-closed, AC-6 live repro)",
+      "result": "BLOCKED — ERROR: unrecognized configuration parameter 'choros.tenant_id'. Fail-closed confirmed at Postgres layer."
+    },
+    {
+      "what": "SELECT on choros.application as choros_app with no GUC set at all (READ fail-closed default-DENY)",
+      "result": "SAFE — 0 rows returned. RLS default-DENY confirmed: no ambient read without tenant context."
+    }
+  ],
+  "ci_wiring": {
+    "verdict": "blocking",
+    "details": ".github/workflows/ci.yml line 63: 'npm run fitness:db' is in the 'db' job (separate postgres:16 service). cross_tenant.test.ts is auto-discovered by 'vitest run --dir ci/checks/db'. vitest.config.js excludes .claude/** and ../choros-wt/** (D-056 / FE-W24-0005 fix). Failure of any cross-tenant test = non-zero exit = build failure = merge blocked."
+  },
+  "run_summary": {
+    "tsc": "exit 0 — no src/ changes on this branch",
+    "eslint": "exit 0",
+    "vitest_unit": "473/473 pass (19 test files)",
+    "fitness_static": "11/11 static shell checks pass (incl. FF-CT10/CT11/CT12)",
+    "fitness_db": "81/81 pass (behavior 7 + schema 16 + two_tenant 4 + cross_tenant 23 + pgJobStore.integration 31)",
+    "db_total": "81 DB integration tests, 0 failed",
+    "postgres_container": "t-0115-postgres-1 (port 55432, healthy), migrations pre-applied (10/10)"
+  },
+  "reviewer_nits": [
+    {
+      "id": "R-1",
+      "status": "non-blocking",
+      "note": "AC-9 second sub-test: spec text says count=0 for session-level SET which is incorrect (Postgres correctly returns TENANT_A rows). Test correctly asserts 0 TENANT_B rows instead. No code change required — comment improvement only."
+    },
+    {
+      "id": "R-2",
+      "status": "non-blocking",
+      "note": "AC-9 first sub-test uses fresh connection for post-commit GUC check instead of same-connection (Postgres SET LOCAL+COMMIT leaves session GUC='' causing uuid cast error). Workaround correct and documented."
+    }
+  ]
+}
