@@ -1,0 +1,139 @@
+{
+  "task_id": "T-0062",
+  "status": "pr_open",
+  "branch": "task/T-0062-idempotency-outbox",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "merge_target": "dev",
+  "base_commit": "8fe7acf",
+  "head_commit": "2676c2d",
+  "migrations": ["023_job_idempotency_key.sql", "024_outbox.sql", "025_outbox_pending_buckets.sql"],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E1.2: идемпотентность enqueue (nullable idempotency_key + partial-unique по (tenant_id, key), ON CONFLICT DO NOTHING + SELECT-back) + outbox-паттерн (FORCE RLS таблица choros.outbox, enqueueInTx в транзакции потребителя, двухфазный диспетчер SECURITY DEFINER outbox_pending_buckets + claimBatch FOR UPDATE SKIP LOCKED, state-machine pending/dispatching/dispatched/dead, exponential backoff, GET /health outbox-блок). 20/20 AC покрыты; 5 adversarial-проб пройдены (concurrent idempotency race, rollback atomicity, handler-throw-retry, dead exhaustion, SECURITY DEFINER aggregate); tsc/eslint/vitest 785/785/fitness:db 203/203 на изолированном Postgres 16 (55457); миграции run×2 — второй прогон 'nothing to apply' (AC-19).",
+  "commits": [
+    {
+      "sha": "b73e7d6",
+      "phase": "SPEC",
+      "message": "T-0062 SPEC: идемпотентность (idempotency-key на enqueue) + outbox-паттерн (транзакционная целостность данные+сигнал, двухфазный диспетчер по образцу T-0116)"
+    },
+    {
+      "sha": "cc02737",
+      "phase": "DESIGN",
+      "message": "T-0062 DESIGN: идемпотентность enqueue (idempotency-key, partial-unique + ON CONFLICT DO NOTHING) + outbox-паттерн (двухфазный диспетчер по образцу T-0116)"
+    },
+    {
+      "sha": "4069c24",
+      "phase": "BUILD",
+      "message": "T-0062 BUILD: fix pre-existing fall-through (actor_event_seq case, триаж оркестратора)"
+    },
+    {
+      "sha": "d11ad61",
+      "phase": "BUILD",
+      "message": "T-0062 BUILD: идемпотентность enqueue + outbox-паттерн (двухфазный диспетчер)"
+    },
+    {
+      "sha": "093b301",
+      "phase": "REVIEW",
+      "message": "T-0062 REVIEW: approved — идемпотентность enqueue + outbox двухфазный диспетчер; CI green, изолированный PG 203/203, негативные пробы (fail-closed/cross-tenant/no-rollback) живьём, 0 blocking"
+    },
+    {
+      "sha": "2676c2d",
+      "phase": "TEST",
+      "message": "T-0062 TEST: pass — 20/20 AC зелёные на изолированном PG, 5 adversarial-проб (idempotency-race/rollback-atomicity/handler-throw-retry/dead-exhaust/secdef-aggregate)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "d11ad61",
+      "blocking_resolved": [],
+      "nits_open": ["R-1", "R-2"],
+      "r1_note": "R-1 (nit): markRetry возвращает 'pending'|'dead'|'noop' — АДДИТИВНО, 'noop' честно закрывает гонку параллельного диспетчера; ADR §4.2 фиксирует 'pending'|'dead' — документационный лаг, не дефект. Подтянуть при следующем касании ADR-доки.",
+      "r2_note": "R-2 (nit): runOutboxOnce берёт now из Date.now() напрямую, pgOutboxStore инжектит Clock (NF-5) — лёгкая несогласованность. На тестируемость/прод не влияет.",
+      "artifact": "docs/reviews/T-0062.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 785,
+      "passed": 785,
+      "failed": 0,
+      "ac_coverage": "20/20",
+      "adversarial_probes": "5/5",
+      "tested_commit": "2676c2d",
+      "run_details": {
+        "tsc": "exit 0 (--noEmit clean)",
+        "eslint": "exit 0 (src clean)",
+        "vitest_unit": "577 passed / 5 skipped (26 files)",
+        "fitness_static": "all static checks PASS (object-handle, cross-tenant, data-classification, flowable static, kc static, pg-single-dep, etc.)",
+        "fitness_db": "203 passed / 203 (10 files, --no-file-parallelism); incl. 28 pgOutboxStore.integration + 41 cross_tenant (outbox seeder) + FF-5 EXPLAIN no-Seq-Scan; 6.18s",
+        "postgres_container": "port 55457, isolated volume t0062test_choros_pgdata (55432 untouched); torn down after run",
+        "migrations_idempotency": "run×2: run1 applied 21 files (001-018 + 023/024/025); run2 'nothing to apply (21 already recorded)'"
+      },
+      "coverage_gap_note": "health.test.ts ассертирует только timer-блок, не outbox-блок на HTTP-уровне; AC-16 выполнен через getOutboxHealth интеграционный тест + server.ts безусловно эмитирует блок. Это gap покрытия, не дефект — кандидат в следующую задачу зоны.",
+      "artifact": "docs/test-reports/T-0062.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 warnings)",
+      "vitest_run": "pass (577 unit / 5 skipped)",
+      "fitness_static": "pass (all static checks)",
+      "fitness_db": "pass (203/203 isolated Postgres 16, --no-file-parallelism D-056 guard)",
+      "integration_honesty_d056": "isolated Postgres 16 vol t0062test_choros_pgdata, migrate-from-zero×2, torn down; concurrency-sensitive AC-12/PROBE_A assert concurrency inside-file and pass"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/pgOutboxStore.integration.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "docs/design/T-0062-idempotency-outbox.adr.md",
+    "docs/design/T-0062.adr.contract.json",
+    "docs/reviews/T-0062.review.json",
+    "docs/specs/T-0062-idempotency-outbox.spec.md",
+    "docs/specs/T-0062.spec.contract.json",
+    "docs/test-reports/T-0062.test-report.json",
+    "migrations/023_job_idempotency_key.sql",
+    "migrations/024_outbox.sql",
+    "migrations/025_outbox_pending_buckets.sql",
+    "package.json",
+    "src/__tests__/inMemoryJobStore.idempotency.test.ts",
+    "src/__tests__/outboxDispatcher.test.ts",
+    "src/core/inMemoryJobStore.ts",
+    "src/core/outboxDispatcher.ts",
+    "src/core/outboxTypes.ts",
+    "src/core/postgres/pgJobStore.ts",
+    "src/core/postgres/pgOutboxStore.ts",
+    "src/http/externalWorker.ts",
+    "src/server.ts"
+  ],
+  "deviations_from_adr": [
+    "markRetry: ADR §4.2 сигнатура Promise<'pending'|'dead'> — реализация добавляет 'noop' (аддитивное расширение; обрабатывает гонку параллельного диспетчера; outboxDispatcher.ts:109 ветку уже учитывает). Документационный лаг ADR §4.2 — подтянуть при следующем касании."
+  ],
+  "rebase_note": "dev уехал (T-0022/T-0034 влиты после base 8fe7acf); ребейз task/T-0062 на текущий dev HEAD делает оркестратор перед мержем (D-053). fall-through фикс actor_event_seq (4069c24) = тот же баг, что T-0034 — при ребейзе сольётся в no-op.",
+  "promote_guide": {
+    "merge_target": "dev",
+    "what_this_gives": "Закрывает две дыры транзакционной целостности воркерного контура: (1) idempotency_key на enqueue — повторный enqueue с тем же ключом возвращает первый job без дубля; (2) outbox-паттерн — доменная мутация + outbox INSERT в одной Postgres-транзакции (данные+сигнал атомарны); двухфазный диспетчер (SECURITY DEFINER агрегат + SET LOCAL FOR UPDATE SKIP LOCKED) = at-least-once доставка с exponential backoff и state-machine dead. Аддитивно: 0 разломов существующих API.",
+    "how_to_verify": [
+      "GET /health: ответ включает поле outbox:{pendingLagMs:number|null, deadCount:number} рядом с queue/timer — убедиться что блок присутствует и статус не 'degraded' на пустом outbox.",
+      "Повторный enqueue: POST /jobs с idempotencyKey='test-key-1' дважды — оба запроса возвращают один и тот же jobId (первый job, не дубль).",
+      "Миграции: node migrations/run.mjs дважды — первый прогон применяет 023/024/025; второй прогон 'nothing to apply'.",
+      "npm run ci: tsc --noEmit / eslint / vitest run / npm run fitness — всё зелёное.",
+      "npm run fitness:db (изолированный PG): 203/203."
+    ],
+    "infra_changes": "3 Postgres-миграции (023 idempotency_key колонка на job, 024 outbox таблица FORCE RLS, 025 outbox_pending_buckets SECURITY DEFINER). Нет новых сервисов/docker-compose изменений. package.json: fitness:db --no-file-parallelism (D-056 shared-PG race guard).",
+    "downstream_seams": {
+      "T-0067": "idempotentSuccess seam: deliver() может вернуть {ok:false, idempotentSuccess:true} — outboxDispatcher трактует это как dispatched (не dead). Зона T-0067: реализует Flowable NOT_FOUND → idempotentSuccess маппинг.",
+      "T-0068": "onDispatched seam: opts.onDispatched?: (row: OutboxRow) => Promise<void> инжектируется в runOutboxOnce; сейчас no-op. Зона T-0068: заполняет запись в audit_event/actor_event при доставке."
+    },
+    "minor_followups": [
+      "ADR §4.2 markRetry подтянуть при следующем касании ADR-доки (R-1 nit, не блокирует).",
+      "health.test.ts: HTTP-ассерт outbox-блока — кандидат в следующую задачу зоны (coverage gap, не дефект)."
+    ]
+  },
+  "friction_events": []
+}
