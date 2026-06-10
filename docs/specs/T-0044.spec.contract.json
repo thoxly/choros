@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0044",
+  "status": "needs_founder",
+  "summary": "Dual-control gate (E4.6, D-A=A3): on an assignment/grant change, compute the EFFECTIVE (compiled from->to, not row-diff) role_criticality expansion via T-0040 criticalityDiff and require TWO distinct approvers (each != the other and != proposer) iff any axis (a approve_or_transition / b external_invoke / c sensitive_read) is newly raised, else a single scoped-approver != proposer; record a confirmation_flag {change_ref, effective_diff, approvers[], status} and enforce at the T-0030/T-0022 write-path before completion. The single-approver path still gets effective-diff + WORM audit.",
+  "functional": [
+    "FR-1: a new pure module exports a decision function (dualControlDecision) taking {from: RoleCriticality, to: RoleCriticality, proposedBy: string, approvers: string[]} and returning {required_approvers: 1|2, distinct_ok: boolean, satisfied: boolean, reason: string}; no pg/fs/net/http, no Date.now in core, equal inputs => deep-equal output",
+    "FR-2: required_approvers === 2 iff criticalityDiff(from,to).escalates === true (any of axes a/b/c newly raised); else required_approvers === 1; escalates is obtained ONLY from T-0040 criticalityDiff, never re-derived",
+    "FR-3: distinctness — required:2 => satisfied iff approvers has >=2 distinct ids none equal to proposedBy; required:1 => satisfied iff approvers has >=1 id != proposedBy; duplicate ids collapse (a principal cannot count twice)",
+    "FR-4: trigger is the EFFECTIVE (compiled) expansion — from/to RoleCriticality come from combineCriticality over the role's effective grants before/after the proposed change, never a literal row delta; a change that flips no axis bit yields required_approvers === 1 even if rows are written",
+    "FR-5: each gated change produces a confirmation_flag {change_ref, effective_diff (serialized CriticalityDiff: expanded bits + escalates), approvers[], status in {pending, satisfied, rejected}}; persistence model is BLOCKING (Q-1)",
+    "FR-6: the single-approver path is not a bypass — it still computes the effective-diff, requires exactly one approver != proposedBy, emits the WORM audit (T-0031 seam), and records a confirmation_flag with required_approvers === 1",
+    "FR-7: integration seam — the T-0030 grant confirm-path and T-0022 assignment confirm-path call the gate BEFORE marking the change confirmed; an unsatisfied gate rejects (HTTP 4xx code DUAL_CONTROL_UNSATISFIED) and writes no confirmed row; gate is the single enforcement point, UI is a consumer",
+    "FR-8: single source of criticality — T-0044 imports combineCriticality/criticalityDiff/RoleCriticality/CriticalityDiff from src/core/role-criticality.ts without re-declaration or re-implementation; a T-0040 contract-shape change is a BLOCKING upstream break",
+    "FR-9: tenant isolation derived not added — reads are pre-scoped to one tenant (T-0040 RoleGrantSource port / existing withTenantTx); no cross-tenant edge; a confirmation_flag table (if any) carries tenant_id, is in known_tenant_tables.txt + cross-tenant fitness, migration 031+"
+  ],
+  "non_functional": [
+    "NF-1: pure core / injected IO — the decision function imports no pg/fs/net/http; DB read/write behind the existing write-path or an injected port, mirroring T-0040",
+    "NF-2: fail-closed bias — ambiguity resolves toward MORE control; if from/to cannot be computed or the approver set is malformed, the gate denies (red-lines doubt->more criticality)",
+    "NF-3: determinism — dualControlDecision called twice with identical inputs yields deep-equal output; no Date.now/RNG in core",
+    "NF-4: zero new npm dependency (zero-dep TS/stdlib)",
+    "NF-5: frozen foundations untouched — no edit to role-criticality.ts, grant-lattice.ts, data-classification.ts, effect-resource.ts, grant-resolver.ts, object-handle.ts; tsc --noEmit passes",
+    "NF-6: migration seam 031+ — a confirmation_flag table (if added) uses migration number >= 031 (030 taken by T-0030 on dev), carries tenant_id + RLS, updates known_tenant_tables.txt + the cross-tenant fitness case in the same change; if derived (no table), known_tenant_tables.txt is unchanged and that is asserted",
+    "NF-7: WORM audit preserved — audit emission uses the existing T-0031 encoder in the same transaction as the write; no parallel audit path"
+  ],
+  "out_of_scope": [
+    "Re-implementing or tuning the three criticality axes or the sensitive-read threshold — owned by T-0040 (frozen)",
+    "The Postgres RoleGrantSource DAO / live binding — deferred to T-0053",
+    "SoD evaluation (sod_constraint, static/dynamic incompatibility) — T-0032; dual-control is a separate, independent gate (AC-18 fixes the boundary)",
+    "The approval UI/workflow (approver queues, notifications, multi-step routing) — a frontend/orchestration consumer of the gate, not this task",
+    "Break-glass / emergency-override path — not in E4.6 scope",
+    "Stage-2 agent-runtime concerns (autonomy downgrade, A2A breakers, agent-as-approver semantics)",
+    "BYO-LLM egress criticality axis — E4.8 / separate task"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "dualControlDecision returns required_approvers === 2 when criticalityDiff(from,to).escalates === true (e.g. from = all-false, to = approve_or_transition:true)", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "dualControlDecision returns required_approvers === 1 when escalates === false (from === to, a true->false narrowing, or a true->true no-op)", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "two-approver path satisfied: {required:2, approvers:['a','b'], proposedBy:'p'} => satisfied === true (approvers distinct from each other and from proposedBy)", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "two-approver path NOT satisfied by one approver: {required:2, approvers:['a'], proposedBy:'p'} => satisfied === false", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "distinctness: {required:2, approvers:['a','a'], proposedBy:'p'} (duplicate) => satisfied === false (a principal cannot count twice)", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "proposer-exclusion: {required:2, approvers:['a','p'], proposedBy:'p'} => satisfied === false (an approver equal to the proposer does not count)", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "single-approver path: {required:1, approvers:['a'], proposedBy:'p'} => satisfied === true; {required:1, approvers:['p'], proposedBy:'p'} => satisfied === false", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "effective (compiled) trigger not row-diff: re-stating an already-held grant (axis bits unchanged, from equiv to) yields required_approvers === 1 even though a row would be written", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "each of axes a/b/c flipping false->true independently triggers required_approvers === 2 (three separate cases)", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "a criticality-(a/b/c) change cannot complete via the write-path with a single approver: the gate rejects (HTTP 4xx DUAL_CONTROL_UNSATISFIED) and no confirmed row / no status:satisfied flag is written", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "a routine non-escalating in-subtree change completes with exactly one approver != proposer, effective-diff recorded and WORM audit event emitted", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "confirmation_flag for a gated change carries the serialized CriticalityDiff (expanded bits + escalates) as effective_diff, the change_ref, the distinct approvers[], and a status", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "T-0044 imports combineCriticality/criticalityDiff/RoleCriticality/CriticalityDiff from src/core/role-criticality.ts; a fitness check asserts T-0044 does NOT redeclare/re-implement the three axis derivations (single-source-of-truth, FR-8)", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "fail-closed: when from/to cannot be computed (malformed input to the gate), the decision denies (does not return a satisfiable single-approver result)", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "tsc --noEmit clean; eslint src clean; no edit to role-criticality.ts/grant-lattice.ts/data-classification.ts/effect-resource.ts/grant-resolver.ts/object-handle.ts (git-diff fitness)", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "migration-seam: if a confirmation_flag table is added its migration number is >= 031, it carries tenant_id + RLS, and known_tenant_tables.txt + the cross-tenant fitness case include it; if derived, known_tenant_tables.txt is unchanged (asserted)", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "determinism: dualControlDecision called twice with identical inputs returns deep-equal output", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "SoD boundary: the gate does NOT read/write sod_constraint and does NOT call the T-0032 SoD evaluator; dual-control and SoD are independent checks", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [
+    {"id": "Q-1", "text": "Is confirmation_flag a persisted control-plane table (queryable approval history, tenant_id + RLS, migration 031+) or a derived/in-request decision object (no table; rationale carried in the audit_event)?", "why_blocking": "Determines whether T-0044 adds a migration, a new tenant_id-bearing table, known_tenant_tables.txt + cross-tenant fitness changes, and queryable history versus a pure decision + audit-only record. Scope, migration count, and the tenant-isolation surface all change with the answer."},
+    {"id": "Q-2", "text": "Gate stance on corrupt/non-derivable clearance (T-0040 R-1 under-flag): must a newly-added read grant whose clearance marker is NOT a derivable DataClass be treated as an implicit escalate (force dual-control) before consulting criticalityDiff, or does T-0044 inherit T-0040's under-flag (no escalation on garbage clearance)?", "why_blocking": "Changes whether a class of garbage-clearance privilege expansions silently completes with one approver — the exact preventive-brake case D-A=A3 was chosen to close. The founder must rule on the safe-vs-permissive direction; T-0044 cannot fix it by editing frozen T-0040/T-0033."},
+    {"id": "Q-3", "text": "Enforcement attachment: does the gate enforce at the existing single-INSERT POST /api/grants and POST /api/role-assignments (change born already confirmed-or-rejected), or does T-0044 introduce a two-phase propose -> (one or two approvers) confirm -> completion flow that the current single-request write-path cannot express?", "why_blocking": "The two-approver requirement structurally implies a multi-actor confirm flow the present write-path (proposed_by/confirmed_by at INSERT) does not model. The answer decides whether T-0044 is a decision function + one guard call on the existing endpoint, or a new propose/confirm endpoint pair (a materially larger scope and a different DB-state model)."}
+  ],
+  "spec_artifact_path": "docs/specs/T-0044-dual-control.spec.md"
+}
