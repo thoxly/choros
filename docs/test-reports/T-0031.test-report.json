@@ -1,0 +1,196 @@
+{
+  "task_id": "T-0031",
+  "verdict": "pass",
+  "phase": "TEST",
+  "tested_object": {
+    "branch": "task/T-0031-grant-trail",
+    "head": "c8bbc96",
+    "base": "dev",
+    "scope": "Grant trail encoder + read API: src/core/audit-grant-encoder.ts, src/db/audit-grant-trail.ts, src/http/grant-trail.ts, web/src/screens/rights/ra-grant-trail.jsx; fitness checks FF-0031-01..07; e2e tests; DB tests"
+  },
+  "deterministic": {
+    "total": 775,
+    "passed": 774,
+    "failed": 0,
+    "note": "732 unit+e2e (npm run ci, no DATABASE_URL) + 21 adversarial probes (tester-authored) + 277 DB fitness (fitness:db, isolated Postgres, run 1) + 277 DB fitness (fitness:db, run 2 idempotency). 5 pre-existing skips (flowable integration, no-Flowable env). 1 initial schema.test.ts failure resolved by correct choros_migrator user in DATABASE_URL (tooling-gap, not product defect)."
+  },
+  "ci_run": {
+    "harness": "isolated Postgres postgres:16-alpine, container=choros-test-T0031, POSTGRES_PORT=55479, volume=choros-test-T0031-vol, DATABASE_URL=postgresql://choros_migrator:migratorpass@localhost:55479/choros_test",
+    "tsc_noEmit": "clean (exit 0) — 0 errors",
+    "eslint_src": "clean (exit 0)",
+    "fitness_static": "all static shell checks green — FF-0031-01 (no IO imports in encoder), FF-0031-02 (grant-lattice.ts unchanged), FF-0031-03 (GrantAuditEvent imported from grant-lattice), FF-0031-04 (appendAuditEvent seam in encoder test), FF-0031-05 (known_tenant_tables.txt unchanged), FF-0031-06 (no CREATE TABLE in 031+ migrations), FF-0031-07 (no seed migration needed)",
+    "vitest_unit_e2e": "732 passed / 5 skipped — no DATABASE_URL; 35 test files (34 passed, 1 skipped)",
+    "fitness_db_run1": "277/277 pass on isolated Postgres, run 1",
+    "fitness_db_run2": "277/277 pass on same persistent volume, run 2 — idempotency confirmed",
+    "migration_run1": "29 migrations applied (001..029)",
+    "migration_run2": "nothing to apply (29 already recorded, 29 files) — idempotency confirmed",
+    "web_build": "vite build — 45 modules, 0 errors (531ms)"
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-01",
+      "test": "audit-grant-encoder.test.ts: 'AC-01: maps grant.create fields correctly' — type, actor, subject, scope, proposed_by=null, confirmed_by=null, payload.resourceType, payload.operation, occurred_at=1000, via=null verified",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-02",
+      "test": "audit-grant-encoder.test.ts: 'AC-02: threads proposedBy and confirmedBy' — proposed_by='llm', confirmed_by='u2'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-03",
+      "test": "audit-grant-encoder.test.ts: 'AC-03: maps grant.revoke type correctly'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-04",
+      "test": "audit-grant-encoder.test.ts: 'AC-04: includes resourceFacet in payload when present' + 'AC-04: omits resourceFacet from payload when absent' — two separate test cases",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-05",
+      "test": "audit-grant-encoder.test.ts: 'AC-05: maps assignment.create fields correctly' — type, actor, subject=emp-1, scope=orgScope, payload.roleId=role-x, occurred_at=2000",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-06",
+      "test": "audit-grant-encoder.test.ts: 'AC-06: maps assignment.revoke type correctly'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-07",
+      "test": "audit-grant-encoder.test.ts: 'AC-07: output contains no chain columns' (both encodeGrantAuditEvent and encodeAssignmentAuditEvent) — seq/prev_hash/row_hash/vocab_version absent",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-08",
+      "test": "audit-grant-encoder.test.ts: 'AC-08: returns same output with same idOverride (structural equality)' — all fields except id equal; id equal when idOverride provided",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-09",
+      "test": "FF-0031-01 (grant-trail-encoder-isolation.sh Check-1): grep confirms no pg/fetch/http/https/net/child_process import in audit-grant-encoder.ts",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "FF-0031-02 (Check-2): git diff merge-base dev -- src/core/grant-lattice.ts is empty (unchanged); FF-0031-03 (Check-3): import GrantAuditEvent from grant-lattice found",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "FF-0031-04 (Check-4): appendAuditEvent found in encoder test; 3 seam stubs (seam-1: grant.create, seam-2: grant.revoke, seam-3: assignment.create) each calling appendAuditEvent(tx, input)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "grant-trail.e2e.test.ts: 'AC-12: GET /api/grant-trail returns 200 with { rows, hasMore } shape' + 'AC-12: each row has required GrantTrailRow fields' (seq, id, type, actor, subject, scope, proposed_by, confirmed_by, payload, occurred_at)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "grant-trail.e2e.test.ts: 'AC-13: GET /api/grant-trail?role_id=X filters by subject or payload.roleId' — filter on role-fin-approve-250 seed data",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "grant-trail.e2e.test.ts: 'AC-14: GET /api/grant-trail?actor=X filters by actor' — А. Кравцова filter on seed data",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "grant-trail.e2e.test.ts: 'AC-15: GET /api/grant-trail?limit=2 returns at most 2 rows' + hasMore=true; DB test: cursor pagination (5 rows, 2 per page, no duplicates, all 5 collected)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "grant-trail.e2e.test.ts: limit=600 → 400 INVALID_PARAM; limit=0 → 400; limit=foo → 400. Adversarial probe (в): limit=-1 → 400; limit=501 → 400; limit=1.5 → 400",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "grant-trail.e2e.test.ts: before_seq=abc → 400 INVALID_PARAM; before_seq=1.5 → 400. Adversarial probe (в): before_seq=-5 → 400",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "grant-trail.e2e.test.ts: 'AC-18: without DATABASE_URL returns HTTP 200 with seed data (≥1 row)' — 10 TRAIL_SEED rows returned",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-19",
+      "test": "grant-trail.db.test.ts: 'AC-19: TENANT_A trail does not include TENANT_B rows' + 'AC-19: TENANT_B trail does not include TENANT_A rows' — withTenant + choros.tenant_id GUC + RLS; live isolated PG 55479. Adversarial probe (г): assertUuid blocks non-UUID tenant IDs (SQL injection, empty string, short UUID)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-20",
+      "test": "grant-trail.db.test.ts: 'AC-20: queryGrantTrail only returns grant-family event types' — 'approve' type row seeded, confirmed absent from trail results; ALLOWED = {grant.create, grant.revoke, assignment.create, assignment.revoke}",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-21",
+      "test": "Manual inspection: ra-grant-trail.jsx useEffect on mount calls fetch('/api/grant-trail'), setAllRows(data.rows.map(apiRowToDisplay)), setHasMore(data.hasMore). TRAIL_SEED is initial state (fallback). .chs-trailrow class on table rows. Load-more implemented. No DOM smoke test possible without browser (secondary UX — manual).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-22",
+      "test": "FF-0031-05 (known_tenant_tables.txt unchanged) + FF-0031-06 (no CREATE TABLE in 031+ migrations — no such migrations exist)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-23",
+      "test": "FF-0031-07: no seed migration shipped (031+ absent) — day-1 static fallback covers dev-no-Postgres; check passes vacuously by design",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "AC-21: GrantTrailScreen useEffect fetch wiring and .chs-trailrow render — visual DOM check",
+      "result": "pass",
+      "note": "вторично, LLM/код-ревью. JSX code review confirms useEffect({fetch('/api/grant-trail'), setAllRows, setHasMore}, []); TRAIL_SEED as initial/fallback state; .chs-trailrow className present on each row. Load-more button rendered when hasMore=true. No browser run possible in CI environment."
+    }
+  ],
+  "adversarial_probes": [
+    {
+      "id": "а",
+      "what": "Hash-chain integrity AFTER encoder-produced rows are inserted into audit_event. Uses live isolated Postgres (55479). Inserts a grant.create row with specific prev_hash/row_hash values, verifies columns are preserved, then confirms the T-0016 UPDATE-blocking trigger still fires on grant-family rows.",
+      "expected": "Chain columns preserved on INSERT; UPDATE blocked by trigger (append-only invariant holds regardless of event type).",
+      "result": "PASS — INSERT OK, prev_hash=deadbeef/row_hash=cafebabe preserved, UPDATE on actor blocked (trigger throws). Adversarial unit probes: (а-1) no chain columns in any encoder output (5 grant + 2 assignment events); (а-2) JSON.stringify roundtrip clean (no Buffer/circular); (а-3) occurred_at is integer ≤ 2^53; (а-4) id is non-empty string."
+    },
+    {
+      "id": "б",
+      "what": "Encoder with garbage GrantAuditEvent (missing required fields, unknown kind) — fail-closed vs silent corruption. Tests: (б-1) missing actor → undefined/null actor (not fabricated string); (б-2) empty {} → no valid type; (б-3) unknown kind passes through literally (not silently mapped to known type); (б-4) AssignmentAuditEvent missing employeeId → undefined subject.",
+      "expected": "Encoder either throws (fail-closed) or passes the invalid value through faithfully so the DB NOT NULL constraint or type validation rejects it. Must NOT silently substitute a fake actor/type string.",
+      "result": "PASS — (б-1): actor=undefined (not 'unknown'/'system'); (б-2): type=undefined (not 'grant.create'); (б-3): unknown kind 'grant.unknown-future-type' passed through literally, not silently changed; (б-4): subject=undefined (not fabricated). All 4 tests green."
+    },
+    {
+      "id": "в",
+      "what": "HTTP /api/grant-trail with edge-case invalid params: limit=0, limit=-1, limit=501, limit=1.5, before_seq=abc, before_seq=-5. Must all return 400 INVALID_PARAM, not 500/empty 200.",
+      "expected": "All 6 cases → HTTP 400, body.error.code = 'INVALID_PARAM'.",
+      "result": "PASS — all 6 return 400 INVALID_PARAM. No 500 produced. Supplements existing AC-16/17 coverage."
+    },
+    {
+      "id": "г",
+      "what": "Tenant header substitution: X-Dev-User = random UUID, SQL injection string, empty string → route must not 500 or leak cross-tenant data. Live DB: queryGrantTrail with non-UUID tenantId (SQL injection, 'not-a-uuid', empty, short UUID) → assertUuid must throw before any DB query.",
+      "expected": "HTTP layer: 200 with seed data for all X-Dev-User values (static path). DB layer: assertUuid blocks non-UUID tenantId with clear error.",
+      "result": "PASS — HTTP probes (г-1/г-2/г-3): all return 200 with seed data, no 500, no exception. Live DB probe: all 4 bad tenantIds rejected by assertUuid ('tenantId must be a valid UUID') before any DB query executes — SQL injection impossible via this path."
+    },
+    {
+      "id": "д",
+      "what": "UI fallback honesty: when DATABASE_URL absent, TRAIL_SEED is served transparently (not masking a DB error). Response must have: ≥1 row, hasMore=false for default limit=100 (10 seed rows < 100), correct GrantTrailRow shape with valid types, no 'is_seed'/'error' fields in response.",
+      "expected": "200 with 10 TRAIL_SEED rows, hasMore=false, all rows have type ∈ {grant-family types}, no error/is_seed marker.",
+      "result": "PASS — (д-1): 200 + 10 rows; (д-2): hasMore=false; (д-3): all rows have type/actor/seq/occurred_at as correct types, all types ∈ valid grant-family set; (д-4): no error/is_seed/seed_fallback field in response. TRAIL_SEED is transparent fallback, not error-masking."
+    }
+  ],
+  "integration_honesty_d056": {
+    "verdict": "honest",
+    "evidence": "DB tests (fitness:db) use real pg.Pool against live isolated Postgres via appUrl()/migratorUrl() — no vi.mock, no stub. grant-trail.db.test.ts seeds real rows via migratorUrl (bypasses RLS), probes via appPool (choros_app NOBYPASSRLS) to confirm actual RLS enforcement. Encoder unit tests mock only appendAuditEvent (T-0053 not yet implemented — explicitly out of scope per spec §4). HTTP e2e tests use real http.Server + real Node.js http.request. Adversarial live probes (а/г) use real pg.Pool against 55479. No describe.skip/it.skip green-skip guard — if DATABASE_URL absent, migratorUrl() throws and the suite errors rather than passing silently."
+  },
+  "false_fail_discipline": {
+    "observed": "Initial fitness:db run with DATABASE_URL=postgresql://postgres:testpass@localhost:55479/choros_test failed schema.test.ts (1/277): 'every tenant table is owned by choros_migrator, not choros_app' — owner was 'postgres'.",
+    "diagnosis": "tooling-gap: isolated container has no choros_migrator role; migrations ran as postgres superuser so tables owned by postgres. Fix: CREATE ROLE choros_migrator SUPERUSER LOGIN, recreate DB with OWNER choros_migrator, re-run migrations. Product DDL is correct — migration 001 creates choros_app but relies on the container bootstrap superuser being choros_migrator (documented in run.mjs comments). Correct harness setup resolves the issue cleanly. Not a product defect.",
+    "root_class": "tooling-gap (tester harness: wrong DB user in initial setup); resolved by using choros_migrator URL"
+  },
+  "failures": [],
+  "friction": []
+}

@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0031",
+  "verdict": "approved",
+  "re_review": "49367b5",
+  "re_review_note": "Fix commit 49367b5 addresses all findings from initial review (296afd8). R-1 verified by running fitness:db twice on same persistent volume — both runs 277/277. Full npm run ci green (no DATABASE_URL).",
+  "ci_seen": {
+    "green": true,
+    "build": "tsc — 0 errors",
+    "test": "732 passed / 5 skipped (unit + e2e, no DATABASE_URL)",
+    "fitness": "all checks green — FF-0031-01..07 pass, cross-tenant pass",
+    "web_build": "vite build — 45 modules, 0 errors",
+    "isolated_db_fitness_run1": "277/277 pass on persistent volume (run 1)",
+    "isolated_db_fitness_run2": "277/277 pass on same persistent volume (run 2 — idempotency confirmed)"
+  },
+  "isolated_db": "pass",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/db/grant-trail.db.test.ts:198",
+      "issue": "CLOSED. Pagination probe was not idempotent on a persistent DB (actor='page-actor' accumulated across runs). Fixed in 49367b5: per-run actor slug PAGE_ACTOR=`page-actor-${SEQ_BASE}` used throughout the probe — seed, queries, and filter. Verified: two consecutive fitness:db runs on the same persistent volume both pass 277/277.",
+      "suggestion": "Closed."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/db/audit-grant-trail.ts:71-83 (comment block)",
+      "issue": "ADDRESSED. Fix 49367b5 adds an inline comment at the withTenant copy site explaining why a shared import is not possible (org.ts does not export withTenant — private helper), documenting the extraction risk, and flagging it as a future cleanup task. Original nit (duplication without comment) is resolved. The two implementations remain byte-for-byte identical; extraction deferred.",
+      "suggestion": "Addressed by documentation comment in 49367b5. Future cleanup: extract to src/db/tenant.ts."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/http/grant-trail.ts:39",
+      "issue": "CLOSED. Fix 49367b5 removes the spurious `roleId: null` from the TRAIL_SEED grant.create row payload, making the seed data semantically accurate with ADR §3.2 FR-1 payload shape.",
+      "suggestion": "Closed."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/core/audit-grant-encoder.ts:23-29 (comment block)",
+      "issue": "ADDRESSED. Fix 49367b5 adds an inline comment at the GrantAuditEvent re-export in audit-grant-encoder.ts that documents the cross-spec ambiguity (T-0030 AC-12 vs T-0031 §6) and defers resolution to the T-0030 merge review. No code change needed in T-0031.",
+      "suggestion": "Addressed by documentation comment in 49367b5. Flag for T-0030 review as noted."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-01", "covered": true, "note": "encoder test passes, field mapping verified" },
+    { "ac": "AC-02", "covered": true, "note": "proposedBy/confirmedBy passthrough tested" },
+    { "ac": "AC-03", "covered": true, "note": "grant.revoke type tested" },
+    { "ac": "AC-04", "covered": true, "note": "resourceFacet conditional tested (present + absent)" },
+    { "ac": "AC-05", "covered": true, "note": "assignment.create mapping tested" },
+    { "ac": "AC-06", "covered": true, "note": "assignment.revoke type tested" },
+    { "ac": "AC-07", "covered": true, "note": "no chain columns in output — asserted in tests" },
+    { "ac": "AC-08", "covered": true, "note": "idOverride param makes output deterministic" },
+    { "ac": "AC-09", "covered": true, "note": "FF-0031-01 PASS — no IO imports" },
+    { "ac": "AC-10", "covered": true, "note": "FF-0031-02+03 PASS — grant-lattice.ts unchanged, GrantAuditEvent imported from it" },
+    { "ac": "AC-11", "covered": true, "note": "FF-0031-04 PASS — appendAuditEvent seam stubs in encoder tests (3 seam tests)" },
+    { "ac": "AC-12", "covered": true, "note": "e2e test: 200 + {rows, hasMore} with all GrantTrailRow fields" },
+    { "ac": "AC-13", "covered": true, "note": "e2e test: role_id filter works on seed data" },
+    { "ac": "AC-14", "covered": true, "note": "e2e test: actor filter works on seed data" },
+    { "ac": "AC-15", "covered": true, "note": "e2e test: limit=2 returns 2 rows + hasMore=true; cursor pagination tested in DB tests" },
+    { "ac": "AC-16", "covered": true, "note": "e2e test: limit=600 → 400 INVALID_PARAM; limit=0 and limit=foo also tested" },
+    { "ac": "AC-17", "covered": true, "note": "e2e test: before_seq=abc and before_seq=1.5 → 400 INVALID_PARAM" },
+    { "ac": "AC-18", "covered": true, "note": "e2e test: no DATABASE_URL → 200 + ≥1 seed row" },
+    { "ac": "AC-19", "covered": true, "note": "DB test: TENANT_A rows not visible to TENANT_B and vice versa; withTenant + assertUuid enforced" },
+    { "ac": "AC-20", "covered": true, "note": "DB test: type IN filter confirmed; 'approve' row absent from trail results" },
+    { "ac": "AC-21", "covered": true, "note": "ra-grant-trail.jsx: useEffect fetch to /api/grant-trail on mount; TRAIL_SEED as initial/fallback state; load-more implemented" },
+    { "ac": "AC-22", "covered": true, "note": "FF-0031-05+06 PASS — known_tenant_tables.txt unchanged, no CREATE TABLE in 031+ migrations" },
+    { "ac": "AC-23", "covered": true, "note": "FF-0031-07 PASS — no seed migration shipped (none required)" }
+  ],
+  "role_gap_evidence": []
+}

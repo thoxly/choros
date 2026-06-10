@@ -3,9 +3,9 @@
    ЭКРАН 4: ЖУРНАЛ ВЫДАЧИ ПРАВ (grant trail).
    ============================================================================ */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ExecutorBadge, MonoId, Mono, OpChip, Button } from '../../components/components.jsx';
-import { TRAIL, ProvenanceTag, SectionHead } from './ra-data.jsx';
+import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
 
 const ACTION_META = {
   grant:  { label: "выдан",  cls: "grant" },
@@ -20,13 +20,103 @@ const TRAIL_FILTERS = [
   { id: "narrow", label: "Сужения" },
 ];
 
+// ---------------------------------------------------------------------------
+// Map a GrantTrailRow (from /api/grant-trail) to the display shape the table
+// uses. The API returns machine types; we derive the display fields here.
+// ---------------------------------------------------------------------------
+
+function apiRowToDisplay(r) {
+  // Derive action from type: "grant.create" → "grant", "grant.revoke" → "revoke",
+  // "assignment.create" → "grant", "assignment.revoke" → "revoke".
+  let action;
+  if (r.type === "grant.create" || r.type === "assignment.create") action = "grant";
+  else if (r.type === "grant.revoke" || r.type === "assignment.revoke") action = "revoke";
+  else action = "grant";
+
+  // Format occurred_at (epoch-ms) to a display timestamp string.
+  const ts = r.occurred_at
+    ? new Date(r.occurred_at).toISOString().replace("T", " ").replace("Z", "")
+    : String(r.occurred_at);
+
+  // Subject display: actor and subject are plain strings in the API response.
+  const actorDisplay = { type: "human", name: r.actor };
+  const subjectDisplay = { type: "human", name: r.subject ?? "—" };
+
+  // Scope display: render nodeId or a JSON snippet for other scope kinds.
+  let scopeDisplay = "—";
+  if (r.scope && typeof r.scope === "object") {
+    const s = r.scope;
+    if (s.kind === "node") scopeDisplay = `${s.hierarchy}:${s.nodeId}`;
+    else if (s.kind === "tags") scopeDisplay = (s.tags ?? []).join(", ");
+    else if (s.kind === "interval") scopeDisplay = `${s.axis} ≤ ${s.hi}`;
+    else scopeDisplay = JSON.stringify(s);
+  }
+
+  // Payload fields
+  const payload = r.payload && typeof r.payload === "object" ? r.payload : {};
+  const op = String(payload.operation ?? payload.roleId ?? r.type);
+  const res = String(payload.resourceType ?? payload.roleId ?? "—");
+  const role = r.subject ?? "—";
+
+  return {
+    id: r.id,
+    ts,
+    action,
+    actor: actorDisplay,
+    subject: subjectDisplay,
+    role,
+    res,
+    op,
+    scope: scopeDisplay,
+    proposed: r.proposed_by ?? "human",
+    confirmed: r.confirmed_by ? [r.confirmed_by] : [],
+    crit: false, // day-1: crit flag not pre-computed by API (spec §4)
+    _seq: r.seq,
+  };
+}
+
 function GrantTrailScreen() {
   const [filter, setFilter] = useState("all");
   const [critOnly, setCritOnly] = useState(false);
+  const [allRows, setAllRows] = useState(() => TRAIL_SEED.map(apiRowToDisplay));
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
 
-  const rows = TRAIL.filter((r) => (filter === "all" || r.action === filter) && (!critOnly || r.crit));
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/grant-trail')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.rows)) {
+          setAllRows(data.rows.map(apiRowToDisplay));
+          setHasMore(Boolean(data.hasMore));
+        }
+      })
+      .catch(() => {
+        // keep seed — NF-8: static fallback if API is unavailable
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  function loadMore() {
+    if (!hasMore || allRows.length === 0) return;
+    const minSeq = Math.min(...allRows.map((r) => r._seq));
+    setLoading(true);
+    fetch(`/api/grant-trail?before_seq=${minSeq}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.rows)) {
+          setAllRows((prev) => [...prev, ...data.rows.map(apiRowToDisplay)]);
+          setHasMore(Boolean(data.hasMore));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }
+
+  const rows = allRows.filter((r) => (filter === "all" || r.action === filter) && (!critOnly || r.crit));
   const counts = TRAIL_FILTERS.reduce((acc, f) => {
-    acc[f.id] = f.id === "all" ? TRAIL.length : TRAIL.filter((r) => r.action === f.id).length;
+    acc[f.id] = f.id === "all" ? allRows.length : allRows.filter((r) => r.action === f.id).length;
     return acc;
   }, {});
 
@@ -94,6 +184,11 @@ function GrantTrailScreen() {
         <div className="chs-trail__foot">
           <span className="chs-trail__footglyph" />
           Журнал неизменяем (append-only). Каждая запись — часть единого аудит-лога инстанса; правки и удаления невозможны.
+          {hasMore && (
+            <Button variant="secondary" size="sm" onClick={loadMore} disabled={loading} style={{ marginLeft: "1rem" }}>
+              {loading ? "Загрузка…" : "Загрузить ещё"}
+            </Button>
+          )}
         </div>
       </div>
     </div>

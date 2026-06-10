@@ -13,6 +13,7 @@ import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
 import { registerProcessesRoutes } from "./http/processes.js";
+import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 
 const { Pool } = pg;
@@ -157,6 +158,9 @@ function buildRouter(
 
   // Register processes endpoints
   registerProcessesRoutes(router, store as JobStore);
+
+  // Register grant trail endpoints (T-0031)
+  registerGrantTrailRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
