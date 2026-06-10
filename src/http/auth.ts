@@ -35,7 +35,7 @@ const AUTH_MODE = (process.env.CHOROS_AUTH_MODE ?? "dev") as "dev" | "keycloak";
 export function registerAuthRoutes(router: Router, _store?: JobStore): void {
   // GET /api/users — return list of selectable users (humans only)
   router.register("GET", "/api/users", async (_req, res) => {
-    const users = listSelectableUsers();
+    const users = await listSelectableUsers();
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ users }));
@@ -59,7 +59,7 @@ export function registerAuthRoutes(router: Router, _store?: JobStore): void {
       throw new HttpError(401, "UNAUTHENTICATED", "no valid dev identity");
     }
 
-    const employee = findEmployee(devUserId);
+    const employee = await findEmployee(devUserId);
     if (!employee) {
       throw new HttpError(401, "UNAUTHENTICATED", "no valid dev identity");
     }

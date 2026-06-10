@@ -120,6 +120,59 @@ async function seedObjectHandle(c: pg.Client, tenantId: string): Promise<string>
   return id;
 }
 
+/** Seed a tenant row for the given tenant (tenant_id = id = tenantId). */
+async function seedTenantRow(c: pg.Client, tenantId: string): Promise<void> {
+  const slug = `ct-tenant-${tenantId.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+     VALUES ($1, $1, $2, $2, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, slug],
+  );
+}
+
+/** Seed one row into choros.department. Returns the department id. */
+async function seedDepartmentRow(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  const slug = `ct-dept-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.department
+       (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, NULL, $3, $3, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, slug],
+  );
+  return id;
+}
+
+/** Seed one row into choros.position. Returns the position id. */
+async function seedPositionRow(c: pg.Client, tenantId: string, departmentId: string): Promise<string> {
+  const id = uuid();
+  const slug = `ct-pos-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.position
+       (tenant_id, id, department_id, slug, title, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $4, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, departmentId, slug],
+  );
+  return id;
+}
+
+/** Seed one row into choros.employee. */
+async function seedEmployeeRow(c: pg.Client, tenantId: string, positionId: string): Promise<string> {
+  const id = uuid();
+  const slug = `ct-emp-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.employee
+       (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, positionId, slug],
+  );
+  return id;
+}
+
 /** Seed one row into choros.job. Returns the job id. */
 async function seedJobRow(c: pg.Client, tenantId: string): Promise<string> {
   const id = uuid();
@@ -162,6 +215,11 @@ const seedState = {
   // track audit_event seq per tenant to avoid PK collision
   auditSeqA: 1,
   auditSeqB: 1,
+  // org-structure FK chain: dept → position (needed for employee seed)
+  deptIdA: '',
+  deptIdB: '',
+  posIdA: '',
+  posIdB: '',
 };
 
 /**
@@ -208,6 +266,31 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
     case 'app_timer':
       await seedAppTimer(c, tenantId);
       break;
+    case 'tenant':
+      // tenant_id = id for the tenant row (self-anchoring per T-0017 ADR §3.1)
+      await seedTenantRow(c, tenantId);
+      break;
+    case 'department': {
+      // Must seed after tenant. Store dept id for downstream position seed.
+      const deptId = await seedDepartmentRow(c, tenantId);
+      if (tenantId === TENANT_A) seedState.deptIdA = deptId;
+      else seedState.deptIdB = deptId;
+      break;
+    }
+    case 'position': {
+      // Must seed after department. Store position id for downstream employee seed.
+      const deptId = tenantId === TENANT_A ? seedState.deptIdA : seedState.deptIdB;
+      const posId = await seedPositionRow(c, tenantId, deptId);
+      if (tenantId === TENANT_A) seedState.posIdA = posId;
+      else seedState.posIdB = posId;
+      break;
+    }
+    case 'employee': {
+      // Must seed after position.
+      const posId = tenantId === TENANT_A ? seedState.posIdA : seedState.posIdB;
+      await seedEmployeeRow(c, tenantId, posId);
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }

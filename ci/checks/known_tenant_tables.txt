@@ -7,3 +7,7 @@ audit_head
 grant
 object_handle
 app_timer
+tenant
+department
+position
+employee
