@@ -4,7 +4,11 @@
  * (FF-DC*) and its AC ids.
  *
  * FF-DC3  → AC-3       : class-driven divergence (grant×class only)
- * FF-DC4  → AC-4, AC-12: fail-closed on missing/mismatched classification
+ * FF-DC4  → AC-4, AC-12: fail-closed on missing classification — 4a state U
+ *                        (ungoverned ⇒ raw), 4b state G (governed, empty version
+ *                        rows, non-null clearance ⇒ max mask)
+ * FF-DC12 → AC-4, AC-12: version-boundary isolation (governed@vN, facet vM≠N,
+ *                        MAXIMAL clearance ⇒ classified field dropped, raw absent)
  * FF-DC5  → AC-5       : value-aware (present, transformed value)
  * FF-DC6  → AC-6       : transform selected by (class, clearance), not field name
  * FF-DC11 → AC-11      : direction-aware guard
@@ -53,13 +57,20 @@ function row(
   return { resourceType, facetField, facetSchemaVersion: schemaVersion, class: cls };
 }
 
-/** Build a MaskContext. */
+/**
+ * Build a MaskContext. rev-2 (R-1): `governed` defaults to `true` (a resource
+ * with classification rows is governed). Existing FF-DC3/5/6/13 tests pass
+ * non-empty rows for the fields under test, so they never reach the
+ * `cls === undefined` fork and are unaffected by the default. The fail-closed
+ * version-boundary tests (FF-DC4a/4b/DC12) set `governed` explicitly.
+ */
 function ctx(
   rows: ClassificationRow[],
   clearance: Clearance,
   schemaVersion = V,
+  governed = true,
 ): MaskContext {
-  return { rows, clearance, facetSchemaVersion: schemaVersion };
+  return { governed, rows, clearance, facetSchemaVersion: schemaVersion };
 }
 
 /** Build a grant carrying a clearance marker on its (opaque) resourceFacet. */
@@ -214,9 +225,14 @@ describe("FF-DC3 class-driven divergence keyed on clearance only [AC-3]", () => 
     expect(high.ssn).toBe("123456789"); // reveal
     expect(low.ssn).toBe("[redacted]"); // gap 2 ⇒ redact
     expect(high.ssn).not.toEqual(low.ssn);
-    // Unclassified fields are identical for both (divergence keyed only by class).
-    expect(high.name).toBe("Alice");
-    expect(low.name).toBe("Alice");
+    // The divergence is keyed ONLY by class: `name` (no row) is treated
+    // IDENTICALLY for both readers. The resource is governed (ssn is
+    // classified), so under rev-2 (R-1, truth-table row 4) `name` fails closed
+    // for both — same outcome regardless of clearance (divergence is class-only,
+    // not field-name driven).
+    expect("name" in high).toBe(false);
+    expect("name" in low).toBe(false);
+    expect("name" in high).toBe("name" in low);
   });
 });
 
@@ -226,34 +242,65 @@ describe("FF-DC3 class-driven divergence keyed on clearance only [AC-3]", () => 
 // ---------------------------------------------------------------------------
 
 describe("FF-DC4/DC12 fail-closed on missing/mismatched classification [AC-4, AC-12]", () => {
-  it("a classified facet whose version has NO rows fails closed — but never widens to whole-resource", () => {
-    // Reader is visible-granted all fields, but the classification source has
-    // no rows for this version: classified fields fall through as unclassified
-    // (kept raw) ONLY because no row declares them classified — the version
-    // boundary is enforced by row-matching, see next test for the real mismatch.
-    const out = maskFields(RAW, ALL_VISIBLE, ctx([], "public"));
-    // With NO rows, nothing is declared classified ⇒ legacy raw projection.
-    // Critically it does NOT widen beyond the visible set.
+  // FF-DC4a (state U, ungoverned) — the legacy back-compat anchor. An
+  // affirmatively-ungoverned resource (governed:false, zero rows at any
+  // version) keeps every visible field RAW. This is the pre-T-0033 floor:
+  // classification is additive; an untouched resource is not newly denied.
+  it("FF-DC4a state U (ungoverned, governed:false) keeps fields raw — legacy floor", () => {
+    const out = maskFields(RAW, ALL_VISIBLE, ctx([], "public", V, false));
     expect(Object.keys(out).sort()).toEqual(["card", "name", "ssn"]);
+    // Raw values survive unchanged (this is the ungoverned legacy answer).
+    expect(out.ssn).toBe("123456789");
   });
 
-  it("a row for a DIFFERENT schema version does not classify this facet's version", () => {
-    // ssn is classified restricted, but only for version 2; the handle facet is
-    // version 1 ⇒ the row does not apply ⇒ ssn is NOT masked under v1.
-    const rows = [row("ssn", "restricted", 2)];
-    const v1 = maskFields(RAW, ALL_VISIBLE, ctx(rows, "public", 1));
-    expect(v1.ssn).toBe("123456789"); // v2 row does not bite v1
-    // Bump the facet to v2 with a row but NO clearance ⇒ max mask (dropped).
-    const v2 = maskFields(RAW, ALL_VISIBLE, ctx(rows, null, 2));
-    expect("ssn" in v2).toBe(false); // dropped — fail-closed at version boundary
+  // FF-DC4b (state G, governed) — a governed resource whose REQUESTED version
+  // has ZERO rows, with NON-null clearance, max-masks the whole facet: classified
+  // keys fall away (drop), raw NEVER appears, and it does NOT widen to whole-
+  // resource. Clearance is held non-null ('restricted', the max) so the ONLY
+  // lever producing the drop is governance×version — not null clearance.
+  it("FF-DC4b state G (governed, empty version rows, NON-null clearance) max-masks — raw absent", () => {
+    const out = maskFields(RAW, ALL_VISIBLE, ctx([], "restricted", V, true));
+    // Governed + version V has no rows ⇒ every classified field drops (truth-
+    // table row 3). No raw leak; no widening beyond the visible set.
+    expect("ssn" in out).toBe(false);
+    expect("card" in out).toBe(false);
+    expect("name" in out).toBe(false);
+    // Belt-and-suspenders: the raw value is nowhere in the output.
+    expect(Object.values(out)).not.toContain("123456789");
+  });
+
+  // FF-DC12 (rev-2, R-1, the isolating test) — the version mechanism in
+  // isolation. The resource IS governed (rows exist for version 2); the handle
+  // facet is version 1; clearance is NON-null and MAXIMAL ('restricted'). The
+  // classified field (ssn) MUST be absent under version 1 and its raw value MUST
+  // NOT leak — reachable ONLY through the version boundary (truth-table row 3),
+  // never through null clearance. With rev-1 code this is RED (returns raw);
+  // with §10.3 it is GREEN. Negative probe on the VERSION axis.
+  it("FF-DC12 governed@v2, facet v1, MAXIMAL clearance ⇒ ssn absent, value not leaked", () => {
+    const rows = [row("ssn", "restricted", 2)]; // governed under version 2
+    const out = maskFields(RAW, ALL_VISIBLE, ctx(rows, "restricted", 1, true));
+    expect("ssn" in out).toBe(false); // dropped at the version boundary
+    expect(Object.values(out)).not.toContain("123456789"); // raw never leaks
   });
 
   it("null clearance maximally masks every classified field (key dropped)", () => {
     const rows = [row("ssn", "confidential"), row("card", "restricted")];
+    // Resource is GOVERNED (default) — classified ssn/card drop on null
+    // clearance; `name` has no row for this version ⇒ truth-table row 4
+    // (governed, version has rows but not for `name`) ⇒ also drops (fail-closed),
+    // never raw. This is the rev-2 (R-1) inversion of the rev-1 raw fall-through.
     const out = maskFields(RAW, ALL_VISIBLE, ctx(rows, null));
     expect("ssn" in out).toBe(false);
     expect("card" in out).toBe(false);
-    expect(out.name).toBe("Alice"); // unclassified survives
+    expect("name" in out).toBe(false); // governed ⇒ no-row field fails closed
+  });
+
+  it("null clearance on an UNGOVERNED resource keeps unclassified fields raw (state U)", () => {
+    // governed:false ⇒ no row anywhere ⇒ legacy floor: every field is raw,
+    // regardless of clearance (there is nothing classified to mask).
+    const out = maskFields(RAW, ALL_VISIBLE, ctx([], null, V, false));
+    expect(out.name).toBe("Alice");
+    expect(out.ssn).toBe("123456789");
   });
 
   it("a corrupt class value (not a DataClass) drives the maximal mask (drop)", () => {

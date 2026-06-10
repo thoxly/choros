@@ -581,15 +581,21 @@ import {
   type ClassificationRow,
 } from "../core/data-classification.js";
 
-/** A static-now ClassificationSource over a fixed row list. */
+/**
+ * A static-now ClassificationSource over a fixed row list. rev-2 (R-1):
+ * `governed` is the existence of ANY row for `resourceType` (any version);
+ * `rows` is the per-(type, version) slice (ADR §10.4).
+ */
 function staticClassifications(rows: ClassificationRow[]): ClassificationSource {
   return {
-    getClassifications: (resourceType, facetSchemaVersion) =>
-      rows.filter(
+    getClassifications: (resourceType, facetSchemaVersion) => ({
+      governed: rows.some((r) => r.resourceType === resourceType),
+      rows: rows.filter(
         (r) =>
           r.resourceType === resourceType &&
           r.facetSchemaVersion === facetSchemaVersion,
       ),
+    }),
   };
 }
 
@@ -616,7 +622,10 @@ describe("FF-DC7 value-aware masking folds into the single projection [AC-7]", (
     expect(v.denied).toBe(false);
     if (v.denied === false) {
       expect(v.fields.ssn).toBe("[redacted]"); // value-level mask
-      expect(v.fields.name).toBe("Alice"); // unclassified stays raw
+      // rev-2 (R-1): the resource is GOVERNED (ssn is classified), so `name`
+      // (no row for this version) fails closed to drop (truth-table row 4) —
+      // not raw. The value-aware mask still folds into the single projection.
+      expect("name" in v.fields).toBe(false);
     }
   });
 
@@ -670,8 +679,9 @@ describe("FF-DC7 value-aware masking folds into the single projection [AC-7]", (
     });
     const v = await resolveFor(d, recordHandle(), subject(), "read");
     if (v.denied === false) {
-      expect("ssn" in v.fields).toBe(false); // dropped
-      expect(v.fields.name).toBe("Alice");
+      expect("ssn" in v.fields).toBe(false); // dropped — null clearance
+      // rev-2 (R-1): governed resource ⇒ `name` (no row) also fails closed.
+      expect("name" in v.fields).toBe(false);
     }
   });
 });

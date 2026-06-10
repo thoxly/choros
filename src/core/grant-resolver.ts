@@ -159,9 +159,12 @@ function refToResourceType(ref: ResourceRef): string {
  * The clearance is DERIVED FROM the already-covering grant rows (rights-derived-
  * only, AC-8) — not a field-name lookup, not a new store. The facet schema
  * version comes from the handle's (optionally typed) facet (`0` if unversioned).
- * The classification rows are read through the injected port for exactly
- * `(resourceType, facetSchemaVersion)`; a version with no rows yields an empty
- * `rows` array ⇒ maskFields fails closed (max mask), never widens (AC-4/AC-12).
+ * The classification lookup is read through the injected port for exactly
+ * `(resourceType, facetSchemaVersion)` in ONE read (rev-2 / R-1): it carries
+ * both the per-version `rows` AND the resource-level `governed` bit. On a
+ * governed resource a version with no rows yields an empty `rows` array ⇒
+ * maskFields fails closed (max mask), never widens (AC-4/AC-12); on an
+ * ungoverned resource the legacy raw floor holds (ADR §10.2/§10.6).
  */
 function buildMaskContext(
   deps: ResolverDeps,
@@ -172,9 +175,14 @@ function buildMaskContext(
   if (source === undefined) return undefined;
   const resourceType = refToResourceType(handle.ref);
   const facetSchemaVersion = readFacetVersion(handle.facet);
-  const rows = source.getClassifications(resourceType, facetSchemaVersion);
+  const lookup = source.getClassifications(resourceType, facetSchemaVersion);
   const clearance: Clearance = deriveClearance(covering);
-  return { rows, clearance, facetSchemaVersion };
+  return {
+    governed: lookup.governed,
+    rows: lookup.rows,
+    clearance,
+    facetSchemaVersion,
+  };
 }
 
 // ---------------------------------------------------------------------------

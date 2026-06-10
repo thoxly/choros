@@ -157,17 +157,36 @@ export interface ClassificationRow {
 }
 
 /**
+ * rev-2 (R-1): the port returns a governance-bearing envelope, not a bare
+ * `ClassificationRow[]`. `governed` is TRUE iff resource type `R` has >=1
+ * classification row under ANY version (the source computes it from the SAME
+ * scan/state it uses for `rows` — no second query, no second store). `rows` is
+ * STILL only the rows for the requested `(resourceType, facetSchemaVersion)`
+ * pair — the per-version slice is unchanged. The two states `governed`
+ * distinguishes (ADR §10.1): U (ungoverned ⇒ legacy raw floor) vs. G (governed
+ * ⇒ a field with no resolvable class for this version fails closed, never raw).
+ * `governed` is monotone-safe: a source that cannot prove the resource
+ * ungoverned MUST return `true` (fail-closed bias, NF-3).
+ */
+export interface ClassificationLookup {
+  governed: boolean; // R is under classification governance (any version)
+  rows: ClassificationRow[]; // rows for exactly (resourceType, facetSchemaVersion)
+}
+
+/**
  * Injected port — pure static-now; the RLS-scoped Postgres DAO lands in T-0053
  * (mirrors `GrantSource`/`RecordSource`). The resolver calls it ONLY AFTER a
  * covering grant is found — it never reads classification for a record it has
- * no grant for. Returns the rows for a `(resourceType, facetSchemaVersion)`
- * pair; an empty result is a fail-closed signal (no widening), never an error.
+ * no grant for. Returns a `ClassificationLookup` (the governance bit + the rows
+ * for the `(resourceType, facetSchemaVersion)` pair) in ONE read — an empty
+ * `rows` slice on a `governed` resource is a fail-closed signal (max mask, no
+ * widening), never an error (ADR §10.2/§10.4).
  */
 export interface ClassificationSource {
   getClassifications(
     resourceType: string,
     facetSchemaVersion: number,
-  ): ClassificationRow[];
+  ): ClassificationLookup;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +331,7 @@ export function selectTransform(
  * schema version. `undefined` (no ClassificationSource) ⇒ legacy behaviour.
  */
 export interface MaskContext {
+  governed: boolean; // rev-2 (R-1) — R is under classification governance (any version)
   rows: ClassificationRow[]; // for (resourceType, facetSchemaVersion)
   clearance: Clearance;
   facetSchemaVersion: number;
@@ -321,9 +341,13 @@ export interface MaskContext {
  * The masking fold. The body grant-resolver's `projectFields` delegates to when
  * a `MaskContext` is present. Returns a NEW object containing the visible field
  * names, each value transformed per `(class × clearance)`:
- *  - a field with NO classification row is unclassified ⇒ kept raw (per its
- *    grant) — classification is ADDITIVE; absence of a class is not a new denial
- *    of unclassified data (§4.2).
+ *  - a field with NO resolvable class for this version forks on `ctx.governed`
+ *    (rev-2 / R-1, ADR §10.3): on an UNGOVERNED resource (`governed: false`,
+ *    state U) it is kept raw (legacy floor — classification is additive); on a
+ *    GOVERNED resource (`governed: true`, state G) it fails closed to maximal
+ *    mask (`drop`, key omitted) — NEVER raw. This covers both "this version has
+ *    zero rows" (AC-12 version boundary) and "this version has rows but not for
+ *    `f`" (AC-4).
  *  - a field WITH a classification row gets `selectTransform(class, clearance)`;
  *    `drop` omits the key (capability-not-text), the others leave it PRESENT
  *    with a transformed value.
@@ -365,7 +389,15 @@ export function maskFields(
 
     const cls = classByField.get(key);
     if (cls === undefined) {
-      // Unclassified field ⇒ kept raw per its grant (classification is additive).
+      // rev-2 (R-1): governance decides raw-vs-fail-closed (ADR §10.3).
+      if (ctx.governed) {
+        // State G: governed resource, no class for THIS version/field ⇒
+        // unknown class ⇒ maximal mask. Key omitted (capability-not-text),
+        // NEVER raw — the fail-closed version boundary (AC-4/AC-12, NF-3).
+        continue;
+      }
+      // State U: ungoverned resource ⇒ legacy raw floor (classification is
+      // additive; absence of governance is not a new denial of raw data).
       out[key] = raw;
       continue;
     }
