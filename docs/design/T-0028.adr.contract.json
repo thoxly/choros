@@ -1,0 +1,145 @@
+{
+  "task_id": "T-0028",
+  "status": "ready",
+  "decision": "The guard is the existing assertVariableValue from src/core/object-handle.ts, called at the complete-path of every JobStore implementation. No new module is introduced for the guard: assertVariableValue is the single source of truth for variable-value classification (T-0015 FF-A4). Three deliverables: (1) JobStore.complete gains an optional third parameter payload?: Record<string,unknown>; each value is passed through assertVariableValue before state advance; a single ok:false returns {ok:false, code:'RECORD_IN_PAYLOAD'} fail-closed with job remaining LOCKED, all-or-nothing. (2) ci/checks/mutation-gateway-isolation.sh: structural isolation check asserting no writable accessor escapes the gateway boundary and assertVariableValue is called at the complete boundary. (3) ci/checks/flowable-bridge-contract.sh: deferred probe (FF-G3) that exits 0 when the bridge path is absent, activates when it exists. The fail path is not modified (carries no result payload). JSON-encoded strings are inert literals — guard does not parse string contents. T-0114 seam: after T-0114 merges, the guard is wired into both InMemoryJobStore and PostgresJobStore complete-paths identically — one function call, no duplication.",
+  "rejected_alternatives": [
+    {
+      "option": "New src/core/variable-guard.ts module wrapping assertVariableValue",
+      "why_not": "assertVariableValue already exists in object-handle.ts and is the canonical single source of truth (FF-A4, T-0015). A wrapper module adds indirection without adding invariant. The BUILD contract is: call the existing function directly; the isolation check confirms the call site."
+    },
+    {
+      "option": "Inline record-detection logic inside complete without importing object-handle.ts",
+      "why_not": "Would duplicate the record-detection logic, diverging from T-0015's canonical implementation. Two copies drift; one wins silently."
+    },
+    {
+      "option": "Guard at enqueue time instead of complete time",
+      "why_not": "enqueue is producer-side; the threat is an external worker returning a result via complete. Guarding at enqueue does not protect against a malicious/buggy worker injecting a record via complete."
+    },
+    {
+      "option": "Validate payload in a middleware/router layer above the store",
+      "why_not": "A record object could be constructed in application code and passed directly to complete without going through HTTP. The guard must be at the store boundary — the last defense before state mutation, testable at unit level."
+    },
+    {
+      "option": "Parse JSON strings and check their decoded content inside assertVariableValue",
+      "why_not": "Violates the pure/total/side-effect-free contract; opens an unbounded attack surface; breaks the existing ok:true contract for string primitives already established by T-0015. Strings are inert literals, not objects."
+    },
+    {
+      "option": "Validate fail payload too",
+      "why_not": "fail carries no worker-supplied result payload today (only retries + retryTimeoutMs). No seam exists. Spec is explicit: the seam is complete."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "Job (extended, additive)",
+      "fields": [
+        {"name": "id", "type": "string (unchanged)"},
+        {"name": "topic", "type": "string (unchanged)"},
+        {"name": "variables", "type": "Record<string, unknown> (unchanged)"},
+        {"name": "state", "type": "JobState (unchanged)"},
+        {"name": "retries", "type": "number (unchanged)"},
+        {"name": "lockOwner", "type": "string | undefined (unchanged)"},
+        {"name": "lockExpiry", "type": "number | undefined (unchanged)"},
+        {"name": "createdAt", "type": "number (unchanged)"},
+        {"name": "result", "type": "Record<string, unknown> | undefined (NEW optional: validated complete-payload values)"}
+      ]
+    },
+    {
+      "entity": "ErrorCode (extended, additive)",
+      "fields": [
+        {"name": "NOT_FOUND", "type": "string literal (unchanged)"},
+        {"name": "NOT_LOCKED", "type": "string literal (unchanged)"},
+        {"name": "LOCK_EXPIRED", "type": "string literal (unchanged)"},
+        {"name": "NOT_OWNER", "type": "string literal (unchanged)"},
+        {"name": "RECORD_IN_PAYLOAD", "type": "string literal (NEW)"}
+      ]
+    },
+    {
+      "entity": "CompleteResult (unchanged union shape, new code flows through existing variant)",
+      "fields": [
+        {"name": "ok:true variant", "type": "{ ok: true } (unchanged)"},
+        {"name": "ok:false variant", "type": "{ ok: false; code: ErrorCode } — RECORD_IN_PAYLOAD flows here (unchanged shape, extended ErrorCode)"}
+      ]
+    },
+    {
+      "entity": "mutation-gateway-isolation.sh (new CI check)",
+      "fields": [
+        {"name": "check-1", "type": "no module outside src/core/grant-resolver.ts imports a writable record accessor"},
+        {"name": "check-2", "type": "assertVariableValue is called in src/core/jobStore.ts complete method before state advance"},
+        {"name": "check-3", "type": "no new *mutate*/*write*/*persist* function mapping a ResourceRef to record fields outside gateway"}
+      ]
+    },
+    {
+      "entity": "flowable-bridge-contract.sh (deferred probe FF-G3)",
+      "fields": [
+        {"name": "when-bridge-absent", "type": "exits 0 unconditionally"},
+        {"name": "when-bridge-present", "type": "asserts assertVariableValue called at every bridge result-return site; asserts record mutations route through resolveFor"}
+      ]
+    }
+  ],
+  "contracts": [
+    "// src/core/types.ts — additive field on Job\nexport interface Job { readonly result?: Record<string, unknown>; /* + all existing fields unchanged */ }",
+    "// src/core/jobStore.ts — additive error code\nexport type ErrorCode = 'NOT_FOUND' | 'NOT_LOCKED' | 'LOCK_EXPIRED' | 'NOT_OWNER' | 'RECORD_IN_PAYLOAD';",
+    "// src/core/jobStore.ts — additive optional parameter\ncomplete(workerId: string, jobId: string, payload?: Record<string, unknown>): CompleteResult;",
+    "// Guard algorithm: for each v in Object.values(payload ?? {}): r = assertVariableValue(v); if !r.ok return {ok:false, code:'RECORD_IN_PAYLOAD'} — job NOT advanced; then advance job to COMPLETED, store result = payload; return {ok:true}",
+    "// src/core/object-handle.ts NOT modified — assertVariableValue imported, not changed",
+    "// src/core/grant-resolver.ts NOT modified — resolveFor imported for bridge contract clause only",
+    "// T-0114 seam: BUILD must rebase on dev after T-0114 merges; wire assertVariableValue into complete-path of BOTH InMemoryJobStore and PostgresJobStore implementations"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-G1",
+      "rule": "Structural isolation: no module outside src/core/grant-resolver.ts imports a symbol from a writable record accessor; no new *mutate*/*write*/*persist* function mapping a ResourceRef to record fields appears outside the gateway composition.",
+      "ci_check": "bash ci/checks/mutation-gateway-isolation.sh (AC-1, AC-6)"
+    },
+    {
+      "id": "FF-G2",
+      "rule": "assertVariableValue call-site present at complete boundary: mutation-gateway-isolation.sh asserts assertVariableValue (or a thin wrapper calling it) is called in src/core/jobStore.ts complete method before advancing job state. Not optional, not flag-guarded.",
+      "ci_check": "bash ci/checks/mutation-gateway-isolation.sh (AC-5)"
+    },
+    {
+      "id": "FF-G3",
+      "rule": "Deferred Flowable bridge contract probe: exits 0 when no bridge path (src/bridge/ or src/core/flowable*.ts) exists. When bridge path IS present: asserts every bridge result-return file calls assertVariableValue; asserts record mutations route through resolveFor.",
+      "ci_check": "bash ci/checks/flowable-bridge-contract.sh (AC-8) — exits-0-now, activates-in-T-0058"
+    },
+    {
+      "id": "FF-G4",
+      "rule": "Complete payload fail-closed: JobStore.complete with payload containing a value where assertVariableValue returns ok:false returns {ok:false, code:'RECORD_IN_PAYLOAD'} and leaves the job in LOCKED state (not advanced). All-or-nothing: one invalid value in a payload of N values causes full rejection.",
+      "ci_check": "vitest run src/__tests__/variable-guard.test.ts -t \"complete-payload\" (AC-2, AC-4)"
+    },
+    {
+      "id": "FF-G5",
+      "rule": "Clean payload and no-payload regression: complete with only handles + inert literals returns {ok:true} and advances to COMPLETED; complete without payload is byte-identical to existing behavior.",
+      "ci_check": "vitest run src/__tests__/variable-guard.test.ts -t \"clean-payload|no-payload-regression\" (AC-3)"
+    },
+    {
+      "id": "FF-G6",
+      "rule": "Additive — frozen exports unchanged: git diff for this task's commit does NOT touch src/core/object-handle.ts, src/core/grant-lattice.ts, or src/core/grant-resolver.ts. CompleteResult includes RECORD_IN_PAYLOAD alongside the existing four codes. tsc --noEmit passes.",
+      "ci_check": "bash ci/checks/mutation-gateway-isolation.sh (additive-check) + tsc --noEmit (AC-7)"
+    },
+    {
+      "id": "FF-G7",
+      "rule": "No regression on pre-existing fitness functions: single-resolver.sh, no-record-in-variable.sh, object-handle-isolation.sh, grant-resolver-isolation.sh, audit_append_only.sh all remain green.",
+      "ci_check": "npm run fitness (AC-9)"
+    },
+    {
+      "id": "FF-G8",
+      "rule": "Write-op path is typed: any invocation of resolveFor with a write op compiles against the T-0018 Operation type with no cast; no ad-hoc string literal is accepted in a write-op position.",
+      "ci_check": "tsc --noEmit (AC-10)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-G1; mutation-gateway-isolation.sh structural isolation check (Layer A)"},
+    {"ac": "AC-2", "covered_by": "ADR §4.4 guard algorithm step 2 (fail-closed payload validation); FF-G4; adversarial corpus ADV-1..ADV-3, ADV-9, ADV-10"},
+    {"ac": "AC-3", "covered_by": "ADR §4.4 step 3 (clean payload advances); §2 (no-payload backward compat); FF-G5; ADV-4..ADV-8"},
+    {"ac": "AC-4", "covered_by": "ADR §4.4 step 2 (all-or-nothing: first failure returns RECORD_IN_PAYLOAD immediately); FF-G4; ADV-3, ADV-9"},
+    {"ac": "AC-5", "covered_by": "FF-G2; mutation-gateway-isolation.sh call-site check; ADR §4.4 (guard called before state advance)"},
+    {"ac": "AC-6", "covered_by": "FF-G1; mutation-gateway-isolation.sh (no new parallel write path outside gateway)"},
+    {"ac": "AC-7", "covered_by": "ADR §5.1 (object-handle.ts/grant-lattice.ts/grant-resolver.ts NOT modified); ADR §4.1 (ErrorCode extended additively, no existing code removed); FF-G6"},
+    {"ac": "AC-8", "covered_by": "ADR §8 (bridge contract sealed); FF-G3; ci/checks/flowable-bridge-contract.sh"},
+    {"ac": "AC-9", "covered_by": "FF-G7 (all pre-existing fitness functions run unchanged under npm run fitness)"},
+    {"ac": "AC-10", "covered_by": "ADR §4.3 (Operation type from grant-lattice.ts used directly, no cast); FF-G8; tsc --noEmit"}
+  ],
+  "runtime_target": "локально / in-process (static-now): pure TS extension to the existing Node app; fitness suite runs under vitest in npm run ci with no external resource. T-0028 provisions no new infrastructure. Guard works identically on InMemoryJobStore (static-now) and PostgresJobStore (T-0114, T-0053).",
+  "adr_artifact_path": "docs/design/T-0028-engine-mutation-guard.adr.md",
+  "escalation": ""
+}
