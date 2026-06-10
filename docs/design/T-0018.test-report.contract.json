@@ -1,0 +1,55 @@
+{
+  "task_id": "T-0018",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 282,
+    "passed": 282,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-3", "test": "ADVERSARIAL: partial order properties of ⊑ / (1a) reflexivity", "result": "pass"},
+    {"ac": "AC-3", "test": "ADVERSARIAL: partial order properties of ⊑ / (1b) antisymmetry", "result": "pass"},
+    {"ac": "AC-3", "test": "ADVERSARIAL: partial order properties of ⊑ / (1c) transitivity", "result": "pass"},
+    {"ac": "AC-4", "test": "ADVERSARIAL: no-widening / FUZZ node: ancestor node always rejected", "result": "pass"},
+    {"ac": "AC-4", "test": "ADVERSARIAL: no-widening / FUZZ node: disjoint node always rejected", "result": "pass"},
+    {"ac": "AC-5", "test": "ADVERSARIAL: no-widening / FUZZ tags: superset always rejected", "result": "pass"},
+    {"ac": "AC-5", "test": "ADVERSARIAL: no-widening / FUZZ interval: lo/hi widening rejected", "result": "pass"},
+    {"ac": "AC-6", "test": "ADVERSARIAL: no-widening / FUZZ scope-set: extra member rejected", "result": "pass"},
+    {"ac": "AC-7", "test": "ADVERSARIAL: meet is the greatest lower bound / (2a) meet ⊑ x and ⊑ y", "result": "pass"},
+    {"ac": "AC-7", "test": "ADVERSARIAL: meet is the greatest lower bound / (2b) z ⊑ x ∧ z ⊑ y ⇒ z ⊑ meet(x,y)", "result": "pass"},
+    {"ac": "AC-7", "test": "ADVERSARIAL: meet is the greatest lower bound / (2c) meet closure", "result": "pass"},
+    {"ac": "AC-8", "test": "ADVERSARIAL: normalize idempotence / normalize(normalize(x))=normalize(x)", "result": "pass"},
+    {"ac": "AC-8", "test": "ADVERSARIAL: normalize idempotence / order-independent on generated sets", "result": "pass"},
+    {"ac": "AC-9", "test": "ADVERSARIAL: no-widening / FUZZ comprehensive: ok ↔ isNarrowerOrEqual", "result": "pass"},
+    {"ac": "AC-9", "test": "ADVERSARIAL: validateNarrowing ↔ isNarrowerOrEqual equivalence (whitebox)", "result": "pass"},
+    {"ac": "AC-10", "test": "ADVERSARIAL: no-widening / FUZZ freeform child: always rejected", "result": "pass"},
+    {"ac": "AC-10", "test": "ADVERSARIAL: no-widening / FUZZ freeform parent: always rejected", "result": "pass"},
+    {"ac": "AC-13", "test": "FF-9 / AC-13: validity window (existing test suite)", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "adversarial_summary": {
+    "total_adversarial_tests": 45,
+    "leak_found": false,
+    "fuzz_cases_generated": {
+      "reflexivity_sets": 200,
+      "transitivity_triples": "exhaustive over 26-element pool",
+      "meet_glb_triples": "exhaustive over 26-element pool (17576 triples)",
+      "meet_closure_pairs": 500,
+      "tag_superset_generated": 200,
+      "interval_widening_generated": 300,
+      "comprehensive_narrowing_pairs": 500
+    },
+    "axes_fuzzed": [
+      "node: ancestor, disjoint-sibling, disjoint-tree nodes",
+      "tags: superset, disjoint, generated superset",
+      "interval: lo-widening, hi-widening, both-ends, wrong-axis, generated",
+      "scope-set: extra member outside parent reach",
+      "freeform: child under lattice parent, parent (all child types)",
+      "facet: absent child with present parent, different child facet",
+      "constraint: absent child with present parent, different child constraint",
+      "non-delegable: all scope types",
+      "cross-kind: all atom-kind pairs"
+    ]
+  }
+}
