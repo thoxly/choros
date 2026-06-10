@@ -1,0 +1,128 @@
+{
+  "task_id": "T-0040",
+  "status": "ready",
+  "summary": "A pure, derived (not stored) function role_criticality(role) -> {approve_or_transition, external_invoke, sensitive_read} + level, computed from the role's grant rows (joined via grant.role_id) + the data_classification table; the three bits encode the signed D-A=A3 axes and feed T-0044's dual-control gate, which T-0040 does NOT build.",
+  "functional": [
+    "FR-1: input is the role's Grant rows (grant.role_id == role id, one tenant) via an injected RoleGrantSource.getRoleGrants port; the function does no IO (Postgres JOIN deferred to T-0053)",
+    "FR-2: approve_or_transition === true iff the role holds >=1 effective grant with operation in {approve, transition} (the guarded-transition op-classes)",
+    "FR-3: external_invoke === true iff the role holds >=1 effective grant with resourceType === 'effect_resource' AND operation === 'invoke' (the T-0034 verifyEffectGrants predicate)",
+    "FR-4: sensitive_read === true iff deriveClearance(effective read grants, nowMs) yields a DataClass whose rank >= rank(SENSITIVE_READ_THRESHOLD = 'confidential'); public/internal clearance does not set the bit (the 'above a threshold' carveout)",
+    "FR-5: level === 'critical' iff any of the three bits is true, else 'routine' — the single-approver carveout (routine = T-0044 single-approver path, critical = two-approver path)",
+    "FR-6: only effective grants count — every bit consults grants with isEffective(grant, nowMs) === true; nowMs is a parameter (no Date.now in core)",
+    "FR-7: returns a frozen RoleCriticality record + a criticalityDiff(from, to) helper that T-0044 consumes; T-0040 owns the computation and record shape, T-0044 owns the gate",
+    "FR-8: tenant isolation is derived — grants are pre-scoped to one tenant by the injected port; the function adds no cross-tenant edge and reads no global store",
+    "FR-9: src/core/role-criticality.ts exports RoleCriticality, RoleCriticalityLevel, RoleGrantSource, roleCriticality, combineCriticality, criticalityLevel, criticalityDiff, SENSITIVE_READ_THRESHOLD; T-0044 imports them without re-declaration or cast"
+  ],
+  "non_functional": [
+    "NF-1: src/core/role-criticality.ts imports no pg/fs/net/http; all DB access behind the injected RoleGrantSource port (in-memory now, Postgres DAO in T-0053)",
+    "NF-2: rights-derived-only — every bit derives solely from Grant rows (T-0018 predicates) + DataClass (T-0033 deriveClearance); no parallel criticality store, no second algebra",
+    "NF-3: fail-closed / fail-critical bias — doubt resolves toward MORE criticality; a corrupt/unknown operation or null clearance never silently lowers a bit",
+    "NF-4: no new npm dependency (zero-dep TS/stdlib)",
+    "NF-5: commit does not edit grant-lattice.ts, data-classification.ts, effect-resource.ts, grant-resolver.ts, object-handle.ts, or any migration; tsc --noEmit passes",
+    "NF-6: no migration added — role_criticality is derived, not stored; migration seam 030+ stays unused; no change to known_tenant_tables.txt or the cross-tenant fitness set",
+    "NF-7: determinism — roleCriticality/combineCriticality called twice with same inputs yield deep-equal output; no IO outside the injected port"
+  ],
+  "out_of_scope": [
+    "The dual-control gate itself (two-vs-one approver, confirmation_flag, effective-diff application, WORM audit, safe-mode) — T-0044 (E4.6)",
+    "Materializing criticality into a column/table/row — deferred to T-0053 if performance ever requires; day-1 is the pure function",
+    "Postgres RoleGrantSource DAO — deferred to T-0053",
+    "egress_policy / BYO-LLM egress criticality — T-0041 (S-1)",
+    "Editing grant-lattice.ts, data-classification.ts, effect-resource.ts, grant-resolver.ts, object-handle.ts, or any migration",
+    "Wiring the function into a live screen (ra-criticality.jsx is an existing mockup; real-data integration is a frontend task)",
+    "Stage-2 agent-runtime concerns (autonomy downgrade, A2A breakers)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "approve_or_transition true on approve grant: combineCriticality([grant{operation:'approve', effective}], nowMs).approve_or_transition === true",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "approve_or_transition true on transition grant: combineCriticality([grant{operation:'transition', effective}], nowMs).approve_or_transition === true",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "approve_or_transition false without approve/transition: a role holding only {read,create,update,delete} grants yields approve_or_transition === false",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "external_invoke true: combineCriticality([grant{resourceType:'effect_resource', operation:'invoke', effective}], nowMs).external_invoke === true",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "external_invoke false on non-effect invoke: a grant with operation 'invoke' but resourceType !== 'effect_resource' does NOT set external_invoke",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "external_invoke false on effect_resource non-invoke: a grant resourceType 'effect_resource' with operation 'read' does NOT set external_invoke",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "sensitive_read true at/above threshold: a read grant conferring clearance 'confidential' (via constraint.clearance) yields sensitive_read === true; 'restricted' also true",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "sensitive_read false below threshold: a read grant conferring only 'internal' or 'public' clearance, or no clearance marker, yields sensitive_read === false (the threshold carveout)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "sensitive_read keys on read op only: a 'confidential'-clearance grant whose operation is 'approve' (not 'read') does not set sensitive_read",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "level critical iff any bit: criticalityLevel returns 'critical' when at least one of the three bits is true, and 'routine' iff all three are false (single-approver carveout distinguishable from the unsafe case)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "effective-window honored: an out-of-window grant (isEffective(grant,nowMs)===false) contributes ZERO to all three bits; the same grant in-window flips its bit",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "criticalityDiff expansion: criticalityDiff(from,to) sets expanded.<bit>===true iff to.<bit>===true && from.<bit>===false, and escalates===true iff to.level==='critical' && from.level!=='critical'; a true->false narrowing or any cosmetic same-state does not escalate",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "fail-closed unknown operation: a grant whose operation is not in the closed Operation set never lowers a bit (it is ignored for axes, never used to clear approve_or_transition); doubt resolves toward more criticality",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "determinism/purity: combineCriticality and roleCriticality called twice with identical inputs yield deep-equal outputs; no IO outside the injected RoleGrantSource port",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "no parallel criticality store: ci/checks/role-criticality-isolation.sh exits 0 — role-criticality.ts contains no _acl/criticalityRights/critFlags/criticalityAcl/field-visibility token and no pg/fs/net/http import",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "frozen foundation: T-0040's commit does not edit grant-lattice.ts, data-classification.ts, effect-resource.ts, grant-resolver.ts, object-handle.ts, or any migrations/*.sql file; tsc --noEmit passes",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "no migration / tenant-table set unchanged: no new migrations/*.sql file is added by this commit; ci/checks/known_tenant_tables.txt is byte-unchanged; the cross-tenant fitness set is unchanged (role_criticality is derived, not stored)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "T-0044 export seam: src/core/role-criticality.ts exports RoleCriticality, RoleCriticalityLevel, RoleGrantSource, roleCriticality, combineCriticality, criticalityLevel, criticalityDiff, SENSITIVE_READ_THRESHOLD; a consumer module importing all symbols compiles with no cast; deriveClearance and DataClass are imported from data-classification.ts (not redeclared)",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0040-role-criticality.spec.md"
+}
