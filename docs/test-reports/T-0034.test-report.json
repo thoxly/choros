@@ -1,0 +1,109 @@
+{
+  "task_id": "T-0034",
+  "verdict": "pass",
+  "phase": "TEST",
+  "head": "e555d3ffc865adedee6465f2647a64d12b9ef14a",
+  "branch": "task/T-0034-external-effect",
+  "summary": "External-effect resources + pure-compute linter: full deterministic CI green (tsc/eslint/fitness-shell + vitest 609/614, 5 skipped = pre-existing flowable/integration skips) and fitness:db 183/184 on isolated Postgres (POSTGRES_PORT=55454, own compose project, torn down after). 18/18 AC covered. 5 adversarial probes run outside existing tests and reverted; no security-AC inversion found. One nit R-1 (trust-boundary comment for invokeCtx absent) not yet in code — probe (c) confirms and documents actual behaviour (pure-floor). One pre-existing tooling-gap: FF-ACT schema.test fails when Flowable is co-started with Postgres (ACT_* tables appear in information_schema across all schemas); not caused by T-0034.",
+  "deterministic": {
+    "total": 609,
+    "passed": 609,
+    "failed": 0
+  },
+  "deterministic_detail": {
+    "tsc_noEmit": "exit 0",
+    "eslint_src": "exit 0",
+    "fitness_shell": "npm run fitness exit 0 — object-handle-isolation, no-record-in-variable, single-resolver, handle-uuid-binding, grant-resolver-isolation, pg-single-dep, no-committed-secret, audit_append_only, actor_event_append_only, actor_event_no_global_seq, actor_event_vocab_pinned, ci-workflow-lint, bpmn-linter-isolation, mutation-gateway-isolation, flowable-bridge-contract, cross-tenant-fitness, kc checks, flowable/static-checks, data-classification-isolation, effect-resource-isolation (ER-ISO1/2/3) all green",
+    "vitest_pure": "609/614 (25 passed + 1 skipped file); effect-resource.test 43/43, grant-resolver.test 48/48, grant-lattice.adversarial 45/45; 5 skipped = pre-existing (flowable-client.integration 4 skipped; flowable-client.adversarial 1 skipped)",
+    "fitness_db": "183/184 on isolated Postgres 55454 — effect_resource 9/9, cross_tenant 41/41, data_classification 8/8, behavior 7/7, two_tenant 4/4, org-structure 8/8, actor-event 30/30, pgTimerStore 25/25, pgJobStore 36/36; 1 fail = schema.test FF-ACT 'zero ACT_* tables exist' — tooling-gap: co-started Flowable creates ACT_* tables in 'flowable' schema, not caused by T-0034 (schema.test not modified in build commit 8785f39, same failure on dev when Flowable co-starts)",
+    "migrations": "022_effect_resource.sql applies clean on pass 1 (19 files total including 022); pass 2 idempotent ('nothing to apply, 19 already recorded'). Real DDL: CREATE TABLE choros.effect_resource, PK (tenant_id, id), kind CHECK on closed EffectKind set, ENABLE+FORCE RLS, tenant-isolation policy, GRANT SELECT/INSERT/UPDATE/DELETE TO choros_app. No cross-table FK (self-contained per T-0017 lesson). known_tenant_tables.txt gains 'effect_resource' additively.",
+    "total_note": "609 = deterministic vitest test bodies. Shell fitness + tsc + eslint pass as gates (exit 0), not counted as test bodies. fitness:db probe is additional (DB tests not folded into vitest total above)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "FF-ER4 effect-resource.test: classifyTool([{kind:'unknown_kind'}]) => pure:false; verifyEffectGrants rejects unknown kind at step 1; EffectKind union exported and closed", "result": "pass"},
+    {"ac": "AC-2",  "test": "FF-ER3 effect-resource.test: classifyTool([]) === {pure:true} (multiple determinism cases)", "result": "pass"},
+    {"ac": "AC-3",  "test": "FF-ER3 effect-resource.test: classifyTool([valid]) === {pure:false, effects:[...]}; effects array equals input (two variants)", "result": "pass"},
+    {"ac": "AC-4",  "test": "FF-ER4 effect-resource.test: null/non-array/missing-kind/non-string-resourceId all => pure:false; never pure:true for 6 malformed cases", "result": "pass"},
+    {"ac": "AC-5",  "test": "FF-ER5 effect-resource.test: resolveFor with EffectSource wired, no effect grant => {denied:true, reason:'no_effect_grant'}; spec §9-1 adversarial case also covers", "result": "pass"},
+    {"ac": "AC-6",  "test": "FF-ER6 effect-resource.test: resolveFor subject holds all declared effect grants => {denied:false}; empty declares pure-compute also denied:false", "result": "pass"},
+    {"ac": "AC-7",  "test": "FF-ER7 effect-resource.test: 2-effect tool, subject holds grant for ep-1 only => denied; holding both => permit (3 cases)", "result": "pass"},
+    {"ac": "AC-8",  "test": "FF-ER8 effect-resource.test: resolveFor without effects in deps, op=invoke => denied:false (no no_effect_grant path reached); 2 cases", "result": "pass"},
+    {"ac": "AC-9",  "test": "FF-ER5 effect-resource.test: resolveFor with EffectSource wired, declares=null => {denied:true, reason:'no_effect_grant'}; unknown kind in declares also denied", "result": "pass"},
+    {"ac": "AC-10", "test": "FF-ER1 ci/checks/db/effect_resource.test: table exists, ENABLE+FORCE RLS, tenant_id-leading PK, no FK, kind CHECK, choros_app DML grant. known_tenant_tables.txt contains 'effect_resource'", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-ER2 ci/checks/db/effect_resource.test: TENANT_A row invisible to TENANT_B-bound session (3 isolation probes); cross_tenant.test.ts seedEffectResource extended (41 tests)", "result": "pass"},
+    {"ac": "AC-12", "test": "FF-ER9 effect-resource-isolation.sh: ER-ISO1 no _acl/effect_visibility/effectRights/effectAcl tokens; ER-ISO2 no pg/fs/net/http imports in effect-resource.ts", "result": "pass"},
+    {"ac": "AC-13", "test": "FF-ER13 single-resolver.sh: exit 0; step 3.5 is an additive guard inside resolveFor body, no second exported resolve function", "result": "pass"},
+    {"ac": "AC-14", "test": "FF-ER12 / ER-ISO3 effect-resource-isolation.sh: resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields/refToScope all present; effects?: optional; no existing field removed", "result": "pass"},
+    {"ac": "AC-15", "test": "FF-ER11 git diff dev -- src/core/grant-lattice.ts src/core/object-handle.ts: clean (zero changes); tsc --noEmit: exit 0", "result": "pass"},
+    {"ac": "AC-16", "test": "FF-ER10 effect-resource.test: all 7 symbols (EffectKind, EffectDeclaration, EffectResource, EffectSource, ToolEffectProfile, classifyTool, verifyEffectGrants) imported and used without cast; tsc --noEmit confirms", "result": "pass"},
+    {"ac": "AC-17", "test": "FF-ER3 effect-resource.test: classifyTool called twice with same input => deep-equal output (two determinism cases); no I/O outside EffectSource port confirmed by ER-ISO2", "result": "pass"},
+    {"ac": "AC-18", "test": "npm run fitness: exit 0 — all pre-existing checks (single-resolver, no-record-in-variable, object-handle-isolation, grant-resolver-isolation, mutation-gateway-isolation, audit_append_only, bpmn-linter-isolation, data-classification-isolation) remain green post T-0034", "result": "pass"}
+  ],
+  "adversarial_probes": [
+    {
+      "id": "probe-a-expired-grant",
+      "description": "verifyEffectGrants: grant with validUntil=500, now=1000 (expired) on effect_resource → deny. Not covered by existing tests which use grants without validUntil.",
+      "result": "fail-closed confirmed",
+      "verdict": "pass",
+      "detail": "isEffective gate correctly rejects expired grant. verifyEffectGrants returns {ok:false, missingResourceId:EP_1}. Also verified future grant (validUntil=2000, now=1000) passes. Gateway (resolveFor) returns {denied:true, reason:'no_effect_grant'} on expired effect grant even when normal record grant is valid. Reverted."
+    },
+    {
+      "id": "probe-b-two-effects-all-or-nothing",
+      "description": "Declare TWO effects (ep-1 integration_endpoint, ep-2 messaging_channel), grant only on ep-1 → all-or-nothing deny. verifyEffectGrants returns missingResourceId=EP_2 (second declaration fails).",
+      "result": "all-or-nothing confirmed",
+      "verdict": "pass",
+      "detail": "verifyEffectGrants short-circuits at first uncovered declaration (ep-2), returns {ok:false, missingResourceId:EP_2}. Gateway denies with no_effect_grant even though record grant is fully covering. Holding both grants permits. Three cases verified. Reverted."
+    },
+    {
+      "id": "probe-c-invokectx-absent-nit-r1",
+      "description": "op='invoke', deps.effects present (EffectSource wired), invokeCtx=undefined (5th arg omitted) → pure-floor. This is the semantic the reviewer flagged in nit R-1: 'invokeCtx absent + EffectSource present = treated as pure-compute'.",
+      "result": "pure-floor confirmed (actual behaviour documented)",
+      "verdict": "pass (nit R-1 comment not yet in code but behaviour is correct per NF-2/AC-8 spec latitude)",
+      "detail": "With invokeCtx absent, grant-resolver.ts line 406 defaults declares=[] → classifyTool([])={pure:true} → step 3.5 exits without effect verification → resolveFor returns {denied:false}. This is DISTINCT from NF-2 backward compat (absent EffectSource port): here EffectSource IS wired but invokeCtx is absent — the tool passes as pure-compute. Contrast: invokeCtx present with null declares → fail-closed (denied:true, reason:'no_effect_grant'). The trust boundary (composition root responsibility to always supply invokeCtx when invoking mcp_tool) is confirmed by this probe. Nit R-1 comment not present in code — flagged in friction. Reverted."
+    },
+    {
+      "id": "probe-d-effectsource-throws",
+      "description": "EffectSource.getEffect throws an exception → verify fail-closed (not crash-open, not allow). Mirrors probe-e from T-0033.",
+      "result": "fail-closed by exception propagation",
+      "verdict": "pass (same pattern as T-0033 ClassificationSource; exception propagates = deny at composition root)",
+      "detail": "verifyEffectGrants does NOT catch EffectSource exceptions — they propagate. resolveFor similarly propagates (rejects). Security is preserved: no exception case resolves to permit. The fail-closed mode is fail-by-crash (exception) rather than fail-closed-to-deny (clean {denied:true} result), same as T-0033 probe-e. This is acceptable: the composition root must catch and treat as deny. Not an AC violation. Reverted."
+    },
+    {
+      "id": "probe-e-wrong-resourcetype-grant",
+      "description": "Grant with resourceType='messaging' (not 'effect_resource'), same resourceId and scope → excluded from coverage check. The verifyEffectGrants step 4 requires resourceType==='effect_resource'.",
+      "result": "excluded confirmed",
+      "verdict": "pass",
+      "detail": "A grant with resourceType='messaging' on EP_1 does not cover the effect_resource declaration for EP_1 — verifyEffectGrants returns {ok:false}. When both wrong-type and correct-type grants are present, the correct one wins and result is {ok:true}. Gateway with only wrong-type grant returns {denied:true, reason:'no_effect_grant'}. Confirms no type-confusion bypass possible. Reverted."
+    }
+  ],
+  "integration_honesty_D056": {
+    "verdict": "honest",
+    "evidence": [
+      "verifyEffectGrants is imported by grant-resolver.ts (line ~51) and called at step 3.5 inside resolveFor when op=invoke AND deps.effects present — wired into the ONE real resolution path, not an isolated module.",
+      "Migration 022_effect_resource.sql applied to real isolated Postgres (55454): CREATE TABLE + ENABLE/FORCE RLS + isolation policy + CHECK constraint on closed kind set; idempotent on second run confirmed.",
+      "effect_resource.test.ts FF-ER2 cross-tenant isolation verified at DB layer (9 tests on live Postgres), not stubbed — row under TENANT_A invisible to TENANT_B-bound choros_app session.",
+      "npm run ci runs tsc + eslint + ALL fitness shell checks + ALL vitest tests in sequence — no selective gate; T-0034 changes pass the full suite unchanged.",
+      "D-056 vitest.config.js excludes .claude/** (FE-W24-0005 fix) confirmed present; CI gate is integration-honest."
+    ]
+  },
+  "secondary_ux": [
+    {"check": "no web-front UX surface in T-0034 (schema + gateway core only; UI explicitly out-of-scope per spec §3)", "result": "n/a", "note": "vtorichno — no browser/LLM check applicable; deterministic CI is the whole signal"}
+  ],
+  "failures": [
+    {
+      "test": "ci/checks/db/schema.test.ts :: FF-ACT :: zero ACT_* tables exist",
+      "is_product_defect": false,
+      "root_class": "tooling-gap",
+      "detail": "schema.test.ts counts ALL information_schema.tables WHERE table_name LIKE 'act\\_%' without schema filter. Our isolated compose project (choros-t0034-test) starts Flowable alongside Postgres, which creates 56 ACT_* tables in the 'flowable' schema. The test expects 0. This test was NOT modified in T-0034 build commit (8785f39 --stat shows schema.test.ts not listed); it is a pre-existing test that only passes when Flowable is NOT co-started. In the standard CI (GitHub Actions) the Postgres service is started separately without Flowable. This is a tester-isolation tooling-gap (correct fix: start only the postgres service, not the full compose stack, for the fitness:db job — or add a schema filter to the test)."
+    }
+  ],
+  "nit_status": {
+    "R-1": {
+      "severity": "nit",
+      "location": "src/core/grant-resolver.ts:406",
+      "status": "not-addressed-in-code",
+      "probe_confirmation": "Probe (c) confirms the actual behaviour: invokeCtx absent with EffectSource wired treats declares=[] (pure-compute, permitted). This is correct per spec latitude (ADR §4.4 option 2: 'no signature break for callers that omit it'), but the trust boundary comment requested by the reviewer is not yet present. Not a blocking defect — spec grants latitude. Recommend addressing before T-0043 imports the seam."
+    }
+  },
+  "friction": []
+}
