@@ -1,0 +1,93 @@
+{
+  "task_id": "T-0062",
+  "status": "ready",
+  "decision": "Аддитивно закрываем две дыры транзакционной целостности воркерного контура, не трогая race-safe complete/fail. (1) Идемпотентность enqueue: nullable-колонка choros.job.idempotency_key (CHECK ≤255) + partial-unique (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL; enqueue получает опциональный 4-й параметр idempotencyKey?, при ключе делает INSERT ... ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING с добором существующей строки SELECT — возвращает существующий job, без ключа сохраняет текущее поведение (обратная совместимость: единственный вызыватель externalWorker.ts передаёт 3 арга). (2) Outbox: новая tenant-таблица choros.outbox (FORCE RLS + default-DENY на GUC choros.tenant_id, tenant_id ведущая колонка PK и индексов), доменная мутация + INSERT в одной Postgres-транзакции (целостность процесс+данные CONCEPT §6); доставка двухфазным диспетчером по образцу T-0116: фаза-1 SECURITY DEFINER-агрегат outbox_pending_buckets(p_before) без GUC и без строк, фаза-2 per-tenant tx SET LOCAL + CTE FOR UPDATE SKIP LOCKED → dispatching, успех → dispatched+dispatched_at, ошибка → pending+attempts+1+backoff, исчерпание → dead. Тонкое ядро (стор+диспетчер), poll-режим, никакого брокера. Контракты T-0067/T-0068 зафиксированы интерфейсно. Миграции — номера 023-025 (ШОВ ПРОГОНА перекрывает спеку: 022 у T-0034, 019-021 у T-0022). Вся DDL и инварианты валидированы живьём на изолированном Postgres 55448.",
+  "rejected_alternatives": [
+    {"option": "Дедуп enqueue по контент-хешу (topic, variables) вместо явного idempotency_key", "why_not": "Хрупко: нормализация JSON, ложные коллизии для легитимно-одинаковых заданий; продюсер лучше знает логический ключ ретрая. Спека пинит явный ключ."},
+    {"option": "INSERT ... ON CONFLICT DO UPDATE ... RETURNING (upsert) для enqueue", "why_not": "DO UPDATE тронул бы уже-принятый job (state/variables) — нарушает 'повторный enqueue не меняет принятое'. DO NOTHING + добор SELECT возвращает существующий как есть."},
+    {"option": "Outbox без intermediate-состояния dispatching (сразу pending→dispatched)", "why_not": "Два диспетчера могут параллельно доставить одну строку; dispatching под FOR UPDATE SKIP LOCKED = ровно один захват (AC-12), как firing в T-0116."},
+    {"option": "FK outbox.aggregate_id → доменная таблица", "why_not": "aggregate_kind полиморфен ('job'/'record'/'external_task'/...) — единого parent нет. Денормализованная opaque-ссылка (как object_handle/actor_event.object_ref). Не composite FK — урок T-0019 про ссылки на tenant-таблицы здесь неприменим (её нет)."},
+    {"option": "DLQ отдельной таблицей", "why_not": "state='dead' остаётся в outbox (спека §5 out-of-scope); перекладывание/алертинг — отдельная задача."},
+    {"option": "LISTEN/NOTIFY как wake-up диспетчера", "why_not": "Poll-режим (T-0116 ADR §1); NOTIFY не доживает до подписки и не транзакционно-надёжен. Out-of-scope."},
+    {"option": "Брокер Redis/Kafka/Temporal", "why_not": "Отвергнуты в stack-ADR (single-Postgres substrate)."}
+  ],
+  "object_model": [
+    {"entity": "choros.job (аддитивная колонка, миграция 023)", "fields": [
+      {"name": "idempotency_key", "type": "text NULL, CHECK char_length <= 255"},
+      {"name": "job_idempotency_key_uq", "type": "UNIQUE INDEX (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL"}
+    ]},
+    {"entity": "choros.outbox (новая tenant-таблица, миграция 024)", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (ведущая колонка PK и индексов)"},
+      {"name": "id", "type": "uuid NOT NULL (PK (tenant_id, id))"},
+      {"name": "aggregate_kind", "type": "text NOT NULL (полиморфный источник)"},
+      {"name": "aggregate_id", "type": "uuid NOT NULL (opaque-ссылка, не FK)"},
+      {"name": "event_type", "type": "text NOT NULL"},
+      {"name": "payload", "type": "jsonb NOT NULL"},
+      {"name": "state", "type": "text NOT NULL DEFAULT 'pending' CHECK IN (pending,dispatching,dispatched,dead)"},
+      {"name": "idempotency_key", "type": "text NOT NULL (дедуп доставки потребителем)"},
+      {"name": "attempts", "type": "integer NOT NULL DEFAULT 0 CHECK >= 0 (no-decrement, T-0019)"},
+      {"name": "created_at", "type": "bigint NOT NULL (мс epoch, inject Clock)"},
+      {"name": "available_at", "type": "bigint NOT NULL (backoff-окно)"},
+      {"name": "dispatched_at", "type": "bigint NULL"},
+      {"name": "last_error", "type": "text NULL"},
+      {"name": "outbox_dispatched_at_iff", "type": "CHECK ((state='dispatched') = (dispatched_at IS NOT NULL))"},
+      {"name": "idx_outbox_pending", "type": "INDEX (tenant_id, available_at) WHERE state='pending'"}
+    ]},
+    {"entity": "choros.outbox_pending_buckets (SECURITY DEFINER fn, миграция 025)", "fields": [
+      {"name": "signature", "type": "outbox_pending_buckets(p_before bigint) RETURNS TABLE(tenant_id uuid, pending_count bigint)"},
+      {"name": "security", "type": "SECURITY DEFINER, SET search_path=choros,pg_catalog, STABLE, REVOKE PUBLIC, GRANT EXECUTE choros_app"}
+    ]}
+  ],
+  "contracts": [
+    "PostgresJobStore.enqueue(topic: string, variables: Record<string,unknown>, retries: number, idempotencyKey?: string): Promise<Job> — 4-й параметр опционален (обратная совместимость). При ключе: INSERT ... ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING; если RETURNING пуст — добор SELECT WHERE tenant_id=GUC AND idempotency_key=$key.",
+    "InMemoryJobStore.enqueue получает тот же опциональный idempotencyKey? (Map-дедуп ${tenantId}:${key}) для паритета типа JobStore (frozen unit-тесты импортируют JobStore alias — компилируются без изменений).",
+    "POST /jobs (externalWorker.ts) опционально читает idempotencyKey из тела (валидация string ≤255 если передан) — аддитивно.",
+    "PostgresOutboxStore (новый src/core/postgres/pgOutboxStore.ts): constructor(pool, clock?); enqueueInTx(client, row) — внутри tx потребителя (атомарность); pendingBuckets(before) — фаза-1 без GUC; claimBatch(tenantId, limit) — фаза-2 SET LOCAL + FOR UPDATE SKIP LOCKED → dispatching; markDispatched(tenantId, id) — dispatching→dispatched; markRetry(tenantId, id, backoffMs, error, maxAttempts) — attempts+1, dead при исчерпании; getOutboxHealth() — {pendingLagMs, deadCount} без GUC.",
+    "OutboxInsert = {aggregateKind, aggregateId, eventType, payload, idempotencyKey}; tenant_id из current_setting('choros.tenant_id',false)::uuid (как pgTimerStore.enqueue R-4). tenantId UUID-валидируется перед SET LOCAL (R-3 T-0116).",
+    "outboxDispatcher (новый src/core/outboxDispatcher.ts): runOutboxOnce(store, deliver, {batchLimit, maxAttempts, backoff:(attempts)=>number, onDispatched?}). deliver:(row)=>Promise<{ok:boolean, idempotentSuccess?:boolean}>. Успех (ok||idempotentSuccess) → markDispatched + onDispatched; иначе markRetry.",
+    "Контракт T-0067 (зафиксирован, не реализован): для event_type='task_completed' deliver вызывает flowableClient.completeTask; NOT_FOUND (taskId-идемпотентность движка, дыра №4) → {ok:false, idempotentSuccess:true} → строка dispatched, не dead.",
+    "Контракт T-0068 (зафиксирован, не реализован): onDispatched-хук = seam для записи в audit_event/actor_event (T-0019); по умолчанию no-op.",
+    "Контракт идемпотентного воркера (документирован): at-least-once реклейм fetchAndLock требует либо outbox-в-той-же-транзакции, либо дедуп по бизнес-ключу (зона E1.5/T-0067).",
+    "GET /health (server.ts): аддитивный блок outbox:{pendingLagMs:number|null, deadCount:number}; независимый try/catch → degraded не 500; getOutboxHealth без GUC (migrator-пул).",
+    "Монотонность состояния (урок T-0019): переходы только вперёд; claimBatch берёт лишь pending; markDispatched лишь из dispatching (rowCount-гейт); markRetry лишь из dispatching; attempts только инкремент; запрещён откат dispatched→pending и декремент attempts.",
+    "Frozen: тела complete/fail PostgresJobStore НЕ изменяются (ownership-gate race-safe, ADR T-0114 §4.4)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Partial-unique job_idempotency_key_uq на (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL существует, tenant_id ведущая.", "ci_check": "ci/checks/db/schema.test.ts: pg_index/pg_indexes подтверждает имя + indpred IS NOT NULL + ведущая колонка tenant_id (AC-4)."},
+    {"id": "FF-2", "rule": "outbox присутствует в ci/checks/known_tenant_tables.txt (аддитивно).", "ci_check": "grep -qx outbox ci/checks/known_tenant_tables.txt (новый ci/checks/outbox-registry.sh или существующий чек) + schema.test.ts FF-2 таблица существует (AC-7). ВНИМАНИЕ: требует аддитивного case 'outbox' в cross_tenant.test.ts (см. friction)."},
+    {"id": "FF-3", "rule": "choros.outbox имеет ENABLE+FORCE RLS и default-DENY политику на GUC.", "ci_check": "ci/checks/db/schema.test.ts FF-RLS итерирует KNOWN_TENANT_TABLES → подхватывает outbox без правок ассертов (AC-5, AC-6); живьём: INSERT без GUC падает, B видит 0 строк A."},
+    {"id": "FF-4", "rule": "tenant_id — ведущая колонка ВСЕХ составных индексов и FK новых объектов.", "ci_check": "ci/checks/db/tenant_id_leading.sql → 0 строк (валидировано живьём: 0); FF-LEAD в schema.test.ts (NF-1)."},
+    {"id": "FF-5", "rule": "Партиал-индекс idx_outbox_pending (tenant_id, available_at) WHERE state='pending'; EXPLAIN фазы-2 при 1000 dispatched + 10 pending → Index Scan, не Seq Scan.", "ci_check": "ci/checks/db/pgOutboxStore.integration.test.ts: EXPLAIN содержит idx_outbox_pending, не 'Seq Scan on outbox' (AC-15); живьём: Index Scan using idx_outbox_pending."},
+    {"id": "FF-6", "rule": "outbox_pending_buckets() возвращает ровно 2 колонки (tenant_id, pending_count), работает без GUC.", "ci_check": "integration: SELECT * FROM choros.outbox_pending_buckets($before) от choros_app без GUC → Object.keys(row)=['tenant_id','pending_count'] (AC-9, AC-10); живьём: 0 строк, без ошибки."},
+    {"id": "FF-7", "rule": "Никакого ORM/новых runtime-deps: только pg (parameterised).", "ci_check": "ci/checks/pg-single-dep.sh (существует) + eslint (no raw concat в SQL, кроме UUID-validated SET LOCAL) (NF-3)."},
+    {"id": "FF-8", "rule": "Монотонность состояния outbox: нет SQL dispatched→pending/dead→*, нет декремента attempts; CHECK (state='dispatched')=(dispatched_at IS NOT NULL).", "ci_check": "ci/checks/db/schema.test.ts: CHECK outbox_dispatched_at_iff существует (живьём: отвергает dispatched без dispatched_at) + integration AC-13/AC-14 (урок T-0019)."},
+    {"id": "FF-9", "rule": "complete/fail JobStore НЕ изменены (ownership-gate frozen).", "ci_check": "git diff на pgJobStore.ts: enqueue тронут, тела complete/fail — нет (review-чек, спека §3.1)."},
+    {"id": "FF-10", "rule": "Миграции — номера ≥ 023; раннер применяет идемпотентно (повторный прогон 0 ошибок).", "ci_check": "ci/checks/db bring-up: node migrations/run.mjs дважды → второй прогон 'nothing to apply' (AC-19); валидировано живьём на 55448."},
+    {"id": "FF-11", "rule": "tsc --noEmit, eslint, весь npm run fitness зелёные (аддитивность).", "ci_check": "npm run ci (AC-20)."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.1 enqueue с ключом → INSERT RETURNING; §3.1"},
+    {"ac": "AC-2", "covered_by": "§4.1 ON CONFLICT DO NOTHING + добор SELECT (живьём: total=1)"},
+    {"ac": "AC-3", "covered_by": "§4.1 undefined-ветка = текущее поведение; §3.1 nullable"},
+    {"ac": "AC-4", "covered_by": "§3.1 job_idempotency_key_uq; FF-1"},
+    {"ac": "AC-5", "covered_by": "§3.2 FORCE RLS + default-DENY (живьём: INSERT без GUC падает); FF-3"},
+    {"ac": "AC-6", "covered_by": "§3.2 политика на GUC (живьём: B видит 0 строк A); FF-3"},
+    {"ac": "AC-7", "covered_by": "§3.2/§5 FF-2 + §6 (аддитивный seeder в cross_tenant.test.ts)"},
+    {"ac": "AC-8", "covered_by": "§4.2 enqueueInTx в tx потребителя — атомарность данные+сигнал; FR-3"},
+    {"ac": "AC-9", "covered_by": "§3.3 SECURITY DEFINER без GUC (живьём: 0 строк без ошибки); FF-6"},
+    {"ac": "AC-10", "covered_by": "§3.3 RETURNS TABLE(tenant_id, pending_count) ровно 2 колонки; FF-6"},
+    {"ac": "AC-11", "covered_by": "§4.2 claimBatch per-tenant SET LOCAL + RLS"},
+    {"ac": "AC-12", "covered_by": "§4.2 FOR UPDATE SKIP LOCKED → dispatching (образец T-0116 AC-8)"},
+    {"ac": "AC-13", "covered_by": "§4.2 markDispatched/markRetry; §3.2 backoff/attempts"},
+    {"ac": "AC-14", "covered_by": "§4.2 markRetry → dead при исчерпании maxAttempts; FF-8"},
+    {"ac": "AC-15", "covered_by": "§3.2 idx_outbox_pending; FF-5 (живьём: Index Scan, не Seq Scan)"},
+    {"ac": "AC-16", "covered_by": "§4.4 GET /health outbox.{pendingLagMs,deadCount}, degraded не 500"},
+    {"ac": "AC-17", "covered_by": "§4.3 контракт T-0067 NOT_FOUND=идемпотентный успех (seam)"},
+    {"ac": "AC-18", "covered_by": "§4.3 контракт идемпотентного воркера + onDispatched seam T-0068"},
+    {"ac": "AC-19", "covered_by": "§3/ШОВ номера ≥023; раннер идемпотентен (живьём: 2-й прогон no-op); FF-10"},
+    {"ac": "AC-20", "covered_by": "§5 FF-11 npm run ci зелёный (аддитивность)"}
+  ],
+  "runtime_target": "контейнер — без изменений против T-0114/T-0116 (single-Postgres substrate, stack-ADR). Outbox-диспетчер = фоновый poll-цикл в том же процессе сервиса (как app_timer). Внешний ресурс/брокер/провижн НЕ требуется (GT-4 не задействован). DDL валидирован живьём на изолированном Postgres 16 (порт 55448, снесён после; 55432/T-0115 не тронут).",
+  "adr_artifact_path": "docs/design/T-0062-idempotency-outbox.adr.md",
+  "escalation": ""
+}
