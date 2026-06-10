@@ -10,7 +10,7 @@
     "lint": "eslint src",
     "test": "vitest run",
     "migrate": "node migrations/run.mjs",
-    "fitness": "bash ci/checks/object-handle-isolation.sh && bash ci/checks/no-record-in-variable.sh && bash ci/checks/single-resolver.sh && bash ci/checks/handle-uuid-binding.sh && bash ci/checks/grant-resolver-isolation.sh && bash ci/checks/pg-single-dep.sh && bash ci/checks/no-committed-secret.sh && bash ci/checks/audit_append_only.sh && bash ci/checks/ci-workflow-lint.sh && bash ci/checks/bpmn-linter-isolation.sh",
+    "fitness": "bash ci/checks/object-handle-isolation.sh && bash ci/checks/no-record-in-variable.sh && bash ci/checks/single-resolver.sh && bash ci/checks/handle-uuid-binding.sh && bash ci/checks/grant-resolver-isolation.sh && bash ci/checks/pg-single-dep.sh && bash ci/checks/no-committed-secret.sh && bash ci/checks/audit_append_only.sh && bash ci/checks/ci-workflow-lint.sh && bash ci/checks/bpmn-linter-isolation.sh && bash ci/checks/mutation-gateway-isolation.sh && bash ci/checks/flowable-bridge-contract.sh",
     "fitness:db": "vitest run --dir ci/checks/db",
     "ci": "tsc --noEmit && eslint src && npm run fitness && vitest run"
   },

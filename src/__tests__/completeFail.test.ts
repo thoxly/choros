@@ -77,6 +77,8 @@ function handleCompleteResult(r: CompleteResult): string {
       return "lock-expired";
     case "NOT_OWNER":
       return "not-owner";
+    case "RECORD_IN_PAYLOAD":
+      return "record-in-payload";
     default:
       return assertNever(code);
   }
@@ -100,6 +102,10 @@ function handleFailResult(r: FailResult): string {
       return "lock-expired";
     case "NOT_OWNER":
       return "not-owner";
+    case "RECORD_IN_PAYLOAD":
+      // fail() never returns RECORD_IN_PAYLOAD (no payload on fail path), but
+      // ErrorCode is a shared type — exhaustiveness check covers all variants.
+      return "record-in-payload";
     default:
       return assertNever(code);
   }
