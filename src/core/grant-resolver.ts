@@ -403,6 +403,16 @@ export async function resolveFor(
     // IMPORTANT: do NOT use `?? []` — null is a valid "provided but malformed" value that
     // must trigger fail-closed (AC-9). `?? []` would make `null` behave as `[]` (pure-compute),
     // defeating the fail-closed invariant. Use `undefined` as the "not provided" sentinel only.
+    //
+    // TRUST BOUNDARY — EffectSource present + invokeCtx absent ⇒ treated as pure-compute (declares=[]).
+    // This is DISTINCT from the NF-2 backward-compat floor (EffectSource absent ⇒ block skipped entirely).
+    // Here EffectSource IS wired (composition root opted into T-0034 enforcement), yet the caller omitted
+    // invokeCtx — the resolver trusts the caller's implicit assertion that the tool carries no mcp_tool.declares
+    // context and proceeds as pure-compute.  This bypasses effect-grant verification by design (ADR §4.4
+    // option 2: no signature break for callers that omit the 5th arg).
+    // Composition-root authors: any invoke of an effecting tool MUST pass invokeCtx with a valid `declares`
+    // array; omitting it bypasses effect verification silently (NF-2 floor applies).
+    // See T-0034 ADR §4.4 for the full rationale.
     const declares: unknown = invokeCtx !== undefined ? invokeCtx.declares : [];
     const profile = classifyTool(declares);
     // Pure-compute tool (empty declares): no effect verification needed — proceed (AC-8 compat, AC-6).
