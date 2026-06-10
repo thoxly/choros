@@ -1,0 +1,103 @@
+{
+  "task_id": "T-0053",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 411,
+    "passed": 411,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "live: docker compose up -d postgres; SELECT version() → PostgreSQL 16.14; env vars from ${VAR:-dev_default} form; FF-1 / no-committed-secret.sh PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "live: node migrations/run.mjs (first run) → exit 0, 'applied 9 file(s)'; schema.test.ts FF-2 each known tenant table exists in choros; two_tenant.test.ts 9 rows in schema_migrations",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "live: node migrations/run.mjs (second run) → exit 0, 'nothing to apply (9 already recorded, 9 files)'; two_tenant.test.ts row count unchanged before/after re-run",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "live: schema.test.ts FF-3 — (version text, applied_at timestamptz); duplicate version insert → 23505 PK violation",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "live: schema.test.ts FF-RLS — pg_class query for relrowsecurity AND relforcerowsecurity on all 8 known_tenant_tables returns 0 rows",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "live: behavior.test.ts FF-DENY — choros_app with no choros.tenant_id GUC → SELECT count(*) FROM choros.application = 0; with GUC set → count ≥ 1",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "live: schema.test.ts FF-LEAD — every multi-column pg_index and pg_constraint contype='f' on known_tenant_tables has tenant_id at position 1; 0 violations",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "live: behavior.test.ts FF-SCOPE — (A,slug=X) ok; (B,slug=X) ok; (A,slug=X) again → 23505",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "live: behavior.test.ts FF-SCOPE — INSERT tenant_id=NULL as migrator → 23502 NOT NULL violation",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "live: schema.test.ts FF-ROLE — pg_roles for choros_app: rolbypassrls=false, rolsuper=false; not owner of any tenant table",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "live: schema.test.ts FF-ROLE — every known_tenant_table owned by choros_migrator; choros_app CREATE TABLE → 42501",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "live: behavior.test.ts FF-APPEND — choros_app UPDATE audit_event → 'permission denied'; DELETE audit_event → 'permission denied'; SELECT/INSERT allowed on application; CREATE TABLE → 42501; audit_append_only.sh static lint PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "live: two_tenant.test.ts FF-2TENANT — seed ≥2 tenants (TENANT_A + TENANT_B) across all tenant tables; re-run runner → nothing to apply; same slug coexists once per tenant, global count=2; no unique violation or cross-tenant merge",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "live: schema.test.ts FF-FK-RESOLVE — only 2 FKs exist: registry_def→application, record→registry_def (both baseline tables); grant carries no FK; no FK targets role/assignment",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "live: schema.test.ts FF-JSONB — registry_def.record_schema jsonb NOT NULL; record.data jsonb NOT NULL; audit_event.payload jsonb NOT NULL; grant.scope jsonb NOT NULL; object_handle.facet jsonb (nullable)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "live: schema.test.ts FF-ACT — count(*) from information_schema.tables WHERE table_name LIKE 'act_%' = 0; choros schema exists; choros_app has no CREATE on choros schema",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-17",
+      "test": "static: ci-workflow-lint.sh FF-CI — .github/workflows/ci.yml has db job with postgres:16 service, runs runner twice (apply + idempotency), runs fitness:db; vitest.config.js excludes .claude/** and ../choros-wt/**; PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-18",
+      "test": "static: pg-single-dep.sh FF-PG-ONCE — package.json lists pg in dependencies; no other manifest adds pg client; migrations/run.mjs imports only node:* builtins + pg; PASS",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": []
+}

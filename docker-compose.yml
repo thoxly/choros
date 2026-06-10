@@ -1,0 +1,35 @@
+# Choros silo substrate — Postgres 16 (T-0053, E0.3).
+#
+# One postgres:16 instance per контур (stack ADR). All connection params come
+# from env with DEV-ONLY defaults — NO prod secret is committed (RL-1/NF-5);
+# prod credentials are founder-held and injected at deploy (E0.7).
+#
+# The bootstrap superuser IS choros_migrator (owner + DDL + the runner's role);
+# migration 001 then provisions the non-owner runtime role choros_app.
+#
+# Bring-up is unattended (NF-4): pg_isready healthcheck lets CI and the runner
+# wait for an accepting-connections state with no manual SQL.
+#
+# Default host port is 55432 (not 5432) so a local ambient Postgres on 5432 does
+# not collide; override with POSTGRES_PORT. The runner/app connect via
+# DATABASE_URL (e.g. postgres://choros_migrator:choros_dev_pw@localhost:55432/choros).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-choros}
+      POSTGRES_USER: ${POSTGRES_USER:-choros_migrator}     # bootstrap = migrator/owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-choros_dev_pw}  # DEV default only (RL-1)
+    ports:
+      - "${POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-choros_migrator} -d ${POSTGRES_DB:-choros}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - "choros_pgdata:/var/lib/postgresql/data"
+
+volumes:
+  choros_pgdata: {}

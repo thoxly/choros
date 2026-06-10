@@ -22,3 +22,42 @@ jobs:
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - run: npm run ci
+
+  # T-0053 · integration-honest Postgres gate (D-056): pins its OWN postgres:16
+  # service container — no dependency on ambient build state. Runs the migration
+  # runner against an empty DB, RE-RUNS it (idempotency), then the live probe
+  # suite incl. the ≥2-tenant anti-decorative-tenant_id check (tenancy §9 guard 5).
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: choros
+          POSTGRES_USER: choros_migrator
+          POSTGRES_PASSWORD: choros_dev_pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U choros_migrator -d choros"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      # Runner + probes connect as choros_migrator (owner/DDL). The app-role
+      # probes derive choros_app from this URL (dev default password).
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:5432/choros
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # 1. Apply all migrations against the empty DB (FF-2).
+      - run: node migrations/run.mjs
+      # 2. Re-run to prove idempotency (FF-2 / AC-3): zero new applications.
+      - run: node migrations/run.mjs
+      # 3. Live probe suite: schema + behavior + idempotency + ≥2-tenant guard
+      #    (FF-RLS/DENY/LEAD/SCOPE/ROLE/APPEND/FK-RESOLVE/JSONB/ACT/2TENANT).
+      - run: npm run fitness:db
