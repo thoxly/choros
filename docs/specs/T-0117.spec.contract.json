@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0117",
+  "status": "ready",
+  "summary": "Blocking pre-integration spike: prove that Flowable 7's two load-bearing capabilities — history-cleanup at our load (~70M completed/year, extrapolated from >=300k completed instances) and deadletter management over REST — are available in the OSS Apache-2.0 artifact (no Enterprise key, RL-3 no trials), run the same harness on fallback Operaton, and emit a go/no-go + Flowable-vs-Operaton recommendation as an ADR addendum (founder-ratified). Spike only: artifact is an isolated harness under spikes/flowable-oss/, a measurement log, and the addendum; touches no src/ product code.",
+  "functional": [
+    "FR-1 isolated spike harness in spikes/flowable-oss/ (docker-compose + scripts) bringing up Flowable 7 OSS and Operaton on disposable Postgres; zero changes to src/, zero prod dependency on the spike",
+    "FR-2 history generator: create+complete >= N_history (hundreds of thousands, parameterized) instances landing in engine history tables (ACT_HI_* / equivalent) as a scalable model of our load",
+    "FR-3 history-cleanup probe on Flowable OSS: run the engine's history-cleanup job/API, measure delete throughput and DB behavior, confirm the mechanism exists and executes in the OSS artifact (not Enterprise-only)",
+    "FR-4 deadletter-over-REST probe on Flowable OSS: drive jobs into deadletter, then via OSS REST do list + retry(set-retries) + move/return-to-active; confirm all three available without Enterprise",
+    "FR-5 same harness on Operaton: repeat FR-3 and FR-4, record capability/behavior parity and divergences",
+    "FR-6 license check: record docker image / maven coordinates and confirm Apache 2.0 with no enterprise keys/registrations (RL-3) for both engines",
+    "FR-7 machine-readable measurement log (spikes/flowable-oss/measurements.*): engine, version/coordinates, history volume, cleanup throughput, deadletter op outcomes + status codes, durations, extrapolation assumptions",
+    "FR-8 verdict addendum docs/design/stack-flowable-oss-spike-addendum.md status 'addendum, awaiting ratification': go/no-go Flowable, go/no-go Operaton, Flowable-vs-Operaton recommendation grounded in measurements, explicit 70M/year extrapolation assumptions"
+  ],
+  "non_functional": [
+    "NF-1 executable on the dev machine: Docker daemon up (verified Docker 28.3.0, Compose v2.38.1), network for docker pull / maven central; no registrations/trials/paid subscriptions (RL-3)",
+    "NF-2 reproducible and idempotent: history volume is a parameter; rerun yields comparable numbers; up/down one command; disposable volumes clean up after themselves",
+    "NF-3 honest extrapolation, not literal 70M: measure at N_history (hundreds of thousands completed), throughput/degradation, extrapolate to 70M/year with explicitly written assumptions (linearity, contour-vs-fleet resources, cleanup window); assumptions are part of the verdict",
+    "NF-4 binary OSS-boundary: each capability (cleanup, deadletter list/retry/move) is available OR Enterprise-only with no 'partial'; Enterprise-only on any required capability = no-go for that engine, recorded not worked around",
+    "NF-5 spike does not contaminate the product: everything under spikes/ (plus one addendum in docs/design/); src/, prod docker-compose, prod build CI untouched; spike dir explicitly marked 'spike, not prod'"
+  ],
+  "out_of_scope": [
+    "Flowable integration into Choros (deploy BPMN, external-task bridge, outbox, choros_archive) — work-order step 5, the NEXT task, not the spike",
+    "Choros core / jobStore performance (already proven by prototype per ADR)",
+    "end-to-end benchmark on literal 70M instances on the dev machine (infeasible and unnecessary; methodology NF-3 extrapolates from an executable volume)",
+    "final engine deployment choice/config, JVM/GC tuning, Fleet-ops runbook (ADR section 2)",
+    "final ratification of the verdict (founder per GT/RL-2, outside the phase)",
+    "any Java authoring / BPMN modeling beyond the minimal test process needed to generate history and deadletter jobs",
+    "legal review of Apache-2.0 vs 152-FZ compatibility (lawyer, not engineering gate); spike only records the artifact license fact"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "spikes/flowable-oss/ up brings Flowable 7 OSS + Postgres to green healthcheck from public Apache-2.0 images with no enterprise key; else no-go (nothing to test)", "verifiable_as": "manual"},
+    {"id": "AC-2", "text": "Flowable image/maven coordinates recorded; metadata = Apache 2.0; no enterprise jar/key in the artifact -> go, else no-go", "verifiable_as": "manual"},
+    {"id": "AC-3", "text": "generator completes >= 300000 instances (param N_history) landing in ACT_HI_*; recorded count matches, else result not credible", "verifiable_as": "manual"},
+    {"id": "AC-4", "text": "engine history-cleanup (job/API) runs on the OSS artifact and deletes completed records (mechanism present, not Enterprise-only) -> go; Enterprise-only -> no-go Flowable", "verifiable_as": "manual"},
+    {"id": "AC-5", "text": "cleanup delete throughput (records/s) and duration measured; extrapolated to 70M/year under explicit assumptions fits a reasonable daily/weekly cleanup window on contour resources with headroom -> go; else no-go/risk-flag", "verifiable_as": "manual"},
+    {"id": "AC-6", "text": "DB/latency before and during cleanup shows no unbounded table growth or hang; cleanup completes deterministically -> go", "verifiable_as": "manual"},
+    {"id": "AC-7", "text": "deadletter list over OSS REST returns the deadletter jobs (HTTP 2xx with list) -> go; Enterprise-only -> no-go Flowable", "verifiable_as": "manual"},
+    {"id": "AC-8", "text": "deadletter retry/set-retries over OSS REST returns a job to the active queue (available in OSS and worked) -> go; Enterprise-only -> no-go", "verifiable_as": "manual"},
+    {"id": "AC-9", "text": "deadletter move/return over OSS REST executed and confirmed by queue state (available in OSS and worked) -> go; Enterprise-only -> no-go", "verifiable_as": "manual"},
+    {"id": "AC-10", "text": "AC-1..AC-9 repeated on Operaton with results in the log (Operaton up and probed under the same probes; parity recorded)", "verifiable_as": "manual"},
+    {"id": "AC-11", "text": "Operaton image/coordinates = Apache 2.0 with no keys -> fallback valid; else fallback drops", "verifiable_as": "manual"},
+    {"id": "AC-12", "text": "spikes/flowable-oss/measurements.* present and machine-readable: engine, version, volume, throughput, deadletter outcomes, assumptions for both engines; else spike not evidential", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "docs/design/stack-flowable-oss-spike-addendum.md present, status 'addendum, awaiting ratification', gives explicit go/no-go Flowable + go/no-go Operaton + recommendation grounded in measurements + extrapolation assumptions; else phase not closed", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "git diff of the spike touches no src/, prod docker-compose, or prod CI; all changes under spikes/ plus the one docs/design addendum (NF-5)", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "down tears down environment and disposable volumes; a repeat up yields a comparable result (NF-2 idempotent/clean)", "verifiable_as": "manual"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0117-flowable-oss-spike.spec.md"
+}
