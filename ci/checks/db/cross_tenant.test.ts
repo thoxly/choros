@@ -96,14 +96,22 @@ async function seedAuditHead(c: pg.Client, tenantId: string): Promise<void> {
   );
 }
 
-/** Seed one row into choros.grant. Returns the grant id. */
+/**
+ * Seed one row into choros.grant. Returns the grant id.
+ *
+ * T-0022 (migration 021) promoted grant.role_id to a real FK → role, so the
+ * grant's role_id MUST name an existing role. `grant` is iterated BEFORE `role`
+ * in KNOWN_TENANT_TABLES order, so we seed a dedicated role inline here rather
+ * than depend on seedState (which isn't populated yet at this point).
+ */
 async function seedGrant(c: pg.Client, tenantId: string): Promise<string> {
   const id = uuid();
+  const roleId = await seedRoleRow(c, tenantId);
   await c.query(
     `INSERT INTO choros."grant"
        (tenant_id, id, role_id, resource_type, operation, scope, granted_by, created_at)
      VALUES ($1, $2, $3, 'application', 'read', '{}'::jsonb, 'ct-tester', 0)`,
-    [tenantId, id, uuid()],
+    [tenantId, id, roleId],
   );
   return id;
 }
@@ -188,6 +196,16 @@ async function seedActorEvent(
      VALUES ($1, $2, $3, 'record', $4, $5, $4, 'submit', NULL, 0, 1)
      ON CONFLICT DO NOTHING`,
     [tenantId, seq, id, uuid(), actorId],
+/** Seed one row into choros.role. Returns the role id (T-0022). */
+async function seedRoleRow(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  const slug = `ct-role-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.role
+       (tenant_id, id, slug, display_name, description, created_at, updated_at)
+     VALUES ($1, $2, $3, $3, NULL, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, slug],
   );
   return id;
 }
@@ -200,6 +218,35 @@ async function seedActorEventSeq(c: pg.Client, tenantId: string): Promise<void> 
      ON CONFLICT DO NOTHING`,
     [tenantId],
   );
+/**
+ * Seed one row into choros.role_assignment, wiring the already-seeded employee
+ * to the new role with a valid org-node org_scope (the existing grant-lattice
+ * ScopeElement shape) and confirmed_by set (an effective assignment). (T-0022)
+ */
+async function seedRoleAssignmentRow(
+  c: pg.Client,
+  tenantId: string,
+  employeeId: string,
+  roleId: string,
+  departmentId: string,
+): Promise<string> {
+  const id = uuid();
+  const orgScope = JSON.stringify({
+    kind: 'node',
+    hierarchy: 'org',
+    nodeId: departmentId,
+    nodeLevel: 'department',
+  });
+  await c.query(
+    `INSERT INTO choros.role_assignment
+       (tenant_id, id, employee_id, role_id, org_scope, valid_from, valid_until,
+        source, granted_by, proposed_by, confirmed_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, NULL, NULL,
+             'ct-test', 'ct-tester', NULL, 'ct-tester', 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, employeeId, roleId, orgScope],
+  );
+  return id;
 }
 
 /** Seed one row into choros.job. Returns the job id. */
@@ -271,6 +318,11 @@ const seedState = {
   // track actor_event seq per tenant to avoid PK collision
   actorSeqA: 1,
   actorSeqB: 1,
+  // T-0022 chain: employee + role (needed for role_assignment seed)
+  empIdA: '',
+  empIdB: '',
+  roleIdA: '',
+  roleIdB: '',
 };
 
 /**
@@ -338,10 +390,29 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
     }
     case 'employee': {
       // Must seed after position. Store emp id for downstream actor_event seed.
+      // Must seed after position. Store employee id for downstream role_assignment seed.
       const posId = tenantId === TENANT_A ? seedState.posIdA : seedState.posIdB;
       const empId = await seedEmployeeRow(c, tenantId, posId);
       if (tenantId === TENANT_A) seedState.empIdA = empId;
       else seedState.empIdB = empId;
+      break;
+    }
+    case 'role': {
+      // T-0022 — seed after tenant (no other dep). Store role id for role_assignment.
+      const roleId = await seedRoleRow(c, tenantId);
+      if (tenantId === TENANT_A) seedState.roleIdA = roleId;
+      else seedState.roleIdB = roleId;
+      break;
+    }
+    case 'role_assignment': {
+      // T-0022 — must seed after employee + role (FK targets) and department
+      // (org_scope references a real department node). KNOWN_TENANT_TABLES order
+      // (…, department, …, employee, role, role_assignment) guarantees all are
+      // already seeded by the time this case runs.
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      const roleId = tenantId === TENANT_A ? seedState.roleIdA : seedState.roleIdB;
+      const deptId = tenantId === TENANT_A ? seedState.deptIdA : seedState.deptIdB;
+      await seedRoleAssignmentRow(c, tenantId, empId, roleId, deptId);
       break;
     }
     case 'actor_event': {

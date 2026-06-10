@@ -14,3 +14,5 @@ employee
 actor_event
 actor_event_seq
 data_classification
+role
+role_assignment
