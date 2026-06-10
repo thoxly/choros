@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0015",
+  "status": "ready",
+  "summary": "Specification of opaque object handles (E2.4): a structurally opaque reference type (tenant_id + T-0014 ResourceRef UUID + minimal addressing, never a record payload) so engine process variables / connectors / EL carry handles only and never record fields, plus the structural variable-map guard that rejects record-shaped payloads at assignment and the single gateway-resolution seam resolveHandle(handle, subject) -> filtered view that T-0021 (E2.5 PDP) implements. A handle resolves to a record only through the gateway; opacity, tenant-binding, rename-safety, and round-trip identity are CI-checkable. Design-only/static-now: the handle type + opacity invariant + variable guard + resolution port are pure-TS now; the object_handle DDL is T-0053 and the PDP behind the port is T-0021.",
+  "functional": [
+    "FR-1 opaque handle type carries exactly tenant_id + T-0014 ResourceRef (application|registry|record immutable UUID) + minimal addressing (opaque handle_id + optional facet); never a record field/payload",
+    "FR-2 opacity is structural: handle exposes no record data, is a branded/nominal opaque type, a raw record object is not a handle; cannot read addressed fields off it without the gateway",
+    "FR-3 variable-map invariant: a process variable / connector I/O / EL operand may be a handle or a primitive/structural literal but never a record payload; a record-shaped payload is rejected by a structural guard at the assignment boundary",
+    "FR-4 gateway-only resolution seam: a handle resolves to a grant-filtered record view only via resolveHandle(handle, subject) -> filtered view (the port T-0021 implements); no other handle->record-fields path exists",
+    "FR-5 handle construction is reference-only: built from a persisted ResourceRef + tenant_id with no record read and no authorization decision; reveals nothing about contents or rights",
+    "FR-6 tenant-bound + rename-safe: every component shares one tenant_id (no cross-tenant handle), the addressed resource is an immutable UUID not a slug (inherits T-0014 NF-3)",
+    "FR-7 round-trip identity not payload: serialize+parse yields the same reference (tenant_id + ResourceRef + facet) and still carries no payload; opacity survives serialization"
+  ],
+  "non_functional": [
+    "NF-1 capability-not-text: handle is a capability reference checked at the gateway, never free-text path or smuggled payload",
+    "NF-2 single resolution chokepoint: exactly one seam (resolveHandle) maps handle -> record fields; no second resolver, no payload-bearing handle variant",
+    "NF-3 tenant isolation inherited from T-0013 (object_handle is an ordinary tenant table; handle unresolvable outside its tenant context)",
+    "NF-4 additive/non-breaking: new module src/core/object-handle.ts, no edit to existing exports of types.ts / grant-lattice.ts / jobStore.ts (FE-W23-0008)",
+    "NF-5 deterministic, side-effect-free static-now core: construction/opacity/variable-guard are pure functions, no DB/IO/network/LLM",
+    "NF-6 resolver-agnostic contract: resolveHandle port fixed so T-0021 plugs in without re-opening T-0015"
+  ],
+  "out_of_scope": [
+    "PDP / grant_resolver runtime behind resolveHandle: resolution order, grant evaluation, field masking, action-time binding, caching (T-0021/E2.5)",
+    "BPMN deploy-time linter rejecting raw-object bindings (T-0027/E2.6)",
+    "engine state-mutation guard forbidding direct object writes (T-0028/E2.7)",
+    "SQL DDL / migrations / RLS policy body for object_handle (T-0053)",
+    "the ResourceRef resource model itself (T-0014; consumed here, not redefined)",
+    "grant semantics / authority table (T-0018; applied inside resolveHandle, which is T-0021)",
+    "migrating Job.variables storage to Postgres (T-0053)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "An ObjectHandle carries exactly tenantId + a ResourceRef (T-0014 kind+UUIDs) + an opaque handleId + an optional facet, and has NO record-field/payload property; a compile-time + structural fixture asserts the shape has no data/payload member", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Opacity: no accessor/branch returns the addressed record's fields without resolveHandle; a lint asserts no payload accessor exists and the handle is a branded/nominal type (a raw record object is not assignable to ObjectHandle)", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Variable-map guard accepts a handle and primitive/structural literals but REJECTS a record-shaped payload (object matching the T-0014 record shape / raw registry-record object) with a typed rejection, at assignment before storage", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "resolveHandle(handle, subject) port is defined with a fixed signature and fail-closed contract (no satisfying grant => denied/empty filtered view, never the raw record); T-0015 ships the port + a default deny-all stub and a test asserts the stub denies; T-0021 replaces the stub", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Handle construction is reference-only: makeHandle(resourceRef, tenantId) builds a handle with no record read and no authorization call; a test asserts construction touches no record store and reveals no field", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Tenant-bound + rename-safe: a handle's ResourceRef components are UUIDs (a slug/display-name target is rejected by a lint); every component shares one tenantId; a cross-tenant handle (mixed tenant_ids) is rejected at construction", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "Round-trip: parseHandle(serializeHandle(h)) deep-equals h (same tenant_id + ResourceRef + facet) and the serialized form contains no record-field value, only identity", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "Single resolution chokepoint: a lint asserts the only function mapping handle -> record fields is resolveHandle; no .data/.fields/.payload accessor exists on ObjectHandle and no second resolver entry-point is exported", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "Additive/non-breaking: the new module changes no existing export of types.ts / grant-lattice.ts / jobStore.ts; git diff touches no existing public symbol; the module imports nothing from jobStore/http/pg/fs/net", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "object_handle is a registered T-0013 tenant table: in known_tenant_tables fixture (static-now); live FORCE RLS = (true,true); no tenant context => count 0 (default-DENY) (activates-in-T-0053)", "verifiable_as": "test"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0015-object-handles.spec.md"
+}

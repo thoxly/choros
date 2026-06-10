@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0015",
+  "status": "ready",
+  "decision": "Adopt ObjectHandle — a branded, structurally-opaque, tenant-scoped reference carrying exactly { tenantId, ref: ResourceRef (T-0014 immutable UUID), handleId, facet? } and NO record field. Engine process variables / connectors / EL operands may hold a handle or an inert literal but never a record payload; this is enforced at the variable-write boundary by assertVariableValue(value), a pure structural guard that rejects record-shaped payloads (a record-kind ResourceRef + data, or a raw registry-record object) with a typed reason before storage. A handle is turned back into a grant-filtered record view by exactly one seam, resolveHandle(handle, subject) -> Promise<ResolvedView>, which T-0021 (E2.5 PDP) implements; T-0015 ships the port type plus a fail-closed denyAllResolver stub so the chokepoint exists and is tested from day one. makeHandle(ref, tenantId) is reference-only (no record read, no authorization, rejects cross-tenant refs); serializeHandle/parseHandle round-trip identity, never payload. The handle type, nominal brand, variable guard, constructor, (de)serializer, resolution port, and deny-all stub are built NOW as a self-contained pure-TS module src/core/object-handle.ts with vitest fitness tests; the object_handle Postgres table (a T-0013 tenant table with no payload column) defers to T-0053 and the resolver body to T-0021. Opacity is two-edged: the nominal brand stops the typed leak (a record is not assignable to ObjectHandle, the handle exposes no field accessor) and the runtime variable guard stops the untyped leak (connectors deal in unknown). Proportional (rubric axis 5): a small reference type, one brand, one guard, one constructor, one (de)serializer, one port with a deny-all default — no payload cache, no resolution logic here; logic lives at the boundary (T-0021).",
+  "rejected_alternatives": [
+    {"option": "Variables hold the record object directly", "why_not": "This IS the leak E2.4 closes: every later variable read is ungated/unfiltered/un-audited; the whole E2.5 gateway chokepoint is void if a record can sit in a variable (hypothesis §1 caveat). Rejected categorically."},
+    {"option": "Handle carries a cached/denormalized record snapshot for performance", "why_not": "A snapshot IS a payload in the variable map; it re-opens the leak and serves stale + unfiltered data (the grant may have narrowed). Resolution must be action-time (TOCTOU-safe, E2.5); a handle carries zero record fields. Caching lives behind the gateway, keyed by subject+grant."},
+    {"option": "Opacity by convention / lint only (handle is a plain object)", "why_not": "A linter catches only known spellings and only typed code; a connector dealing in unknown bypasses it; detect-not-prevent (T-0013 §2 anti-pattern). Opacity must be structural: a type-enforced brand PLUS a runtime guard at the variable boundary rejecting record-shaped unknown values."},
+    {"option": "Resolve handles eagerly at variable-assignment (store the resolved view)", "why_not": "Binds rights at task-creation not action-time — the TOCTOU hazard E2.5 forbids — and re-introduces a payload into the variable. Resolution is lazy and gateway-only, at the moment of use."},
+    {"option": "Define resolveHandle inside T-0021 only (no port in T-0015)", "why_not": "Then 'resolution is gateway-only' has no compile-time anchor; connectors could grow ad-hoc resolution before T-0021. Fixing the port + a deny-all stub here makes the chokepoint exist & be fail-closed-tested from day one and gives T-0021 a contract to satisfy. Mirrors T-0014 handing T-0018 a closed ResourceRef."},
+    {"option": "Handle stores a slug / human-readable resource path", "why_not": "A slug rename would silently re-target or orphan the handle (T-0014 NF-3). A handle binds to immutable ResourceRef UUIDs only (FF-A6)."},
+    {"option": "Handle includes the subject's grants / a baked-in capability token", "why_not": "Couples the reference to a point-in-time authorization; substitution/revocation/audit break and TOCTOU re-opens. A handle is subject-independent; authority is evaluated at resolve-time from subject + the live grant table (T-0018) inside resolveHandle."},
+    {"option": "Mint the handle type inside src/core/types.ts / jobStore.ts (edit existing files)", "why_not": "Collides with frozen job-model types / in-memory store and couples handles to the job apparatus. The handle is a new self-contained file src/core/object-handle.ts (additive, no edits to existing exports — FE-W23-0008)."}
+  ],
+  "object_model": [
+    {"entity": "object_handle (Postgres tenant table, DDL is T-0053)", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL — leading PK column; T-0013 RLS key; a handle is meaningless outside its tenant"},
+      {"name": "id", "type": "uuid NOT NULL — the opaque handle_id; PK (tenant_id, id); addressing-only, reveals nothing about contents"},
+      {"name": "ref_kind", "type": "text NOT NULL — application | registry | record (T-0014 ResourceRef.kind)"},
+      {"name": "application_id", "type": "uuid NULL — ResourceRef component (present per ref_kind)"},
+      {"name": "registry_id", "type": "uuid NULL — ResourceRef component (registry/record)"},
+      {"name": "record_id", "type": "uuid NULL — ResourceRef component (record)"},
+      {"name": "facet", "type": "jsonb NULL — opaque narrowing token; names fields, never holds values"},
+      {"name": "created_at", "type": "bigint NOT NULL — unix epoch ms"},
+      {"name": "(NO payload column)", "type": "deliberately no data/snapshot/view column — FF-A7 enforces; identity → fields is the gateway's job, never a column read"}
+    ]},
+    {"entity": "ObjectHandle (static-now TS type, branded-opaque)", "fields": [
+      {"name": "[HANDLE_BRAND]", "type": "unique symbol member — nominal brand; a plain record object is NOT assignable to ObjectHandle and the brand is un-forgeable outside the module"},
+      {"name": "tenantId", "type": "string — T-0013 key; equals every ref component's tenant"},
+      {"name": "ref", "type": "ResourceRef — immutable UUID identity (T-0014 §5); never a slug"},
+      {"name": "handleId", "type": "string — opaque addressing id (== object_handle.id), deterministic over identity"},
+      {"name": "facet", "type": "Facet { fields: string[] } | undefined — optional opaque narrowing token; names fields only, no value"},
+      {"name": "(NO data/fields/payload/view member)", "type": "intentionally absent — opacity is structural"}
+    ]},
+    {"entity": "ResolvedView (the gateway return; fail-closed default)", "fields": [
+      {"name": "denied", "type": "true | false — denied:true is the fail-closed default; denyAllResolver always returns denied:true"},
+      {"name": "reason", "type": "'no_grant' | 'cross_tenant' | 'not_found' — present when denied:true"},
+      {"name": "ref", "type": "ResourceRef — present when denied:false"},
+      {"name": "fields", "type": "Record<string, unknown> — grant-masked fields; present only when denied:false (the only place addressed fields appear)"}
+    ]},
+    {"entity": "VariableValueResult (the variable-guard verdict)", "fields": [
+      {"name": "ok", "type": "true | false — false ⇒ a record-shaped payload was rejected at the variable-write boundary before storage"},
+      {"name": "reason", "type": "'record_payload' | 'raw_object_with_data' — present when ok:false"}
+    ]}
+  ],
+  "contracts": [
+    "export function makeHandle(ref: ResourceRef, tenantId: string, facet?: Facet): ObjectHandle — reference-only; NO record read, NO authorization; throws CrossTenantHandleError if any tenant-scoped ref component !== tenantId; handleId deterministic over (tenantId, ref, facet)",
+    "export function serializeHandle(h: ObjectHandle): string — identity-only wire form, contains no record field",
+    "export function parseHandle(s: string): ObjectHandle — re-brands; parseHandle(serializeHandle(h)) deep-equals h",
+    "export function isObjectHandle(value: unknown): value is ObjectHandle — nominal type-guard backed by the brand",
+    "export function assertVariableValue(value: unknown): { ok: true } | { ok: false; reason: 'record_payload' | 'raw_object_with_data' } — pure write-boundary guard; ok iff handle or inert literal; rejects record-shaped payloads before storage",
+    "export interface HandleResolver { resolveHandle(handle: ObjectHandle, subject: ResolveSubject): Promise<ResolvedView> } — THE single handle→fields edge; fail-closed, tenant-checked, action-time; T-0021 implements",
+    "export const denyAllResolver: HandleResolver — default that returns { denied: true, reason: 'no_grant' } for every input; T-0021 swaps for the PDP without changing the contract",
+    "export interface ResolveSubject { tenantId: string; subjectId: string } — identity only; grants looked up live from T-0018 inside the resolver, NOT carried on the handle",
+    "export class CrossTenantHandleError extends Error",
+    "Module boundary: src/core/object-handle.ts is new + additive; imports nothing from jobStore/http/pg/fs/net; does NOT modify existing exports of types.ts / grant-lattice.ts / jobStore.ts (FE-W23-0008)"
+  ],
+  "fitness_functions": [
+    {"id": "FF-A1", "rule": "Handle identity-only & branded-opaque; variable-guard rejects record payloads; round-trip preserves identity not payload; deny-all resolver fails closed", "ci_check": "vitest run src/__tests__/object-handle.test.ts — the §5.3 suite FF-1..FF-8 green"},
+    {"id": "FF-A2", "rule": "ObjectHandle TS type carries identity-only fields and is nominal (a record object is not assignable, no payload member)", "ci_check": "tsc --noEmit over src/core/object-handle.ts + a compile fixture with @ts-expect-error asserting a record object is not an ObjectHandle and the handle has no data/fields/payload member"},
+    {"id": "FF-A3", "rule": "Module is self-contained & additive (no edit to frozen types.ts/grant-lattice.ts/jobStore.ts exports; no DB/IO import)", "ci_check": "ci/checks/object-handle-isolation.sh: assert src/core/object-handle.ts imports nothing from jobStore/http/pg/fs/net; git diff touches no existing export in those three files (AC-9)"},
+    {"id": "FF-A4", "rule": "No record payload may sit in a process variable — the variable-write boundary calls assertVariableValue and rejects record-shaped payloads", "ci_check": "ci/checks/no-record-in-variable.sh: assert no handle type exposes .data/.fields/.payload, and (when an engine variable-write path exists) every Job.variables/connector-out assignment is guarded by assertVariableValue; a raw-record assignment fixture ⇒ guard rejects (AC-3); engine-path call-site enforcement activates with T-0027/T-0028"},
+    {"id": "FF-A5", "rule": "Single resolution chokepoint — resolveHandle is the only handle→fields edge", "ci_check": "ci/checks/single-resolver.sh: grep exports for any second function returning addressed record fields from a handle (e.g. *Resolve*, a .data getter on a handle) ⇒ >0 fail (AC-8, NF-2)"},
+    {"id": "FF-A6", "rule": "Handle binds to UUIDs not slugs; never cross-tenant", "ci_check": "ci/checks/handle-uuid-binding.sh: every ref component in any handle fixture matches the UUID shape (sourced from a ResourceRef); a slug/display-name ⇒ fail; a cross-tenant ref ⇒ makeHandle throws CrossTenantHandleError (AC-6); + live rename test T-0053"},
+    {"id": "FF-A7", "rule": "object_handle is a registered T-0013 tenant table, FORCE RLS, default-DENY, payload-free", "ci_check": "object_handle in known_tenant_tables fixture (static-now); live relrowsecurity AND relforcerowsecurity=(t,t); no tenant context ⇒ count 0; schema check asserts no payload/data column (AC-10); activates-in-T-0053 for the live halves"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.2 ObjectHandle identity-only shape (no payload member) + §5.3 FF-1 / FF-A2"},
+    {"ac": "AC-2", "covered_by": "§2.1 / §4.2 nominal brand + §4.4 isObjectHandle + §5.3 FF-2 / FF-A2"},
+    {"ac": "AC-3", "covered_by": "§4.4 assertVariableValue write-boundary guard + §5.3 FF-3 / FF-A4"},
+    {"ac": "AC-4", "covered_by": "§4.5 resolveHandle port + denyAllResolver fail-closed + §5.3 FF-4"},
+    {"ac": "AC-5", "covered_by": "§4.3 makeHandle reference-only (no record read) + §5.3 FF-5"},
+    {"ac": "AC-6", "covered_by": "§4.2/§4.3 UUID-only ref + cross-tenant reject (CrossTenantHandleError) + §5.3 FF-6 / FF-A6"},
+    {"ac": "AC-7", "covered_by": "§4.3 serializeHandle/parseHandle round-trip identity + §5.3 FF-7"},
+    {"ac": "AC-8", "covered_by": "§4.5 single resolveHandle edge + §2.1 no payload accessor + §5.3 FF-8 / FF-A5"},
+    {"ac": "AC-9", "covered_by": "§5.1 additive module boundary + FF-A3 (no edit to frozen exports; no DB/IO import)"},
+    {"ac": "AC-10", "covered_by": "§4.1 object_handle as T-0013 tenant table (no payload column) + FF-A7"}
+  ],
+  "runtime_target": "локально (static-now pure-TS module src/core/object-handle.ts runs in npm run ci, no external resource); the object_handle table activates in the Postgres silo stack at T-0053 (founder home server /srv/choros, deploy founder-gated GT-4) — no NEW infra dependency beyond T-0013/T-0014/T-0018; T-0015 provisions nothing",
+  "adr_artifact_path": "docs/design/T-0015-object-handles.adr.md",
+  "escalation": ""
+}

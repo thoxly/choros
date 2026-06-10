@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0015",
+  "verdict": "approved",
+  "ci_seen": { "green": true, "total": 384, "passed": 384 },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "resolved",
+      "resolved_by": "298f97e",
+      "axis": 6,
+      "location": "src/core/object-handle.ts:269-353 (validateAndReconstructRef) + 364-399 (parseHandle)",
+      "issue": "RESOLVED-BY-298f97e. Prior finding: parseHandle cast the parsed `ref` wholesale with no shape validation, so a crafted wire string `{...,ref:{kind:'record',...,data:{ssn}}}` deserialized into a validly-BRANDED ObjectHandle whose `ref` carried a record payload, riding past assertVariableValue (which short-circuits ok:true on isObjectHandle BEFORE structural inspection). Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX closes the ref vector: validateAndReconstructRef() switch-on-kind reconstructs ResourceRef from known identity fields only and throws MalformedHandleError on any payload key (data/fields/payload/view/snapshot), unknown/extra key, kind/field-type mismatch, or unknown kind. Adversarial re-probe of the ref surface (non-forbidden record key, recordId-as-object, __proto__ injection, loose kind with record fields, unknown kind) is REJECTED in every case; no prototype pollution. The exact R-1 repro now throws MalformedHandleError. Honest round-trip (AC-7) preserved for all three ref kinds.",
+      "suggestion": "Resolved. Keep validateAndReconstructRef as the single ref-deserialization chokepoint."
+    },
+    {
+      "id": "R-2",
+      "severity": "resolved",
+      "axis": 6,
+      "resolved_by": "4df5c4b",
+      "location": "src/core/object-handle.ts:363-389 (validateAndReconstructFacet) + 431-438 (parseHandle facet step)",
+      "issue": "RESOLVED-BY-4df5c4b. Prior finding: parseHandle cast `facet` wholesale, so a wire facet `{fields:['a'],data:{ssn}}` rode into a branded handle. Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX: parseHandle now routes facet through validateAndReconstructFacet(), which rejects any key other than `fields`, any non-array `fields`, and any non-string element, throwing MalformedHandleError. Adversarial re-probe (facet with data/payload/view keys, object element in fields, non-array fields, facet:null) is rejected/normalized in every case; the honest `{fields:[...]}` facet still round-trips (AC-7). The R-2 facet-payload vector is closed.",
+      "suggestion": "Resolved. Keep validateAndReconstructFacet as the single facet-deserialization chokepoint."
+    },
+    {
+      "id": "R-3",
+      "severity": "resolved",
+      "axis": 6,
+      "resolved_by": "4df5c4b",
+      "location": "src/core/object-handle.ts:440-444 (parseHandle routes through makeHandle)",
+      "issue": "RESOLVED-BY-4df5c4b. Prior finding: parseHandle did not enforce makeHandle's cross-tenant binding, so a wire ref whose tenantId != envelope tenantId minted a cross-tenant handle. Independent re-verification (run rt-choros, 2026-06-10) confirms the FIX: parseHandle now feeds the validated (ref, tenantId, facet) into makeHandle, which throws CrossTenantHandleError when any tenant-scoped ref component != envelope tenantId. Adversarial re-probe (record/registry/application wire ref with mismatched tenantId) throws CrossTenantHandleError in every case, at parity with makeHandle. The generalization (parseHandle ⊆ makeHandle) holds for the wire-structural surface: every parsed component is forced through makeHandle, so parseHandle returns only handles makeHandle could have produced. R-3 closed.",
+      "suggestion": "Resolved. Keep parseHandle routing all components through makeHandle so future makeHandle invariants are inherited automatically."
+    },
+    {
+      "id": "R-4",
+      "severity": "resolved",
+      "resolved_by": "8d498fb",
+      "axis": 6,
+      "location": "src/core/object-handle.ts:229-245 (makeHandle: Object.create(null) + named identity props + Object.defineProperty non-enumerable brand) + 472-475 (isObjectHandle) + FF-A2 tests src/__tests__/object-handle.test.ts:888-955",
+      "issue": "RESOLVED-BY-8d498fb. Prior finding: the runtime brand `_RUNTIME_BRAND` was attached via Object.assign as an ENUMERABLE own symbol property, so `{...genuineHandle}` / Object.assign({},h) copied the brand and the clone still passed isObjectHandle while being mutable, letting an attacker attach a record payload that rode past the variable guard. Independent final re-verification (run rt-choros-T0015-final, 2026-06-10) confirms the FIX: makeHandle now builds the handle on Object.create(null) with only the named identity props enumerable, and attaches the brand via Object.defineProperty(h,_RUNTIME_BRAND,{value:true,enumerable:false,writable:false,configurable:false}) before Object.freeze. Adversarial re-probe (live throwaway, not committed): isObjectHandle({...h})===false; isObjectHandle(Object.assign({},h))===false; isObjectHandle(JSON.parse(JSON.stringify(h)))===false (brand is a symbol, never serialized); a spread-clone with .data appended is REJECTED by assertVariableValue ({ok:false}) — caught as a raw record object, not blessed. Regression: genuine makeHandle(...) handles still pass isObjectHandle for all 3 ref kinds ±facet; serializeHandle→parseHandle round-trips identity-equal for all 3 kinds ±facet (the non-enumerable brand did NOT break serialize, which reads named props directly, not via enumeration). The only remaining theoretical vector is deliberate Object.getOwnPropertySymbols + Object.defineProperty forgery by code already running in-process, which is OUT of the operative threat model (enforcement.md §7: drift, not an in-process adversary) — any in-process code can do anything. The everyday-idiom opacity-bypass class (spread / Object.assign / JSON clone) is CLOSED.",
+      "suggestion": "Resolved. Keep the brand non-enumerable/non-writable/non-configurable and the FF-A2 spread/assign/json-clone tests wired into npm run ci so regressions are caught."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true, "note": "R-4 resolved (8d498fb): brand is now non-enumerable, so spread/Object.assign/JSON clone cannot copy it — the nominal-opacity invariant holds in-memory. FF-A2 tests assert spread-clone/Object.assign-clone fail isObjectHandle and a spread+data clone is rejected by assertVariableValue." },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true, "note": "R-3 resolved: parseHandle now inherits makeHandle's cross-tenant rejection." },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

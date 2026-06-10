@@ -9,7 +9,8 @@
     "build": "tsc",
     "lint": "eslint src",
     "test": "vitest run",
-    "ci": "tsc --noEmit && eslint src && vitest run"
+    "fitness": "bash ci/checks/object-handle-isolation.sh && bash ci/checks/no-record-in-variable.sh && bash ci/checks/single-resolver.sh && bash ci/checks/handle-uuid-binding.sh",
+    "ci": "tsc --noEmit && eslint src && npm run fitness && vitest run"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
