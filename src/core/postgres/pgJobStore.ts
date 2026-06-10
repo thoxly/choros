@@ -22,6 +22,7 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { type Job, JobState, type Clock, systemClock } from "../types.js";
 import type { CompleteResult, FailResult } from "../jobStoreTypes.js";
+import { assertVariableValue } from "../object-handle.js";
 
 // ---------------------------------------------------------------------------
 // Row shape from Postgres (snake_case DB → camelCase TS)
@@ -193,9 +194,27 @@ export class PostgresJobStore {
   }
 
   // ---------------------------------------------------------------------------
-  // complete — atomic CTE ownership gate (ADR §4.3)
+  // complete — atomic CTE ownership gate (ADR §4.3) + T-0028 payload guard
   // ---------------------------------------------------------------------------
-  async complete(workerId: string, jobId: string): Promise<CompleteResult> {
+  /**
+   * T-0028 Layer B: validates payload with assertVariableValue before the DB update.
+   * A raw record object in any payload value returns RECORD_IN_PAYLOAD fail-closed;
+   * the job state is NOT advanced. Guard fires before the DB round-trip (gate-then-guard).
+   * The payload is validated in TS (not in SQL); the DB is not contacted for invalid payloads.
+   * Note: result persistence to DB is deferred to T-0053+ (no result column in schema yet);
+   * the guard IS wired and the structural invariant is enforced.
+   */
+  async complete(workerId: string, jobId: string, payload?: Record<string, unknown>): Promise<CompleteResult> {
+    // T-0028 Layer B: validate payload before the ownership-gate DB round-trip.
+    // This is fail-closed: a bad payload short-circuits without touching the DB.
+    if (payload !== undefined) {
+      for (const value of Object.values(payload)) {
+        const r = assertVariableValue(value);
+        if (!r.ok) {
+          return { ok: false, code: "RECORD_IN_PAYLOAD" };
+        }
+      }
+    }
     // Uses a single atomic UPDATE with re-read for gate verification.
     // FOR UPDATE in the CTE serializes concurrent complete calls (FF-7):
     // the second concurrent transaction blocks until the first commits, then

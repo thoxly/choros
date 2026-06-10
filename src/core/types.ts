@@ -34,6 +34,11 @@ export interface Job {
    * T-0114: previously recorded-only — now actively enforced by fetchAndLock.
    */
   readonly available_at: number;
+  /**
+   * T-0028: validated complete-payload result. Set when a worker calls complete() with a payload.
+   * Absent when complete() is called without a payload (backward-compat: field absent = no payload).
+   */
+  readonly result?: Record<string, unknown>;
 }
 
 /** Clock abstraction — injection seam for deterministic time in tests. */

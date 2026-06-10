@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { type Job, JobState, type Clock, systemClock } from "./types.js";
 import type { CompleteResult, FailResult } from "./jobStoreTypes.js";
+import { assertVariableValue } from "./object-handle.js";
 
 export class InMemoryJobStore {
   /** Frozen canonical records — external code cannot mutate store state. */
@@ -138,10 +139,14 @@ export class InMemoryJobStore {
   /**
    * Mark a job as completed by the owning worker.
    * Ownership gate precedence: NOT_FOUND → NOT_LOCKED → LOCK_EXPIRED → NOT_OWNER.
-   * On success: stores a new frozen snapshot with state=COMPLETED and lock fields cleared.
+   * T-0028: optional payload parameter — validated fail-closed with assertVariableValue
+   * before state is advanced. A raw record object in any payload value returns
+   * { ok: false, code: "RECORD_IN_PAYLOAD" } and the job remains LOCKED (all-or-nothing).
+   * On success: stores a new frozen snapshot with state=COMPLETED, lock fields cleared,
+   * and result set to the validated payload (if provided).
    * Returns { ok: true } on success; does NOT return the updated Job (use getById).
    */
-  complete(workerId: string, jobId: string): CompleteResult {
+  complete(workerId: string, jobId: string, payload?: Record<string, unknown>): CompleteResult {
     const job = this.jobs.get(jobId);
     if (job === undefined) {
       return { ok: false, code: "NOT_FOUND" };
@@ -155,11 +160,21 @@ export class InMemoryJobStore {
     if (job.lockOwner !== workerId) {
       return { ok: false, code: "NOT_OWNER" };
     }
+    // T-0028 Layer B: validate payload before advancing state (all-or-nothing, fail-closed)
+    if (payload !== undefined) {
+      for (const value of Object.values(payload)) {
+        const r = assertVariableValue(value);
+        if (!r.ok) {
+          return { ok: false, code: "RECORD_IN_PAYLOAD" };
+        }
+      }
+    }
     const updated: Job = Object.freeze({
       ...job,
       state: JobState.COMPLETED,
       lockOwner: undefined,
       lockExpiry: undefined,
+      ...(payload !== undefined ? { result: payload } : {}),
     });
     this.jobs.set(jobId, updated);
     return { ok: true };
