@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0040",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/role-criticality.ts:160-165",
+      "issue": "Axis c (sensitive_read) inherits T-0033's null-on-corrupt-clearance behaviour: a read grant carrying a malformed clearance marker (e.g. constraint.clearance = 'ultrasecret', not a member of the closed DataClass set) is read by deriveClearance/isDataClass as null, so the bit stays false. For axes a/b this is monotone-safe (an OR-fold .some() match can only ever fail to RAISE, never lower, a bit — an unknown op contributes neither a true nor a clearing, so NF-3's 'doubt -> more criticality' holds by construction). But axis c routes through deriveClearance, where a corrupt clearance token resolves to null rather than to the maximal class, so a garbage clearance marker UNDER-flags rather than over-flags. This is spec-conformant: FR-4/AC-8 define the bit via deriveClearance yielding a DataClass and explicitly list 'no resolvable clearance marker => false'; deriveClearance/isDataClass are in the FROZEN T-0033 module that T-0040 correctly reuses (NF-2/NF-5) and must not edit; and T-0033's own fail-closed bias is framed around MASKING (corrupt class => more masking), not criticality elevation. So this is not a defect in T-0040's contract boundary — it faithfully implements the signed spec and the mandated frozen primitive. Recorded only so the architect/T-0044 are aware the per-task NF-3 'doubt -> more criticality' guarantee is monotone-exact for a/b but inherits T-0033's quiet-null for c.",
+      "suggestion": "No change in T-0040 (would require editing the frozen T-0033 deriveClearance, which is out of scope and forbidden). If a corrupt clearance marker should elevate criticality, raise it as a T-0033/T-0044 design question (a clearance-corruption signal on the join), not against this task."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true },
+    { "ac": "AC-8",  "covered": true },
+    { "ac": "AC-9",  "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true },
+    { "ac": "AC-17", "covered": true },
+    { "ac": "AC-18", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
