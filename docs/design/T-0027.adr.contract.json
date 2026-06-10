@@ -1,0 +1,191 @@
+{
+  "task_id": "T-0027",
+  "status": "ready",
+  "decision": "Build src/core/bpmn-linter.ts (library) + src/cli/lint-bpmn.ts (CLI wrapper) with a custom, zero-dependency, fail-closed-whitelist XML tokenizer (src/core/bpmn-xml-parser.ts). The tokenizer's design invariant is: any byte sequence not unambiguously recognized as a known safe token class produces a parse-error token and the linter returns ok:false (whitelist, not blacklist). parseHandle is imported read-only from src/core/object-handle.ts (T-0015) as the single source of truth for handle validity. No new runtime npm dependencies. The deploy-gate contract (lintBpmn(xml):LintResult, reject on ok:false with HTTP 422) is frozen for T-0058/T-0064 in a deploy-contract stub doc.",
+  "rejected_alternatives": [
+    {
+      "option": "Use xmldom or fast-xml-parser as production runtime dependency",
+      "why_not": "Violates NF-1 (zero prod dep, Demiurge convention). Adds supply-chain audit surface to a security gate. The parser differential risk vs Flowable is reduced but not eliminated; the fail-closed-whitelist design is the correct mitigation regardless of parser choice."
+    },
+    {
+      "option": "Use Node.js node:xml or WHATWG DOMParser",
+      "why_not": "Neither exists in Node >=20 built-ins. The spec acknowledges this."
+    },
+    {
+      "option": "Regex-based detection without a tokenizer",
+      "why_not": "Regex on raw XML is trivially bypassable via CDATA, attribute quoting, encoding tricks. The AC-8/AC-9 adversarial cases require tokenized extraction to avoid false-negatives. Rejected categorically."
+    },
+    {
+      "option": "Fail-open on unknown XML constructs (skip-and-continue)",
+      "why_not": "Directly contradicts NF-4 and the orchestrator fail-closed-whitelist requirement. Skipping unknown constructs is the parser-differential exploit path. Rejected categorically."
+    },
+    {
+      "option": "Scan raw XML bytes with string search instead of tokenizing",
+      "why_not": "Cannot reliably distinguish binding values from element names, comments, CDATA boundaries. The adversarial cases (attribute value in AC-8, CDATA in AC-9) require tokenized extraction."
+    },
+    {
+      "option": "Use a maintained XML parser as dev-dependency inlined at build time",
+      "why_not": "Inlining third-party code into the production module is indistinguishable from a production dependency from an audit perspective, adds build complexity disproportionate to the problem size. The custom tokenizer is <300 lines and fully testable."
+    },
+    {
+      "option": "Full BPMN 2.0 schema validation (XSD)",
+      "why_not": "Out of scope per spec §8. Would require a maintained XML/XSD library (violates NF-1). The linter checks handle-discipline only."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "LintViolationType",
+      "fields": [
+        { "name": "value", "type": "\"raw_object_binding\" | \"malformed_xml\"" }
+      ]
+    },
+    {
+      "entity": "LintViolation",
+      "fields": [
+        { "name": "type", "type": "LintViolationType" },
+        { "name": "elementId", "type": "string" },
+        { "name": "elementKind", "type": "string" },
+        { "name": "message", "type": "string" }
+      ]
+    },
+    {
+      "entity": "LintResult",
+      "fields": [
+        { "name": "ok", "type": "true | false" },
+        { "name": "violations", "type": "LintViolation[] (present when ok: false)" }
+      ]
+    },
+    {
+      "entity": "Attr (internal, bpmn-xml-parser.ts)",
+      "fields": [
+        { "name": "name", "type": "string (local name, no prefix, entity-decoded)" },
+        { "name": "value", "type": "string (entity-decoded, numeric-refs expanded)" }
+      ]
+    },
+    {
+      "entity": "OpenTagToken (internal)",
+      "fields": [
+        { "name": "kind", "type": "\"open-tag\"" },
+        { "name": "localName", "type": "string" },
+        { "name": "attrs", "type": "Attr[]" }
+      ]
+    },
+    {
+      "entity": "CloseTagToken (internal)",
+      "fields": [
+        { "name": "kind", "type": "\"close-tag\"" },
+        { "name": "localName", "type": "string" }
+      ]
+    },
+    {
+      "entity": "SelfCloseToken (internal)",
+      "fields": [
+        { "name": "kind", "type": "\"self-close-tag\"" },
+        { "name": "localName", "type": "string" },
+        { "name": "attrs", "type": "Attr[]" }
+      ]
+    },
+    {
+      "entity": "TextToken (internal)",
+      "fields": [
+        { "name": "kind", "type": "\"text\"" },
+        { "name": "value", "type": "string (decoded, CDATA merged)" }
+      ]
+    },
+    {
+      "entity": "ParseErrorToken (internal)",
+      "fields": [
+        { "name": "kind", "type": "\"parse-error\"" },
+        { "name": "reason", "type": "string" }
+      ]
+    },
+    {
+      "entity": "ScanContext (internal, bpmn-linter.ts walker)",
+      "fields": [
+        { "name": "elementKind", "type": "string" },
+        { "name": "elementId", "type": "string" },
+        { "name": "depth", "type": "number" },
+        { "name": "inExtension", "type": "boolean" }
+      ]
+    }
+  ],
+  "contracts": [
+    "export function lintBpmn(xml: string): LintResult  — pure, no I/O, no network, no DB; same input = same output",
+    "export type LintViolationType = 'raw_object_binding' | 'malformed_xml'",
+    "export interface LintViolation { type: LintViolationType; elementId: string; elementKind: string; message: string; }",
+    "export type LintResult = { ok: true } | { ok: false; violations: LintViolation[] }",
+    "CLI: node dist/cli/lint-bpmn.js <file.bpmn>  — exit 0 on ok:true, exit 1 on ok:false; violations to stderr as JSON",
+    "Deploy-gate contract (T-0058/T-0064): (a) lintBpmn called before accepting deploy; (b) ok:false => HTTP 422 + violations; (c) malformed_xml => HTTP 422; (d) lintBpmn is pure, I/O is caller's; (e) T-0058 replaces mock deploy test with real endpoint",
+    "Import from T-0015 (read-only): import { parseHandle } from './object-handle.js' — single source of truth for handle validity; not re-exported",
+    "Raw-object detection pipeline: (1) if value starts with '{' attempt JSON.parse; (2) if result is object with record-identity or payload keys; (3) attempt parseHandle(v) — if succeeds, not a violation; if throws, violation",
+    "Fail-closed-whitelist: any XML construct not unambiguously recognized per §2.2 table => parse-error => ok:false",
+    "Namespace normalization: strip prefix up to ':' for local name matching; do not track namespace bindings"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "lintBpmn returns ok:true for handle-shaped and primitive bindings; ok:false for raw-object bindings in all scoped element types (serviceTask, userTask, sendTask, conditionExpression, dataObject, dataObjectReference)",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — AC-1..AC-10, AC-14, AC-15 green"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Adversarial corpus: malformed XML (AC-6), raw object in attribute value (AC-8), raw object in CDATA (AC-9) all return ok:false",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — these three ACs must be green (adversarial subset)"
+    },
+    {
+      "id": "FF-3",
+      "rule": "LintViolation shape: all four fields present (type, elementId, elementKind, message); elementId is empty string when BPMN element has no id attribute",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — AC-11"
+    },
+    {
+      "id": "FF-4",
+      "rule": "lintBpmn is a pure function: no process.exit, no fs.*, no http.*, no pg.*, no global state mutation in bpmn-linter.ts or bpmn-xml-parser.ts",
+      "ci_check": "tsc --noEmit (no I/O types leak into linter signature) + ci/checks/bpmn-linter-isolation.sh"
+    },
+    {
+      "id": "FF-5",
+      "rule": "bpmn-linter.ts and bpmn-xml-parser.ts import nothing from jobStore, http, pg, fs, net, or any package outside existing project devDependencies (NF-1 zero production deps)",
+      "ci_check": "ci/checks/bpmn-linter-isolation.sh — grep for forbidden imports in both files, exit 1 if found"
+    },
+    {
+      "id": "FF-6",
+      "rule": "No existing export of object-handle.ts, grant-resolver.ts, grant-lattice.ts, types.ts, or jobStore.ts is modified; git diff --name-only does not touch those files; existing test suites for those modules remain green (NF-3 / architect rule 7 / FE-W23-0008)",
+      "ci_check": "ci/checks/bpmn-linter-isolation.sh — git diff --name-only HEAD asserts no change to frozen modules; vitest run (all prior tests still pass)"
+    },
+    {
+      "id": "FF-7",
+      "rule": "CLI exits 0 on passing BPMN file, exits 1 on violations or malformed XML; violations are printed to stderr as valid JSON (NF-6)",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — AC-14 (integration fixture using node:child_process spawn)"
+    },
+    {
+      "id": "FF-8",
+      "rule": "Parser differential — all §2.2 reject conditions produce ok:false with type malformed_xml: DOCTYPE, non-predefined XML entities, duplicate attribute names, processing instructions, invalid UTF-8 bytes, XML 1.1 version declaration, null bytes, nesting depth >200",
+      "ci_check": "vitest run src/__tests__/bpmn-linter.test.ts — dedicated adversarial fixtures in src/__tests__/fixtures/bpmn-parser-adversarial/ covering each §2.2 row"
+    },
+    {
+      "id": "FF-9",
+      "rule": "No new entry in package.json dependencies section; only devDependencies allowed for test tooling",
+      "ci_check": "ci/checks/bpmn-linter-isolation.sh — node -e check that package.json dependencies does not contain any xml/bpmn/parser-related packages"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "§3.2 linting algorithm + §2.3 handle detection pipeline (parseHandle succeeds = ok:true) + FF-1" },
+    { "ac": "AC-2", "covered_by": "§3.3 scoped elements (serviceTask) + §2.3 raw-object detector (registryId/recordId keys) + FF-1" },
+    { "ac": "AC-3", "covered_by": "§3.3 (userTask) + §2.3 (data key) + FF-1" },
+    { "ac": "AC-4", "covered_by": "§3.3 (conditionExpression) + §2.3 secondary embedded-object scan for EL script body (fields/payload keys) + FF-1" },
+    { "ac": "AC-5", "covered_by": "§3.3 (dataObject/dataObjectReference) + §2.3 (applicationId/registryId keys) + FF-1" },
+    { "ac": "AC-6", "covered_by": "§3.1 tokenizer fail-closed (unclosed tags → parse-error token) + §2.2 reject table + FF-2, FF-8" },
+    { "ac": "AC-7", "covered_by": "§2.3 detection pipeline step 3: parseHandle(v) succeeds → not a violation; handle strings pass without false-positive + FF-1" },
+    { "ac": "AC-8", "covered_by": "§3.1 attribute value extraction (attrs[] on open-tag token) + §2.3 (raw object in attribute value) + FF-2 adversarial fixture" },
+    { "ac": "AC-9", "covered_by": "§3.1 CDATA → text token (CDATA content decoded and merged into text stream) + §2.3 + FF-2 adversarial fixture" },
+    { "ac": "AC-10", "covered_by": "§2.3 pipeline step 1: EL expression ${someVar} does not start with { in JSON sense or JSON.parse throws → no raw-object detected → ok:true + FF-1" },
+    { "ac": "AC-11", "covered_by": "§5.1 LintViolation interface (all 4 fields required, elementId='' when absent) + FF-3" },
+    { "ac": "AC-12", "covered_by": "§3 module boundary (linter imports only parseHandle from object-handle.ts and nothing else forbidden) + FF-5, FF-9" },
+    { "ac": "AC-13", "covered_by": "§5.3 compatibility surface (additive only, no modification to frozen exports) + FF-6" },
+    { "ac": "AC-14", "covered_by": "§3.4 CLI design (exit 0/1, violations to stderr as JSON) + FF-7" },
+    { "ac": "AC-15", "covered_by": "§3.5 deploy contract stub + §8 mock deploy fixture (mockDeploy calls lintBpmn, rejects on ok:false) + FF-1" }
+  ],
+  "runtime_target": "local — npm run ci (tsc --noEmit && eslint src && npm run fitness && vitest run); no external resource. When T-0058 lands, lintBpmn runs as an in-process call in the Node.js API server before forwarding BPMN to Flowable deploy REST API. No new infra provisioned by T-0027.",
+  "adr_artifact_path": "docs/design/T-0027-bpmn-deploy-linter.adr.md",
+  "escalation": ""
+}
