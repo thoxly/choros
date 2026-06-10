@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- T-0117 SPIKE — NOT PRODUCTION. Deterministic deadletter generator for Flowable.
+     async service-task delegating to a class that always throws -> after retries
+     exhausted (we set retries=0 via REST), the job lands in ACT_RU_DEADLETTER_JOB. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:flowable="http://flowable.org/bpmn"
+             targetNamespace="spike">
+  <process id="spikeFailing" name="Spike Failing Process" isExecutable="true">
+    <startEvent id="start"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="failTask"/>
+    <!-- flowable:async true => job executor picks it up async, so failure produces a job
+         that can move to deadletter. No class on classpath => ENGINE error each run. -->
+    <serviceTask id="failTask" name="Always Fails"
+                 flowable:async="true"
+                 flowable:class="org.spike.DoesNotExistAlwaysFails"/>
+    <sequenceFlow id="f2" sourceRef="failTask" targetRef="end"/>
+    <endEvent id="end"/>
+  </process>
+</definitions>

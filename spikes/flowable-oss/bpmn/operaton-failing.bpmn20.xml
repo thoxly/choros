@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- T-0117 SPIKE — NOT PRODUCTION. Deterministic deadletter generator for Operaton (Camunda 7 fork).
+     async-before service-task referencing a non-existent delegate class -> async job fails;
+     we set retries=0 via REST so it becomes a failed job with an incident (withException). -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+             targetNamespace="spike">
+  <process id="spikeFailing" name="Spike Failing Process" isExecutable="true">
+    <startEvent id="start"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="failTask"/>
+    <serviceTask id="failTask" name="Always Fails"
+                 camunda:asyncBefore="true"
+                 camunda:class="org.spike.DoesNotExistAlwaysFails"/>
+    <sequenceFlow id="f2" sourceRef="failTask" targetRef="end"/>
+    <endEvent id="end"/>
+  </process>
+</definitions>
