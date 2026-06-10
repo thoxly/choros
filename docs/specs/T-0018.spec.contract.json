@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0018",
+  "status": "ready",
+  "summary": "Specification of the single `grant` authority table (resource_type × operation × scope as the permission floor; tools/fields/record-rights are derived projections) plus the closed scope lattice — hierarchy-nodes (subtree containment), tag-sets (set inclusion), numeric intervals (canonical containment), and scope-sets — with a decidable structural partial order, a closed meet, and a write-time subset check that makes monotonic narrowing (no self-elevation) provable. Free-form predicate scopes are owner-only/non-delegable; grant create/revoke are first-class audit-floor events. Design-only: DDL is T-0053, the resolver/PDP is T-0021, the audit floor is T-0016. 15 CI-checkable acceptance criteria, the lattice core fully static-now.",
+  "functional": [
+    "FR-1 single `grant` authority table; floor = resource_type × operation × scope; record-rights/tools/fields are derived, no second subsystem; T-0013 tenant table",
+    "FR-2 grant row shape (role_id principal, resource_type, resource_facet?, operation incl guarded verbs, scope lattice element, constraint?, delegable, granted_by, validity window); binds to UUIDs not slugs",
+    "FR-3 closed scope lattice: elements (hierarchy-node, tag-set, numeric-interval, scope-set), decidable partial order ⊑, meet ⊓ (GLB), bottom ⊥",
+    "FR-4 closure property: domain closed under ⊓ ⇒ ⊑ decidable+total ⇒ narrowing provable; delegation chains monotonically narrow by construction",
+    "FR-5 write-time subset check: a delegated grant is rejected unless child.scope ⊑ granter.scope (and facet/constraint non-widening); owner is the un-parented lattice root",
+    "FR-6 free-form predicate scopes are owner-only and delegable=false (never the parent of a delegation)",
+    "FR-7 grant issuance/revocation emit first-class audit-floor events (actor, subject role, capability, scope, proposed_by/confirmed_by) — obligation only; ledger is T-0016",
+    "FR-8 revocation removes capability on the read-path (physically absent), not just UI"
+  ],
+  "non_functional": [
+    "NF-1 single authority, single subsystem (no parallel record-ACL)",
+    "NF-2 capability-not-text (structural, gateway-verifiable)",
+    "NF-3 provable monotonic narrowing (no self-elevation)",
+    "NF-4 tenant isolation inherited from T-0013",
+    "NF-5 canonical scope form ⇒ deterministic ⊑/⊓",
+    "NF-6 resolver-agnostic contract (table+algebra+gate, not the PDP)"
+  ],
+  "out_of_scope": [
+    "SQL DDL / migrations / RLS policy bodies for `grant` (T-0053)",
+    "PDP / grant_resolver runtime: resolution, masking, action-time binding, caching (T-0021/E2.5)",
+    "audit floor table + hash-chain + append-only enforcement (T-0016/E2.8); only the emit obligation is fixed here",
+    "role / assignment tables + org/admin scope (T-0022/E3.2, T-0017/E3.1); admin-scope narrowing is E3.3",
+    "structural grant editor UI + LLM-proposes/human-confirms (T-0030/E3.4, T-0039/E3.5)",
+    "toolset resolution / mcp_tool registry / effect-resource verification (T-0043/E5.3, T-0034/E4.4)",
+    "role_criticality + dual-control (T-0040/E4.5, T-0044/E4.6)",
+    "substitutions / TTL'd delegation mechanics (T-0035/E4.7)",
+    "BPMN linter / engine state-mutation guard / opaque handles (T-0027/T-0028/T-0015)"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "`grant` is a registered T-0013 tenant table: in known_tenant_tables fixture; live FORCE RLS = (true,true); no tenant context ⇒ count 0 (default-DENY)", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "grant floor (role_id, resource_type, operation, scope) all NOT NULL; NULL on any ⇒ constraint violation; TS Grant type mirrors FR-2 columns (compile-checked)", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "⊑ is decidable+total over admissible scopes: subsetEq(a,b) returns a boolean for the fixture matrix (never throws/unknown) and matches the FR-3 truth table", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "hierarchy-node subset: descendant ⊑ parent true; disjoint subtree or ancestor (wider) ⇒ false", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "tag-set & interval subset: {a,b}⊑{a,b,c} true / {a,d} false; [10,40]⊑[0,50] true / [10,60] false; mismatched axis ⇒ false", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "scope-set subset: element ⊑ set iff fits one member; A⊑B iff every member of A ⊑ B; an escaping member ⇒ false", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "meet ⊓ closure: meet(x,y) returns an admissible element (node/tags/interval/set/⊥), never an arbitrary predicate; disjoint node⊓node=⊥; interval overlap or ⊥; tags=intersection", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "canonical form: accepted scope is canonical (interval lo≤hi; tags de-duped; set flattened, no nested/redundant members); subsetEq/meet deterministic regardless of member order", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "write-time subset gate: child.scope ⊑ granter.scope (non-widening facet/constraint) ⇒ accepted; not-a-subset (node/tag/interval widening, escaping set member) ⇒ rejected at write-time before persistence", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "owner-only free-form, non-delegable: non-owner free-form-scope mint rejected; free-form-scope forced delegable=false; delegation off a free-form parent rejected", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "single subsystem: static lint asserts no second authority/record-ACL/field-visibility table; record-rights are only grant.operation × grant.scope", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "grant binds to UUIDs not slugs: every node_id in grant.scope is a ResourceRef/org-tree UUID; slug rename does not change reach", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "validity window = capability: out-of-window grant confers zero capability in the evaluation helper; in-window confers its capability", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "audit obligation: grant create/revoke emit an event (actor, subject role, capability, scope, proposed_by/confirmed_by); static lint asserts every create/revoke site emits", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "tenant isolation of grants: context=A ⇒ count of tenant-B grants = 0; subset check runs inside withTenant; a tenant-B grant can never parent a tenant-A delegation", "verifiable_as": "test"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0018-grant-authority.spec.md"
+}

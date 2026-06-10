@@ -1,0 +1,29 @@
+{
+  "task_id": "T-0018",
+  "status": "pr_open",
+  "branch": "task/T-0018-grant-authority",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/grant-lattice.ts",
+    "src/__tests__/grant-lattice.test.ts",
+    "src/__tests__/grant-lattice.adversarial.test.ts",
+    "docs/specs/T-0018-grant-authority.spec.md",
+    "docs/specs/T-0018.spec.contract.json",
+    "docs/design/T-0018-grant-authority.adr.md",
+    "docs/design/T-0018.adr.contract.json",
+    "docs/design/T-0018.review.contract.json",
+    "docs/design/T-0018.test-report.contract.json"
+  ],
+  "deviations_from_adr": [
+    "None. ADR build-contract implemented verbatim (module src/core/grant-lattice.ts, pure-TS, additive — types.ts/jobStore.ts untouched). Static-now fitness FF-1..9 (122 tests: 77 spec + 45 adversarial) run green now; DB-level ACs (grant TABLE/DDL) deferred to T-0053 per design-only convention. Full gate (tsc+eslint+vitest) green at 282/282, deterministic (ran twice). REVIEW approved, TEST pass (no widening-leak).",
+    "No remote PR: committed to local branch only; founder reviews via dev. Opening GitHub PR needs scoped agent PAT (GT-4), not in env."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}
