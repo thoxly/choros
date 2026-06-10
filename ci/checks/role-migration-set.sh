@@ -28,16 +28,10 @@ for f in 019_role.sql 020_role_assignment.sql 021_grant_role_fk.sql; do
   fi
 done
 
-# ---- AC-18b: NO file numbered 017 or 018 on this branch --------------------
-# (Those numbers are reserved for T-0033 / T-0019; the orchestrator merges them.)
-reserved=$(find "${MIG}" -maxdepth 1 -type f \( -name '017_*.sql' -o -name '018_*.sql' \) 2>/dev/null || true)
-if [[ -n "${reserved}" ]]; then
-  echo "FAIL (AC-18): reserved migration number present on this branch:"
-  echo "${reserved}"
-  ERRORS=$((ERRORS + 1))
-else
-  echo "PASS: no 017/018 migration on this branch (reserved for T-0033/T-0019)"
-fi
+# ---- AC-18b (RETIRED at rebase-reconciliation by orchestrator, rt-choros-s8):
+# the "no 017/018 on this branch" guard was a TRANSIENT run-seam reservation
+# (T-0033/T-0019 in flight); after rebase onto dev those migrations legally
+# exist here. Permanent invariant is AC-18a + AC-22 below.
 
 # ---- AC-22: no second role/principal table in 019–021 ----------------------
 # A divergent principal or a human/agent grant fork would split the single-role
