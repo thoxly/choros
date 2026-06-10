@@ -146,16 +146,31 @@ export function projectFields(
  * The visible field names of a grant are its T-0021 `Facet` shape
  * `{ fields: string[] }` carried on the grant's optional `resourceFacet`
  * (T-0018 Grant.resourceFacet is `unknown` — the minimal opaque field-name
- * narrowing token of T-0015/T-0018; richer grammar is T-0033). A grant with no
- * well-formed facet confers the WHOLE resource (returns undefined ⇒ all keys).
+ * narrowing token of T-0015/T-0018; richer grammar is T-0033).
+ *
+ * Two cases, kept strictly distinct (ADR §4.4 'visibleFields rule'):
+ *  - STRICTLY ABSENT facet (`undefined`/`null`) ⇒ whole-resource read: returns
+ *    `undefined` ⇒ caller unions in ALL raw keys.
+ *  - PRESENT but MALFORMED facet (a non-null value whose `fields` is not a
+ *    `string[]` — e.g. `{fields: 123}`, `{fields: "bad"}`, `{fields: null}`,
+ *    `{fields: [1,2]}`, `{}`, or a non-object like `42`/`"x"`) ⇒ FAIL-CLOSED:
+ *    returns `[]` (zero visible fields). A structurally-present facet that does
+ *    not parse to a valid field-list confers NO fields — it must never silently
+ *    widen to whole-resource. This is the fail-closed discipline of the
+ *    authority core: doubt about a present narrowing token resolves to zero.
  */
 function grantFacetFields(grant: Grant): string[] | undefined {
   const facet = grant.resourceFacet;
-  if (facet === null || typeof facet !== "object") return undefined;
+  // Strictly-absent facet ⇒ whole-resource (the ONLY whole-resource path).
+  if (facet === undefined || facet === null) return undefined;
+  // Present but not an object (e.g. a number/string) ⇒ malformed ⇒ fail-closed.
+  if (typeof facet !== "object") return [];
   const fields = (facet as Record<string, unknown>)["fields"];
-  if (!Array.isArray(fields)) return undefined;
-  // A facet present narrows to its named fields (only string names count). An
-  // explicit empty facet confers no fields — it cannot silently widen reach.
+  // Present facet object whose `fields` is not an array ⇒ malformed ⇒ zero.
+  if (!Array.isArray(fields)) return [];
+  // Present, well-formed facet narrows to its named fields (only string names
+  // count; non-string members are dropped). An explicit empty facet confers no
+  // fields — it cannot silently widen reach.
   return fields.filter((f): f is string => typeof f === "string");
 }
 
@@ -165,8 +180,10 @@ function grantFacetFields(grant: Grant): string[] | undefined {
  *
  * Rule (ADR §4.4):
  *  - Start from ∅.
- *  - For each covering grant: NO facet ⇒ union in ALL keys of `raw`
- *    (whole-resource read); a facet `{fields:[...]}` ⇒ union in those names.
+ *  - For each covering grant: STRICTLY-ABSENT facet (undefined/null) ⇒ union in
+ *    ALL keys of `raw` (whole-resource read); a well-formed facet `{fields:[...]}`
+ *    ⇒ union in those names; a PRESENT-but-malformed facet ⇒ union in nothing
+ *    (zero fields, fail-closed — see grantFacetFields).
  *  - Then, if the HANDLE carries a Facet, INTERSECT with the handle's facet
  *    field names — the handle's narrowing token can only SHRINK the view,
  *    never widen it.
@@ -262,21 +279,29 @@ export async function resolveFor(
   // 6. Project once (FR-4, AC-5, AC-6).
   const vis = visibleFields(covering, handle.facet, raw);
   const fields = projectFields(raw, vis);
+  // TODO(T-0053): FR-8 (MAY) — thread the static-now T-0016 AuditObligation
+  // shape ({ type, actor, subject, via, decision }) from here once the T-0016
+  // ADR fixes its return contract. The durable append is explicitly deferred to
+  // T-0053 (ADR §5); the obligation shape itself is intentionally not threaded
+  // yet — ResolvedView carries no audit payload in static-now.
   return { denied: false, ref: handle.ref, fields };
 }
 
 /**
- * A grant's scope is a lattice ScopeElement (delegable) iff it is one of the
- * four admissible kinds. A `freeform` scope is owner-only / non-delegable and
- * does not participate in resource-hierarchy containment.
+ * A grant's scope is a lattice `ScopeElement` (delegable, participates in
+ * resource-hierarchy containment) iff it is NOT the `freeform` kind. A
+ * `freeform` scope is owner-only / non-delegable and does not participate in
+ * containment here.
+ *
+ * Discriminating on `kind !== "freeform"` (rather than enumerating the four
+ * lattice kinds) keeps this guard structurally tied to the T-0018
+ * `GrantScope = ScopeElement | FreeformScope` union: if T-0018 ever adds a
+ * fifth lattice kind it is automatically treated as a lattice scope, with no
+ * silent divergence. `FreeformScope` is the only non-`ScopeElement` member, so
+ * excluding it narrows to `ScopeElement` exactly.
  */
 function isLatticeScope(scope: Grant["scope"]): scope is ScopeElement {
-  return (
-    scope.kind === "node" ||
-    scope.kind === "tags" ||
-    scope.kind === "interval" ||
-    scope.kind === "set"
-  );
+  return scope.kind !== "freeform";
 }
 
 // ---------------------------------------------------------------------------

@@ -391,6 +391,92 @@ describe("FF-R4 containment + projection [AC-6, AC-8]", () => {
     });
     expect([...vis].sort()).toEqual(["name", "salary"]);
   });
+
+  // -------------------------------------------------------------------------
+  // ADVERSARIAL (R-1): a PRESENT-but-malformed resourceFacet must FAIL-CLOSED
+  // to ZERO visible fields — it must NEVER widen to whole-resource. Only a
+  // STRICTLY-ABSENT facet (undefined/null) confers whole-resource (ADR §4.4).
+  // resourceFacet is typed `unknown`, so any of these parse cleanly yet must
+  // confer no fields. Each case is checked both via visibleFields (the unit)
+  // and end-to-end via resolveFor (the projected payload).
+  // -------------------------------------------------------------------------
+  const RAW = { name: "Alice", salary: 100, ssn: "x" } as const;
+  const malformedFacets: Array<[string, unknown]> = [
+    ["fields is a number ({fields:123})", { fields: 123 }],
+    ["fields is a string ({fields:'bad'})", { fields: "bad" }],
+    ["fields is null ({fields:null})", { fields: null }],
+    ["fields is an object ({fields:{}})", { fields: {} }],
+    ["fields is array of non-strings ([1,2])", { fields: [1, 2] }],
+    ["fields is array of mixed junk ([1,{},null])", { fields: [1, {}, null] }],
+    ["missing fields key ({})", {}],
+    ["extra junk, no fields ({foo:'bar'})", { foo: "bar" }],
+    ["facet is a bare number (42)", 42],
+    ["facet is a bare string ('whole')", "whole"],
+    ["facet is a boolean (true)", true],
+    ["facet is an array (['name'])", ["name"]],
+  ];
+
+  for (const [label, badFacet] of malformedFacets) {
+    it(`malformed facet ⇒ ZERO fields, NOT whole-resource [R-1]: ${label}`, async () => {
+      const g = grant({ resourceFacet: badFacet });
+
+      // Unit: visibleFields confers nothing for the malformed grant.
+      const vis = visibleFields([g], undefined, { ...RAW });
+      expect([...vis]).toEqual([]);
+
+      // End-to-end: the projected payload is empty (fail-closed), and crucially
+      // NOT the whole record — none of name/salary/ssn leak.
+      const d = deps({
+        grants: staticGrants([g]),
+        records: staticRecord({ ...RAW }),
+      });
+      const v = await resolveFor(d, recordHandle(), subject(), "read");
+      expect(v.denied).toBe(false);
+      if (!v.denied) {
+        expect(v.fields).toEqual({});
+        expect("name" in v.fields).toBe(false);
+        expect("salary" in v.fields).toBe(false);
+        expect("ssn" in v.fields).toBe(false);
+      }
+    });
+  }
+
+  it("explicit empty fields array ({fields:[]}) ⇒ zero fields (not whole) [R-1]", () => {
+    const g = grant({ resourceFacet: { fields: [] } });
+    const vis = visibleFields([g], undefined, { ...RAW });
+    expect([...vis]).toEqual([]);
+  });
+
+  it("strictly-absent facet (undefined) ⇒ whole-resource (the ONLY widen path) [AC-6]", () => {
+    const g = grant({ resourceFacet: undefined });
+    const vis = visibleFields([g], undefined, { ...RAW });
+    expect([...vis].sort()).toEqual(["name", "salary", "ssn"]);
+  });
+
+  it("strictly-absent facet (null) ⇒ whole-resource [AC-6]", () => {
+    const g = grant({ resourceFacet: null });
+    const vis = visibleFields([g], undefined, { ...RAW });
+    expect([...vis].sort()).toEqual(["name", "salary", "ssn"]);
+  });
+
+  it("malformed facet does NOT widen a sibling well-formed grant's view [R-1]", async () => {
+    // One grant confers {name}; another is malformed. The malformed one must
+    // contribute nothing — the union stays {name}, never the whole resource.
+    const good = grant({ id: "good", resourceFacet: { fields: ["name"] } });
+    const bad = grant({ id: "bad", resourceFacet: { fields: 999 } });
+    const vis = visibleFields([good, bad], undefined, { ...RAW });
+    expect([...vis].sort()).toEqual(["name"]);
+
+    const d = deps({
+      grants: staticGrants([good, bad]),
+      records: staticRecord({ ...RAW }),
+    });
+    const v = await resolveFor(d, recordHandle(), subject(), "read");
+    expect(v.denied).toBe(false);
+    if (!v.denied) {
+      expect(v.fields).toEqual({ name: "Alice" });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
