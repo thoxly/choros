@@ -66,6 +66,13 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
+if grep -qE 'SPRING_DATASOURCE_URL.*currentSchema=flowable|SPRING_DATASOURCE_SCHEMA.*flowable' "${COMPOSE}"; then
+  echo "  PASS FF-FL-5c: schema isolation mechanism present (currentSchema=flowable or SPRING_DATASOURCE_SCHEMA)"
+else
+  echo "  FAIL FF-FL-5c: schema isolation mechanism missing — SPRING_DATASOURCE_URL must include currentSchema=flowable or SPRING_DATASOURCE_SCHEMA must be set to flowable" >&2
+  ERRORS=$((ERRORS + 1))
+fi
+
 # ---------------------------------------------------------------------------
 # FF-FL-6: Port non-collision
 # ---------------------------------------------------------------------------
@@ -111,6 +118,7 @@ else
 fi
 
 # Check all password defaults are in allowed list
+ERRORS_BEFORE_7C=${ERRORS}
 while IFS= read -r line; do
   dflt=$(printf '%s' "${line}" | sed -nE 's/.*PASSWORD:[[:space:]]*\$\{[A-Za-z0-9_]+:-([A-Za-z0-9_]+)\}.*/\1/p')
   if [[ -n "${dflt}" ]] && ! [[ "${dflt}" =~ ^(${ALLOWED_DEV_DEFAULTS})$ ]]; then
@@ -118,7 +126,9 @@ while IFS= read -r line; do
     ERRORS=$((ERRORS + 1))
   fi
 done < <(grep -iE 'PASSWORD' "${COMPOSE}" | grep -v '^\s*#' || true)
-echo "  PASS FF-FL-7c: all password defaults are allowed dev defaults"
+if [[ ${ERRORS} -eq ${ERRORS_BEFORE_7C} ]]; then
+  echo "  PASS FF-FL-7c: all password defaults are allowed dev defaults"
+fi
 
 # ---------------------------------------------------------------------------
 # FF-FL-8: depends_on postgres: service_healthy
@@ -145,8 +155,8 @@ else:
 " 2>/dev/null; then
   echo "  PASS FF-FL-8 (yaml): flowable.depends_on.postgres.condition = service_healthy"
 elif [[ $? -eq 2 ]]; then
-  # yaml not available — fallback to grep
-  if grep -A5 'depends_on:' "${COMPOSE}" | grep -q 'service_healthy'; then
+  # yaml not available — fallback to grep scoped to the flowable service block
+  if sed -n '/^  flowable:/,/^  [a-z]/p' "${COMPOSE}" | grep -A5 'depends_on:' | grep -q 'service_healthy'; then
     echo "  PASS FF-FL-8 (grep): flowable depends_on references service_healthy"
   else
     echo "  FAIL FF-FL-8: flowable does not depend on postgres with service_healthy" >&2
