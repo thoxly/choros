@@ -196,6 +196,10 @@ async function seedActorEvent(
      VALUES ($1, $2, $3, 'record', $4, $5, $4, 'submit', NULL, 0, 1)
      ON CONFLICT DO NOTHING`,
     [tenantId, seq, id, uuid(), actorId],
+  );
+  return id;
+}
+
 /** Seed one row into choros.role. Returns the role id (T-0022). */
 async function seedRoleRow(c: pg.Client, tenantId: string): Promise<string> {
   const id = uuid();
@@ -218,6 +222,8 @@ async function seedActorEventSeq(c: pg.Client, tenantId: string): Promise<void> 
      ON CONFLICT DO NOTHING`,
     [tenantId],
   );
+}
+
 /**
  * Seed one row into choros.role_assignment, wiring the already-seeded employee
  * to the new role with a valid org-node org_scope (the existing grant-lattice
@@ -352,8 +358,6 @@ const seedState = {
   actorSeqA: 1,
   actorSeqB: 1,
   // T-0022 chain: employee + role (needed for role_assignment seed)
-  empIdA: '',
-  empIdB: '',
   roleIdA: '',
   roleIdB: '',
 };
