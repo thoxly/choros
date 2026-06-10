@@ -1,6 +1,7 @@
 {
   "task_id": "T-0044",
-  "status": "needs_founder",
+  "status": "ready",
+  "ruling_ref": "Orchestrator ruling (founder-autonomy-impl frame, D-A=A3 signed) resolves Q-1/Q-2/Q-3; recorded in friction ledger FE-2026-W24-0044 and docs/design/T-0044-dual-control.adr.md §1. Q-1: confirmation_flag = DERIVED + WORM dualcontrol.gate audit event (no table, T-0040 §6-B precedent). Q-2: a non-derivable clearance on an added read grant = implicit escalate (fail-closed, NF-2). Q-3: gate enforced at the existing single-INSERT write-path with approvers[] in one request; durable two-phase workflow is downstream (no migration day-1, ddl_needed=none). spec.schema.json status enum lacks 'ready-with-ruling'; status therefore set to 'ready' with this ruling_ref.",
   "summary": "Dual-control gate (E4.6, D-A=A3): on an assignment/grant change, compute the EFFECTIVE (compiled from->to, not row-diff) role_criticality expansion via T-0040 criticalityDiff and require TWO distinct approvers (each != the other and != proposer) iff any axis (a approve_or_transition / b external_invoke / c sensitive_read) is newly raised, else a single scoped-approver != proposer; record a confirmation_flag {change_ref, effective_diff, approvers[], status} and enforce at the T-0030/T-0022 write-path before completion. The single-approver path still gets effective-diff + WORM audit.",
   "functional": [
     "FR-1: a new pure module exports a decision function (dualControlDecision) taking {from: RoleCriticality, to: RoleCriticality, proposedBy: string, approvers: string[]} and returning {required_approvers: 1|2, distinct_ok: boolean, satisfied: boolean, reason: string}; no pg/fs/net/http, no Date.now in core, equal inputs => deep-equal output",
