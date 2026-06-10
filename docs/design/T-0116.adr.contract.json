@@ -1,0 +1,193 @@
+{
+  "task_id": "T-0116",
+  "status": "ready",
+  "decision": "PostgresTimerStore (raw pg, parameterised SQL, injected Clock) за интерфейсом enqueue/fetchAndFire/cancel/done. Таблица choros.app_timer (migration 011): tenant_id ведущий PK, due_at bigint, state text CHECK, kind/payload/fired_at/cancel_reason. FORCE RLS + fail-closed политика на GUC choros.tenant_id. Partial-index (tenant_id, due_at) WHERE state='pending'. SECURITY DEFINER-функция next_due_buckets() (migration 012) возвращает только агрегат (tenant_id, timer_count) без данных строк. fetchAndFire: BEGIN; SET LOCAL; CTE SELECT FOR UPDATE SKIP LOCKED LIMIT N; UPDATE state='firing'; COMMIT. Health расширяется timer.timerLagMs (null=нет просрочки, degraded при ошибке). Ops ops/catalog/timer_stats.ts (T0, идемпотентный SELECT). known_tenant_tables.txt += app_timer.",
+  "rejected_alternatives": [
+    {
+      "option": "LISTEN/NOTIFY как wake-up dispatcher-а",
+      "why_not": "Spec Out of Scope §5 п.2; добавляет stateful push-соединения, усложняет отказоустойчивость без пользы на silo-нагрузке."
+    },
+    {
+      "option": "Единственная фаза без SECURITY DEFINER",
+      "why_not": "Для обнаружения просроченных тенантов choros_app нужен full-scan без GUC — нарушает RLS-изоляцию. SECURITY DEFINER-агрегат минимально и безопасно расширяет поверхность."
+    },
+    {
+      "option": "Отдельная dispatch-таблица поверх app_timer",
+      "why_not": "Дублирует субстрат. Stack ADR §1 п.3 явно называет due_at + partial index как механизм прикладных таймеров на Postgres."
+    },
+    {
+      "option": "Redis / внешний брокер",
+      "why_not": "Spec Out of Scope §5; stack ADR — не до S2."
+    },
+    {
+      "option": "Один общий store-метод вместо fetchAndFire + next_due_buckets",
+      "why_not": "Фаза-1 работает без GUC (SECURITY DEFINER), фаза-2 требует GUC. Смешение скрывало бы разницу контекстов и нарушало бы security-boundary."
+    },
+    {
+      "option": "Multi-consumer fan-out одного таймера",
+      "why_not": "Spec Out of Scope §5. Усложняет семантику без текущей потребности."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "choros.app_timer (migration 011_app_timer.sql)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL — ведущий PK (T-0013 §3.1); PK(tenant_id,id)"},
+        {"name": "id", "type": "uuid NOT NULL — уникальный идентификатор таймера"},
+        {"name": "due_at", "type": "bigint NOT NULL — unix epoch ms; момент срабатывания"},
+        {"name": "state", "type": "text NOT NULL CHECK (state IN ('pending','firing','done','cancelled'))"},
+        {"name": "kind", "type": "text NOT NULL — тип таймера (inbox_sla, lease_renew, retry, …); непрозрачен для dispatcher"},
+        {"name": "payload", "type": "jsonb NOT NULL — прикладная нагрузка; непрозрачна для dispatcher"},
+        {"name": "created_at", "type": "bigint NOT NULL — unix epoch ms (Clock.now() при enqueue)"},
+        {"name": "fired_at", "type": "bigint NULL — установлен dispatcher при переходе → firing"},
+        {"name": "cancel_reason", "type": "text NULL — устанавливается при cancel()"}
+      ]
+    },
+    {
+      "entity": "idx_app_timer_pending (partial index)",
+      "fields": [
+        {"name": "columns", "type": "(tenant_id, due_at)"},
+        {"name": "where", "type": "state = 'pending'"},
+        {"name": "purpose", "type": "primary fetchAndFire path и next_due_buckets"}
+      ]
+    },
+    {
+      "entity": "choros.next_due_buckets (SECURITY DEFINER function, migration 012)",
+      "fields": [
+        {"name": "input", "type": "p_due_before bigint — unix epoch ms cutoff"},
+        {"name": "returns", "type": "TABLE(tenant_id uuid, timer_count bigint) — только агрегат, без полей строк"},
+        {"name": "security", "type": "SECURITY DEFINER; owner=choros_migrator; EXECUTE granted to choros_app; no DDL for choros_app"}
+      ]
+    },
+    {
+      "entity": "AppTimer (src/core/timerTypes.ts)",
+      "fields": [
+        {"name": "tenantId", "type": "string — UUID"},
+        {"name": "id", "type": "string — UUID"},
+        {"name": "dueAt", "type": "number — unix epoch ms"},
+        {"name": "state", "type": "TimerState: 'pending'|'firing'|'done'|'cancelled'"},
+        {"name": "kind", "type": "string"},
+        {"name": "payload", "type": "Record<string,unknown>"},
+        {"name": "createdAt", "type": "number — unix epoch ms"},
+        {"name": "firedAt", "type": "number|undefined — unix epoch ms"},
+        {"name": "cancelReason", "type": "string|undefined"}
+      ]
+    },
+    {
+      "entity": "PostgresTimerStore (src/core/postgres/pgTimerStore.ts)",
+      "fields": [
+        {"name": "constructor", "type": "(pool: pg.Pool, clock?: Clock)"},
+        {"name": "enqueue", "type": "(tenantId: string, kind: string, payload: Record<string,unknown>, dueAt: number) => Promise<AppTimer>"},
+        {"name": "fetchAndFire", "type": "(tenantId: string, dueBeforeMs: number, limit: number) => Promise<AppTimer[]>"},
+        {"name": "cancel", "type": "(tenantId: string, timerId: string, reason?: string) => Promise<boolean>"},
+        {"name": "done", "type": "(tenantId: string, timerId: string) => Promise<boolean>"},
+        {"name": "getTimerHealth", "type": "() => Promise<{ timerLagMs: number | null }> — throws on Postgres error"}
+      ]
+    },
+    {
+      "entity": "HealthResponse (расширение GET /health)",
+      "fields": [
+        {"name": "status", "type": "\"ok\" | \"degraded\""},
+        {"name": "queue.depth", "type": "number — unchanged"},
+        {"name": "queue.oldestAvailableLagMs", "type": "number | null — unchanged"},
+        {"name": "timer.timerLagMs", "type": "number | null — NEW T-0116; null=нет просрочки; degraded+null при ошибке"}
+      ]
+    },
+    {
+      "entity": "ops/catalog/timer_stats output",
+      "fields": [
+        {"name": "pendingCount", "type": "number — state='pending'"},
+        {"name": "firingCount", "type": "number — state='firing'"},
+        {"name": "doneCount", "type": "number — state='done'"},
+        {"name": "cancelledCount", "type": "number — state='cancelled'"},
+        {"name": "overdueCount", "type": "number — state='pending' AND due_at < now"},
+        {"name": "timerLagMs", "type": "number | null — MAX(now - due_at) WHERE state='pending' AND due_at < now"},
+        {"name": "error_variant", "type": "{ ok: false, error: string } при ошибке соединения"}
+      ]
+    }
+  ],
+  "contracts": [
+    "fetchAndFire SQL: BEGIN; SET LOCAL choros.tenant_id=$1; WITH candidates AS (SELECT id FROM choros.app_timer WHERE state='pending' AND due_at<$2 ORDER BY due_at ASC LIMIT $3 FOR UPDATE SKIP LOCKED) UPDATE choros.app_timer t SET state='firing', fired_at=$4 FROM candidates WHERE t.id=candidates.id RETURNING t.*; COMMIT",
+    "next_due_buckets SQL (SECURITY DEFINER): SELECT tenant_id, COUNT(*)::bigint AS timer_count FROM choros.app_timer WHERE state='pending' AND due_at<$1 GROUP BY tenant_id",
+    "getTimerHealth SQL (migrator connection, no GUC): SELECT MIN(due_at) AS oldest_overdue_at FROM choros.app_timer WHERE state='pending' AND due_at<=$1; timerLagMs = oldest_overdue_at IS NOT NULL ? ($1 - oldest_overdue_at) : null",
+    "enqueue SQL: INSERT INTO choros.app_timer (tenant_id, id, due_at, state, kind, payload, created_at) VALUES (current_setting('choros.tenant_id',false)::uuid, $1, $2, 'pending', $3, $4::jsonb, $5) RETURNING *",
+    "cancel SQL: UPDATE choros.app_timer SET state='cancelled', cancel_reason=$3 WHERE id=$2 AND state='pending'; returns rowCount>0",
+    "done SQL: UPDATE choros.app_timer SET state='done' WHERE id=$2 AND state='firing'; returns rowCount>0",
+    "timer_stats SQL (migrator, no RLS): SELECT COUNT(*) FILTER (WHERE state='pending') AS pending_count, COUNT(*) FILTER (WHERE state='firing') AS firing_count, COUNT(*) FILTER (WHERE state='done') AS done_count, COUNT(*) FILTER (WHERE state='cancelled') AS cancelled_count, COUNT(*) FILTER (WHERE state='pending' AND due_at<$1) AS overdue_count, MAX($1-due_at) FILTER (WHERE state='pending' AND due_at<$1) AS timer_lag_ms FROM choros.app_timer",
+    "known_tenant_tables.txt: добавить строку 'app_timer' — cross-tenant тест T-0115 подхватывает таблицу без изменений самого теста",
+    "Migration 011_app_timer.sql: CREATE TABLE + ENABLE/FORCE RLS + policy + GRANT + CREATE INDEX idx_app_timer_pending ON choros.app_timer(tenant_id,due_at) WHERE state='pending'",
+    "Migration 012_next_due_buckets.sql: CREATE OR REPLACE FUNCTION choros.next_due_buckets(bigint) RETURNS TABLE(tenant_id uuid, timer_count bigint) SECURITY DEFINER + REVOKE ALL FROM PUBLIC + GRANT EXECUTE TO choros_app",
+    "GET /health response schema extension: {status, queue:{depth,oldestAvailableLagMs}, timer:{timerLagMs}} — timer block added backward-compatible"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T1",
+      "rule": "app_timer присутствует в ci/checks/known_tenant_tables.txt — cross-tenant тест T-0115 подхватывает таблицу без изменений",
+      "ci_check": "grep 'app_timer' ci/checks/known_tenant_tables.txt возвращает строку. Gating: static (каждый push). CI-job db: cross_tenant.test.ts проходит."
+    },
+    {
+      "id": "FF-T2",
+      "rule": "Partial-индекс idx_app_timer_pending существует в pg_indexes после применения миграций 011+; имя содержит 'app_timer' и 'pending'",
+      "ci_check": "Integration db-job: SELECT indexname FROM pg_indexes WHERE tablename='app_timer' AND indexname LIKE '%app_timer%' AND indexname LIKE '%pending%' — возвращает >= 1 строку. ci/checks/db/schema.test.ts."
+    },
+    {
+      "id": "FF-T3",
+      "rule": "choros.app_timer имеет FORCE ROW LEVEL SECURITY (pg_class.relforcerowsecurity = true)",
+      "ci_check": "Integration db-job: SELECT relforcerowsecurity FROM pg_class WHERE relname='app_timer' = true. ci/checks/db/force_rls.sql + schema.test.ts. Gating: db-job."
+    },
+    {
+      "id": "FF-T4",
+      "rule": "tenant_id — ведущая колонка во всех составных индексах app_timer (T-0013 §3.1)",
+      "ci_check": "Integration db-job: ci/checks/db/tenant_id_leading.sql (существующая T-0115 проверка) покрывает app_timer автоматически. Gating: db-job."
+    },
+    {
+      "id": "FF-T5",
+      "rule": "next_due_buckets() возвращает ровно 2 колонки (tenant_id, timer_count) — никаких полей строк таймеров",
+      "ci_check": "Integration db-job: вызов next_due_buckets(now) в тесте; assert Object.keys(row).length === 2 && 'tenant_id' in row && 'timer_count' in row. ci/checks/db/two_tenant.test.ts."
+    },
+    {
+      "id": "FF-T6",
+      "rule": "fetchAndFire использует FOR UPDATE SKIP LOCKED — no advisory locks",
+      "ci_check": "grep -n 'FOR UPDATE' src/core/postgres/pgTimerStore.ts содержит 'SKIP LOCKED'. Static, каждый push."
+    },
+    {
+      "id": "FF-T7",
+      "rule": "GET /health backward-compatible: без DATABASE_URL возвращает 200, status:'ok', Content-Type application/json; schema содержит timer.timerLagMs",
+      "ci_check": "npm test -- health.test.ts без DATABASE_URL. Тест обновляется для проверки наличия поля timer.timerLagMs. Gating: static, каждый push."
+    },
+    {
+      "id": "FF-T8",
+      "rule": "ops timer_stats выходит 0 и эмитит валидный JSON для bad URL и real URL",
+      "ci_check": "Integration: DATABASE_URL=bad node ops/dist/timer_stats.js exits 0, {ok:false,error:…}. DATABASE_URL=$real node ops/dist/timer_stats.js exits 0, {ok:true,pendingCount:…}. ci/checks/ops-ops.test.ts."
+    },
+    {
+      "id": "FF-T9",
+      "rule": "Нет ORM-зависимостей в src/ и ops/",
+      "ci_check": "grep -rn 'prisma|typeorm|drizzle|sequelize|knex|mikro-orm' src/ ops/ → 0 hits. Static, каждый push."
+    },
+    {
+      "id": "FF-T10",
+      "rule": "choros_app не может ALTER/DROP функцию next_due_buckets() — только EXECUTE",
+      "ci_check": "Integration db-job: подключение от choros_app; ALTER FUNCTION choros.next_due_buckets(bigint) ... → ошибка permission denied. ci/checks/db/two_tenant.test.ts."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§3.3 FORCE RLS fail-closed политика; FF-T3; тест: INSERT без GUC → Postgres error"},
+    {"ac": "AC-2", "covered_by": "§4.2 SET LOCAL + RLS автофильтр; тест: SELECT TENANT_A context, WHERE tenant_id=TENANT_B → 0 строк"},
+    {"ac": "AC-3", "covered_by": "§4.1 known_tenant_tables.txt += app_timer; FF-T1; cross_tenant.test.ts без изменений"},
+    {"ac": "AC-4", "covered_by": "§3.4 SECURITY DEFINER функция + §4.4 dispatcher-контракт; тест: вызов без GUC → агрегат без ошибки"},
+    {"ac": "AC-5", "covered_by": "§3.4 SELECT возвращает только (tenant_id, timer_count); FF-T5; тест: Object.keys(row).length === 2"},
+    {"ac": "AC-6", "covered_by": "§4.2 fetchAndFire SET LOCAL + RLS; тест: fetchAndFire TENANT_A не захватывает строки TENANT_B"},
+    {"ac": "AC-7", "covered_by": "§4.2 LIMIT N в SQL; тест: rowCount ≤ N, оставшиеся state='pending'"},
+    {"ac": "AC-8", "covered_by": "§4.2 FOR UPDATE SKIP LOCKED; FF-T6; тест: параллельные fetchAndFire, rowCount1+rowCount2 ≤ total"},
+    {"ac": "AC-9", "covered_by": "§3.7 timerLagMs ≥ 0 при просроченных; тест: health с перезревшим таймером"},
+    {"ac": "AC-10", "covered_by": "§4.3 oldest_overdue_at IS NULL → null; тест: health без просроченных таймеров"},
+    {"ac": "AC-11", "covered_by": "§3.7 try/catch в health → degraded; FF-T7; тест: broken pool → degraded, timerLagMs:null"},
+    {"ac": "AC-12", "covered_by": "§3.2 partial index + §4.1 имя idx_app_timer_pending; FF-T2; тест: pg_indexes после миграции"},
+    {"ac": "AC-13", "covered_by": "§3.1 DDL колонки; §4.1 migration 011; тест: app_timer существует с обязательными колонками"},
+    {"ac": "AC-14", "covered_by": "§3.3 FORCE ROW LEVEL SECURITY; FF-T3; тест: pg_class.relforcerowsecurity = true"}
+  ],
+  "runtime_target": "Postgres 16 в docker-compose silo на сервере фаундера (/srv/choros); деплой фаундер-гейт. Соединение via DATABASE_URL. Приложение: choros_app (NOBYPASSRLS). Миграции: choros_migrator. T-0116 владеет миграциями 011_ и 012_. Инфра (compose, runner, pg, 001–010) — T-0053/T-0114 (влиты).",
+  "adr_artifact_path": "docs/design/T-0116-app-timer.adr.md",
+  "escalation": ""
+}
