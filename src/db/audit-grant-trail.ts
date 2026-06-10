@@ -71,6 +71,13 @@ function assertUuid(value: string, label: string): void {
 // ---------------------------------------------------------------------------
 // withTenant — local copy of the T-0013 pattern from src/db/org.ts.
 // Sets choros.tenant_id GUC inside a BEGIN/COMMIT/ROLLBACK block.
+//
+// NOTE (R-2): src/db/org.ts does NOT export withTenant (private module helper),
+// so a shared import is not possible without a refactor that introduces a new
+// shared module (e.g. src/db/tenant.ts).  That refactor is out of scope for
+// T-0031; tracked as a future cleanup task.  The two implementations are
+// byte-for-byte identical — any future change (e.g. new security GUC) must
+// update both until the extraction happens.
 // ---------------------------------------------------------------------------
 
 async function withTenant<T>(

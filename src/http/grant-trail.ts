@@ -36,7 +36,7 @@ const TRAIL_SEED: GrantTrailRow[] = [
     scope: { kind: "node", hierarchy: "org", nodeId: "fin", nodeLevel: "department" },
     proposed_by: "human",
     confirmed_by: "М. Соколов",
-    payload: { resourceType: "record", operation: "exec", roleId: null },
+    payload: { resourceType: "record", operation: "exec" },
     occurred_at: 1749383066318,
   },
   {

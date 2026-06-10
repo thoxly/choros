@@ -191,20 +191,26 @@ describe("queryGrantTrail — live Postgres", () => {
 
   // cursor pagination probe (>= 100+ events simulation)
   it("negative probe — cursor pagination: no duplicates or gaps over boundary", async () => {
+    // Use a per-run-unique actor slug so the probe is idempotent on a persistent DB.
+    // Without scoping to SEQ_BASE the actor='page-actor' query would accumulate rows
+    // from previous runs and break the expect(uniqueIds.size).toBe(5) assertion.
+    // Fix: R-1 (review finding) — per-run actor slug scoped to SEQ_BASE.
+    const PAGE_ACTOR = `page-actor-${SEQ_BASE}`;
+
     // Seed 5 more rows and paginate them in pages of 2
     await withClient(migratorUrl(), async (c) => {
       await seedAuditEvents(c, TENANT_A, [
-        { seq: SEQ_BASE + 20, id: uuid(), type: "grant.create", actor: "page-actor", subject: "r1", payload: {} },
-        { seq: SEQ_BASE + 21, id: uuid(), type: "grant.create", actor: "page-actor", subject: "r2", payload: {} },
-        { seq: SEQ_BASE + 22, id: uuid(), type: "grant.create", actor: "page-actor", subject: "r3", payload: {} },
-        { seq: SEQ_BASE + 23, id: uuid(), type: "grant.create", actor: "page-actor", subject: "r4", payload: {} },
-        { seq: SEQ_BASE + 24, id: uuid(), type: "grant.create", actor: "page-actor", subject: "r5", payload: {} },
+        { seq: SEQ_BASE + 20, id: uuid(), type: "grant.create", actor: PAGE_ACTOR, subject: "r1", payload: {} },
+        { seq: SEQ_BASE + 21, id: uuid(), type: "grant.create", actor: PAGE_ACTOR, subject: "r2", payload: {} },
+        { seq: SEQ_BASE + 22, id: uuid(), type: "grant.create", actor: PAGE_ACTOR, subject: "r3", payload: {} },
+        { seq: SEQ_BASE + 23, id: uuid(), type: "grant.create", actor: PAGE_ACTOR, subject: "r4", payload: {} },
+        { seq: SEQ_BASE + 24, id: uuid(), type: "grant.create", actor: PAGE_ACTOR, subject: "r5", payload: {} },
       ]);
     });
 
     // Paginate: page1 = limit 2, page2 = limit 2 with beforeSeq from page1.
     const page1 = await queryGrantTrail(appPool, TENANT_A, {
-      actor: "page-actor",
+      actor: PAGE_ACTOR,
       limit: 2,
     });
     expect(page1.rows.length).toBe(2);
@@ -212,7 +218,7 @@ describe("queryGrantTrail — live Postgres", () => {
 
     const minSeq1 = Math.min(...page1.rows.map((r) => r.seq));
     const page2 = await queryGrantTrail(appPool, TENANT_A, {
-      actor: "page-actor",
+      actor: PAGE_ACTOR,
       limit: 2,
       beforeSeq: minSeq1,
     });
@@ -229,7 +235,7 @@ describe("queryGrantTrail — live Postgres", () => {
     while (cursor.hasMore && cursor.rows.length > 0) {
       const minSeq = Math.min(...cursor.rows.map((r) => r.seq));
       cursor = await queryGrantTrail(appPool, TENANT_A, {
-        actor: "page-actor",
+        actor: PAGE_ACTOR,
         limit: 2,
         beforeSeq: minSeq,
       });
@@ -238,7 +244,7 @@ describe("queryGrantTrail — live Postgres", () => {
 
     // All 5 rows should be collected exactly once (no duplicates)
     const idsFromPageActor = allCollected
-      .filter((r) => r.actor === "page-actor")
+      .filter((r) => r.actor === PAGE_ACTOR)
       .map((r) => r.id);
     const uniqueIds = new Set(idsFromPageActor);
     expect(uniqueIds.size).toBe(idsFromPageActor.length); // no duplicates

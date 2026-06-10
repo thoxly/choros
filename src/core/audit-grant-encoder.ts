@@ -20,6 +20,14 @@ export type { Scope };
 
 // Re-export GrantAuditEvent so T-0030 can import it from a single seam module if desired
 export type { GrantAuditEvent };
+// NOTE (R-4 / cross-spec): T-0030 AC-12 specifies a fitness lint asserting that the
+// emit call-site imports GrantAuditEvent from grant-lattice.ts.  T-0031 §6 specifies
+// that T-0030 imports encodeGrantAuditEvent from this file (audit-grant-encoder.ts).
+// Because this module re-exports GrantAuditEvent, T-0030 can satisfy AC-12 by
+// importing from either source — creating spec ambiguity.  No change needed here;
+// when T-0030 is reviewed its AC-12 fitness lint should additionally assert the
+// encodeGrantAuditEvent import from audit-grant-encoder.ts.  Resolution deferred to
+// the T-0030 merge review (orchestrator-owned).
 
 // ---------------------------------------------------------------------------
 // AuditEventInput — the concrete TS type for the T-0016 appendAuditEvent seam.
