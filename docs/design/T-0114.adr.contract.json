@@ -1,0 +1,224 @@
+{
+  "task_id": "T-0114",
+  "status": "ready",
+  "decision": "Replace in-memory Map-backed JobStore with a PostgresJobStore (pg driver, FOR UPDATE SKIP LOCKED, single job table, available_at bigint, two partial indexes WHERE state IN CREATED/LOCKED). Promote InMemoryJobStore as explicit TestDouble; re-export it as JobStore alias so all 3 frozen unit-test files compile unchanged. Add available_at to Job TS interface (additive, no frozen test constructs Job literals). Ops ops run_vacuum/queue_stats as standalone Node/TS scripts in ops/catalog/. Health extends with queue.depth + oldestAvailableLagMs, backward-compatible. Zero breaking changes to public interface surface.",
+  "rejected_alternatives": [
+    {
+      "option": "Advisory locks instead of SKIP LOCKED",
+      "why_not": "Advisory locks require application-level lock ID management; SKIP LOCKED is purpose-built for queues and already mandated by ratified stack ADR §1."
+    },
+    {
+      "option": "Separate inbox_task table",
+      "why_not": "inbox_task is an alias in current codebase, not a distinct entity. One table job with topic column covers all types; splitting would duplicate schema/index logic without behavioral justification."
+    },
+    {
+      "option": "ORM (Prisma/TypeORM/Drizzle)",
+      "why_not": "NF-4 explicitly forbids ORM; zero-dep in domain logic is a stack invariant. Raw pg + parameterised SQL is proportional."
+    },
+    {
+      "option": "LISTEN/NOTIFY instead of polling",
+      "why_not": "Changes client interaction model (push vs pull); the external-worker pull model is the current contract. Over-engineering without spec justification."
+    },
+    {
+      "option": "available_at only in DB, not in Job TS interface",
+      "why_not": "Leaves TS Job diverged from DB row; getById would return partial view; breaks client code reading available_at. Additive field is the clean approach."
+    },
+    {
+      "option": "Keep InMemoryJobStore as production default",
+      "why_not": "T-0114's goal is durability and concurrency correctness; in-memory loses data on restart and is unsafe for multi-worker concurrency."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "Job (types.ts extension)",
+      "fields": [
+        {"name": "id", "type": "string — UUID v4; unchanged"},
+        {"name": "topic", "type": "string; unchanged"},
+        {"name": "variables", "type": "Record<string,unknown>; unchanged"},
+        {"name": "state", "type": "JobState CREATED|LOCKED|COMPLETED|FAILED; unchanged"},
+        {"name": "retries", "type": "number integer>=0; unchanged"},
+        {"name": "lockOwner", "type": "string|undefined; unchanged"},
+        {"name": "lockExpiry", "type": "number|undefined unix epoch ms; unchanged"},
+        {"name": "createdAt", "type": "number unix epoch ms; unchanged"},
+        {"name": "available_at", "type": "number unix epoch ms — NEW; enqueue=createdAt; fail-with-retry=clock.now()+retryTimeoutMs; fail-no-retry=unchanged"}
+      ]
+    },
+    {
+      "entity": "job (Postgres table — migration 010_ extends T-0013 baseline)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL leading PK column (T-0013)"},
+        {"name": "id", "type": "uuid NOT NULL PK(tenant_id,id) (T-0013)"},
+        {"name": "topic", "type": "text NOT NULL"},
+        {"name": "variables", "type": "jsonb NOT NULL"},
+        {"name": "state", "type": "text NOT NULL CREATED|LOCKED|COMPLETED|FAILED"},
+        {"name": "retries", "type": "integer NOT NULL"},
+        {"name": "lock_owner", "type": "text NULL"},
+        {"name": "lock_expiry", "type": "bigint NULL unix epoch ms"},
+        {"name": "created_at", "type": "bigint NOT NULL unix epoch ms"},
+        {"name": "available_at", "type": "bigint NOT NULL DEFAULT 0 unix epoch ms — NEW (T-0114); back-filled to created_at by migration"}
+      ]
+    },
+    {
+      "entity": "idx_job_fetchable_created (partial index)",
+      "fields": [
+        {"name": "columns", "type": "(tenant_id, topic, created_at)"},
+        {"name": "where", "type": "state = 'CREATED'"},
+        {"name": "purpose", "type": "primary fetchAndLock path"}
+      ]
+    },
+    {
+      "entity": "idx_job_fetchable_locked (partial index)",
+      "fields": [
+        {"name": "columns", "type": "(tenant_id, topic, created_at)"},
+        {"name": "where", "type": "state = 'LOCKED'"},
+        {"name": "purpose", "type": "fetchAndLock expired-lock reclaim path"}
+      ]
+    },
+    {
+      "entity": "PostgresJobStore (src/core/postgres/pgJobStore.ts)",
+      "fields": [
+        {"name": "constructor", "type": "(pool: pg.Pool, clock?: Clock)"},
+        {"name": "enqueue", "type": "(topic: string, variables: Record<string,unknown>, retries: number) => Promise<Job>"},
+        {"name": "getById", "type": "(id: string) => Promise<Job|undefined>"},
+        {"name": "listByTopic", "type": "(topic: string) => Promise<Job[]>"},
+        {"name": "listByState", "type": "(state: JobState) => Promise<Job[]>"},
+        {"name": "listByTopicAndState", "type": "(topic: string, state: JobState) => Promise<Job[]>"},
+        {"name": "fetchAndLock", "type": "(workerId: string, topics: string[], maxJobs: number, lockDurationMs: number) => Promise<Job[]>"},
+        {"name": "complete", "type": "(workerId: string, jobId: string) => Promise<CompleteResult>"},
+        {"name": "fail", "type": "(workerId: string, jobId: string, retries: number, retryTimeoutMs: number) => Promise<FailResult>"}
+      ]
+    },
+    {
+      "entity": "InMemoryJobStore (src/core/inMemoryJobStore.ts)",
+      "fields": [
+        {"name": "note", "type": "Same interface as PostgresJobStore; Map-backed; updated to include available_at field and enforce available_at <= now in fetchAndLock predicate"},
+        {"name": "constructor", "type": "(clock?: Clock) — identical to current JobStore constructor"},
+        {"name": "re-export", "type": "export { InMemoryJobStore as JobStore } from src/core/jobStore.ts — preserves all frozen unit-test imports"}
+      ]
+    },
+    {
+      "entity": "HealthResponse (extended)",
+      "fields": [
+        {"name": "status", "type": "\"ok\" | \"degraded\""},
+        {"name": "queue.depth", "type": "number — count of CREATED jobs with available_at <= now"},
+        {"name": "queue.oldestAvailableLagMs", "type": "number | null — null when depth=0"}
+      ]
+    },
+    {
+      "entity": "ops/catalog/run_vacuum output",
+      "fields": [
+        {"name": "ok", "type": "true"},
+        {"name": "tableVacuumed", "type": "\"job\""},
+        {"name": "error_variant", "type": "{ ok: false, error: string } on any failure"}
+      ]
+    },
+    {
+      "entity": "ops/catalog/queue_stats output",
+      "fields": [
+        {"name": "depth", "type": "number — CREATED available + LOCKED, available_at<=now"},
+        {"name": "lockedCount", "type": "number — state=LOCKED"},
+        {"name": "failedCount", "type": "number — state=FAILED"},
+        {"name": "completedCount", "type": "number — state=COMPLETED"},
+        {"name": "dlqCount", "type": "number — state=FAILED AND retries=0"},
+        {"name": "oldestAvailableLagMs", "type": "number | null"},
+        {"name": "error_variant", "type": "{ ok: false, error: string } on any failure"}
+      ]
+    }
+  ],
+  "contracts": [
+    "fetchAndLock SQL: WITH candidates AS (SELECT id FROM job WHERE topic=ANY($topics) AND ((state='CREATED' AND available_at<=$now) OR (state='LOCKED' AND lock_expiry<=$now)) ORDER BY created_at ASC LIMIT $maxJobs FOR UPDATE SKIP LOCKED) UPDATE job SET state='LOCKED', lock_owner=$workerId, lock_expiry=$now+$lockDurationMs FROM candidates WHERE job.id=candidates.id RETURNING job.*",
+    "complete SQL: single atomic CTE — read gate (NOT_FOUND|NOT_LOCKED|LOCK_EXPIRED|NOT_OWNER), UPDATE on verdict=OK, RETURNING verdict",
+    "fail SQL: same gate CTE; on OK: SET state=CASE WHEN retries>0 THEN 'CREATED' ELSE 'FAILED' END, retries=$r, lock_owner=NULL, lock_expiry=NULL, available_at=CASE WHEN retries>0 THEN $now+$retryTimeoutMs ELSE available_at END",
+    "Health query: SELECT COUNT(*) FILTER (WHERE state='CREATED' AND available_at<=$now) AS depth, MIN(available_at) FILTER (WHERE state='CREATED' AND available_at<=$now) AS oldest FROM job",
+    "queue_stats query: SELECT COUNT(*) FILTER (WHERE state IN ('CREATED','LOCKED') AND available_at<=$now) AS depth, COUNT(*) FILTER (WHERE state='LOCKED') AS locked_count, COUNT(*) FILTER (WHERE state='FAILED') AS failed_count, COUNT(*) FILTER (WHERE state='COMPLETED') AS completed_count, COUNT(*) FILTER (WHERE state='FAILED' AND retries=0) AS dlq_count, MIN(available_at) FILTER (...available...) AS oldest_available_at FROM job",
+    "src/core/jobStore.ts re-exports: export { InMemoryJobStore as JobStore }; export { PostgresJobStore }; export type { CompleteResult, FailResult, ErrorCode }",
+    "Migration 010_add_available_at_and_indexes.sql: ALTER TABLE job ADD COLUMN available_at bigint NOT NULL DEFAULT 0; UPDATE job SET available_at=created_at WHERE available_at=0; CREATE INDEX CONCURRENTLY idx_job_fetchable_created ON job(tenant_id,topic,created_at) WHERE state='CREATED'; CREATE INDEX CONCURRENTLY idx_job_fetchable_locked ON job(tenant_id,topic,created_at) WHERE state='LOCKED'",
+    "run_vacuum: VACUUM ANALYZE job; returns JSON stdout; exit 0 always; DATABASE_URL from env or --db arg",
+    "queue_stats: SELECT aggregates; returns JSON stdout; exit 0 always"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "fetchAndLock uses FOR UPDATE SKIP LOCKED — no advisory locks",
+      "ci_check": "grep -n 'FOR UPDATE' src/core/postgres/pgJobStore.ts MUST contain 'SKIP LOCKED'; grep -rn 'advisory|pg_advisory' src/ MUST return 0 hits. Static-now in npm run ci."
+    },
+    {
+      "id": "FF-2",
+      "rule": "No Seq Scan on full job table when COMPLETED rows exist",
+      "ci_check": "Integration (live-T-0114): seed 1000 COMPLETED + 10 CREATED rows; EXPLAIN (ANALYZE, FORMAT JSON) of fetchAndLock query; assert top-level node is NOT Seq Scan on job; partial index visible in plan. ci/checks/no-seq-scan.test.ts."
+    },
+    {
+      "id": "FF-3",
+      "rule": "available_at is always set (never NULL) in DB and TS after enqueue/fail operations",
+      "ci_check": "Integration: SELECT COUNT(*) FROM job WHERE available_at IS NULL MUST be 0 after any enqueue/complete/fail sequence. tsc --noEmit validates Job interface requires available_at."
+    },
+    {
+      "id": "FF-4",
+      "rule": "Unit tests pass without DATABASE_URL (in-memory TestDouble path)",
+      "ci_check": "npm test -- --reporter=verbose (no DATABASE_URL); grep for jobStore.test, fetchLock.test, completeFail.test — all pass. Gating: static-now, every CI push."
+    },
+    {
+      "id": "FF-5",
+      "rule": "JobStore symbol remains importable at ../core/jobStore.js with all original methods",
+      "ci_check": "grep -n '^export.*JobStore' src/core/jobStore.ts MUST show re-export alias. tsc --noEmit validates import shapes. jobStore.test.ts line 6 import compiles unchanged."
+    },
+    {
+      "id": "FF-6",
+      "rule": "CompleteResult, FailResult, ErrorCode remain exported from src/core/jobStore.ts",
+      "ci_check": "grep -n 'CompleteResult|FailResult|ErrorCode' src/core/jobStore.ts confirms re-export. completeFail.test.ts line 6 import compiles. Static-now."
+    },
+    {
+      "id": "FF-7",
+      "rule": "Ownership-gate precedence NOT_FOUND->NOT_LOCKED->LOCK_EXPIRED->NOT_OWNER is atomic (one transaction, no TOCTOU)",
+      "ci_check": "Integration (live-T-0114): concurrent complete calls on same jobId return exactly one ok:true; gate error codes match exact table state. ci/checks/ownership-gate.test.ts."
+    },
+    {
+      "id": "FF-8",
+      "rule": "Health endpoint backward-compatible: GET /health returns 200, {status:'ok'}, Content-Type application/json without Postgres",
+      "ci_check": "npm test -- health.test.ts passes without DATABASE_URL. Gating: static-now."
+    },
+    {
+      "id": "FF-9",
+      "rule": "ops run_vacuum and queue_stats exit 0 and emit valid JSON for both success and bad-DATABASE_URL paths",
+      "ci_check": "Integration: DATABASE_URL=bad node ops/dist/run_vacuum.js exits 0, emits {ok:false,error:<non-empty>}. DATABASE_URL=$real node ops/dist/run_vacuum.js emits {ok:true,tableVacuumed:'job'}. ci/checks/ops-ops.test.ts."
+    },
+    {
+      "id": "FF-10",
+      "rule": "No ORM dependency in src/ or ops/",
+      "ci_check": "grep -rn 'prisma|typeorm|drizzle|sequelize|knex|mikro-orm' src/ ops/ MUST return 0 hits. Static-now."
+    },
+    {
+      "id": "FF-11",
+      "rule": "Migration 010_ adds available_at bigint NOT NULL and both partial indexes; idempotent re-run succeeds",
+      "ci_check": "Integration: apply migration twice on same DB; \\d job shows column + both indexes; no error on second run (schema_migrations guards from T-0053). ci/checks/migration-010.test.ts."
+    },
+    {
+      "id": "FF-12",
+      "rule": "All 3 frozen unit-test files (jobStore.test.ts, fetchLock.test.ts, completeFail.test.ts) are green without any modification",
+      "ci_check": "npm test without DATABASE_URL: 0 failures in those three files. CI gate every push."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§3.4 PostgresJobStore.fetchAndLock + §4.2 SQL + FF-3, FF-7"},
+    {"ac": "AC-2", "covered_by": "§4.2 ORDER BY created_at ASC LIMIT $maxJobs + FF-2"},
+    {"ac": "AC-3", "covered_by": "§3.2 available_at<=now predicate + §4.2 + FF-3"},
+    {"ac": "AC-4", "covered_by": "§4.2 state=LOCKED AND lock_expiry<=now + FF-7"},
+    {"ac": "AC-5", "covered_by": "§4.2 SKIP LOCKED + FF-1"},
+    {"ac": "AC-6", "covered_by": "§4.3 complete CTE SQL + FF-7"},
+    {"ac": "AC-7", "covered_by": "§4.3 gate SQL CTE precedence + FF-7"},
+    {"ac": "AC-8", "covered_by": "§4.4 fail SQL available_at=now+retryTimeoutMs + §3.5 InMemoryJobStore + FF-3"},
+    {"ac": "AC-9", "covered_by": "§4.4 fail state=FAILED + §4.2 no FAILED in predicate + FF-7"},
+    {"ac": "AC-10", "covered_by": "§4.4 gate SQL + FF-7"},
+    {"ac": "AC-11", "covered_by": "§3.6 JobStore re-export->InMemoryJobStore + FF-4, FF-12"},
+    {"ac": "AC-12", "covered_by": "§3.3 partial indexes + §4.2 index predicates + FF-2"},
+    {"ac": "AC-13", "covered_by": "§3.7 health extension + §4.5 SQL + FF-8"},
+    {"ac": "AC-14", "covered_by": "§3.7 health null branch + FF-8"},
+    {"ac": "AC-15", "covered_by": "§3.7 backward-compat status:ok + FF-8"},
+    {"ac": "AC-16", "covered_by": "§3.8 run_vacuum + FF-9"},
+    {"ac": "AC-17", "covered_by": "§4.6 queue_stats SQL + FF-9"},
+    {"ac": "AC-18", "covered_by": "§3.8 top-level catch + FF-9"}
+  ],
+  "runtime_target": "Postgres 16 in docker-compose silo stack on founder home server (/srv/choros), deploy founder-gated. Connection via DATABASE_URL env. App connects as choros_app (NOBYPASSRLS, non-owner — T-0013). Migrations as choros_migrator. T-0114 migrations start at 010_. Infra (compose, migrations runner, pg package, 001-009 migrations) NOT built here — T-0053 dependency. BUILD phase starts after T-0053 merges to dev.",
+  "adr_artifact_path": "docs/design/T-0114-jobstore-postgres.adr.md",
+  "escalation": ""
+}
