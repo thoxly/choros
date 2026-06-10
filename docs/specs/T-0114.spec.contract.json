@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0114",
+  "status": "ready",
+  "summary": "Перенос JobStore с in-memory Map на Postgres: контракт fetchAndLock/complete/fail/lease 1:1, колонка available_at (активирует retry-backoff, закрывает retryTimeoutMs recorded-only), partial-индексы WHERE state (устраняют O(n)-скан), расширение GET /health метриками глубины очереди и oldest-available lag, ops-операции run_vacuum и queue_stats в каталоге органов fleet-ops.",
+  "functional": [
+    "FR-1: Postgres-стор за существующим интерфейсом JobStore — все методы enqueue/getById/listByTopic/listByState/listByTopicAndState/fetchAndLock/complete/fail сохраняют контракт 1:1; fetchAndLock через FOR UPDATE SKIP LOCKED; ownership-gate в одной атомарной транзакции; инжекция Clock сохраняется.",
+    "FR-2: Колонка available_at (bigint NOT NULL, unix epoch ms) — при enqueue равна createdAt, при fail с retries>0 равна clock.now()+retryTimeoutMs; fetchAndLock фильтрует кандидатов по available_at <= now(); retryTimeoutMs перестаёт быть recorded-only.",
+    "FR-3: Partial-индексы WHERE state IN ('CREATED','LOCKED') — fetchAndLock-запрос использует partial-индекс; Sequential Scan по всей таблице недопустим.",
+    "FR-4: In-memory реализация сохраняется как TestDouble — unit-тесты jobStore.test.ts/fetchLock.test.ts/completeFail.test.ts проходят без Postgres.",
+    "FR-5: GET /health расширяется полями queue.depth (доступные строки) и queue.oldestAvailableLagMs (ms от oldest available_at до now, или null если пусто); обратная совместимость status:ok сохраняется; при недоступной БД health деградирует, не 500.",
+    "FR-6: ops-операция run_vacuum — VACUUM ANALYZE job, идемпотентна, принимает DATABASE_URL, возвращает { ok: true, tableVacuumed: 'job' } или { ok: false, error }, тир T0.",
+    "FR-7: ops-операция queue_stats — возвращает depth/lockedCount/failedCount/completedCount/dlqCount/oldestAvailableLagMs, идемпотентна, принимает DATABASE_URL, тир T0."
+  ],
+  "non_functional": [
+    "NF-1: At-least-once семантика — FOR UPDATE SKIP LOCKED + lock_expiry обеспечивает повторную доступность при падении воркера.",
+    "NF-2: Нет O(n)-скана — EXPLAIN ANALYZE fetchAndLock при 1000 COMPLETED + 10 CREATED строках не показывает Seq Scan по всей таблице.",
+    "NF-3: Health деградирует, не падает — при недоступной БД GET /health возвращает 2xx/503 с JSON, не unhandled rejection.",
+    "NF-4: Zero-dep в доменной логике — pg (от T-0053) единственная новая runtime-зависимость; никаких ORM.",
+    "NF-5: Инжекция часов — Postgres-стор принимает Clock; тесты с makeFixedClock/makeCounterClock работают против TestDouble без реального Postgres."
+  ],
+  "out_of_scope": [
+    "tenant_id + RLS на таблице job — T-0013/T-0053.",
+    "docker-compose.yml, раннер миграций, зависимость pg — T-0053.",
+    "DLQ-обработка (перекладывание в отдельную таблицу, уведомления) — отдельная задача.",
+    "Flowable external-task мост — T-0115+.",
+    "Мозг fleet-ops (Sentinel/Diagnost/Operator) — отдельный контур, вне этого репо.",
+    "HTTP-эндпоинты для ops-операций — только CLI/программный вызов.",
+    "Pooled-mode / tenant isolation на очереди — T-0053 и последующие задачи.",
+    "Метрики GC/heap/timer-lag Flowable — вне скопа T-0114."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "fetchAndLock возвращает заблокированные jobs с корректными полями (state=LOCKED, lockOwner, lockExpiry=clock+lockDurationMs, createdAt совпадает с enqueue, available_at присутствует) — integration test с Postgres, stubbed Clock.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "fetchAndLock возвращает jobs в FIFO-порядке (createdAt asc), ограниченный maxJobs; лишние jobs остаются в CREATED — integration test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "fetchAndLock не возвращает job, у которой available_at > clock.now() — integration test: fail с retryTimeoutMs=60000 при clock=T, fetchAndLock при clock=T+59999 возвращает [], при clock=T+60000 возвращает job.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "fetchAndLock переиспользует job с истёкшим lock_expiry (реклейм) — integration test: lock с lockDurationMs=0, clock advance, новый fetchAndLock берёт ту же job с новым lockOwner и lockExpiry.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "fetchAndLock атомарен: два параллельных вызова для 1 job — сумма результатов = 1 (SKIP LOCKED гарантирует эксклюзивность) — integration test с параллельными транзакциями.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "complete happy path: state→COMPLETED, lock_owner=null, lock_expiry=null, возвращает { ok: true } — integration test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "complete gate errors: NOT_FOUND (нет job) → NOT_LOCKED (state != LOCKED) → LOCK_EXPIRED (lock_expiry <= now) → NOT_OWNER (wrong workerId) — integration test, все четыре кода в правильном приоритете.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "fail с retries>0 и retryTimeoutMs>0: state→CREATED, retries уменьшается, available_at = clock.now()+retryTimeoutMs; job недоступна fetchAndLock до available_at; доступна после — integration test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "fail с retries=0: state→FAILED, fetchAndLock не возвращает FAILED job — integration test.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "fail gate errors: NOT_FOUND → NOT_LOCKED → LOCK_EXPIRED → NOT_OWNER — integration test, аналогично AC-7.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Все unit-тесты jobStore.test.ts, fetchLock.test.ts, completeFail.test.ts проходят без Postgres — CI: npm test без DATABASE_URL, все три файла зелёные.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "fetchAndLock не производит Sequential Scan при наличии строк вне ожидаемых состояний — fitness: 1000 COMPLETED + 10 CREATED строк, EXPLAIN (ANALYZE) запроса fetchAndLock не показывает 'Seq Scan on job' без Index condition.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "GET /health при непустой очереди возвращает queue.depth=N (число доступных строк) и queue.oldestAvailableLagMs>=0 — integration test: enqueue 3 jobs с available_at в прошлом.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "GET /health при пустой очереди: queue.depth=0, queue.oldestAvailableLagMs=null — integration test: пустая БД.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "Существующие health.test.ts AC-1..AC-4 проходят без Postgres: GET /health 200, status='ok', Content-Type application/json, POST /health 404 — CI: npm test без DATABASE_URL.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "run_vacuum: выполняется, возвращает { ok: true, tableVacuumed: 'job' }, идемпотентен (повторный вызов — тот же результат) — integration test с Postgres.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-17",
+      "text": "queue_stats: корректные метрики для известного состояния — integration test: seed 5 CREATED available + 2 LOCKED + 1 FAILED retries=0 + 3 COMPLETED; проверить depth=5, lockedCount=2, failedCount=1, completedCount=3, dlqCount=1, oldestAvailableLagMs>=0.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-18",
+      "text": "run_vacuum и queue_stats при неверном DATABASE_URL возвращают { ok: false, error: <non-empty string> }, не кидают unhandled exception — integration test.",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0114-jobstore-postgres.spec.md"
+}
