@@ -67,8 +67,13 @@ describe("handleRequest", () => {
     const { res, capture } = makeRes();
     handleRequest(req, res);
     expect(capture.statusCode).toBe(200);
-    const parsed = JSON.parse(capture.body) as { status: string };
+    const parsed = JSON.parse(capture.body) as { status: string; timer?: { timerLagMs: unknown } };
     expect(parsed.status).toBe("ok");
+    // FF-T7: response schema contains timer.timerLagMs (T-0116 backward-compatible extension)
+    expect(parsed).toHaveProperty("timer");
+    expect(parsed.timer).toHaveProperty("timerLagMs");
+    // Without DATABASE_URL, timerLagMs is null (no store)
+    expect(parsed.timer!.timerLagMs).toBeNull();
   });
 
   it("AC-2: GET /unknown → 404", () => {

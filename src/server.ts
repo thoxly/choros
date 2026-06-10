@@ -4,6 +4,7 @@ import { Router } from "./http/router.js";
 import { JobStore, PostgresJobStore } from "./core/jobStore.js";
 import { InMemoryJobStore } from "./core/inMemoryJobStore.js";
 import { type Clock } from "./core/types.js";
+import { PostgresTimerStore } from "./core/postgres/pgTimerStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
@@ -33,20 +34,39 @@ function createJobStore(clock?: Clock): PostgresJobStore | InMemoryJobStore {
   return new InMemoryJobStore(clock);
 }
 
+/**
+ * Creates a PostgresTimerStore if DATABASE_URL is set, otherwise undefined.
+ * Timer health is only available when Postgres is configured.
+ */
+function createTimerStore(clock?: Clock): PostgresTimerStore | undefined {
+  const url = process.env["DATABASE_URL"];
+  if (url) {
+    const pool = new Pool({ connectionString: url });
+    return new PostgresTimerStore(pool, clock);
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Internal builder — composes a Router with health + external-worker routes.
 // Returns both the Router (for handleRequest) and the http.Server.
 // ---------------------------------------------------------------------------
 
-function buildRouter(store: JobStore | PostgresJobStore | InMemoryJobStore): Router {
+function buildRouter(
+  store: JobStore | PostgresJobStore | InMemoryJobStore,
+  timerStore?: PostgresTimerStore
+): Router {
   const router = new Router();
 
-  // Register GET /health (ADR §3.7: queue metrics when Postgres available)
+  // Register GET /health (ADR §3.7: queue + timer metrics when Postgres available)
+  // T-0116: extends response with timer.timerLagMs (backward-compatible).
   router.register("GET", "/health", async (_req, res) => {
     let status: "ok" | "degraded" = "ok";
     let queueDepth = 0;
     let oldestAvailableLagMs: number | null = null;
+    let timerLagMs: number | null = null;
 
+    // Queue health (T-0114)
     if (store instanceof PostgresJobStore) {
       try {
         const health = await store.getQueueHealth();
@@ -57,11 +77,24 @@ function buildRouter(store: JobStore | PostgresJobStore | InMemoryJobStore): Rou
       }
     }
 
+    // Timer health (T-0116) — independent try/catch (AC-11, ADR §3.7)
+    if (timerStore !== undefined) {
+      try {
+        const timerHealth = await timerStore.getTimerHealth();
+        timerLagMs = timerHealth.timerLagMs;
+      } catch {
+        status = "degraded";
+      }
+    }
+
     const body = JSON.stringify({
       status,
       queue: {
         depth: queueDepth,
         oldestAvailableLagMs,
+      },
+      timer: {
+        timerLagMs,
       },
     });
     res.statusCode = 200;
@@ -105,7 +138,7 @@ function buildRouter(store: JobStore | PostgresJobStore | InMemoryJobStore): Rou
  * Does NOT call .listen() — that is the caller's responsibility.
  */
 export function createServer(store: JobStore | PostgresJobStore | InMemoryJobStore = createJobStore()): http.Server {
-  const router = buildRouter(store);
+  const router = buildRouter(store, createTimerStore());
   return http.createServer(router.dispatch.bind(router));
 }
 
@@ -125,7 +158,7 @@ export const handleRequest = (
   res: http.ServerResponse
 ): void => {
   if (!_defaultRouter) {
-    _defaultRouter = buildRouter(createJobStore());
+    _defaultRouter = buildRouter(createJobStore(), createTimerStore());
   }
   _defaultRouter.dispatch(req, res);
 };
