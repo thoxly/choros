@@ -114,6 +114,10 @@ interface RouteEntry {
   segments: string[];
   paramIndex: number | null;
   paramName: string | null;
+  // T-0072 additive: multi-param support (paramIndices/paramNames supersede
+  // paramIndex/paramName when present; existing single-param routes are unaffected).
+  paramIndices?: number[];
+  paramNames?: string[];
   handler: RouteHandler;
 }
 
@@ -147,16 +151,32 @@ export class Router {
     let paramIndex: number | null = null;
     let paramName: string | null = null;
 
+    // T-0072 additive: collect ALL :param positions (multi-param support).
+    const paramIndices: number[] = [];
+    const paramNames: string[] = [];
+
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       if (seg !== undefined && seg.startsWith(":")) {
-        paramIndex = i;
-        paramName = seg.slice(1);
-        break; // only one :param segment supported
+        paramIndices.push(i);
+        paramNames.push(seg.slice(1));
+        // Preserve legacy single-param behaviour: first param sets paramIndex/paramName.
+        if (paramIndex === null) {
+          paramIndex = i;
+          paramName = seg.slice(1);
+        }
       }
     }
 
-    this.routes.push({ method: upperMethod, segments, paramIndex, paramName, handler });
+    this.routes.push({
+      method: upperMethod,
+      segments,
+      paramIndex,
+      paramName,
+      // Multi-param: only stored when there is more than one param segment.
+      ...(paramIndices.length > 1 ? { paramIndices, paramNames } : {}),
+      handler,
+    });
   }
 
   setFallback(handler: RouteHandler): void {
@@ -178,17 +198,36 @@ export class Router {
       let matched = true;
       const params: Record<string, string> = {};
 
+      // T-0072 additive: use paramIndices/paramNames (multi-param) when present;
+      // fall back to legacy paramIndex/paramName for single-param routes.
+      const paramIdxSet: Set<number> = route.paramIndices
+        ? new Set(route.paramIndices)
+        : route.paramIndex !== null
+          ? new Set([route.paramIndex])
+          : new Set();
+      const paramNameMap: Map<number, string> = new Map();
+      if (route.paramIndices && route.paramNames) {
+        for (let pi = 0; pi < route.paramIndices.length; pi++) {
+          paramNameMap.set(route.paramIndices[pi] as number, route.paramNames[pi] as string);
+        }
+      } else if (route.paramIndex !== null && route.paramName !== null) {
+        paramNameMap.set(route.paramIndex, route.paramName);
+      }
+
       for (let i = 0; i < route.segments.length; i++) {
         const routeSeg = route.segments[i] as string;
         const urlSeg = urlSegments[i] as string;
 
-        if (i === route.paramIndex) {
+        if (paramIdxSet.has(i)) {
           // Named param segment — match any non-empty string
           if (urlSeg.length === 0) {
             matched = false;
             break;
           }
-          params[route.paramName as string] = urlSeg;
+          const pName = paramNameMap.get(i);
+          if (pName !== undefined) {
+            params[pName] = urlSeg;
+          }
         } else {
           if (routeSeg !== urlSeg) {
             matched = false;
