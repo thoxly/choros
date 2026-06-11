@@ -92,7 +92,8 @@
         {"name": "declares", "type": "jsonb — []"},
         {"name": "pure_compute", "type": "boolean — true"},
         {"name": "resource_ops", "type": "jsonb — [{resourceType:'authoring_draft',operation:'create'},{resourceType:'authoring_draft',operation:'update'}]"},
-        {"name": "input_schema", "type": "object — {app_id, slug, title, floor, page_def|page_code, deps?: [{registry_def_id, field_key, dep_kind}]}"}
+        {"name": "input_schema", "type": "object — {app_id, slug, title, floor, page_def|page_code, deps?: [{registry_def_id, field_key, dep_kind}]}"},
+        {"name": "tenant_id", "type": "uuid — ОБЯЗАН быть a0000000-0000-0000-0000-000000000001 (dev-тенант, урок T-0077 §2.3: resolveAgentToolset ищет tool/grants строго в одном tenantId под RLS)"}
       ]
     }
   ],
