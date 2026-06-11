@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0188",
+  "status": "ready",
+  "summary": "Add seedRowForTable cases for 6 missing tenant tables (invoke_proposal, notification, email_channel_config, notification_preference, report_page, report_page_dep) plus a guard that fails if any known_tenant_tables.txt entry lacks a seeder — resolving 75+ skipped cross-tenant probes.",
+  "functional": [
+    "Seeder for invoke_proposal: no FK deps, minimal row (caller_id/target_id = fresh UUIDs, status='proposed')",
+    "Seeder for notification: FK to employee via recipient_id — uses seedState.empId per tenant",
+    "Seeder for email_channel_config: PK=(tenant_id), ON CONFLICT DO NOTHING, no FK deps",
+    "Seeder for notification_preference: PK=(tenant_id, event_kind, recipient_scope), no FK deps",
+    "Seeder for report_page: FK to application via app_id — uses seedState.appId per tenant; id stored in seedState.reportPageId{A,B}",
+    "Seeder for report_page_dep: FK to report_page (page_id) + registry_def (registry_def_id) — uses seedState.reportPageId and seedState.regId per tenant",
+    "Guard describe block inside cross_tenant.test.ts: SEEDED_TABLES set vs KNOWN_TENANT_TABLES; missing entry = red test"
+  ],
+  "non_functional": [
+    "Additive only: no existing cases, functions, or imports removed",
+    "tsc --noEmit passes",
+    "npm run fitness passes (static checks)",
+    "Two consecutive fitness:db runs are idempotent"
+  ],
+  "out_of_scope": [
+    "Fixing effect_resource missing break (pre-existing bug, separate task)",
+    "Schema changes to any table",
+    "Modifications to ci/checks/*.sh files"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-CT-1",
+      "text": "seedRowForTable has explicit case entries for invoke_proposal, notification, email_channel_config, notification_preference, report_page, report_page_dep",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-CT-2",
+      "text": "beforeAll completes without error against a migrated DB (0 beforeAll failures)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-CT-3",
+      "text": "0 skipped tests in cross_tenant.test.ts when run against a live DB",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-CT-4",
+      "text": "Guard test is red if a table in KNOWN_TENANT_TABLES is absent from SEEDED_TABLES",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-CT-5",
+      "text": "Two consecutive fitness:db runs produce identical pass/fail results",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-CT-6",
+      "text": "tsc --noEmit exits 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-CT-7",
+      "text": "npm run fitness exits 0",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0188-cross-tenant-seeders.spec.md"
+}
