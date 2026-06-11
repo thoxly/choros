@@ -1,25 +1,8 @@
 {
   "task_id": "T-0185",
-  "verdict": "changes_requested",
-  "ci_seen": {"green": false},
-  "findings": [
-    {
-      "id": "R-1",
-      "severity": "blocking",
-      "axis": 4,
-      "location": "ci/checks/role-criticality-migration-excludes.txt:missing entry",
-      "issue": "050_tier_delete_fix migration is not listed in the sibling-migration excludes file. role-criticality-isolation.sh (FF-RC5/FF-RC6) treats any new migration as a T-0040 violation unless explicitly excluded. npm run fitness exits non-zero with 3 FAIL lines.",
-      "suggestion": "Add line: `050_tier_delete_fix  # T-0185 — tier DELETE suppression bugfix` to ci/checks/role-criticality-migration-excludes.txt"
-    },
-    {
-      "id": "R-2",
-      "severity": "nit",
-      "axis": 3,
-      "location": "ci/checks/db/tier_delete_fix.test.ts:DEL-2 and DEL-4 describe blocks",
-      "issue": "Tests leave published del-app-* rows in choros.application after each run (no afterEach cleanup). Table accumulates on repeated CI runs. Correctness unaffected (unique UUIDs per run).",
-      "suggestion": "Add afterEach that deletes rows WHERE slug LIKE 'del-app-%' to keep the test DB clean across runs."
-    }
-  ],
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [],
   "acceptance_coverage": [
     {"ac": "BEFORE DELETE returns OLD for draft row", "covered": true},
     {"ac": "BEFORE DELETE raises for published row (no GUC)", "covered": true},
@@ -28,9 +11,19 @@
     {"ac": "Migration is idempotent (CREATE OR REPLACE + DROP/CREATE trigger)", "covered": true},
     {"ac": "049_tier.sql untouched", "covered": true},
     {"ac": "No .sh files touched", "covered": true},
-    {"ac": "npm run fitness green", "covered": false}
+    {"ac": "npm run fitness green (role-criticality-isolation)", "covered": true},
+    {"ac": "Test DB cleaned up after each run (del-app-* count = 0)", "covered": true}
   ],
   "role_gap_evidence": [
     "externalWorker.e2e.test.ts and health.test.ts are brittle to ambient DATABASE_URL: createJobStore() silently selects PostgresJobStore when DATABASE_URL is set, breaking tests designed for InMemoryJobStore. Pre-existing gap, not introduced by T-0185. Candidate for a future test-isolation hardening task."
-  ]
+  ],
+  "re_review": {
+    "base_sha": "69b7d1b",
+    "fix_sha": "af3af84",
+    "r1_resolved": true,
+    "r2_resolved": true,
+    "diff_scope": "exactly 2 files: excludes entry + afterEach cleanup",
+    "fitness_db_result": "5/5 tier_delete_fix.test.ts pass",
+    "db_cleanup_confirmed": "SELECT count(*) FROM choros.application WHERE slug LIKE 'del-app-%' = 0"
+  }
 }
