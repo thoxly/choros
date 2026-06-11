@@ -1,0 +1,122 @@
+{
+  "task_id": "T-0125",
+  "status": "pr_open",
+  "branch": "task/T-0125-card-actions-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0125-card-actions.spec.md",
+    "docs/specs/T-0125.spec.contract.json",
+    "docs/design/T-0125-card-actions.adr.md",
+    "docs/design/T-0125.adr.contract.json",
+    "docs/design/T-0125.review.contract.json",
+    "docs/reviews/T-0125.review.md",
+    "docs/test-reports/T-0125.test-report.md",
+    "docs/design/T-0125.test-report.contract.json",
+    "docs/pr/T-0125.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review iter-1/iter-2/iter-3 + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI env-gap pre-existing = node_modules absent, идентично dev; docs-only ветка). D-056: integration-honest gate пройден.",
+    "AC-11/AC-12/AC-13/AC-14 (verifiable_as: test) отложены в impl-задачу — легально для design-фазы; покрыты fitness-функциями FF-CA-1..FF-CA-10 (gating=live-impl) в ADR §8.",
+    "R-1 (blocking iter-1): terminate коллапсирует в record-transition-грант (эскалация). Закрыт коммитом 2100226: §2.2.1 dormant process_instance + ветвь (б) отвергнута + B-8 двойное условие + FF-CA-10.",
+    "R-2 (nit iter-1): амортизация batch-PDP record-fetch. Закрыт нотой §5 коммитом 2100226.",
+    "R-3 (nit iter-2): механизм дизъюнктности мис-атрибутирован (resourceType-match вместо scope-containment); B-8 surface неполна (ResourceRef-kind + refToScope/NodeLevel не названы); FF-CA-10 без broad-scope-пробы. Закрыт коммитом 712c3c2: §2.2.1/§2.3/§6 переформулированы на isNarrowerOrEqual(refToScope(handle.ref), g.scope); B-8 в §7/§9 дополнен full surface; FF-CA-10 — broad-scope кейс добавлен.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**)",
+    "npm_ci_result": "env-gap pre-existing (node_modules absent; identical on dev); product code unaffected; D-056",
+    "review_verdict": "approved iter-2 (T-0125.review.contract.json); 15/15 AC covered; R-1 blocking + R-2 nit закрыты 2100226; R-3 nit закрыт 712c3c2",
+    "test_report": "docs/design/T-0125.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0125.spec.contract.json",
+    "adr": "docs/design/T-0125-card-actions.adr.md",
+    "adr_contract": "docs/design/T-0125.adr.contract.json",
+    "review_iter2_contract": "docs/design/T-0125.review.contract.json (verdict=approved iter-2; R-1 blocking + R-2 nit closed 2100226; R-3 nit closed 712c3c2)",
+    "review_md": "docs/reviews/T-0125.review.md",
+    "test_report_md": "docs/test-reports/T-0125.test-report.md",
+    "test_report_contract": "docs/design/T-0125.test-report.contract.json"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-impl-T-0125-1",
+      "title": "impl: B-1 — ObjectModel CardActionDecl/Target/маппинг §2.3 (TS-типы + валидатор closed enum) + FF-CA-2",
+      "scope": "ADR §9 B-1: TS-типы CardActionDecl (id/label/operation/semantics/target/paramsSchema/bindings/visibilityHint/origin/readiness), CardActionTarget (kind/resourceRef/processInstanceId), маппинг-таблица semantics→(op,path) §2.3. Валидатор закрытых enum (operation ⊆ Operation; semantics ⊆ {transition,terminate,message,invoke}). FF-CA-2.",
+      "gates": "FF-CA-2 green (card-action-closed-enum.sh); нет *Operation*/*Right* токенов в модуле; record-/process_instance-kind разделены.",
+      "depends_on": ["grant-lattice.ts (ЖИВ)", "binding-compat.ts (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-2",
+      "title": "impl: B-2 — PDP-исполнитель card-action: resolveFor-обёртка + batch-резолв + fail-closed + FF-CA-1, FF-CA-8",
+      "scope": "ADR §9 B-2: resolveFor(deps, handle, subject, op=map(semantics), guardCtx?) — единственный арбитр видимости И исполнимости; batch-резолв (один record-fetch на target, не N+1, нота §5 [iter-2,R-2]); fail-closed. FF-CA-1 (card-action-pdp-arbiter.sh). FF-CA-8 (cross-tenant-fitness.sh + unit).",
+      "gates": "FF-CA-1 green; FF-CA-8 green; запрет actionEnabled/canShow/allowedFlag как авторизаторов; record-fetch амортизован.",
+      "depends_on": ["grant-resolver.ts:489 (ЖИВ)", "T-0013 RLS (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-3",
+      "title": "impl: B-3 — Путь transition: wiring mutation-gateway + actor_event + audit_event + FF-CA-7",
+      "scope": "ADR §9 B-3: wiring card-action→mutation-gateway (T-0028)→appendActorEvent (T-0019)→audit_event (T-0016) для semantics=transition/approve. FF-CA-7 (card-action-audit.test.ts: executed→audit_event+actor_event; denied→audit_event).",
+      "gates": "FF-CA-7 green; нет прямого write мимо mutation-gateway (FF-G1/FF-G3 T-0028); audit_writer_isolation.sh.",
+      "depends_on": ["T-0028 mutation-gateway (ЖИВ)", "T-0019 appendActorEvent (ЖИВ)", "T-0016 audit (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-4",
+      "title": "impl: B-4 — Путь invoke: wiring invoke-effect + audit",
+      "scope": "ADR §9 B-4: wiring card-action→invoke-effect (T-0024/T-0034, effect-resource.ts) для semantics=invoke; audit_event(card_action.executed/denied).",
+      "gates": "FF-CA-3 green (engine-single-channel; нет прямого fetch к движку); FF-CA-7 green (audit).",
+      "depends_on": ["effect-resource.ts (ЖИВ)", "T-0034 (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-5",
+      "title": "impl: B-5 — Генератор дефолта defaultCardActions из T-0014 + T-0019 + FF-CA-9",
+      "scope": "ADR §9 B-5: defaultCardActions(handle, subject, deps) → CardActionDecl[]; источники: registry_def/record_schema (T-0014) + доступные guarded transitions из текущего статуса (T-0019); содержимое: transition-per-status + terminate при инстансе (readiness=dormant) + без invoke; FF-CA-9 (card-action-default-gen.test.ts).",
+      "gates": "FF-CA-9 green; дефолт не читает кастом-схему; все под PDP (B-2).",
+      "depends_on": ["T-0014 registry_def (ADR)", "T-0019 actor_event (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-6",
+      "title": "impl: B-6 — Dormant-гейт isReady/engineBridgeSupports/customReady + FF-CA-5",
+      "scope": "ADR §9 B-6: isReady(semantics): transition|invoke→true; terminate|message→engineBridgeSupports() (проверяет, экспортированы ли deleteProcessInstance/correlateMessage В FLOWABLE-CLIENT ∧ ResourceType process_instance добавлен в решётку ∧ ResourceRef-kind расширен ∧ refToScope/NodeLevel добавлен — все аддитивы B-8); customReady()→formDefTableExists(). FF-CA-5 (dormant-gate.test.ts: isReady=false→denied(path_not_ready), нет вызова engine-bridge).",
+      "gates": "FF-CA-5 green; dormant-семантика никогда не вызывает engine-bridge без isReady; audit_event(denied, reason=path_not_ready) при попытке.",
+      "depends_on": []
+    },
+    {
+      "suggested_id": "T-impl-T-0125-7",
+      "title": "impl: B-7 — Аудит-контракт card_action.* (open-vocab) + FF-CA-7",
+      "scope": "ADR §9 B-7: эмиссия audit_event T-0016 типов card_action.executed/card_action.denied с полями actor/subject/via/result/processInstanceId/tenant_id. Запрет новой audit-таблицы (audit_writer_isolation.sh).",
+      "gates": "FF-CA-7 green; нет CREATE TABLE card_action_log/*; tenant-scoped.",
+      "depends_on": ["T-0016 audit (ЖИВ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-8",
+      "title": "impl: B-8 — Разморозка terminate/message: REST-путь (T-0058) + полный аддитив решётки (ResourceType + object_kind CHECK + ResourceRef-kind + refToScope/NodeLevel) + FF-CA-10 с broad-scope-пробой",
+      "scope": "ADR §9 B-8 [iter-2,R-1][iter-3,R-3]: (1) flowable-client.ts: deleteProcessInstance(instanceId)+correlateMessage(instanceId,messageName,variables) под mutation-guard T-0028 FF-G3 + FF-CA-3; (2) ПОЛНЫЙ surface решётки — ResourceType 'process_instance' в grant-lattice.ts union + миграция object_kind CHECK IN('application','registry','record','process_instance') + VOCAB bump + ResourceRef-kind в object-handle.ts:40 (ветвь process_instance в exhaustive switch) + refToScope/NodeLevel в grant-resolver.ts:178 (instance-handle→scope, размещение в отдельной ветви иерархии); (3) FF-CA-10 (3 кейса: узкий record-грант→denied, broad-scope record-грант→denied, грант на инстанс не покрывает запись). Дизъюнктность через scope-containment (isNarrowerOrEqual), не resourceType-match.",
+      "gates": "FF-CA-3/FF-CA-10 green; isReady(terminate|message)→true после всех аддитивов; broad-scope-проба (кейс 2) green — критически: доказывает containment-вайринг иерархии.",
+      "depends_on": ["T-0058 engine-bridge (НЕ DONE — блокирует)", "grant-lattice.ts:33-38 + object-handle.ts:40 + grant-resolver.ts:178"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-9",
+      "title": "impl: B-9 — Разморозка кастом-слоя: form_def + bundle promotion + FF-CA-4, FF-CA-6",
+      "scope": "ADR §9 B-9: создание таблицы form_def (T-0073/T-0079); промоут card-action-конфига из external→choros_table (T-0082 promotion-rule); card-action-конфиг добавлен в bundle_members.txt как член bundle; checkBindingCompat (binding-compat.ts:86) для bindings-согласования + FF-CA-4; bundle-coherence.sh расширен + FF-CA-6.",
+      "gates": "FF-CA-4/FF-CA-6 green; нет card_action_version/отдельной version-таблицы; bundle_members.txt обновлён.",
+      "depends_on": ["T-0073/T-0079/T-0082 form_def (НЕ DONE — блокирует)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0125-10",
+      "title": "impl: B-10 — Интеграционный прогон «Прервать согласование» (transition day-1 + terminate после B-8)",
+      "scope": "ADR §9 B-10: integration-test прогон кейса §6: (1) transition-часть (record→«Отказано», op=transition, грант на record) — ЖИВОЙ day-1; (2) terminate-часть (инстанс, op=transition, грант на process_instance) — после B-8; audit trail: 2 audit_event + 1 actor_event (transition-часть). PDP-изоляция: держатель только record-гранта не может terminate (FF-CA-10).",
+      "gates": "B-10 зелёный только после B-1..B-7 (transition-часть) и B-8 (terminate-часть). FF-CA-10 кейс 2 (broad-scope-проба) — обязателен до merge B-8.",
+      "depends_on": ["T-impl-T-0125-1..T-impl-T-0125-7 (transition day-1)", "T-impl-T-0125-8 (terminate после B-8)"]
+    }
+  ],
+  "rationale": "T-0125 — design-задача (SPEC+ADR+review iter-1/iter-2/iter-3). ADR зафиксировал: card action = декларативная типизированная кнопка (op+semantics+target+PDP+аудит+дефолт-генератор), авторизуемая resolveFor — единственным арбитром. Ключевые инварианты: один механизм прав (NF-1); видимость=исполнимость=PDP (NF-2); один канал к движку (NF-3); один механизм согласованности (NF-4); tenant fail-closed (NF-5). terminate/message dormant с честным двойным критерием разморозки B-8 [iter-2,R-1][iter-3,R-3]: REST-путь ∧ полный аддитив решётки (ResourceType+object_kind+ResourceRef-kind+refToScope/NodeLevel). Механизм дизъюнктности — scope-containment (isNarrowerOrEqual, grant-resolver.ts:508-516), а не resourceType-match в covering (которого нет). Review approved iter-2 (15/15 AC, R-1 blocking + R-2 nit закрыты 2100226, R-3 nit закрыт 712c3c2). Product CI env-gap pre-existing (docs-only branch unaffected). AC-11..AC-14 deferred-to-impl (4 post-impl live probes). Готово к merge в dev и старту impl-декомпозиции (B-1..B-10, B-8/B-9 dormant за T-0058/form_def)."
+}
