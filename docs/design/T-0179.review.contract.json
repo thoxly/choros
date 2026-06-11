@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0179",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/bundle-coherence.sh (absent cross-ref)",
+      "issue": "ADR FF-BUNDLE-DEPS буквально гласит 'bundle-coherence.sh содержит check-report-page-deps'. bundle-coherence.sh не содержит делегирования в companion-скрипт. Смысловое требование полностью закрыто (companion в fitness-chain), но формальная cross-reference отсутствует.",
+      "suggestion": "При следующей волне или unfreezing T-0082: добавить комментарий '# FF-BUNDLE-DEPS companion: check-report-page-deps.sh' в bundle-coherence.sh. Не блокирует текущий approve."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true},
+    {"ac": "AC-2",  "covered": true},
+    {"ac": "AC-3",  "covered": true},
+    {"ac": "AC-4",  "covered": true},
+    {"ac": "AC-5",  "covered": true},
+    {"ac": "AC-6",  "covered": true},
+    {"ac": "AC-7",  "covered": true},
+    {"ac": "AC-8",  "covered": true},
+    {"ac": "AC-9",  "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Known environment: choros_test_template contaminated by T-0180 migration 053_author_report_page_seed (8 mcp_tool vs expected 7). config-agent-seed.test.ts AC-02/AC-04 fail on T-0179 fitness:db run. T-0179 new tests (report_page_bundle_deps.test.ts) green on clean clone. Gap T-0147 (template-reset discipline) materialized as separate task."
+  ]
+}
