@@ -138,6 +138,10 @@ Dev-значения ниже — **DEV ONLY**; prod-значения инжек
 | `KEYCLOAK_PORT` | `8180` | Порт Keycloak HTTP (для внешних клиентов; сервер-сайд KC_ISSUER использует имя сервиса) |
 | `KEYCLOAK_REALM` | `choros` | Имя realm Keycloak |
 | `KC_ISSUER` | `http://keycloak:8180/realms/choros` | OIDC issuer (внутренний хост compose для server-side валидации JWT) |
+| `KEYCLOAK_URL` | `http://keycloak:8180` | **T-0060** Base URL Keycloak (server-side). Обязателен при `CHOROS_AUTH_MODE=keycloak` если не задан `KC_ISSUER`. |
+| `KEYCLOAK_AUDIENCE` | `choros-api` | **T-0060** Ожидаемая аудитория JWT (`aud` claim). Зафиксирована T-0054 §4.1. |
+| `JWKS_CACHE_TTL_MS` | `300000` | **T-0060** TTL in-memory JWKS-кэша (мс). Горячий кэш — нулевой сетевой хоп (NF-3). |
+| `KEYCLOAK_JWKS_URI` | — | **T-0060** Опциональный override URI JWKS; по умолчанию резолвится через OIDC discovery. |
 | `NODE_ENV` | `development` | Режим Node (`development` / `production`); prod overlay устанавливает `production` |
 | `PORT` | `3000` | Внутренний порт приложения (EXPOSE 3000 в Dockerfile) |
 | `APP_PORT` | `3000` | Хост-порт маппинга (`${APP_PORT:-3000}:3000`); не конфликтует с 55432/8180/9000/8082 |
