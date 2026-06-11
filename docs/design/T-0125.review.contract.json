@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0125",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true,
+    "note": "DESIGN-фаза: продуктового CI нет; ADR-FF (FF-CA-1..9) design-declared, scripts — deliverable §9 B-tasks. Опорные ci/checks (mutation-gateway-isolation, actor_event_vocab_pinned, audit_append_only, audit_writer_isolation, cross-tenant-fitness) присутствуют и цитируются корректно."
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/design/T-0125-card-actions.adr.md:72,:84,:187",
+      "issue": "Адресация инстанса процесса подана как существующий ResourceRef PDP ('resourceRef: ResourceRef (= существующий тип PDP)', ADR:72; 'terminate/message резолвятся на существующую op transition над ResourceRef инстанса', ADR:84), но в закрытой решётке такого типа НЕТ: grant-lattice.ts:33-39 ResourceType = application|registry|record|mgmt_object:*|effect_resource (нет process_instance); T-0019 ADR:147 живой object_kind CHECK IN ('application','registry','record'). Следствие — разъезд семантики прав: без инстансного ResourceRef terminate резолвится только над record-ref с op=transition, поэтому держатель обычного transition-статус-гранта (op=transition,record,scope) удовлетворяет тот же PDP-чек, что 'терминировать инстанс'. 'Право сменить статус' ≠ 'право убить инстанс', но дизайн их структурно не разделяет живыми примитивами и подаёт инстанс-адресацию как готовое переиспользование, а не dormant. Путь dormant (FF-CA-5 → denied без isReady), поэтому не живая дыра сегодня, но это несущая посылка AC-8/§7-B-8: при разморозке без явного решения материализуется как эскалация привилегии. ADR не выбирает ни ветвь (а) новый ResourceType process_instance (коллизия с NF-1 закрытая решётка — нужен довод 'новый ресурс-тип ≠ новый тип права'), ни ветвь (б) различитель transition-статус vs terminate-instance (guard-facet) над op=transition.",
+      "suggestion": "Не coder — дизайн-решение architect. В §2.2/§2.3 и критерии разморозки §7/B-8 явно зафиксировать: инстансного ResourceRef в закрытой решётке day-1 НЕТ → пометить как dormant наравне с REST T-0058. Выбрать и обосновать ветвь: (а) ввести process_instance ResourceType с доводом 'новый ресурс-тип под тем же закрытым Operation enum ≠ новая authority-подсистема' + FF на не-эскалацию; либо (б) guard-facet/предикат, различающий transition-статус-записи от terminate-lifecycle-инстанса над op=transition, + FF, доказывающий, что обычный transition-грант НЕ терминирует инстанс."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0125-card-actions.adr.md:166",
+      "issue": "§5 batch-PDP видимости: 'цикл по op над тем же subject/handle'. Edge корректен (тот же resolveFor, fail-closed), для DESIGN достаточно. Но resolveFor (grant-resolver.ts:489) делает grant-резолв + (шаг 5) fetch записи; ADR не фиксирует, амортизируется ли record-fetch один раз на target или повторяется per-op (потенциальный N+1 на рендере списка карточек).",
+      "suggestion": "Добавить в §5 строку: batch = K grant-резолвов над одним уже-загруженным target (record-fetch один раз на target), а не K независимых resolveFor-с-fetch."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true, "note": "секция §2.3 присутствует; качественно подорвано R-1 (посылка инстанс-ResourceRef)"},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true, "note": "кейс прогнан §6, но несущая посылка terminate-над-инстансом подорвана R-1"},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true, "note": "terminate-семантика — см. R-1"},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
