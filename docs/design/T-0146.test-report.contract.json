@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0146",
+  "verdict": "pass",
+  "tested_commit": "f90238c",
+  "branch": "task/T-0146-frozen-checks-immutable",
+  "date": "2026-06-11",
+  "tester": "claude-sonnet-4-6 (tester role)",
+  "dev_gap": {
+    "merge_base": "353ec791d997d0e5325ea660055188a0cf3a845d",
+    "dev_head": "92a53e14fe6bc8b9b4fd50e5779df23a184f46fd",
+    "branch_ahead": 6,
+    "dev_ahead": 87,
+    "rebase_required": true,
+    "note": "Gap is pre-existing stale state on branch; branch delta (6 commits) is self-contained T-0146 work only"
+  },
+  "deterministic": {
+    "total": 914,
+    "passed": 914,
+    "failed": 0,
+    "breakdown": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (2 cosmetic console warnings, 0 errors)",
+      "fitness_static": "pass (186/186 PASS, 0 FAIL — including frozen-checks-immutable.sh self-check)",
+      "vitest_unit": "pass (904/904 passed, 5 skipped — flowable integration offline)",
+      "hostile_probe_fitness_db": "pass (10/10 — frozen-checks-immutable.test.ts only, other db tests skip without DATABASE_URL)"
+    }
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "FF-FCI9: AC-1/AC-2 modifying dual-control-isolation.sh (T-0044) on T-0999 branch → exit 1", "result": "pass"},
+    {"ac": "AC-2", "test": "FF-FCI9: AC-1/AC-2 modifying dual-control-isolation.sh (T-0044) on T-0999 branch → exit 1 (FROZEN_EXCLUDE_RE variant covered by same test)", "result": "pass"},
+    {"ac": "AC-3", "test": "FF-FCI10: AC-3 modifying frozen-checks-immutable.sh (T-0146) on task/T-0146-test branch → exit 0", "result": "pass"},
+    {"ac": "AC-4", "test": "FF-FCI3: AC-4 on dev branch with no task context → exit 0", "result": "pass"},
+    {"ac": "AC-5", "test": "FF-FCI4: AC-5 adding a new ci/checks/new-gate.sh on a task branch → exit 0", "result": "pass"},
+    {"ac": "AC-6", "test": "FF-FCI9: AC-6 deleting a foreign check on a task branch → exit 1", "result": "pass"},
+    {"ac": "AC-7", "test": "static: grep 'frozen-checks-immutable.sh' package.json → 1 match in fitness chain", "result": "pass"},
+    {"ac": "AC-8", "test": "static: sed -n '2p' ci/checks/frozen-checks-immutable.sh | grep -E '^# T-0146[[:space:]]·' → match", "result": "pass"},
+    {"ac": "AC-9", "test": "static: ci/checks/known_tenant_tables.txt does not match glob ^ci/checks/[^/]+\\.sh$", "result": "pass"},
+    {"ac": "AC-10", "test": "ci/checks/db/frozen-checks-immutable.test.ts — 10/10 hostile-probe tests pass (vitest)", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-FCI9: AC-11 modifying actor_event_append_only.sh (no T-ID header) → exit 1", "result": "pass"},
+    {"ac": "AC-12", "test": "FF-FCI6: AC-12 modifying ci/checks/kc/some-check.sh on task branch → exit 0", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "Web frontend UX", "result": "n/a", "note": "No web frontend changes in this task"}
+  ],
+  "failures": [],
+  "residual_risks": [
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "description": "Branch-name spoof: a branch named task/T-0044-anything obtains TASK_ID=T-0044 and can amend dual-control-isolation.sh. Accepted by design — reviewer-visible, requires deliberate naming collision. PROBE-5 documents as accepted exit 0.",
+      "follow_up": "Full R-2 closure via control-plane claim verification (out of scope for pure-bash gate NF-1)"
+    }
+  ],
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  }
+}
