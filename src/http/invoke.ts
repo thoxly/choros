@@ -378,7 +378,7 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
     const rawBody = await readJsonBody(req);
     const body = validateInvokeBody(rawBody);
 
-    const { target_agent_id: targetAgentId, goal, context: _context } = body;
+    const { target_agent_id: targetAgentId, goal } = body;
     assertUuidShape(targetAgentId, "target_agent_id");
 
     const result = await withTenantTx(pool, tenantId, async (client) => {
