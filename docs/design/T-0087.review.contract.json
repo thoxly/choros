@@ -1,9 +1,9 @@
 {
   "task_id": "T-0087",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {
     "green": false,
-    "note": "tsc clean; npm test 1084 pass / 6 skip (env-tier 12/12). npm run fitness: only red is FF-DC7 (dual-control-isolation.sh) flagging migrations/046_tier.sql — a sibling-frozen-check gotcha with no data-file exclusion (unlike role-criticality-isolation.sh / T-0164); cannot fix without editing T-0044 frozen .sh; T-0072/T-0077 merged through the same gap. role-criticality-isolation.sh FF-RC5/FF-RC6 GREEN (R-1 excludes.txt fix works). npm run fitness:db RAN against live PG localhost:55432 (046_tier applied manually, idempotent): 12 failed/318 pass/69 skip — 5 pre-existing (cross_tenant, dual-control.gate.e2e, genesis-owner-seed 17-count, grant-editor ADV-2, schema ACT_*), 7 are T-0087's OWN tier db-tests failing with 'invalid input syntax for type uuid: \"\"' (R-5)."
+    "note": "iter-3 (SHA 13d9850). tsc --noEmit clean. Diff 5f0b44b..HEAD touches ONLY 3 files (both tier db-test files + role-criticality excludes); git diff -- src/ is empty (zero product-code change). fitness:db sanctioned run (vitest --dir ci/checks/db, 046_tier applied, PG localhost:55432): the two T-0087 tier files now PASS — tier_promote_atomic 7/7 + tier_read_scope 3/3 = 10/10, 0 skip (R-5 closed). tier-isolation.sh all-green FF-1..FF-11; role-criticality-isolation.sh FF-RC1..RC6 green; role-migration-set.sh green. Sole remaining fitness red = FF-DC7 (dual-control-isolation.sh) flagging migrations/046_tier.sql — the SAME documented sibling-frozen-check gotcha (T-0044 hardcoded whitelist, no data-file exclusion; T-0072/T-0077 merged through it). Baseline did NOT grow; not a regression from the iter-3 fix; cannot fix without editing a T-0044 frozen .sh (R-7 / role_gap_evidence). green=false reflects only this pre-existing, orchestrator-owned gotcha."
   },
   "findings": [
     {
@@ -11,55 +11,55 @@
       "severity": "nit",
       "axis": 2,
       "location": "ci/checks/role-criticality-migration-excludes.txt:21",
-      "issue": "CLOSED. iter-1 R-1 (illegal sibling-migration edit / numbering) is resolved via the additive data-file mechanism: role-criticality-migration-excludes.txt + its reader in role-criticality-isolation.sh:171-213 both pre-exist on dev (T-0164 cd01def). The branch only appends '046_tier' (line 21); role-criticality-isolation.sh is byte-untouched (git diff --stat empty). migrations/046_tier.sql renamed off old 044. Fitness: role-criticality FF-RC1..RC6 all green. Legal and additive.",
+      "issue": "CLOSED (iter-1/iter-2). Resolved via the additive data-file mechanism: role-criticality-migration-excludes.txt + its reader in role-criticality-isolation.sh both pre-exist on dev (T-0164 cd01def). Branch only appends '046_tier'; role-criticality-isolation.sh byte-untouched. role-criticality FF-RC1..RC6 all green. Legal and additive.",
       "suggestion": "No action — recorded as resolved."
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 4,
-      "location": "src/http/artifacts.ts:195-217",
-      "issue": "CLOSED (adversarially verified). currentTier is read honestly: SELECT tier ... FOR UPDATE (line 196), real tier read at line 204, decidePromote({currentTier,actorType}) at line 211; NOT_IN_DRAFT path (env-tier.ts:84-85) now reachable -> 409 (line 217). Race: FOR UPDATE serializes concurrent promotes; second sees 'published' -> NOT_IN_DRAFT -> 409. published-locked: real DB trigger tier_published_locked (046_tier.sql:46-55) RAISEs unless choros.promoting='1' (set LOCAL at artifacts.ts:221, reverts on commit) — an attached-trigger fail-closed barrier, not just an app check.",
+      "location": "src/http/artifacts.ts:195-217; ci/checks/db/tier_promote_atomic.test.ts:315-352",
+      "issue": "CLOSED (adversarially re-verified iter-3). Product code unchanged and correct: currentTier read honestly (SELECT tier FOR UPDATE), NOT_IN_DRAFT path reachable -> 409 (artifacts.ts:217); published-locked DB trigger fail-closed. iter-3 re-corrected the R-2 endpoint TEST which had drifted: it now seeds the draft under DEV_TENANT_ID (a0000000-...-001) — the same tenant the HTTP handler binds at artifacts.ts:331 — so the endpoint actually finds the row and returns 409; and asserts the real wire envelope shape { error: { code: 'NOT_IN_DRAFT' } } produced by router.ts:134. Live test passes; green is causal, not coincidental.",
       "suggestion": "No action — recorded as resolved."
     },
     {
       "id": "R-5",
-      "severity": "blocking",
+      "severity": "nit",
       "axis": 6,
-      "location": "ci/checks/db/tier_promote_atomic.test.ts:30,45,60,105,128-129,140,155-156,167,191-192,203,222-225,243,302,310; ci/checks/db/tier_read_scope.test.ts:23,seeds",
-      "issue": "The tier live-DB probes never actually touch the DB. Seed/verification blocks call 'SET LOCAL choros.tenant_id = ...' OUTSIDE an active transaction (autocommit over the pg driver), so SET LOCAL is discarded and current_setting('choros.tenant_id') reads ''. An RLS/audit trigger casts the empty GUC to uuid -> every seed INSERT dies with 'invalid input syntax for type uuid: \"\"' before any assertion runs. Reproduced directly: APP INSERT without BEGIN -> 'invalid input syntax for type uuid: \"\"'. Even blocks with BEGIN (lines 129/156/192/225/310) put SET LOCAL on the line BEFORE BEGIN, so it is still a no-op in the new txn. Consequence: live proof of AC-2 (trigger), AC-3 (config-only), AC-4/AC-5 (atomic promote+audit), AC-6 (read-scope), and the R-2 409 path is non-functional. Pure-function + DDL layers are correct; the live verification layer is unproven. iter-1's 'covered — DB not available here' masked this.",
-      "suggestion": "In both files, for every withClient block doing tenant-scoped work issue 'BEGIN' FIRST, then 'SET LOCAL choros.tenant_id = ...' immediately after, then 'COMMIT' at the end — matching the passing sibling pattern in ci/checks/db/cross_tenant.test.ts:714+ and genesis-owner-seed.test.ts:130+. Re-run DATABASE_URL=... npm run fitness:db (046 migration applied) and confirm the tier tests pass before re-review."
+      "location": "ci/checks/db/tier_promote_atomic.test.ts (BEGIN at 34/51/68/115/140/152/169/181/207/219/242/261/324/334); ci/checks/db/tier_read_scope.test.ts (BEGIN at 23/39/56/73/111/140)",
+      "issue": "CLOSED. Every withClient block doing tenant-scoped work now issues BEGIN BEFORE 'SET LOCAL choros.tenant_id', so the GUC survives into the txn (was discarded under autocommit in iter-2, causing 'invalid input syntax for type uuid' on seed). Verified line-by-line: each SET LOCAL choros.tenant_id is immediately preceded by BEGIN in both files; the three FF-2 blocks that previously had SET LOCAL on the line before BEGIN are reordered (BEGIN->SET LOCAL->SET LOCAL promoting); read-only blocks COMMIT, expected-rejection blocks ROLLBACK. Live run (vitest --dir ci/checks/db, 046_tier applied, PG localhost:55432): tier_promote_atomic 7/7 + tier_read_scope 3/3 = 10/10 pass, 0 skip. Adversarial: asserts are non-trivial (count seeded rows toBe(1)/toBe(2)/toBe(0), id-match toBe(pubId)) so a no-op seed would red the test — the live verification layer now genuinely proves AC-2/AC-3/AC-4/AC-5/AC-6/AC-9.",
+      "suggestion": "No action — recorded as resolved."
     },
     {
       "id": "R-6",
       "severity": "nit",
       "axis": 5,
-      "location": "ci/checks/role-criticality-migration-excludes.txt:20",
-      "issue": "Branch adds '045_form_binding' to excludes.txt, but dev's excludes.txt does NOT carry that line (T-0072 applied the migration without the exclude entry) and there is no 045_form_binding.sql in this branch's migrations/. The entry is inert (excludes a file absent here) but is not T-0087's to own and will duplicate/conflict against dev's file at merge.",
-      "suggestion": "Drop the '045_form_binding' line from this branch — keep only the '046_tier' entry that T-0087 owns."
+      "location": "ci/checks/role-criticality-migration-excludes.txt",
+      "issue": "CLOSED. The foreign '045_form_binding' line is deleted; excludes.txt now carries only the T-0087-owned '046_tier' entry. No cross-task ownership collision at merge. role-criticality-isolation.sh FF-RC5/RC6 + role-migration-set.sh stay green.",
+      "suggestion": "No action — recorded as resolved."
     },
     {
       "id": "R-7",
       "severity": "nit",
       "axis": 2,
-      "location": "migrations/046_tier.sql:1 + ci/checks/tier-isolation.sh:158,235-245 + ci/checks/role-criticality-migration-excludes.txt:21 + docs/pr/T-0087.pr-handoff.json:16",
-      "issue": "Merge-window renumber: 046_tier.sql collides with dev's 046_notification (T-0168 occupies 046/047/048 — confirmed applied on the live dev DB). The file must be renamed to 049_tier.sql at merge. Load-bearing '046' references that MUST rename in sync: (1) the .sql file + its header comment line 1; (2) excludes.txt:21 stem; (3) tier-isolation.sh:158 GENESIS_PATHS; (4) tier-isolation.sh:235/236/239/242/245 FF-11a; (5) pr-handoff.json:16. No '046' hardcode in src/. Mechanically safe given these 5 sync points.",
-      "suggestion": "Orchestrator: rename 046->049 across the 5 sync points in one atomic step during the merge window. Do not renumber on the branch (would re-trigger conflicts)."
+      "location": "migrations/046_tier.sql:1 + ci/checks/tier-isolation.sh:158,235-245 + ci/checks/role-criticality-migration-excludes.txt + docs/pr/T-0087.pr-handoff.json:16",
+      "issue": "OPEN, non-blocking, merge-window. 046_tier.sql collides with dev's 046_notification (T-0168 occupies 046/047/048, confirmed applied on live dev DB). Rename to 049_tier.sql at merge across the load-bearing sync points: (1) the .sql file + header comment line 1; (2) excludes.txt stem; (3) tier-isolation.sh:158 GENESIS_PATHS; (4) tier-isolation.sh:235/236/239/242/245 FF-11a; (5) pr-handoff.json:16. No '046' hardcode in src/. Mechanically safe given these 5 sync points.",
+      "suggestion": "Orchestrator: rename 046->049 across the 5 sync points in one atomic step during the merge window. Do not renumber on the branch (re-triggers conflicts). Not a build-fix item."
     }
   ],
   "acceptance_coverage": [
-    {"ac": "AC-1", "covered": false, "note": "tier column+CHECK on 4 tables: code correct (046_tier.sql:21-35), static FF-1 green, but live FF-1 not proven (R-5)."},
-    {"ac": "AC-2", "covered": false, "note": "published-locked dual-mechanism: code correct (trigger + assertWritable), but live FF-2 not proven (R-5)."},
-    {"ac": "AC-3", "covered": false, "note": "config-only promote: code correct (promoteTier touches only artifact tier, no record copy), but live FF-3 not proven (R-5)."},
-    {"ac": "AC-4", "covered": false, "note": "atomic promote: code wraps tier flip + audit in withTenantTx, but live FF-4 not proven (R-5)."},
-    {"ac": "AC-5", "covered": false, "note": "artifact.promoted audit row atomic: code at artifacts.ts:229-248, but live FF-5 not proven (R-5)."},
-    {"ac": "AC-6", "covered": false, "note": "read-scope default published: pure env-tier.test.ts green, but live FF-6 not proven (R-5)."},
-    {"ac": "AC-7", "covered": true, "note": "agent self-promote -> 403: env-tier.ts:81-82 + artifacts.ts:213-214; unit-tested. actorType from authenticated claim, never body."},
+    {"ac": "AC-1", "covered": true, "note": "tier column+CHECK on 4 tables: code (046_tier.sql:21-35) + static FF-1 + live FF-1 now PASS (tier CHECK rejects invalid tier; R-5 closed)."},
+    {"ac": "AC-2", "covered": true, "note": "published-locked dual-mechanism: live FF-2 PASS — direct UPDATE on published application AND registry_def both raise the tier_published_locked trigger (R-5 closed)."},
+    {"ac": "AC-3", "covered": true, "note": "config-only promote: live FF-3 PASS — after promoting a registry_def, draft record count in published context stays 0."},
+    {"ac": "AC-4", "covered": true, "note": "atomic promote: tier flip + audit wrapped in withTenantTx; live promote path exercised via FF-2/FF-9 sanctioned promoting='1' flow (R-5 closed)."},
+    {"ac": "AC-5", "covered": true, "note": "artifact.promoted audit row atomic: product code at artifacts.ts:229-248 unchanged; live promote path exercised; R-2 endpoint path live-green."},
+    {"ac": "AC-6", "covered": true, "note": "read-scope default published: live FF-6 PASS — published context shows 1 published rec (id-matched), draft context shows 2; draft-only app returns 0 in published context (R-5 closed)."},
+    {"ac": "AC-7", "covered": true, "note": "agent self-promote -> 403: env-tier.ts:81-82 + artifacts.ts:213-214; unit-tested; actorType from authenticated claim, never body."},
     {"ac": "AC-8", "covered": true, "note": "no createDatabase/provisionContour: FF-8 static green."},
-    {"ac": "AC-9", "covered": false, "note": "tier orthogonal to SDLC: pure correct, but live FF-9 not proven (R-5)."},
+    {"ac": "AC-9", "covered": true, "note": "tier orthogonal to SDLC: live FF-9 PASS — published-tier application INSERT/promote succeeds in dev Choros (R-5 closed)."},
     {"ac": "AC-10", "covered": true, "note": "tier='published' assigned only at artifacts.ts:225 inside the promote UPDATE; FF-10 static green."}
   ],
   "role_gap_evidence": [
-    "FF-DC7 (dual-control-isolation.sh) hardcodes a single-migration whitelist (031_*confirmed2_by*) with NO data-file exclusion mechanism, so EVERY sibling migration reddens it falsely. This is the 3rd task (after T-0072/045, T-0077/044) to hit the same structural gap and merge through it. Candidate: backport the T-0164 data-file exclusion pattern to dual-control-isolation.sh, or generalize the migration-ownership exclusion to a single shared check. Evidence for ledgers/role-gaps.md."
+    "FF-DC7 (dual-control-isolation.sh) hardcodes a single-migration whitelist (031_*confirmed2_by*) with NO data-file exclusion mechanism, so EVERY sibling migration reddens it falsely. This is the 3rd task (after T-0072/045, T-0077/044) to hit the same structural gap and merge through it; iter-3 re-confirmed it is still red on 046_tier.sql with no T-0087 way to fix it (editing a T-0044 frozen .sh is out of zone). Candidate: backport the T-0164 data-file exclusion pattern to dual-control-isolation.sh, or generalize migration-ownership exclusion into one shared check. Evidence for ledgers/role-gaps.md."
   ]
 }
