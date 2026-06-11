@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0176",
+  "status": "ready",
+  "summary": "Модуль src/core/report-page-compat.ts реализует две чистые функции (no I/O, no DB, no process.env): checkReportPageDepFields (проверяет field_key deps страницы против record_schema реестра, возвращает DepViolation[]) и classifyReportPageFloor (машинная граница Floor-1 ↔ Floor-2 по vocab page_def). Зеркало паттерна binding-compat.ts (T-0072). NF-1 ADR — один контрол плейн согласованности.",
+  "functional": [
+    "FR-1: checkReportPageDepFields(deps, recordSchema) — pure. field_key не в properties → DepViolation{type:'missing_in_schema'}; все присутствуют → {ok:true}.",
+    "FR-2: classifyReportPageFloor(pageDef) — pure. pageDef = массив Floor-1 vocab метрик → {requiredFloor:'1'}; иначе → {requiredFloor:'2', reason}.",
+    "FR-3: DepViolation = зеркало BindingViolation (T-0072): type 'missing_in_schema'|'lossy_narrowing', registryDefId, fieldKey.",
+    "FR-4: JsonSchema объявляется локально как {properties?: Record<string,unknown>}; нет внешних schema-зависимостей.",
+    "FR-5: Нет запрещённых импортов: pg, node:fs, node:http, node:net, child_process, import.meta, process.env, process.exit, DAO.",
+    "FR-6: Файл src/core/report-page-compat.ts с ADR-комментарием, ссылающимся на T-0072 checkBindingCompat.",
+    "FR-7: Тесты src/__tests__/report-page-compat.test.ts — unit-пробы на каждое ADR-правило §3/§4, no DB/net/env.",
+    "FR-8: Fitness-check ci/checks/report-page-compat-isolation.sh: существование файла + запрещённые импорты + экспорты. Вызывается из npm run fitness."
+  ],
+  "non_functional": [
+    "NF-1: Симметрия паттерна с binding-compat.ts (T-0072): стиль, именование, purity-дисциплин.",
+    "NF-2: Нет process.env в коде (no-env-in-core.sh T-0163 остаётся зелёным).",
+    "NF-3: JsonSchema-тип минимально-достаточный (только properties); расширяем без breaking-change.",
+    "NF-4: classifyReportPageFloor принимает pageDef: unknown, валидирует внутри без throw.",
+    "NF-5: checkReportPageDepFields не проверяет дубли fieldKey — это ответственность write-path guard."
+  ],
+  "out_of_scope": [
+    "lossy_narrowing триггер (dep_kind='aggregate' + type-narrowing) — T-0177 (schema-change API)",
+    "registry_def schema-change API (soft-warning, destructive-deny, force-escape-hatch) — T-0121c/T-0177",
+    "Авто-извлечение deps из page_def Floor-1 → report_page_dep — T-0121d",
+    "bundle-coherence расширение check-report-page-deps — T-0121e",
+    "MCP-tool seed author_report_page — T-0121f",
+    "Floor-1 server-side renderer + Floor-2 RLS-gated data API — T-0121g",
+    "Статический анализ Floor-2 React (Stage-2) — T-0121h"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "test -f src/core/report-page-compat.ts — exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "grep на запрещённые I/O-импорты в src/core/report-page-compat.ts — пустой результат (FF-COMPAT-PURE).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Файл содержит export DepKind, PageDep, DepViolation, DepCompatResult, function checkReportPageDepFields, function classifyReportPageFloor.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "checkReportPageDepFields([{registryDefId:'r1', fieldKey:'amount', depKind:'aggregate'}], {properties:{amount:{}}}) → {ok:true}.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "checkReportPageDepFields([{registryDefId:'r1', fieldKey:'amount', depKind:'aggregate'}], {properties:{}}) → {ok:false, violations:[{type:'missing_in_schema', registryDefId:'r1', fieldKey:'amount'}]}.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "checkReportPageDepFields([], {properties:{amount:{}}}) → {ok:true}.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Два dep с несуществующими ключами → violations длиной 2; один dep без ключа + один с ключом → violations длиной 1.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "checkReportPageDepFields([{registryDefId:'r1', fieldKey:'f', depKind:'read'}], {}) → {ok:false, violations:[{type:'missing_in_schema',...}]} (отсутствие properties ≡ пустой).", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "classifyReportPageFloor([{source_registry_def_id:'r1', field_key:'amount', agg:'sum'}]) → {requiredFloor:'1',...} (FF-FLOOR).", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "classifyReportPageFloor([]) → {requiredFloor:'1',...} (пустой массив — Floor-1).", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "classifyReportPageFloor({metrics:[]}) и classifyReportPageFloor(null) → {requiredFloor:'2',...} (не массив).", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "classifyReportPageFloor([{source_registry_def_id:'r1', field_key:'f', agg:'median'}]) → {requiredFloor:'2',...} ('median' не в vocab).", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "classifyReportPageFloor([{source_registry_def_id:'r1', field_key:'f', agg:'count', custom_render:true}]) → {requiredFloor:'2',...} (лишнее поле вне vocab).", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "classifyReportPageFloor([{source_registry_def_id:'r1', field_key:'f', agg:'avg', group_by:'dept', filter:{field_key:'status', op:'=', value:'active'}, title:'Avg', subtitle:'sub'}]) → {requiredFloor:'1',...}.", "verifiable_as": "test"},
+    {"id": "AC-15", "text": "npx vitest run src/__tests__/report-page-compat.test.ts — exit 0, все тесты прошли.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "tsc --noEmit — exit 0 после добавления файлов.", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "bash ci/checks/no-env-in-core.sh — exit 0 (T-0163 FF-NF-2 зелёный).", "verifiable_as": "fitness"},
+    {"id": "AC-18", "text": "bash ci/checks/report-page-compat-isolation.sh — exit 0 (FF-COMPAT-PURE).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0176-report-page-compat.spec.md"
+}
