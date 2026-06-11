@@ -1,0 +1,128 @@
+{
+  "task_id": "T-0170",
+  "status": "ready",
+  "summary": "Notifications E-N.3 + wiring: EmailChannelDriver (requiresEmailConfig=true) + RL-3 smtp_handle custody (validateSecretHandleShape/redactHandle/SmtpSecretResolverPort) + SMTP-адаптер (инжектируемый порт SmtpSenderPort) + email_channel_config-CRUD с аудитом + wiring makeNotificationDeliver в production dispatch loop lifecycle-bridge.ts + wired-entry тест. Immediate-dead = maxAttempts=1 для notification dispatcher-instance.",
+  "functional": [
+    "FR-1: EmailChannelDriver implements ChannelDriver, key='email', requiresEmailConfig=true",
+    "FR-2: EmailChannelDriver резолвит smtp_handle через SmtpSecretResolverPort только в deliver",
+    "FR-3: EmailChannelDriver From = from_name <from_address> из email_channel_config; нет захардкоженного relay",
+    "FR-4: SmtpSenderPort = инжектируемый порт sendEmail(opts); src/adapters/smtp-sender.ts; реальный SMTP в тестах ЗАПРЕЩЁН",
+    "FR-5: setEmailChannelConfig валидирует smtp_handle через validateSecretHandleShape перед записью",
+    "FR-6: getEmailChannelConfigStatus возвращает redactHandle(smtp_handle), не raw",
+    "FR-7: appendAuditEvent notif.email_config.set/revoke — payload: from_address/smtp_host; smtp_handle никогда",
+    "FR-8: immediate-dead semantics: retryable:false → maxAttempts=1 в notification dispatcher-instance",
+    "FR-9: makeNotificationDeliver зарегистрирован в lifecycle-bridge.ts startLifecycleBridge",
+    "FR-10: wired-entry тест от composition root startLifecycleBridge",
+    "FR-11: deliver fail-closed без tenantId → {ok:false, retryable:false}",
+    "FR-12: DataClass импортируется из data-classification.ts"
+  ],
+  "non_functional": [
+    "NF-1: raw SMTP-секрет нигде — нет в лог/audit/exception/res.json (FF-NO-RAW-SMTP)",
+    "NF-2: validateSecretHandleShape блокирует sk-/hex-32+/JWT при set/rotate (FF-HANDLE-SHAPE)",
+    "NF-3: SmtpSecretResolverPort совместим с T-0025 SecretResolverPort под tsc (FF-RESOLVER-PORT)",
+    "NF-4: From из email_channel_config; нет relay-домена в коде (FF-EMAIL-FROM-CLIENT)",
+    "NF-5: email-deliver fail-closed без tenant-контекста (FF-FANOUT-FAILCLOSED)",
+    "NF-6: нет нового dispatcher/setInterval в notification-email.ts (FF-ONE-OUTBOX)",
+    "NF-7: pure-core notification-email.ts — нет pg/http/net/fetch-импортов",
+    "NF-8: нет appendAuditEvent в delivery-пути email-драйвера (FF-NO-DELIVERY-AUDIT)",
+    "NF-9: requiresEmailConfig=true ОБЯЗАТЕЛЕН на EmailChannelDriver (T-0169 jsdoc)"
+  ],
+  "out_of_scope": [
+    "notification_preference-CRUD, defaults-seed — E-N.4",
+    "renderTemplate, notification-templates.ts — E-N.5",
+    "REST API notification center, /api/email-channel-config route — E-N.6",
+    "audit notif.preference.changed — E-N.7",
+    "Реальный SmtpSecretResolver (vault/env) — Stage-2",
+    "Bounce-webhook-обработка DSN — Stage-2",
+    "Tenant-configurable шаблоны — Stage-2",
+    "SLA-watchdog / эскалации как продюсеры NotificationEvent — T-0095/E7"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "EmailChannelDriver.requiresEmailConfig === true; key === 'email'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "EmailChannelDriver.deliver вызывает SmtpSecretResolverPort.resolveSecret(handle, {tenantId})",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Resolved secret не покидает драйвер: нет в console.*/appendAuditEvent/res.json/exception (FF-NO-RAW-SMTP)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "setEmailChannelConfig с sk-*/bare-hex-32+/JWT → {ok:false, reason:…}; valid opaque → {ok:true}, запись происходит (smtp-handle-shape тест)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "getEmailChannelConfigStatus возвращает handleRedacted = redactHandle(handle), не raw smtp_handle",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "setEmailChannelConfig эмитит audit_event notif.email_config.set с from_address/smtp_host; smtp_handle отсутствует в payload",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "SMTP-адаптер-стаб получает from = 'from_name <from_address>' из конфига; нет захардкоженного relay-домена (email-from-client тест)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "deliver с ctx.tenantId='' → {ok:false, retryable:false}, нет SMTP-звонка (fanout-fail-closed тест)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "SmtpSecretResolverPort совместим с T-0025 SecretResolverPort под tsc --noEmit; нет LLM-вызовов/relay в notification-email.ts (FF-RESOLVER-PORT)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "appendAuditEvent не вызывается в deliver-пути email-драйвера (FF-NO-DELIVERY-AUDIT)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Нет setInterval/startEmailDispatcher в notification-email.ts и smtp-sender.ts (FF-ONE-OUTBOX)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "makeNotificationDeliver импортирован и используется в lifecycle-bridge.ts; wired-entry тест: notification outbox-ряд → email-стаб deliver вызван (FE-W24-0045)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "retryable:false → DispatchResult.error начинается с IMMEDIATE_DEAD_ERROR_PREFIX; wiring использует maxAttempts=1 для notification dispatcher (immediate-dead тест)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "DataClass импортируется из ../core/data-classification.js в notification-email.ts, не редекларируется (FF-EGRESS-CLASS)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "tsc --noEmit и npm test (vitest) проходят без новых ошибок",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "npm run fitness (включая notification-email.sh owner T-0170) зелёный",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "npm run fitness:db (1 pass) зелёный",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0170-notifications-email.spec.md"
+}
