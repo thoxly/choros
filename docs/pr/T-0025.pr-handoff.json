@@ -1,0 +1,23 @@
+{
+  "task_id": "T-0025",
+  "status": "pr_open",
+  "branch": "task/T-0025",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/secret-handle-validator.ts",
+    "src/http/secret-handle.ts",
+    "src/__tests__/secret-handle.test.ts",
+    "ci/checks/secret-handle-isolation.sh",
+    "src/server.ts",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": []
+}
