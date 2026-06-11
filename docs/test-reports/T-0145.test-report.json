@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0145",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "adversarial-probe: added fake_table_probe to known_tenant_tables.txt → FF-5 still green (toBeGreaterThan(0), count not hardcoded)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "negative-probe: removed invoke_proposal from known_tenant_tables.txt → FF-5 red at line 116 toContain('invoke_proposal')",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "fitness-grep: FF-5 block contains no withClient / information_schema reference; confirmed by reading grant-editor.test.ts lines 98-118",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "fitness-grep: no toBe(29) or toBe(<number>) in FF-5 block; header comment updated to 'known_tenant_tables file is well-formed (static; count from file)'",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "FF-5 / AC-19 static test: toContain('invoke_proposal') present at line 116 and passes with 30-entry registry",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "npx vitest run --dir ci/checks/db --no-file-parallelism: FF-1/FF-2/FF-7/FF-8/FF-10 static tests all pass; live-DB tests fail only due to no DATABASE_URL (known-env, not T-0145); ambient npx vitest run = 927 pass / 5 skip",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "notes": {
+    "known_env_failures": [
+      "grant-editor.test.ts: 10 live-DB tests fail (DATABASE_URL not set) — pre-existing env condition, not T-0145",
+      "grant-editor.adversarial.test.ts: 10 fail (8 × DATABASE_URL not set, 1 × route 404 ADV-4, 1 × ADV-5 DB); 5 skipped — pre-existing",
+      "schema.test.ts: all 16 fail (no DATABASE_URL) — known-env",
+      "genesis-owner-seed.test.ts: 5 fail (DATABASE_URL) — known-env",
+      "cross_tenant.test.ts: 67 skipped — known-env",
+      "dual-control.gate.e2e.test.ts: 1 fail (DATABASE_URL), 4 skipped — known-env",
+      "FF-ACT act_* tables — schema.test.ts live test, fails due to DATABASE_URL — known-env"
+    ],
+    "schema_test_anti_decorative_assert": "schema.test.ts FF-RLS 'no choros base table is missing from the known_tenant_tables fixture (anti-decorative)' uses KNOWN_TENANT_TABLES from _helpers.ts vs live DB information_schema. In CI mode (CI=true) it enforces exact set equality: extra tables in DB → fail. Adding a fake row to known_tenant_tables.txt would cause 'missing from DB' failure there too. This is the live-DB drift detector complementing the static FF-5.",
+    "probe_ac1_detail": "After appending 'fake_table_probe' (31 lines), FF-5 passes: toBeGreaterThan(0) satisfied, toContain checks all pass. MD5 b2fcc1349757a08d0cf422e74cc59cdc restored via git checkout.",
+    "probe_ac2_detail": "After removing 'invoke_proposal' (29 lines), FF-5 fails at grant-editor.test.ts:116 with AssertionError: expected [...(27)] to include 'invoke_proposal'. MD5 b2fcc1349757a08d0cf422e74cc59cdc restored via git checkout."
+  }
+}
