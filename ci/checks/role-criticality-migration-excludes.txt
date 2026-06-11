@@ -17,3 +17,6 @@
 030_grant_proposed_confirmed  # T-0030 — grant editor; sibling task, predates T-0040
 031_grant_confirmed2_by       # T-0044 — dual-control gate ADD COLUMN confirmed2_by
 043_invoke_proposal           # T-0024 — invoke-grant migration; owned by invoke-grant-isolation.sh
+046_notification              # T-0168 — notifications E-N.1 migrations (choros.notification)
+047_email_channel_config      # T-0168 — notifications E-N.1 migrations (choros.email_channel_config)
+048_notification_preference   # T-0168 — notifications E-N.1 migrations (choros.notification_preference)

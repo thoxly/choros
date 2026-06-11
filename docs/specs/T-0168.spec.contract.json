@@ -1,0 +1,140 @@
+{
+  "task_id": "T-0168",
+  "status": "ready",
+  "summary": "Три SQL-миграции создают tenant-таблицы notification / email_channel_config / notification_preference с полным T-0013-контрактом (FORCE RLS, default-DENY, choros_app DML), badge-частичным индексом, keyset-индексом и аддитивным обновлением known_tenant_tables.txt.",
+  "functional": [
+    "FR-1: Миграция 046_notification.sql создаёт choros.notification с колонками по ADR §4.1: tenant_id/id/recipient_id/event_kind/title/body/object_ref/is_read/created_at/expires_at; PK (tenant_id, id); FK (tenant_id, recipient_id) → employee(tenant_id, id).",
+    "FR-2: Миграция 047_email_channel_config.sql создаёт choros.email_channel_config с колонками по ADR §4.2: tenant_id/smtp_host/smtp_port/smtp_tls/from_address/from_name/smtp_handle/is_enabled/updated_by/updated_at; PK (tenant_id).",
+    "FR-3: Миграция 048_notification_preference.sql создаёт choros.notification_preference с колонками по ADR §4.3: tenant_id/event_kind/recipient_scope/channels/updated_by/updated_at; PK (tenant_id, event_kind, recipient_scope).",
+    "FR-4: Каждая из трёх таблиц имеет ENABLE+FORCE ROW LEVEL SECURITY и политику default-DENY на current_setting('choros.tenant_id', true)::uuid; политики именованы <table>_tenant_isolation.",
+    "FR-5: GRANT SELECT, INSERT, UPDATE, DELETE ON каждой таблице TO choros_app (NOBYPASSRLS-роль).",
+    "FR-6: Badge-частичный индекс idx_notification_unread ON choros.notification (tenant_id, recipient_id) WHERE is_read = false.",
+    "FR-7: Keyset-индекс idx_notification_listing ON choros.notification (tenant_id, recipient_id, created_at, id).",
+    "FR-8: Три имени notification / email_channel_config / notification_preference добавляются в ci/checks/known_tenant_tables.txt аддитивно.",
+    "FR-9: Миграции не создают новых таблиц queue/delivery/dispatch (нет второго outbox, FF-NB-OUTBOX).",
+    "FR-10: Слоты миграций — три свободных номера ≥ 046 (045_form_binding.sql — наивысший занятый)."
+  ],
+  "non_functional": [
+    "NF-1: Каждая миграция идемпотентна (CREATE TABLE IF NOT EXISTS, DO-guard для политик, runner записывает версию в choros.schema_migrations).",
+    "NF-2: tenant_id — ведущая колонка PK и всех составных индексов (FF-LEAD).",
+    "NF-3: FK (tenant_id, recipient_id) → employee tenant-scoped на обеих сторонах (T-0017-дисциплина); нет cross-tenant FK.",
+    "NF-4: Стиль SQL совместим с образцами 043–045 (header-комментарий, choros. prefix, именованные политики).",
+    "NF-5: Все объекты в схеме choros, ничего в public."
+  ],
+  "out_of_scope": [
+    "TS-код routing/fanout/publishNotificationEvent (E-N.2)",
+    "ChannelDriver-реестр, makeNotificationDeliver (E-N.2)",
+    "Email-драйвер, SmtpSecretResolverPort, SMTP-адаптер (E-N.3)",
+    "notification_preference CRUD-хендлеры и defaults-seed при genesis tenant (E-N.4)",
+    "renderTemplate, notification-templates.ts (E-N.5)",
+    "REST API /api/notifications, /api/email-channel-config, /api/notification-preferences (E-N.6)",
+    "Аудит-события notif.email_config.*/notif.preference.changed (E-N.7)",
+    "Sweeper авто-ретенции (Stage-2)",
+    "Tenant-configurable шаблоны (Stage-2)",
+    "Push-уведомления / bounce-webhook (Stage-2 / not-MVP)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "После применения миграций SELECT 1 FROM information_schema.tables WHERE table_schema='choros' AND table_name='notification' возвращает 1 строку.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "После применения миграций SELECT 1 FROM information_schema.tables WHERE table_schema='choros' AND table_name='email_channel_config' возвращает 1 строку.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "После применения миграций SELECT 1 FROM information_schema.tables WHERE table_schema='choros' AND table_name='notification_preference' возвращает 1 строку.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "pg_class подтверждает relrowsecurity=true и relforcerowsecurity=true для всех трёх таблиц в схеме choros; существующий FF-RLS гейт schema.test.ts становится зелёным.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "SELECT policyname FROM pg_policies WHERE schemaname='choros' AND tablename IN ('notification','email_channel_config','notification_preference') возвращает notification_tenant_isolation, email_channel_config_tenant_isolation, notification_preference_tenant_isolation.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "qual и with_check каждой политики — tenant_id = current_setting('choros.tenant_id', true)::uuid; без GUC — 0 строк видно, INSERT отказывает.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "information_schema.role_table_grants для grantee='choros_app' возвращает SELECT/INSERT/UPDATE/DELETE для каждой из трёх таблиц.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "pg_constraint для notification содержит primary key (tenant_id, id) и foreign key (tenant_id, recipient_id) → choros.employee(tenant_id, id).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "pg_constraint для email_channel_config содержит primary key с единственной колонкой tenant_id.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "pg_constraint для notification_preference содержит composite primary key (tenant_id, event_kind, recipient_scope).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "pg_indexes для choros.notification содержит строку indexname='idx_notification_unread'; indexdef содержит WHERE (is_read = false).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "pg_indexes для choros.notification содержит строку indexname='idx_notification_listing'; indexdef содержит колонки (tenant_id, recipient_id, created_at, id).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Существующий FF-LEAD гейт schema.test.ts применяется к трём новым таблицам: ни один составной индекс не начинается с колонки, отличной от tenant_id.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "grep -c 'notification$\\|email_channel_config\\|notification_preference' ci/checks/known_tenant_tables.txt возвращает 3; общее число строк в файле ≥ 34 (было 31 + 3 новых).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "grep -iE 'CREATE TABLE.*(queue|delivery|dispatch)' в файлах миграций T-0168 — пустой результат.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "Полный FF-T13 гейт (loop KNOWN_TENANT_TABLES → FORCE RLS) зелёный для notification, email_channel_config, notification_preference.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "EXPLAIN (FORMAT JSON) SELECT COUNT(*) FROM choros.notification WHERE tenant_id=$1 AND recipient_id=$2 AND is_read=false содержит idx_notification_unread в плане; нет seq-scan, нет materialized view.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "information_schema.columns для choros.notification возвращает ровно 10 колонок по ADR §4.1: tenant_id uuid NOT NULL, id uuid NOT NULL, recipient_id uuid NOT NULL, event_kind text NOT NULL, title text NOT NULL, body text NOT NULL, object_ref text NULL, is_read boolean NOT NULL DEFAULT false, created_at bigint NOT NULL, expires_at bigint NULL.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "information_schema.columns для choros.email_channel_config возвращает ровно 10 колонок по ADR §4.2: tenant_id, smtp_host, smtp_port, smtp_tls (DEFAULT true), from_address, from_name (NULL), smtp_handle, is_enabled (DEFAULT false), updated_by, updated_at.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-20",
+      "text": "information_schema.columns для choros.notification_preference возвращает ровно 6 колонок по ADR §4.3: tenant_id, event_kind, recipient_scope, channels (ARRAY), updated_by, updated_at.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0168-notifications-migrations.spec.md"
+}
