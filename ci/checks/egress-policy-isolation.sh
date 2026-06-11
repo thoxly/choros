@@ -20,8 +20,9 @@
 #         __tests__/, returns ZERO matches (the only src/ reference allowed is the
 #         compile-time type-check fixture under src/__tests__/).
 #
-#  FF-EP4 (AC-12 / NF-5) — migration seam: T-0041 adds ONLY files numbered 038
-#         (039 reserve, unused); no migrations/03[2-7]_*.sql or 04*+ file exists.
+#  FF-EP4 (AC-12 / NF-5) — egress_policy definition seam: migrations/038_egress_policy.sql
+#         exists and is the ONLY migration file that CREATE/ALTER-s egress_policy.
+#         Double-definition guard — other migration slots are not policed here.
 #
 #  FF-EP5 (AC-14 / FR-4) — deny-by-default: migration 038 seeds NO catch-all
 #         "allow all" row (no INSERT with class/endpoint wildcards). The dormant
@@ -96,16 +97,31 @@ else
   echo "PASS [FF-EP3]: egress_policy is schema-dormant (no src/ runtime read)"
 fi
 
-# ---- FF-EP4: migration seam — only 038 (039 reserve), none 032-037/040+ ---
+# ---- FF-EP4: egress_policy definition seam — exactly one file owns the table ----
+# Checks:
+#   (a) migrations/038_egress_policy.sql exists (the canonical owner)
+#   (b) no OTHER migration file contains CREATE TABLE ... egress_policy or
+#       ALTER TABLE egress_policy (double-definition guard)
+# Note: policing unrelated sibling migration slots (034, 036, 040+) is NOT this
+# check's responsibility — those are owned by their respective tasks and are
+# legitimate on dev as waves merge. This check owns only the egress_policy axis.
 before=${ERRORS}
-STRAY=$(ls "${PROJECT_ROOT}/migrations" 2>/dev/null \
-  | grep -E "^(03[2-7]|0[4-9][0-9]|[1-9][0-9]{2})_.*\.sql$" || true)
-if [[ -n "${STRAY}" ]]; then
-  echo "FAIL [FF-EP4]: migration outside the 038/039 seam present:"
-  echo "${STRAY}"
+if [[ ! -f "${MIGRATION}" ]]; then
+  echo "FAIL [FF-EP4]: migrations/038_egress_policy.sql does not exist (canonical owner missing)"
   ERRORS=$((ERRORS + 1))
 else
-  echo "PASS [FF-EP4]: migration seam clean (only 038/039 may be added by T-0041)"
+  # Search for any OTHER migration file that creates or alters egress_policy
+  DOUBLE_DEF=$(grep -rlE \
+    "(CREATE TABLE( IF NOT EXISTS)? +(choros\.)?egress_policy|ALTER TABLE (choros\.)?egress_policy)" \
+    "${PROJECT_ROOT}/migrations" 2>/dev/null \
+    | grep -vF "038_egress_policy.sql" || true)
+  if [[ -n "${DOUBLE_DEF}" ]]; then
+    echo "FAIL [FF-EP4]: egress_policy CREATE/ALTER found outside the canonical 038 migration:"
+    echo "${DOUBLE_DEF}"
+    ERRORS=$((ERRORS + 1))
+  else
+    echo "PASS [FF-EP4]: egress_policy defined exactly once in migrations/038_egress_policy.sql"
+  fi
 fi
 
 # ---- FF-EP5: deny-by-default — no catch-all seed row in migration 038 -----
