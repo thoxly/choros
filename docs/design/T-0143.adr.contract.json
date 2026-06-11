@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0143",
+  "status": "ready",
+  "decision": "Thread resolverDeps (the full ResolverDeps interface containing keyedDigest) as an additive optional second parameter to createServer() and then to buildRouter(), where it is captured in a closure for use by any route that calls makeGrantResolver. startMain builds a single ResolverDeps object { keyedDigest } (from buildKeyedDigestFromEnv), passes it to createServer(), and places the SAME instance on MainHandle.resolverDeps — object identity by construction, not by coincidence. The e2e proof uses spec §8 pattern (b): resolveFor(handle.resolverDeps, ...) is called directly; the proof-of-equivalence comment in the test states that handle.resolverDeps is the exact allocation createServer received. No new HTTP route is added. No existing signature is broken (additive optional parameter). hash fields honestly degrade to drop when resolverDeps is absent (callers passing zero/one arg to createServer are unaffected).",
+  "rejected_alternatives": [
+    {
+      "option": "Add a minimal probe HTTP route (GET /api/resolve-probe) to drive a full HTTP socket through makeGrantResolver",
+      "why_not": "Gold-plating: spec FR-3 says additive only, no new routes beyond threading keyedDigest. A probe endpoint that exists only for testing is extra production surface. Spec §8 explicitly provides pattern (b) as a valid e2e proof — no socket required."
+    },
+    {
+      "option": "Store resolverDeps in a module-level singleton in server.ts",
+      "why_not": "Hidden global state makes createServer non-re-entrant and non-testable with different deps. All other injected ports in this codebase use explicit parameter injection, not module-level globals."
+    },
+    {
+      "option": "Read CHOROS_MASK_DIGEST_KEY inside buildRouter via process.env",
+      "why_not": "Violates FF-DC9 / NF-1 — process.env reads must stay exclusively in src/main.ts. Re-introduces the env boundary inside server.ts."
+    },
+    {
+      "option": "Expose a makeResolver() factory on MainHandle and call it from the route",
+      "why_not": "Couples the request path back to the startup handle. Routes do not know about MainHandle — single-direction dependency enforced by the codebase conventions."
+    },
+    {
+      "option": "Thread only { keyedDigest: KeyedDigest } rather than the full ResolverDeps",
+      "why_not": "Creates a second partial ResolverDeps shape and will require a signature change when the next optional port (classifications, effects, sod) is threaded. The full ResolverDeps interface is the established pattern; the optional type makes it backward-compatible today and extensible tomorrow."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "createServer (src/server.ts, ADDITIVE optional second parameter)",
+      "fields": [
+        {"name": "store", "type": "JobStore | PostgresJobStore | InMemoryJobStore (existing, default = createJobStore())"},
+        {"name": "resolverDeps", "type": "ResolverDeps | undefined (NEW additive optional; passed to buildRouter; absent => hash fields drop honestly)"}
+      ]
+    },
+    {
+      "entity": "buildRouter (src/server.ts, internal, ADDITIVE optional last parameter)",
+      "fields": [
+        {"name": "store", "type": "JobStore | PostgresJobStore | InMemoryJobStore (existing)"},
+        {"name": "timerStore", "type": "PostgresTimerStore | undefined (existing)"},
+        {"name": "outboxStore", "type": "PostgresOutboxStore | undefined (existing)"},
+        {"name": "resolverDeps", "type": "ResolverDeps | undefined (NEW additive optional; captured in closure; any route calling makeGrantResolver receives it)"}
+      ]
+    },
+    {
+      "entity": "startMain composition change (src/main.ts)",
+      "fields": [
+        {"name": "resolverDepsObj", "type": "ResolverDeps — single allocation { keyedDigest } built from buildKeyedDigestFromEnv(env); passed to createServer() AND to MainHandle.resolverDeps; same instance (object identity guarantee)"},
+        {"name": "MainHandle.resolverDeps", "type": "{ keyedDigest: KeyedDigest } (existing public contract UNCHANGED; concrete value also satisfies ResolverDeps)"}
+      ]
+    },
+    {
+      "entity": "e2e test (src/__tests__/keyed-digest-e2e.test.ts, NEW)",
+      "fields": [
+        {"name": "pattern", "type": "spec §8 pattern (b) — resolveFor(handle.resolverDeps, ...) directly; proof-of-equivalence comment required"},
+        {"name": "AC-2 case", "type": "startMain with CHOROS_MASK_DIGEST_KEY => restricted field => 64-char hex in result"},
+        {"name": "AC-3 case", "type": "startMain without CHOROS_MASK_DIGEST_KEY => same field ABSENT (dropped), never raw, never keyless djb2"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/server.ts: createServer(store = createJobStore(), resolverDeps?: ResolverDeps): http.Server — additive optional second parameter; zero-arg and one-arg callers unchanged",
+    "src/server.ts: buildRouter(store, timerStore?, outboxStore?, resolverDeps?: ResolverDeps): Router — additive optional last parameter; internal only (not exported)",
+    "src/server.ts: handleRequest lazy-shim continues to call buildRouter with NO resolverDeps (hash fields drop honestly for backward-compat; shim is not a masking-test surface)",
+    "src/main.ts: single ResolverDeps allocation { keyedDigest } passed to both createServer() and MainHandle.resolverDeps — object identity by construction",
+    "src/main.ts: createJobStore (or equivalent) called explicitly before createServer so resolverDepsObj can be passed as second argument",
+    "src/__tests__/keyed-digest-e2e.test.ts (NEW): e2e test — resolveFor(handle.resolverDeps, ...) pattern (b) with proof-of-equivalence comment; two cases: key present (hex output) and key absent (field dropped)",
+    "MainHandle.resolverDeps type: { keyedDigest: KeyedDigest } — UNCHANGED (FR-5 / AC-7 / AC-9); no widening to ResolverDeps on the public handle type"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T143-1",
+      "rule": "createServer additive signature (NF-2 / FE-W23-0008): zero-arg and one-arg callers compile and behave identically after the additive optional second parameter is added.",
+      "ci_check": "tsc --noEmit clean; vitest src/__tests__/auth.e2e.test.ts + health.test.ts + all existing e2e tests that call createServer() with zero/one arg pass green."
+    },
+    {
+      "id": "FF-T143-2",
+      "rule": "resolverDeps object identity at composition root (FR-1 / AC-1 / AC-7): handle.resolverDeps.keyedDigest.digest(...) returns a 64-char hex string when CHOROS_MASK_DIGEST_KEY is set; returns undefined when not set. This passes only if the real bound KeyedDigest from startMain's buildKeyedDigestFromEnv is propagated — not a default undefined.",
+      "ci_check": "vitest src/__tests__/keyed-digest-e2e.test.ts: startMain({ listen: false, env: { CHOROS_MASK_DIGEST_KEY: <32-byte hex> } }) => handle.resolverDeps.keyedDigest.digest({value:'v',tenantId:'t',resourceType:'r',facetField:'f'}) matches /^[0-9a-f]{64}$/; startMain({ listen: false, env: {} }) => same call returns undefined."
+    },
+    {
+      "id": "FF-T143-3",
+      "rule": "e2e keyed hash active through real composition root (AC-2): resolveFor(handle.resolverDeps, ...) with a restricted field and CHOROS_MASK_DIGEST_KEY set produces a 64-char lowercase hex string — NOT the keyless djb2, NOT raw, NOT absent.",
+      "ci_check": "vitest src/__tests__/keyed-digest-e2e.test.ts: startMain with key => resolveFor(handle.resolverDeps, testHandle, testSubject, 'read') => result field matches /^[0-9a-f]{64}$/ AND does not equal old djb2 AND does not equal raw value."
+    },
+    {
+      "id": "FF-T143-4",
+      "rule": "e2e absent key — hash field drops (AC-3 / FR-2): resolveFor with no CHOROS_MASK_DIGEST_KEY in env produces an output where the hash-routed field is ABSENT. Server starts normally. Fail-closed, never raw, never keyless.",
+      "ci_check": "vitest src/__tests__/keyed-digest-e2e.test.ts: startMain({ listen: false, env: {} }) => resolveFor(handle.resolverDeps, ...) => expect('ssn' in result.fields).toBe(false); assert keyless djb2 of the test value NOT present in any output value."
+    },
+    {
+      "id": "FF-T143-5",
+      "rule": "No new process.env under src/core/ (NF-1 / AC-8): grep -rn 'process\\.env' src/core/ returns no new matches introduced by T-0143.",
+      "ci_check": "grep -rn \"process\\.env\\|process\\[.env.\\]\" src/core/ exits with no output (0 matches) after T-0143. Run as part of npm run fitness or explicitly in CI."
+    },
+    {
+      "id": "FF-T143-6",
+      "rule": "T-0118 + T-0033 + T-0021 fitness suites stay green (FR-4 / AC-4 / AC-5): all 13 T-0118 fitness checks, all data-classification.test.ts cases, and all grant-resolver.test.ts cases pass unchanged.",
+      "ci_check": "vitest src/__tests__/hash-oracle.test.ts + src/__tests__/data-classification.test.ts + src/__tests__/grant-resolver.test.ts all green; ci/checks/data-classification-isolation.sh + ci/checks/single-resolver.sh + ci/checks/grant-resolver-isolation.sh all exit 0."
+    },
+    {
+      "id": "FF-T143-7",
+      "rule": "main-wired-entry.test.ts stays green without modification (AC-9): the existing lifecycle-audit wiring test passes after T-0143 with the test file bytewise unchanged.",
+      "ci_check": "vitest src/__tests__/main-wired-entry.test.ts green; verify test file is unmodified (git diff shows no change to that file)."
+    },
+    {
+      "id": "FF-T143-8",
+      "rule": "FF-DC9 purity invariant still green (AC-6): ci/checks/data-classification-isolation.sh exits 0 (PASS [DC9]) after T-0143; no node:crypto/crypto/process.env introduced into src/core/data-classification.ts.",
+      "ci_check": "Execute ci/checks/data-classification-isolation.sh; expect exit 0 / PASS [DC9]."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.3 single allocation passed to both createServer and MainHandle; FF-T143-2"},
+    {"ac": "AC-2", "covered_by": "§4.4 pattern-b e2e resolveFor(handle.resolverDeps,...) with key set; FF-T143-3"},
+    {"ac": "AC-3", "covered_by": "§4.1 absent resolverDeps => hash drops; §4.4 sibling e2e case; FF-T143-4"},
+    {"ac": "AC-4", "covered_by": "T-0118 core unchanged (additive on composition layer only); FF-T143-6"},
+    {"ac": "AC-5", "covered_by": "Additive only, no core change; FF-T143-6"},
+    {"ac": "AC-6", "covered_by": "No env/crypto in core; FF-T143-8"},
+    {"ac": "AC-7", "covered_by": "§4.3 MainHandle.resolverDeps type unchanged, keyedDigest always bound; FF-T143-2"},
+    {"ac": "AC-8", "covered_by": "§4.5 server.ts imports only the ResolverDeps type, no process.env read; FF-T143-5"},
+    {"ac": "AC-9", "covered_by": "§4.1 additive optional params; §4.3 startMain backward-compatible; FF-T143-7"}
+  ],
+  "runtime_target": "Silo container (founder home-server /srv/choros docker-compose via Tailscale). No new infrastructure, no new env vars, no migration. CHOROS_MASK_DIGEST_KEY was introduced by T-0118 and is already provisioned in .env.prod at the T-0061 secret surface. T-0143 makes that key active in live HTTP traffic — no additional ops change required.",
+  "adr_artifact_path": "docs/design/T-0143-keyed-digest-request-path.adr.md",
+  "escalation": ""
+}
