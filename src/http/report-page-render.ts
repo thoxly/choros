@@ -126,20 +126,68 @@ async function defaultCheckReadGrant(
   actorId: string,
   nowMs: number,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
+  // Step 1: genesis-owner short-circuit (tenant-owner role check via loadAdminContext).
   const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
-  // Genesis owner is the root — always allowed.
   if (admin.isGenesisOwner) {
     return { ok: true };
   }
-  // Non-genesis: check for any grant with operation `read` on resource_type `application`.
-  // This mirrors the ADR §6 pattern: page visibility = application read grant.
-  const hasRead = admin.adminGrants.some(
-    (g) => g.delegable && (g.operation as string) === "read",
-  );
-  if (!hasRead) {
-    return { ok: false, reason: "no_read_grant_on_application" };
+
+  // Step 2: Non-genesis path — query `application read` grants directly.
+  //
+  // ADR §6: page visibility = grant `read` on resource_type `application`.
+  // loadAdminContext only loads `mgmt_object:*` grants (write-path delegation);
+  // it does NOT load `application` grants. We must query them separately.
+  //
+  // Pattern mirrors invoke.ts loadInvokeGrants (src/http/invoke.ts:220-262):
+  // join grant → role_assignment on (tenant_id, role_id) filtered by employee
+  // slug + grant operation/resource_type + validity window.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+
+    // Resolve the actor's employee.id from slug (actorId is the slug in dev-mode).
+    const { rows: empRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      [tenantId, actorId],
+    );
+    if (empRows.length === 0) {
+      await client.query("COMMIT");
+      return { ok: false, reason: "no_read_grant_on_application" };
+    }
+    const employeeId = empRows[0]!.id;
+
+    // Check for any confirmed, in-window role_assignment + application/read grant.
+    const { rows: grantRows } = await client.query<{ id: string }>(
+      `SELECT g.id
+         FROM choros."grant" g
+         JOIN choros.role_assignment ra
+           ON ra.tenant_id = g.tenant_id AND ra.role_id = g.role_id
+        WHERE g.tenant_id = $1
+          AND ra.employee_id = $2
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND g.resource_type = 'application'
+          AND g.operation = 'read'
+          AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
+          AND (g.valid_until IS NULL OR g.valid_until  > $3)
+        LIMIT 1`,
+      [tenantId, employeeId, nowMs],
+    );
+    await client.query("COMMIT");
+
+    if (grantRows.length === 0) {
+      return { ok: false, reason: "no_read_grant_on_application" };
+    }
+    return { ok: true };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
-  return { ok: true };
 }
 
 const defaultRenderAuthzDeps: ReportPageRenderAuthzDeps = {
@@ -481,8 +529,18 @@ async function renderFloor1(args: {
   pool: pg.Pool;
   tenantId: string;
   pageId: string;
+  actor: string;
+  nowMs: number;
+  authzDeps: ReportPageRenderAuthzDeps;
 }): Promise<RenderResult> {
-  const { pool, tenantId, pageId } = args;
+  const { pool, tenantId, pageId, actor, nowMs, authzDeps } = args;
+
+  // PDP gate: application read grant (ADR §6 — page visibility = app read).
+  // Called BEFORE withTenantTx, mirroring dataFloor2 (lines 634-637).
+  const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, nowMs);
+  if (!gateResult.ok) {
+    throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
+  }
 
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Load page (RLS-gated)
@@ -740,14 +798,16 @@ export function registerReportPageRenderRoutes(
         throw new HttpError(400, "VALIDATION", "report_page id must be a valid UUID");
       }
 
-      // Auth (required for RLS context)
+      // Auth (required for PDP gate + RLS context)
       const actor = extractActor(req);
-      void actor; // floor-1 render gate is application-read — checked by PDP inside renderFloor1 via withTenantTx
 
       const result = await renderFloor1({
         pool: _poolHint ?? getPool(),
         tenantId: DEV_TENANT_ID,
         pageId,
+        actor,
+        nowMs: Date.now(),
+        authzDeps: deps,
       });
 
       res.statusCode = 200;

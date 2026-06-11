@@ -802,6 +802,43 @@ describe("AC-8 — invalid registry_def_id query param → 400", () => {
 });
 
 // ---------------------------------------------------------------------------
+// AC-10-FLOOR1: Floor-1 render: 403 NO_READ_GRANT for non-genesis without grant
+// ---------------------------------------------------------------------------
+
+describe("AC-10-FLOOR1 — Floor-1 render: 403 NO_READ_GRANT when denied", () => {
+  let server: http.Server;
+  let baseUrl: () => string;
+
+  beforeAll(
+    () =>
+      new Promise<void>((resolve) => {
+        resetRenderPoolForTesting();
+        // denyDeps: checkReadGrant returns {ok:false} — no pool queries needed
+        const { server: s, baseUrl: b } = buildTestServer(denyDeps, makeFakePool([]));
+        server = s;
+        baseUrl = b;
+        server.listen(0, "127.0.0.1", resolve);
+      }),
+  );
+
+  afterAll(
+    () => new Promise<void>((resolve) => server.close(() => resolve())),
+  );
+
+  it("Floor-1 render with denied read grant → 403 NO_READ_GRANT", async () => {
+    const { status, json } = await httpReq(
+      "GET",
+      baseUrl() + `/api/report-pages/${VALID_PAGE_ID}/render`,
+      { "x-dev-user": "non-owner" },
+    );
+    expect(status).toBe(403);
+    const body = json as Record<string, unknown>;
+    const err = body["error"] as Record<string, unknown> | undefined;
+    expect(err?.["code"]).toBe("NO_READ_GRANT");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FF-FLOOR2-RLS structural check: no DB credentials in render module
 // ---------------------------------------------------------------------------
 
