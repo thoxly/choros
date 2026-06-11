@@ -29,3 +29,6 @@ spend_ledger
 substitution_rule
 invoke_proposal
 form_binding
+notification
+email_channel_config
+notification_preference
