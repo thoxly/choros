@@ -1,24 +1,15 @@
 {
   "task_id": "T-0025",
   "verdict": "approved",
-  "iteration": 2,
+  "iteration": 3,
+  "seam_amendment": "ADR §13 (Variant B) + C-1..C-6 — validator-gated hire write, FF-25-3 allow-list, FF-25-8",
   "ci_seen": { "green": true },
-  "fitness_db_seen": {
-    "secret_handle_suite": "5/5 PASS (AC-1, AC-7, AC-8, AC-9, AC-10, AC-12, AC-13, AC-14, AC-11/R-2)",
-    "other_failures": [
-      {
-        "file": "ci/checks/db/genesis-owner-seed.test.ts",
-        "test": "tenant-owner has exactly 17 delegable mgmt_object:* grants over the 3-root forest",
-        "cause": "dev-DB accumulated 120 rows (idempotent migrations re-run multiple times); pre-existing, not T-0025",
-        "t0025_introduced": false
-      },
-      {
-        "file": "ci/checks/db/schema.test.ts",
-        "test": "zero ACT_* tables exist",
-        "cause": "Flowable already installed on dev-DB (56 ACT_* tables); pre-existing env state, not T-0025",
-        "t0025_introduced": false
-      }
-    ]
+  "ci_detail": {
+    "tsc": "PASS",
+    "eslint": "PASS (0 errors, 2 pre-existing warnings in bridge-runner/externalTaskBridge)",
+    "fitness": "PASS (all FF-25-1..8 + all sibling FFs green)",
+    "vitest": "1032 passed, 6 skipped (KC e2e + Flowable integration — expected skip), 0 failures",
+    "agent_hire_tests": "29 tests (26 pre-existing + 3 new C6-1..3), all PASS"
   },
   "findings": [
     {
@@ -26,7 +17,7 @@
       "severity": "blocking",
       "axis": 4,
       "location": "ci/checks/db/secret-handle.test.ts:1-397",
-      "issue": "CLOSED. ci/checks/db/secret-handle.test.ts добавлен в 25706db. 5 поведенческих тестов против живой Postgres (no-file-parallelism): AC-1 (POST DB read-back), AC-7 (PUT atomic overwrite), AC-9 (GET /status bound no-echo), AC-8/AC-14 (DELETE NULL + revoke audit), AC-10 (cross-tenant 404 + target row unchanged). Все 5 прошли зелёными.",
+      "issue": "CLOSED (iteration 2). 5 DB-backed behavioural tests; all 5 passed.",
       "resolution": "resolved"
     },
     {
@@ -34,7 +25,7 @@
       "severity": "nit",
       "axis": 4,
       "location": "ci/checks/db/secret-handle.test.ts:126-160",
-      "issue": "CLOSED. AC-11 HTTP-path (stdout capture) реализован в AC-1/AC-12 describe-блоке через monkey-patch process.stdout.write/process.stderr.write вокруг HTTP-вызова. Captured output проверяется на отсутствие HANDLE_A.",
+      "issue": "CLOSED (iteration 2). AC-11 stdout-capture path verified.",
       "resolution": "resolved"
     },
     {
@@ -42,58 +33,80 @@
       "severity": "nit",
       "axis": 5,
       "location": "src/http/secret-handle.ts:54-62",
-      "issue": "ORG_SEED_CHILDREN дублирован с grants.ts. Не требует правки в T-0025; кандидат T-0053 (DAO extraction).",
+      "issue": "ORG_SEED_CHILDREN duplicated with grants.ts. Carried forward — T-0053 candidate.",
       "resolution": "carried forward — no action required"
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/secret-handle-isolation.sh:70",
+      "issue": "FF-25-3 allow-list contains src/http/grant-propose.ts (6th entry not listed in ADR §13.4 C-5). grant-propose.ts reads llm_secret_handle via SELECT (T-0039 resolveSecret port) — this is semantically correct (read, not write). ADR §13.4 C-5 described only the write-path allow-set; the fitness check correctly accommodates the pre-existing T-0039 reader. No security or dormancy violation: the file does not INSERT/UPDATE the column.",
+      "suggestion": "ADR §13.4 C-5 note could explicitly acknowledge T-0039 grant-propose.ts as a permitted reader. No code change needed."
     }
   ],
+  "seam_amendment_verdicts": {
+    "adr_13_internal_consistency": "PASS — §13.1 Variant B correctly states the real RL-3 invariant: 'no raw key un-validated, every binding audited'. §13.2 rejection of Variant A is sound (removes T-0042 behavior, creates silent discard gap). §13.3 FF consequences are correct: FF-25-3 widened to explicit allow-set (not weakened — all non-listed files still fail); FF-25-8 added as structural pin. §13.4 coder instructions match implementation exactly.",
+    "adr_13_closes_rl3_hole": "PASS — validateSecretHandleShape (line 223 agents.ts) is called on non-NULL llmSecretHandle BEFORE buildAgentHirePlan (line 250) AND before kcPort.createServiceAccountClient (line 267). Rejection throws HttpError(400, 'INVALID_HANDLE', verdict.reason) — reason is the code (vendor_key_prefix etc.), never the handle value itself (NF-1 satisfied). Keycloak and DB are unreachable on 400 path.",
+    "adr_13_audit_same_tx": "PASS — custody audit (set_llm_secret_handle) is emitted inside the withTenantTx callback (agents.ts lines 296-309), alongside insertAgentRows and the hire audit, before COMMIT. Same-tx atomicity: a DB failure rolls back all three writes together.",
+    "c1_validation_position": "PASS — validateSecretHandleShape at line 223, before buildAgentHirePlan (250), before KC call (267), before withTenantTx (279). ADR §13.4 C-1 ordering satisfied.",
+    "c1_no_value_in_error": "PASS — HttpError(400, 'INVALID_HANDLE', verdict.reason): message is verdict.reason (a code enum string), never llmSecretHandle. FF-25-4 grep also green.",
+    "c1_audit_shape": "PASS — AuditEventInput fields: type='set_llm_secret_handle', actor=actorId, subject=plan.employee.id, scope=null, via='secret-handle', proposed_by/confirmed_by=null, payload={agentEmployeeId: plan.employee.id}. No handle value in any field.",
+    "c2_c3_c4_untouched": "PASS — git diff 7eb03c4..880e441 -- src/core/agent-hire.ts src/db/agent-provision.ts src/core/secret-handle-validator.ts returns empty. None of these files were modified by C-1..C-6 implementation.",
+    "c5_ff25_3_allowlist": "PASS — explicit allow-set: 5 ADR-listed files + grant-propose.ts (pre-existing T-0039 reader, semantically correct). dormancy sub-check (autonomy_threshold|budget_policy_id|escalation_rule_id) unchanged. FF-25-3 PASS in CI.",
+    "c5_ff25_8": "PASS — (a) agents.ts imports and calls validateSecretHandleShape: PASS; (b) UPDATE choros.agent_card...llm_secret_handle only in secret-handle.ts (INSERT in agent-provision.ts allowed): PASS; (c) literal 'set_llm_secret_handle' in agents.ts: PASS. All wired into ERRORS accumulator.",
+    "c6_1_zero_side_effects": "PASS — C6-1 asserts kc.created.length===0 (KC not called) and capturedAuditTypes.length===0 (no audit rows, consistent with no DB writes on 400 path). The fake pool's capturedAuditTypes records audit_event INSERTs; zero entries confirms zero side-effects.",
+    "c6_2_two_audit_rows": "PASS — C6-2 asserts capturedAuditTypes contains both 'agent.hire' and 'set_llm_secret_handle', length===2.",
+    "c6_3_one_audit_row": "PASS — C6-3 asserts capturedAuditTypes contains 'agent.hire', NOT 'set_llm_secret_handle', length===1.",
+    "existing_hire_tests_intact": "PASS — 0 test lines removed in delta (git diff 0b29e99..880e441 -- src/__tests__/agent-hire.test.ts | grep '^-.*it(' = empty). All 26 pre-existing tests still present and passing.",
+    "identity_rights_isolation": "PASS — C-1..C-6 live entirely on the custody axis (agent_card.llm_secret_handle). No changes to scoped-admin.ts, grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts, object-handle.ts. FF-HIRE-2 (no kc_client_id/agent_card in rights layer) still green."
+  },
   "join_fix_review": {
-    "file": "src/http/secret-handle.ts",
-    "diff_range": "lines 183-191",
-    "verdict": "CORRECT AND SAFE",
-    "schema_check": "employee.position_id (nullable FK) -> position.id, position.department_id (NOT NULL). Цепочка employee->position->department существует и корректна согласно migrations/015_position.sql + migrations/016_employee.sql. Исходный код читал несуществующую колонку employee.department_id — бесспорный баг.",
-    "authz_semantics": "org_scope не расширился и не сузился: все 5 seed-агентов имеют position_id != NULL в 016_employee.sql, так что для существующих агентов путь через JOIN корректно резолвит department_id. Агент с position_id IS NULL (edge case) получает fallback org-root — допустимо, ADR §4 это документирует явно. Покрытие NULL-пути косвенно есть в AC-10: ghostAgentId не найден в employee → rows.length=0 → rows[0]?.department_id=undefined → fallback. Специального теста на position_id=NULL нет, но это nit, не blocking.",
-    "rls_check": "LEFT JOIN использует p.tenant_id = e.tenant_id — tenant_id совпадает в обеих таблицах, RLS на employee и position работает через SET LOCAL choros.tenant_id=tenantId в withTenantTx. Инъекций нет: $1/$2 параметризованы.",
-    "security": "PASS — tenantId и agentId параметризованы, нет шаблонных литералов с пользовательскими данными."
+    "verdict": "CORRECT AND SAFE (iteration 2, carried forward — no change)"
   },
   "diff_scope_check": {
-    "commits": ["25706db", "883a7d1"],
+    "iteration_3_commits": ["7eb03c4", "edcf7f3", "880e441"],
     "files_changed": [
-      "ci/checks/db/secret-handle.test.ts",
-      "docs/pr/T-0025.pr-handoff.json",
-      "src/http/secret-handle.ts"
+      "docs/design/T-0025-byo-llm-secret-custody.adr.md",
+      "ci/checks/secret-handle-isolation.sh",
+      "docs/design/T-0025.adr.contract.json",
+      "src/__tests__/agent-hire.test.ts",
+      "src/http/agents.ts",
+      "docs/pr/T-0025.pr-handoff.json"
     ],
     "out_of_scope": false,
-    "note": "Только: DB-тесты (R-1) + JOIN-фикс (продуктовый баг, корректен) + обновление PR-handoff sha. Других файлов не затронуто."
+    "note": "ADR §13 amendment + C-1..C-6 implementation + pr-handoff update. src/core/agent-hire.ts, src/db/agent-provision.ts, src/core/secret-handle-validator.ts — unchanged by this delta (confirmed by empty diff)."
   },
   "acceptance_coverage": [
-    { "ac": "AC-1",  "covered": true,  "note": "DB read-back после POST подтверждает non-NULL значение в agent_card.llm_secret_handle." },
-    { "ac": "AC-2",  "covered": true  },
-    { "ac": "AC-3",  "covered": true  },
-    { "ac": "AC-4",  "covered": true  },
-    { "ac": "AC-5",  "covered": true  },
-    { "ac": "AC-6",  "covered": true  },
-    { "ac": "AC-7",  "covered": true,  "note": "PUT перезаписывает атомарно; DB подтверждает HANDLE_B, HANDLE_A отсутствует." },
-    { "ac": "AC-8",  "covered": true,  "note": "DELETE ставит NULL; GET /status возвращает {bound:false}; DB колонка NULL подтверждена." },
-    { "ac": "AC-9",  "covered": true,  "note": "GET /status: bound=true, summary присутствует, полное значение handle не в ответе." },
-    { "ac": "AC-10", "covered": true,  "note": "POST с ghostAgentId (нет в DEV_TENANT) → 404; DEV_AGENT row unchanged." },
-    { "ac": "AC-11", "covered": true,  "note": "HTTP-path: stdout/stderr capture вокруг POST не содержит HANDLE_A (R-2 закрыт). Validator-path: src/__tests__/secret-handle.test.ts." },
-    { "ac": "AC-12", "covered": true,  "note": "audit_event с type=set_llm_secret_handle, payload без handle, subject=agentId — DB assertion." },
-    { "ac": "AC-13", "covered": true,  "note": "audit_event с type=rotate_llm_secret_handle, payload без HANDLE_A/HANDLE_B — DB assertion." },
-    { "ac": "AC-14", "covered": true,  "note": "audit_event с type=revoke_llm_secret_handle, payload без 'vault://' — DB assertion." },
-    { "ac": "AC-15", "covered": true  },
-    { "ac": "AC-16", "covered": true  },
-    { "ac": "AC-17", "covered": true  },
-    { "ac": "AC-18", "covered": true  },
-    { "ac": "AC-19", "covered": true  }
+    { "ac": "AC-1",  "covered": true,  "note": "DB read-back after POST (DB suite iteration 2, carried forward)." },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true,  "note": "PUT atomic overwrite; DB confirmed." },
+    { "ac": "AC-8",  "covered": true,  "note": "DELETE → NULL; GET /status → {bound:false}." },
+    { "ac": "AC-9",  "covered": true,  "note": "GET /status: bound=true, summary present, full value not in response." },
+    { "ac": "AC-10", "covered": true,  "note": "Cross-tenant 404 via RLS." },
+    { "ac": "AC-11", "covered": true,  "note": "Validator path + HTTP stdout/stderr capture (iteration 2). Hire path: FF-25-4 static grep + C6-1 (message=reason code, not handle value)." },
+    { "ac": "AC-12", "covered": true,  "note": "set_llm_secret_handle audit: payload has no handle value; DB asserted in iteration 2. Hire path: C6-2 asserts audit type presence; payload shape enforced by code + FF-25-4." },
+    { "ac": "AC-13", "covered": true,  "note": "rotate_llm_secret_handle audit: DB assertion iteration 2." },
+    { "ac": "AC-14", "covered": true,  "note": "revoke_llm_secret_handle audit: DB assertion iteration 2." },
+    { "ac": "AC-15", "covered": true },
+    { "ac": "AC-16", "covered": true,  "note": "FF-25-3 explicit allow-set: 6 files allowed, all others fail. PASS." },
+    { "ac": "AC-17", "covered": true,  "note": "tsc + eslint green." },
+    { "ac": "AC-18", "covered": true },
+    { "ac": "AC-19", "covered": true,  "note": "FF-25-5 seed NULL invariant: PASS." }
   ],
   "special_attention_verdicts": {
-    "withTenantTx_duplication": "PASS (итерация 1 — без изменений)",
-    "rl3_handle_not_in_logs": "PASS (итерация 1 — без изменений)",
-    "resolve_secret_not_implemented": "PASS (итерация 1 — без изменений)",
-    "frozen_files": "PASS (итерация 2 — FF-25-6 зелёный, src/core/scoped-admin.ts/grant-lattice.ts/object-handle.ts нетронуты)",
-    "authz_holdsAgentMgmtUpdate": "PASS (итерация 1 — без изменений)",
-    "validator_io_free": "PASS (итерация 1 — без изменений)",
-    "join_fix_correct": "PASS — employee.position_id FK правильно резолвит department_id через JOIN с position; RLS tenant-safe; нет расширения authz-scope."
+    "withTenantTx_duplication": "PASS (iteration 1)",
+    "rl3_handle_not_in_logs": "PASS (iteration 1 + iteration 3: FF-25-4 green, C6-1 message=reason-code)",
+    "resolve_secret_not_implemented": "PASS (iteration 1)",
+    "frozen_files": "PASS (iteration 3: FF-25-6 PASS — scoped-admin.ts/grant-lattice.ts/object-handle.ts byte-unchanged vs merge-base)",
+    "authz_holdsAgentMgmtUpdate": "PASS (iteration 1)",
+    "validator_io_free": "PASS (iteration 1 + iteration 3: FF-25-1 PASS)",
+    "join_fix_correct": "PASS (iteration 2, unchanged)",
+    "hire_path_rl3_bypass_closed": "PASS (iteration 3: validateSecretHandleShape at line 223 before all side-effects; FF-25-8 pins structurally)"
   },
   "role_gap_evidence": []
 }
