@@ -6,9 +6,11 @@
  * Reads audit_event rows with type IN ('grant.create', 'grant.revoke',
  * 'assignment.create', 'assignment.revoke') for a given tenant.
  *
- * DESIGN INVARIANTS (ADR §4.2 / NF-4):
+ * DESIGN INVARIANTS (ADR §4.2 / NF-4 — updated by T-0184 R-1 follow-up):
  *  - queryGrantTrail always executes inside withTenant() (sets choros.tenant_id GUC).
- *  - No raw tenant_id WHERE clause beyond the GUC (RLS enforces isolation).
+ *  - T-0184: explicit WHERE tenant_id = $N added for BYPASSRLS (choros_migrator) pool
+ *    safety. Mirrors the T-0141 org.ts pattern. Additive — redundant but correct on
+ *    NOBYPASSRLS connections where RLS already filters.
  *  - The function never queries the grant or role_assignment tables — only audit_event.
  *  - No DDL, no new tables; known_tenant_tables.txt is unchanged.
  */
@@ -121,11 +123,14 @@ export async function queryGrantTrail(
   return withTenant(pool, tenantId, async (client) => {
     // Build params and conditions incrementally.
     // $1 is always the GRANT_TRAIL_TYPES array.
-    const params: unknown[] = [GRANT_TRAIL_TYPES];
-    let paramIdx = 1;
+    // $2 is always the tenantId — explicit WHERE tenant_id guard for BYPASSRLS
+    // (choros_migrator) pool safety (T-0184, mirrors T-0141 org.ts pattern).
+    const params: unknown[] = [GRANT_TRAIL_TYPES, tenantId];
+    let paramIdx = 2;
 
     const conditions: string[] = [
       `type = ANY($1::text[])`,
+      `tenant_id = $2`,
     ];
 
     // actor filter
