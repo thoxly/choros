@@ -582,3 +582,138 @@ describe("assertKeycloakConfig — fail-fast (AC-20)", () => {
     expect(typeof assertKeycloakConfig).toBe("function");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Group D: ES256 (P-256) JWT verification (R-1 fix coverage)
+// AC-13/AC-14 with ES256 algorithm — verifies ieee-p1363 encoding fix.
+// ---------------------------------------------------------------------------
+
+describe("Group D — ES256 (P-256) JWT verification (R-1 fix)", () => {
+  let ecPrivateKey: crypto.KeyObject;
+  let ecPublicKey: crypto.KeyObject;
+  let ecPublicJwk: crypto.JsonWebKey & { kid: string; alg: string; use: string };
+  const EC_KID = "test-ec-key-1";
+
+  let esServer: http.Server;
+  let esPort: number;
+
+  function makeEsJwt(claims: TokenClaims): string {
+    const header = base64url(Buffer.from(JSON.stringify({ alg: "ES256", kid: EC_KID, typ: "JWT" })));
+    const payload = base64url(Buffer.from(JSON.stringify(claims)));
+    const signingInput = `${header}.${payload}`;
+    // crypto.sign with EC key produces DER by default; we need P1363 (raw R||S) for JWT
+    const derSig = crypto.sign("SHA256", Buffer.from(signingInput, "utf8"), ecPrivateKey);
+    // Convert DER → IEEE P1363 (raw R||S, 32 bytes each for P-256)
+    const p1363Sig = derToP1363(derSig, 32);
+    return `${signingInput}.${base64url(p1363Sig)}`;
+  }
+
+  /** Minimal DER SEQUENCE → raw R||S converter (P-256 = 32 bytes each). */
+  function derToP1363(der: Buffer, coordLen: number): Buffer {
+    // DER: 0x30 <total-len> 0x02 <r-len> <r> 0x02 <s-len> <s>
+    let offset = 2; // skip 0x30 <len>
+    offset++; // skip 0x02
+    const rLen = der[offset++];
+    const r = der.subarray(offset, offset + rLen);
+    offset += rLen;
+    offset++; // skip 0x02
+    const sLen = der[offset++];
+    const s = der.subarray(offset, offset + sLen);
+
+    // Strip/pad to coordLen
+    const rPad = Buffer.alloc(coordLen);
+    const sPad = Buffer.alloc(coordLen);
+    r.copy(rPad, Math.max(0, coordLen - r.length), Math.max(0, r.length - coordLen));
+    s.copy(sPad, Math.max(0, coordLen - s.length), Math.max(0, s.length - coordLen));
+    return Buffer.concat([rPad, sPad]);
+  }
+
+  beforeAll(async () => {
+    // Generate P-256 key pair for this suite
+    const pair = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+    ecPrivateKey = pair.privateKey;
+    ecPublicKey = pair.publicKey;
+    const rawJwk = ecPublicKey.export({ format: "jwk" });
+    ecPublicJwk = { ...rawJwk, kid: EC_KID, alg: "ES256", use: "sig" };
+
+    // Start a JWKS server serving the EC public key
+    esServer = http.createServer((_req, res) => {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      if (_req.url?.includes("openid-configuration")) {
+        res.end(JSON.stringify({
+          issuer: `http://127.0.0.1:${esPort}/realms/choros`,
+          jwks_uri: `http://127.0.0.1:${esPort}/certs`,
+        }));
+      } else {
+        res.end(JSON.stringify({ keys: [ecPublicJwk] }));
+      }
+    });
+    await new Promise<void>((resolve) => esServer.listen(0, "127.0.0.1", () => {
+      esPort = (esServer.address() as AddressInfo).port;
+      resolve();
+    }));
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => esServer.close(() => resolve()));
+    _resetJwksCache();
+  });
+
+  beforeEach(() => {
+    _resetJwksCache();
+  });
+
+  it("AC-13 ES256: valid ES256 token → verifyJwt returns claims (200/201 path)", async () => {
+    const { verifyJwt } = await import("../http/auth.js");
+    _resetJwksCache();
+
+    const cfg = {
+      mode: "keycloak" as const,
+      issuer: `http://127.0.0.1:${esPort}/realms/choros`,
+      keycloakUrl: `http://127.0.0.1:${esPort}`,
+      realm: "choros",
+      audience: "choros-api",
+      jwksUri: undefined,
+      jwksCacheTtlMs: 300000,
+    };
+
+    const claims = validClaims({
+      iss: cfg.issuer,
+      actor_type: "agent",
+      sub: "es256-agent-uuid",
+      preferred_username: "es256-agent",
+    });
+    const token = makeEsJwt(claims);
+
+    const result = await verifyJwt(token, cfg);
+    expect(result.sub).toBe("es256-agent-uuid");
+    expect(result.actor_type).toBe("agent");
+    expect(result.preferred_username).toBe("es256-agent");
+  });
+
+  it("AC-14 ES256: tampered ES256 signature → verifyJwt throws 401", async () => {
+    const { verifyJwt } = await import("../http/auth.js");
+    _resetJwksCache();
+
+    const cfg = {
+      mode: "keycloak" as const,
+      issuer: `http://127.0.0.1:${esPort}/realms/choros`,
+      keycloakUrl: `http://127.0.0.1:${esPort}`,
+      realm: "choros",
+      audience: "choros-api",
+      jwksUri: undefined,
+      jwksCacheTtlMs: 300000,
+    };
+
+    const claims = validClaims({ iss: cfg.issuer, actor_type: "human" });
+    const goodToken = makeEsJwt(claims);
+
+    // Corrupt the signature part (last segment)
+    const parts = goodToken.split(".");
+    const corruptedSig = base64url(Buffer.alloc(64, 0xaa)); // 64 bytes of garbage
+    const badToken = `${parts[0]}.${parts[1]}.${corruptedSig}`;
+
+    await expect(verifyJwt(badToken, cfg)).rejects.toThrow();
+  });
+});
