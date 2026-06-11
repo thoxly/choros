@@ -1,0 +1,24 @@
+{
+  "task_id": "T-0184",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/grant-trail-bypassrls-predicate.sh:61",
+      "issue": "Grep regex `WHERE[[:space:][:alnum:]_.$]*tenant_id` matches comment lines (11 and 126 in audit-grant-trail.ts) rather than the actual SQL conditions array entry `tenant_id = $2`. A regression that removes the WHERE condition from the array but leaves the comments intact would pass the static check undetected. The real protection is the DB-gated AC-2 test.",
+      "suggestion": "Extend the grep pattern to also match `conditions.push.*tenant_id` or `tenant_id = \\\\\\$` to target the actual SQL binding rather than (or in addition to) comments."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
