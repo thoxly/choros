@@ -32,3 +32,5 @@ form_binding
 notification
 email_channel_config
 notification_preference
+report_page
+report_page_dep
