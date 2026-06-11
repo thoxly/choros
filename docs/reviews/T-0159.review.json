@@ -3,7 +3,7 @@
   "verdict": "approved",
   "ci_seen": {
     "green": true,
-    "notes": "tsc --noEmit 0 errors; eslint 0 errors (2 pre-existing no-console warnings unrelated to this task); fitness 47/47 checks PASS; vitest 953 passed / 5 skipped / 0 failed (47 test files, 1 skipped integration). TEST attestation covered by this review artifact."
+    "notes": "tsc --noEmit 0 errors; eslint 0 errors (2 pre-existing no-console warnings unrelated to this task); fitness 47/47 checks PASS; vitest 981 passed / 6 skipped / 0 failed (49 test files, 2 skipped). Round 2 delta verified."
   },
   "findings": [],
   "acceptance_coverage": [
@@ -22,7 +22,38 @@
     {
       "ac": "AC-4: no behavioural change — deleted symbols were never read downstream",
       "covered": true
+    },
+    {
+      "ac": "AC-R2-1: remove dead discoveryFetchCount counter from jwks-cache.test.ts (never asserted)",
+      "covered": true
+    },
+    {
+      "ac": "AC-R2-2: remove dead jwksFetchCount counter from workerAuth.test.ts (never asserted)",
+      "covered": true
+    },
+    {
+      "ac": "AC-R2-3: remove unused getJwks import from workerAuth.test.ts Group C test",
+      "covered": true
+    },
+    {
+      "ac": "AC-R2-4: replace rest-omit { actor_type: _, ... } with eslint-disable-next-line two-step pattern — semantics identical, TS no-unused-vars satisfied",
+      "covered": true
     }
   ],
-  "role_gap_evidence": []
+  "role_gap_evidence": [],
+  "review_rounds": [
+    {
+      "round": 1,
+      "sha": "f5de0b4",
+      "verdict": "approved",
+      "findings_count": 0
+    },
+    {
+      "round": 2,
+      "sha": "ca245d9",
+      "verdict": "approved",
+      "findings_count": 0,
+      "delta_note": "4 unused-vars от T-0060 в двух тест-файлах: discoveryFetchCount, jwksFetchCount (мёртвые mock-счётчики), getJwks (неиспользуемый импорт), eslint-disable для rest-omit паттерна actor_type. Ни один ассерт не тронут. eslint.config.js + destructuredArrayIgnorePattern корректное дополнение."
+    }
+  ]
 }
