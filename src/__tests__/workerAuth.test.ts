@@ -89,14 +89,10 @@ function validClaims(overrides: Partial<TokenClaims> = {}): TokenClaims {
 let jwksServer: http.Server;
 let jwksPort: number;
 
-// Track fetch calls for cache tests
-let jwksFetchCount = 0;
-
 async function startJwksServer(keys: typeof publicJwk[] = [publicJwk]): Promise<void> {
   return new Promise((resolve) => {
     jwksServer = http.createServer((req, res) => {
       if (req.url === "/realms/choros/.well-known/openid-configuration") {
-        jwksFetchCount++;
         const disc = {
           issuer: `http://localhost:${jwksPort}/realms/choros`,
           jwks_uri: `http://localhost:${jwksPort}/realms/choros/protocol/openid-connect/certs`,
@@ -105,7 +101,6 @@ async function startJwksServer(keys: typeof publicJwk[] = [publicJwk]): Promise<
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify(disc));
       } else if (req.url === "/realms/choros/protocol/openid-connect/certs") {
-        jwksFetchCount++;
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ keys }));
@@ -285,7 +280,6 @@ describe("Group B — keycloak mode JWT validation (AC-3..AC-16)", () => {
 
   beforeEach(() => {
     _resetJwksCache();
-    jwksFetchCount = 0;
   });
 
   // AC-3: POST /jobs without Authorization → 401
@@ -366,7 +360,9 @@ describe("Group B — keycloak mode JWT validation (AC-3..AC-16)", () => {
 
   // AC-12: no actor_type → 401
   it("AC-12: JWT without actor_type → 401 UNAUTHENTICATED", async () => {
-    const { actor_type: _, ...claimsNoActor } = validClaimsKc();
+    const allClaims = validClaimsKc();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { actor_type, ...claimsNoActor } = allClaims;
     const token = makeJwt(claimsNoActor);
     const res = await req("POST", "/jobs", { Authorization: `Bearer ${token}` }, { topic: "t" });
     expect(res.status).toBe(401);
@@ -437,7 +433,7 @@ describe("Group B — keycloak mode JWT validation (AC-3..AC-16)", () => {
 describe("Group C — JWT claims parsing unit tests", () => {
   it("verifyJwt: valid token returns claims with sub and preferred_username", async () => {
     // Import verifyJwt and test directly with a mock config
-    const { verifyJwt, getJwks, _resetJwksCache: resetCache } = await import("../http/auth.js");
+    const { verifyJwt, _resetJwksCache: resetCache } = await import("../http/auth.js");
 
     resetCache();
     // Patch getJwks to return our test key without network
