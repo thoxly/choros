@@ -22,3 +22,7 @@ effect_resource
 egress_policy
 outbox
 sod_constraint
+instance_budget
+agent_budget
+reservation
+spend_ledger

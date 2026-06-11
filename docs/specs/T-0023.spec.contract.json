@@ -1,0 +1,156 @@
+{
+  "task_id": "T-0023",
+  "status": "ready",
+  "summary": "Add four tenant-isolated tables — `instance_budget(tenant_id, id, process_instance_id, currency, ceiling, remaining_cache, created_at, updated_at)`, `agent_budget(tenant_id, id, employee_id, window_kind, window_ref, currency, ceiling, remaining_cache, created_at, updated_at)`, `reservation(tenant_id, id, tool_call_id, instance_budget_id, agent_budget_id, held, currency, status, expires_at, created_at, finalized_at)`, `spend_ledger(tenant_id, id, reservation_id, tool_call_id, employee_id, instance_budget_id, agent_budget_id, amount, currency, description, recorded_at)` — implementing two-ceiling AND-composed budget semantics via reservation semantics (reserve max_cost → finalize actual≤held / TTL-release); spend_ledger is append-only (trigger); remaining caches are advisory and fully reconstructable from ledger+reservations; FK agent_card.budget_policy_id → instance_budget added; runtime enforcement is Stage-2 (E5.9).",
+  "functional": [
+    "FR-1 instance_budget table: PK(tenant_id, id), columns process_instance_id/currency/ceiling/remaining_cache/created_at/updated_at; ceiling > 0 CHECK; FORCE RLS default-DENY; choros_app SELECT/INSERT/UPDATE/DELETE",
+    "FR-2 agent_budget table: PK(tenant_id, id), FK employee_id → employee(kind=agent), window_kind IN ('instance','daily','monthly','total'), window_ref nullable; ceiling > 0 CHECK; FORCE RLS; index on (tenant_id, employee_id, window_kind, window_ref)",
+    "FR-3 reservation table: PK(tenant_id, id), UNIQUE(tenant_id, tool_call_id) idempotency key, FK instance_budget_id/agent_budget_id, held > 0 CHECK, status IN ('open','spent','released') CHECK, expires_at TTL, constraint at_least_one_budget_not_null; FORCE RLS",
+    "FR-4 spend_ledger table: PK(tenant_id, id), FK reservation_id, denorm tool_call_id/employee_id/instance_budget_id/agent_budget_id, amount > 0 CHECK, currency, description nullable, recorded_at; append-only trigger (NO UPDATE/DELETE); FORCE RLS; indexes on (tenant_id, instance_budget_id, recorded_at) and (tenant_id, agent_budget_id, recorded_at)",
+    "FR-5 reservation state machine: OPEN→SPENT (finalize-spend: amount≤held, write spend_ledger, return delta to caches); OPEN→RELEASED (finalize-release: return held to caches, no ledger row); TTL auto-release (lazy sweep permitted); two-ceiling AND-gate: allowed iff min(instance_remaining, agent_remaining) ≥ max_cost, evaluated atomically; duplicate tool_call_id rejected by UNIQUE constraint",
+    "FR-6 T-0013 isolation invariants: tenant_id NOT NULL leading PK column, FORCE RLS default-DENY policy, choros_app role only, access via SET LOCAL choros.tenant_id",
+    "FR-7 authoritative balance reconstruction: remaining = ceiling − SUM(spend_ledger.amount) − SUM(reservation.held WHERE status='open' AND expires_at >= now()) — possible from four tables alone, no external state",
+    "FR-8 known_tenant_tables.txt updated with agent_budget, instance_budget, reservation, spend_ledger (alphabetical); cross-tenant tests pass without source change",
+    "FR-9 dev seed (ON CONFLICT DO NOTHING, migrations 034-035) for dev silo: at least one instance_budget row and one agent_budget row for agent a-recon",
+    "FR-10 no runtime budget enforcement on day-1: no HTTP handler, PDP, job-store, or engine guard reads reservation or spend_ledger in an enforcement context (fitness-checked)"
+  ],
+  "non_functional": [
+    "NF-1 spend_ledger append-only: DB-level trigger raises exception on UPDATE or DELETE (same pattern as audit_event T-0016)",
+    "NF-2 numeric precision: all amount columns (ceiling, remaining_cache, held, amount) use numeric(18,6); no floating-point",
+    "NF-3 currency homogeneity: a reservation must reference budget rows with matching currency; mixing currencies in one reservation is rejected",
+    "NF-4 migration seam: slots 034 (and 035 if needed); 032=T-0020 agent_card, 033=reserved; migrations idempotent",
+    "NF-5 no new TypeScript runtime module: T-0023 delivers migrations, seed, known_tenant_tables.txt update, and spec only",
+    "NF-6 zero-dep migration: applies cleanly in existing CI Postgres container"
+  ],
+  "out_of_scope": [
+    "agent-runtime budget enforcement at call boundary (E5.9, Stage-2, UNAPPROVED)",
+    "autonomy downgrade on budget exhaustion (E5.7, Stage-2)",
+    "reservation expiry sweep job (E5.9 implementation detail)",
+    "HTTP endpoints reading or writing budget rows",
+    "billing, invoicing, external payment processing",
+    "cost estimation / pricing tables",
+    "budget_exceeded flag in Demiurge orchestration budget-ledger (separate system)",
+    "LLM provider cost-tracking integration",
+    "budget policy authoring UI",
+    "agent_card table definition (T-0020)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Migration file migrations/034_budget_schema.sql (or split 034/035) exists; creates all four tables (instance_budget, agent_budget, reservation, spend_ledger) in the choros schema.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "All four tables have tenant_id uuid NOT NULL as the leading column of the PK.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "All four tables have FORCE ROW LEVEL SECURITY and a default-DENY RLS policy USING (tenant_id = current_setting('choros.tenant_id', true)::uuid).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Cross-tenant read on any of the four tables (tenant B context, tenant A data) returns 0 rows.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Cross-tenant write on any of the four tables (tenant B context, tenant A tenant_id) is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "choros_app role has SELECT, INSERT, UPDATE, DELETE on all four tables and no DDL.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "spend_ledger: a direct UPDATE on an existing row raises an exception (append-only trigger).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "spend_ledger: a direct DELETE on an existing row raises an exception (append-only trigger).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "reservation.tool_call_id has a UNIQUE constraint per tenant: inserting two reservation rows with the same (tenant_id, tool_call_id) is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "reservation.held > 0 CHECK constraint: inserting a row with held = 0 is rejected; held = 0.000001 is accepted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "reservation.status CHECK constraint: values 'open', 'spent', 'released' are accepted; any other value is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "reservation: the constraint (instance_budget_id IS NOT NULL OR agent_budget_id IS NOT NULL) is enforced: inserting a row with both NULLs is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "instance_budget.ceiling > 0 CHECK constraint: ceiling = 0 is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "agent_budget.ceiling > 0 CHECK constraint: ceiling = 0 is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "spend_ledger.amount > 0 CHECK constraint: amount = 0 is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "All amount columns (ceiling, remaining_cache, held, amount) are numeric(18,6): a value with 6 decimal places (e.g. 0.000001) is stored without rounding.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-17",
+      "text": "Authoritative balance reconstruction: after inserting spend_ledger rows and open reservation rows, the formula ceiling − SUM(spend) − SUM(open_held) returns a value consistent with the sum of amounts inserted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-18",
+      "text": "ci/checks/known_tenant_tables.txt contains agent_budget, instance_budget, reservation, spend_ledger; cross-tenant CI tests pass for all four tables without modification to test source.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "Dev seed: after applying migrations, the dev silo has at least one instance_budget row and one agent_budget row for agent a-recon, all ON CONFLICT DO NOTHING.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-20",
+      "text": "The FK agent_card.budget_policy_id → instance_budget(tenant_id, id) is added by T-0023 migration if agent_card table exists; migration succeeds without error if agent_card does not exist.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-21",
+      "text": "Migrations 034-035 are idempotent: running the migration runner twice produces no error.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-22",
+      "text": "tsc --noEmit, eslint, and npm run fitness (existing) are all green after migrations are added.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-23",
+      "text": "No Choros runtime code path (HTTP handlers, PDP, job-store, engine guard) imports or reads reservation or spend_ledger in an enforcement context on day-1: grep -rE 'reservation|spend_ledger' src/ returns 0 matches in .ts files outside __tests__/migrations/.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0023-budget-schema.spec.md"
+}

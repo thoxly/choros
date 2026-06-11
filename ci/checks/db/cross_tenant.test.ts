@@ -385,6 +385,70 @@ async function seedSodConstraint(c: pg.Client, tenantId: string): Promise<void> 
   );
 }
 
+/** Seed one row into choros.instance_budget (T-0023). Returns the instance_budget id. */
+async function seedInstanceBudget(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.instance_budget
+       (tenant_id, id, process_instance_id, currency, ceiling, remaining_cache,
+        created_at, updated_at)
+     VALUES ($1, $2, NULL, 'USD', 100.000000, 100.000000, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id],
+  );
+  return id;
+}
+
+/** Seed one row into choros.agent_budget (T-0023). Requires a seeded employee id. */
+async function seedAgentBudget(c: pg.Client, tenantId: string, employeeId: string): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.agent_budget
+       (tenant_id, id, employee_id, window_kind, window_ref, currency,
+        ceiling, remaining_cache, created_at, updated_at)
+     VALUES ($1, $2, $3, 'total', NULL, 'USD', 50.000000, 50.000000, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, employeeId],
+  );
+  return id;
+}
+
+/** Seed one row into choros.reservation (T-0023). Requires a seeded instance_budget id. */
+async function seedReservation(c: pg.Client, tenantId: string, instanceBudgetId: string): Promise<string> {
+  const id = uuid();
+  const toolCallId = `ct-tcid-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.reservation
+       (tenant_id, id, tool_call_id, instance_budget_id, agent_budget_id,
+        held, currency, status, expires_at, created_at, finalized_at)
+     VALUES ($1, $2, $3, $4, NULL, 1.000000, 'USD', 'open', 9999999999999, 0, NULL)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, toolCallId, instanceBudgetId],
+  );
+  return id;
+}
+
+/** Seed one row into choros.spend_ledger (T-0023). Requires seeded reservation + employee ids. */
+async function seedSpendLedger(
+  c: pg.Client,
+  tenantId: string,
+  reservationId: string,
+  employeeId: string,
+  instanceBudgetId: string,
+): Promise<void> {
+  const id = uuid();
+  const toolCallId = `ct-sl-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.spend_ledger
+       (tenant_id, id, reservation_id, tool_call_id, employee_id,
+        instance_budget_id, agent_budget_id, amount, currency,
+        description, recorded_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL, 0.500000, 'USD', NULL, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, reservationId, toolCallId, employeeId, instanceBudgetId],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -413,6 +477,11 @@ const seedState = {
   // T-0022 chain: employee + role (needed for role_assignment seed)
   roleIdA: '',
   roleIdB: '',
+  // T-0023 chain: instance_budget → reservation → spend_ledger
+  instanceBudgetIdA: '',
+  instanceBudgetIdB: '',
+  reservationIdA: '',
+  reservationIdB: '',
 };
 
 /**
@@ -543,6 +612,37 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       await c.query(
         `INSERT INTO choros.agent_card (tenant_id,employee_id,kc_client_id,created_at,updated_at)
          VALUES ($1,$2,$3,0,0) ON CONFLICT DO NOTHING`, [tenantId, id, `ct-kc-${id.slice(0,8)}`]);
+      break;
+    }
+    case 'instance_budget': {
+      // T-0023 — no deps beyond tenant. Store id for downstream reservation seed.
+      const ibId = await seedInstanceBudget(c, tenantId);
+      if (tenantId === TENANT_A) seedState.instanceBudgetIdA = ibId;
+      else seedState.instanceBudgetIdB = ibId;
+      break;
+    }
+    case 'agent_budget': {
+      // T-0023 — requires seeded employee (FK). KNOWN_TENANT_TABLES order
+      // (…, employee, …, instance_budget, agent_budget) guarantees employee is seeded.
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      await seedAgentBudget(c, tenantId, empId);
+      break;
+    }
+    case 'reservation': {
+      // T-0023 — requires seeded instance_budget (FK).
+      const ibId = tenantId === TENANT_A ? seedState.instanceBudgetIdA : seedState.instanceBudgetIdB;
+      const resId = await seedReservation(c, tenantId, ibId);
+      if (tenantId === TENANT_A) seedState.reservationIdA = resId;
+      else seedState.reservationIdB = resId;
+      break;
+    }
+    case 'spend_ledger': {
+      // T-0023 — requires seeded reservation + employee + instance_budget (FKs).
+      // KNOWN_TENANT_TABLES order guarantees all are seeded before this case runs.
+      const resId = tenantId === TENANT_A ? seedState.reservationIdA : seedState.reservationIdB;
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      const ibId  = tenantId === TENANT_A ? seedState.instanceBudgetIdA : seedState.instanceBudgetIdB;
+      await seedSpendLedger(c, tenantId, resId, empId, ibId);
       break;
     }
     default:
