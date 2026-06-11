@@ -20,6 +20,7 @@ import * as http from 'node:http';
 import pg from 'pg';
 import { migratorUrl, withClient, uuid } from './_helpers.js';
 import { createServer } from '../../../src/server.js';
+import { resetPoolForTesting } from '../../../src/http/registry-defs.js';
 
 // DEV_TENANT_ID must match the value used by the HTTP layer (registry-defs.ts).
 const DEV_TENANT_ID = process.env['DEV_TENANT_ID'] ?? 'a0000000-0000-0000-0000-000000000001';
@@ -427,6 +428,9 @@ describe('Route registration (no-DB)', () => {
     // rather than 404 (route not found).
     const savedUrl = process.env['DATABASE_URL'];
     delete process.env['DATABASE_URL'];
+    // Reset the module-level pool singleton so previous live-DB tests don't leak
+    // a cached _pool into this no-DB server instance (R-1 fix).
+    resetPoolForTesting();
 
     const noDbServer = createServer();
     let noDbBaseUrl = '';

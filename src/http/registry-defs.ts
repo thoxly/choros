@@ -77,6 +77,15 @@ function getPool(): pg.Pool {
   return _pool;
 }
 
+/**
+ * Reset the module-level pool singleton.
+ * FOR TESTING ONLY — call before creating a server in no-DB tests to ensure
+ * the pool is not re-used from a previous test that initialised it with a live DB.
+ */
+export function resetPoolForTesting(): void {
+  _pool = null;
+}
+
 // ---------------------------------------------------------------------------
 // UUID helper
 // ---------------------------------------------------------------------------
@@ -184,8 +193,11 @@ async function loadActiveDeps(
 // updateSchemaInTx — the transactional schema-change service
 // ---------------------------------------------------------------------------
 
+// NOTE: "noop" (unchanged schema) is intentionally absent — identical schema is not
+// detected; every PUT/PATCH with record_schema present runs the classifier and applies
+// an UPDATE. If unchanged-schema detection is needed, add deep-equal guard here and
+// return { kind: "noop" } before entering the transaction. (R-2 ADR honesty)
 type UpdateSchemaResult =
-  | { kind: "noop" }
   | { kind: "soft"; warnings: AffectedDep[] }
   | { kind: "destructive_denied"; affected_pages: AffectedDep[]; fields: string[] }
   | { kind: "force_applied"; affected_pages: AffectedDep[] };
@@ -233,11 +245,7 @@ async function updateSchemaInTx(args: {
       };
     }
 
-    // 5. Unlock tier trigger for this transaction (same GUC pattern as artifacts.ts T-0087)
-    //    Required because we may UPDATE report_page tier='draft' below
-    await client.query("SET LOCAL choros.promoting = '1'");
-
-    // 6. Apply the schema update (UPDATE registry_def.record_schema)
+    // 5. Apply the schema update (UPDATE registry_def.record_schema)
     await client.query(
       `UPDATE choros.registry_def
           SET record_schema = $1::jsonb,
@@ -246,7 +254,7 @@ async function updateSchemaInTx(args: {
       [JSON.stringify(newSchema), nowMs, tenantId, registryDefId],
     );
 
-    // 7a. Soft path: only soft warnings — done, return warnings
+    // 6. Soft path: only soft warnings — done, return warnings (no tier changes needed)
     if (destructiveDeps.length === 0) {
       return { kind: "soft", warnings: softWarnings };
     }
@@ -255,6 +263,10 @@ async function updateSchemaInTx(args: {
     //   (a) Mark affected deps stale=true
     //   (b) Depromote affected pages to tier='draft'
     //   (c) Append audit event
+
+    // Unlock tier trigger for this transaction (same GUC pattern as artifacts.ts T-0087).
+    // SET LOCAL only here — not on the soft path where tier='draft' UPDATE never runs. (R-4)
+    await client.query("SET LOCAL choros.promoting = '1'");
 
     // AUTHORITY CHECK (T-0021 integration seam — dev-mode honest stub):
     // TODO(T-0021): wire real grant PDP check: assertGranted(actor,
@@ -396,13 +408,6 @@ export function registerRegistryDefRoutes(router: Router, _poolHint?: pg.Pool): 
     });
 
     // 4. Return response based on result kind
-    if (result.kind === "noop") {
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ updated: false, registry_def_id: registryDefId }));
-      return;
-    }
-
     if (result.kind === "destructive_denied") {
       // 409 — schema NOT applied (ADR §5.2, spec AC-9/AC-16)
       res.statusCode = 409;
