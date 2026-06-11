@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0144",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": false,
+    "notes": "tsc PASS, npm test PASS (1042/1048), npm run fitness PASS; fitness:db FAIL — genesis-owner-seed count!=17 (tier_published_locked trigger T-0087 suppresses DELETE in dev DB); sibling-known: ADV-2 (pre-existing), schema.test.ts FF-ACT (pre-existing)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "scripts/cleanup-test-grants.ts:24",
+      "issue": "TEST_ACTORS contains 'e-owner' (3rd marker) absent from spec FR-6 and ADR §4.2. FR-6 defines exactly two markers: 'test' and 'd0000000-0000-0000-0000-0000000000ff'. The script silently extends scope without RFC or founder approval.",
+      "suggestion": "Remove 'e-owner' from TEST_ACTORS. If historical 'e-owner' rows must be cleaned, extend FR-6 explicitly with founder approval and re-spec."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "ci/checks/db/grant-editor.test.ts (all 5 afterAll blocks)",
+      "issue": "AC-1/NF-2 double-run idempotency not verifiable. The tier_published_locked BEFORE DELETE trigger (introduced by T-0087, merged to dev after T-0144 branch point) returns NEW instead of OLD for non-published rows. In PostgreSQL BEFORE DELETE triggers, RETURN NULL (= RETURN NEW for DELETE) suppresses the delete. afterAll cleanup code is syntactically correct but ineffective against current dev DB — rows accumulate across runs (observed: +6 per run, count grows from 17).",
+      "suggestion": "Coordinate with T-0087 to fix tier_published_locked trigger (RETURN OLD for non-published rows). Document in PR-handoff. T-0144 code itself is correct; this is a blocking environment incompatibility."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "scripts/cleanup-test-grants.ts:23",
+      "issue": "Comment references 'e-owner' as legacy marker without explaining the divergence from FR-6. If marker is retained after RFC, comment should reference the spec extension explicitly.",
+      "suggestion": "Add reference to spec section that authorizes 'e-owner' inclusion, or remove the marker."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": false, "note": "FAIL (env): tier_published_locked suppresses DELETE, count grows"},
+    {"ac": "AC-2", "covered": false, "note": "FAIL (env): genesis-owner-seed count!=17 after second run"},
+    {"ac": "AC-3", "covered": true, "note": "All expect() calls preserved, verified by diff"},
+    {"ac": "AC-4", "covered": true, "note": "freeformGrantId = json.id at grant-editor.test.ts:644-645, before first expect()"},
+    {"ac": "AC-5", "covered": false, "note": "Script logic correct but contains undocumented 3rd marker vs FR-6"},
+    {"ac": "AC-6", "covered": true, "note": "git diff dev -- migrations/ = empty"}
+  ],
+  "e_owner_focus": {
+    "genesis_safe": true,
+    "genesis_granted_by": "seed",
+    "cleanup_actors": ["test", "d0000000-0000-0000-0000-0000000000ff", "e-owner"],
+    "genesis_at_risk": false,
+    "explanation": "Genesis grants (migration 026) use granted_by='seed'. 'e-owner' cannot match genesis rows. Safety confirmed.",
+    "adv3_risk": "ADV-3.beforeAll inserts granted_by='e-owner' with role_id=DEV_ROLE_OWNER; cleanup script WOULD delete this row if run during test execution. ADV-3 has its own afterAll cleanup by ID so this is only a theoretical window, but it violates 'script only knows its own markers' principle."
+  },
+  "idempotency_result": {
+    "run1_count": "growing (13+13+17+52 after 5 runs)",
+    "run2_stable": false,
+    "root_cause": "tier_published_locked BEFORE DELETE trigger (T-0087) returns NEW instead of OLD, suppressing all DELETEs on choros.grant",
+    "code_correct": true,
+    "env_broken": true
+  },
+  "role_gap_evidence": []
+}
