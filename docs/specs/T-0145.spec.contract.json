@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0145",
+  "status": "ready",
+  "summary": "Убрать хардкод toBe(29) из блока FF-5/AC-19 в ci/checks/db/grant-editor.test.ts: длина known_tenant_tables.txt должна выводиться из самого файла (readFileSync уже используется), а не сравниваться с константой. Сохранить toContain-проверки точечных таблиц (добавить invoke_proposal). Граница с schema.test.ts чёткая: FF-5 остаётся статическим (без withClient/information_schema), а live-сверка реестра со схемой — ответственность schema.test.ts.",
+  "functional": [
+    "FR-1 В блоке FF-5 describe/it убрать expect(lines.length).toBe(29) и заменить на expect(lines.length).toBeGreaterThan(0) — счётчик отныне выводится из файла",
+    "FR-2 В тот же it-блок добавить expect(lines).toContain('invoke_proposal') (таблица уже есть в реестре с T-0120, но не была покрыта точечным тестом)",
+    "FR-3 Обновить строку описания describe и it, убрав число '29' и фразу 'unchanged'; заменить на 'is well-formed'",
+    "FR-4 Обновить комментарий FF-5 в шапке файла: 'known_tenant_tables file is well-formed (static; count from file)'"
+  ],
+  "non_functional": [
+    "NF-1 Блок FF-5 не должен импортировать withClient, migratorUrl или обращаться к information_schema — тест остаётся чисто статическим (без Postgres)",
+    "NF-2 Все остальные describe-блоки в grant-editor.test.ts не изменяются",
+    "NF-3 schema.test.ts, _helpers.ts, known_tenant_tables.txt не трогать"
+  ],
+  "out_of_scope": [
+    "Изменения в schema.test.ts, _helpers.ts, known_tenant_tables.txt",
+    "Добавление live-DB проверок в FF-5",
+    "Перенос FF-5 в другой файл",
+    "Любые изменения вне ci/checks/db/grant-editor.test.ts"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Добавление строки в known_tenant_tables.txt не требует правки теста FF-5: тест запускается до и после добавления строки-фиктивной записи в txt; оба раза зелёный (без правки теста)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Тест FF-5 падает, если убрать из known_tenant_tables.txt одну из точечных таблиц из toContain-набора (grant / role_assignment / instance_budget / agent_budget / reservation / spend_ledger / substitution_rule / invoke_proposal)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Блок FF-5 не содержит вызовов withClient или обращений к information_schema (чисто статический, без Postgres)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "В grant-editor.test.ts отсутствует хардкод toBe(29) (или любое toBe(<число>) в контексте длины known_tenant_tables)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "invoke_proposal добавлен в toContain-набор FF-5",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Все остальные describe-блоки grant-editor.test.ts (FF-1, FF-2, FF-7, FF-8, FF-10, AC-01..AC-20) остаются без изменений",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0145-table-count-registry.spec.md"
+}
