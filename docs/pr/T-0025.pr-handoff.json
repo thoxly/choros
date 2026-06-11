@@ -3,6 +3,7 @@
   "status": "pr_open",
   "branch": "task/T-0025",
   "pr_url": "",
+  "sha": "edcf7f3533b3e29dad4b887bfd0f51fecc770e29",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -17,7 +18,10 @@
     "ci/checks/db/secret-handle.test.ts",
     "ci/checks/secret-handle-isolation.sh",
     "src/server.ts",
-    "package.json"
+    "package.json",
+    "src/http/agents.ts",
+    "src/__tests__/agent-hire.test.ts",
+    "docs/design/T-0025.adr.contract.json"
   ],
   "deviations_from_adr": [],
   "friction_events": []
