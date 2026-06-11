@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0072",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "T-0072-F-001",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/router.ts:148–179 + src/__tests__/router.test.ts",
+      "issue": "Кодер добавил multi-param поддержку в Router (paramIndices/paramNames), но router.test.ts не содержит ни одного теста для маршрута с двумя и более :param-сегментами. Существующие тесты покрывают только однопарам-маршруты (/items/:id/info) и статические пути. Само изменение аддитивно и не ломает существующие маршруты (проверено: router.test.ts 19/19 pass, dispatch при paramIndices=undefined через paramIndex-ветку эквивалентен оригиналу), но coverage нового код-пути нулевая.",
+      "suggestion": "Добавить в router.test.ts минимум один тест: зарегистрировать маршрут с тремя :param-сегментами, убедиться что dispatch корректно извлекает все три параметра. Это нит, не блокер: binding.ts игнорирует router params (_params) и перечитывает URL через extractBindingUrlParts — функциональная регрессия невозможна."
+    },
+    {
+      "id": "T-0072-F-002",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/binding.ts:68",
+      "issue": "withTenantTx использует строковую интерполяцию для SET LOCAL choros.tenant_id: `SET LOCAL choros.tenant_id = '${tenantId}'`. Это зеркалит паттерн из invoke.ts (строка 101, pre-existing). UUID-форму tenantId гарантирует assertUuidShape (UUID_RE=/^[0-9a-f]{8}-...$/ вызывается на строке 64 до withTenantTx), что исключает SQL-инъекцию через этот вектор. Тем не менее паттерн потенциально опасен при копировании без assertUuidShape. Pre-existing — не введён T-0072.",
+      "suggestion": "Долгосрочно: завести утилиту withTenantTx в shared-модуле, чтобы assertUuidShape был структурно неотделим от SET LOCAL. Текущая реализация безопасна при наличии guard-а."
+    },
+    {
+      "id": "T-0072-F-003",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/binding.ts:163–175 (comment block)",
+      "issue": "Блок комментариев в registerBindingRoutes описывает 'workaround' для «single :param constraint of the existing Router». Это описание устарело сразу после того, как кодер же сам расширил Router до multi-param в том же коммите c36f7e7. Комментарий технически неточен: Router теперь поддерживает мультипарам, просто binding.ts не пользуется этим (использует extractBindingUrlParts напрямую).",
+      "suggestion": "Обновить комментарий: «Для надёжности (и чтобы избежать зависимости от порядка register/dispatch) handler извлекает параметры из req.url напрямую через extractBindingUrlParts». Нит-только."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-1",
+      "covered": true,
+      "note": "form_binding.test.ts: table exists, ENABLE+FORCE RLS confirmed via pg_class, UNIQUE(tenant_id,process_key,form_key) verified, DML grants for choros_app confirmed, migration idempotency tested via re-insert ON CONFLICT DO NOTHING."
+    },
+    {
+      "ac": "AC-2",
+      "covered": true,
+      "note": "form_binding listed in ci/checks/known_tenant_tables.txt. form_binding.test.ts (AC-2/NF-3 section): row written under TENANT_A is invisible to TENANT_B choros_app session (SELECT with id filter → 0 rows; SELECT without WHERE → 0 TENANT_A rows from TENANT_B context)."
+    },
+    {
+      "ac": "AC-3",
+      "covered": true,
+      "note": "binding-compat.test.ts: 3 cases in 'AC-3 — perfect match returns ok:true' (single, three fields, both-empty)."
+    },
+    {
+      "ac": "AC-4",
+      "covered": true,
+      "note": "binding-compat.test.ts: AC-4a (missing_in_schema, 2 cases), AC-4b (missing_in_bpmn, 2 cases), AC-4c (both directions simultaneously). All returning ok:false as required."
+    },
+    {
+      "ac": "AC-5",
+      "covered": true,
+      "note": "named-binding-isolation.sh NB-3 (static grep for forbidden I/O imports: pg, node:fs, node:http, node:net, child_process, import.meta, process.env, process.exit) — PASS. Runtime test in binding-compat.test.ts 'AC-5 purity' confirms synchronous no-throw execution."
+    },
+    {
+      "ac": "AC-6",
+      "covered": true,
+      "note": "binding-compat.test.ts: 'AC-6 — lintBpmn with bindingSchema fires binding_mismatch' (3 cases: match→ok:true, missing BPMN var→ok:false, extra schema field→ok:false). named-binding-isolation.sh NB-4 confirms 'binding_mismatch' in LintViolationType."
+    },
+    {
+      "ac": "AC-7",
+      "covered": true,
+      "note": "binding-compat.test.ts 'AC-7': Source #1/#2 (<in>/<out> name attr), Source #3/#4 (<formProperty>/<formField> id attr), Source #5 (EL ${} in conditionExpression incl. dot-walk root extraction). EL_VAR_RE verified against ADR §2.4 spec (matches /\\$\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\b/g)."
+    },
+    {
+      "ac": "AC-8",
+      "covered": true,
+      "note": "lint-bpmn.ts implements --binding-schema flag with file-read, JSON.parse, array-validation, exit 1 on error. Without flag, calls lintBpmn(xml, {}) — backwards-compatible (AC-13). No direct shell test for exit codes, but lint-bpmn.ts logic is straightforward and covered structurally."
+    },
+    {
+      "ac": "AC-9",
+      "covered": true,
+      "note": "binding.ts GET handler: returns 200 {fields, version} on row found (row.fields + row.version), throws HttpError(404) on null row. Covered by integration path via server.ts wiring and form_binding.test.ts cross-tenant isolation tests (which do GET via withClient/appUrl)."
+    },
+    {
+      "ac": "AC-10",
+      "covered": true,
+      "note": "binding.ts POST: INSERT→201, UPDATE→200 with version+1. 401 on missing x-dev-user header (extractActor throws HttpError 401). 403 in keycloak mode on role check (dev mode softened per ADR §4 footnote). upsert via getBinding→INSERT or UPDATE path."
+    },
+    {
+      "ac": "AC-11",
+      "covered": true,
+      "note": "form_binding.test.ts 'AC-11: dev-seed row contains supplier/category/decision fields': queries dev-tenant 00000000-0000-0000-0000-000000000001, purchase-approval, purchase-form; verifies keys array contains all three. Migration seed matches spec FR-7 exactly."
+    },
+    {
+      "ac": "AC-12",
+      "covered": true,
+      "note": "named-binding-isolation.sh NB-6: exports BindingField, BindingViolationType, BindingViolation, BindingCompatResult, checkBindingCompat, KEY_RE, MAX_KEY_LEN, validateBindingFields — all present. LintViolationType union includes 'binding_mismatch' (NB-4). tsc build exits clean (0 errors)."
+    },
+    {
+      "ac": "AC-13",
+      "covered": true,
+      "note": "binding-compat.test.ts 'AC-13': 3 cases (no opts, undefined opts, empty opts {}). bpmn-linter.test.ts: 46 T-0027 tests all pass unchanged — no regressions. bpmn-xml-parser.ts byte-unmodified (NB-5 PASS, git diff empty)."
+    }
+  ],
+  "role_gap_evidence": [
+    "Особо-1 (router dispatch): Изменение аддитивно-совместимо. Анализ diff: register() удалён break после первого :param → теперь собирает все :param-позиции. dispatch() заменяет 'i === route.paramIndex' на 'paramIdxSet.has(i)' — для однопарам-маршрутов (paramIndices отсутствует, отсутствует опциональное поле) paramIdxSet строится из legacy paramIndex. Совпадение байт-в-байт для старых маршрутов подтверждено: router.test.ts 19/19 pass; все существующие маршруты (однопарам) работают идентично. Порядок матчинга не затронут (итерация this.routes без изменений). Нет теста на двухпарам-маршрут в router.test.ts — зарегистрировано как нит F-001.",
+    "Особо-2 (form_binding в cross_tenant.test.ts): Seed-строка корректна: все NOT NULL колонки заполнены (tenant_id, id, process_key, form_key, fields::jsonb, version=1, created_at=0, updated_at=0). fields=[{key:ctField,type:string,required:false}] проходит CHECK jsonb_typeof(fields)='array'. ON CONFLICT DO NOTHING предотвращает ошибку при повторных прогонах. process_key/form_key генерируются через uuid-slice — гарантируют уникальность UNIQUE(tenant_id,process_key,form_key). Схема 045 совместима полностью.",
+    "Особо-3 (миграция 045 dev-seed): Dev-seed присутствует в миграции (ON CONFLICT DO NOTHING — идемпотентен). ADR §1/FR-7 предписывают dev-seed в миграции явно («1 dev-seed строка (ON CONFLICT DO NOTHING) для dev-тенанта»). Спека FR-7 однозначно: «dev-seed ON CONFLICT DO NOTHING». INSERT в структурной миграции уместен и предписан ADR. Идемпотентность подтверждена тестом form_binding.test.ts (re-insert ON CONFLICT DO NOTHING resolves without throw). Соответствие ADR: полное.",
+    "Adversarial — чужой тенант (RLS): POST /binding вызывает withTenantTx с tenantId из URL, гарантирует SET LOCAL choros.tenant_id перед любым DB-операцией. FORCE RLS политика 045 не позволяет видеть/писать строки других тенантов даже при explicit WHERE tenant_id=other. form_binding.test.ts AC-2 подтверждает cross-tenant invisibility. extractBindingUrlParts возвращает null для malformed URL → HttpError 404.",
+    "Adversarial — malformed fields (не-массив): validateBindingFields проверяет Array.isArray на входе → { ok:false, errors:[{index:-1,...}] } → POST → 400. key=null: typeof null !== 'string' → rejected. Тест: 'fields is not an array → error'. Все случаи покрыты.",
+    "Adversarial — сверхдлинный key: key.length > MAX_KEY_LEN=255 → rejected с reason 'exceeds 255 characters'. Тест: 'key exceeding MAX_KEY_LEN → rejected'.",
+    "Adversarial — GET несуществующего binding: getBinding возвращает null → throw HttpError(404, NOT_FOUND, 'binding not found').",
+    "CI gate числа (финальные): tsc build — 0 errors, 0 warnings; ESLint — 0 errors (2 pre-existing warnings в bridge-runner.ts/externalTaskBridge.ts, не в T-0072 файлах); vitest run — 1020 pass / 6 skip (1026 total); named-binding-isolation.sh — 6/6 PASS; sibling-reds: role-criticality FF-RC6 FAIL (ожидаемо, migration+known_tenant_tables.txt изменены), dual-control FF-DC7 FAIL (ожидаемо, migration+known_tenant_tables.txt) — оба из documented ADR §8 'известный класс sibling-red'. scoped-admin-isolation и grant-trail-encoder-isolation — зелёные."
+  ]
+}

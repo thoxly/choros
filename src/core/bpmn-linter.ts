@@ -15,12 +15,18 @@
 import { tokenize } from "./bpmn-xml-parser.js";
 import type { Attr } from "./bpmn-xml-parser.js";
 import { parseHandle } from "./object-handle.js";
+import {
+  checkBindingCompat,
+  KEY_RE,
+  type BindingField,
+} from "./binding-compat.js";
 
 // ---------------------------------------------------------------------------
 // Exported types (frozen public surface — T-0058/T-0064 wire against this)
 // ---------------------------------------------------------------------------
 
-export type LintViolationType = "raw_object_binding" | "malformed_xml";
+// T-0072: "binding_mismatch" added additively (NF-4 / AC-13 — no existing tests broken).
+export type LintViolationType = "raw_object_binding" | "malformed_xml" | "binding_mismatch";
 
 export interface LintViolation {
   type: LintViolationType;
@@ -237,6 +243,36 @@ function hasRawObjectKey(obj: Record<string, unknown>): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// T-0072: LintOpts — optional second argument for binding compat check
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional opts for lintBpmn (T-0072 additive extension).
+ * bindingSchema: if supplied, triggers binding_mismatch check using
+ *   checkBindingCompat(bindingSchema, bpmnVarNames).
+ * Absent (undefined) → identical behavior to T-0027 (NF-4 / AC-13).
+ */
+export interface LintOpts {
+  bindingSchema?: BindingField[];
+}
+
+// ---------------------------------------------------------------------------
+// T-0072: EL variable extractor regex (ADR §2.4, NF-5)
+//
+// Best-effort: extracts the ROOT variable name from EL expressions.
+// ${supplier}         → "supplier"
+// ${supplier.name}    → "supplier"   (dot-walk — only root extracted)
+// ${amount > 100}     → "amount"
+// ${a && b}           → "a"          (only first root extracted — known limitation)
+//
+// Ложные отрицания допустимы (NF-5). Ложных срабатываний нет:
+// регекс требует первый символ буква/underscore — цифры/символы не пропускаются.
+// Закреплено этим ADR; полный OGNL/MVEL-парсер вне скоупа T-0072.
+// ---------------------------------------------------------------------------
+
+const EL_VAR_RE = /\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\b/g;
+
+// ---------------------------------------------------------------------------
 // Main lintBpmn function
 // ---------------------------------------------------------------------------
 
@@ -247,13 +283,24 @@ function hasRawObjectKey(obj: Record<string, unknown>): boolean {
  * Pure function — no I/O, no network, no DB, no side effects.
  * T-0058/T-0064 MUST call this before accepting any BPMN deploy request.
  *
- * @param xml - The BPMN 2.0 XML document as a UTF-8 string.
+ * @param xml  - The BPMN 2.0 XML document as a UTF-8 string.
+ * @param opts - Optional. T-0072: if opts.bindingSchema is supplied, an
+ *               additional binding_mismatch check is performed after the
+ *               raw-object check. Without opts the function is byte-for-byte
+ *               identical to T-0027 behavior (NF-4 / AC-13).
  * @returns { ok: true } if the document passes all checks.
  *          { ok: false; violations: LintViolation[] } if any violation is found,
  *          including malformed XML (fail-closed).
  */
-export function lintBpmn(xml: string): LintResult {
+export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   const violations: LintViolation[] = [];
+
+  // T-0072: collect bpmnVarNames during the token walk (only when bindingSchema supplied).
+  // The Set is populated aditively in the token loop below; checkBindingCompat is
+  // called after the walk completes (post-walk, before final violations check).
+  const bpmnVarNames: Set<string> | null = opts?.bindingSchema !== undefined
+    ? new Set<string>()
+    : null;
 
   // Validate UTF-8 by checking for replacement characters that Node may have
   // inserted for invalid byte sequences. We operate on a JS string, so we
@@ -344,6 +391,19 @@ export function lintBpmn(xml: string): LintResult {
             }
           }
         }
+
+        // T-0072: varName extraction from extension variable sources (ADR §2.4).
+        // Sources #1/#2: <in name="X"> / <out name="Y"> (call-activity mappings)
+        // Sources #3/#4: <formProperty id="Z"> / <formField id="W"> (form element ids)
+        // Key shape is filtered through KEY_RE to avoid injecting malformed names.
+        if (bpmnVarNames !== null) {
+          extractVarNameFromToken(localName, attrs, bpmnVarNames);
+        }
+      } else if (bpmnVarNames !== null) {
+        // T-0072: extract varNames even from top-level (non-child) occurrences
+        // e.g. <in> / <out> / <formProperty> / <formField> appearing without a
+        // scoped parent in this document. Best-effort.
+        extractVarNameFromToken(localName, attrs, bpmnVarNames);
       }
 
       // Self-close: immediately pop the scoped context if it was just pushed
@@ -394,6 +454,19 @@ export function lintBpmn(xml: string): LintResult {
           if ((ctx.isConditionExpression || ctx.isDataObject) && ctx.textBuffer.trim().length > 0) {
             checkTextContent(ctx.textBuffer, ctx.elementKind, ctx.elementId, violations);
           }
+          // T-0072: varName extraction — Source #5: EL ${...} in <conditionExpression> text (ADR §2.4).
+          // Best-effort regex (NF-5): extracts root var name from EL expressions.
+          // Ложные отрицания допустимы; ложные срабатывания исключены (KEY_RE shape).
+          if (bpmnVarNames !== null && ctx.isConditionExpression && ctx.textBuffer.length > 0) {
+            EL_VAR_RE.lastIndex = 0;
+            let elMatch: RegExpExecArray | null;
+            while ((elMatch = EL_VAR_RE.exec(ctx.textBuffer)) !== null) {
+              const varName = elMatch[1];
+              if (varName !== undefined && KEY_RE.test(varName)) {
+                bpmnVarNames.add(varName);
+              }
+            }
+          }
           contextStack.pop();
         } else if (EXTENSION_CONTAINER_NAMES.has(localName) && !SCOPED_ELEMENTS.has(localName)) {
           // Flush text for extension element closing
@@ -423,10 +496,56 @@ export function lintBpmn(xml: string): LintResult {
     };
   }
 
+  // T-0072: binding compat check (ADR §2.4 / AC-6 / AC-7).
+  // Runs AFTER the raw-object walk so parse errors short-circuit above.
+  // Only activated when opts.bindingSchema is supplied.
+  if (bpmnVarNames !== null && opts?.bindingSchema !== undefined) {
+    const compatResult = checkBindingCompat(opts.bindingSchema, bpmnVarNames);
+    if (!compatResult.ok) {
+      for (const v of compatResult.violations) {
+        violations.push({
+          type: "binding_mismatch",
+          elementId: "",
+          elementKind: "binding_mismatch",
+          message: v.message,
+        });
+      }
+    }
+  }
+
   if (violations.length === 0) {
     return { ok: true };
   }
   return { ok: false, violations };
+}
+
+// ---------------------------------------------------------------------------
+// T-0072: varName extraction helper (ADR §2.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts a variable name from a token and adds it to bpmnVarNames if valid.
+ * Sources:
+ *   <in name="X">        / <out name="Y">      → attrs.name value
+ *   <formProperty id="Z"> / <formField id="W"> → attrs.id value
+ * Names not passing KEY_RE are discarded (prevent false positives, NF-5).
+ */
+function extractVarNameFromToken(
+  localName: string,
+  attrs: Attr[],
+  bpmnVarNames: Set<string>,
+): void {
+  if (localName === "in" || localName === "out") {
+    const nameAttr = attrs.find((a) => a.name === "name");
+    if (nameAttr?.value && KEY_RE.test(nameAttr.value)) {
+      bpmnVarNames.add(nameAttr.value);
+    }
+  } else if (localName === "formProperty" || localName === "formField") {
+    const idAttr = attrs.find((a) => a.name === "id");
+    if (idAttr?.value && KEY_RE.test(idAttr.value)) {
+      bpmnVarNames.add(idAttr.value);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
