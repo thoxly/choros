@@ -38,6 +38,9 @@ interface PrefDbRow {
   updated_at: string;  // bigint comes back as string from pg
 }
 
+// R-3: UUID shape guard for SET LOCAL interpolation (mirrors notification-prefs.ts pattern).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function rowToPreference(r: PrefDbRow): NotificationPreference {
   return {
     tenantId: r.tenant_id,
@@ -97,6 +100,11 @@ export class PostgresPrefStore implements NotificationPrefStore {
    * commits — mirrors pgOutboxStore.claimBatch pattern.
    */
   async getPreferences(tenantId: string, eventKind: string): Promise<NotificationPreference[]> {
+    // R-3: UUID-validate tenantId before interpolating into SET LOCAL (mirrors
+    // notification-prefs.ts withTenantTx / pgOutboxStore pattern).
+    if (!UUID_RE.test(tenantId)) {
+      throw new Error(`getPreferences: tenantId must be a valid UUID, got: ${tenantId}`);
+    }
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");

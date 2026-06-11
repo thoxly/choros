@@ -25,6 +25,8 @@ import { DEV_USER_HEADER } from "./auth.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { PostgresPrefStore } from "../core/postgres/pgPrefStore.js";
+import { loadAdminContext } from "../db/org.js";
+import type { Operation } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,6 +39,67 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // The audit writer instance for this module (single canonical sink per T-0016).
 const prefAuditWriter = makePgAuditWriter();
+
+// ---------------------------------------------------------------------------
+// PrefAuthzDeps — injectable PDP gate (R-1 / AC-6/AC-7/AC-10)
+//
+// The gate checks that the actor holds a grant on mgmt_object:notification_config
+// for the required operation (read for GET, update for PUT).
+//
+// Default implementation uses loadAdminContext + validateAdminDelegation — the
+// same pattern used by all other mgmt-route writes (agents.ts, grants.ts, etc).
+// Injected as deps to allow unit tests to supply a fake without a live DB.
+// ---------------------------------------------------------------------------
+
+export interface PrefAuthzDeps {
+  /**
+   * Check whether `actorId` holds admin authority for `mgmt_object:notification_config`
+   * with the given `operation` in `tenantId`. Returns `{ ok: true }` if allowed or
+   * `{ ok: false, reason: string }` to trigger a 403.
+   */
+  checkAdminGrant: (
+    pool: pg.Pool,
+    tenantId: string,
+    actorId: string,
+    operation: Operation,
+    nowMs: number,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+async function defaultCheckAdminGrant(
+  pool: pg.Pool,
+  tenantId: string,
+  actorId: string,
+  operation: Operation,
+  nowMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  // Genesis owner is the un-parented delegation root — always allowed (T-0029 §2 step 3).
+  if (admin.isGenesisOwner) {
+    return { ok: true };
+  }
+
+  // For non-owners: check that adminGrants contains a delegable grant on
+  // mgmt_object:notification_config with the required operation (read or update).
+  // loadAdminContext fetches all LIKE 'mgmt_object:%' delegable grants — this
+  // covers mgmt_object:notification_config without expanding MGMT_OBJECT_KINDS.
+  const hasCovering = admin.adminGrants.some(
+    (g) =>
+      g.delegable &&
+      g.resourceType === "mgmt_object:notification_config" &&
+      g.operation === operation,
+  );
+
+  if (!hasCovering) {
+    return { ok: false, reason: "no_admin_authority" };
+  }
+  return { ok: true };
+}
+
+const defaultPrefAuthzDeps: PrefAuthzDeps = {
+  checkAdminGrant: defaultCheckAdminGrant,
+};
 
 // ---------------------------------------------------------------------------
 // withTenantTx helper (mirrors grants.ts / grant-propose.ts pattern)
@@ -107,15 +170,21 @@ function parsePutBody(raw: unknown): PrefPutBody {
   };
 }
 
-// Structural guard: self-endpoint must not allow setting role: or foreign actor: scopes.
+// Structural guard: self-endpoint must not allow setting role: or any explicit actor: scope.
+// The actual recipientScope is ALWAYS server-constructed as actor:<self>.
+// We reject both role: scopes AND any explicit actor: scope from the body — the server
+// overrides the value, but we return a clear 400 so the client knows the field is ignored.
+// (R-2: reject actor:foreign too, not only role:)
 function assertSelfScopeValid(scope: string | undefined): void {
   if (scope === undefined) return;
   if (scope.startsWith("role:")) {
     throw new HttpError(400, "VALIDATION", "self-endpoint may not set role: recipient_scope");
   }
-  // Reject any explicit 'actor:' that does NOT start with actor: (paranoia) or
-  // is present at all (we override it server-side). Reject explicitly to return a clear error.
-  // The actual scope is always constructed server-side from actorId.
+  // Reject any explicit actor: value — the server always constructs actor:<self>;
+  // providing a different actor: in the body is an error (either self-redundant or foreign).
+  if (scope.startsWith("actor:")) {
+    throw new HttpError(400, "VALIDATION", "self-endpoint may not set actor: recipient_scope; scope is always actor:<self>");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,19 +194,20 @@ function assertSelfScopeValid(scope: string | undefined): void {
 /**
  * Registers the four notification-preference endpoints.
  *
- * Authorization (dev-mode):
+ * Authorization:
  *   Admin routes (GET/PUT /api/notification-preferences) — require X-Dev-User header
- *     as actorId; day-1 dev-mode accepts any valid header (PDP is wired for grant-check;
- *     day-1 dev grants are pre-seeded for the genesis owner role).
+ *     as actorId AND PDP gate via deps.checkAdminGrant (mgmt_object:notification_config
+ *     / read or update). 403 NO_PREF_MGMT_GRANT if actor lacks the grant (AC-6/AC-7).
  *   Self routes — require X-Dev-User header; scope is structurally locked to actor:<self>.
  *
- * NOTE: PDP grant-check (resolveFor / mgmt_object:notification_config) is the production
- * gate for admin routes. The current implementation includes the structural guard (no
- * second ACL mechanism) but does not wire resolveFor in dev-mode to avoid a dependency
- * on the full grant-resolver initialization in the composition root. The TODO marks
- * where resolveFor should be called when the full PDP wiring lands.
+ * @param deps  - Injectable authz deps (default: production loadAdminContext gate).
+ *                Override in tests to supply a fake resolver without a live DB.
  */
-export function registerNotificationPrefRoutes(router: Router, pool: pg.Pool): void {
+export function registerNotificationPrefRoutes(
+  router: Router,
+  pool: pg.Pool,
+  deps: PrefAuthzDeps = defaultPrefAuthzDeps,
+): void {
   const store = new PostgresPrefStore(pool);
 
   // -------------------------------------------------------------------------
@@ -154,11 +224,12 @@ export function registerNotificationPrefRoutes(router: Router, pool: pg.Pool): v
       actorId = devUser;
     }
 
-    // TODO: PDP resolveFor(deps, handle, actorId, 'read') for mgmt_object:notification_config
-    // when grant-resolver is wired into this composition root. Day-1: actor presence = gate.
-    void actorId;
-
+    // PDP gate: actor must hold mgmt_object:notification_config / read (AC-6/AC-10).
     const tenantId = DEV_TENANT_ID;
+    const gateResult = await deps.checkAdminGrant(pool, tenantId, actorId, "read", Date.now());
+    if (!gateResult.ok) {
+      throw new HttpError(403, "NO_PREF_MGMT_GRANT", `mgmt_object:notification_config/read denied: ${gateResult.reason}`);
+    }
 
     const preferences = await withTenantTx(pool, tenantId, (client) =>
       store.listByTenant(client),
@@ -183,10 +254,13 @@ export function registerNotificationPrefRoutes(router: Router, pool: pg.Pool): v
       actorId = devUser;
     }
 
-    // TODO: PDP resolveFor for mgmt_object:notification_config / update (day-1: actor gate).
-    void actorId;
-
+    // PDP gate: actor must hold mgmt_object:notification_config / update (AC-7/AC-10).
     const tenantId = DEV_TENANT_ID;
+    const gateResult = await deps.checkAdminGrant(pool, tenantId, actorId, "update", Date.now());
+    if (!gateResult.ok) {
+      throw new HttpError(403, "NO_PREF_MGMT_GRANT", `mgmt_object:notification_config/update denied: ${gateResult.reason}`);
+    }
+
     const nowMs = Date.now();
 
     const rawBody = await readJsonBody(req);

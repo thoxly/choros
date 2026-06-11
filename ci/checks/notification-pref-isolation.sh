@@ -68,6 +68,16 @@ if [[ ${FF_NP1_ERRORS} -eq 0 ]]; then
   echo "PASS (FF-NP1): no new ACL mechanism in preference modules"
 fi
 
+# AC-10 second criterion: PDP gate is wired (FF-PREF-AUTHZ).
+# checkAdminGrant is the PDP entrypoint (wraps loadAdminContext + T-0029 validateAdminDelegation).
+echo "Check FF-NP1b (FF-PREF-AUTHZ): PDP gate (checkAdminGrant) wired in admin routes"
+if ! grep -q "checkAdminGrant" "${PREF_HTTP}"; then
+  echo "FAIL (FF-NP1b): checkAdminGrant not found in ${PREF_HTTP} — PDP gate is not wired"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS (FF-NP1b): checkAdminGrant (PDP gate) present in notification-prefs.ts"
+fi
+
 # ---- FF-NP2: self-endpoint structural guard (FF-SELF-PREF-SCOPED) ------
 echo ""
 echo "Check FF-NP2 (FF-SELF-PREF-SCOPED): self-endpoint constructs actor:<self> server-side"

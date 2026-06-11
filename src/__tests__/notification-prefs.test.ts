@@ -10,12 +10,15 @@
  *   AC-3  upsert creates + updates on conflict
  *   AC-4  seedDefaultPreferences inserts 5 rows; idempotent
  *   AC-5  default preference content matches ADR §2.4
- *   AC-8  PUT /self rejects role: scope; accepts valid; writes actor:<self>
+ *   AC-6  GET /api/notification-preferences → 403 when checkAdminGrant denies (R-1)
+ *   AC-7  PUT /api/notification-preferences → 403 when checkAdminGrant denies (R-1)
+ *   AC-8  PUT /self rejects role: scope AND actor: scope (R-2); accepts valid event_kind
  *   AC-9  GET /self returns only actor:<self> rows
  *   AC-10 no new ACL mechanism in code (grep fitness in notification-pref-isolation.sh)
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import * as http from "node:http";
 import {
   PostgresPrefStore,
   seedDefaultPreferences,
@@ -26,6 +29,11 @@ import type {
   NotificationPrefStore,
   NotificationPreference,
 } from "../core/notification-router.js";
+import {
+  registerNotificationPrefRoutes,
+  type PrefAuthzDeps,
+} from "../http/notification-prefs.js";
+import { Router } from "../http/router.js";
 
 // ---------------------------------------------------------------------------
 // AC-1: structural compatibility — verify PostgresPrefStore satisfies NotificationPrefStore
@@ -259,5 +267,177 @@ describe("AC-3: pgPrefStore.listByTenant returns mapped preferences", () => {
     expect(prefs[0]!.eventKind).toBe("sla.breach");
     expect(prefs[0]!.recipientScope).toBe("object_owner");
     expect(prefs[0]!.channels).toEqual(["in_app", "email"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-6/AC-7: PDP gate — 403 when checkAdminGrant denies (R-1)
+//
+// Tests the injected-deps approach: a fake PrefAuthzDeps that always denies
+// is passed to registerNotificationPrefRoutes, and we assert 403.
+// No DB required — the fake resolver short-circuits the real loadAdminContext.
+// ---------------------------------------------------------------------------
+
+// Helper: build an in-process HTTP server with the pref routes registered.
+function buildTestServer(
+  authzDeps: PrefAuthzDeps,
+): { server: http.Server; baseUrl: () => string } {
+  const router = new Router();
+  const fakePool = null as unknown as import("pg").Pool;
+  registerNotificationPrefRoutes(router, fakePool, authzDeps);
+
+  const server = http.createServer((req, res) => {
+    router.dispatch(req, res);
+  });
+  return {
+    server,
+    baseUrl: () => {
+      const addr = server.address() as { port: number } | null;
+      if (!addr) throw new Error("server not listening");
+      return `http://127.0.0.1:${addr.port}`;
+    },
+  };
+}
+
+// Helper: make an HTTP request to the test server.
+async function httpReq(
+  method: string,
+  url: string,
+  headers: Record<string, string> = {},
+  body?: unknown,
+): Promise<{ status: number; json: unknown }> {
+  return new Promise((resolve, reject) => {
+    const buf = body !== undefined ? Buffer.from(JSON.stringify(body)) : undefined;
+    const parsed = new URL(url);
+    const opts: http.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parseInt(parsed.port, 10),
+      path: parsed.pathname,
+      method,
+      headers: {
+        ...headers,
+        ...(buf ? { "Content-Type": "application/json", "Content-Length": String(buf.length) } : {}),
+      },
+    };
+    const req = http.request(opts, (res) => {
+      let data = "";
+      res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode ?? 0, json: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode ?? 0, json: { raw: data } }); }
+      });
+    });
+    req.on("error", reject);
+    if (buf) req.write(buf);
+    req.end();
+  });
+}
+
+// Fake deps: always deny — simulates an actor without any mgmt grant.
+const denyAllDeps: PrefAuthzDeps = {
+  checkAdminGrant: async (_pool, _tenantId, _actorId, _op, _now) =>
+    ({ ok: false, reason: "no_admin_authority" }),
+};
+
+// Fake deps: always allow — simulates a genesis-owner actor.
+// The store will be a fake pool (null) so we also need to intercept any DB calls.
+// For the GET test we just need the 200 path to not crash on missing pool.
+// We skip store-level tests here (those live in the live-DB suite).
+
+describe("AC-6: GET /api/notification-preferences → 403 when checkAdminGrant denies", () => {
+  const { server, baseUrl } = buildTestServer(denyAllDeps);
+
+  beforeAll(
+    () => new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.once("error", reject);
+    }),
+  );
+
+  afterAll(
+    () => new Promise<void>((res) => server.close(() => res())),
+  );
+
+  it("returns 403 NO_PREF_MGMT_GRANT without a covering admin grant", async () => {
+    const res = await httpReq(
+      "GET",
+      `${baseUrl()}/api/notification-preferences`,
+      { "x-dev-user": "actor-no-grant" },
+    );
+    expect(res.status, `expected 403, got ${res.status}: ${JSON.stringify(res.json)}`).toBe(403);
+    const errCode = (res.json as Record<string, unknown>)["error"];
+    const code = errCode && typeof errCode === "object"
+      ? (errCode as Record<string, unknown>)["code"]
+      : undefined;
+    expect(code).toBe("NO_PREF_MGMT_GRANT");
+  });
+});
+
+describe("AC-7: PUT /api/notification-preferences → 403 when checkAdminGrant denies", () => {
+  const { server, baseUrl } = buildTestServer(denyAllDeps);
+
+  beforeAll(
+    () => new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.once("error", reject);
+    }),
+  );
+
+  afterAll(
+    () => new Promise<void>((res) => server.close(() => res())),
+  );
+
+  it("returns 403 NO_PREF_MGMT_GRANT without a covering admin grant", async () => {
+    const res = await httpReq(
+      "PUT",
+      `${baseUrl()}/api/notification-preferences`,
+      { "x-dev-user": "actor-no-grant" },
+      { eventKind: "task.assigned", recipientScope: "actor:u1", channels: ["in_app"] },
+    );
+    expect(res.status, `expected 403, got ${res.status}: ${JSON.stringify(res.json)}`).toBe(403);
+    const errCode = (res.json as Record<string, unknown>)["error"];
+    const code = errCode && typeof errCode === "object"
+      ? (errCode as Record<string, unknown>)["code"]
+      : undefined;
+    expect(code).toBe("NO_PREF_MGMT_GRANT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-8 (R-2): assertSelfScopeValid also rejects actor: scope
+// ---------------------------------------------------------------------------
+
+describe("AC-8 (R-2): PUT /self rejects actor: scope in body", () => {
+  const { server, baseUrl } = buildTestServer(denyAllDeps);
+
+  beforeAll(
+    () => new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.once("error", reject);
+    }),
+  );
+
+  afterAll(
+    () => new Promise<void>((res) => server.close(() => res())),
+  );
+
+  it("returns 400 when body.recipientScope = actor:foreign-id", async () => {
+    const res = await httpReq(
+      "PUT",
+      `${baseUrl()}/api/notification-preferences/self`,
+      { "x-dev-user": "actor-self" },
+      { eventKind: "task.assigned", recipientScope: "actor:other-uuid", channels: ["in_app"] },
+    );
+    expect(res.status, `expected 400 for actor: scope, got ${res.status}: ${JSON.stringify(res.json)}`).toBe(400);
+  });
+
+  it("returns 400 when body.recipientScope = role:manager", async () => {
+    const res = await httpReq(
+      "PUT",
+      `${baseUrl()}/api/notification-preferences/self`,
+      { "x-dev-user": "actor-self" },
+      { eventKind: "task.assigned", recipientScope: "role:manager", channels: ["in_app"] },
+    );
+    expect(res.status, `expected 400 for role: scope, got ${res.status}: ${JSON.stringify(res.json)}`).toBe(400);
   });
 });
