@@ -1,7 +1,8 @@
 {
   "task_id": "T-0039",
-  "verdict": "changes_requested",
-  "ci_seen": { "green": false },
+  "verdict": "approved",
+  "iteration": 2,
+  "ci_seen": { "green": true },
   "findings": [
     {
       "id": "R-1",
@@ -9,7 +10,9 @@
       "axis": 3,
       "location": "src/http/grant-propose.ts:43",
       "issue": "CI RED (ESLint error): function `isValidUuid` is defined but never used (`@typescript-eslint/no-unused-vars`). The function was likely scaffolded early in development and superseded by the `assertUuidShape` helper that uses `UUID_RE` directly. Dead code blocks lint and must be removed.",
-      "suggestion": "Delete the `isValidUuid` function (lines 43-45) in `src/http/grant-propose.ts`. Validate via `UUID_RE.test()` directly (as `assertUuidShape` already does) or re-use `assertUuidShape` if needed elsewhere."
+      "suggestion": "Delete the `isValidUuid` function (lines 43-45) in `src/http/grant-propose.ts`. Validate via `UUID_RE.test()` directly (as `assertUuidShape` already does) or re-use `assertUuidShape` if needed elsewhere.",
+      "resolved": true,
+      "resolved_in": "56532c2"
     },
     {
       "id": "R-2",
@@ -17,7 +20,9 @@
       "axis": 3,
       "location": "src/__tests__/grant-propose.test.ts:109",
       "issue": "CI RED (ESLint error): `baseUrl` is declared with `let` but never reassigned (`prefer-const`). The variable is set to the empty string `\"\"` on line 109 and is only ever read via the getter on the returned object; the `let` declaration is never written outside initialization.",
-      "suggestion": "Change `let baseUrl = \"\";` to `const baseUrl = \"\";` on line 109 of the test file. Note: the `get baseUrl()` accessor references the const closure, which is valid in JS/TS."
+      "suggestion": "Change `let baseUrl = \"\";` to `const baseUrl = \"\";` on line 109 of the test file. Note: the `get baseUrl()` accessor references the const closure, which is valid in JS/TS.",
+      "resolved": true,
+      "resolved_in": "56532c2"
     }
   ],
   "acceptance_coverage": [
