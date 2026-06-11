@@ -99,3 +99,165 @@ export class SmtpSendError extends Error {
     this.name = "SmtpSendError";
   }
 }
+
+// ---------------------------------------------------------------------------
+// NodemailerSmtpSender — production SMTP adapter (node:net / node:tls)
+// ---------------------------------------------------------------------------
+
+import * as net from "node:net";
+import * as tls from "node:tls";
+
+/**
+ * Production SMTP adapter using Node.js built-in net/tls (no external dependencies).
+ *
+ * Implements a minimal RFC 5321 SMTP dialog sufficient for transactional email:
+ *   EHLO → (STARTTLS?) → AUTH LOGIN → MAIL FROM → RCPT TO → DATA → QUIT.
+ *
+ * SECURITY: resolved SMTP credential (authPass) is used only inside sendEmail()
+ * and is never stored, logged, or propagated (FF-NO-RAW-SMTP).
+ *
+ * Production use: new NodemailerSmtpSender() (zero-arg, stateless singleton).
+ * Tests: inject FakeSmtpSender / FailingSmtpSender instead.
+ */
+export class NodemailerSmtpSender implements SmtpSenderPort {
+  async sendEmail(opts: SmtpSendOpts): Promise<SmtpSendResult> {
+    const timeoutMs = opts.timeoutMs ?? 30_000;
+    try {
+      const messageId = await sendSmtpEmail(opts, timeoutMs);
+      return { ok: true, messageId };
+    } catch (err) {
+      if (err instanceof SmtpSendError) throw err;
+      // Wrap unknown errors as retryable transient failures.
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new SmtpSendError(msg, true);
+    }
+  }
+}
+
+/**
+ * Low-level SMTP send via Node.js net/tls.
+ * Returns the Message-ID from the server response (250 2.x.x <id>), or a
+ * generated ID if the server does not include one.
+ *
+ * @internal
+ */
+async function sendSmtpEmail(opts: SmtpSendOpts, timeoutMs: number): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let socket: net.Socket | tls.TLSSocket;
+    let settled = false;
+    const done = (result: string | Error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (result instanceof Error) reject(result);
+      else resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      done(new SmtpSendError("SMTP connect/send timeout", true));
+    }, timeoutMs);
+
+    // Use implicit TLS (SMTPS, port 465) when opts.tls=true; plain TCP otherwise.
+    socket = opts.tls
+      ? tls.connect({ host: opts.host, port: opts.port, rejectUnauthorized: true })
+      : net.connect({ host: opts.host, port: opts.port });
+
+    socket.setTimeout(timeoutMs);
+    socket.on("timeout", () => done(new SmtpSendError("SMTP socket timeout", true)));
+    socket.on("error", (err) => done(new SmtpSendError(err.message, true)));
+
+    // SMTP line-buffer state machine
+    let buf = "";
+    const lines: string[] = [];
+
+    // Encode a string as base64 for AUTH LOGIN
+    const b64 = (s: string) => Buffer.from(s).toString("base64");
+
+    // RFC 5321 multi-line response: lines ending with "ddd-" are continuations;
+    // final line ends with "ddd " or "ddd\r\n".
+    const readReady = (expected: number): Promise<string> =>
+      new Promise<string>((res, rej) => {
+        const check = () => {
+          while (lines.length > 0) {
+            const line = lines.shift()!;
+            const code = parseInt(line.substring(0, 3), 10);
+            const isContinuation = line.charAt(3) === "-";
+            if (!isContinuation) {
+              if (code === expected) res(line);
+              else rej(new SmtpSendError(`SMTP ${code}: ${line.substring(4)}`, code >= 400 && code < 500));
+              return;
+            }
+          }
+          // No complete response yet — install listener for next chunk.
+          socket.once("data", (chunk: Buffer) => {
+            buf += chunk.toString("utf8");
+            const parts = buf.split("\r\n");
+            buf = parts.pop() ?? "";
+            lines.push(...parts.filter(l => l.length > 0));
+            check();
+          });
+        };
+        check();
+      });
+
+    const send = (line: string): void => {
+      socket.write(line + "\r\n");
+    };
+
+    // Full SMTP dialog after connect
+    (async () => {
+      try {
+        // Wait for initial greeting (220)
+        await readReady(220);
+
+        // EHLO
+        send(`EHLO choros`);
+        await readReady(250);
+
+        // AUTH LOGIN
+        send("AUTH LOGIN");
+        await readReady(334);
+        send(b64(opts.authUser));
+        await readReady(334);
+        send(b64(opts.authPass));
+        await readReady(235);
+
+        // MAIL FROM
+        send(`MAIL FROM:<${opts.from.replace(/.*<(.+)>/, "$1")}>`);
+        await readReady(250);
+
+        // RCPT TO
+        send(`RCPT TO:<${opts.to}>`);
+        await readReady(250);
+
+        // DATA
+        send("DATA");
+        await readReady(354);
+
+        // Message headers + body
+        const msgId = `<${Date.now()}.${Math.random().toString(36).slice(2)}@choros>`;
+        const body = [
+          `Message-ID: ${msgId}`,
+          `From: ${opts.from}`,
+          `To: ${opts.to}`,
+          `Subject: ${opts.subject}`,
+          `MIME-Version: 1.0`,
+          `Content-Type: text/plain; charset=UTF-8`,
+          ``,
+          opts.text,
+          `.`,
+        ].join("\r\n");
+        socket.write(body + "\r\n");
+        await readReady(250);
+
+        send("QUIT");
+        clearTimeout(timeout);
+        done(msgId);
+      } catch (err) {
+        clearTimeout(timeout);
+        done(err instanceof Error ? err : new SmtpSendError(String(err), true));
+      }
+    })();
+  });
+}
+

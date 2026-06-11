@@ -889,3 +889,164 @@ describe("EmailChannelDriver.deliver — secret not exposed in error reason", ()
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-1 proof: permanent-fail notification row dies on attempt 1 via perRowMaxAttempts
+// ---------------------------------------------------------------------------
+
+describe("R-1 fix: permanent-fail notification row dies on first attempt (AC-13/FR-8)", () => {
+  it("perRowMaxAttempts returns 1 for IMMEDIATE_DEAD notification rows → markRetry called with maxAttempts=1", async () => {
+    const { runOutboxOnce } = await import("../core/outboxDispatcher.js");
+    const { IMMEDIATE_DEAD_ERROR_PREFIX } = await import("../core/notification-router.js");
+
+    // Simulate the perRowMaxAttempts callback as wired in lifecycle-bridge.ts
+    const NOTIFICATION_KIND = "notification";
+    const perRowMaxAttempts = (row: OutboxRow, error: string | undefined): number | undefined => {
+      if (
+        row.aggregateKind === NOTIFICATION_KIND &&
+        error !== undefined &&
+        error.startsWith(IMMEDIATE_DEAD_ERROR_PREFIX)
+      ) {
+        return 1;
+      }
+      return undefined;
+    };
+
+    // Fake store that records the maxAttempts passed to markRetry
+    const markRetryCalls: Array<{ id: string; maxAttempts: number }> = [];
+    const fakeStore = {
+      async pendingBuckets() { return [{ tenantId: "t1", pendingCount: 1 }]; },
+      async claimBatch() {
+        return [{
+          tenantId: "t1",
+          id: "notif-row-1",
+          aggregateKind: "notification",
+          aggregateId: "n1",
+          eventType: "task.assigned",
+          payload: { channel: "email" },
+          state: "dispatching",
+          idempotencyKey: "k-notif-1",
+          attempts: 0,
+          createdAt: 0,
+          availableAt: 0,
+          dispatchedAt: undefined,
+          lastError: undefined,
+        }];
+      },
+      async markDispatched() { return false; },
+      async markRetry(_tid: string, id: string, _backoff: number, _err: string, maxAttempts: number) {
+        markRetryCalls.push({ id, maxAttempts });
+        return "dead" as const; // simulate immediate-dead outcome
+      },
+    };
+
+    // deliver returns IMMEDIATE_DEAD (permanent failure)
+    const deadError = `${IMMEDIATE_DEAD_ERROR_PREFIX}email_not_configured`;
+    const deliver = async () => ({ ok: false as const, error: deadError });
+
+    const result = await runOutboxOnce(
+      fakeStore as unknown as import("../core/postgres/pgOutboxStore.js").PostgresOutboxStore,
+      deliver,
+      {
+        batchLimit: 10,
+        maxAttempts: 5, // shared ceiling (would be 5 without per-row override)
+        backoff: () => 0,
+        perRowMaxAttempts,
+      },
+    );
+
+    // Row should be dead (not pending)
+    expect(result.dead).toBe(1);
+    expect(result.failed).toBe(0);
+    // markRetry was called with maxAttempts=1 (not 5)
+    expect(markRetryCalls).toHaveLength(1);
+    expect(markRetryCalls[0].maxAttempts).toBe(1);
+  });
+
+  it("perRowMaxAttempts returns undefined for non-IMMEDIATE_DEAD rows → uses opts.maxAttempts=5", async () => {
+    const { runOutboxOnce } = await import("../core/outboxDispatcher.js");
+    const { IMMEDIATE_DEAD_ERROR_PREFIX } = await import("../core/notification-router.js");
+
+    const perRowMaxAttempts = (row: OutboxRow, error: string | undefined): number | undefined => {
+      if (
+        row.aggregateKind === "notification" &&
+        error !== undefined &&
+        error.startsWith(IMMEDIATE_DEAD_ERROR_PREFIX)
+      ) {
+        return 1;
+      }
+      return undefined;
+    };
+
+    const markRetryCalls: Array<{ id: string; maxAttempts: number }> = [];
+    const fakeStore = {
+      async pendingBuckets() { return [{ tenantId: "t1", pendingCount: 1 }]; },
+      async claimBatch() {
+        return [{
+          tenantId: "t1",
+          id: "notif-row-retryable",
+          aggregateKind: "notification",
+          aggregateId: "n2",
+          eventType: "task.assigned",
+          payload: { channel: "email" },
+          state: "dispatching",
+          idempotencyKey: "k-notif-2",
+          attempts: 0,
+          createdAt: 0,
+          availableAt: 0,
+          dispatchedAt: undefined,
+          lastError: undefined,
+        }];
+      },
+      async markDispatched() { return false; },
+      async markRetry(_tid: string, id: string, _backoff: number, _err: string, maxAttempts: number) {
+        markRetryCalls.push({ id, maxAttempts });
+        return "pending" as const;
+      },
+    };
+
+    // deliver returns a retryable error (NOT IMMEDIATE_DEAD)
+    const deliver = async () => ({ ok: false as const, error: "smtp_transient_error" });
+
+    await runOutboxOnce(
+      fakeStore as unknown as import("../core/postgres/pgOutboxStore.js").PostgresOutboxStore,
+      deliver,
+      {
+        batchLimit: 10,
+        maxAttempts: 5,
+        backoff: () => 0,
+        perRowMaxAttempts,
+      },
+    );
+
+    // markRetry should use opts.maxAttempts=5 (no per-row override)
+    expect(markRetryCalls).toHaveLength(1);
+    expect(markRetryCalls[0].maxAttempts).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-2 proof: production notification registry includes EmailChannelDriver
+// ---------------------------------------------------------------------------
+
+describe("R-2 fix: buildProductionNotificationRegistry wires EmailChannelDriver (FR-9)", () => {
+  it("buildProductionNotificationRegistry returns registry with email + in_app keys", async () => {
+    const { buildProductionNotificationRegistry } = await import("../server/lifecycle-bridge.js");
+    const { Pool } = await import("pg");
+
+    // Use a stub pool — we are only checking that the registry keys are correct,
+    // not making any DB calls. EmailChannelDriver is constructed with PgEmailConfigStore(pool).
+    const stubPool = {} as InstanceType<typeof Pool>;
+
+    const registry = buildProductionNotificationRegistry(stubPool);
+
+    expect(registry.has("email")).toBe(true);
+    expect(registry.has("in_app")).toBe(true);
+
+    const emailDriver = registry.get("email");
+    expect(emailDriver).toBeDefined();
+    // EmailChannelDriver.requiresEmailConfig must be true (AC-1)
+    expect(emailDriver?.requiresEmailConfig).toBe(true);
+    expect(emailDriver?.key).toBe("email");
+  });
+});

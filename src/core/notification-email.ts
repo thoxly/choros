@@ -13,7 +13,8 @@
  *    appendAuditEvent payload carries from_address/smtp_host only.
  *  - requiresEmailConfig=true REQUIRED on EmailChannelDriver (T-0169 jsdoc contract).
  *  - Immediate-dead semantics: retryable:false → IMMEDIATE_DEAD_ERROR_PREFIX error
- *    in makeNotificationDeliver (T-0169); wiring uses maxAttempts=1 in dispatcher.
+ *    in makeNotificationDeliver (T-0169); lifecycle-bridge wiring uses perRowMaxAttempts
+ *    to force maxAttempts=1 for IMMEDIATE_DEAD rows (row dies on first attempt, AC-13/FR-8).
  *  - No appendAuditEvent in deliver path (FF-NO-DELIVERY-AUDIT).
  *  - DataClass imported from data-classification.ts, NOT redeclared (FF-EGRESS-CLASS).
  *  - No new setInterval/startEmailDispatcher (FF-ONE-OUTBOX).
