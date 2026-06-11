@@ -61,7 +61,7 @@ This query runs on the pool without setting the tenant GUC (pool role is `choros
 
 When `DATABASE_URL` is absent → serve `RIGHTS_SEED` / `PROCESSES_SEED` as today (no behavior change). This is an **additive, one-branch shim** that preserves the no-DB fallback (I-2 / spec §4.5).
 
-**Pack path:** `seed/showcase/pack.json` relative to the process CWD. The importer already reads it the same way (`seed/importer.ts` via `loadPack`). A `PACK_DIR` env var can override the base path if needed (coder decision).
+**Pack path:** `seed/showcase/pack.json` relative to the module location (dist/http/ → ../../seed/). The importer already reads it the same way (`seed/importer.ts` via `loadPack`). `CHOROS_PACK_DIR` env var overrides the base path (follows `CHOROS_WEB_DIST` pattern; legacy `PACK_DIR` accepted as fallback).
 
 **Response shape contract:** `GET /api/rights` must return a JSON array of objects with at least `{ role_slug, name, grants }` (AC-11). The existing `RIGHTS_SEED` `Role` type has `id` (not `role_slug`) and `name`/`grants`. **Resolution:** the pack's `rights_cards[].role_slug` is mapped to `id` in the response (i.e., `id = role_slug`) for backwards-compat with the existing frozen e2e test shape. This is a 1-field alias in the serve handler, not a schema change.
 
@@ -94,7 +94,7 @@ When `DATABASE_URL` is absent → serve `RIGHTS_SEED` / `PROCESSES_SEED` as toda
 | Var | Default | Purpose |
 |---|---|---|
 | `DEMO_TENANT_SLUG` | `showcase` | Tenant slug used by `/api/users` (pre-login picker) and display-plane serve |
-| `PACK_DIR` | `seed` | Base directory for pack files (optional override for CI) |
+| `CHOROS_PACK_DIR` | `seed` (module-relative) | Base directory for pack files (canonical env-seam, follows `CHOROS_WEB_DIST` pattern; legacy `PACK_DIR` accepted as fallback) |
 
 ### 3.3 Frozen exports — compatibility contract (FE-W23-0008)
 

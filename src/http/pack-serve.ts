@@ -48,15 +48,19 @@ export type ShowcasePack = {
 
 // ---------------------------------------------------------------------------
 // Pack loader — lazy singleton (loaded once per process start)
-// PACK_DIR env override allows CI to point at a mock pack directory.
-// When PACK_DIR is not set, resolves relative to the module's own location
+// CHOROS_PACK_DIR env override allows CI to point at a mock pack directory
+// (follows the same pattern as CHOROS_WEB_DIST in src/http/static.ts).
+// Legacy PACK_DIR is accepted as a fallback so existing test environments
+// continue to work without change.
+// When neither is set, resolves relative to the module's own location
 // (dist/http/ → ../../seed/) so the server works from any CWD.
 // ---------------------------------------------------------------------------
 
 let _cachedPack: ShowcasePack | null = null;
 
-function resolvePackDir(): string {
-  const envDir = process.env["PACK_DIR"];
+export function resolvePackDir(): string {
+  // Priority: CHOROS_PACK_DIR (canonical) > PACK_DIR (legacy compat) > module-relative default
+  const envDir = process.env["CHOROS_PACK_DIR"] ?? process.env["PACK_DIR"];
   if (envDir) {
     return envDir;
   }
