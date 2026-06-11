@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0177",
+  "status": "ready",
+  "summary": "registry_def schema-change API (T-0121c): PUT/PATCH /api/registry-defs/:id расширяется логикой schema-change guard — classifySchemaChange (чистая функция) классифицирует изменение record_schema как мягкое (warnings в ответе) или деструктивное (409 default-DENY без force / force-escape-hatch с стale+депромоут+аудит при force=true). Закрывает R-1 carry T-0176: DepViolation.message задокументировано.",
+  "functional": [
+    "FR-1: PUT/PATCH /api/registry-defs/:id принимает record_schema + force?:boolean.",
+    "FR-2: Перед UPDATE загружаются active (stale=false) report_page_dep для данного registry_def_id.",
+    "FR-3: Мягкое изменение (add field, relabel, enum widening, toggle required) → применяется + warnings:[{page_slug,registry_def_id,field_key}].",
+    "FR-4: Деструктивное без force → 409 destructive_schema_change; record_schema не меняется.",
+    "FR-5: Деструктивное с force=true + grant schema_destructive/apply → UPDATE schema + stale=true + tier='draft' + appendAuditEvent(report_page.schema_destructive_force) — атомарно.",
+    "FR-6: classifySchemaChange(oldSchema,newSchema,deps) — чистая функция в src/core/schema-change-classifier.ts → {softWarnings,destructiveDeps}.",
+    "FR-7: lossy_narrowing: dep_kind='aggregate' + number→integer / string→enum-сужение → destructive; dep_kind='read' → soft.",
+    "FR-8: Аудит через единственный appendAuditEvent (T-0016); event payload содержит affected_pages и fields.",
+    "FR-9: Депромоут через SET LOCAL choros.promoting='1' + UPDATE report_page SET tier='draft' (паттерн T-0087).",
+    "FR-10: Вся транзакция — READ deps + classify + action — атомарна (одна withTenantTx).",
+    "FR-11: DepViolation.message: string задокументировано в спеке §6 (R-1 carry из T-0176)."
+  ],
+  "non_functional": [
+    "NF-1: Нет нового permission-механизма — PDP T-0021 или dev-stub; никакого нового grant-поля.",
+    "NF-2: Tenant-изоляция структурная — withTenantTx + SET LOCAL choros.tenant_id (T-0013).",
+    "NF-3: Нет тихого удаления deps: stale=true, не DELETE.",
+    "NF-4: classifySchemaChange — pure функция (no I/O, no DB, no net).",
+    "NF-5: warnings — структурный массив {page_slug,registry_def_id,field_key}[], не строка.",
+    "NF-6: Fitness FF-SOFT-WARN/FF-DESTRUCTIVE-DENY/FF-FORCE-DEMOTE — live-DB пробы в ci/checks/db/.",
+    "NF-7: Ответ несёт machine-readable affected_pages/warnings для T-0084 changelog (FF-CHANGELOG-T84)."
+  ],
+  "out_of_scope": [
+    "report_page CRUD API (авторинг, promote, dep registration) — T-0121d",
+    "bundle-coherence расширение check-report-page-deps — T-0121e",
+    "MCP-tool seed author_report_page — T-0121f",
+    "Floor-1 server-side renderer — T-0121g",
+    "Статический анализ Floor-2 React (Stage-2) — T-0121h",
+    "promote human-gate на stale-dep — T-0121d"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "PUT/PATCH /api/registry-defs/:id зарегистрирован; grep выдаёт строки регистрации роута; tsc exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "classifySchemaChange с relabel-only → softWarnings=[...], destructiveDeps=[].", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Drop field_key с active dep → destructiveDeps.length===1.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "lossy type-narrowing (number→integer) при depKind='aggregate' → destructiveDeps.length===1.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "lossy type-narrowing при depKind='read' → softWarnings.length===1, destructiveDeps=[].", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "deps=[] → обе списки пустые, никакого блока.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "HTTP: PUT без deps → 200, нет warnings (live-DB).", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "HTTP: мягкое изменение с deps → 200 + warnings[] (live-DB).", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "HTTP: деструктивное без force → 409, record_schema в БД неизменна (live-DB).", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "HTTP: force=true → 200, dep.stale=true, page.tier='draft', audit_event записан (live-DB).", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "DepViolation.message задокументировано в спеке §6 (R-1 carry).", "verifiable_as": "manual"},
+    {"id": "AC-12", "text": "classifySchemaChange — pure функция: grep запрещённых импортов пустой (FF-PURE).", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "force-ветка транзакционна: partial-failure → ROLLBACK, schema неизменна (live-DB).", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "Нет тихого DELETE report_page_dep в schema-change пути — grep NOT IN src/http/registry-defs.ts.", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "tsc --noEmit exit 0 после всех новых файлов.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "record_schema в БД не изменена после 409 (live-DB, SELECT после PUT).", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "warnings — структурный массив объектов (grep + type-check).", "verifiable_as": "fitness"},
+    {"id": "AC-18", "text": "npm run fitness exit 0 (schema-change-classifier-isolation.sh добавлен и проходит).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0177-schema-change-api.spec.md"
+}
