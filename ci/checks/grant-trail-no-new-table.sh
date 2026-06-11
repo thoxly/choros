@@ -27,21 +27,9 @@ else
   if git -C "${ROOT}" diff --quiet "${MERGE_BASE}" -- ci/checks/known_tenant_tables.txt; then
     echo "PASS: known_tenant_tables.txt is unchanged"
   else
-    # T-0035 integration note: T-0035 (E4.7 substitutions/absences) legitimately
-    # adds 'substitution_rule' to known_tenant_tables.txt as part of the CI wave
-    # design (FF-SUB6 / FR-10). This is a pure additive sibling change; T-0031
-    # itself still adds no new table. The only permitted addition is 'substitution_rule'.
-    # Any other change to this file still fails the check.
-    DIFF_LINES="$(git -C "${ROOT}" diff "${MERGE_BASE}" -- ci/checks/known_tenant_tables.txt \
-      | grep '^[+-]' | grep -v '^[+-][+-][+-]' || true)"
-    UNKNOWN_DIFF="$(echo "${DIFF_LINES}" | grep -v '^+substitution_rule$' || true)"
-    if [[ -z "${UNKNOWN_DIFF}" ]]; then
-      echo "PASS: known_tenant_tables.txt change is the T-0035 sibling addition of 'substitution_rule' (additive, by design)"
-    else
-      echo "FAIL: known_tenant_tables.txt has been modified relative to merge-base with dev"
-      git -C "${ROOT}" diff "${MERGE_BASE}" -- ci/checks/known_tenant_tables.txt | head -20
-      ERRORS=$((ERRORS + 1))
-    fi
+    echo "FAIL: known_tenant_tables.txt has been modified relative to merge-base with dev"
+    git -C "${ROOT}" diff "${MERGE_BASE}" -- ci/checks/known_tenant_tables.txt | head -20
+    ERRORS=$((ERRORS + 1))
   fi
 fi
 

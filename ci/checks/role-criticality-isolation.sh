@@ -174,26 +174,7 @@ FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|s
 # is the additive ADD COLUMN confirmed2_by owned by T-0044 (dual-control gate),
 # a sibling task. Excluded here for the same reason as 030; any NEW T-0040
 # migration would still be caught (031 is owned + asserted by dual-control-isolation.sh).
-# T-0035 integration note: migration 036 (migrations/036_substitution_rule.sql)
-# is the substitution_rule table owned by T-0035 (E4.7 substitutions/absences).
-# Excluded here for the same reason as 030/031; the T-0035 ownership is asserted
-# by substitution-isolation.sh (FF-SUB5). Any NEW T-0040 migration still caught.
-MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by|036_substitution_rule)\.sql$'
-
-# T-0035 integration note: src/core/grant-resolver.ts receives ONE additive touch
-# per T-0035 (optional substitution?: SubstitutionSource on ResolverDeps — a seam
-# wired for the routing layer, never read inside resolveFor). This is an additive-only
-# sibling change; grant-resolver-isolation.sh + substitution-isolation.sh (FF-SUB3)
-# assert the seam is strictly optional and the resolver body is byte-stable. Any
-# new T-0040 touch to grant-resolver.ts would still be caught because T-0040 is
-# not listed in the resolver exclusion below.
-RESOLVER_EXCLUDE_RE='^src/core/grant-resolver\.ts$'
-
-# T-0035 integration note: ci/checks/known_tenant_tables.txt gains one entry
-# (substitution_rule) owned by T-0035. This is the expected sibling wave update;
-# the cross-tenant tests (cross_tenant.test.ts / schema.test.ts) sweep the new
-# table via the updated file. T-0040 (role_criticality) adds no new tenant table.
-KNOWN_TABLES_EXCLUDE_OWNERS=("T-0035")  # tables listed by sibling tasks, not T-0040
+MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by)\.sql$'
 
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then
@@ -215,9 +196,8 @@ else
   )"
 fi
 
-# Remove known-other-task migrations and known additive seam files from the diff
-# before checking T-0040's constraints.
-CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" | grep -vE "${RESOLVER_EXCLUDE_RE}" || true)"
+# Remove known-other-task migrations from the diff before checking T-0040's constraints.
+CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" || true)"
 
 FROZEN_HITS="$(echo "${CHANGED_FILTERED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
@@ -234,27 +214,10 @@ if [[ -n "${NEW_MIGRATIONS}" ]]; then
   ERRORS=$((ERRORS + 1))
 fi
 
-# FF-RC6: known_tenant_tables.txt byte-unchanged (no new tenant table from T-0040).
-# Known-other-task additions (T-0035 substitution_rule) do not trigger this check —
-# the CI wave design allows sibling tasks to append tenant tables; T-0040 specifically
-# must NOT add a new tenant table (role_criticality is derived, not stored).
-# We confirm the file changed ONLY because of the T-0035 sibling entry, not T-0040:
-# if known_tenant_tables.txt changed AND any new entry other than 'substitution_rule'
-# was added by T-0040, that is still caught (T-0040 must not modify this file at all).
+# FF-RC6: known_tenant_tables.txt byte-unchanged (no new tenant table).
 if echo "${CHANGED}" | grep -qE '^ci/checks/known_tenant_tables\.txt$'; then
-  # Check whether the only addition is from known sibling tasks (T-0035: substitution_rule).
-  # If T-0040 itself added a tenant table, it would appear as an unfamiliar addition.
-  # Simple heuristic: if grant-resolver.ts is NOT in the T-0040 diff (i.e. T-0040 did
-  # not touch the resolver), and the known_tenant_tables.txt changed only because of
-  # the T-0035 sibling add, we can skip this check. We identify the T-0035 sibling
-  # by checking whether 'substitution_rule' appears in the changed file.
-  TABLES_CONTENT="$(cat "${PROJECT_ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
-  if echo "${TABLES_CONTENT}" | grep -qx "substitution_rule"; then
-    : # T-0035 sibling addition present — known_tenant_tables.txt change is owned by T-0035, not T-0040.
-  else
-    echo "FAIL [FF-RC6]: ci/checks/known_tenant_tables.txt changed — but role_criticality adds no new tenant table"
-    ERRORS=$((ERRORS + 1))
-  fi
+  echo "FAIL [FF-RC6]: ci/checks/known_tenant_tables.txt changed — but role_criticality adds no new tenant table"
+  ERRORS=$((ERRORS + 1))
 fi
 
 if [[ ${ERRORS} -eq ${before} ]]; then
