@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0077",
+  "status": "ready",
+  "summary": "Установить governance-аппарат системного config-агента как первоклассного сотрудника (ADR §4 §9.8): роль 'config-agent', 7 MCP-tool строк в mcp_tool (emit_form_code / edit_jsonschema / author_dmn / scaffold_external_worker / write_object_migration / open_draft_branch / request_promote) с resource_ops={resourceType:'authoring_draft'}, 7 grant-строк роли, seed-агент с budget_policy, аудит event-типы — всё через migration 044 data-seed, ноль новых TS-модулей, ноль правок в заморожённых файлах. DRAFT-граница физическая: роль не имеет грантов на authoring_published.",
+  "functional": [
+    "FR-1: Роль 'config-agent' в dev-silo seed (migration 044, ON CONFLICT DO NOTHING)",
+    "FR-2: 7 mcp_tool строк с declares='[]', pure_compute=true, resource_ops=[{resourceType:'authoring_draft', operation:...}]",
+    "FR-3: 7 grant строк resource_type='authoring_draft' привязаны к роли config-agent",
+    "FR-4: seed employee(kind='agent') + role_assignment config-agent",
+    "FR-5: agent_card seed с kc_client_id='agent-config', budget_policy_id → instance_budget",
+    "FR-6: DRAFT-boundary — ноль грантов authoring_published для роли config-agent",
+    "FR-7: Audit event types authoring.* задокументированы как frozen seam для E11.x",
+    "FR-8: resolveAgentToolset для seed config-агента возвращает 7 McpToolRow",
+    "FR-9: resolveAgentToolset без role_assignment возвращает []",
+    "FR-10: Аддитивность — frozen files не редактируются"
+  ],
+  "non_functional": [
+    "NF-1: Нет нового authority-store — всё через choros.grant / resolveAgentToolset / appendAuditEvent",
+    "NF-2: Ноль новых .ts в src/ (только __tests__)",
+    "NF-3: Все INSERT с ON CONFLICT DO NOTHING (idempotency)",
+    "NF-4: RLS изоляция mcp_tool и grant строк по tenant_id",
+    "NF-5: Runtime вызов resolveAgentToolset из HTTP остаётся за пределами T-0077",
+    "NF-6: Migration slot 044 — единственный, 041/042/043 не трогаются"
+  ],
+  "out_of_scope": [
+    "Реализация emit_form_code / edit_jsonschema / author_dmn как генераторов кода (E11.x)",
+    "Promote draft → published human-gate workflow (E11.y)",
+    "BYO-LLM интеграция llm_endpoint/secret_handle (T-0025)",
+    "Autonomy-threshold routing (E5.6/E5.7, Stage-2)",
+    "HTTP invoke-dispatch для config-агента (T-0024 dispatch stub уже есть)",
+    "Production Keycloak client (founder-gated GT-4/RL-1)",
+    "authoring_published гранты (вне T-0077)",
+    "git-под-капотом draft-branch объекты (ADR §7, инкрементально)",
+    "Создание новых tenant-таблиц (authoring_draft — content-tier, не tenant-table)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-01",
+      "text": "После migration 044 в dev-silo существует role со slug='config-agent' и id='e0000000-0000-0000-0000-000000000003' (следующий в namespace e0 после tenant-owner/budget-approver из migration 019)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-02",
+      "text": "В choros.mcp_tool ровно 7 строк с resource_ops содержащим resourceType='authoring_draft' для dev-tenant: emit_form_code, edit_jsonschema, author_dmn, scaffold_external_worker, write_object_migration, open_draft_branch, request_promote",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-03",
+      "text": "Все 7 authoring mcp_tool строк имеют pure_compute=true и declares='[]'::jsonb",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-04",
+      "text": "В choros.grant ровно 7 строк с resource_type='authoring_draft' и role_id='e0000000-0000-0000-0000-000000000003' для dev-tenant",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-05",
+      "text": "Ноль grant-строк с resource_type='authoring_published' для роли config-agent (DRAFT-boundary физическая)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-06",
+      "text": "resolveAgentToolset для seed config-агента (employeeId=d0000000-0000-0000-0000-000000000013) возвращает массив длиной 7, все элементы McpToolRow с resourceOps[0].resourceType==='authoring_draft'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-07",
+      "text": "resolveAgentToolset для fresh employee без role_assignment возвращает [] (подтверждение zero-tool по T-0043 для authoring_draft resource_ops)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-08",
+      "text": "Ни один McpToolRow из toolset config-агента не содержит resourceType='authoring_published' в resourceOps",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-09",
+      "text": "Migration 044 идемпотентна: двойной запуск run.mjs — второй проход 'nothing to apply', счёт строк неизменен",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "git diff --exit-code <dev-base> -- src/core/grant-lattice.ts src/core/grant-resolver.ts src/core/mcp-tool-registry.ts src/http/agents.ts src/http/grants.ts src/db/audit-writer.ts возвращает exit 0 (frozen files не изменены)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "git diff --name-only <dev-base> -- 'src/**/*.ts' | grep -v '__tests__' возвращает 0 строк (ноль новых TS-модулей в src/)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Cross-tenant: SET LOCAL choros.tenant_id='<other>'; SELECT * FROM choros.mcp_tool WHERE resource_ops @> '[{\"resourceType\":\"authoring_draft\"}]' возвращает 0 строк",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "agent_card seed config-агента имеет ненулевой budget_policy_id, разрешаемый в instance_budget (FK constraint существует из migration 034)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "git diff --name-only <dev-base> -- migrations/ | grep -E '^migrations/04[123]_' возвращает 0; migrations/044_*.sql существует (ровно один файл)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "Список authoring.* audit event types зафиксирован в spec (ручная проверка: типы перечислены в документе и используются E11.x как contract)",
+      "verifiable_as": "manual"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0077-config-agent-employee.spec.md"
+}
