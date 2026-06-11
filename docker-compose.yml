@@ -147,6 +147,8 @@ services:
       KEYCLOAK_PORT:    ${KEYCLOAK_PORT:-8180}
       KEYCLOAK_REALM:   ${KEYCLOAK_REALM:-choros}
       KC_ISSUER:        ${KC_ISSUER:-http://keycloak:8180/realms/choros}
+      # T-0060: KEYCLOAK_URL — base URL used by JWT guard (server-side, internal compose hostname)
+      KEYCLOAK_URL:     ${KEYCLOAK_URL:-http://keycloak:${KEYCLOAK_PORT:-8180}}
       NODE_ENV:         ${NODE_ENV:-development}
       PORT:             ${PORT:-3000}
     ports:

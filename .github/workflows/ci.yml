@@ -155,3 +155,45 @@ jobs:
       - name: Stop stack
         if: always()
         run: docker compose down
+
+  # T-0060 · E1.4 · Keycloak JWT-guard live integration tests (FF-1, FF-7, AC-22/23):
+  # Starts postgres + keycloak via compose, waits for KC readiness, then runs the
+  # live-kc integration tests (workerAuth.kc.e2e.test.ts) against a real choros server
+  # with real Keycloak tokens (ROPC human, client_credentials agent).
+  # Additive: does NOT modify ci/db/flowable/stack jobs.
+  kc:
+    runs-on: ubuntu-latest
+    env:
+      CHOROS_AUTH_MODE: keycloak
+      KEYCLOAK_URL: http://localhost:8180
+      KEYCLOAK_REALM: choros
+      KEYCLOAK_AUDIENCE: choros-api
+      KEYCLOAK_PORT: "8180"
+      KEYCLOAK_MGMT_PORT: "9000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Start Postgres + Keycloak via compose
+        run: docker compose up -d postgres keycloak
+      - name: Wait for Keycloak readiness (FF-1)
+        run: bash ci/checks/kc/wait-ready.sh
+      - name: Wait for realm OIDC discovery (FF-2)
+        run: bash ci/checks/kc/realm-ready.sh
+      - name: Build choros (required for server + FF-6 assertKeycloakConfig)
+        run: npm run build
+      - name: Static fitness checks (FF-3/FF-4/FF-5/FF-6/FF-8)
+        run: |
+          bash ci/checks/worker-auth-single-branch.sh
+          bash ci/checks/worker-auth-zero-dep.sh
+          bash ci/checks/worker-auth-public-surface.sh
+          bash ci/checks/worker-auth-config-failfast.sh
+          bash ci/checks/worker-auth-env-docs.sh
+      - name: Run live-KC integration tests (FF-1/FF-7, AC-22/23)
+        run: vitest run src/__tests__/workerAuth.kc.e2e.test.ts
+      - name: Stop services
+        if: always()
+        run: docker compose stop keycloak postgres
