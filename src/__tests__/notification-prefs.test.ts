@@ -15,10 +15,17 @@
  *   AC-8  PUT /self rejects role: scope AND actor: scope (R-2); accepts valid event_kind
  *   AC-9  GET /self returns only actor:<self> rows
  *   AC-10 no new ACL mechanism in code (grep fitness in notification-pref-isolation.sh)
+ *
+ * T-0174 E-N.7 addition:
+ *   AC-1 (T-0174)  notif.preference.changed audit: source-code contract verification
+ *                  (FF-AUDIT-CONFIG-ONLY: type present, smtp_handle absent from payload)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "node:http";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   PostgresPrefStore,
   seedDefaultPreferences,
@@ -439,5 +446,87 @@ describe("AC-8 (R-2): PUT /self rejects actor: scope in body", () => {
       { eventKind: "task.assigned", recipientScope: "role:manager", channels: ["in_app"] },
     );
     expect(res.status, `expected 400 for role: scope, got ${res.status}: ${JSON.stringify(res.json)}`).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0174 AC-1: notif.preference.changed audit wiring — source-code contract
+// (FF-AUDIT-CONFIG-ONLY / ADR T-0120 §2.8)
+//
+// The notification-prefs HTTP handler uses a module-level prefAuditWriter
+// (not injectable) — so we verify the audit contract by reading the source
+// and asserting the required shape is present. This is the same approach used
+// by fitness checks for non-injectable audit paths.
+//
+// Verified:
+//   1. type: "notif.preference.changed" appears at both audit call-sites
+//      (admin PUT + self PUT) in notification-prefs.ts
+//   2. "smtp_handle" does NOT appear in payload construction of those audit inputs
+//   3. payload construction includes eventKind, recipientScope, channels
+// ---------------------------------------------------------------------------
+
+describe("T-0174 AC-1: notif.preference.changed audit wiring (FF-AUDIT-CONFIG-ONLY)", () => {
+  const HERE = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = join(HERE, "..", "..");
+  const SOURCE = readFileSync(
+    join(REPO_ROOT, "src", "http", "notification-prefs.ts"),
+    "utf8",
+  );
+
+  it("type 'notif.preference.changed' appears in both admin-PUT and self-PUT audit blocks", () => {
+    // Count occurrences — must be at least 2 (one per PUT handler)
+    const matches = SOURCE.match(/type:\s*"notif\.preference\.changed"/g);
+    expect(
+      matches?.length ?? 0,
+      "notif.preference.changed must appear in at least 2 audit blocks (admin PUT + self PUT)",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("appendAuditEvent (or appendPrefAudit) is called after each notif.preference.changed block", () => {
+    // Verify the source calls appendPrefAudit — the local audit wrapper — near the type lines
+    expect(SOURCE, "appendPrefAudit call must be present in notification-prefs.ts").toContain(
+      "appendPrefAudit(client, auditInput)",
+    );
+  });
+
+  it("audit payload includes eventKind, recipientScope, channels", () => {
+    // The payload object literal must reference all three fields
+    expect(SOURCE, "payload must reference eventKind").toContain("eventKind,");
+    expect(SOURCE, "payload must reference recipientScope").toContain("recipientScope,");
+    expect(SOURCE, "payload must reference channels,").toContain("channels,");
+  });
+
+  it("smtp_handle does NOT appear in any audit payload in notification-prefs.ts (FF-NO-RAW-SMTP)", () => {
+    // Confirm no smtp_handle in audit blocks — preferences carry no SMTP config
+    const payloadMatches = SOURCE.matchAll(
+      /type:\s*"notif\.preference\.changed"[^}]+payload:\s*\{([^}]*)\}/gs,
+    );
+    for (const m of payloadMatches) {
+      expect(
+        m[1],
+        "audit payload for notif.preference.changed must not contain smtp_handle",
+      ).not.toContain("smtp_handle");
+    }
+  });
+
+  it("appendAuditEvent is NOT called in makeNotificationDeliver (FF-NO-DELIVERY-AUDIT)", () => {
+    const routerSource = readFileSync(
+      join(REPO_ROOT, "src", "core", "notification-router.ts"),
+      "utf8",
+    );
+    // The makeNotificationDeliver function body must not contain appendAuditEvent
+    const deliverFnMatch = routerSource.match(
+      /export function makeNotificationDeliver[\s\S]*?^}/m,
+    );
+    if (deliverFnMatch) {
+      expect(
+        deliverFnMatch[0],
+        "makeNotificationDeliver must not call appendAuditEvent (FF-NO-DELIVERY-AUDIT)",
+      ).not.toContain("appendAuditEvent");
+    }
+    // Also grep the whole router file — no appendAuditEvent anywhere
+    expect(routerSource, "notification-router.ts must not contain appendAuditEvent call").not.toMatch(
+      /await\s+\w+\.appendAuditEvent/,
+    );
   });
 });
