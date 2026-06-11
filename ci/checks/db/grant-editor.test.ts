@@ -167,8 +167,22 @@ describe('Migration 030: grant.proposed_by / confirmed_by columns added', () => 
 // AC-01 · AC-20: happy-path INSERT into grant with correct tenant_id
 // ---------------------------------------------------------------------------
 describe('AC-01 / AC-20: grant INSERT with tenant_id leading', () => {
+  let createdGrantId: string | undefined;
+
+  afterAll(async () => {
+    if (createdGrantId) {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+          [DEV_TENANT, createdGrantId],
+        );
+      });
+    }
+  });
+
   it('inserts a grant row with correct tenant_id and fields via choros_app role', async () => {
     const newId = uuid();
+    createdGrantId = newId;
     const nowMs = Date.now();
     const scope = JSON.stringify(FIN_NODE_SCOPE);
 
@@ -200,11 +214,6 @@ describe('AC-01 / AC-20: grant INSERT with tenant_id leading', () => {
       expect(rows[0].resource_type).toBe('mgmt_object:grant');
       expect(rows[0].delegable).toBe(true);
     });
-
-    // Cleanup
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, newId]);
-    });
   });
 });
 
@@ -212,8 +221,22 @@ describe('AC-01 / AC-20: grant INSERT with tenant_id leading', () => {
 // AC-07: revoke sets valid_until, row NOT deleted
 // ---------------------------------------------------------------------------
 describe('AC-07: grant revoke sets valid_until, row survives', () => {
+  let grantId: string | undefined;
+
+  afterAll(async () => {
+    if (grantId) {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+          [DEV_TENANT, grantId],
+        );
+      });
+    }
+  });
+
   it('UPDATE sets valid_until and row is not deleted', async () => {
-    const grantId = uuid();
+    const id = uuid();
+    grantId = id;
     const nowMs = Date.now();
     const scope = JSON.stringify(FIN_NODE_SCOPE);
 
@@ -226,7 +249,7 @@ describe('AC-07: grant revoke sets valid_until, row survives', () => {
            (tenant_id, id, role_id, resource_type, operation, scope,
             delegable, granted_by, created_at)
          VALUES ($1, $2, $3, 'mgmt_object:role', 'read', $4::jsonb, true, 'test', $5)`,
-        [DEV_TENANT, grantId, DEV_ROLE_OWNER, scope, nowMs],
+        [DEV_TENANT, id, DEV_ROLE_OWNER, scope, nowMs],
       );
       await c.query('COMMIT');
     });
@@ -238,7 +261,7 @@ describe('AC-07: grant revoke sets valid_until, row survives', () => {
       await c.query(`SET LOCAL choros.tenant_id = '${DEV_TENANT}'`);
       await c.query(
         `UPDATE choros."grant" SET valid_until = $3 WHERE tenant_id = $1 AND id = $2`,
-        [DEV_TENANT, grantId, revokeMs],
+        [DEV_TENANT, id, revokeMs],
       );
       await c.query('COMMIT');
     });
@@ -247,15 +270,10 @@ describe('AC-07: grant revoke sets valid_until, row survives', () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT valid_until FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
-        [DEV_TENANT, grantId],
+        [DEV_TENANT, id],
       );
       expect(rows.length, 'row must still exist (not deleted)').toBe(1);
       expect(Number(rows[0].valid_until)).toBe(revokeMs);
-    });
-
-    // Cleanup
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, grantId]);
     });
   });
 });
@@ -348,8 +366,22 @@ describe('AC-12 / FF-6: grant INSERT + audit emit atomicity', () => {
 // AC-14: proposed_by set, confirmed_by null → PROPOSAL row inserted
 // ---------------------------------------------------------------------------
 describe('AC-14: proposed_by set / confirmed_by null = proposal row', () => {
+  let grantId: string | undefined;
+
+  afterAll(async () => {
+    if (grantId) {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+          [DEV_TENANT, grantId],
+        );
+      });
+    }
+  });
+
   it('inserts grant with proposed_by and confirmed_by IS NULL', async () => {
-    const grantId = uuid();
+    const id = uuid();
+    grantId = id;
     const nowMs = Date.now();
     const scope = JSON.stringify(FIN_NODE_SCOPE);
 
@@ -362,7 +394,7 @@ describe('AC-14: proposed_by set / confirmed_by null = proposal row', () => {
             delegable, granted_by, created_at, proposed_by, confirmed_by)
          VALUES ($1, $2, $3, 'mgmt_object:role', 'read', $4::jsonb,
                  true, 'test', $5, $6, NULL)`,
-        [DEV_TENANT, grantId, DEV_ROLE_OWNER, scope, nowMs, 'llm'],
+        [DEV_TENANT, id, DEV_ROLE_OWNER, scope, nowMs, 'llm'],
       );
       await c.query('COMMIT');
     });
@@ -371,16 +403,11 @@ describe('AC-14: proposed_by set / confirmed_by null = proposal row', () => {
       const { rows } = await c.query(
         `SELECT proposed_by, confirmed_by
            FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
-        [DEV_TENANT, grantId],
+        [DEV_TENANT, id],
       );
       expect(rows.length).toBe(1);
       expect(rows[0].proposed_by).toBe('llm');
       expect(rows[0].confirmed_by).toBeNull();
-    });
-
-    // Cleanup
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, grantId]);
     });
   });
 });
@@ -434,8 +461,22 @@ describe('AC-15 (live): isGenesisOwner resolved from DB', () => {
 // AC-20 (live): RLS enforces cross-tenant isolation on grant INSERT
 // ---------------------------------------------------------------------------
 describe('AC-20 (live): RLS blocks cross-tenant grant INSERT', () => {
+  let grantId: string | undefined;
+
+  afterAll(async () => {
+    if (grantId) {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+          [DEV_TENANT, grantId],
+        );
+      });
+    }
+  });
+
   it('INSERT with wrong tenant_id in GUC → choros_app cannot see the row', async () => {
-    const grantId = uuid();
+    const id = uuid();
+    grantId = id;
     const nowMs = Date.now();
     const scope = JSON.stringify(FIN_NODE_SCOPE);
 
@@ -448,7 +489,7 @@ describe('AC-20 (live): RLS blocks cross-tenant grant INSERT', () => {
            (tenant_id, id, role_id, resource_type, operation, scope,
             delegable, granted_by, created_at)
          VALUES ($1, $2, $3, 'mgmt_object:role', 'read', $4::jsonb, true, 'test', $5)`,
-        [DEV_TENANT, grantId, DEV_ROLE_OWNER, scope, nowMs],
+        [DEV_TENANT, id, DEV_ROLE_OWNER, scope, nowMs],
       );
       await c.query('COMMIT');
     });
@@ -459,15 +500,10 @@ describe('AC-20 (live): RLS blocks cross-tenant grant INSERT', () => {
       await c.query(`SET LOCAL choros.tenant_id = '11111111-1111-1111-1111-111111111111'`);
       const { rows } = await c.query(
         `SELECT id FROM choros."grant" WHERE id=$1`,
-        [grantId],
+        [id],
       );
       await c.query('COMMIT');
       expect(rows.length, 'RLS must hide row from wrong tenant').toBe(0);
-    });
-
-    // Cleanup via migrator (bypasses RLS)
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, grantId]);
     });
   });
 });
@@ -555,6 +591,7 @@ describe('FF-10 (static): NF-1 freeform delegable forced false in grants.ts', ()
 describe('FF-10 (live): freeform grant INSERT has delegable=false regardless of body', () => {
   let server: http.Server;
   let serverPort: number;
+  let freeformGrantId: string | undefined;
 
   beforeAll(async () => {
     // Dynamically import createServer to pick up DATABASE_URL set in this process.
@@ -569,50 +606,58 @@ describe('FF-10 (live): freeform grant INSERT has delegable=false regardless of 
   });
 
   afterAll(async () => {
+    // 1. DB cleanup first (before server closes)
+    if (freeformGrantId) {
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(
+          `DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
+          [DEV_TENANT, freeformGrantId],
+        );
+      });
+    }
+    // 2. Close server
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   it('genesis owner POST /api/grants freeform+delegable:true → DB stores delegable=false', async () => {
-    const grantId = await (async () => {
-      // POST with delegable:true in body — handler must force it to false (NF-1).
-      const body = JSON.stringify({
-        role_id: DEV_ROLE_OWNER,
-        resource_type: 'mgmt_object:grant',
-        operation: 'create',
-        scope: { kind: 'freeform', predicate: 'resource.org_unit == "external"' },
-        granted_by: DEV_EMP_OWNER,
-        delegable: true,   // body says true — handler must override to false
-      });
+    // POST with delegable:true in body — handler must force it to false (NF-1).
+    const body = JSON.stringify({
+      role_id: DEV_ROLE_OWNER,
+      resource_type: 'mgmt_object:grant',
+      operation: 'create',
+      scope: { kind: 'freeform', predicate: 'resource.org_unit == "external"' },
+      granted_by: DEV_EMP_OWNER,
+      delegable: true,   // body says true — handler must override to false
+    });
 
-      // x-dev-user is the employee SLUG (loadAdminContext queries by slug, not UUID).
-      const res = await fetch(`http://127.0.0.1:${serverPort}/api/grants`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-dev-user': 'e-owner',    // genesis owner slug
-        },
-        body,
-      });
+    // x-dev-user is the employee SLUG (loadAdminContext queries by slug, not UUID).
+    const res = await fetch(`http://127.0.0.1:${serverPort}/api/grants`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-dev-user': 'e-owner',    // genesis owner slug
+      },
+      body,
+    });
 
-      expect(res.status, `expected 201 from POST /api/grants, got ${res.status}`).toBe(201);
-      const json = await res.json() as { id?: string };
-      expect(json.id, 'response must include grant id').toBeTruthy();
-      return json.id as string;
-    })();
+    // Extract ID before first assertion — saved at describe scope for afterAll cleanup
+    const json = await res.json() as { id?: string };
+    if (json.id) {
+      freeformGrantId = json.id;
+    }
+
+    // Assertions — after ID captured
+    expect(res.status, `expected 201 from POST /api/grants, got ${res.status}`).toBe(201);
+    expect(json.id, 'response must include grant id').toBeTruthy();
 
     // Verify DB row has delegable=false despite body sending delegable:true.
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT delegable FROM choros."grant" WHERE tenant_id=$1 AND id=$2`,
-        [DEV_TENANT, grantId],
+        [DEV_TENANT, freeformGrantId],
       );
       expect(rows.length, 'grant row must exist').toBe(1);
       expect(rows[0].delegable, 'freeform grant must have delegable=false (NF-1)').toBe(false);
-    });
-
-    // Cleanup
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, grantId]);
     });
   });
 });
