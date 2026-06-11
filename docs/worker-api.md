@@ -10,6 +10,8 @@
 
 ## 1. Что такое external worker
 
+> Запуск сервера: см. [docs/environments.md](environments.md) (dev-режим).
+
 Choros реализует **pull-модель** внешних задач (external task pattern).
 Воркер — это любой процесс (на любом языке), который:
 
@@ -24,6 +26,8 @@ Voркер сам управляет темпом и параллелизмом.
 ---
 
 ## 2. Быстрый старт (happy-path walkthrough)
+
+> Запуск сервера: см. [docs/environments.md](environments.md) (dev-режим).
 
 Три шага: enqueue → fetch-and-lock → complete.
 
@@ -136,7 +140,9 @@ curl -s -X POST "http://localhost:3000/external-task/${JOB_ID}/fail" \
 ### 3.1 Dev-режим (CHOROS_AUTH_MODE=dev)
 
 По умолчанию (`CHOROS_AUTH_MODE=dev`). JWT не требуется.
-Передайте заголовок `x-dev-user` с employee-id:
+Заголовок `x-dev-user` **опционален**: в dev-режиме `withAuth` — полный no-op,
+сервер принимает запросы без проверки идентичности. Если передан, используется
+как контекст пользователя (employee-id):
 
 ```
 x-dev-user: e-kravtsova
