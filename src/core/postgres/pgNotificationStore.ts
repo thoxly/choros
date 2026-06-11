@@ -17,7 +17,7 @@
  * Semantic contract: docs/design/T-0120-notifications.adr.md §2.2/§2.7; spec T-0173.
  */
 
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
 import type { NotifInsertPort, NotifInsertRow } from "../notification-router.js";
 
 // ---------------------------------------------------------------------------

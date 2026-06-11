@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0173",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1274,
+    "passed": 1274,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: pgNotificationStore.ts структурно совместим с NotifInsertPort под tsc --noEmit; импортирует NotifInsertPort/NotifInsertRow из notification-router.ts, не редекларирует",
+      "test": "notifications.test.ts > AC-1: PgNotificationStore satisfies NotifInsertPort — structural-compat + no-redeclare; tsc exit 0; fitness FF-NC5",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: GET /api/notifications возвращает только уведомления текущего актора (recipient_id = actor)",
+      "test": "notifications.test.ts > AC-2 (own-only SQL param check) + notification-center.test.ts > AC-2 (live DB listing — rows all have recipientId matching actor)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3: Keyset-пагинация корректна: второй запрос с cursor не возвращает дублей и не пропускает строки",
+      "test": "notifications.test.ts > AC-3 (cursor serialize/deserialize + nextCursor logic + null on fit) + notification-center.test.ts > AC-3 (live DB 2-page probe, 5 rows, no duplicates/gaps)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4: GET /api/notifications/unread-count возвращает { count: N }; EXPLAIN live-DB показывает idx_notification_unread",
+      "test": "notifications.test.ts > AC-4 (countUnread SQL is_read=false gate + zero-rows) + notification-center.test.ts > AC-4 (EXPLAIN Index Only Scan on idx_notification_unread confirmed)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5: POST /api/notifications/:id/read для своего уведомления → 200 { ok: true }, is_read = true в БД",
+      "test": "notifications.test.ts > AC-5 (HTTP markRead=true → 200 ok:true) + notification-center.test.ts > AC-5 (live DB: own row is_read=true after markRead)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6: POST /api/notifications/:id/read для чужого или несуществующего → 404, строка не мутирует",
+      "test": "notifications.test.ts > AC-6 (HTTP 404 when markRead=false) + notification-center.test.ts > AC-6 (live DB: non-existent → false, foreign-recipient → false, no mutation)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7: PATCH /api/notifications — помечает свои ids прочитанными; чужие молча пропускаются",
+      "test": "notifications.test.ts > AC-7 (batchMarkRead count + empty array → 0 without SQL) + notification-center.test.ts > AC-7 (live DB: 3 own updated, foreign silently skipped)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8: GET /api/notifications без X-Dev-User → 401",
+      "test": "notifications.test.ts > AC-8: 4 × 401 tests for all endpoints (GET list, GET unread-count, POST :id/read, PATCH batch)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9: Cross-tenant: уведомление tenant A не видно в контексте tenant B",
+      "test": "notification-center.test.ts > AC-9: notification_preference RLS cross-tenant probe (TENANT_A not visible from TENANT_B); notification row invisible without GUC",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10: pgNotificationStore.ts не содержит appendAuditEvent ни в каком пути (FF-NO-ISREAD-AUDIT)",
+      "test": "notifications.test.ts > AC-10 (module source grep no appendAuditEvent); fitness FF-NC4 (PASS both files)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11: tsc --noEmit и npm test (vitest) проходят без новых ошибок",
+      "test": "npm run ci — tsc exit 0, vitest 1274/1274 passed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12: npm run fitness зелёный (notification-isolation.sh, notification-pref-isolation.sh, notification-email.sh, notification-center-isolation.sh)",
+      "test": "npm run fitness — all static checks green, FF-NC1..FF-NC6 all PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13: ci/checks/notification-center-isolation.sh зелёный: FF-OWN-ONLY-READ, FF-NO-CROSS-USER, FF-UNREAD-INDEXED, FF-NO-ISREAD-AUDIT",
+      "test": "notification-center-isolation.sh — FF-NC1..FF-NC6 all PASS (6/6)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14: fitness:db notification-center.test.ts зелёный: insert + list + unread-count + markRead + batchMarkRead + cross-tenant isolation + EXPLAIN badge-index",
+      "test": "fitness:db > notification-center.test.ts — 12/12 PASS (live DB: AC-2/AC-3/AC-4/AC-5/AC-6/AC-7/AC-9/AC-14 all green)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "fitness:db total: 557/557 passed — full suite clean",
+      "result": "pass",
+      "note": "All 36 db test files pass; 0 pre-existing failures; notification-center.test.ts 12/12"
+    },
+    {
+      "check": "FF-NC fitness checks: FF-NC1 (own-only-read) + FF-NC2 (no-cross-user) + FF-NC3 (unread-indexed) + FF-NC4 (no-isread-audit) + FF-NC5 (pure-DAO import) + FF-NC6 (own-only keyset)",
+      "result": "pass",
+      "note": "All 6 FF-NC assertions green"
+    },
+    {
+      "check": "Lint fixes (pre-run): 2 unused import errors in PoolClient (pgNotificationStore.ts) and NotificationRow/NotifInsertRow (notifications.test.ts)",
+      "result": "pass",
+      "note": "Fixed before CI run. No logic changed. Review-approved code was otherwise clean."
+    },
+    {
+      "check": "R-1 nit: actorId UUID validation absent in X-Dev-User path",
+      "result": "n/a",
+      "note": "No injection risk (parameterized). Consistent with codebase pattern. Candidate for KC-mode activation."
+    },
+    {
+      "check": "R-2 nit: event_kind filter ADR gap vs spec FR-6",
+      "result": "n/a",
+      "note": "Spec FR-6 explicitly scopes out event_kind filter. ADR gap — Stage-2 candidate."
+    }
+  ],
+  "failures": [],
+  "tested_commit": "post-lint-fix",
+  "branch": "task/T-0173-notification-center-api",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+    "fitness_static": "PASS — all checks green including FF-NC1..FF-NC6 all PASS",
+    "vitest_unit": "1274/1274 passed, 6 skipped",
+    "fitness_db_notification_center": "12/12 PASS — AC-2/AC-3/AC-4/AC-5/AC-6/AC-7/AC-9/AC-14 live DB probes all green",
+    "fitness_db_total": "557/557 passed, 0 failed, 0 skipped"
+  }
+}

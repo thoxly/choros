@@ -18,10 +18,9 @@ import {
   PgNotificationStore,
   serializeCursor,
   deserializeCursor,
-  type NotificationRow,
   type PgNotifClientLike,
 } from "../core/postgres/pgNotificationStore.js";
-import type { NotifInsertPort, NotifInsertRow } from "../core/notification-router.js";
+import type { NotifInsertPort } from "../core/notification-router.js";
 import { registerNotificationRoutes } from "../http/notifications.js";
 import { Router } from "../http/router.js";
 import pg from "pg";
