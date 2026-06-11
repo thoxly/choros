@@ -20,3 +20,4 @@
 046_notification              # T-0168 — notifications E-N.1 migrations (choros.notification)
 047_email_channel_config      # T-0168 — notifications E-N.1 migrations (choros.email_channel_config)
 048_notification_preference   # T-0168 — notifications E-N.1 migrations (choros.notification_preference)
+045_tier                      # T-0087 — tier column + published-locked trigger (E12.6)

@@ -40,9 +40,6 @@ import { decidePromote } from "../core/env-tier.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEV_TENANT_ID =
-  process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -51,6 +48,18 @@ function assertUuidShape(value: string, label: string): void {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
   }
 }
+
+// Startup-time validation of DEV_TENANT_ID (R-4): emit a clear error if the env
+// var is set to a non-UUID value so operators see the root cause immediately,
+// rather than a generic 400 VALIDATION on the first request.
+const _rawDevTenantId = process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
+if (!UUID_RE.test(_rawDevTenantId)) {
+  throw new Error(
+    `[artifacts] DEV_TENANT_ID env var is not a valid UUID: "${_rawDevTenantId}". ` +
+    `Fix the env var or unset it to use the built-in default.`,
+  );
+}
+const DEV_TENANT_ID = _rawDevTenantId;
 
 // ---------------------------------------------------------------------------
 // Pool (lazy singleton — same pattern as db/org.ts)
@@ -163,6 +172,10 @@ function resolveArtifactTable(table: string): string {
  *
  * Config-only (FR-3 / AC-3): touches only the artifact row's tier column.
  * No INSERT/UPDATE on choros.record or any data table.
+ *
+ * decidePromote is called with the REAL currentTier read via FOR UPDATE (ADR §4.3):
+ * this means both the agent gate and the NOT_IN_DRAFT guard run against the live row,
+ * making the NOT_IN_DRAFT path reachable when a published artifact is re-promoted.
  */
 async function promoteTier(args: {
   pool: pg.Pool;
@@ -170,9 +183,10 @@ async function promoteTier(args: {
   artifactTable: string;    // validated config table name (e.g. "application")
   artifactId: string;       // uuid
   actor: string;
+  actorType: "human" | "agent";
   nowMs: number;
 }): Promise<void> {
-  const { pool, tenantId, artifactId, actor, nowMs } = args;
+  const { pool, tenantId, artifactId, actor, actorType, nowMs } = args;
   const quotedTable = resolveArtifactTable(args.artifactTable);
   const writer = makePgAuditWriter();
 
@@ -189,10 +203,17 @@ async function promoteTier(args: {
 
     const currentTier = rowRes.rows[0]!.tier as "draft" | "published";
 
-    // decidePromote validates the actorType gate — but actorType was already checked
-    // before entering this function (caller throws on agent). We use currentTier here
-    // for the NOT_IN_DRAFT guard.
-    if (currentTier !== "draft") {
+    // 1b. decidePromote with the REAL currentTier from the DB (ADR §4.3).
+    //     This makes both code paths reachable:
+    //       - actorType=agent            → FORBIDDEN_AGENT_SELF_PROMOTE → 403
+    //       - currentTier='published'    → NOT_IN_DRAFT                → 409
+    //       - currentTier='draft'+human  → ok                          → proceed
+    const decision = decidePromote({ currentTier, actorType });
+    if (!decision.ok) {
+      if (decision.code === "FORBIDDEN_AGENT_SELF_PROMOTE") {
+        throw new HttpError(403, "FORBIDDEN_AGENT_SELF_PROMOTE", "agents cannot self-promote");
+      }
+      // NOT_IN_DRAFT: artifact is already published (idempotent re-promote → 409).
       throw new HttpError(409, "NOT_IN_DRAFT", "artifact is already published");
     }
 
@@ -253,17 +274,8 @@ export function registerArtifactRoutes(router: Router): void {
     assertUuidShape(artifactId, "artifact id");
 
     // 1. Extract actor + actorType from AUTHENTICATED source only.
+    //    actorType is from the authenticated claim; NEVER from the body (T-0044 §9).
     const { actor, actorType } = await extractActorWithType(req);
-
-    // 2. Agent self-promote gate (AC-7 / FR-3) — checked before any DB read.
-    //    actorType is from the authenticated claim; NEVER from the body.
-    const decision = decidePromote({ currentTier: "draft", actorType });
-    //    decidePromote(draft, agent) → FORBIDDEN_AGENT_SELF_PROMOTE → 403.
-    //    decidePromote(draft, human) → ok → proceed.
-    //    NOTE: NOT_IN_DRAFT is checked inside promoteTier after the DB read.
-    if (!decision.ok && decision.code === "FORBIDDEN_AGENT_SELF_PROMOTE") {
-      throw new HttpError(403, "FORBIDDEN_AGENT_SELF_PROMOTE", "agents cannot self-promote");
-    }
 
     // 3. Parse artifact_table from body (optional; default "application").
     let artifactTable = "application";
@@ -311,6 +323,8 @@ export function registerArtifactRoutes(router: Router): void {
     // TODO(T-0021): wire real grant PDP check here.
 
     // 5. Promote (transactional: tier flip + audit row).
+    //    actorType is passed into promoteTier so decidePromote runs with the real
+    //    currentTier from the DB (ADR §4.3 — NOT_IN_DRAFT path is live).
     const pool = getPool();
     await promoteTier({
       pool,
@@ -318,6 +332,7 @@ export function registerArtifactRoutes(router: Router): void {
       artifactTable,
       artifactId,
       actor,
+      actorType,
       nowMs: Date.now(),
     });
 

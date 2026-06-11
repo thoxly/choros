@@ -56,16 +56,19 @@ ALL_SQL_STRIPPED="$(sed -E 's/--.*$//' "${MIG}"/*.sql | tr '\n' ' ' | tr -s '[:s
 while IFS= read -r table || [[ -n "${table}" ]]; do
   # Skip blank lines
   [[ -z "${table}" ]] && continue
-  # grep for: ADD COLUMN … tier … DEFAULT 'draft' AND a CHECK containing 'draft'
-  if echo "${ALL_SQL_STRIPPED}" | grep -iqE "ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT .draft."; then
-    if echo "${ALL_SQL_STRIPPED}" | grep -iqE "CHECK.*tier.*IN.*draft.*published"; then
+  # grep for: ALTER TABLE choros."<table>" … ADD COLUMN … tier … DEFAULT 'draft'
+  # and a CHECK constraint referencing 'draft'/'published' on the same table.
+  # Both greps are anchored to the specific table name so that a column added
+  # to any single table does not make all tables pass (R-3 nit hardening).
+  if echo "${ALL_SQL_STRIPPED}" | grep -iqE "ALTER TABLE choros\.\"?${table}\"?[^;]*ADD COLUMN[^;]*tier[^;]*DEFAULT .draft."; then
+    if echo "${ALL_SQL_STRIPPED}" | grep -iqE "ALTER TABLE choros\.\"?${table}\"?[^;]*CHECK[^;]*(tier|draft.*published|published.*draft)"; then
       echo "PASS FF-1: table '${table}' — tier column + CHECK found in migrations"
     else
       echo "FAIL FF-1: table '${table}' — missing CHECK(tier IN ('draft','published')) in migrations"
       ERRORS=$((ERRORS + 1))
     fi
   else
-    echo "FAIL FF-1: table '${table}' — missing ADD COLUMN … tier … DEFAULT 'draft' in migrations"
+    echo "FAIL FF-1: table '${table}' — missing ALTER TABLE choros.${table} ADD COLUMN tier DEFAULT 'draft' in migrations"
     ERRORS=$((ERRORS + 1))
   fi
 done < "${TIER_TABLES}"
@@ -152,7 +155,7 @@ fi
 echo ""
 echo "FF-8: no createDatabase/provisionContour/compose-per-tier in promote/genesis paths"
 # grep both artifacts.ts and any genesis path
-GENESIS_PATHS=("${SRC}/http/artifacts.ts" "${MIG}/044_tier.sql")
+GENESIS_PATHS=("${SRC}/http/artifacts.ts" "${MIG}/045_tier.sql")
 for f in "${GENESIS_PATHS[@]}"; do
   [[ -f "${f}" ]] || continue
   if grep -qiE 'createDatabase|provisionContour|new Pool.*new.db|compose.*up.*tier' "${f}"; then
@@ -229,17 +232,17 @@ fi
 
 # ---- FF-11a: T-0087 migration is additive ALTER TABLE only (no CREATE TABLE) ----
 echo ""
-echo "FF-11a: T-0087 migration (044_tier.sql) is ALTER TABLE only — no CREATE TABLE"
-TIER_MIG="${MIG}/044_tier.sql"
+echo "FF-11a: T-0087 migration (045_tier.sql) is ALTER TABLE only — no CREATE TABLE"
+TIER_MIG="${MIG}/045_tier.sql"
 if [[ -f "${TIER_MIG}" ]]; then
   if grep -iqE '^\s*CREATE TABLE' "${TIER_MIG}"; then
-    echo "FAIL FF-11a: 044_tier.sql contains CREATE TABLE (must be additive ALTER TABLE only)"
+    echo "FAIL FF-11a: 045_tier.sql contains CREATE TABLE (must be additive ALTER TABLE only)"
     ERRORS=$((ERRORS + 1))
   else
-    echo "PASS FF-11a: 044_tier.sql contains no CREATE TABLE"
+    echo "PASS FF-11a: 045_tier.sql contains no CREATE TABLE"
   fi
 else
-  echo "FAIL FF-11a: 044_tier.sql not found"
+  echo "FAIL FF-11a: 045_tier.sql not found"
   ERRORS=$((ERRORS + 1))
 fi
 

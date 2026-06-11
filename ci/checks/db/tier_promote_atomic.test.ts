@@ -9,9 +9,12 @@
 //   FF-2  — live: direct UPDATE on published row raises (trigger fires) (AC-2)
 //   FF-3  — promote does NOT copy draft record rows to published context (AC-3)
 //   FF-9  — published artifact creatable in dev Choros (no SDLC restriction) (AC-9)
+//   R-2   — POST /api/artifacts/:id/promote on a published artifact → 409 NOT_IN_DRAFT
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import * as http from 'node:http';
 import { migratorUrl, appUrl, withClient, uuid, TENANT_A } from './_helpers.js';
+import { createServer } from '../../../src/server.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -244,5 +247,82 @@ describe('FF-9 (live): published artifact in dev Choros succeeds (tier ⊥ SDLC)
       );
       expect(res.rows[0].tier).toBe('published');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-2 (endpoint) — re-promote of a published artifact → 409 NOT_IN_DRAFT
+// ---------------------------------------------------------------------------
+// This test proves the NOT_IN_DRAFT path is live in the HTTP handler after the
+// R-2 fix: decidePromote is now called with the real currentTier from the DB
+// (not the hardcoded "draft" that made NOT_IN_DRAFT permanently dead).
+// ---------------------------------------------------------------------------
+
+describe('R-2: POST /api/artifacts/:id/promote on published artifact → 409 NOT_IN_DRAFT', () => {
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    server = createServer();
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        if (addr && typeof addr !== 'string') {
+          baseUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  });
+
+  function postPromote(id: string): Promise<{ statusCode: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`${baseUrl}/api/artifacts/${id}/promote`);
+      const req = http.request(url, { method: 'POST', headers: { 'x-dev-user': 'alice' } }, (res) => {
+        let body = '';
+        res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  it('returns 409 NOT_IN_DRAFT when artifact is already published (R-2 live path)', async () => {
+    // Seed a draft application, then promote it directly via SQL (bypassing the endpoint),
+    // then attempt to promote again via the endpoint → must get 409.
+    const id = uuid();
+    await withClient(appUrl(), async (c) => {
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+      await c.query(
+        `INSERT INTO choros.application
+           (tenant_id, id, slug, display_name, tier, created_at, updated_at)
+         VALUES ($1, $2, $3, 'R-2 Test App', 'draft', 0, 0)`,
+        [TENANT, id, `r2-app-${id.slice(0, 8)}`],
+      );
+      // Promote via sanctioned SQL path (set promoting GUC)
+      await c.query('BEGIN');
+      await c.query("SET LOCAL choros.promoting = '1'");
+      await c.query(
+        `UPDATE choros.application SET tier = 'published' WHERE tenant_id = $1 AND id = $2`,
+        [TENANT, id],
+      );
+      await c.query('COMMIT');
+    });
+
+    // Now attempt to promote via the endpoint — artifact is already published.
+    const result = await postPromote(id);
+
+    // The real currentTier ('published') is now passed to decidePromote →
+    // NOT_IN_DRAFT → endpoint returns 409.
+    expect(result.statusCode, 'expected 409 NOT_IN_DRAFT for already-published artifact').toBe(409);
+    const parsed: unknown = JSON.parse(result.body);
+    expect(parsed).toMatchObject({ error: 'NOT_IN_DRAFT' });
   });
 });
