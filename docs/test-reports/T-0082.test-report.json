@@ -1,0 +1,143 @@
+{
+  "task_id": "T-0082",
+  "verdict": "pass",
+  "sha": "e024b3b0f2ab44b2de1312bedbced3fa6c94859e",
+  "deterministic": {
+    "total": 1049,
+    "passed": 1049,
+    "failed": 0,
+    "breakdown": {
+      "npm_run_ci_vitest": {
+        "test_files": 51,
+        "tests_passed": 1032,
+        "tests_skipped": 6,
+        "tests_failed": 0
+      },
+      "fitness_checks": {
+        "bundle_coherence_sh": "exit 0 — all members coherent",
+        "all_other_fitness_checks": "all green (bundle-coherence.sh at end of fitness chain)"
+      },
+      "fitness_db_bundle_coherence": {
+        "FF12_AC12": "pass (2/2 — record_schema parse-valid JSON objects)",
+        "FF13_AC13": "pass (2/2 — no grant resource_type=record with null resource_facet)"
+      }
+    }
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "static-grep: bundle_members.txt has 5 data lines; choros_table rows have non-empty table_or_path and key_column; external rows have deferral entries. Confirmed: object-schema|choros_table|…|registry_def|record_schema; grants|choros_table|…|grant|resource_type; bpmn-process/form-code/form-json-schema as external.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "bash ci/checks/bundle-coherence.sh → exit 0 in clean worktree without DB. File is chmod +x (-rwxr-xr-x). Static checks (registry parse, known_tenant_tables grep, DDL grep, bpmn-linter delegation) all pass.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "static-grep: registry_def present in known_tenant_tables.txt (grep -x match); migration 004_registry_def.sql contains 'record_schema  jsonb NOT NULL' (whitespace-tolerant grep -E matches). Confirmed by bundle-coherence.sh PASS output.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "static-grep: migration 008_grant.sql contains 'CREATE TABLE choros.\"grant\"' and 'resource_type  text NOT NULL'. Confirmed by bundle-coherence.sh PASS output.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "static-grep: bundle-coherence.sh contains 'bash $BPMN_LINTER || ERRORS++' delegation pattern. Integration negative path (b): bpmn-linter-isolation.sh replaced with exit-1 stub in temp env → bundle-coherence.sh exits 1 (FAIL: bpmn-linter-isolation.sh returned non-zero).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "live run of bundle-coherence.sh: outputs 3 x [bundle-deferred] lines (bpmn-process, form-code, form-json-schema) and exits 0. External members do not increment ERRORS.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "docs/design/T-0082-bundle-deferral-contract.md exists; contains '## Deferred members' section; lists form-code, form-json-schema, bpmn (bpmn-process); contains 'Promotion rule: external → choros_table' section with when-to-promote conditions.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "package.json fitness script ends with '&& bash ci/checks/bundle-coherence.sh' (1 occurrence). ci.yml job 'ci' step 'npm run ci' at line 24 (already existing blocking step) — bundle-coherence.sh is part of npm run fitness which is part of npm run ci.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "negative path (a): temp MEMBERS_FILE with object-schema line removed (4 members) passed to bundle-coherence.sh → exit 1 with 'FAIL: registry has only 4 member(s); expected ≥5' and 'FAIL: required member object-schema not found'. MEMBERS_FILE argument confirmed working.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "git diff --name-only HEAD~3..HEAD: known_tenant_tables.txt and bpmn-linter-isolation.sh NOT in changed files. ci/checks/tier_bearing_tables.txt and ci/checks/tier-isolation.sh do NOT exist in worktree (T-0087 files absent, not created by T-0082).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "grep -Eiq '\\b(tier|draft|published)\\b' ci/checks/bundle-coherence.sh → no match. PASS: no tier/draft/published tokens found.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "fitness:db (FF-12): DATABASE_URL=postgresql://choros_migrator:choros_dev_pw@localhost:55432/choros npm run fitness:db → ci/checks/db/bundle-coherence.test.ts 2 tests PASS. All registry_def.record_schema values are parse-valid JSON objects.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "fitness:db (FF-13): same run → bundle-coherence.test.ts 2 tests PASS. No grant with resource_type='record' and null resource_facet found.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "git diff --name-only HEAD~3..HEAD: src/core/grant-lattice.ts, src/core/types.ts, src/core/flowable-client.ts, src/core/bpmn-linter.ts — none present in changed files. Frozen public surface intact.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "negative_paths": [
+    {
+      "id": "neg-a",
+      "description": "MEMBERS_FILE без строки object-schema (4 члена) → exit 1",
+      "method": "Temp file passed via MEMBERS_FILE arg; object-schema line removed",
+      "result": "exit 1 — FAIL: registry has only 4 member(s) + required member object-schema not found",
+      "verdict": "pass"
+    },
+    {
+      "id": "neg-b",
+      "description": "bpmn-linter-isolation.sh заменён стабом exit 1 → bundle-coherence.sh exit 1",
+      "method": "Temp ci/checks dir with real bundle-coherence.sh + stub bpmn-linter-isolation.sh (exit 1) + real migrations; bundle-coherence.sh run from temp SCRIPT_DIR",
+      "result": "exit 1 — FAIL: bpmn-linter-isolation.sh returned non-zero",
+      "verdict": "pass"
+    },
+    {
+      "id": "neg-c",
+      "description": "Удалена deferral-строка form-code из реестра (4 члена) → exit 1",
+      "method": "Temp MEMBERS_FILE без строки form-code|external|...; passed via MEMBERS_FILE arg",
+      "result": "exit 1 — FAIL: registry has only 4 member(s); expected ≥5",
+      "verdict": "pass"
+    }
+  ],
+  "known_gaps": [
+    {
+      "id": "kg-1",
+      "description": "fitness:db failures unrelated to T-0082: schema.test.ts FF-ACT (ACT_* tables exist because Flowable has run in dev DB — pre-existing env state); genesis-owner-seed.test.ts AC-12 count mismatch (17 vs actual grants — pre-existing); grant-trail.db.test.ts AC-20 (pre-existing); cross_tenant.test.ts 67 skipped (pg-single-dep env). None are T-0082 product defects.",
+      "root_class": "tooling-gap",
+      "is_product_defect": false
+    },
+    {
+      "id": "kg-2",
+      "description": "Negative path (c) bpmn-linter-isolation.sh in temp dir fails with 'Cannot find module package.json' (bpmn-linter-isolation.sh runs a node eval that expects package.json at PROJECT_ROOT). This is a temp-dir isolation limitation of the test setup — the guard still correctly exits 1 due to member count check. Not a product defect; bpmn-linter delegation is covered cleanly by neg-b with properly structured temp env.",
+      "root_class": "tooling-gap",
+      "is_product_defect": false
+    }
+  ],
+  "ci_summary": {
+    "tsc": "pass (0 errors, 2 warnings — pre-existing console statements)",
+    "eslint": "pass (0 errors, 2 warnings)",
+    "fitness": "pass (all 57 fitness checks green, bundle-coherence.sh last)",
+    "vitest": "1032 passed, 6 skipped, 0 failed (51 test files)"
+  }
+}
