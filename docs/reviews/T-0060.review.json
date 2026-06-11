@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0060",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true,
+    "tsc": "clean (0 errors)",
+    "vitest": "895 pass / 6 skip / 0 fail (48 files, 2 skipped live-kc)",
+    "fitness_static": "43 green (FF-3/FF-4/FF-5/FF-8 + 39 pre-existing); FF-6 green (manual run)"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/http/auth.ts:256-273 (verifyEcSignature)",
+      "issue": "ES256 signature verification is broken. JWT ES256 signatures use the IEEE P1363 raw R||S format (64 bytes for P-256), but Node.js `crypto.verify` with an EC key expects DER-encoded (ASN.1) signatures. `verifyEcSignature` passes the base64url-decoded JWT signature directly to `crypto.verify`, which expects DER; this causes every legitimate ES256 token to be rejected with 401. Verified empirically: `crypto.verify('SHA256', msg, ecKey, rawRS_sig)` returns `false`; `crypto.verify('SHA256', msg, ecKey, derSig)` returns `true`. ADR §1.3 explicitly promises ES256 support ('алгоритм: RS256 допустим ES256'). There is no unit test covering ES256 tokens (all tests use RS256), so the defect is undetected by CI.",
+      "suggestion": "Convert the raw R||S signature to DER before passing to `crypto.verify`. Standard conversion: extract r (32 bytes) and s (32 bytes), build DER sequence 0x30 <len> 0x02 <rlen> <r> 0x02 <slen> <s> (strip leading zeros). Alternatively use `crypto.verify` with `dsaEncoding: 'ieee-p1363'` option (Node >= 18.13) to accept raw format directly. Add a unit test with an ES256 key pair to cover AC-13/AC-14 with ES256."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "package.json (fitness script) / ci/checks/worker-auth-config-failfast.sh",
+      "issue": "FF-6 (`worker-auth-config-failfast.sh`, AC-20 gate) is absent from `npm run fitness` but present only in the `kc` CI job. ADR §6 table explicitly classifies FF-6 as `static-now` — meaning it must run in the standard fitness pipeline, not only when Keycloak is available. The kc CI job placement is sensible because FF-6 requires `npm run build` (dist/), but `npm run fitness` has no build step. The result: `AC-20` (fail-fast assertKeycloakConfig on missing KEYCLOAK_URL) is ungated in the local `npm run fitness` check that guards the static-now tier. If future refactoring removes `assertKeycloakConfig`, the violation will not be caught locally.",
+      "suggestion": "Either (a) add a `prebuild` step that runs FF-6 after `tsc` within the fitness script (e.g., `npm run build && bash ci/checks/worker-auth-config-failfast.sh`), or (b) extract the logic of FF-6 into a form that can run without `dist/` (e.g., a ts-node/tsx invocation against the TypeScript source), or (c) update the ADR §6 table to reclassify FF-6 as `live-kc` tier (since it requires a build) and document this consciously. Option (a) is simplest."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/workerAuth.test.ts:398-412 (AC-15 test)",
+      "issue": "The AC-15 test (AuthContext has non-empty sub and preferredUsername) only verifies that `POST /jobs` returns 201, which proves auth passed but does not confirm `getAuthContext(req)` actually contains the expected values. The comment acknowledges this: 'We verify by importing getAuthContext... For the unit-level test, we verify the token round-trip succeeds'. The Group C test (`verifyJwt` directly) does check `result.sub` and `result.preferred_username`, but does not exercise the WeakMap path through `authenticate()`. The AC-15 assertion in the spec ('доступны в request-контексте') is therefore only partially covered.",
+      "suggestion": "Add a handler-level hook test that calls `getAuthContext(req)` inside a test handler and asserts non-empty `sub` and `preferredUsername`. This can be done by registering a temporary route on the test server that exposes the context values in its response body."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/auth.ts:277-305 (verifyClaims error messages)",
+      "issue": "401 error messages reveal claim-level failure detail: 'invalid token issuer', 'token expired', 'missing or invalid actor_type claim', 'missing sub claim'. This allows an attacker to enumerate exactly which claim fails, aiding token crafting. NF-4 spec says 'не раскрывать детали' only for 503; the 401 spec is silent. The concern is minor in a machine-to-machine API context, but worth noting for hardening.",
+      "suggestion": "Collapse all 401 messages to a single generic 'authentication failed' or 'invalid token' message to eliminate the enumeration signal. Keep specific messages in server-side logs only (not in response body)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true},
+    {"ac": "AC-21", "covered": true},
+    {"ac": "AC-22", "covered": false},
+    {"ac": "AC-23", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "FF-3 changed from line-count to file-count (--exclude-dir=__tests__): legitimate — test files set env vars, not branching points; invariant FR-1 is about production branching, not test env manipulation",
+    "validClaimsKc() uses dynamic jwksPort for iss: legitimate — mirrors KEYCLOAK_URL env that auth.ts reads; AC-10 still verifies wrong-iss rejection with hardcoded evil domain",
+    "assertKeycloakConfig() unit test only checks typeof === 'function': acceptable given ESM module-level const limitation; FF-6 shell script provides real behavioral coverage",
+    "alg:none → 401 confirmed: not in RS256/ES256 whitelist, throws HttpError(401, 'UNAUTHENTICATED', 'unsupported algorithm')",
+    "HS256/alg-confusion → 401 confirmed: HS256 not in algorithm whitelist; no HMAC path exists in verifyJwt",
+    "exp check: claims.exp + 60 < nowSecs → exact 60s clock-skew tolerance, 0 or null exp → 401",
+    "kid=undefined → keys[0] fallback: standard RFC 7517 §4.5 (kid optional); fail-safe because attacker cannot forge signature without KC private key",
+    "JWKS cache poisoning: cache populated only from configured KC JWKS URI; no user-controlled cache injection path",
+    "AC-22 (live-kc) covered only in workerAuth.kc.e2e.test.ts which is skipped without KEYCLOAK_URL — by design (live-kc tier)"
+  ]
+}
