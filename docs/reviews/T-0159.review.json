@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0159",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "notes": "tsc --noEmit 0 errors; eslint 0 errors (2 pre-existing no-console warnings unrelated to this task); fitness 47/47 checks PASS; vitest 953 passed / 5 skipped / 0 failed (47 test files, 1 skipped integration). TEST attestation covered by this review artifact."
+  },
+  "findings": [],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-1: remove unused import beforeEach from src/__tests__/invoke-grant.test.ts",
+      "covered": true
+    },
+    {
+      "ac": "AC-2: remove unused declaration TENANT_B from src/__tests__/invoke-grant.test.ts",
+      "covered": true
+    },
+    {
+      "ac": "AC-3: remove unused destructuring context:_context from src/http/invoke.ts:381",
+      "covered": true
+    },
+    {
+      "ac": "AC-4: no behavioural change — deleted symbols were never read downstream",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": []
+}
