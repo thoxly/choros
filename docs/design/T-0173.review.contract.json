@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0173",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/http/notifications.ts:75-81",
+      "issue": "actorId from X-Dev-User header is not validated as UUID before use as parameterized SQL argument. No injection risk (parameterized), but a malformed actorId would result in 0 rows rather than a validation error. Consistent with notification-prefs.ts pattern.",
+      "suggestion": "Optionally call assertUuidShape(actorId, 'actorId') in extractActor() or inline in each handler. Low priority — Keycloak mode enforces real identity."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/specs/T-0173-notification-center.spec.md:FR-6",
+      "issue": "ADR T-0120 §2.2 mentions event_kind as a filter for GET /api/notifications, but spec FR-6 and the implementation omit it. Narrowing is acceptable for MVP scope.",
+      "suggestion": "Add a TODO comment in spec or create a follow-up task to add event_kind filter (likely in E-N.6 continuation or a standalone task)."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true }
+  ],
+  "role_gap_evidence": []
+}

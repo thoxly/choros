@@ -27,6 +27,7 @@ import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
 import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
+import { registerNotificationRoutes } from "./http/notifications.js";
 
 const { Pool } = pg;
 
@@ -235,6 +236,11 @@ function buildRouter(
   // Register notification preference endpoints (T-0171 E-N.4).
   if (grantsPool) {
     registerNotificationPrefRoutes(router, grantsPool);
+  }
+
+  // Register notification center endpoints (T-0173 E-N.6).
+  if (grantsPool) {
+    registerNotificationRoutes(router, grantsPool);
   }
 
   // Set static file handler as fallback for everything else

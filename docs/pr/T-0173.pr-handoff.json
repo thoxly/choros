@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0173",
+  "status": "pr_open",
+  "branch": "task/T-0173-notification-center-api",
+  "merge_target": "dev",
+  "base_commit": "fc39382",
+  "head_commit": "3087878",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Notifications E-N.6: REST API notification-центра — PgNotificationStore (src/core/postgres/pgNotificationStore.ts) реализует NotifInsertPort + list (keyset-пагинация по (created_at, id) через idx_notification_listing) + countUnread (частичный индекс idx_notification_unread) + markRead + batchMarkRead. REST: GET /api/notifications (keyset-пагинация, cursor base64url), GET /api/notifications/unread-count (badge), POST /api/notifications/:id/read (mark-read, чужое → 404), PATCH /api/notifications (batch mark-read, чужие ids молча пропускаются). Авторизация структурна: recipient_id всегда = actor из X-Dev-User (own-only). Без appendAuditEvent (FF-NO-ISREAD-AUDIT). Tenant-RLS fail-closed через withTenantTx. UUID guard на notifId и ids. CI: tsc 0 errors, eslint 0 errors (2 pre-existing console warnings), fitness all PASS (FF-NC1..FF-NC6), vitest 1274/1274, fitness:db 557/557 (notification-center.test.ts 12/12). Lint fixes: PoolClient import (pgNotificationStore.ts) + NotificationRow/NotifInsertRow imports (notifications.test.ts) — cosmetic only, no logic change.",
+  "commits": [
+    {
+      "sha": "5da2424",
+      "phase": "SPEC",
+      "message": "spec(T-0173): notification-center REST API + badge + mark-read SPEC"
+    },
+    {
+      "sha": "242d65f",
+      "phase": "BUILD",
+      "message": "build(T-0173): E-N.6 notification center — REST API + unread badge (partial index) + mark-read"
+    },
+    {
+      "sha": "3087878",
+      "phase": "REVIEW",
+      "message": "T-0173 REVIEW: approved — notification center REST API"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "3087878",
+      "findings_resolved": [],
+      "findings_nit_open": [
+        "R-1 (nit, axis 4): actorId from X-Dev-User not validated as UUID before use as parameterized SQL argument. No injection risk (parameterized, dev-mode). Candidate fix: assertUuidShape(actorId, 'actorId') at KC-mode activation. Consistent with codebase pattern (same as notification-prefs.ts).",
+        "R-2 (nit, axis 2): ADR T-0120 §2.2 lists event_kind filter for GET /api/notifications; spec FR-6 explicitly scopes it out. MVP narrowing accepted. Stage-2 candidate task."
+      ],
+      "artifact": "docs/design/T-0173.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1274,
+      "passed": 1274,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "14/14",
+      "fitness_static": "PASS — all checks green including FF-NC1..FF-NC6",
+      "fitness_db_notification_center": "12/12 PASS — live DB AC-2/AC-3/AC-4/AC-5/AC-6/AC-7/AC-9/AC-14 probes",
+      "fitness_db_total": "557/557 PASS, 0 failed, 0 skipped",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+        "fitness_static_checks": "PASS — all checks green (FF-NC1..FF-NC6 all PASS)",
+        "vitest_unit": "1274/1274 passed, 6 skipped (flowable integration offline)",
+        "notifications_unit_tests": "28/28 — src/__tests__/notifications.test.ts — AC-1..AC-10 covered",
+        "fitness_db_total": "557/557 passed, 0 failed",
+        "fitness_db_notification_center": "12/12 — ci/checks/db/notification-center.test.ts — all AC-2/AC-3/AC-4/AC-5/AC-6/AC-7/AC-9/AC-14 probes green"
+      },
+      "pre_run_fixes": [
+        "Removed unused 'PoolClient' import from src/core/postgres/pgNotificationStore.ts line 20 (cosmetic lint error)",
+        "Removed unused 'NotificationRow' and 'NotifInsertRow' type imports from src/__tests__/notifications.test.ts lines 21/24 (cosmetic lint errors)"
+      ],
+      "artifact": "docs/test-reports/T-0173.test-report.md",
+      "contract_artifact": "docs/design/T-0173.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/postgres/pgNotificationStore.ts",
+    "src/http/notifications.ts",
+    "src/__tests__/notifications.test.ts",
+    "ci/checks/db/notification-center.test.ts",
+    "ci/checks/notification-center-isolation.sh",
+    "src/server.ts",
+    "docs/specs/T-0173-notification-center.spec.md",
+    "docs/specs/T-0173-notification-center.spec.contract.json",
+    "docs/design/T-0173.review.contract.json",
+    "docs/reviews/T-0173.review.md",
+    "docs/test-reports/T-0173.test-report.md",
+    "docs/design/T-0173.test-report.contract.json",
+    "docs/pr/T-0173.pr-handoff.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "description": "actorId from X-Dev-User header not validated as UUID before use as parameterized SQL argument. Consistent with codebase pattern. No injection risk. In dev-mode any string accepted; Keycloak mode enforces real identity.",
+      "follow_up_candidate": "Add assertUuidShape(actorId, 'actorId') check at KC-mode activation boundary. Low priority — parameterized query prevents injection regardless."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "description": "ADR T-0120 §2.2 mentions event_kind filter for GET /api/notifications; spec FR-6 explicitly scopes it out of T-0173 MVP. ADR gap noted.",
+      "follow_up_candidate": "Add event_kind filter parameter to GET /api/notifications in E-N.6 continuation or standalone Stage-2 task. Comment or TODO in spec to close ADR traceability."
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "Migrations 046/047 (notification table + idx_notification_unread + idx_notification_listing + RLS policy) already applied to dev DB. Branch contains no new DDL.",
+    "downstream_effect": "Completes E-N.6 notification center REST surface. pgNotificationStore now provides both NotifInsertPort (insert, for router T-0169) and client-facing list/countUnread/markRead/batchMarkRead endpoints. Unblocks any UI slice depending on notification inbox."
+  },
+  "friction_events": [
+    "3 lint errors found post-review (2 unused imports in test file, 1 unused import in DAO). Fixed in TEST phase. No logic change."
+  ]
+}
