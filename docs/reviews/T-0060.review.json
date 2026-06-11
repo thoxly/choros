@@ -1,11 +1,11 @@
 {
   "task_id": "T-0060",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {
     "green": true,
     "tsc": "clean (0 errors)",
-    "vitest": "895 pass / 6 skip / 0 fail (48 files, 2 skipped live-kc)",
-    "fitness_static": "43 green (FF-3/FF-4/FF-5/FF-8 + 39 pre-existing); FF-6 green (manual run)"
+    "vitest": "897 pass / 6 skip / 0 fail (48 files, 2 skipped live-kc)",
+    "fitness_static": "43+FF-6 green (FF-3/FF-4/FF-5/FF-6/FF-8 + 39 pre-existing); all green via npm run fitness"
   },
   "findings": [
     {
@@ -14,7 +14,8 @@
       "axis": 2,
       "location": "src/http/auth.ts:256-273 (verifyEcSignature)",
       "issue": "ES256 signature verification is broken. JWT ES256 signatures use the IEEE P1363 raw R||S format (64 bytes for P-256), but Node.js `crypto.verify` with an EC key expects DER-encoded (ASN.1) signatures. `verifyEcSignature` passes the base64url-decoded JWT signature directly to `crypto.verify`, which expects DER; this causes every legitimate ES256 token to be rejected with 401. Verified empirically: `crypto.verify('SHA256', msg, ecKey, rawRS_sig)` returns `false`; `crypto.verify('SHA256', msg, ecKey, derSig)` returns `true`. ADR §1.3 explicitly promises ES256 support ('алгоритм: RS256 допустим ES256'). There is no unit test covering ES256 tokens (all tests use RS256), so the defect is undetected by CI.",
-      "suggestion": "Convert the raw R||S signature to DER before passing to `crypto.verify`. Standard conversion: extract r (32 bytes) and s (32 bytes), build DER sequence 0x30 <len> 0x02 <rlen> <r> 0x02 <slen> <s> (strip leading zeros). Alternatively use `crypto.verify` with `dsaEncoding: 'ieee-p1363'` option (Node >= 18.13) to accept raw format directly. Add a unit test with an ES256 key pair to cover AC-13/AC-14 with ES256."
+      "suggestion": "Convert the raw R||S signature to DER before passing to `crypto.verify`. Standard conversion: extract r (32 bytes) and s (32 bytes), build DER sequence 0x30 <len> 0x02 <rlen> <r> 0x02 <slen> <s> (strip leading zeros). Alternatively use `crypto.verify` with `dsaEncoding: 'ieee-p1363'` option (Node >= 18.13) to accept raw format directly. Add a unit test with an ES256 key pair to cover AC-13/AC-14 with ES256.",
+      "resolved_by": "d1b2d1e"
     },
     {
       "id": "R-2",
@@ -22,7 +23,8 @@
       "axis": 3,
       "location": "package.json (fitness script) / ci/checks/worker-auth-config-failfast.sh",
       "issue": "FF-6 (`worker-auth-config-failfast.sh`, AC-20 gate) is absent from `npm run fitness` but present only in the `kc` CI job. ADR §6 table explicitly classifies FF-6 as `static-now` — meaning it must run in the standard fitness pipeline, not only when Keycloak is available. The kc CI job placement is sensible because FF-6 requires `npm run build` (dist/), but `npm run fitness` has no build step. The result: `AC-20` (fail-fast assertKeycloakConfig on missing KEYCLOAK_URL) is ungated in the local `npm run fitness` check that guards the static-now tier. If future refactoring removes `assertKeycloakConfig`, the violation will not be caught locally.",
-      "suggestion": "Either (a) add a `prebuild` step that runs FF-6 after `tsc` within the fitness script (e.g., `npm run build && bash ci/checks/worker-auth-config-failfast.sh`), or (b) extract the logic of FF-6 into a form that can run without `dist/` (e.g., a ts-node/tsx invocation against the TypeScript source), or (c) update the ADR §6 table to reclassify FF-6 as `live-kc` tier (since it requires a build) and document this consciously. Option (a) is simplest."
+      "suggestion": "Either (a) add a `prebuild` step that runs FF-6 after `tsc` within the fitness script (e.g., `npm run build && bash ci/checks/worker-auth-config-failfast.sh`), or (b) extract the logic of FF-6 into a form that can run without `dist/` (e.g., a ts-node/tsx invocation against the TypeScript source), or (c) update the ADR §6 table to reclassify FF-6 as `live-kc` tier (since it requires a build) and document this consciously. Option (a) is simplest.",
+      "resolved_by": "d1b2d1e"
     },
     {
       "id": "R-3",
