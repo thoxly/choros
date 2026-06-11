@@ -240,6 +240,107 @@ describe('FF-FCI4: adding new check → exit 0', () => {
 });
 
 // =============================================================================
+// R-1 BLOCKING FIX: ownership-capture via header rewrite — must now be caught
+// =============================================================================
+
+describe('R-1 fix: ownership-capture via header rewrite → exit 1', () => {
+  it('PROBE-2: DELETE foreign check + re-ADD with own T-ID header → exit 1 (was bypass before fix)', () => {
+    // Attack: delete a foreign check and re-add it with an own header.
+    // Before the fix the gate read the on-disk file header (= own T-ID) → PASS.
+    // After the fix the gate reads BASE_REF header (= foreign T-ID) → FAIL.
+    const repoDir = createBaseRepo(tmpRoot, [
+      { file: 'dual-control-isolation.sh', header: '# T-0044 · FF-DC1 — dual-control-isolation' },
+    ]);
+
+    sh('git', ['checkout', '-b', 'task/T-0999-del-readd'], repoDir);
+
+    // Delete + re-add the same-named file, but with an own T-ID header
+    sh('git', ['rm', 'ci/checks/dual-control-isolation.sh'], repoDir);
+    // git rm removes the file; re-create the file in the same location (dir still exists)
+    mkdirSync(join(repoDir, 'ci', 'checks'), { recursive: true });
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'dual-control-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0999 · now I own this\nset -euo pipefail\necho "gutted"\n`,
+    );
+    sh('git', ['add', 'ci/checks/dual-control-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0999: delete+re-add foreign check with own header (R-1 attack)'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+
+    // The delete of the foreign file must be caught (D is in CDMRT, BASE_REF header = T-0044 ≠ T-0999)
+    expect(exitCode, `Expected exit 1 (R-1 attack must be caught). Output:\n${stdout}`).toBe(1);
+    expect(stdout).toMatch(/FAIL/);
+    expect(stdout).toMatch(/dual-control-isolation\.sh/);
+    expect(stdout).toMatch(/T-0044/);
+  });
+
+  it('PROBE-3: modify foreign check + rewrite header to own T-ID → exit 1 (was bypass before fix)', () => {
+    // Attack: edit a foreign check and rewrite its second line to own T-ID.
+    // Before the fix the gate read the on-disk file header (= own T-ID) → PASS.
+    // After the fix the gate reads BASE_REF header (= foreign T-ID) → FAIL.
+    const repoDir = createBaseRepo(tmpRoot, [
+      { file: 'dual-control-isolation.sh', header: '# T-0044 · FF-DC1 — dual-control-isolation' },
+    ]);
+
+    sh('git', ['checkout', '-b', 'task/T-0999-header-capture'], repoDir);
+
+    // Overwrite the file, changing the header to claim ownership
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'dual-control-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0999 · captured ownership of dual-control\nFROZEN_EXCLUDE_RE='bypass'\necho "gutted"\n`,
+    );
+    sh('git', ['add', 'ci/checks/dual-control-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0999: rewrite foreign check header to own T-ID (R-1 attack)'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+
+    expect(exitCode, `Expected exit 1 (R-1 header-capture must be caught). Output:\n${stdout}`).toBe(1);
+    expect(stdout).toMatch(/FAIL/);
+    expect(stdout).toMatch(/dual-control-isolation\.sh/);
+    expect(stdout).toMatch(/T-0044/);
+  });
+});
+
+// =============================================================================
+// R-2 RESIDUAL: branch-name spoof — editing own check via spoofed branch name
+// =============================================================================
+// Design decision: a branch task/T-0044-spoof obtains TASK_ID=T-0044.  When
+// dual-control-isolation.sh has BASE_REF header "# T-0044 ·", the BASE_REF
+// anchor allows this edit (the file genuinely belonged to T-0044 in BASE_REF).
+// This residual risk is ACCEPTED BY DESIGN (see script header and ADR §10
+// amendment): the reviewer sees the PR branch name alongside the diff, so the
+// mismatch between the claimed task and the actual task is reviewer-visible.
+// The R-1 fix closes the more dangerous path (foreignizing a check by header
+// rewrite); this test documents the accepted residual.
+
+describe('R-2 residual (accepted): branch-name spoof for genuinely-owned check', () => {
+  it('PROBE-5 residual: branch task/T-0044-spoof editing T-0044 check → exit 0 (accepted residual risk)', () => {
+    // A spoofed branch name matches the BASE_REF header of a real task's check.
+    // This is accepted by design — the reviewer sees the branch name mismatch.
+    const repoDir = createBaseRepo(tmpRoot, [
+      { file: 'dual-control-isolation.sh', header: '# T-0044 · FF-DC1 — dual-control-isolation' },
+    ]);
+
+    // Branch named task/T-0044-spoof: TASK_ID=T-0044 via branch name
+    sh('git', ['checkout', '-b', 'task/T-0044-spoof'], repoDir);
+
+    // Modify the T-0044 check — BASE_REF header says T-0044 = TASK_ID → PASS
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'dual-control-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0044 · FF-DC1 — dual-control-isolation\n# modified by spoofed branch\necho "stub"\n`,
+    );
+    sh('git', ['add', 'ci/checks/dual-control-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'spoof: edit T-0044 check via spoofed branch name (residual risk)'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+
+    // This is exit 0 — accepted residual risk documented in ADR §10 and script header
+    expect(exitCode, `Expected exit 0 (residual risk, accepted by design). Output:\n${stdout}`).toBe(0);
+    expect(stdout).toMatch(/PASS/);
+  });
+});
+
+// =============================================================================
 // AC-12 / FF-FCI6: Subdirectory ci/checks/kc/*.sh not in glob → exit 0
 // =============================================================================
 

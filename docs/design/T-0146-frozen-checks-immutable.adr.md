@@ -274,3 +274,40 @@ Harness НЕ требует живой БД — это чистый git/shell т
 ## 10. Runtime / deploy target
 
 **Локально** + CI (GitHub Actions). Чек — pure bash, запускается в `npm run fitness` на рабочей станции и в CI-пайплайне. Нет внешнего ресурса, нет GT-4. Hostile-probe тест — vitest в `fitness:db` (Node, уже в зависимостях). Никаких новых runtime-зависимостей (NF-1).
+
+---
+
+## 11. Amendment after review (2026-06-11) — R-1 ownership-capture + R-2 branch-spoof
+
+**Trigger:** reviewer verdict `changes_requested` (T-0146.review.md, findings R-1/R-2 blocking).
+
+### R-1: ownership-capture fix
+
+**Problem (probe 2/3):** The original Step 4 read the owner T-ID from the on-disk file (`sed -n '2p' "${full_path}"`). An attacker could rewrite the second line of a foreign check to their own T-ID and have the gate accept the modification as "own". Similarly, DELETE+re-ADD the same filename with an own header was accepted.
+
+**Fix:** For ALL files processed by the gate (diff-filter C/M/R/T/D), the owner T-ID is now read exclusively from the BASE_REF version of the file via `git show BASE_REF:path | sed -n '2p'`. The on-disk `sed` read is removed entirely. The BASE_REF version was committed before the current branch touched the file, so the branch agent cannot retroactively forge it.
+
+This closes PROBE 2 (DELETE+re-ADD with own header) and PROBE 3 (modify + rewrite header).
+
+**Changed:** `ci/checks/frozen-checks-immutable.sh` Step 4 — removed `[[ -f "${full_path}" ]]` branch, unified to single `git show BASE_REF:path` read for all cases.
+
+### R-2: branch-name-spoof residual risk
+
+**Problem (probe 5):** `TASK_ID` derives from the branch name (`task/T-XXXX-*`), which is chosen by the agent itself. A branch named `task/T-0044-spoof` obtains `TASK_ID=T-0044` and can amend `dual-control-isolation.sh` if that file's BASE_REF header already reads `# T-0044 ·`.
+
+**Design decision (accepted residual risk):**
+- The R-1 fix already closes the dangerous path: rewriting a foreign header to your own T-ID is now caught by BASE_REF comparison.
+- The remaining residual is a branch genuinely named `task/T-0044-*` editing the real T-0044 check (whose BASE_REF header is `# T-0044 ·`). This passes the gate.
+- Fully closing this would require verifying `TASK_ID` against a control-plane claim (out of scope for a local pure-bash gate, NF-1).
+- **Mitigation:** the reviewer sees the PR branch name alongside the diff; a branch `task/T-0044-spoof` from an unexpected agent is visible in the PR title and audit trail. This is reviewer-visible, not silently green.
+- **Threshold:** the gate's stated threat model (spec §2, ADR §1) is "misdirected BUILD agent, not adversary". A spoofed branch name to impersonate another task's ownership is above the erring-agent threshold. The gate provides meaningful deterrence + reviewer visibility for this case.
+
+**Documented in:** script header (RESIDUAL RISK comment), this section, hostile-probe test `PROBE-5 residual` (exit 0, accepted).
+
+### New hostile-probe tests added (review iteration 2)
+
+| Test | Scenario | Expected | Closes |
+|---|---|---|---|
+| PROBE-2 | DELETE foreign check + re-ADD with own T-ID header | exit 1 | R-1 |
+| PROBE-3 | Modify foreign check + rewrite header to own T-ID | exit 1 | R-1 |
+| PROBE-5 residual | Branch `task/T-0044-spoof` edits T-0044 check (BASE_REF header matches) | exit 0 (accepted) | R-2 documented |

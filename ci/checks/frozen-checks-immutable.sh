@@ -8,8 +8,25 @@
 # If the T-ID in that header matches the TASK_ID of the current branch, the
 # file is considered "own" and changes are permitted. Otherwise — FAIL.
 #
-#  FF-FCI1  — На task-ветке с TASK_ID ≠ владелец-чека: правка/удаление
-#             ci/checks/*.sh → FAIL + exit 1.
+# OWNERSHIP ANCHOR (R-1 fix, review 2026-06-11):
+#   For ALL existing files (diff-filter C/M/R/T), the owner T-ID is read from
+#   the BASE_REF (git show BASE_REF:path | sed -n '2p'), NOT from the on-disk
+#   working copy.  This makes ownership tamper-proof: rewriting line 2 of a
+#   foreign check to your own T-ID is still detected because the BASE_REF
+#   version of that line is read.  DELETE is likewise already BASE_REF-anchored.
+#
+# RESIDUAL RISK — branch-name spoof (R-2, documented per ADR §10 amendment):
+#   TASK_ID derives from the branch name, which is chosen by the agent itself.
+#   A branch named task/T-0044-anything obtains TASK_ID=T-0044 and can amend
+#   ci/checks/dual-control-isolation.sh if that file's BASE_REF header already
+#   reads "# T-0044 ·".  There is no local anchor independent of the branch name
+#   to close this path completely (that would require a control-plane claim check
+#   which is out of scope here).  Mitigation: the reviewer sees the full header
+#   diff and the PR branch name together; forging TASK_ID via branch name does
+#   not change the file header, so it is visible in review.  Accepted by design.
+#
+#  FF-FCI1  — На task-ветке с TASK_ID ≠ владелец-чека (BASE_REF header):
+#             правка/удаление ci/checks/*.sh → FAIL + exit 1.
 #  FF-FCI2  — На task/T-0146-*: правка frozen-checks-immutable.sh → exit 0.
 #  FF-FCI3  — На dev/main/non-task ветке или нет merge-base → exit 0.
 #  FF-FCI4  — Новые файлы (diff-filter=A) не являются нарушением.
@@ -68,18 +85,30 @@ changed_sh() {
 }
 
 # ---- Step 4: Classify each changed *.sh file --------------------------------
+# R-1 fix: ownership anchor is the BASE_REF version of the file, NOT the
+# on-disk working copy.  This prevents an attacker from rewriting line 2 of a
+# foreign check to their own T-ID and having the gate accept it as "own".
+#
+# Anchor resolution order (first that returns a non-empty header wins):
+#   1. git show BASE_REF:path  — pre-branch, cannot be forged by current branch
+#   2. git show HEAD:path      — first committed version on this branch (fallback
+#      for files that were ADDED by this branch and then modified in the working
+#      tree; HEAD:path still exists, BASE_REF:path does not)
+#
+# If both BASE_REF and HEAD lack the file (pathological, should not occur for
+# CDMRT filter) header_tid will be empty → treated as foreign → FAIL (safe).
 ERRORS=0
 while IFS= read -r f; do
   [[ -z "${f}" ]] && continue
 
-  full_path="${PROJECT_ROOT}/${f}"
+  # Try BASE_REF first (the immutable pre-branch anchor).
+  header_line="$(git -C "${PROJECT_ROOT}" show "${BASE_REF}:${f}" 2>/dev/null \
+    | sed -n '2p' || true)"
 
-  # Read second line from disk (file exists) or from BASE_REF (file deleted)
-  if [[ -f "${full_path}" ]]; then
-    header_line="$(sed -n '2p' "${full_path}" 2>/dev/null || true)"
-  else
-    # File deleted — read its header from the BASE_REF version in git
-    header_line="$(git -C "${PROJECT_ROOT}" show "${BASE_REF}:${f}" 2>/dev/null \
+  # Fallback: if file was added by THIS branch (not in BASE_REF) and then
+  # modified in working tree, read from HEAD (the committed branch version).
+  if [[ -z "${header_line}" ]]; then
+    header_line="$(git -C "${PROJECT_ROOT}" show "HEAD:${f}" 2>/dev/null \
       | sed -n '2p' || true)"
   fi
 
@@ -89,9 +118,9 @@ while IFS= read -r f; do
     | grep -oE 'T-[0-9]+' || true)"
 
   if [[ "${header_tid}" == "${TASK_ID}" ]]; then
-    echo "PASS [FF-FCI1]: ${f} is own check for ${TASK_ID}, modification allowed"
+    echo "PASS [FF-FCI1]: ${f} is own check for ${TASK_ID} (BASE_REF/HEAD header), modification allowed"
   else
-    echo "FAIL [FF-FCI1]: ${f} belongs to task '${header_tid:-<no-T-ID>}', not ${TASK_ID}; modification/deletion forbidden on this branch"
+    echo "FAIL [FF-FCI1]: ${f} belongs to task '${header_tid:-<no-T-ID>}' (BASE_REF/HEAD header), not ${TASK_ID}; modification/deletion forbidden on this branch"
     ERRORS=$((ERRORS + 1))
   fi
 done < <(changed_sh)
