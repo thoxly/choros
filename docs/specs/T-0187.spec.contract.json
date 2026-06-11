@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0187",
+  "status": "ready",
+  "summary": "package.json contains two duplicate 'fitness' keys; JSON.parse silently uses the last one, meaning named-binding-isolation.sh and npm run build never run. Merge both keys into a single union value and add a CI guard to prevent future duplicate keys.",
+  "functional": [
+    "Merge both 'fitness' key values into a single key containing the union of all commands (95 entries), with named-binding-isolation.sh and npm run build re-inserted at their correct position",
+    "Add ci/checks/package-json-no-dup-keys.sh that detects duplicate top-level and scripts-level keys in package.json, with self-test",
+    "Register the new guard check at the end of the merged fitness value"
+  ],
+  "non_functional": [
+    "No changes to any existing ci/checks/*.sh files",
+    "package.json remains valid JSON",
+    "npx tsc --noEmit continues to pass",
+    "npm test continues to pass without ambient DATABASE_URL"
+  ],
+  "out_of_scope": [
+    "Fixing pre-existing failures in checks that were already running",
+    "Re-ordering checks beyond minimal restoration",
+    "Adding new functional invariant checks"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "package.json scripts object contains exactly one 'fitness' key (verified by node JSON.parse key enumeration)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Previously-lost checks named-binding-isolation.sh and npm run build are present in the merged fitness value and exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "Guard check ci/checks/package-json-no-dup-keys.sh exits 0 on current package.json; --self-test exits 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "npx tsc --noEmit exits 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "npm test (vitest, no DATABASE_URL) exits 0",
+      "verifiable_as": "test"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0187-fitness-key-dedup.spec.md"
+}
