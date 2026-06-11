@@ -70,7 +70,7 @@ INSERT INTO choros.substitution_rule
    valid_from, valid_until, source, created_by, created_at, updated_at)
 VALUES
   ('a0000000-0000-0000-0000-000000000001',
-   'g0000000-0000-0000-0000-000000000001',
+   '5b000000-0000-0000-0000-000000000001',
    'd0000000-0000-0000-0000-000000000004',  -- e-mironov (absent)
    'd0000000-0000-0000-0000-000000000002',  -- a-recon (substitute)
    'e0000000-0000-0000-0000-000000000002',  -- budget-approver

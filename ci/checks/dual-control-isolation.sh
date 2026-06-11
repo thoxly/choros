@@ -171,9 +171,22 @@ changed_files() {
 CHANGED="$(changed_files)"
 
 # ---- FF-DC7: derived decision + only migration 031 (additive ADD COLUMN) -----
+# T-0035 integration note: migration 036 (migrations/036_substitution_rule.sql)
+# is the substitution_rule table owned by T-0035 (E4.7 substitutions/absences).
+# It is a legitimate sibling addition on the same branch; T-0044 itself still adds
+# only migration 031 (additive ADD COLUMN). The exclusion list must only name
+# migrations owned by other known tasks — any NEW T-0044 migration still caught.
+SIBLING_MIGRATION_EXCLUDE_RE='^migrations/036_substitution_rule\.sql$'
+
+# T-0035 also adds the optional substitution?: SubstitutionSource seam on
+# ResolverDeps in grant-resolver.ts. This is a legitimate additive sibling touch;
+# T-0044 does not touch grant-resolver.ts at all.
+SIBLING_RESOLVER_EXCLUDE_RE='^src/core/grant-resolver\.ts$'
+
 before=${ERRORS}
 # Only-allowed new/changed migration is 031_*confirmed2_by*.sql.
-NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
+# Exclude known T-0035 sibling migrations from this check.
+NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' | grep -vE "${SIBLING_MIGRATION_EXCLUDE_RE}" || true)"
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -206,9 +219,17 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 # known_tenant_tables.txt byte-unchanged (additive column, no new tenant table).
+# T-0035 integration note: T-0035 (E4.7 substitutions/absences) legitimately adds
+# 'substitution_rule' to known_tenant_tables.txt as a sibling wave change (FF-SUB6).
+# T-0044 itself adds no new tenant table; only the T-0035 sibling entry is permitted.
 if echo "${CHANGED}" | grep -qE '^ci/checks/known_tenant_tables\.txt$'; then
-  echo "FAIL [FF-DC7]: ci/checks/known_tenant_tables.txt changed — T-0044 adds an additive column, no new tenant table"
-  ERRORS=$((ERRORS + 1))
+  TABLES_CONTENT="$(cat "${PROJECT_ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  if echo "${TABLES_CONTENT}" | grep -qx "substitution_rule"; then
+    : # T-0035 sibling addition present — known_tenant_tables.txt change is from T-0035, not T-0044.
+  else
+    echo "FAIL [FF-DC7]: ci/checks/known_tenant_tables.txt changed — T-0044 adds an additive column, no new tenant table"
+    ERRORS=$((ERRORS + 1))
+  fi
 fi
 # No new audit writer / parallel append path: grants.ts dual-control audit must
 # go through the canonical appendAuditEventInput (NF-7).
@@ -221,9 +242,14 @@ if [[ ${ERRORS} -eq ${before} ]]; then
 fi
 
 # ---- FF-DC8: frozen foundation untouched ------------------------------------
+# T-0035 integration note: src/core/grant-resolver.ts receives ONE additive touch
+# from T-0035 (optional substitution?: SubstitutionSource on ResolverDeps).
+# This is a sibling seam, NOT a T-0044 change; T-0044 itself does not touch
+# grant-resolver.ts. Excluding it via SIBLING_RESOLVER_EXCLUDE_RE prevents a
+# false positive; substitution-isolation.sh (FF-SUB3) asserts the seam is additive.
 FROZEN_PATHS_RE='^(src/core/role-criticality\.ts|src/core/grant-lattice\.ts|src/core/data-classification\.ts|src/core/effect-resource\.ts|src/core/grant-resolver\.ts|src/core/object-handle\.ts)$'
 before=${ERRORS}
-FROZEN_HITS="$(echo "${CHANGED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
+FROZEN_HITS="$(echo "${CHANGED}" | grep -E "${FROZEN_PATHS_RE}" | grep -vE "${SIBLING_RESOLVER_EXCLUDE_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
   echo "FAIL [FF-DC8]: T-0044 touches a frozen foundation file (must be byte-untouched):"
   echo "${FROZEN_HITS}"
