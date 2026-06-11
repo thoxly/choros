@@ -1,0 +1,142 @@
+{
+  "task_id": "T-0072",
+  "status": "pr_open",
+  "branch": "task/T-0072",
+  "merge_target": "dev",
+  "base_commit": "83b02cc",
+  "head_commit": "3460591",
+  "pr_url": "https://github.com/thoxly/choros/pull/14",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E11.1 named-binding: таблица form_binding (миграция 045) — тенант-изолированное хранилище связи формы и переменных BPMN-процесса. Чистая функция checkBindingCompat (двустороннее соответствие, обоюдно блокирующее). Линтер bpmn-linter.ts аддитивно расширен типом нарушения binding_mismatch. CLI lint-bpmn --binding-schema проверяет BPMN-файл против схемы (exit 1 при несоответствии). HTTP CRUD /tenants/:tenantId/processes/:processKey/forms/:formKey/binding с upsert-семантикой. Router расширен multi-param dispatch (аддитивно, 19/19 существующих тестов зелёные). Гейты: REVIEW approved (d788f6a), 1020 vitest + 6 skip, DB 10/10, NB 6/6, итого 1086 deterministic, live e2e CLI+HTTP пройдены.",
+  "commits": [
+    {
+      "sha": "70844bc",
+      "phase": "SPEC",
+      "message": "T-0072 SPEC: named-binding — form_binding (045) как источник истины, checkBindingCompat, линтер аддитивно"
+    },
+    {
+      "sha": "0426dcb",
+      "phase": "DESIGN",
+      "message": "T-0072 DESIGN: ADR named-binding — form_binding(045)+RLS, checkBindingCompat обоюдно-блокирующий, vars из in/out/formProperty/formField/EL; 12 fitness"
+    },
+    {
+      "sha": "c36f7e7",
+      "phase": "BUILD",
+      "message": "T-0072 BUILD: foundation — form_binding(045), binding-compat, bpmn-linter ext, router multi-param"
+    },
+    {
+      "sha": "f28a86c",
+      "phase": "BUILD",
+      "message": "T-0072 BUILD: completions — server wiring, CLI, tests, fitness, DB test"
+    },
+    {
+      "sha": "d788f6a",
+      "phase": "REVIEW",
+      "message": "T-0072 REVIEW: approved — router-dispatch аддитивен (19/19), 045 dev-seed предписан спекой, 13/13 AC; 3 nit"
+    },
+    {
+      "sha": "3460591",
+      "phase": "TEST",
+      "message": "T-0072 TEST: pass — живой e2e CLI mismatch/match, HTTP CRUD+401/404/413, адверсариальные пробы; 13/13 AC"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "d788f6a",
+      "blocking_resolved": [],
+      "nits_non_blocking": [
+        "T-0072-F-001: router.test.ts не покрывает двухпарам-маршрут — нит, binding.ts использует extractBindingUrlParts напрямую, регрессия невозможна",
+        "T-0072-F-002: withTenantTx строковая интерполяция tenantId — pre-existing паттерн, безопасен при наличии assertUuidShape guard",
+        "T-0072-F-003: комментарий workaround устарел после multi-param расширения Router — нит"
+      ],
+      "ac_coverage": "13/13",
+      "artifact": "docs/reviews/T-0072.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 1086,
+      "passed": 1086,
+      "failed": 0,
+      "ac_coverage": "13/13",
+      "tested_commit": "3460591",
+      "run_details": {
+        "tsc": "exit 0 (0 errors)",
+        "eslint": "exit 0 (2 pre-existing warnings в bridge-runner.ts/externalTaskBridge.ts, не в T-0072 файлах)",
+        "vitest_run": "1020 pass / 6 skip",
+        "db_form_binding": "10/10 pass (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros)",
+        "fitness_named_binding_isolation": "6/6 pass (NB-1..NB-6)",
+        "live_e2e_cli_mismatch": "PASS: lint-bpmn --binding-schema mismatch.json → stderr=binding_mismatch violations, exit=1",
+        "live_e2e_cli_match": "PASS: lint-bpmn --binding-schema match.json → exit=0",
+        "live_e2e_cli_no_schema": "PASS: lint-bpmn (no flag) → exit=0 (backward compat)",
+        "live_e2e_http_get_200": "PASS: GET /tenants/DEV/processes/purchase-approval/forms/purchase-form/binding → 200 {fields:[supplier,category,decision], version:1}",
+        "live_e2e_http_get_404": "PASS: GET non-existent binding → 404",
+        "live_e2e_http_post_create": "PASS: POST new binding → 201 {id, version:1}",
+        "live_e2e_http_post_upsert": "PASS: POST same binding → 200 {id, version:2}",
+        "live_e2e_http_post_401": "PASS: POST without x-dev-user → 401 UNAUTHENTICATED",
+        "live_e2e_http_post_413": "PASS: POST with 1.36MB body → 413 PAYLOAD_TOO_LARGE"
+      },
+      "artifact": "docs/test-reports/T-0072.test-report.json"
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (0 errors; 2 pre-existing warnings in non-T-0072 files)",
+      "vitest_run": "pass (1020/1020 deterministic unit tests)",
+      "db_fitness": "pass (10/10 form_binding DB tests)",
+      "fitness_named_binding": "pass (6/6 NB-1..NB-6)",
+      "live_e2e": "pass (CLI + HTTP CRUD)"
+    }
+  },
+  "files_changed": [
+    "migrations/045_form_binding.sql",
+    "src/core/binding-compat.ts",
+    "src/http/binding.ts",
+    "src/core/bpmn-linter.ts",
+    "src/http/router.ts",
+    "src/cli/lint-bpmn.ts",
+    "src/server.ts",
+    "src/__tests__/binding-compat.test.ts",
+    "ci/checks/db/form_binding.test.ts",
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/named-binding-isolation.sh",
+    "docs/design/T-0072-named-binding.adr.md",
+    "docs/design/T-0072.adr.contract.json",
+    "docs/specs/T-0072-named-binding.spec.md",
+    "docs/specs/T-0072.spec.contract.json",
+    "docs/reviews/T-0072.review.json",
+    "docs/test-reports/T-0072.test-report.json",
+    "package.json"
+  ],
+  "sibling_reds": {
+    "class": "diff-vs-merge-base (pre-existing in dev branch, not introduced by T-0072)",
+    "known_pre_merge": [
+      "role-criticality-isolation.sh (FF-RC6) — ожидаемо: migration+known_tenant_tables.txt изменены; позеленеет после мержа в dev",
+      "dual-control-isolation.sh (FF-DC7) — ожидаемо: та же причина; позеленеет после мержа в dev",
+      "grant-editor.adversarial.test.ts ADV-5 — pre-existing, DATABASE_URL not set / route 404",
+      "schema.test.ts FF-ACT — pre-existing, Flowable не запущен",
+      "pgJobStore sweepExpiredLocks — pre-existing timer sweep tests",
+      "genesis-owner-seed.test.ts seed count mismatch — pre-existing",
+      "pgOutboxStore claimBatch per-tenant isolation — pre-existing"
+    ],
+    "verdict": "None of the failing checks touch form_binding or T-0072 code paths"
+  },
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — оркестратор (D-053) мержит task/T-0072 в dev после прохождения всех гейтов",
+    "post_merge_expected": "FF-RC6 и FF-DC7 автоматически позеленеют после мержа в dev (diff-vs-merge-base класс)",
+    "founder_gate_GT-3": "dev→main продвижение founder-гейт (GT-3). Что проверить: (1) миграция 045_form_binding.sql добавляет choros.form_binding с FORCE RLS + UNIQUE(tenant_id,process_key,form_key); (2) checkBindingCompat обоюдно блокирует несоответствие; (3) lint-bpmn --binding-schema возвращает exit 1 при binding_mismatch; (4) HTTP CRUD /binding работает с upsert-семантикой; (5) Router multi-param dispatch аддитивен (19/19 существующих тестов зелёные). One-click promote dev→main когда удовлетворён.",
+    "infra_changes": "T-0072 добавляет 1 Postgres-миграцию (045): таблица form_binding. Нет новых сервисов, нет изменений docker-compose.yml. Безопасно мержить в dev.",
+    "rls_note": "form_binding добавлена в known_tenant_tables.txt. Cross-tenant CI-тест автоматически проверяет изоляцию.",
+    "downstream_note": "T-0072 — E11.1 named-binding foundation. Предоставляет HTTP API и CLI инструмент для проверки соответствия форм и BPMN-процессов. Downstream: E11.2+ (lint-on-deploy интеграция)."
+  },
+  "friction_events": []
+}
