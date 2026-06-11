@@ -16,6 +16,8 @@ import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.j
 import { registerInvokeRoutes } from "./http/invoke.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
+import { registerAgentRoutes } from "./http/agents.js";
+import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 
 const { Pool } = pg;
@@ -181,6 +183,12 @@ function buildRouter(
 
   // Register grant trail endpoints (T-0031)
   registerGrantTrailRoutes(router);
+
+  // Register agent hire endpoint (T-0042 — additive, no existing routes modified)
+  if (grantsPool) {
+    const kcPort = makeHttpKeycloakAdminPort();
+    registerAgentRoutes(router, grantsPool, kcPort);
+  }
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
