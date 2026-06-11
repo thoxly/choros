@@ -1,15 +1,15 @@
 /**
- * src/http/registry-defs.ts — T-0177 · T-0121c: registry_def schema-change API.
+ * src/http/registry-defs.ts — T-0177 · T-0121c · T-0191: registry_def schema-change API.
  *
  * Registers:
  *   PUT   /api/registry-defs/:id   → updateRegistryDefSchema (schema-change guard)
  *   PATCH /api/registry-defs/:id   → updateRegistryDefSchema (same handler)
  *
- * Contract (ADR T-0121 §5 / spec T-0177):
+ * Contract (ADR T-0121 §5 / spec T-0177 / spec T-0191):
  *   Body: { record_schema?: unknown, force?: boolean }
  *
  *   - If record_schema is absent or unchanged → 200 { updated: false } (no-op).
- *   - Mягкое изменение (add field, relabel, enum widening, toggle required) →
+ *   - Мягкое изменение (add field, relabel, enum widening, toggle required) →
  *       200 { updated: true, ..., warnings: AffectedDep[] } + schema applied.
  *   - Деструктивное без force → 409 destructive_schema_change; schema NOT applied.
  *   - Деструктивное с force=true + grant mgmt_object:schema_destructive/apply →
@@ -19,9 +19,11 @@
  * TENANT: dev-mode uses DEV_TENANT_ID (process.env.DEV_TENANT_ID ??
  * 'a0000000-0000-0000-0000-000000000001'). Same pattern as artifacts.ts.
  *
- * AUTHORITY CHECK (force path): production gates on
+ * AUTHORITY CHECK (force path — T-0191): PDP gate via loadAdminContext:
  *   grant(resource_type='mgmt_object:schema_destructive', operation='apply').
- *   Day-1: dev-mode stub (honest degrade, same pattern as artifacts.ts T-0021 seam).
+ *   genesis-owner short-circuit (always allowed). Injectable via RegistryDefAuthzDeps.
+ *   Note: 'apply' is not in the frozen Operation union (grant-lattice.ts) — comparison
+ *   is a string match at runtime; widening-cast only in tests (ADR T-0121 §6 / T-0077).
  *
  * DEPS NOT DELETED: stale=true only. deps are never silently removed (ADR §5.3 §10).
  *
@@ -41,6 +43,7 @@ import {
   type JsonSchemaForClassify,
 } from "../core/schema-change-classifier.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import { loadAdminContext } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -85,6 +88,69 @@ function getPool(): pg.Pool {
 export function resetPoolForTesting(): void {
   _pool = null;
 }
+
+// ---------------------------------------------------------------------------
+// RegistryDefAuthzDeps — injectable PDP gate for force-path (T-0191)
+//
+// The gate checks that the actor holds a grant on
+//   mgmt_object:schema_destructive / apply
+// for the current tenant. Default implementation uses loadAdminContext +
+// adminGrants.some() — the same pattern as PrefAuthzDeps in notification-prefs.ts
+// (T-0171). Injected as deps to allow unit tests to supply a fake without a live DB.
+//
+// NOTE on 'apply' vs Operation union: 'apply' is not in the frozen Operation union
+// (grant-lattice.ts). The comparison g.operation === 'apply' is a plain string
+// match at runtime. The interface parameter uses 'string' (not Operation) to avoid
+// touching the frozen union. widening-cast only in tests (ADR T-0121 §6, T-0077 §2.2).
+// ---------------------------------------------------------------------------
+
+export interface RegistryDefAuthzDeps {
+  /**
+   * Check whether `actorId` holds a grant on `mgmt_object:schema_destructive` / `apply`
+   * in `tenantId`. Returns `{ ok: true }` if allowed or `{ ok: false; reason: string }`.
+   */
+  checkDestructiveGrant: (
+    pool: pg.Pool,
+    tenantId: string,
+    actorId: string,
+    nowMs: number,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+async function defaultCheckDestructiveGrant(
+  pool: pg.Pool,
+  tenantId: string,
+  actorId: string,
+  nowMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  // Genesis owner is the un-parented delegation root — always allowed (T-0029 §2 step 3).
+  if (admin.isGenesisOwner) {
+    return { ok: true };
+  }
+
+  // For non-owners: check that adminGrants contains a delegable grant on
+  // mgmt_object:schema_destructive with operation='apply'.
+  // loadAdminContext fetches all LIKE 'mgmt_object:%' delegable grants — this
+  // covers mgmt_object:schema_destructive without expanding any frozen sets.
+  // Note: 'apply' is not in the frozen Operation union; comparison is string-based.
+  const hasCovering = admin.adminGrants.some(
+    (g) =>
+      g.delegable &&
+      g.resourceType === "mgmt_object:schema_destructive" &&
+      (g.operation as string) === "apply",
+  );
+
+  if (!hasCovering) {
+    return { ok: false, reason: "no_admin_authority" };
+  }
+  return { ok: true };
+}
+
+const defaultRegistryDefAuthzDeps: RegistryDefAuthzDeps = {
+  checkDestructiveGrant: defaultCheckDestructiveGrant,
+};
 
 // ---------------------------------------------------------------------------
 // UUID helper
@@ -210,8 +276,9 @@ async function updateSchemaInTx(args: {
   force: boolean;
   actor: string;
   nowMs: number;
+  authzDeps: RegistryDefAuthzDeps;
 }): Promise<UpdateSchemaResult> {
-  const { pool, tenantId, registryDefId, newSchema, force, actor, nowMs } = args;
+  const { pool, tenantId, registryDefId, newSchema, force, actor, nowMs, authzDeps } = args;
 
   return withTenantTx(pool, tenantId, async (client: pg.PoolClient) => {
     // 1. Lock and read current registry_def row
@@ -268,21 +335,24 @@ async function updateSchemaInTx(args: {
     // SET LOCAL only here — not on the soft path where tier='draft' UPDATE never runs. (R-4)
     await client.query("SET LOCAL choros.promoting = '1'");
 
-    // AUTHORITY CHECK (T-0021 integration seam — dev-mode honest stub):
-    // TODO(T-0021): wire real grant PDP check: assertGranted(actor,
-    //   'mgmt_object:schema_destructive', 'apply', { registry_def_id: registryDefId })
-    // Dev-mode: force is accepted from any authenticated actor (honest degrade).
-    void actor; // used in audit event below
+    // AUTHORITY CHECK (T-0191 — real PDP gate, T-0021 seam):
+    // Actor must hold grant mgmt_object:schema_destructive / apply (ADR T-0121 §6).
+    // genesis-owner short-circuit in defaultCheckDestructiveGrant.
+    // Gate runs inside the transaction so a 403 triggers ROLLBACK via withTenantTx catch.
+    const gateResult = await authzDeps.checkDestructiveGrant(pool, tenantId, actor, nowMs);
+    if (!gateResult.ok) {
+      throw new HttpError(
+        403,
+        "NO_SCHEMA_DESTRUCTIVE_GRANT",
+        `mgmt_object:schema_destructive/apply denied: ${gateResult.reason}`,
+      );
+    }
 
     const affectedPageIds = [...new Set(destructiveDeps.map((d) => d.page_id))];
-    const affectedDepIds = destructiveDeps.map((d) => {
-      // We need the dep row id — fetch from activeDeps cross-referenced
-      return d;
-    });
 
     // (a) Mark affected report_page_dep rows stale=true
     //     Use page_id + field_key to identify exact deps (avoiding cross-registry deps)
-    if (affectedDepIds.length > 0) {
+    if (destructiveDeps.length > 0) {
       // Build per-dep WHERE clause using (page_id, field_key) pairs
       // Postgres ANY with array of composites is non-trivial; use unnest approach
       for (const dep of destructiveDeps) {
@@ -361,8 +431,17 @@ async function updateSchemaInTx(args: {
  *
  * Uses lazy pool (same pattern as artifacts.ts) — no grantsPool required at wiring time.
  * When DATABASE_URL is absent, requests receive 503 DB_UNAVAILABLE (honest degrade).
+ *
+ * @param deps - Injectable authz deps for the force-path PDP gate (T-0191).
+ *               Default: production loadAdminContext gate (genesis-owner short-circuit +
+ *               adminGrants check for mgmt_object:schema_destructive/apply).
+ *               Override in tests to supply a fake without a live DB.
  */
-export function registerRegistryDefRoutes(router: Router, _poolHint?: pg.Pool): void {
+export function registerRegistryDefRoutes(
+  router: Router,
+  _poolHint?: pg.Pool,
+  deps: RegistryDefAuthzDeps = defaultRegistryDefAuthzDeps,
+): void {
   const handler = async (
     req: IncomingMessage,
     res: import("node:http").ServerResponse,
@@ -396,15 +475,17 @@ export function registerRegistryDefRoutes(router: Router, _poolHint?: pg.Pool): 
 
     const force = body["force"] === true;
 
-    // 3. Run transactional schema-change guard (lazy pool — throws 503 if no DB)
+    // 3. Run transactional schema-change guard.
+    // poolHint is provided by tests to inject a fake pool; production uses lazy singleton.
     const result = await updateSchemaInTx({
-      pool: getPool(),
+      pool: _poolHint ?? getPool(),
       tenantId: DEV_TENANT_ID,
       registryDefId,
       newSchema,
       force,
       actor,
       nowMs: Date.now(),
+      authzDeps: deps,
     });
 
     // 4. Return response based on result kind

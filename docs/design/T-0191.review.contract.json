@@ -1,0 +1,28 @@
+{
+  "task_id": "T-0191",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/specs/T-0191.spec.contract.json:59",
+      "issue": "Spec contract AC-7 ('live: force=true + сидированный grant → 200 force_applied') не покрыт тестом на non-owner пути с реальным делегированным apply-грантом. Реализованный AC-10 fitness:db использует genesis-owner short-circuit (isGenesisOwner=true → ok:true), а не сидированный mgmt_object:schema_destructive/apply грант на обычного актора. Apply-грант конструируем через grant API (genesis-owner short-circuit в validateAdminDelegation шаг 3), но живой happy-path через delegated grant не протестирован.",
+      "suggestion": "Либо добавить seed grant в setup-блоке AC-10 для non-owner актора и проверить force=true → 200 (полное покрытие), либо обновить spec contract AC-7 явно: изменить на 'genesis-owner short-circuit достаточен для day-1; seeded-grant путь — T-0121f'. Не blocking — ADR §6 явно задаёт паттерн T-0077 widening-cast, genesis short-circuit корректен, day-1 behaviour owner-only осознан."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": false},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

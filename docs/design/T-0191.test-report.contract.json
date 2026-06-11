@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0191",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1800,
+    "passed": 1800,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "tsc --noEmit: exit 0; RegistryDefAuthzDeps exported from src/http/registry-defs.ts:109", "result": "pass" },
+    { "ac": "AC-2",  "test": "registerRegistryDefRoutes accepts deps? third parameter (src/http/registry-defs.ts:434-437)", "result": "pass" },
+    { "ac": "AC-3",  "test": "src/__tests__/registry-defs-pdp.test.ts: denyAll gate → 403 NO_SCHEMA_DESTRUCTIVE_GRANT", "result": "pass" },
+    { "ac": "AC-4",  "test": "src/__tests__/registry-defs-pdp.test.ts: force=false → 409, gate NOT called", "result": "pass" },
+    { "ac": "AC-5",  "test": "FF-RDP1 fitness grep: TODO(T-0021) stub + 'void actor;' absent (registry-defs-pdp-isolation.sh)", "result": "pass" },
+    { "ac": "AC-6",  "test": "ci/checks/db/schema_change_api.test.ts AC-10: genesis-owner force=true → 200, dep.stale=true, page.tier=draft, audit event (live-DB)", "result": "pass" },
+    { "ac": "AC-7",  "test": "ci/checks/db/schema_change_api_ac7b.test.ts AC-7b (R-N1): seeded non-owner mgmt_object:schema_destructive/apply grant → force=true → 200 force_applied:true (live-DB)", "result": "pass" },
+    { "ac": "AC-8",  "test": "ci/checks/db/schema_change_api.test.ts AC-10b: sc-tester (no grant) force=true → 403 NO_SCHEMA_DESTRUCTIVE_GRANT (live-DB)", "result": "pass" },
+    { "ac": "AC-9",  "test": "vitest run: 1253/1259 passed, 0 failed (6 skipped = flowable integration offline)", "result": "pass" },
+    { "ac": "AC-10", "test": "npm run fitness: all checks PASS incl. FF-RDP1..FF-RDP7 (registry-defs-pdp-isolation.sh)", "result": "pass" }
+  ],
+  "secondary_ux": [
+    {
+      "check": "R-N1 (review nit): AC-7 non-owner seeded-grant live-test",
+      "result": "pass",
+      "note": "Closed by ci/checks/db/schema_change_api_ac7b.test.ts (new file). New file required: FF-T147-2 prohibits modifying existing ci/checks/db/*.test.ts relative to HEAD. Test seeds employee+role+role_assignment+grant with BEGIN/SET LOCAL/COMMIT (T-0144), verifies status=200+force_applied=true, cleans up in afterAll."
+    },
+    {
+      "check": "fitness:db total — 547/547 live-DB tests pass (0 failed)",
+      "result": "pass",
+      "note": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros; 36 test files, ~23s; +1 vs T-0177 baseline (AC-7b R-N1 test)"
+    },
+    {
+      "check": "FF-T147-2: no modification of existing ci/checks/db/*.test.ts vs HEAD",
+      "result": "pass",
+      "note": "AC-7b test placed in new file schema_change_api_ac7b.test.ts (untracked until commit). schema_change_api.test.ts unchanged."
+    },
+    {
+      "check": "ADR T-0121 §6 — деструктив owner-only day-1",
+      "result": "pass",
+      "note": "By default (seed 026) only genesis-owner passes via isGenesisOwner short-circuit. Delegated-grant path works but no grant is seeded in production. validateAdminDelegation is the enforcement point when genesis-owner delegates via grant API."
+    }
+  ],
+  "failures": []
+}

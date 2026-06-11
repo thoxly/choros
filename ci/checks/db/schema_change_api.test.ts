@@ -1,14 +1,16 @@
-// T-0177 · T-0121c — schema-change API live Postgres probes.
+// T-0177 · T-0121c · T-0191 — schema-change API live Postgres probes.
 //
 // Run in the `db` CI job / locally:
 //   DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros npm run fitness:db
 //
-// Covers (ADR §5 / spec T-0177):
+// Covers (ADR §5 / spec T-0177 / spec T-0191):
 //   AC-7:  PUT without report_page_dep → 200, no warnings.
 //   AC-8:  Soft change (add field) with active dep → 200 + warnings[].
 //   AC-9:  Destructive (drop field) without force → 409 + schema unchanged.
-//   AC-10: Destructive with force=true → 200, dep.stale=true, page.tier='draft',
-//          audit_event 'report_page.schema_destructive_force' written.
+//   AC-10: Destructive with force=true + genesis-owner actor → 200, dep.stale=true,
+//          page.tier='draft', audit_event 'report_page.schema_destructive_force' written.
+//          (T-0191: actor 'e-owner' = genesis-owner; short-circuit in defaultCheckDestructiveGrant)
+//   AC-10b (T-0191): force=true + actor without grant → 403 NO_SCHEMA_DESTRUCTIVE_GRANT.
 //   AC-13: Partial failure (simulated via second destructive check) → schema unchanged.
 //   AC-16: record_schema in DB unchanged after 409.
 //   FF-SOFT-WARN, FF-DESTRUCTIVE-DENY, FF-FORCE-DEMOTE live probes.
@@ -339,11 +341,15 @@ describe('AC-9/AC-16 — destructive without force → 409, schema unchanged', (
 });
 
 // ---------------------------------------------------------------------------
-// AC-10 — force=true → 200, dep.stale=true, page.tier='draft', audit event
+// AC-10 (T-0191) — force=true + genesis-owner → 200, dep.stale=true,
+//                  page.tier='draft', audit event
+//
+// T-0191: uses 'e-owner' (genesis-owner employee slug from migration 026).
+// defaultCheckDestructiveGrant: isGenesisOwner=true → short-circuit → ok:true.
 // ---------------------------------------------------------------------------
 
-describe('AC-10 — force=true → stale dep, depromoted page, audit event', () => {
-  it('drop field with force=true → dep.stale=true, page tier=draft, audit written', requireDb(async () => {
+describe('AC-10 (T-0191) — force=true + genesis-owner → stale dep, depromoted page, audit event', () => {
+  it('genesis-owner drops field with force=true → dep.stale=true, page tier=draft, audit written', requireDb(async () => {
     const tenantId = DEV_TENANT_ID;
     let regId: string | undefined;
     let appId: string | undefined;
@@ -370,11 +376,15 @@ describe('AC-10 — force=true → stale dep, depromoted page, audit event', () 
       });
     });
 
-    // force=true → destructive operation allowed
-    const result = await makeRequest(baseUrl, 'PUT', `/api/registry-defs/${regId}`, {
-      record_schema: { properties: {} }, // drop 'amount'
-      force: true,
-    });
+    // force=true + genesis-owner (e-owner) → PDP gate short-circuits → allowed
+    // 'e-owner' is the genesis employee slug from migration 026_genesis_owner_seed.sql.
+    const result = await makeRequest(
+      baseUrl,
+      'PUT',
+      `/api/registry-defs/${regId}`,
+      { record_schema: { properties: {} }, force: true }, // drop 'amount'
+      { 'x-dev-user': 'e-owner' }, // genesis-owner (T-0191 AC-10)
+    );
 
     expect(result.statusCode).toBe(200);
     const body = JSON.parse(result.body) as Record<string, unknown>;
@@ -415,6 +425,54 @@ describe('AC-10 — force=true → stale dep, depromoted page, audit event', () 
       expect(payload.fields.includes('amount')).toBe(true);
       expect(payload.affected_pages.length).toBeGreaterThanOrEqual(1);
     });
+  }));
+});
+
+// ---------------------------------------------------------------------------
+// AC-10b (T-0191) — force=true + actor WITHOUT grant → 403 NO_SCHEMA_DESTRUCTIVE_GRANT
+//
+// Uses a non-genesis actor ('sc-tester') who has no role_assignment to tenant-owner
+// and no mgmt_object:schema_destructive/apply grant in the dev DB.
+// Verifies the PDP gate returns 403 for unauthorized force requests.
+// ---------------------------------------------------------------------------
+
+describe('AC-10b (T-0191) — force=true + actor without grant → 403 NO_SCHEMA_DESTRUCTIVE_GRANT', () => {
+  it('non-genesis actor with force=true and destructive dep → 403', requireDb(async () => {
+    const tenantId = DEV_TENANT_ID;
+    let regId: string | undefined;
+    let appId: string | undefined;
+
+    await withClient(migratorUrl(), async (c) => {
+      appId = await seedApplication(c, tenantId);
+      regId = await seedRegistryDef(c, tenantId, appId, { properties: { amount: { type: 'number' } } });
+      const page = await seedReportPage(c, tenantId, appId, 'draft');
+      await seedReportPageDep(c, tenantId, page.id, regId, 'amount', 'aggregate');
+
+      cleanupFns.push(async () => {
+        await withClient(migratorUrl(), async (cc) => {
+          await cc.query('BEGIN');
+          await cc.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await cc.query(`DELETE FROM choros.report_page WHERE tenant_id=$1 AND id=$2`, [tenantId, page.id]);
+          await cc.query(`DELETE FROM choros.registry_def WHERE tenant_id=$1 AND id=$2`, [tenantId, regId!]);
+          await cc.query(`DELETE FROM choros.application WHERE tenant_id=$1 AND id=$2`, [tenantId, appId!]);
+          await cc.query('COMMIT');
+        });
+      });
+    });
+
+    // 'sc-tester' is not a genesis-owner and has no mgmt_object:schema_destructive/apply grant
+    const result = await makeRequest(
+      baseUrl,
+      'PUT',
+      `/api/registry-defs/${regId}`,
+      { record_schema: { properties: {} }, force: true }, // drop 'amount' → destructive
+      { 'x-dev-user': 'sc-tester' }, // non-genesis actor without grant
+    );
+
+    expect(result.statusCode).toBe(403);
+    const body = JSON.parse(result.body) as { error?: Record<string, unknown>; code?: string };
+    const errCode = body.error?.['code'] ?? body.code;
+    expect(errCode).toBe('NO_SCHEMA_DESTRUCTIVE_GRANT');
   }));
 });
 
