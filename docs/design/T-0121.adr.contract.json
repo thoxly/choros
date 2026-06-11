@@ -1,0 +1,215 @@
+{
+  "task_id": "T-0121",
+  "status": "ready",
+  "adr_artifact_path": "docs/design/T-0121-reports-pages.adr.md",
+  "escalation": "",
+  "decision": "Report in Choros = кастомная UI-страница третьего уровня навигации Section→App→Page, материализованная двумя tenant-таблицами: (1) `report_page` — метаданные страницы с floor∈{'1','2'}, tier∈{'draft','published'}, page_def jsonb (Floor-1 агрегат) или page_code text (Floor-2 React); (2) `report_page_dep` — реестр зависимостей страницы от полей registry_def.record_schema с dep_kind∈{'read','aggregate'} и stale boolean. Граница Floor-1↔Floor-2 машинная (classifyReportPageFloor — синтаксическое свойство page_def). Согласованность — расширение T-0072 через checkReportPageDepFields (pure function, DepViolation-зеркало BindingViolation). Изменение схемы: мягкое → warnings[], деструктивное → default-DENY 409; escape-hatch force+grant schema_destructive/apply → stale+депромоут+audit. Права — единый PDP T-0021, ноль второго механизма. Аудит — единый appendAuditEvent T-0016. Migration slots 046/047.",
+  "rejected_alternatives": [
+    {
+      "option": "Отдельная подсистема «отчёт» со своими правами/версиями/coherence",
+      "why_not": "Дублирует named-binding (T-0072) и bundle-coherence (T-0082) — третий механизм согласованности, gap-map §4б прямо запрещает. Отчёт = страница в Section→App→Page под существующими механизмами."
+    },
+    {
+      "option": "report_page_acl / page_visibility-поле",
+      "why_not": "Второй источник истины «кто видит страницу» дрейфует от «кто видит app» → тихий leak/отказ. Запрещено T-0018 §2 / T-0021 FF-R6 / NF-1. Видимость = grant read на application через тот же PDP."
+    },
+    {
+      "option": "Чистый статический анализ для всех field-deps (Floor-1+Floor-2)",
+      "why_not": "Floor-2 React-парсинг недетерминирован, даёт ложные срабатывания (ломает мягкие изменения зря). Гибрид: Floor-1 авто из page_def (точно), Floor-2 ручная декларация day-1, статанализ Floor-2 = Stage-2."
+    },
+    {
+      "option": "Чистая ручная декларация для Floor-1",
+      "why_not": "page_def агрегата и есть декларация зависимостей — ручное дублирование рассинхронизируется. Floor-1 deps выводятся автоматически из page_def — единый источник."
+    },
+    {
+      "option": "Тихое удаление зависимостей при деструктив-force",
+      "why_not": "Прячет сломанный край: страница published поверх несуществующего поля. Вместо этого — stale=true + депромоут в draft + audit-event."
+    },
+    {
+      "option": "Бинарь/компилированный бандл Floor-2 в Postgres",
+      "why_not": "Раздувает БД/бэкапы/WAL. Хранится сырой TSX/JS (page_code text), компиляция в deploy-шаге (паттерн T-0119)."
+    },
+    {
+      "option": "Деструктив = всегда hard-block без escape-hatch",
+      "why_not": "Невозможно полностью заблокировать эволюцию схемы живого клиента. Нужен аудируемый human-confirm-выход (force+grant+депромоут), иначе клиент застревает."
+    },
+    {
+      "option": "Промоутить может config-агент (self-promote)",
+      "why_not": "Self-apply в prod запрещён для обоих этажей (extensibility §4/§8 governance, ось B). Promote — human-only grant; агент имеет только authoring_draft (T-0077)."
+    },
+    {
+      "option": "Floor-2 React читает DB напрямую",
+      "why_not": "Cross-tenant leak-вектор + обход RLS. Floor-2 читает данные только через RLS-gated серверный канал (extensibility §6); DB-credentials в клиентском бандле отсутствуют структурно."
+    },
+    {
+      "option": "Править TS-union ResourceType под mgmt_object:report_page/schema_destructive",
+      "why_not": "grant-lattice.ts — frozen seam. Out-of-union resource_type живёт как TEXT в DB + widening-cast на границе (доказано T-0024/T-0077 §2.2). Правка union сломала бы frozen-guard."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "choros.report_page (migration 046)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL — leading PK, RLS-key"},
+        {"name": "id", "type": "uuid NOT NULL"},
+        {"name": "app_id", "type": "uuid NOT NULL — FK (tenant_id, app_id) → application(tenant_id, id)"},
+        {"name": "slug", "type": "text NOT NULL — URL-safe; UNIQUE (tenant_id, app_id, slug)"},
+        {"name": "title", "type": "text NOT NULL — human-visible sidebar name"},
+        {"name": "floor", "type": "text NOT NULL — CHECK (floor IN ('1','2'))"},
+        {"name": "tier", "type": "text NOT NULL DEFAULT 'draft' — CHECK (tier IN ('draft','published'))"},
+        {"name": "page_def", "type": "jsonb NULL — Floor-1: JSON-Schema агрегата; Floor-2: NULL"},
+        {"name": "page_code", "type": "text NULL — Floor-2: raw TSX/JS; Floor-1: NULL"},
+        {"name": "bundle_ref", "type": "text NULL DEFAULT NULL — git-ref bundle (deferred)"},
+        {"name": "created_at", "type": "bigint NOT NULL — epoch ms"},
+        {"name": "updated_at", "type": "bigint NOT NULL"}
+      ]
+    },
+    {
+      "entity": "choros.report_page_dep (migration 047)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL — leading PK, RLS-key"},
+        {"name": "id", "type": "uuid NOT NULL"},
+        {"name": "page_id", "type": "uuid NOT NULL — FK (tenant_id, page_id) → report_page(tenant_id, id) ON DELETE CASCADE"},
+        {"name": "registry_def_id", "type": "uuid NOT NULL — FK (tenant_id, registry_def_id) → registry_def(tenant_id, id)"},
+        {"name": "field_key", "type": "text NOT NULL — key in registry_def.record_schema.properties"},
+        {"name": "dep_kind", "type": "text NOT NULL — CHECK (dep_kind IN ('read','aggregate'))"},
+        {"name": "stale", "type": "boolean NOT NULL DEFAULT false — set true on destructive-force"},
+        {"name": "created_at", "type": "bigint NOT NULL"}
+      ]
+    },
+    {
+      "entity": "src/core/report-page-compat.ts",
+      "fields": [
+        {"name": "checkReportPageDepFields", "type": "pure function (deps: PageDep[], recordSchema: JsonSchema) → DepCompatResult — mirrors checkBindingCompat (T-0072)"},
+        {"name": "classifyReportPageFloor", "type": "pure function (pageDef) → {requiredFloor: '1'|'2', reason} — machine boundary §4"},
+        {"name": "DepViolation", "type": "type {type: 'missing_in_schema'|'lossy_narrowing', registryDefId, fieldKey} — mirrors BindingViolation"},
+        {"name": "PageDep", "type": "interface {registryDefId, fieldKey, depKind: DepKind}"}
+      ]
+    },
+    {
+      "entity": "choros.mcp_tool seed: author_report_page",
+      "fields": [
+        {"name": "declares", "type": "jsonb — []"},
+        {"name": "pure_compute", "type": "boolean — true"},
+        {"name": "resource_ops", "type": "jsonb — [{resourceType:'authoring_draft',operation:'create'},{resourceType:'authoring_draft',operation:'update'}]"},
+        {"name": "input_schema", "type": "object — {app_id, slug, title, floor, page_def|page_code, deps?: [{registry_def_id, field_key, dep_kind}]}"}
+      ]
+    }
+  ],
+  "contracts": [
+    "checkReportPageDepFields(deps, recordSchema): pure, no I/O; field_key ∉ schema.properties → {ok:false, violations:[{type:'missing_in_schema'}]}; all present → {ok:true}. ADR §3, AC-4/AC-18/AC-22.",
+    "classifyReportPageFloor(pageDef): pure; page_def expressible as Floor-1 vocab (metrics[] with source_registry_def_id/field_key/agg) → requiredFloor='1' (Floor-2 forbidden); non-aggregate presentation → requiredFloor='2'. ADR §4, AC-3.",
+    "Schema change soft (relabel/add/widen) with active deps → API applies + returns warnings:[{page_slug,registry_def_id,field_key}] (machine-readable array). ADR §5.1, AC-6, NF-8.",
+    "Schema change destructive (drop/rename field_key or lossy narrowing with dep_kind='aggregate') without force → 409 {error:'destructive_schema_change', affected_pages, fields}; record_schema unchanged. ADR §5.2, AC-7/AC-16.",
+    "Destructive with force=true + grant mgmt_object:schema_destructive/apply → change applied; affected report_page_dep.stale=true; pages tier='draft'; audit_event action='report_page.schema_destructive_force' with affected_pages. ADR §5.3, AC-8/AC-19.",
+    "Promote report_page with any dep.stale=true → 409; page stays draft. ADR §5.2 p3, AC-9/AC-17.",
+    "report_page_dep registration with field_key ∉ registry_def.record_schema → 422 (not silent accept). ADR §5.1/§6.1, AC-5.",
+    "author_report_page MCP-tool: DRAFT-only (authoring_draft grants only); agent cannot self-promote; Floor-1 deps auto-derived from page_def; Floor-2 deps from explicit deps[]. ADR §6.1, AC-12.",
+    "Audit vocab (frozen seam): report_page.authored / report_page.promoted / report_page.demoted / report_page_dep.registered / report_page_dep.updated / report_page_dep.deleted / report_page.schema_destructive_force — single appendAuditEvent T-0016. ADR §6.1/§7, AC-13.",
+    "Floor-2 reads record-data ONLY via RLS-gated server API endpoint; no DB-credentials in client bundle. ADR §7, AC-11.",
+    "bundle-coherence.sh check-report-page-deps: each report_page_dep.field_key ∈ registry_def.record_schema → exit 1 on stale; report_page_dep ∈ bundle_members.txt kind=choros_table. ADR §5.4, AC-10, NF-5.",
+    "T-0084 changelog contract: affected pages payload available as machine-readable warnings[]/affected_pages[] on schema change. ADR §5.1, AC-21.",
+    "Migration slots: report_page ≥ 046, report_page_dep ≥ 047 (order preserved for FK); DDL not executed in DESIGN. ADR §0/§2, AC-14."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T13-PAGE",
+      "rule": "report_page и report_page_dep имеют tenant_id-leading PK/FK, ENABLE+FORCE RLS, default-DENY на choros.tenant_id GUC, choros_app DML-only, занесены в known_tenant_tables.txt.",
+      "ci_check": "T-0013/T-0115-пробы (tenant_id_leading.sql, cross-tenant-fitness.sh) после внесения в фикстуру. Тип: live-impl."
+    },
+    {
+      "id": "FF-SCHEMA-046",
+      "rule": "Миграции 046_report_page.sql/047_report_page_dep.sql определяют ровно поля §2.1/§2.2, CHECK на floor/tier/dep_kind, UNIQUE-ключи; бинарь не в Postgres (нет bytea/large-object — page_code это text).",
+      "ci_check": "grep-статик на DDL: assert колонки/CHECK/UNIQUE; grep -iE '\\b(bytea|lo_)\\b' ⇒ 0. Тип: static-now (после coder)."
+    },
+    {
+      "id": "FF-COMPAT-PURE",
+      "rule": "checkReportPageDepFields экспортируется из src/core/report-page-compat.ts; pure (нет импортов pg/fs/net/DAO); ADR-комментарий ссылается на T-0072 checkBindingCompat.",
+      "ci_check": "vitest src/__tests__/report-page-compat.test.ts -t 'pure' + grep на запрещённые импорты. Аналог T-0072 NF-2. Тип: static-now."
+    },
+    {
+      "id": "FF-COMPAT-BEHAVIOR",
+      "rule": "checkReportPageDepFields: field_key ∉ schema.properties ⇒ {ok:false, violations:[{type:'missing_in_schema', field_key}]}; все присутствуют ⇒ {ok:true}.",
+      "ci_check": "vitest … -t 'missing-field' / 'all-present'. Покрывает AC-18. Тип: static-now."
+    },
+    {
+      "id": "FF-FLOOR",
+      "rule": "classifyReportPageFloor: page_def, выразимый vocab Floor-1, ⇒ requiredFloor='1'; эмиссия Floor-2 для такой страницы запрещена. Граница синтаксическая, не «вкус агента».",
+      "ci_check": "vitest … -t 'floor-boundary': агрегатный page_def ⇒ '1'; assert author-path reject Floor-2 для агрегата. Покрывает AC-3. Тип: static-now."
+    },
+    {
+      "id": "FF-DEP-VALIDATE",
+      "rule": "Регистрация dep с field_key ∉ record_schema ⇒ ошибка 422, не тихий accept.",
+      "ci_check": "live-impl probe: POST dep с несуществующим ключом ⇒ 422; запись в report_page_dep не создана. Покрывает AC-5. Тип: live-impl."
+    },
+    {
+      "id": "FF-SOFT-WARN",
+      "rule": "Мягкое изменение схемы (relabel/add/widen) с активными deps ⇒ операция применяется + warnings:[{page_slug,registry_def_id,field_key}] (структурный массив, не текст).",
+      "ci_check": "live-impl probe + vitest на классификатор soft/destructive. Покрывает AC-6, NF-8. Тип: static-now + live-impl."
+    },
+    {
+      "id": "FF-DESTRUCTIVE-DENY",
+      "rule": "drop/rename field_key (или lossy narrowing при aggregate) с активным non-stale dep без force ⇒ 409 destructive_schema_change; record_schema неизменна.",
+      "ci_check": "live-impl probe: drop поля с dep ⇒ 409, schema unchanged. Покрывает AC-7/AC-16. Тип: live-impl."
+    },
+    {
+      "id": "FF-BUNDLE-DEPS",
+      "rule": "bundle-coherence.sh содержит check-report-page-deps: каждый report_page_dep.field_key ∈ актуальной record_schema; иначе exit 1. report_page_dep ∈ bundle_members.txt (kind=choros_table).",
+      "ci_check": "запуск bundle-coherence.sh на фикстуре со stale dep ⇒ exit 1; grep bundle_members.txt. Покрывает AC-10/NF-5. Тип: static-now (после T-0121-impl)."
+    },
+    {
+      "id": "FF-FORCE-DEMOTE",
+      "rule": "Деструктив с force:true + grant schema_destructive/apply ⇒ изменение применено, затронутые deps stale=true, страницы tier='draft', audit_event action='report_page.schema_destructive_force' с affected_pages.",
+      "ci_check": "live-impl probe. Покрывает AC-8/AC-19. Тип: live-impl."
+    },
+    {
+      "id": "FF-PROMOTE-GATE",
+      "rule": "Promote report_page с dep.stale=true ⇒ 409; страница остаётся draft.",
+      "ci_check": "live-impl probe. Покрывает AC-9/AC-17. Тип: live-impl."
+    },
+    {
+      "id": "FF-NO-2ND-AUTHZ",
+      "rule": "Видимость/авторинг/promote страниц = grant-алгебра T-0018 + PDP T-0021; нет report_page_acl/page_visibility/второго permission-поля; promote-grant отсутствует у config-агента (DRAFT-only).",
+      "ci_check": "grep forbidden tokens в migrations 046/047 + API-слое; assert PDP-call (resolveFor/PDP T-0021), не локальный grant-фильтр. Покрывает AC-12, FF-R6. Тип: static-now."
+    },
+    {
+      "id": "FF-FLOOR2-RLS",
+      "rule": "Floor-2 код не имеет DB-credentials/прямого DB-доступа; читает record-данные только через RLS-gated серверный API.",
+      "ci_check": "static: assert клиентский бандл не содержит DB-connection; data-fetch идёт на серверный эндпоинт. Покрывает AC-11. Тип: static-now."
+    },
+    {
+      "id": "FF-AUDIT-EVENTS",
+      "rule": "create/update/delete report_page, tier_change, dep register/update/delete, destructive-force ⇒ каждое = appendAuditEvent (open vocab report_page.*), tenant-scoped; нет второго audit-sink/дубль-таблицы.",
+      "ci_check": "vitest … -t 'audit-events': каждая операция эмитит ожидаемый event; assert нет audit-дубля. Покрывает AC-13. Тип: static-now."
+    },
+    {
+      "id": "FF-CHANGELOG-T84",
+      "rule": "Список затронутых страниц при изменении схемы доступен как структурный payload для T-0084 changelog (machine-readable affected_pages/warnings).",
+      "ci_check": "static: assert API-ответ содержит machine-readable affected_pages/warnings; ADR §5.1 фиксирует контракт к T-0084. Покрывает AC-21. Тип: static-now."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.1 (report_page T-0013-контракт, все поля, UNIQUE) + FF-T13-PAGE/FF-SCHEMA-046"},
+    {"ac": "AC-2", "covered_by": "§2.2 (report_page_dep T-0013-контракт, поля, UNIQUE, stale) + FF-T13-PAGE/FF-SCHEMA-046"},
+    {"ac": "AC-3", "covered_by": "§4 (classifyReportPageFloor, vocab Floor-1, синтаксическая граница) + FF-FLOOR"},
+    {"ac": "AC-4", "covered_by": "§3 (checkReportPageDepFields, ссылка на T-0072 checkBindingCompat) + FF-COMPAT-PURE/BEHAVIOR"},
+    {"ac": "AC-5", "covered_by": "§5.1/§6.1 (валидация при регистрации dep, 422) + FF-DEP-VALIDATE"},
+    {"ac": "AC-6", "covered_by": "§5.1 (мягкое изменение, warnings машинно-читаемы, операция применяется) + FF-SOFT-WARN/NF-8"},
+    {"ac": "AC-7", "covered_by": "§5.2 (критерий деструктива drop/rename/narrowing + 409 + CI fail) + FF-DESTRUCTIVE-DENY/FF-BUNDLE-DEPS"},
+    {"ac": "AC-8", "covered_by": "§5.3 (escape-hatch force + grant + stale + депромоут + audit) + FF-FORCE-DEMOTE"},
+    {"ac": "AC-9", "covered_by": "§5.2 п3 (promote human-gate на stale dep) + FF-PROMOTE-GATE"},
+    {"ac": "AC-10", "covered_by": "§5.4 (check-report-page-deps, bundle_members.txt) + FF-BUNDLE-DEPS"},
+    {"ac": "AC-11", "covered_by": "§7 (Floor-2 RLS-gated, нет DB-credentials) + FF-FLOOR2-RLS"},
+    {"ac": "AC-12", "covered_by": "§6/§6.1 (PDP T-0021, ноль второго механизма, author_report_page DRAFT-only) + FF-NO-2ND-AUTHZ"},
+    {"ac": "AC-13", "covered_by": "§7 (аудит-события T-0016, единый appendAuditEvent) + FF-AUDIT-EVENTS"},
+    {"ac": "AC-14", "covered_by": "§0 header + §2 (слоты ≥046, DDL не в DESIGN)"},
+    {"ac": "AC-15", "covered_by": "§7 (fail-closed tenant, cross-tenant невозможен) + FF-T13-PAGE → live-impl"},
+    {"ac": "AC-16", "covered_by": "§5.2 (деструктив без force → 409, schema неизменна) + FF-DESTRUCTIVE-DENY → live-impl"},
+    {"ac": "AC-17", "covered_by": "§5.2 п3 (promote stale → 409) + FF-PROMOTE-GATE → live-impl"},
+    {"ac": "AC-18", "covered_by": "§3 (контракт checkReportPageDepFields) + FF-COMPAT-BEHAVIOR → test"},
+    {"ac": "AC-19", "covered_by": "§5.3 (force → stale + draft + audit с affected_pages) + FF-FORCE-DEMOTE → live-impl"},
+    {"ac": "AC-20", "covered_by": "весь ADR: §1/§3/§6/§10 (ноль второго permission/coherence-механизма, не противоречит T-0072/T-0082/extensibility-инвариантам) — ревью-гейт архитектора §12"},
+    {"ac": "AC-21", "covered_by": "§5.1 (changelog-payload контракт к T-0084) + FF-CHANGELOG-T84"},
+    {"ac": "AC-22", "covered_by": "§3 (pure function, no I/O) + FF-COMPAT-PURE"}
+  ]
+}
