@@ -170,7 +170,11 @@ FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|s
 # check prevents a false positive when T-0030 is rebased onto a dev that already
 # contains T-0040.  The exclusion list must only name migrations owned by other
 # known tasks; any new T-0040 migration would still be caught.
-MIGRATION_EXCLUDE_RE='^migrations/030_grant_proposed_confirmed\.sql$'
+# T-0044 integration note: migration 031 (migrations/031_grant_confirmed2_by.sql)
+# is the additive ADD COLUMN confirmed2_by owned by T-0044 (dual-control gate),
+# a sibling task. Excluded here for the same reason as 030; any NEW T-0040
+# migration would still be caught (031 is owned + asserted by dual-control-isolation.sh).
+MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by)\.sql$'
 
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then
