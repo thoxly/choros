@@ -179,6 +179,7 @@ export function startOutboxDispatcherLoop(
     maxAttempts: opts.maxAttempts,
     backoff: opts.backoff,
     ...(opts.onDispatched !== undefined ? { onDispatched: opts.onDispatched } : {}),
+    ...(opts.perRowMaxAttempts !== undefined ? { perRowMaxAttempts: opts.perRowMaxAttempts } : {}),
   };
 
   const handle = setIntervalFn(() => {

@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   runOutboxOnce,
+  startOutboxDispatcherLoop,
   defaultBackoff,
   type Deliver,
 } from "../core/outboxDispatcher.js";
@@ -170,5 +171,99 @@ describe("defaultBackoff", () => {
     expect(defaultBackoff(1)).toBe(2000);
     expect(defaultBackoff(2)).toBe(4000);
     expect(defaultBackoff(100)).toBe(5 * 60 * 1000);
+  });
+});
+
+/**
+ * R-NEW proof (T-0170 re-review): startOutboxDispatcherLoop MUST thread
+ * perRowMaxAttempts through to runOutboxOnce — otherwise immediate-dead rows
+ * survive 5 retries in the production loop. This test drives the loop directly
+ * (via injectable setIntervalFn) and proves the callback reaches runOutboxOnce.
+ */
+describe("startOutboxDispatcherLoop — perRowMaxAttempts threads to runOutboxOnce (R-NEW proof)", () => {
+  it("loop pass invokes perRowMaxAttempts for each failed row", async () => {
+    // Arrange: one failing row per tenant
+    const f = new FakeStore();
+    f.buckets = [{ tenantId: "t1", pendingCount: 1 }];
+    const row = makeRow({ id: "rn1", attempts: 0 });
+    f.batches = { t1: [row] };
+    f.retryOutcome = { rn1: "pending" };
+
+    const deliver: Deliver = async () => ({ ok: false, error: "immediate-dead" });
+
+    // Capture which rows the callback was called for
+    const callbackHits: Array<{ rowId: string; error: string | undefined }> = [];
+    const perRowMaxAttempts = (r: typeof row, err: string | undefined): number | undefined => {
+      callbackHits.push({ rowId: r.id, error: err });
+      return undefined; // fall through to default maxAttempts
+    };
+
+    // Capture pass results
+    const passResults: import("../core/outboxDispatcher.js").RunOutboxResult[] = [];
+
+    // Use injectable setInterval: capture fn, run it manually once, then assert
+    let capturedFn: (() => void) | undefined;
+    const fakeSetInterval = (fn: () => void, _ms: number) => {
+      capturedFn = fn;
+      return 0 as unknown as ReturnType<typeof setInterval>;
+    };
+
+    const { stop } = startOutboxDispatcherLoop(asStore(f), deliver, {
+      batchLimit: 10,
+      maxAttempts: 5,
+      backoff: () => 1000,
+      intervalMs: 100,
+      setIntervalFn: fakeSetInterval,
+      onPass: (r) => passResults.push(r),
+      perRowMaxAttempts,
+    });
+
+    // The loop has NOT fired yet (first pass is deferred to interval)
+    expect(capturedFn).toBeDefined();
+    expect(callbackHits).toHaveLength(0);
+
+    // Trigger one pass manually and wait for the async chain to settle
+    capturedFn!();
+    // Allow microtasks to flush (the pass is async; onPass fires in .then())
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    stop();
+
+    // Assert: perRowMaxAttempts was called — proving it reached runOutboxOnce
+    expect(callbackHits).toHaveLength(1);
+    expect(callbackHits[0].rowId).toBe("rn1");
+    expect(callbackHits[0].error).toBe("immediate-dead");
+
+    // And the pass itself ran (failed=1, because the row is still pending)
+    expect(passResults).toHaveLength(1);
+    expect(passResults[0].failed).toBe(1);
+  });
+
+  it("loop pass does NOT invoke perRowMaxAttempts when it is undefined (backward-compat)", async () => {
+    // Sanity-check: omitting perRowMaxAttempts still works (no regression)
+    const f = new FakeStore();
+    f.buckets = [{ tenantId: "t2", pendingCount: 1 }];
+    f.batches = { t2: [makeRow({ id: "ok2" })] };
+    const deliver: Deliver = async () => ({ ok: true });
+
+    const passResults: import("../core/outboxDispatcher.js").RunOutboxResult[] = [];
+    let capturedFn: (() => void) | undefined;
+
+    const { stop } = startOutboxDispatcherLoop(asStore(f), deliver, {
+      batchLimit: 10,
+      maxAttempts: 3,
+      backoff: () => 1000,
+      intervalMs: 100,
+      setIntervalFn: (fn) => { capturedFn = fn; return 0 as unknown as ReturnType<typeof setInterval>; },
+      onPass: (r) => passResults.push(r),
+      // perRowMaxAttempts intentionally omitted
+    });
+
+    capturedFn!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    stop();
+
+    expect(passResults).toHaveLength(1);
+    expect(passResults[0].dispatched).toBe(1);
   });
 });
