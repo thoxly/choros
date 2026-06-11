@@ -27,9 +27,10 @@
 > Это ADR **design-only**. Choros имеет Postgres-в-compose (T-0053/T-0114) и уже-живой outbox
 > (T-0062, миграция 024/025, `src/core/outboxDispatcher.ts`). Сами DDL-миграции трёх новых
 > tenant-таблиц, TS-код routing/ChannelDriver/шаблонизатора и SMTP-адаптер — **последующие
-> impl-задачи**, не здесь. **Следующие свободные миграционные слоты ≥ 044** (наивысший занятый —
-> `043_invoke_proposal.sql`; барьер T-0119 был ≥ 041, с тех пор слот сдвинулся — точный номер НЕ
-> фиксируется, реальный свободный слот выбирает coder на момент материализации). Каждая
+> impl-задачи**, не здесь. **Следующие свободные миграционные слоты ≥ 044**: слоты 043 и ниже
+> заняты к моменту дизайна (043_invoke_proposal.sql — наивысший занятый; часть слотов ниже 043
+> тоже уже занята, в т.ч. 044 может быть занят T-0077 или другим post-base merge — точный
+> следующий свободный слот выбирает coder при материализации). Каждая
 > fitness-функция несёт конкретный `ci_check` + `gating`-ноту (**static-now** = лайнт/тип-чек/юнит
 > в `npm run ci` после impl; **live-impl** = проба, авторённая позже, активируемая при Postgres).
 > Этот ADR — единый источник полей/типов/контрактов для `coder` и `tester`.
@@ -89,7 +90,10 @@ ChannelDriver>`, доставка делегирована СУЩЕСТВУЮЩ�
    `deliver(row)` (см. §2.6) распознаёт `row.aggregateKind === 'notification'`, достаёт `channel` из
    `row.payload`, зовёт `driverMap.get(channel).deliver(job, ctx)`; `{ok:true}` → `markDispatched`;
    `{ok:false, retryable:true}` → `markRetry` (back-off); после `maxAttempts` → `dead` (DLQ в той же
-   outbox-таблице). **Второго диспетчера/очереди нет** (NF-3).
+   outbox-таблице); `{ok:false, retryable:false}` → **immediate-dead**: вызвать `markRetry` с
+   `maxAttempts=0` (механизм T-0062: `attempts ≥ maxAttempts` → `dead` без следующего poll; отдельный
+   `markDead` не требуется — `maxAttempts=0` достаточен). Не уходит в бесконечный back-off.
+   **Второго диспетчера/очереди нет** (NF-3).
 
 **Связь с T-0019 (без двойного аудита):** одно действие → один `actor_event` (T-0019, как и было) →
 **при наличии подписок** → routing создаёт notification-строки/outbox-ряды. Нотификатор **не пишет
@@ -199,8 +203,10 @@ webhook/SMS = новый Driver + регистрация в Map + строка `
 - **`deliver(row)`** (notification-вариант, инжектируется в `runOutboxOnce`): распознаёт
   `aggregateKind === 'notification'`, берёт `channel` из `payload`, зовёт `driverMap.get(channel).deliver`.
   Маппинг `DeliveryResult → DispatchResult`: `{ok:true}→{ok:true}`; `{ok:false,retryable:true}→{ok:false,
-  error}`; `{ok:false,retryable:false}→` помечается так, чтобы `markRetry(maxAttempts)` сразу дал `dead`
-  (или прямой `markDead`-путь — impl-деталь; контракт: non-retryable не уходит в бесконечный back-off).
+  error}` (→`markRetry`, back-off); `{ok:false,retryable:false}→` **immediate-dead**: `markRetry` с
+  `maxAttempts=0` — механизм T-0062: `attempts ≥ maxAttempts` → `dead` без следующего poll. Отдельного
+  `markDead`-вызова T-0062 не требует; `maxAttempts=0` достаточен. Контракт: non-retryable не уходит
+  в бесконечный back-off.
 - **`in_app`-драйвер day-1 = no-op success** (строка `choros.notification` уже создана при fanout —
   in-app «доставка» = факт INSERT; outbox-ряд для in_app существует ради единообразия pipeline и
   будущего push, day-1 его driver просто `{ok:true}`). Это держит pipeline единым (нет спец-ветки
@@ -416,7 +422,7 @@ ADR-декомпозиция (E-нумерация — продолжение no
 
 | Build-задача (предлагаемая) | Что создаёт | Зависит от | Несёт fitness |
 |---|---|---|---|
-| **E-N.1 `[impl] notification: 3 миграции + tenant-изоляция`** | Миграции `0NN_notification.sql`, `0NN+1_email_channel_config.sql`, `0NN+2_notification_preference.sql` (свободные слоты ≥ 044) по §4.1–4.3 — FORCE RLS + default-DENY + `choros_app` DML + badge/keyset-индексы; **добавляет 3 имени в `known_tenant_tables.txt`** (единственное легитимное изменение фикстуры). | T-0013, T-0014 (employee), T-0119 (слот-дисциплина) | FF-T13, FF-NB-OUTBOX (нет второго outbox), FF-BADGE-INDEX |
+| **E-N.1 `[impl] notification: 3 миграции + tenant-изоляция`** | Миграции `0NN_notification.sql`, `0NN+1_email_channel_config.sql`, `0NN+2_notification_preference.sql` (свободные слоты ≥ 044) по §4.1–4.3 — FORCE RLS + default-DENY + `choros_app` DML + badge/keyset-индексы; **добавляет 3 имени в `known_tenant_tables.txt`** (единственное легитимное изменение фикстуры). | T-0013, T-0014 (employee), T-0119 (слот-дисциплина) | FF-T13, FF-NB-OUTBOX (нет второго outbox), FF-UNREAD-INDEXED |
 | **E-N.2 `[impl] notification routing + ChannelDriver-реестр`** | `src/core/notification-router.ts` (`publishNotificationEvent`, fanout, scope-разворот), `ChannelDriver`/`DeliveryJob`/`DeliveryResult`-типы, `makeNotificationDeliver` (Map, не switch), in_app-no-op-driver; **импортирует** `Deliver`/`OutboxRow` (T-0062), grant/role-резолвер (T-0018/21). | E-N.1, T-0062 (outbox/dispatcher), T-0018/21 (PDP/role) | FF-NO-SWITCH-CHANNEL, FF-ONE-OUTBOX, FF-FANOUT-FAILCLOSED, FF-EVENT-CONTRACT |
 | **E-N.3 `[impl] email-channel config + RL-3 custody + SMTP-драйвер`** | `src/core/notification-email.ts` (`email_channel_config`-CRUD через PDP `mgmt_object:email_config`, `EmailChannelDriver`, `SmtpSecretResolverPort`-seam day-1=stub), `src/adapters/smtp-sender.ts`; **импортирует** `validateSecretHandleShape`/`redactHandle`/`SecretResolverPort` (T-0025). | E-N.2, T-0025 (custody), T-0041 (egress), T-0053 (Postgres) | FF-NO-RAW-SMTP, FF-HANDLE-SHAPE, FF-RESOLVER-PORT, FF-EMAIL-FROM-CLIENT, FF-EGRESS-CLASS |
 | **E-N.4 `[impl] notification preferences + defaults seed`** | `notification_preference`-CRUD (tenant-admin `mgmt_object:notification_config` + self-эндпоинт), `recipient_scope`-vocab, defaults-seed при genesis tenant. | E-N.2, T-0018/21, T-0026 (genesis-seed) | FF-PREF-AUTHZ, FF-SELF-PREF-SCOPED, FF-DEFAULTS-SEED |
