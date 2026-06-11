@@ -106,7 +106,7 @@ function buildTestServer(
   registerGrantProposeRoute(router, pool, deps);
 
   const server = http.createServer(router.dispatch.bind(router));
-  let baseUrl = "";
+  const baseUrl = "";
 
   return {
     server,
