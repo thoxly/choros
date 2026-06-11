@@ -1,0 +1,151 @@
+{
+  "task_id": "T-0060",
+  "status": "ready",
+  "decision": "Единый JWT-guard как декоратор RouteHandler'а (withAuth), применяемый в одной точке — registerExternalWorkerRoutes — ко всем 4 worker-эндпоинтам, с единственной точкой ветвления по CHOROS_AUTH_MODE в src/http/auth.ts (seam T-0054). В режиме keycloak guard извлекает Bearer-JWT, валидирует подпись через Keycloak JWKS на stdlib node:crypto (createPublicKey({format:'jwk'}) + verify, zero-dep) и claims iss/aud/exp/actor_type (T-0054 §4.1); JWKS кэшируется in-memory (TTL JWKS_CACHE_TTL_MS, миграция 041 НЕ создаётся); токен-ошибки → 401 UNAUTHENTICATED (fail-closed), недоступность KC → 503 AUTH_UNAVAILABLE без раскрытия деталей. После успеха identity (sub, preferredUsername, actorType) кладётся в WeakMap<IncomingMessage>. dev-режим (x-dev-user) — pass-through, нетронут. router.ts и публичные экспорты не меняются (только аддитив в auth.ts + externalWorker.ts).",
+  "rejected_alternatives": [
+    {"option": "Pre-handler в Router.dispatch", "why_not": "Требует правки router.ts (контракт швов: только аддитив) и навешивает guard на ВЕСЬ трафик, включая non-worker роуты (inbox/org/rights), которые spec оставляет на x-dev-user."},
+    {"option": "Wrapper над всем Router'ом", "why_not": "Глобальное покрытие; пришлось бы белым списком исключать non-worker роуты — хрупко, противоречит 'одной точке', список дрейфует."},
+    {"option": "Ветвление по CHOROS_AUTH_MODE в каждом из 4 хендлеров", "why_not": "Разброс guard-логики по N точкам (FR-1 запрещает); grep CHOROS_AUTH_MODE src/ вырос бы > 2 (AC-17 fail)."},
+    {"option": "npm jose / jsonwebtoken / jwks-rsa", "why_not": "Нарушает zero-dep конвенцию (NF-1, AC-18). Node 20 crypto.createPublicKey({format:'jwk'}) + crypto.verify покрывают RS256/ES256 нативно."},
+    {"option": "JWKS-кэш в Postgres/Redis (миграция 041)", "why_not": "Избыточно: JWKS маленький и редко меняется; in-memory TTL-кэш на процесс достаточен и zero-dep. Spec §6 явно предпочитает in-memory."},
+    {"option": "KC token introspection endpoint (RFC 7662) на каждый запрос", "why_not": "Сетевой хоп на горячем пути (NF-3 ≤2 мс нарушен), привязка к доступности KC. Локальная JWKS-валидация — стандарт для resource-server'ов."},
+    {"option": "Переименовать KC_ISSUER (T-0061) в KEYCLOAK_URL", "why_not": "Сломало бы смерженный compose-seam T-0061. Решено: KEYCLOAK_URL — основной источник, KC_ISSUER — опциональный override; сосуществуют."},
+    {"option": "403 при отсутствии токена", "why_not": "Spec фиксирует 401 UNAUTHENTICATED (аутентификация). 403 — RBAC/авторизация, явно вне скоупа T-0060."}
+  ],
+  "object_model": [
+    {
+      "entity": "AuthContext",
+      "fields": [
+        {"name": "sub", "type": "string (KC user/service-account UUID, непустой)"},
+        {"name": "preferredUsername", "type": "string (employee id или service-account-<clientId>, непустой)"},
+        {"name": "actorType", "type": "'human' | 'agent'"}
+      ]
+    },
+    {
+      "entity": "KeycloakAuthConfig",
+      "fields": [
+        {"name": "mode", "type": "'dev' | 'keycloak' (process.env.CHOROS_AUTH_MODE ?? 'dev')"},
+        {"name": "issuer", "type": "string (KC_ISSUER override, иначе ${KEYCLOAK_URL}/realms/${realm})"},
+        {"name": "keycloakUrl", "type": "string (process.env.KEYCLOAK_URL — обязателен в keycloak-режиме, AC-20)"},
+        {"name": "realm", "type": "string (process.env.KEYCLOAK_REALM ?? 'choros')"},
+        {"name": "audience", "type": "string (process.env.KEYCLOAK_AUDIENCE ?? 'choros-api')"},
+        {"name": "jwksUri", "type": "string | undefined (KEYCLOAK_JWKS_URI override; иначе через OIDC discovery)"},
+        {"name": "jwksCacheTtlMs", "type": "number (process.env.JWKS_CACHE_TTL_MS ?? 300000)"}
+      ]
+    },
+    {
+      "entity": "Jwk",
+      "fields": [
+        {"name": "kid", "type": "string"},
+        {"name": "kty", "type": "string ('RSA' | 'EC')"},
+        {"name": "n", "type": "string (base64url, RSA modulus)"},
+        {"name": "e", "type": "string (base64url, RSA exponent)"},
+        {"name": "alg", "type": "string ('RS256' | 'ES256')"}
+      ]
+    },
+    {
+      "entity": "JwksCacheEntry",
+      "fields": [
+        {"name": "keys", "type": "Jwk[]"},
+        {"name": "fetchedAtMs", "type": "number (для TTL-проверки)"}
+      ]
+    },
+    {
+      "entity": "JwtClaims",
+      "fields": [
+        {"name": "iss", "type": "string (=== config.issuer, AC-10)"},
+        {"name": "aud", "type": "string | string[] (includes config.audience, AC-11)"},
+        {"name": "exp", "type": "number (секунды; > now с допуском skew ≤60с, AC-9)"},
+        {"name": "sub", "type": "string (непустой → AuthContext.sub)"},
+        {"name": "preferred_username", "type": "string (непустой → AuthContext.preferredUsername)"},
+        {"name": "actor_type", "type": "'human' | 'agent' (присутствует и валиден, AC-12)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "export function withAuth(handler: RouteHandler): RouteHandler — оборачивает worker-хендлер аутентификацией; dev = pass-through, keycloak = валидирует Bearer JWT и при провале НЕ вызывает inner",
+    "async function authenticate(req: IncomingMessage): Promise<void> — ЕДИНСТВЕННАЯ точка ветвления по AUTH_MODE; бросает HttpError(401|503) при провале, при успехе кладёт AuthContext в WeakMap",
+    "export function getAuthContext(req: IncomingMessage): AuthContext | undefined — доступ к идентичности после успешной аутентификации (FR-4, AC-15)",
+    "export function assertKeycloakConfig(): void — fail-fast: бросает Error при keycloak-режиме без KEYCLOAK_URL/KC_ISSUER (AC-20)",
+    "async function verifyJwt(token: string, cfg: KeycloakAuthConfig): Promise<JwtClaims> — stdlib RS256/ES256 валидатор; HttpError(401) на токен-ошибку, HttpError(503,'AUTH_UNAVAILABLE') на недоступность KC",
+    "async function getJwks(cfg: KeycloakAuthConfig, forceRefresh?: boolean): Promise<Jwk[]> — in-memory TTL-кэш; однократный forceRefresh при промахе kid (ротация ключа)",
+    "Контракт швов (NF-2): DEV_USER_HEADER, registerAuthRoutes(router, store?), registerExternalWorkerRoutes(router, store), createServer(store?) — сигнатуры НЕ меняются; AUTH_MODE внутренняя (не экспорт); router.ts НЕ трогается",
+    "externalWorker.ts (аддитивно): router.register('POST','/jobs', withAuth(handler)) для всех 4 эндпоинтов (/jobs, /external-task/fetch-and-lock, /external-task/:id/complete, /external-task/:id/fail)",
+    "Коды (NF-4 fail-closed): нет/битый Authorization, битый JWT, неверная подпись/claim/exp → 401 {error:{code:'UNAUTHENTICATED'}}; KC недостижим → 503 {error:{code:'AUTH_UNAVAILABLE'}} без stacktrace"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "Полный JWT-набор AC-3..AC-16 против живого Keycloak: 4 эндпоинта без токена → 401; malformed/badsig/expired/bad-iss/bad-aud/no-actor_type → 401; валидный agent/human → 201/200; sub+preferred_username доступны; KC-down → 503 AUTH_UNAVAILABLE",
+      "ci_check": "live-kc: src/__tests__/workerAuth.kc.e2e.test.ts (vitest) — createServer() с CHOROS_AUTH_MODE=keycloak против compose-Keycloak; реальные токены (ROPC e-kravtsova, client_credentials agent-orchestrator); ассерт кодов 401/201/200/503"
+    },
+    {
+      "id": "FF-2",
+      "rule": "Существующие e2e (externalWorker.e2e + auth.e2e) зелёные при CHOROS_AUTH_MODE=dev/unset; нулевая регрессия (AC-1, AC-2)",
+      "ci_check": "live-dev (existing ci job): CHOROS_AUTH_MODE=dev npm run ci — наследует default; externalWorker.e2e.test.ts + auth.e2e.test.ts без изменений проходят"
+    },
+    {
+      "id": "FF-3",
+      "rule": "Одна точка ветвления (AC-17): grep -rE 'CHOROS_AUTH_MODE' src/ ≤ 2 совпадения (auth.ts + опц. server.ts); externalWorker.ts НЕ содержит CHOROS_AUTH_MODE",
+      "ci_check": "static-now: ci/checks/worker-auth-single-branch.sh — c=$(grep -rE 'CHOROS_AUTH_MODE' src/ | wc -l); test \"$c\" -le 2; и ! grep -q CHOROS_AUTH_MODE src/http/externalWorker.ts. Добавить в npm run fitness."
+    },
+    {
+      "id": "FF-4",
+      "rule": "Zero-dep (AC-18): grep -rE 'jsonwebtoken|jose|jwks-rsa' src/ = 0; package.json dependencies не содержит этих пакетов",
+      "ci_check": "static-now: ci/checks/worker-auth-zero-dep.sh — ! grep -rE 'jsonwebtoken|\\bjose\\b|jwks-rsa' src/; и ! grep -E '\"(jsonwebtoken|jose|jwks-rsa)\"' package.json. Добавить в npm run fitness."
+    },
+    {
+      "id": "FF-5",
+      "rule": "Публичная поверхность неизменна (AC-19, NF-2): export DEV_USER_HEADER присутствует (=1); registerExternalWorkerRoutes/registerAuthRoutes/createServer экспортируются с прежней арностью; router.ts не изменён относительно базовой ветки",
+      "ci_check": "static-now: ci/checks/worker-auth-public-surface.sh — grep 'export.*DEV_USER_HEADER' src/http/auth.ts = 1; grep на экспорты register*/createServer; git diff --quiet origin/dev -- src/http/router.ts. Добавить в npm run fitness."
+    },
+    {
+      "id": "FF-6",
+      "rule": "fail-fast конфиг (AC-20): при CHOROS_AUTH_MODE=keycloak без KEYCLOAK_URL/KC_ISSUER сервер падает на старте (non-zero/thrown Error), не silent, не на первом запросе",
+      "ci_check": "static-now: ci/checks/worker-auth-config-failfast.sh — после tsc-сборки: CHOROS_AUTH_MODE=keycloak node -e \"import('./dist/http/auth.js').then(m=>m.assertKeycloakConfig())\" → non-zero; с заданным KEYCLOAK_URL → zero. Добавить в npm run fitness (или kc-джоб с build)."
+    },
+    {
+      "id": "FF-7",
+      "rule": "live-kc happy-path (AC-22): реальный agent-token (client_credentials agent-orchestrator) → POST /jobs → 201; реальный human-token (ROPC e-kravtsova) → POST /external-task/fetch-and-lock → 200",
+      "ci_check": "live-kc: внутри workerAuth.kc.e2e.test.ts (FF-1) или ci/checks/kc/worker-token-roundtrip.sh — curl токен у KC, бьёт в поднятый choros-сервер, ассерт 201/200"
+    },
+    {
+      "id": "FF-8",
+      "rule": "Новые env vars задокументированы (AC-21): grep -cE 'KEYCLOAK_URL|KEYCLOAK_AUDIENCE|JWKS_CACHE_TTL_MS' docs/environments.md ≥ 3",
+      "ci_check": "static-now: расширить ci/checks/kc/environments-docs.sh (или новый worker-auth-env-docs.sh) проверкой grep -cE '...' ≥ 3. Уже в npm run fitness через environments-docs.sh."
+    },
+    {
+      "id": "FF-9",
+      "rule": "Горячий JWKS-кэш (AC-23, NF-3): второй verifyJwt с тем же kid НЕ инициирует новый HTTP-запрос к KC (0 fetch после первого); overhead ≤ 2 мс",
+      "ci_check": "unit (vitest, часть npm run ci): src/__tests__/jwks-cache.test.ts — mock глобального fetch/https.get, дважды валидирует токен, ассерт fetchSpy.callCount === 1 после прогрева"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §1.1 dev pass-through; FF-2"},
+    {"ac": "AC-2", "covered_by": "ADR §1.6 dev контекст не заполняется, /api/me не трогается; FF-2"},
+    {"ac": "AC-3", "covered_by": "ADR §1.1 withAuth на /jobs; §1.5 401; FF-1"},
+    {"ac": "AC-4", "covered_by": "ADR §1.1 withAuth на fetch-and-lock; FF-1"},
+    {"ac": "AC-5", "covered_by": "ADR §1.1 withAuth на complete; FF-1"},
+    {"ac": "AC-6", "covered_by": "ADR §1.1 withAuth на fail; FF-1"},
+    {"ac": "AC-7", "covered_by": "ADR §1.3 парсинг → 401; FF-1"},
+    {"ac": "AC-8", "covered_by": "ADR §1.3 crypto.verify → 401; FF-1"},
+    {"ac": "AC-9", "covered_by": "ADR §1.3 exp-проверка со skew; FF-1"},
+    {"ac": "AC-10", "covered_by": "ADR §1.3 iss===issuer; §1.2 резолв issuer; FF-1"},
+    {"ac": "AC-11", "covered_by": "ADR §1.3 aud includes audience; FF-1"},
+    {"ac": "AC-12", "covered_by": "ADR §1.3 actor_type ∈ {human,agent}; FF-1"},
+    {"ac": "AC-13", "covered_by": "ADR §1.3 happy-path agent; §3.1 AuthContext; FF-1/FF-7"},
+    {"ac": "AC-14", "covered_by": "ADR §1.3 happy-path human; FF-1/FF-7"},
+    {"ac": "AC-15", "covered_by": "ADR §1.6 WeakMap AuthContext + getAuthContext; FF-1"},
+    {"ac": "AC-16", "covered_by": "ADR §1.5 503-ветка; §1.3 fetch-ошибка → 503; FF-1"},
+    {"ac": "AC-17", "covered_by": "ADR §1.1 декоратор + единый authenticate; FF-3"},
+    {"ac": "AC-18", "covered_by": "ADR §1.3 stdlib only; FF-4"},
+    {"ac": "AC-19", "covered_by": "ADR §4 контракт швов; FF-5"},
+    {"ac": "AC-20", "covered_by": "ADR §1.7 assertKeycloakConfig; FF-6"},
+    {"ac": "AC-21", "covered_by": "ADR §1.2 + environments.md; FF-8"},
+    {"ac": "AC-22", "covered_by": "ADR §1.3 against живой KC; FF-7"},
+    {"ac": "AC-23", "covered_by": "ADR §1.4 in-memory TTL-кэш; FF-9"}
+  ],
+  "runtime_target": "локально + silo docker-compose. Guard исполняется в choros-сервисе (Node ≥20). dev-режим (default) — без новых ресурсов. keycloak-режим требует живого Keycloak (сервис keycloak уже в compose, провижится T-0054). T-0060 НЕ вводит новый внешний ресурс и НЕ коммитит секретов; prod-Keycloak (TLS/hostname-pinning) — E0.7 founder-gated (GT-4).",
+  "adr_artifact_path": "docs/design/T-0060-worker-endpoint-auth.adr.md",
+  "escalation": ""
+}
