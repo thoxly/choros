@@ -84,7 +84,9 @@ function buildRouter(
   outboxStore?: PostgresOutboxStore,
   // T-0143: captured in closure; passed to makeGrantResolver when a route calls it.
   // Absent ⇒ hash fields drop honestly (FR-2 / NF-3).
-  resolverDeps?: ResolverDeps
+  // Partial<ResolverDeps>: at composition-root time only keyedDigest exists;
+  // per-request sources (grants/records/ancestry) are assembled at the route.
+  resolverDeps?: Partial<ResolverDeps>
 ): Router {
   // resolverDeps is captured here in the closure so every future route that calls
   // makeGrantResolver(resolverDeps) automatically inherits the composition-root
@@ -232,7 +234,10 @@ function buildRouter(
  */
 export function createServer(
   store: JobStore | PostgresJobStore | InMemoryJobStore = createJobStore(),
-  resolverDeps?: ResolverDeps   // T-0143: threaded to buildRouter; absent => hash fields drop (FR-2)
+  // Partial<ResolverDeps>: at composition-root time only keyedDigest is available;
+  // per-request sources (grants/records/ancestry) are assembled at the route (T-0143 §4.3 amendment).
+  // Absent => hash fields drop honestly (FR-2 / NF-3).
+  resolverDeps?: Partial<ResolverDeps>
 ): http.Server {
   const router = buildRouter(store, createTimerStore(), createOutboxStore(), resolverDeps);
   return http.createServer(router.dispatch.bind(router));

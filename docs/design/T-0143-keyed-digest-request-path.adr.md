@@ -325,4 +325,79 @@ cross-vendor / product-loop trigger. No new external resource.
 
 ---
 
+---
+
+## 9. Amendment after review (R-1 / R-2 / R-3)
+
+**Status:** Applied in BUILD-fix iteration (review verdict `changes_requested`, 3 blocking).
+
+### R-1 — FF-T143-5 purity check rewritten
+
+The original check at `ci/checks/keyed-digest-core-purity.sh` had:
+
+1. A malformed third grep alternative (`process\x27\(env\x27)` — unbalanced group) that
+   caused regex errors swallowed by `2>/dev/null || true`, making the check pass
+   unconditionally.
+2. A recursive scan over `src/core/` that would red-line immediately on the
+   pre-existing `src/core/flowable-client.ts:264/269/274` env reads (pre-T-0143 code,
+   out of scope).
+
+**Fix:** The check is rewritten to:
+- Scope ONLY to the three masking/resolver modules (`keyed-digest.ts`,
+  `data-classification.ts`, `grant-resolver.ts`) — the files where the T-0143
+  invariant is meaningful and provable.
+- Strip comment-only lines before matching, so JSDoc/inline comments that mention
+  `process.env` (documentation) do not trigger the check.
+- Remove `|| true` suppression — grep errors now fail loud.
+- Include a positive self-test (planted violation detected) and a negative self-test
+  (comment-only mention not flagged); either failure causes `exit 2`.
+
+**Backlog candidate:** A full "no `process.env` anywhere under `src/core/`" sweep
+requires first refactoring `src/core/flowable-client.ts` to push its env reads up
+to the composition root. This is a separate task (scope outside T-0143). The T-0143
+check explicitly documents this in its SCOPE NOTE.
+
+### R-2 — Object identity between MainHandle.resolverDeps and createServer argument
+
+**Original issue:** `startMain` allocated `resolverDepsObj` (passed to `createServer`)
+and then returned a SEPARATE `{ keyedDigest }` literal on `MainHandle.resolverDeps`.
+Two allocations; the proof-of-equivalence comment claiming single-allocation identity
+was false.
+
+**Fix:** `MainHandle.resolverDeps` is now set to `resolverDepsObj` directly:
+```ts
+return { ..., resolverDeps: resolverDepsObj, ... };
+```
+Same allocation. Object identity between `handle.resolverDeps` and the object
+received by `buildRouter`'s closure is now genuine.
+
+### R-3 — Honest seam type: `Partial<ResolverDeps>` replaces `as unknown as ResolverDeps`
+
+**Original issue:** The ADR §4.3 snippet `const resolverDepsObj: ResolverDeps = { keyedDigest };`
+does not compile because `grants`, `records`, `ancestry` are REQUIRED members of
+`ResolverDeps`. BUILD had reconciled this with a double-cast `as unknown as ResolverDeps`
+that masked the incompatibility. The ADR's FR-3 claim ("any future route auto-inherits
+a usable `ResolverDeps` from buildRouter's closure") is hollow: the captured object has
+`undefined` for the three required sources; a route consuming it would break at runtime.
+
+**Fix:**
+- `createServer` and `buildRouter` parameter types changed from `ResolverDeps` to
+  `Partial<ResolverDeps>` (honest: only composition-root ports exist at startup;
+  per-request sources are assembled at the route).
+- `resolverDepsObj` in `startMain` is typed as `{ keyedDigest: KeyedDigest }` (no cast).
+- No `as unknown as` anywhere.
+- **ADR §4.3 correction:** The code comment "single ResolverDeps allocation" is updated
+  to reflect that `resolverDepsObj` is the composition-root wiring fragment
+  (`Partial<ResolverDeps>`), not a full `ResolverDeps`. Per-request sources
+  (grants/records/ancestry) are assembled at the route, not the composition root.
+- **ADR FR-3 correction:** "Any future route auto-inherits" is narrowed: a future route
+  receives `resolverDeps?.keyedDigest` from the closure and must assemble
+  grants/records/ancestry per-request (from its own store/DAO). Only `keyedDigest`
+  propagates from the composition root.
+
+The `MainHandle.resolverDeps` public type `{ keyedDigest: KeyedDigest }` is unchanged
+(FR-5 / AC-7 / AC-9 unaffected).
+
+---
+
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

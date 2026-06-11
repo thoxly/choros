@@ -17,7 +17,6 @@
 import http from "node:http";
 import { Pool } from "pg";
 import { createServer, createJobStore } from "./server.js";
-import { type ResolverDeps } from "./core/grant-resolver.js";
 import { PostgresJobStore } from "./core/jobStore.js";
 import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import {
@@ -127,11 +126,12 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   // composition root (the only process.env boundary). Honest-degrade when absent.
   const keyedDigest = buildKeyedDigestFromEnv(env);
 
-  // T-0143: single ResolverDeps allocation — passed to BOTH createServer() and
-  // placed on MainHandle.resolverDeps (object identity by construction, not
-  // by coincidence). Any future route that calls makeGrantResolver(resolverDeps)
-  // from buildRouter's closure receives the same instance (FR-3 / FR-5 / AC-7).
-  const resolverDepsObj: ResolverDeps = { keyedDigest } as unknown as ResolverDeps;
+  // T-0143: single allocation for the composition-root wiring fragment.
+  // Only keyedDigest exists at startup; per-request sources (grants/records/ancestry)
+  // are assembled at the route (ADR §4.3 amendment after review R-3).
+  // resolverDepsObj is passed to createServer() AND placed on MainHandle.resolverDeps
+  // — same object identity by construction (R-2 fix, ADR §4.3).
+  const resolverDepsObj: { keyedDigest: KeyedDigest } = { keyedDigest };
 
   let server: http.Server | undefined;
   if (listen) {
@@ -149,7 +149,7 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   return {
     server,
     lifecycle,
-    resolverDeps: { keyedDigest },
+    resolverDeps: resolverDepsObj, // same allocation as passed to createServer() (R-2 / AC-7)
     stop: () => {
       lifecycle.stop();
       server?.close();
