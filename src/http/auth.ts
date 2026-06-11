@@ -37,6 +37,13 @@ function getAuthMode(): "dev" | "keycloak" {
   return (process.env["CHOROS_AUTH_MODE"] ?? "dev") as "dev" | "keycloak";
 }
 
+/**
+ * Public accessor for the active auth mode (used by modules outside the auth layer,
+ * e.g. binding.ts — avoids re-reading process.env["CHOROS_AUTH_MODE"] directly).
+ * Additive export seam; delegates to internal getAuthMode() — no behaviour change.
+ */
+export { getAuthMode };
+
 /** Convenience alias for the /api/me route branch (eager read at route-registration time). */
 const AUTH_MODE = getAuthMode();
 
