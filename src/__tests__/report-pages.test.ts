@@ -22,13 +22,12 @@
  * T-0144 discipline: BEGIN before SET LOCAL is handled inside withTenantTx (tested by pool structure).
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "node:http";
 import {
   registerReportPageRoutes,
   resetPoolForTesting,
   type ReportPageAuthzDeps,
-  type PageDepInput,
 } from "../http/report-pages.js";
 import { Router } from "../http/router.js";
 

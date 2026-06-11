@@ -1,0 +1,58 @@
+{
+  "task_id": "T-0178",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1926,
+    "passed": 1926,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "report_page_crud.test.ts AC-1/AC-2: create Floor-1 → 201, tier=draft (live-DB)", "result": "pass" },
+    { "ac": "AC-2",  "test": "report_page_crud.test.ts AC-1/AC-2: dep rows auto-derived from page_def (live-DB)", "result": "pass" },
+    { "ac": "AC-3",  "test": "report_page_agent_gate.test.ts AC-3 live: Floor-2 + deps[] body → 201, 2 dep rows verified (live-DB)", "result": "pass" },
+    { "ac": "AC-4",  "test": "report-pages.test.ts AC-4: bad field_key → 422 INVALID_DEP_FIELD (atomicity via mock)", "result": "pass" },
+    { "ac": "AC-5",  "test": "report-pages.test.ts AC-5: denyDeps → 403 NO_AUTHOR_GRANT", "result": "pass" },
+    { "ac": "AC-6",  "test": "report_page_crud.test.ts: GET by id → 200 full object (live-DB)", "result": "pass" },
+    { "ac": "AC-7",  "test": "report_page_crud.test.ts: GET by app_id → 200 {pages} (live-DB)", "result": "pass" },
+    { "ac": "AC-8",  "test": "report_page_crud.test.ts: PATCH draft title → 200, updated_at changed (live-DB)", "result": "pass" },
+    { "ac": "AC-9",  "test": "report_page_crud.test.ts: PATCH published → 409 PUBLISHED_LOCKED (live-DB)", "result": "pass" },
+    { "ac": "AC-10", "test": "report_page_crud.test.ts: Floor-1 PATCH page_def → old deps deleted, new deps re-derived atomically (live-DB)", "result": "pass" },
+    { "ac": "AC-11", "test": "report_page_crud.test.ts: DELETE → 204 + cascade + audit_event survives (live-DB)", "result": "pass" },
+    { "ac": "AC-12", "test": "report_page_agent_gate.test.ts AC-12: a-recon (kind=agent) → 403 FORBIDDEN_AGENT_SELF_PROMOTE + tier='draft' post-gate (live-DB)", "result": "pass" },
+    { "ac": "AC-13", "test": "report-pages.test.ts AC-13: denyPromoteDeps → 403 NO_PROMOTE_GRANT", "result": "pass" },
+    { "ac": "AC-14", "test": "report_page_crud.test.ts: stale dep → 409 STALE_DEPENDENCIES; tier unchanged (live-DB)", "result": "pass" },
+    { "ac": "AC-15", "test": "report_page_crud.test.ts: non-draft → 409 NOT_IN_DRAFT (live-DB)", "result": "pass" },
+    { "ac": "AC-16", "test": "report_page_crud.test.ts AC-16: promote success → tier=published + audit_event report_page.promoted (live-DB)", "result": "pass" },
+    { "ac": "AC-17", "test": "report_page_agent_gate.test.ts AC-17 live: floor=2 + Floor-1 page_def → 400 FLOOR_MISMATCH, strict toBe (live-DB)", "result": "pass" },
+    { "ac": "AC-18", "test": "report_page_crud.test.ts AC-18: audit events report_page.authored / report_page.promoted / report_page.deleted all present (live-DB)", "result": "pass" },
+    { "ac": "AC-19", "test": "report-page-crud-isolation.sh FF-NO-2ND-AUTHZ: 0 forbidden tokens (fitness static)", "result": "pass" },
+    { "ac": "AC-20", "test": "report-pages.test.ts AC-20: registerReportPageRoutes accepts injectable ReportPageAuthzDeps; no-DB test passes", "result": "pass" },
+    { "ac": "AC-21", "test": "tsc --noEmit: 0 errors", "result": "pass" },
+    { "ac": "AC-22", "test": "npm run fitness: report-page-crud-isolation.sh all checks PASS", "result": "pass" },
+    { "ac": "AC-23", "test": "report_page_crud.test.ts AC-23: create + promote end-to-end (genesis-owner) (live-DB)", "result": "pass" },
+    { "ac": "AC-24", "test": "report_page_crud.test.ts AC-24: promote blocked stale → stale cleared → promote success (live-DB)", "result": "pass" }
+  ],
+  "secondary_ux": [
+    {
+      "check": "fitness:db — 572/572 live-DB tests pass (0 failed)",
+      "result": "pass",
+      "note": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros; 39 test files, ~25s; includes report_page.test.ts (37), report_page_crud.test.ts (10), report_page_agent_gate.test.ts (3)"
+    },
+    {
+      "check": "Lint fix: unused imports `vi` + `PageDepInput` removed from src/__tests__/report-pages.test.ts",
+      "result": "pass",
+      "note": "Zero-semantics fix; test logic unchanged; 0 AC coverage affected"
+    },
+    {
+      "check": "eslint binary symlink fix in worktree node_modules/.bin/",
+      "result": "pass",
+      "note": "Non-symlink copy crashed with require('../package.json') MODULE_NOT_FOUND; restored symlink → ../eslint/bin/eslint.js, matching main choros tree"
+    },
+    {
+      "check": "T-0121d ADR coverage: §6–§9.4 (report_page CRUD + author/promote API)",
+      "result": "pass",
+      "note": "T-0121 ADR covered through T-0121d; T-0121e+ (bundle-coherence, MCP seed, Floor renderers) deferred to next slices"
+    }
+  ],
+  "failures": []
+}
