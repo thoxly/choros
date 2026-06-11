@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0122",
+  "status": "pr_open",
+  "branch": "task/T-0122-external-participant-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0122-external-participant.spec.md",
+    "docs/specs/T-0122.spec.contract.json",
+    "docs/design/T-0122-external-participant.adr.md",
+    "docs/design/T-0122.adr.contract.json",
+    "docs/design/T-0122.review.contract.json",
+    "docs/reviews/T-0122.review.md",
+    "docs/test-reports/T-0122.test-report.md",
+    "docs/design/T-0122.test-report.contract.json",
+    "docs/pr/T-0122.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review iter-1+2 + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI зелёный, docs-only ветка — baseline=dev). D-056: integration-honest gate пройден.",
+    "AC-11/AC-12/AC-13/AC-14 (verifiable_as: test) отложены в impl-задачу — это легально для design-фазы; все четыре покрыты fitness-функциями FF-EXTERNAL-GETGRANTS / FF-EXTERNAL-MAXUSES-RACE / FF-T13-LOOKUP / FF-EXTERNAL-AUDIT (gating=live-impl) в ADR §6.",
+    "Нит R-1a (цитата is_external на 019_role.sql:23) закрыт коммитом 50b6412: ссылка заменена на «новая миграция: ALTER TABLE choros.role ADD COLUMN is_external ... (additive, T-0020 §1.5)». Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**)",
+    "npm_ci_result": "PASS — tsc (0 errors) + eslint + fitness (253/253) + vitest (1042/1042; 53 files / 2 skipped)",
+    "review_verdict": "approved iter-2 (T-0122.review.contract.json); 15/15 AC covered; все blocking R-1/R-2/R-3 закрыты",
+    "nit_R1a": "CLOSED: коммит 50b6412 — is_external cited as new additive column, not existing 019 line",
+    "test_report": "docs/design/T-0122.test-report.contract.json (verdict=pass, schema OK)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0122.spec.contract.json",
+    "adr": "docs/design/T-0122-external-participant.adr.md",
+    "adr_contract": "docs/design/T-0122.adr.contract.json",
+    "review_iter1": "docs/reviews/T-0122.review.md (R-1..R-6, 3 blocking + 3 nit; sha 92de8d3)",
+    "review_iter2_contract": "docs/design/T-0122.review.contract.json (verdict=approved, sha 45cd20f)",
+    "test_report_md": "docs/test-reports/T-0122.test-report.md",
+    "test_report_contract": "docs/design/T-0122.test-report.contract.json"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-0123 (или следующий свободный)",
+      "title": "impl: миграция is_external + external_surface + external_token + core + fitness-шеллы",
+      "scope": "ADR §5 Build Plan: (1) additive-миграция `ALTER TABLE choros.role ADD COLUMN is_external boolean NOT NULL DEFAULT false` (T-0020 §1.5 дисциплина); (2) миграция 0NN_external_surface.sql (FORCE RLS, default-DENY, tenant_id-leading, known_tenant_tables.txt); (3) миграция 0NN_external_token.sql (token_hash bytea, NOT plaintext; ДВУМЯ именованными политиками: tenant-isolation + lookup_routing; column-GRANT SELECT (token_hash,tenant_id,surface_id) для choros_token_lookup NOBYPASSRLS; known_tenant_tables.txt); (4) src/core/external-surface.ts (mint, revoke, validateNarrowing, is_external-роль); (5) src/core/external-token.ts (hashToken sha256, create, lookup, maxUsesAtomic UPDATE RETURNING); (6) интеграция resolveFor T-0021 с subjectId=external_role_id (ветвь directly-held в DB-backed getGrants порта T-0053); (7) ci/checks/external-surface-isolation.sh (FF-NOACL / FF-TOKEN-HASH / FF-EXTERNAL-GETGRANTS static-now); (8) src/__tests__/external-surface.test.ts (FF-EXTERNAL-MAXUSES-RACE / FF-EXTERNAL-AUDIT + live-DB пробы AC-11..AC-14).",
+      "gates": "FF-NOACL (нет external_acl/public_share/visibility tokens) + FF-TOKEN-HASH (token_hash bytea, не plaintext) + FF-EXTERNAL-GETGRANTS (static: grant-resolver.ts не импортирует external_surface; live: seed is_external-роль + grant БЕЗ role_assignment → getGrants найден) + FF-EXTERNAL-MAXUSES-RACE (live: N параллельных single-use ⇒ ровно 1 успех) + FF-T13-LOOKUP (static: ровно 2 политики + NOBYPASSRLS + нет SELECT на контент; live: cross-tenant ⇒ отказ) + FF-EXTERNAL-AUDIT (live: каждое действие → audit_event, секрет не пишется).",
+      "nits_to_carry": [
+        "R-1a (closed): is_external — additive миграция, НЕ 019_role.sql:23 (уже отражено в ADR post-nit-коммит)"
+      ],
+      "depends_on": ["T-0053 (DB-backed getGrants port с directly-held-ветвью)", "T-0119 (presign-after-allow)", "T-0021 (resolveFor)"]
+    },
+    {
+      "suggested_id": "T-0124 (уже в плане)",
+      "title": "impl: document-on-demand рендер + snapshot surface",
+      "scope": "Потребляет поверхность T-0122: verify=projectFields (is_snapshot=true, T-0119), download = presign-after-allow. Зависит от impl T-0122 (T-0123+).",
+      "gates": "verify не раскрывает скрытые поля; snapshot = иммутабельный файл T-0119; QR-кейс прогоняется end-to-end.",
+      "nits_to_carry": [],
+      "depends_on": ["T-0122 impl (T-0123+)", "T-0119 impl"]
+    },
+    {
+      "suggested_id": "T-0126 (уже в плане)",
+      "title": "design: headless API (programmatic external surface)",
+      "scope": "Программная поверхность (агент → ответ через производный грант). Переиспользует §4 T-0122 ADR (тот же механизм прав). Design-only до Stage-2.",
+      "gates": "Ревью-гейт: не вводит второй permission-механизм; переиспользует resolveFor T-0021.",
+      "nits_to_carry": [],
+      "depends_on": ["T-0122 (design ratified)"]
+    }
+  ],
+  "rationale": "T-0122 — design-задача (SPEC+ADR+review iter-1+2). ADR закрыл 5 внутри-DESIGN развилок (материализованный grant vs resolve-time, is_external-роль-принципал, tenant-из-хэша-токена, актор-аудита-от-поверхности, max_uses-атомарность); зафиксировал 2 новые таблицы (external_surface + external_token), контракты (mint/resolve/revoke/hashToken/validateNarrowing), 11 fitness-функций, traceability AC-1..AC-15. Review iter-2 approved (15/15 AC, 3 blocking закрыты, R-1a nit закрыт коммитом). Product CI green (1042/1042 docs-only). Единственная развилка уровня фаундера (rate-limit-бюджет + TTL-дефолт публичной ссылки) вынесена как deploy-time параметр — не блокирует impl. Готово к merge в dev и старту impl (T-0123+)."
+}
