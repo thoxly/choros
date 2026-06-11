@@ -41,7 +41,7 @@
 
 ## 2. Object model (DDL бронируется, не выполняется)
 
-### 2.1 `choros.report_page` (migration 046) — T-0013-контракт
+### 2.1 `choros.report_page` (migration 046 — или следующий свободный ≥046 при материализации, см. §0) — T-0013-контракт
 
 | Колонка | Тип | Примечание |
 |---|---|---|
@@ -60,7 +60,7 @@
 
 PK `(tenant_id, id)`; `UNIQUE (tenant_id, app_id, slug)`. `CHECK`: Floor-1 ⇒ `page_def IS NOT NULL`, Floor-2 ⇒ `page_code IS NOT NULL` (`report_page_floor_payload_chk`). ENABLE+FORCE RLS; policy `report_page_tenant_isolation` USING/WITH CHECK на `current_setting('choros.tenant_id', true)::uuid`; `GRANT SELECT,INSERT,UPDATE,DELETE TO choros_app`; занесена в `ci/checks/known_tenant_tables.txt`.
 
-### 2.2 `choros.report_page_dep` (migration 047) — T-0013-контракт
+### 2.2 `choros.report_page_dep` (migration 047 — или следующий свободный ≥047 при материализации, см. §0) — T-0013-контракт
 
 | Колонка | Тип | Примечание |
 |---|---|---|
@@ -171,6 +171,8 @@ T-0121-impl обязан: (а) добавить `report_page_dep` в `bundle_mem
 
 ### 6.1 MCP-tool `author_report_page` (seed, паттерн T-0077) — AC-12
 Новый `choros.mcp_tool`- row (seed в той же migration-волне или отдельный slot, coder выбирает): `declares='[]'::jsonb`, `pure_compute=true`, `resource_ops='[{"resourceType":"authoring_draft","operation":"create"},{"resourceType":"authoring_draft","operation":"update"}]'::jsonb`.
+
+> **⚠ WARNING (урок T-0077 §2.3): seed `author_report_page` обязан идти в dev-тенант `a0000000-0000-0000-0000-000000000001`.** `resolveAgentToolset(tenantId)` ищет tools и grants строго в одном `tenantId` под RLS — строка в другом тенанте делает инструмент невидимым для config-агента (критический инвариант: тот же тенант, что migration 044 T-0077).
 - **Input-schema:** `{ app_id, slug, title, floor, page_def | page_code, deps?: [{registry_def_id, field_key, dep_kind}] }`.
 - **Назначение:** create/update `report_page` в `tier='draft'` + register/update `report_page_dep` (для Floor-1 deps выводятся из `page_def` автоматически; для Floor-2 берутся из `deps[]`).
 - **DRAFT-only (структурно):** config-агент имеет гранты только на `authoring_draft` (T-0077 §1) → `resolveAgentToolset` не выдаёт promote-tool. Promote — отдельный human-gated tool/UI (`promote_report_page` либо переиспользование existing promote-механизма T-0087). Агент **не может** self-promote (extensibility §4/§8 governance, ось B).
