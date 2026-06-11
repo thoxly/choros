@@ -96,13 +96,13 @@ describe('FF-2 (static): isGenesisOwner not hardcoded outside src/db/org.ts', ()
 // FF-5 / AC-19 (static): known_tenant_tables.txt length unchanged
 // ---------------------------------------------------------------------------
 describe('FF-5 / AC-19 (static): known_tenant_tables.txt unchanged', () => {
-  it('has exactly 21 entries (no new tenant table from T-0030)', () => {
+  it('has exactly 22 entries (no new tenant table beyond T-0041 egress_policy)', () => {
     const content = readFileSync(
       join(REPO_ROOT, 'ci', 'checks', 'known_tenant_tables.txt'),
       'utf8',
     );
     const lines = content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-    expect(lines.length, 'known_tenant_tables.txt must have exactly 21 entries').toBe(21);
+    expect(lines.length, 'known_tenant_tables.txt must have exactly 22 entries').toBe(22);
     expect(lines).toContain('grant');
     expect(lines).toContain('role_assignment');
   });
