@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0146",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:78-96",
+      "issue": "Ownership-capture bypass: editing a foreign ci/checks/*.sh AND rewriting its second line to '# T-<own-task> ·' (or DELETE+re-ADD same name with own header) yields exit 0 PASS, fully neutering the foreign invariant. Reproduced in isolated tmp git repos (PROBE 2/3). The script reads the owner header from the ON-DISK (post-edit) version, which the attacker controls, instead of from the BASE_REF version.",
+      "suggestion": "For files present in BASE_REF (diff-filter C/M/R/T), determine the owner T-ID from the BASE_REF version via `git show BASE_REF:path | sed -n '2p'` (as already done for deletes), NOT from the on-disk file. Rewriting the owner header of an existing foreign check then becomes a forbidden ownership change."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:35-41",
+      "issue": "Branch-name-spoof bypass: a branch named task/T-0044-anything sets TASK_ID=T-0044 and is then permitted to edit/gut the real T-0044 check (dual-control-isolation.sh) → exit 0 PASS. Reproduced (PROBE 5). TASK_ID derives solely from the agent-controlled branch name with no independent anchor. Not listed in spec Out-of-scope §7 nor ADR §7; the ADR/spec contain no 'erring-agent-not-adversary' threshold statement (grep confirmed).",
+      "suggestion": "Either (a) fixing R-1 via BASE_REF header already closes the edit-by-spoof path, or (b) explicitly accept this in ADR §7 with rationale (rely on reviewer seeing the header diff), which would downgrade it to nit. Currently undocumented => blocking."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/specs/T-0146-frozen-checks-immutable.spec.md:84",
+      "issue": "Destructive shrink of ci/checks/known_tenant_tables.txt (removing a registry line) passes (exit 0). Spec FR-6.2 promises 'additive edits' are fine but the gate ignores the .txt entirely, so destructive edits also pass.",
+      "suggestion": "Accepted by design (.txt is out of the *.sh glob, spec §7). Note as residual risk; no change required for this gate."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "package.json:13",
+      "issue": "Removing a foreign check's invocation from the fitness chain in package.json disables it as effectively as gutting it, and is not caught (out of ci/checks/*.sh glob).",
+      "suggestion": "Accepted by design (spec §7 scopes gate to ci/checks/*.sh). Candidate for a separate fitness-chain-integrity gate; not in this task's scope."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Integrity meta-gates must anchor ownership in something NOT controlled by the audited agent (BASE_REF header or control-plane claim). T-0146 proves both control-strings (branch name + file line 2) are agent-controlled => self-declaring ownership is trivially bypassable (PROBE 3/5). Candidate for ledgers/role-gaps.md.",
+    "The AC set itself is incomplete for the goal stated in spec §2 ('make CI-weakening visible before PR'): no AC covers header-rewrite or branch-spoof, so the spec under-specified the threat surface."
+  ]
+}
