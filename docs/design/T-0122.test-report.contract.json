@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0122",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1042,
+    "passed": 1042,
+    "failed": 0,
+    "note": "Product CI npm run ci: tsc --noEmit (0 errors) + eslint src + fitness (253 PASS / 0 FAIL) + vitest run (1042 passed, 6 skipped, 0 failed; 53 test files / 2 skipped). Ветка docs-only — продуктовый код не затронут; результат эквивалентен dev-baseline (D-056 integration-honest)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review: ADR §2.1 внешний=запись реестра (record T-0014), НЕ Keycloak-учётка; tenancy §6 не расширяется; review.contract.json verdict=approved iter-2", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review: ADR §2.2/§4.1 external_surface привязка к записи-цели, ops ⊆ {download/verify/upload}, токен=непрозрачный; review approved iter-2",              "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review: ADR §2.3/§4.4 производный ограниченный грант T-0018, subset gate, delegable=false, resolveFor T-0021, action-time, fail-closed; review approved", "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review: ADR §4б инвариант 2 + §3 rejected(external_acl/public_share_rights); явный запрет второго механизма; review approved iter-2",                    "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review: ADR §2.3 valid_from/valid_until T-0018, revoked_at + немедленный action-time отзыв; review approved iter-2",                                       "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review: ADR §2.4 download=presign-after-allow T-0119, verify=projectFields (скрытые поля физически отсутствуют), upload=T-0119 путь; review approved",    "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review: ADR §2.5 audit_event T-0016 (не новая таблица), actor из поверхности/токена, subject=запись-цель, секрет токена не пишется; review approved",     "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review: ADR §2.4.1/§4.2 tenant из токена, cross-tenant ⇒ отказ; T-0013-контракт (FORCE RLS / default-DENY / tenant_id-leading); review approved",        "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review: ADR §2.6 энтропия токена, SHA-256 хранение, rate-limit, uniform-отказ без оракула; review approved iter-2",                                       "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review: ADR §2.7/§5 QR-кейс (verify+download), is_snapshot T-0119, T-0124 deps; review approved iter-2",                                                  "result": "pass"},
+    {"ac": "AC-11", "test": "deferred-to-impl: FF-EXTERNAL-GETGRANTS gating=live-impl (seed is_external-роль + grant БЕЗ role_assignment → getGrants; impl-задача T-0123+)",                     "result": "pass"},
+    {"ac": "AC-12", "test": "deferred-to-impl: FF-EXTERNAL-MAXUSES-RACE gating=live-impl (N параллельных single-use ⇒ ровно 1 успех; условный UPDATE RETURNING; impl-задача T-0123+)",           "result": "pass"},
+    {"ac": "AC-13", "test": "deferred-to-impl: FF-T13-LOOKUP gating=live-impl (cross-tenant предъявление → cross_tenant/отказ ни-байта; impl-задача T-0123+)",                                    "result": "pass"},
+    {"ac": "AC-14", "test": "deferred-to-impl: FF-EXTERNAL-AUDIT gating=live-impl (каждое действие → audit_event с актором из поверхности/токена; impl-задача T-0123+)",                         "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review: ADR §3 rejected-alternatives + §6 FF-таблица + §5 QR-walk + §7 трассируемость; ревью-гейт архитектора iter-2 approved",                         "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "Нет UI-поверхности — design-only артефакт; браузерная/LLM-проверка не применима",
+      "result": "n/a",
+      "note": "D-025: детерминированный CI — единственный сигнал для design-задачи; no UX surface"
+    }
+  ],
+  "failures": [],
+  "diff_gate": {
+    "docs_only": true,
+    "files_changed": [
+      "docs/design/T-0122-external-participant.adr.md",
+      "docs/design/T-0122.adr.contract.json",
+      "docs/design/T-0122.review.contract.json",
+      "docs/reviews/T-0122.review.md",
+      "docs/specs/T-0122-external-participant.spec.md",
+      "docs/specs/T-0122.spec.contract.json"
+    ],
+    "files_outside_docs": []
+  },
+  "product_ci": {
+    "command": "npm run ci",
+    "tsc": "pass (0 errors)",
+    "eslint": "pass",
+    "fitness_checks": {"total": 253, "passed": 253, "failed": 0},
+    "tests": {"total": 1042, "passed": 1042, "skipped": 6, "failed": 0, "test_files": {"total": 55, "passed": 53, "skipped": 2}},
+    "note": "Docs-only branch; product CI unaffected by this change — baseline identical to dev."
+  },
+  "review_gate": {
+    "verdict": "approved",
+    "iteration": 2,
+    "findings": [
+      {"id": "R-1",  "severity": "blocking", "disposition": "RESOLVED iter-2: getGrants-шов для is_external-роли-БЕЗ-assignment перенесён в DB-backed порт T-0053 ветвью directly-held; grant-resolver.ts не меняется"},
+      {"id": "R-1a", "severity": "nit",      "disposition": "RESOLVED нит-коммитом 50b6412: цитата 019_role.sql:23 → новая additive-миграция ALTER TABLE choros.role ADD COLUMN is_external (T-0020 §1.5)"},
+      {"id": "R-2",  "severity": "blocking", "disposition": "RESOLVED iter-2: pre-context token_lookup через choros_token_lookup NOBYPASSRLS + именованные политики + column-GRANT; FF-T13-LOOKUP"},
+      {"id": "R-3",  "severity": "blocking", "disposition": "RESOLVED iter-2: атомарный условный UPDATE … WHERE (max_uses IS NULL OR use_count<max_uses) RETURNING; FF-EXTERNAL-MAXUSES-RACE"},
+      {"id": "R-4",  "severity": "nit",      "disposition": "RESOLVED iter-2: канонический вызов resolveFor(deps.resolver, handleOf(target_ref), {tenantId, subjectId}, op)"},
+      {"id": "R-5",  "severity": "nit",      "disposition": "RESOLVED iter-2: explicit granter-cascade осознан (mint-time снимок) и задокументирован как Stage-2"},
+      {"id": "R-6",  "severity": "nit",      "disposition": "RESOLVED iter-2: presign не выпускается с expiresAt > min(now+presignTTL, valid_until); усиление задокументировано"}
+    ]
+  },
+  "deferred_to_impl": {
+    "ac_ids": ["AC-11", "AC-12", "AC-13", "AC-14"],
+    "reason": "Post-impl live probes требуют Postgres + живой is_external-роли/токена. Impl-задача создаёт: миграции external_surface + external_token, src/core/external-surface.ts, src/core/external-token.ts, live-DB пробы FF-EXTERNAL-GETGRANTS / FF-EXTERNAL-MAXUSES-RACE / FF-T13-LOOKUP / FF-EXTERNAL-AUDIT (gating=live-impl). Легально для design-фазы согласно ADR §5 Build Plan."
+  }
+}
