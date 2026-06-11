@@ -149,6 +149,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // Tenant table: tenant_id = id (self-referential, migration 013).
     // RLS policy: row visible iff id = GUC. We must SET the GUC to the new id
     // so the WITH CHECK policy passes for the new row.
+    let insertConflict = false;
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -162,13 +163,39 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK");
-      client.release();
-      if (isConflict(err)) {
-        throw new HttpError(409, "CONFLICT", `tenant with slug '${slug}' already exists`);
+      if (!isConflict(err)) {
+        throw err;
       }
-      throw err;
+      insertConflict = true;
+    } finally {
+      client.release();
     }
-    client.release();
+
+    if (insertConflict) {
+      // R-6: On slug conflict, resolve the existing tenant UUID so the importer
+      // can obtain {id} from the 409 body without a separate slug-lookup GET
+      // (which would need the GUC the caller cannot know without the id first).
+      // The pool role (migrator: BYPASSRLS) can SELECT choros.tenant without GUC.
+      // Per T-0022 roadmap: when APP_DATABASE_URL splits the pool to choros_app
+      // this lookup will require a SECURITY DEFINER function.
+      const lookupClient = await pool.connect();
+      try {
+        const { rows } = await lookupClient.query<{ id: string; slug: string }>(
+          `SELECT id, slug FROM choros.tenant WHERE slug = $1 LIMIT 1`,
+          [slug],
+        );
+        if (rows.length > 0) {
+          res.statusCode = 409;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ id: rows[0].id, slug: rows[0].slug, code: "CONFLICT" }));
+          return;
+        }
+      } finally {
+        lookupClient.release();
+      }
+      // Fallback if lookup finds nothing (theoretical race — normal flow won't hit this)
+      throw new HttpError(409, "CONFLICT", `tenant with slug '${slug}' already exists`);
+    }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
@@ -590,7 +617,17 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   });
 
   // -------------------------------------------------------------------------
-  // GET /api/tenants/:slug — resolve tenant id by slug (used by importer)
+  // GET /api/tenants/:slug — resolve tenant id by slug (used by DB-probe tests)
+  //
+  // R-6 note: The importer (seed/importer.ts) no longer calls this endpoint —
+  // it reads the tenant UUID directly from the POST /api/tenants 201/409 body.
+  // This route is retained for test-side verification (seed-pack.test.ts).
+  //
+  // RLS discipline: SELECT executes on the pool connection without setting
+  // choros.tenant_id GUC. This is correct ONLY because the pool role is
+  // choros_migrator (BYPASSRLS superuser) in the current T-0140 architecture.
+  // When T-0022 splits the pool to choros_app (NOBYPASSRLS), this route will
+  // require a SECURITY DEFINER function to perform the slug→UUID lookup.
   // -------------------------------------------------------------------------
   router.register("GET", "/api/tenants/:slug", async (req, res, params) => {
     const slug = params["slug"] as string;

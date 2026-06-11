@@ -294,19 +294,24 @@ describe('R-1: DELETE endpoints scoped to target tenant_id in body', () => {
       expect(tenantRes.status).toBe(200);
       tenantId = (tenantRes.body as Record<string, string>)['id'];
 
-      // Get a real department id from the showcase tenant
-      const stateRes = await apiGet(`/api/org/tenant-state?tenant_id=${tenantId}`);
-      expect(stateRes.status).toBe(200);
-      const depts = (stateRes.body as { departments: Array<{ id: string; slug: string }> }).departments;
-      const firstDept = depts[0];
-      expect(firstDept, 'must have at least one department').toBeTruthy();
+      // Create a leaf department with no positions (safe to DELETE without FK cascade).
+      // The showcase pack departments (fin/cs/plat) all have positions referencing them
+      // so they cannot be deleted without first removing the positions — out of test scope.
+      const leafSlug = `r1-leaf-${uuid().slice(0, 8)}`;
+      const createR = await apiPost('/api/departments', {
+        tenant_id: tenantId,
+        slug: leafSlug,
+        display_name: 'R-1 leaf dept (no positions)',
+      });
+      expect(createR.status, 'leaf dept must be created').toBe(201);
+      const leafDeptId = (createR.body as Record<string, string>)['id'];
 
       // DELETE with wrong tenant_id (dev silo) → 404 (entity not in that tenant)
-      const wrongR = await apiDelete(`/api/departments/${firstDept.id}`, { tenant_id: DEV_TENANT });
+      const wrongR = await apiDelete(`/api/departments/${leafDeptId}`, { tenant_id: DEV_TENANT });
       expect(wrongR.status, 'R-1: DELETE with wrong tenant_id must return 404').toBe(404);
 
       // DELETE with correct tenant_id → 200
-      const correctR = await apiDelete(`/api/departments/${firstDept.id}`, { tenant_id: tenantId });
+      const correctR = await apiDelete(`/api/departments/${leafDeptId}`, { tenant_id: tenantId });
       expect(correctR.status, 'R-1: DELETE with correct tenant_id must return 200').toBe(200);
     } finally {
       if (tenantId) await cleanupTenant(tenantId);

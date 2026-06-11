@@ -301,28 +301,34 @@ export async function applyPack(opts: {
 
   // ---- tenant ----
   // FF-7: only LIVE_ENTITY_ORDER entities are processed here
+  //
+  // R-6: POST uses the caller-supplied tenantSlug (not pack.tenant.slug) so that
+  // the same pack can be applied under an arbitrary slug (e.g. per-test isolation).
+  // The tenant UUID is read directly from the POST 201 body {id, slug} or from
+  // the POST 409 body {id, slug, code} — no separate GET /api/tenants/:slug needed.
+  // This removes the slug-mismatch bug (pack slug vs caller slug) and eliminates
+  // the RLS-blind GET that blocked non-dev tenants (POST handler knows the id).
+  let tenantId: string;
   {
     const r = await httpPost(baseUrl, "/api/tenants", {
-      slug: pack.tenant.slug,
+      slug: tenantSlug,
       display_name: pack.tenant.display_name,
     }, devUser);
 
     if (r.status === 201) {
       summary.created["tenant"] = 1;
+      tenantId = (r.body as Record<string, string>)["id"];
     } else if (r.status === 409) {
       summary.skipped["tenant"] = 1;
+      // R-6: POST 409 body includes {id, slug, code} — read id directly.
+      tenantId = (r.body as Record<string, string>)["id"];
+      if (!tenantId) {
+        throw new Error(`[applyPack] POST /api/tenants → 409 but body missing 'id': ${JSON.stringify(r.body)}`);
+      }
     } else {
       throw new Error(`[applyPack] POST /api/tenants → ${r.status}: ${JSON.stringify(r.body)}`);
     }
-    // R-5: duplicate GET /api/tenants/:slug removed — single resolution below
   }
-
-  // Resolve tenant UUID for FK bodies (single resolution after POST/409, R-5)
-  const tenantRes = await httpGet(baseUrl, `/api/tenants/${tenantSlug}`, devUser);
-  if (tenantRes.status !== 200) {
-    throw new Error(`[applyPack] Cannot resolve tenant '${tenantSlug}': ${tenantRes.status}`);
-  }
-  const tenantId = (tenantRes.body as Record<string, string>)["id"];
 
   // ---- departments ----
   for (const dept of pack.departments) {
