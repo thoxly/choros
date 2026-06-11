@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0174",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1341,
+    "passed": 1341,
+    "failed": 0,
+    "skipped": 6
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1", "test": "notification-prefs.test.ts — T-0174 AC-1: notif.preference.changed audit wiring (5 source-contract assertions)", "result": "pass" },
+    { "ac": "AC-2", "test": "notification-e2e.test.ts — AC-2: publishNotificationEvent fanout with [in_app, email] → inAppCreated=1, outboxEnqueued=2", "result": "pass" },
+    { "ac": "AC-3", "test": "notification-e2e.test.ts — AC-3: full pipeline — publishNotificationEvent → runOutboxOnce → FakeSmtpSender", "result": "pass" },
+    { "ac": "AC-4", "test": "notification-e2e.test.ts — AC-4: immediate-dead — FailingSmtpSender(retryable=false) → email row dead=1", "result": "pass" },
+    { "ac": "AC-5", "test": "git diff --name-only confirms test+spec files only (no new production files)", "result": "pass" },
+    { "ac": "AC-6", "test": "tsc --noEmit exit 0; vitest 1341/1341 pass", "result": "pass" },
+    { "ac": "AC-7", "test": "npm run fitness — all shell checks green including notification-isolation, notification-email, notification-pref-isolation", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "FF-NO-DELIVERY-AUDIT structural: makeNotificationDeliver takes no audit writer", "result": "pass", "note": "notification-e2e.test.ts FF-NO-DELIVERY-AUDIT describe" },
+    { "check": "FF-AUDIT-CONFIG-ONLY: no appendAuditEvent in delivery path", "result": "pass", "note": "fitness grep + source-contract" },
+    { "check": "live fitness:db ×1 (DATABASE_URL probe)", "result": "pass", "note": "4/4 notification-e2e.test.ts with DATABASE_URL; test uses in-memory stores — DB not contacted" }
+  ],
+  "failures": [],
+  "nit_closed": [
+    {
+      "id": "N-1",
+      "location": "src/__tests__/notification-e2e.test.ts:291-302",
+      "fix": "Extracted emailDriverAC2 variable — single instance used for both key and value in AC-2 registry"
+    }
+  ]
+}

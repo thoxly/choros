@@ -288,17 +288,14 @@ describe("AC-2: publishNotificationEvent fanout with [in_app, email] → inAppCr
     const outboxStore = new InMemoryOutboxStore();
     const emailGateStore = new InMemoryEmailGateStore(true); // email enabled
 
+    const emailDriverAC2 = new EmailChannelDriver(
+      new InMemoryEmailConfigStore(VALID_EMAIL_CONFIG),
+      makeDirectStringSmtpResolver(),
+      new FakeSmtpSender(),
+    );
     const driverRegistry: ChannelRegistry = new Map([
       [inAppNoOpDriver.key, inAppNoOpDriver],
-      [new EmailChannelDriver(
-        new InMemoryEmailConfigStore(VALID_EMAIL_CONFIG),
-        makeDirectStringSmtpResolver(),
-        new FakeSmtpSender(),
-      ).key, new EmailChannelDriver(
-        new InMemoryEmailConfigStore(VALID_EMAIL_CONFIG),
-        makeDirectStringSmtpResolver(),
-        new FakeSmtpSender(),
-      )],
+      [emailDriverAC2.key, emailDriverAC2],
     ]);
 
     const deps: PublishNotificationDeps = {
