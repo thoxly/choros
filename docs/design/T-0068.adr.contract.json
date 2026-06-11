@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0068",
+  "status": "ready",
+  "decision": "Канонический writer appendAuditEvent(tx, input: AuditEventInput) в новом src/db/audit-writer.ts (Postgres-tx путь) поверх чистого src/core/audit-preimage.ts (детерминированный length-prefixed preimage + SHA-256, vocab=1, zero-dep node:crypto), принимающего AuditEventInput-форму T-0031 как единый канонический сток (grant-trail И lifecycle). Writer — порт AuditWriter: production пишет в Postgres внутри tx вызывающего (withTenant-tx: per-tenant audit_head FOR UPDATE → seq=head.seq+1/genesis → canonical preimage → row_hash → atomic audit_event INSERT + audit_head forward-advance), InMemoryAuditWriter (тот же интерфейс, чейн в памяти) обслуживает static-now unit-тесты (образец T-0032 In-Memory↔Postgres split). Чистый маппер src/core/lifecycle-audit.ts проецирует lifecycle-событие → AuditEventInput с hash-covered payload.actorType∈{human,agent,service} (ось employee.kind, проекция projectActorType, service=канал external-worker, НЕ новая колонка). makeAuditOnDispatched возвращает T-0067 OnDispatched-callback: task_completed/task_failed → ровно один append, worker_lock_expired/unknown → no-op; exactly-once опирается на T-0067 if(advanced). Server-wiring в src/server/lifecycle-bridge.ts (startLifecycleBridge), вызываемом из index.ts main-блока за env-флагом FLOWABLE_BASE_URL — без конфига деградирует no-throw (T-0067 AC-13/14), НЕ в createServer (тесты не стартуют loop). GuardContext-шов аддитивен: resolveFor уже принимает опциональные guardCtx/deps.sod — сигнатура не меняется, Postgres SoD-DAO остаётся T-0053. Новых таблиц/миграций нет (006/007 существуют, уже в known_tenant_tables) → AC-16/17 вакуумно зелёные.",
+  "rejected_alternatives": [
+    {"option": "Параллельный input-тип writer-а вместо AuditEventInput T-0031", "why_not": "Развилка стока: grant-trail и lifecycle потекли бы через разные формы → два preimage-пути, риск рассинхрона vocab. Запинено: единый канонический путь; AuditEventInput уже отражает писательские колонки (chain-колонки отсутствуют, их считает writer). Переиспользуем как контракт совместимости."},
+    {"option": "Writer открывает собственную транзакцию (BEGIN внутри)", "why_not": "Ломает атомарность с бизнес-эффектом вызывающего (T-0016 FR-4: append+head+бизнес-факт в одной tx, ROLLBACK откатывает всё). Writer обязан работать в tx вызывающего (enqueueInTx-паттерн T-0062: принимает client/tx, не pool)."},
+    {"option": "Глобальный SEQUENCE / bigserial / константный advisory-lock для seq", "why_not": "T-0016 NF-2/AC-4: per-tenant сериализация только через audit_head FOR UPDATE. Глобальный lock связал бы throughput всех тенантов в одну точку и сделал бы seq tenant-global. Запрещено fitness-линтом FF-2."},
+    {"option": "Таблица-зеркало состояния инстанса (process_instance)", "why_not": "CONCEPT §6: движок=чёрный ящик, Choros не дублирует машину состояний Flowable. instance_id — опаковый указатель в subject/payload, связь через job.idempotency_key=externalTask.id (T-0067 reverse-map). Новая таблица = лишняя миграция + known_tenant_tables без пользы (§2.4 спеки)."},
+    {"option": "Новая колонка actor_kind в employee", "why_not": "FR-2/§7: ось различения уже есть (employee.kind∈{human,agent}). service = agent-employee по каналу external-worker (via), не новая схема. Проекция kind→{human,agent,service} — правило в коде. Изменение employee-схемы = скоуп-крип + слом T-0017-инвариантов."},
+    {"option": "actorType в неканоническом (не-hash-covered) поле", "why_not": "AC-12: подмена типа актора должна детектироваться как tamper. actorType обязан входить в payload (покрыт preimage) → recompute row_hash ловит подмену. Колонка вне preimage была бы tamper-невидима."},
+    {"option": "Реализовать verifyAuditChain в T-0068", "why_not": "§5.3/forward: T-0068 строит writer, не верификатор (T-0053). Обязан лишь не нарушить verifier-инвариант (preimage детерминирован, chain dense) — покрыто golden-digest FF-3."},
+    {"option": "Живая инъекция Postgres SoD-DAO (deps.sod)", "why_not": "§2.3: Postgres SoD-DAO = T-0053 (until T-0053 lands deps.sod never injected in production). lifecycle-аудит НЕ зависит от активности SoD-гейта (пишется по факту доставки независимо от SoD-решения). T-0068 оставляет шов готовым (опциональный параметр), не строит DAO."},
+    {"option": "instance.completed/instance.cancel аудит", "why_not": "§5.1: REST T-0064 (FlowableClient) их не отдаёт (нет cancel/history/query). Выдумывать события движка нечестно. Forward-obligation E6.4 / расширение T-0064."}
+  ],
+  "object_model": [
+    {"entity": "AuditEventInput (импорт из src/core/audit-grant-encoder.ts, T-0031 — НЕ переопределяется)", "fields": [
+      {"name": "id", "type": "string (UUID)"},
+      {"name": "type", "type": "string — 'instance.started'|'task.completed'|'task.failed'|'grant.create'|…"},
+      {"name": "actor", "type": "string — slug employee | worker-id"},
+      {"name": "subject", "type": "string | null — для lifecycle = processInstanceId"},
+      {"name": "scope", "type": "unknown | null — ScopeElement; JCS — забота preimage"},
+      {"name": "via", "type": "string | null — канал 'engine'|'external-worker'|'user-task'"},
+      {"name": "proposed_by", "type": "string | null"},
+      {"name": "confirmed_by", "type": "string | null"},
+      {"name": "payload", "type": "unknown — несёт actorType (hash-covered) для lifecycle"},
+      {"name": "occurred_at", "type": "number (epoch-ms, < 2^53)"}
+    ]},
+    {"entity": "AuditWriter (порт, src/db/audit-writer.ts)", "fields": [
+      {"name": "appendAuditEvent(tx: PgClientLike, input: AuditEventInput)", "type": "Promise<{seq:number; rowHash:Buffer}> — в tx вызывающего, не открывает BEGIN"},
+      {"name": "makePgAuditWriter()", "type": "AuditWriter — production Postgres"},
+      {"name": "InMemoryAuditWriter", "type": "class implements AuditWriter — чейн в памяти для static-now тестов; те же preimage/seq/prev_hash инварианты"}
+    ]},
+    {"entity": "canonicalPreimage (src/core/audit-preimage.ts, чистый, zero-dep)", "fields": [
+      {"name": "field order (vocab=1)", "type": "tenant_id,seq,id,type,actor,subject,scope,via,proposed_by,confirmed_by,payload,occurred_at,prev_hash,vocab_version (row_hash — выход, не в preimage)"},
+      {"name": "encoding", "type": "каждое поле length-prefixed (4-байт BE uint32 длины + байты); uuid=16 raw BE; bigint=8 BE; smallint=2 BE; text=UTF-8 (NULL=сентинел 0xFFFFFFFF≠empty); jsonb=JCS/RFC8785 UTF-8 (NULL=0xFFFFFFFF); bytea(prev_hash)=raw 32"},
+      {"name": "hash / genesis", "type": "row_hash=SHA-256(preimage) 32B; GENESIS_PREV_HASH=Buffer.alloc(32,0); GENESIS_SEQ=1 — все часть vocab_version=1"}
+    ]},
+    {"entity": "LifecycleAuditInput → encodeLifecycleAuditEvent (src/core/lifecycle-audit.ts, чистый)", "fields": [
+      {"name": "kind", "type": "'instance.started'|'task.completed'|'task.failed'"},
+      {"name": "instanceId", "type": "string | null — processInstanceId (указатель, не дубль)"},
+      {"name": "jobId / aggregateId", "type": "string — T-0067 reverse-map ref (для task.*)"},
+      {"name": "actor / actorType", "type": "string / 'human'|'agent'|'service' (hash-covered в payload)"},
+      {"name": "via", "type": "string | null — 'engine' (started) | 'external-worker' (task.*)"}
+    ]},
+    {"entity": "projectActorType (src/core/lifecycle-audit.ts, чистая проекция FR-2/§7)", "fields": [
+      {"name": "(kind: 'human'|'agent', channel)", "type": "→ ActorType: human⟸kind=human; agent⟸kind=agent под agent-runtime; service⟸kind=agent под external-worker (s-ledger/s-ocr/control-plane). Схема employee не меняется."}
+    ]},
+    {"entity": "makeAuditOnDispatched (мост T-0067 шва)", "fields": [
+      {"name": "deps", "type": "{writer:AuditWriter; withTenantTx; resolveActor(row)→{actor,actorType}; now?}"},
+      {"name": "returns", "type": "OnDispatched ((row:OutboxRow)=>Promise<void>); task_completed→task.completed, task_failed→task.failed (1 append), worker_lock_expired/unknown→no-op; exactly-once via T-0067 if(advanced)"}
+    ]},
+    {"entity": "startLifecycleBridge (src/server/lifecycle-bridge.ts, FR-8)", "fields": [
+      {"name": "(deps, env?)", "type": "LifecycleBridgeHandle {stop()}; читает FLOWABLE_BASE_URL — без конфига no-op handle (degraded, no-throw); вызывается из index.ts main-блока, НЕ в createServer"}
+    ]},
+    {"entity": "buildLifecycleGuardCtx → GuardContext (FR-7, аддитивно)", "fields": [
+      {"name": "GuardContext", "type": "{actor; onBehalfOf?; roleAtEvent; verb:'transition'|'approve'; approveLevel?} — resolveFor уже принимает guardCtx?/deps.sod? опционально; сигнатура НЕ меняется; без deps.sod = pre-T-0032; Postgres SoD-DAO остаётся T-0053"}
+    ]}
+  ],
+  "contracts": [
+    "interface AuditWriter { appendAuditEvent(tx: PgClientLike, input: AuditEventInput): Promise<{seq:number; rowHash:Buffer}> }  — единственный санкционированный путь записи в audit_event/audit_head (T-0016 §4.4); работает в tx вызывающего (enqueueInTx-паттерн).",
+    "function canonicalPreimage(row): Buffer  — vocab=1: фикс field-order, length-prefixed (uuid16/bigint8/smallint2 BE, text UTF-8 c NULL-сентинелом 0xFFFFFFFF≠empty, jsonb через JCS/RFC8785, bytea raw); row_hash=SHA-256(preimage); GENESIS_PREV_HASH=32×0x00, GENESIS_SEQ=1.",
+    "function encodeLifecycleAuditEvent(e: LifecycleAuditInput, nowMs: number, idOverride?: string): AuditEventInput  — чистый, образец encodeGrantAuditEvent; payload несёт hash-covered actorType + instanceId + aggregateId/jobId.",
+    "function projectActorType(kind: 'human'|'agent', channel): 'human'|'agent'|'service'  — множество ровно = AuditEvent.type в src/http/audit.ts; employee.kind схема не меняется.",
+    "function makeAuditOnDispatched(deps): OnDispatched  — T-0067 callback; task_completed/task_failed → 1 append; worker_lock_expired/unknown → 0; exactly-once опирается на outboxDispatcher if(advanced).",
+    "function startLifecycleBridge(deps, env?): {stop:()=>void}  — за FLOWABLE_BASE_URL; degraded no-throw без конфига; вызывается из index.ts main-блока, не из createServer.",
+    "resolveFor(deps, handle, subject, op, invokeCtx?, guardCtx?)  — сигнатура НЕ меняется; T-0068 добавляет buildLifecycleGuardCtx (чистый) + опциональная инъекция deps.sod готова для T-0053 (без неё = pre-T-0032 grant-only).",
+    "AuditEventInput остаётся экспортирован из src/core/audit-grant-encoder.ts (контракт совместимости FE-W23-0008: импортёры = T-0031 тесты, T-0030 grants.ts при мерже)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Writer пишет genesis-якорь (seq=1, prev_hash=32×0x00) и плотную +1 цепь (prev_hash[n]=row_hash[n-1]); append audit_event + advance audit_head атомарны (ROLLBACK откатывает обе записи).", "ci_check": "vitest run live-DB ci/checks/db/audit-writer.chain.test.ts против isolated Postgres; gated job fitness:db (AC-1/2/5)."},
+    {"id": "FF-2", "rule": "Writer НЕ использует глобальный SEQUENCE/bigserial/nextval/константный pg_advisory_lock для audit seq; использует audit_head FOR UPDATE per tenant.", "ci_check": "новый ci/checks/audit_no_global_seq.sh (образец actor_event_no_global_seq.sh): grep src/db/audit-writer.ts — присутствует 'FOR UPDATE' на audit_head, отсутствуют nextval/CREATE SEQUENCE.*audit/pg_advisory.*\\([0-9] (AC-4 static)."},
+    {"id": "FF-2b", "rule": "N конкурентных appendAuditEvent в тенант-A → N плотных различных seq (нет дубля/пропуска); append в A и B не блокируют друг друга.", "ci_check": "vitest run live-DB concurrency-тест; gated fitness:db (AC-4 live)."},
+    {"id": "FF-3", "rule": "canonicalPreimage детерминирован, length-unambiguous (NULL≠empty; переставленные ключи jsonb → идентичный preimage через JCS), SHA256(preimage)==pinned golden hex digest (vocab=1); изменение поля/порядка/кодировки флипает golden → красный (форсит bump vocab_version).", "ci_check": "vitest run unit src/__tests__/audit-preimage.test.ts: golden-digest assertion + permuted-keys-equal + null-vs-empty-differs (AC-3)."},
+    {"id": "FF-4", "rule": "audit_append_only.sh (T-0016) остаётся зелёным: writer не добавляет GRANT UPDATE/DELETE и не делает UPDATE/DELETE на audit_event; триггеры 006/007 не тронуты.", "ci_check": "существующий ci/checks/audit_append_only.sh (без изменений) + grep-линт: src/db/audit-writer.ts не содержит 'UPDATE choros.audit_event'/'DELETE FROM choros.audit_event' (AC-6)."},
+    {"id": "FF-5", "rule": "auditOnDispatched(task_completed/task_failed) → ровно 1 append с instance/job-указателем (aggregateId); worker_lock_expired/unknown → 0 append; повторный dispatcher-проход (already dispatched) → 0 доп. append (exactly-once via T-0067 if(advanced)).", "ci_check": "vitest run unit src/__tests__/lifecycle-audit.test.ts с InMemoryAuditWriter + spy append-count + двойной прогон outboxDispatcher (AC-8/9/10)."},
+    {"id": "FF-6", "rule": "Успешный startInstance → ровно 1 append type='instance.started', subject=processInstanceId, payload.instanceId=processInstanceId.", "ci_check": "vitest run unit (in-memory writer + обёртка startInstance-аудита) (AC-7)."},
+    {"id": "FF-7", "rule": "human/agent/service различимы в payload.actorType; изменение payload.actorType в фикстуре меняет recomputed row_hash (hash-covered, tamper-detectable).", "ci_check": "vitest run unit: projectActorType 3 значения + recompute-hash-differs при подмене actorType (AC-11/12)."},
+    {"id": "FF-8", "rule": "Проекция kind→actorType даёт значения ровно из множества AuditEvent.type ('human'|'agent'|'service') в src/http/audit.ts; схема employee не меняется (kind остаётся {human,agent}).", "ci_check": "новый ci/checks/audit_actor_type_set.sh: grep union projectActorType ⊆ {human,agent,service}; src/http/audit.ts содержит ту же тройку; миграция 016 CHECK остаётся ('human','agent') (AC-13)."},
+    {"id": "FF-9", "rule": "Композиционный корень регистрирует startBridgePollLoop с onDispatched=auditOnDispatched и lifecycle-аудит на startInstance; без FLOWABLE_BASE_URL сервер стартует (loop no-throw, poll-ошибки глотаются), createServer/импорт server НЕ стартует loop.", "ci_check": "vitest run unit src/__tests__/lifecycle-bridge.test.ts: startLifecycleBridge({},{}) без env → no-throw, stop() идемпотентен; grep-линт: createServer body не зовёт startBridgePollLoop (AC-14, NF-5)."},
+    {"id": "FF-10", "rule": "resolveFor с guardCtx но без deps.sod → решение идентично pre-T-0032 (нет sod_violation); сигнатура resolveFor не изменена (опциональный deps.sod готов для T-0053).", "ci_check": "vitest run unit (resolveFor с guardCtx без sod → grant-only) + grep-линт: сигнатура resolveFor(deps,handle,subject,op,invokeCtx?,guardCtx?) не тронута (AC-15)."},
+    {"id": "FF-11", "rule": "audit-preimage.ts и lifecycle-audit.ts чистые (no import pg/http/https/net/child_process/fetch); writer — единственный модуль с SQL на audit_event/audit_head вне миграций.", "ci_check": "новый ci/checks/audit_writer_isolation.sh (образец grant-resolver-isolation.sh): grep импортов core-модулей + grep audit_event/audit_head SQL только в src/db/audit-writer.ts и migrations/."},
+    {"id": "FF-12", "rule": "Нет новых таблиц/миграций (вакуумно AC-16/17); если появятся — миграция ≥031 идемпотентна, таблица в known_tenant_tables.txt + cross_tenant case. AuditEventInput остаётся экспортирован из audit-grant-encoder.ts (импортёры T-0031/T-0030).", "ci_check": "существующий ci/checks/cross-tenant-fitness.sh + grep-линт: 'export type AuditEventInput' присутствует в src/core/audit-grant-encoder.ts (AC-16/17 + контракт совместимости)."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.2 алгоритм шаг 2/4 (genesis-якорь); FF-1 live-DB"},
+    {"ac": "AC-2", "covered_by": "§4.2 шаг 2-4 (плотная +1 цепь, prev=row_hash[n-1]); FF-1"},
+    {"ac": "AC-3", "covered_by": "§4.3 (пере-пиннен preimage+JCS+vocab=1+golden); FF-3"},
+    {"ac": "AC-4", "covered_by": "§4.2 шаг 1 + concurrency-нюанс (FOR UPDATE per tenant); FF-2 static + FF-2b live"},
+    {"ac": "AC-5", "covered_by": "§4.2 шаг 4 (одна tx вызывающего, ROLLBACK откатывает обе); FF-1"},
+    {"ac": "AC-6", "covered_by": "§4.9 (триггеры/grant 006/007 не тронуты); FF-4"},
+    {"ac": "AC-7", "covered_by": "§4.4/§4.8 (обёртка startInstance → instance.started); FF-6"},
+    {"ac": "AC-8", "covered_by": "§4.6 makeAuditOnDispatched (task.completed/failed → 1 append); FF-5"},
+    {"ac": "AC-9", "covered_by": "§4.6 no-op branch (worker_lock_expired/unknown → 0); FF-5"},
+    {"ac": "AC-10", "covered_by": "§4.6 опора на T-0067 if(advanced); FF-5 двойной прогон"},
+    {"ac": "AC-11", "covered_by": "§4.5 projectActorType (human/agent/service); FF-7"},
+    {"ac": "AC-12", "covered_by": "§4.4 (actorType в payload) + §4.3 (payload в preimage → hash-covered); FF-7"},
+    {"ac": "AC-13", "covered_by": "§4.5 (множество = audit.ts type, employee не меняется); FF-8"},
+    {"ac": "AC-14", "covered_by": "§4.8 startLifecycleBridge (degraded no-throw без env); FF-9"},
+    {"ac": "AC-15", "covered_by": "§4.7 (resolveFor сигнатура не тронута, fail-open без sod); FF-10"},
+    {"ac": "AC-16", "covered_by": "§4.9 (нет новых миграций → вакуумно; если есть → ≥031 идемпотентна); FF-12"},
+    {"ac": "AC-17", "covered_by": "§4.9 (нет новой таблицы → вакуумно); FF-12"}
+  ],
+  "runtime_target": "контейнер/сервер (как весь Choros, T-0053 single-Postgres substrate). Writer+lifecycle-аудит в Node-процессе Choros рядом с Flowable+Postgres. Static-now (unit + grep-линты) в npm run ci без БД; live-DB пробы (FF-1/FF-2b) против isolated Postgres (fitness:db), gated при наличии БД. Внешний ресурс не требуется (006/007 уже есть, новых таблиц нет). Provision/deploy — существующий гейт фаундера GT-4, не меняется.",
+  "adr_artifact_path": "docs/design/T-0068-instance-lifecycle.adr.md",
+  "escalation": ""
+}

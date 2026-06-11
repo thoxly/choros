@@ -1,0 +1,122 @@
+{
+  "task_id": "T-0068",
+  "status": "pr_open",
+  "branch": "task/T-0068-instance-lifecycle",
+  "pr_url": "local-merge:dev (no remote PR, D-053)",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/audit_actor_type_set.sh",
+    "ci/checks/audit_no_global_seq.sh",
+    "ci/checks/audit_writer_isolation.sh",
+    "ci/checks/db/audit-writer.chain.test.ts",
+    "ci/checks/lifecycle_bridge_wiring.sh",
+    "docs/design/T-0068-instance-lifecycle.adr.md",
+    "docs/design/T-0068.adr.contract.json",
+    "docs/reviews/T-0068.review.json",
+    "docs/specs/T-0068-instance-lifecycle.spec.md",
+    "docs/specs/T-0068.spec.contract.json",
+    "docs/test-reports/T-0068.test-report.json",
+    "package.json",
+    "src/__tests__/audit-preimage.test.ts",
+    "src/__tests__/lifecycle-audit.test.ts",
+    "src/__tests__/lifecycle-bridge.test.ts",
+    "src/__tests__/lifecycle-guard.test.ts",
+    "src/__tests__/main-wired-entry.test.ts",
+    "src/core/audit-preimage.ts",
+    "src/core/lifecycle-audit.ts",
+    "src/core/lifecycle-guard.ts",
+    "src/core/outboxDispatcher.ts",
+    "src/db/audit-writer.ts",
+    "src/http/grants.ts",
+    "src/index.ts",
+    "src/main.ts",
+    "src/server/lifecycle-bridge.ts"
+  ],
+  "deviations_from_adr": [
+    "BUILD-genesis-seed-head: seed-head from genesis tenant (rather than a blank-slate append) was already present in the isolated DB — test harness adapted. No schema change; product invariants unaffected.",
+    "BUILD-verb-mapping: ADR §4.7 initially listed verb='transition' as in ActorEventVerb set; reviewer (R-3) confirmed this was an ADR mis-spec — architect issued doc-fix (§4.7 now reads verb ∈ ActorEventVerb with explicit correction note). Implementation follows corrected ADR; no product deviation."
+  ],
+  "friction_events": [
+    "FE-T0068-R1: R-1 changes_requested (round 1) — lifecycle audit runtime path dead in prod: dep-less startLifecycleBridge() + void-ed onDispatched. Root cause: ADR §4.8 mis-specified onDispatched on startBridgePollLoop; coder followed the mis-spec and voided the callback. Fix: extract composition root to src/main.ts; startLifecycleBridge starts BOTH loops (startBridgePollLoop + startOutboxDispatcherLoop) with onDispatched=buildAuditOnDispatched(...) live-wired; startOutboxDispatcherLoop created in src/core/outboxDispatcher.ts; ADR §4.8 doc-fixed by architect. Resolved in BUILD-fix commit 91b2763.",
+    "FE-T0068-R2: R-2 dual-writer conflict — grants.ts carried local partial/non-JCS SHA-256 chain math (createHash + manual seq/prev_hash/row_hash + audit_head upsert) alongside T-0068 canonical writer on same vocab=1 tables. Root cause: T-0030 grants.ts was not updated to route through the new canonical sink. Fix: local chain math deleted from grants.ts; now routes through makePgAuditWriter() canonical sink; audit_writer_isolation.sh fitness check enforces single-sink chokepoint. Resolved in BUILD-fix commit 91b2763.",
+    "FE-T0068-E2E-false-fail: First live-e2e runner pass mis-reported 'found 9 task.completed rows' — authoritative psql + independent verifier confirmed exactly 1 task.completed row (exactly-once held, chain dense). Miscount was a throwaway-script read-path artifact, not a product defect. Anti-false-fail discipline applied per role rule 3 (C-004).",
+    "FE-T0068-live-e2e-CI-gap: Live Flowable+Postgres e2e is run manually via isolated compose (same class as T-0067 bridge-e2e-smoke gap). Runtime task.completed path IS covered automatically in CI by main-wired-entry.test.ts (in-memory leaves, mutation-proven). Classified tooling-gap, not product defect; carry to T-0053/CI forward-obligation."
+  ],
+  "merge_target": "dev",
+  "merge_base": "91f991e",
+  "merge_policy": "auto-merge D-053 (orchestrator rebases task/T-0068-instance-lifecycle onto current dev HEAD before merge; no PR on GitHub per dispatch constraint)",
+  "migrations": "none — T-0068 adds no new migrations. Existing 006/007 (audit_event/audit_head append-only + head-advance triggers) and 016/018/024 (actor/scope constraints) already live. 30 migrations applied total (AC-16 idempotency confirmed ×2 against isolated Postgres).",
+  "promote_guide_GT3": {
+    "what_is_new": "Canonical audit writer + instance lifecycle (E6.3): single-sink appendAuditEvent(tx, input) in src/db/audit-writer.ts writes the hash-chained audit_event/audit_head per T-0016 contract; lifecycle mapper encodes task.completed/task.failed/instance.started → AuditEventInput with hash-covered actorType∈{human,agent,service}; bridge wiring (src/server/lifecycle-bridge.ts + src/main.ts composition root) closes the T-0067 onDispatched seam so every Flowable task delivery lands a durable audit row. grants.ts now routes through the same canonical sink (single preimage, single chain, dual-writer conflict resolved).",
+    "how_to_verify_audit_chain": [
+      "1. Start compose stack: docker compose up -d postgres flowable",
+      "2. Run migrations: node migrations/run.mjs",
+      "3. Build: npm run build",
+      "4. Start server: DATABASE_URL=... FLOWABLE_BASE_URL=... node dist/index.js",
+      "5. Trigger a task cycle (deploy BPMN, start instance, complete external task via worker API)",
+      "6. Verify chain integrity: SELECT seq, row_hash, prev_hash FROM choros.audit_event WHERE tenant_id='<id>' ORDER BY seq — confirm prev_hash[n] = row_hash[n-1], seq=1 has prev_hash=32×0x00 (genesis anchor)",
+      "7. Canonical recompute check: rerun canonicalPreimage(row) → SHA-256 → compare to stored row_hash — must match (tamper-detect on any field incl. payload.actorType)",
+      "8. Full CI gate (no Flowable needed): npm run ci — 801 tests pass, 4 T-0068 static fitness checks green"
+    ],
+    "how_to_start_lifecycle_bridge": [
+      "Set environment vars: DATABASE_URL, FLOWABLE_BASE_URL, BRIDGE_TOPICS, BRIDGE_WORKER_ID, BRIDGE_TENANT_ID (or auto-resolved from genesis tenant)",
+      "Start via node dist/index.js (startMain composition root wires startLifecycleBridge automatically)",
+      "startLifecycleBridge starts: (a) startBridgePollLoop — polls Flowable fetchAndLock per topic, enqueues to pgJobStore; (b) startOutboxDispatcherLoop — drains outbox, delivers to Flowable completeTask/failTask, fires onDispatched=buildAuditOnDispatched → appendAuditEvent per delivery",
+      "Without FLOWABLE_BASE_URL: server starts cleanly, bridge degrades to no-op handle (no throw) — safe for non-Flowable environments"
+    ],
+    "key_env_vars": {
+      "DATABASE_URL": "postgres://choros_migrator:<pw>@localhost:5432/choros — required for pool/writer",
+      "FLOWABLE_BASE_URL": "http://localhost:8080 (dev default) — required to activate lifecycle bridge loops",
+      "FLOWABLE_REST_APP_ADMIN_PASSWORD": "required for Flowable REST auth",
+      "BRIDGE_TOPICS": "comma-separated topic strings (e.g. 'ledger-task,ocr-task')",
+      "BRIDGE_WORKER_ID": "worker identity passed to Flowable fetchAndLock (e.g. 's-ledger')",
+      "BRIDGE_TENANT_ID": "UUID of tenant; auto-resolved from Postgres genesis tenant if not set"
+    },
+    "hash_chain_invariants": {
+      "genesis_anchor": "seq=1, prev_hash=Buffer.alloc(32,0) (32×0x00); GENESIS_PREV_HASH constant",
+      "dense_chain": "prev_hash[n] = row_hash[n-1] for all n>1; no gaps/duplicates within tenant",
+      "canonical_preimage_vocab_1": "field order (vocab=1): tenant_id,seq,id,type,actor,subject,scope,via,proposed_by,confirmed_by,payload,occurred_at,prev_hash,vocab_version; encoding: uuid=16B raw BE, bigint=8B BE, smallint=2B BE, text=UTF-8 NULL-sentinel=0xFFFFFFFF≠empty, jsonb=JCS/RFC8785 UTF-8, bytea=raw 32; row_hash=SHA-256(preimage)",
+      "tamper_detection": "changing any field (incl. payload.actorType) causes recomputed row_hash to diverge from stored value — detected by chain verifier",
+      "append_only": "UPDATE/DELETE on audit_event rejected: choros_app (GRANT=SELECT,INSERT only) + migrator (trigger 006 'append-only'); audit_head in-place tamper rejected by trigger 007 ('seq must advance by exactly +1')"
+    },
+    "forward_obligations": {
+      "T-0053_verifyAuditChain": "Implement verifyAuditChain(tenantId, pool): walk the full chain per tenant, recompute canonicalPreimage for each row, verify row_hash matches and prev_hash links. T-0068 guarantees writer side is correct; T-0053 builds the verifier. Also owns: Postgres SoD-DAO (deps.sod injection, currently shimmed as optional/undefined in resolveFor); resolver-filter for semi-confirmed grants from T-0044 line.",
+      "prod_route_start_instance": "src/server/lifecycle-bridge.ts auditInstanceStarted wrapper is wired and unit-tested (AC-7); it has NO upstream production caller yet. The prod HTTP route 'start instance' must call auditInstanceStarted(deps, instanceId, actor, actorType) inside its withTenant tx when ok:true (ADR §4.4 forward-obligation). This is the T-0068 instance.started honest seam — not a defect.",
+      "live_e2e_in_CI": "Add Flowable+Postgres live e2e (class T-0067 bridge-e2e-smoke) to .github/workflows CI for the task.completed/task.failed audit path. Currently covered in CI by main-wired-entry.test.ts (in-memory leaves, mutation-proven); live-stack run is supplementary manual gate. Same gap as T-0067 FE-T0067-0001 — should be closed for T-0053/T-0068 class.",
+      "SQ11_GUC_interpolation": "SET LOCAL GUC tenant-id is string-interpolated (escaped with replace) in lifecycle-bridge.ts:154 and grants.ts with assertUuidShape guard — no T-0068 regression, but the pattern (vs. set_config($1,...,true) with bind param) is a class-level security normalization candidate for security-reviewer (noted in review role_gap_evidence SQ11)."
+    }
+  },
+  "verdict_payload": {
+    "review_verdict": "approved",
+    "review_round": 2,
+    "review_commit": "1a7dd54",
+    "review_findings_all_closed": true,
+    "test_verdict": "pass",
+    "test_commit": "b396fe7",
+    "ac_coverage": 17,
+    "ac_passed": 17,
+    "deterministic_tests": {
+      "total": 1124,
+      "passed": 1119,
+      "failed": 0,
+      "skipped": 5
+    },
+    "ci_detail": {
+      "tsc_noEmit": "exit 0",
+      "eslint_src": "exit 0 (2 pre-existing no-console warns in externalTaskBridge.ts, 0 errors)",
+      "fitness_static": "exit 0 — 4 T-0068 checks green: audit_no_global_seq, audit_actor_type_set, audit_writer_isolation (single-sink chokepoint, negative-proved), lifecycle_bridge_wiring; plus rebased T-0030 grant-editor checks",
+      "vitest_run": "801 passed | 5 skipped (42 files); 0 regressions; main-wired-entry.test.ts mutation-proven",
+      "fitness_db": "318/318 pass ×2 runs (isolated Postgres POSTGRES_PORT=55489, torn down -v); migrations ×2 idempotent (30 files, no 031)"
+    },
+    "live_e2e": {
+      "stack": "Isolated docker compose: Postgres 16 (POSTGRES_PORT=55489) + Flowable 7.1.0 (FLOWABLE_PORT=18089), torn down -v after run",
+      "result": "REAL task.completed row in audit_event (seq=7, actor=s-ledger, actorType=service); canonical recompute matches; chain dense 1..7 from genesis; exactly-once on re-dispatch; 4 adversarial probes pass (append-only, head-tamper, parallel exactly-once, supra-BMP/emoji-key JCS determinism)"
+    }
+  }
+}

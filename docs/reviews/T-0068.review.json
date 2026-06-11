@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0068",
+  "verdict": "approved",
+  "review_round": 2,
+  "review_note": "Re-review of fix commit 91b2763 (rebased onto dev 91f991e) against the prior changes_requested verdict (R-1 dead prod-wiring; dual-writer conflict with grants.ts). All four prior findings closed and verified by substance, not by trusting the BUILD claim: R-1 live-wiring proven via mutation (removing onDispatched from the composition reddens the wired-entry test), the dual-writer is chokepointed (negative isolation test proven), and the gate re-run independently green incl. an isolated Postgres.",
+  "ci_seen": {
+    "green": true
+  },
+  "ci_detail": {
+    "tsc": "exit 0 (tsc --noEmit)",
+    "eslint": "exit 0 (eslint src)",
+    "fitness_static": "exit 0 — full fitness chain green incl. the 4 T-0068 checks (audit_no_global_seq, audit_actor_type_set, audit_writer_isolation, lifecycle_bridge_wiring) AND the rebased grant-editor checks (grant-editor-isolation, grant-trail-no-new-table) — chain unioned correctly post-rebase.",
+    "vitest": "801 pass | 5 skipped (42 files) — incl. main-wired-entry(1, NEW), audit-preimage(11, +R-4 non-ASCII/supra-BMP fixture), lifecycle-audit(13), lifecycle-bridge(3), lifecycle-guard(4), outboxDispatcher(7); 0 regressions. npm run ci (no DATABASE_URL) re-run by reviewer → exit 0.",
+    "fitness_db": "isolated Postgres POSTGRES_PORT=55488 / POSTGRES_USER=choros_migrator (own volume choros-t0068-rereview-vol, torn down after): migrations ×2 (run#1 = 30 files applied incl. 030_grant_proposed_confirmed from the T-0030 rebase — consistent with T-0068 adding NO migration; run#2 = nothing to apply, idempotent); fitness:db ×2 = 318/318 pass both runs (up from 282 in round-1 because the rebase brought in grant-editor + grant-trail db suites), incl. audit-writer.chain.test.ts with the NEW interleaved grant+lifecycle dual-writer chain test (dense 1..6 single preimage + tamper-detect on a grant row via canonical recompute)."
+  },
+  "isolated_db": "pass",
+  "round1_findings_disposition": [
+    {
+      "id": "R-1",
+      "was": "blocking — lifecycle-audit runtime path dead in prod (dep-less startLifecycleBridge() + void-ed onDispatched; no prod dispatcher consumed the callback).",
+      "now": "CLOSED. (1) Composition root extracted to src/main.ts: startMain builds real deps from DATABASE_URL (pool/PostgresJobStore/PostgresOutboxStore) behind FLOWABLE_BASE_URL; index.ts:22 delegates (startMain({port})); createServer starts NO loop (verified — src/server.ts has no startBridgePollLoop/startLifecycleBridge/startOutboxDispatcherLoop/setInterval); degradation honest (noopHandle when env or deps absent, no throw). (2) startLifecycleBridge now starts BOTH loops — startBridgePollLoop (poll) AND startOutboxDispatcherLoop (the REAL onDispatched firing point), with onDispatched=buildAuditOnDispatched(deps.pool, deps.resolveActor, deps.auditWriter, deps.withTenantTx) passed into the dispatcher (lifecycle-bridge.ts:230-244) — no longer void-ed. (3) startOutboxDispatcherLoop added (src/core/outboxDispatcher.ts:150, lockReclaimer pattern, graceful stop). MUTATION PROOF: reviewer removed `onDispatched: auditOnDispatched` from the dispatcher composition → main-wired-entry.test.ts goes RED (writer received 0 rows, expected 1) while outbox.dispatched() still hit 1 — exactly the R-1 dead-callback signature; restored → green. The wired-entry test drives startMain (NOT createServer) and asserts a task_completed reaches the audit writer through the REAL composition (only leaves faked: InMemoryAuditWriter + inMemoryTx + fake outbox/job store) — it does NOT mock past the wiring point."
+    },
+    {
+      "id": "R-2",
+      "was": "nit — dead `void buildAuditOnDispatched(...)` touch with a misleading 'composition is exercised' comment.",
+      "now": "CLOSED. The void-touch is removed (grep for `void buildAuditOnDispatched` / 'Touch the audit onDispatched' → 0 hits); the callback is now passed to the real dispatcher loop."
+    },
+    {
+      "id": "R-3",
+      "was": "nit — ADR §4.7 verb='transition' (not in the closed ActorEventVerb set) + §4.8 mis-specified onDispatched on startBridgePollLoop.",
+      "now": "CLOSED (architect doc-fix landed in the ADR). §4.7 now reads `verb ∈ ActorEventVerb`, with an explicit R-3 correction note distinguishing the actor_event verb vocabulary (request/prepare/submit/approve/release) from Grant.operation's 'transition' OP-CLASS. §4.8 now states onDispatched fires in the outbox dispatcher (runOutboxOnce/startOutboxDispatcherLoop) AFTER markDispatched, and that startBridgePollLoop has no onDispatched param. The root mis-spec that caused the coder to void the callback is corrected."
+    },
+    {
+      "id": "R-4",
+      "was": "nit — JCS key ordering under vocab=1 not pinned for non-ASCII / supra-BMP keys.",
+      "now": "CLOSED. audit-preimage.test.ts adds 'JCS — non-ASCII / supra-BMP jsonb keys sort deterministically (R-4 pin)': a non-ASCII key + an emoji (surrogate pair above U+FFFF) + an ASCII key supplied in two insertion orders, pinning RFC 8785 §3.2.3 UTF-16-code-unit ordering under vocab=1 (a future comparator change flips the fixture). Passes."
+    }
+  ],
+  "dual_writer_resolution": "RESOLVED. The round-1 CONFLICT-RISK (grants.ts carrying a LOCAL partial/non-JCS preimage writer — SHA-256(prevHash || type || actor || subject || occurred_at) — on the same vocab=1 audit_event/audit_head tables) is fixed. The local chain math is DELETED from src/http/grants.ts (grep for createHash/prevHash/rowHash/sha256 → 0 hits; the prior fed338a version had createHash + manual seq/prev_hash/row_hash + audit_head upsert — all gone). grants.ts now appends through the canonical sink: grantAuditWriter = makePgAuditWriter(); appendAuditEventInput → grantAuditWriter.appendAuditEvent(client, input). writeGrant/writeAssignmentAuditEvent encode via the T-0031 encoders then route through the single writer, inside the caller's withTenantTx (tx-semantics preserved). The audit_writer_isolation.sh fitness check ENFORCES this chokepoint: it greps for INSERT/UPDATE/DELETE on choros.audit_(event|head) outside src/db/audit-writer.ts. NEGATIVE PROOF: reviewer injected a rogue `INSERT INTO choros.audit_event` literal into grants.ts → check exits 1 ('audit write-SQL found outside src/db/audit-writer.ts: .../grants.ts'); reverted → exit 0. The mixed grant+lifecycle interleaved chain is covered live (audit-writer.chain.test.ts, isolated DB): dense +1 chain under one vocab + tamper-detect on a grant row via the SAME canonical recompute as the lifecycle row — no dual preimage. One sink, one preimage, verifiable interleaved chain.",
+  "instance_started_assessment": "HONEST FORWARD — NOT an AC-dyra; acceptable against the spec. Reviewer independently confirmed there is NO production call-site for flowableClient.startInstance anywhere in src (grep: startInstance appears only as the FlowableClient method DEFINITION in src/core/flowable-client.ts and is invoked only by flowable-client.* tests — no HTTP route, no server.ts call, no process emits an instance-start today). FR-3's trigger ('successful startInstance') therefore has no upstream producer in this build — you cannot audit an event no production code emits, and starting an instance is a downstream concern outside T-0068's audit-projection scope. AC-7 is verifiable_as:'test' (the spec does NOT require live-DB for it), and it IS met: auditInstanceStarted is the sanctioned wrapper, unit-covered via the in-memory writer, and the ADR §4.4/§9 name it as the forward-obligation call-site the future start-instance route MUST invoke (on ok:true inside its own withTenant tx). Crucially the round-1 R-1 grievance was about the task.completed/task.failed runtime path being dead — that path CAN fire today (outbox dispatcher) and is now live-wired and mutation-proven; instance.started is the one branch honestly inert because its producer is absent in prod. The coder documented this transparently (commit body + ADR §4.4 'Forward-obligation (честный шов): прод-HTTP-route старта инстанса сегодня НЕ существует'), did NOT dress it as live, and did NOT ship a silent uncalled wrapper passed off as wired. This is the right disposition under the integration-honesty gate (D-056): claim narrowed to what is delivered, gap named as a forward-obligation. Adjudicated: ACCEPT.",
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true}
+  ],
+  "acceptance_notes": "Round-1 marked AC-7/AC-8/AC-14 not-covered because the wired entry point exercised no runtime path. Now flipped to covered: AC-14 — startMain (main.ts) is the composition root, index.ts delegates, startLifecycleBridge registers the dispatcher loop with onDispatched=auditOnDispatched AND the poll loop, degrades no-throw without env (lifecycle-bridge.test.ts FF-9 + main-wired-entry.test.ts both green; createServer verified loop-free). AC-8 (task.completed/task.failed → 1 audit row) — now live end-to-end through the real composition (wired-entry test reddens if the wiring breaks, mutation-proven). AC-7 (instance.started → 1 audit row) — covered at the AC's required level (test / in-memory writer + wrapper); the start-instance route is an explicit named forward-obligation (ADR §4.4/§9), not a T-0068 deliverable, since no production producer of instance-start exists yet (see instance_started_assessment).",
+  "findings": [],
+  "role_gap_evidence": [
+    "D-056 integration-honesty gate proved its worth across BOTH rounds: round-1 it caught a unit-green+fitness-green seam wired by a dep-less call + void-ed callback (the BUILD asserted wiring it did not deliver); round-2 the FIX is itself defended by a mutation-resistant wired-entry test (removing the composition link reddens it) + a negative isolation test (rogue audit INSERT reddens the chokepoint check). The evidence stands: BUILD phase benefits from a 'does the wired entry point actually exercise the new path' self-check before handoff, and the reviewer should mutation-probe wiring claims rather than trust unit-green — both done here.",
+    "SQ11 (security-reviewer candidate) — carried forward unchanged from round-1: GUC tenant-id interpolation is escaped in lifecycle-bridge.ts:154 (SET LOCAL choros.tenant_id = '${tenantId.replace(/'/g,\"''\")}') but raw-interpolated (or only UUID-shape-guarded) across grants.ts:115 / pgOutboxStore / pgJobStore / org.ts. tenantId is a trusted UUID and grants.ts adds an assertUuidShape guard before SET LOCAL, so no T-0068 regression, but the class-level pattern (SET LOCAL GUC by string-interpolation instead of set_config($1,...,true)) is the kind of systematic item a dedicated security-reviewer should normalize. Evidence for ledgers/role-gaps.md, not a T-0068 blocker."
+  ]
+}
