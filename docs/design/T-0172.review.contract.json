@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0172",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/notification-templates.ts:224-231",
+      "issue": "defaultTemplateRenderer uses html=false; EmailChannelDriver (T-0170) uses text: job.body (plain-text SMTP). Code comment documents that HTML email would require a separate renderNotification(..., {html:true}) call, but no follow-up task tracks this. Gap is safe for day-1 but needs a future task when HTML email bodies are introduced.",
+      "suggestion": "Create a follow-up task (e.g. T-xxx) tracking 'HTML email render path: EmailChannelDriver must call renderNotification with html=true before SMTP send'. Minimal spec change: add 'Email HTML body render path' to Out-of-Scope with explicit follow-up reference."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/notification-templates.test.ts",
+      "issue": "No test for fullwidth Unicode lookalike chars (U+FF1C ＜, U+FF1E ＞) to explicitly document they are not HTML-dangerous and not escaped. Not a security gap — HTML parsers do not interpret fullwidth as tags — but an explicit test would make the decision auditable.",
+      "suggestion": "Add: it('escapeHtml: fullwidth < and > are not HTML-dangerous, not escaped', () => { expect(escapeHtml('＜script＞')).toBe('＜script＞'); });"
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true },
+    { "ac": "AC-2",  "covered": true },
+    { "ac": "AC-3",  "covered": true },
+    { "ac": "AC-4",  "covered": true },
+    { "ac": "AC-5",  "covered": true },
+    { "ac": "AC-6",  "covered": true },
+    { "ac": "AC-7",  "covered": true },
+    { "ac": "AC-8",  "covered": true },
+    { "ac": "AC-9",  "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
