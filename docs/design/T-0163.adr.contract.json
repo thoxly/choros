@@ -1,0 +1,127 @@
+{
+  "task_id": "T-0163",
+  "status": "ready",
+  "decision": "Remove the three process.env reads from makeFlowableClient (lines 264/269/274 of src/core/flowable-client.ts): baseUrl gets a literal default 'http://flowable:8082/flowable-rest/service', adminUser gets literal default 'admin', adminPassword throws if absent. Signature (config?: Partial<FlowableClientConfig>) is unchanged — zero breaking callers when bridge-runner.ts and bridge-smoke-runner.ts are updated to pass an explicit config built from local env reads. A NEW ci/checks/no-env-in-core.sh (owner T-0163) is created that scans the full src/core/ tree with positive and negative self-tests; keyed-digest-core-purity.sh (owner T-0143, frozen) is NOT modified. package.json fitness script gains '&& bash ci/checks/no-env-in-core.sh'.",
+  "rejected_alternatives": [
+    {
+      "option": "Extend keyed-digest-core-purity.sh to cover all of src/core/",
+      "why_not": "That file carries header '# T-0143 ·'. frozen-checks-immutable.sh reads ownership from BASE_REF and blocks modification of any ci/checks/*.sh not owned by the current task (FF-FCI1). Modifying it on task/T-0163 would produce a CI failure."
+    },
+    {
+      "option": "Rename keyed-digest-core-purity.sh to no-env-in-core.sh",
+      "why_not": "Rename is a CDMRT diff-filter event. The frozen guard treats rename as modification of a foreign check (owner T-0143) — same FF-FCI5 failure as direct edit."
+    },
+    {
+      "option": "Extract makeFlowableClientFromEnv into src/server/flowable-client-env.ts",
+      "why_not": "Adds a new file and indirection with no benefit. Both bridge-runner.ts and bridge-smoke-runner.ts already read other env vars locally. Inline env reads in the same function match the pattern already used by lifecycle-bridge.ts and are the simplest change."
+    },
+    {
+      "option": "Make baseUrl a required parameter (no literal default)",
+      "why_not": "Breaking change for tests and scenarios that rely on the container default. Spec §2.1 explicitly preserves the literal default; only the env read is removed."
+    },
+    {
+      "option": "Keep adminUser as an env read (it is not a secret)",
+      "why_not": "NF-1 prohibits any process.env read in src/core/, not just secret reads. 'admin' is a public Flowable default; a literal is more accurate and removes the env dependency entirely."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "src/core/flowable-client.ts — makeFlowableClient factory (MODIFIED)",
+      "fields": [
+        {"name": "baseUrl", "type": "config?.baseUrl ?? 'http://flowable:8082/flowable-rest/service' — literal default, no process.env"},
+        {"name": "adminUser", "type": "config?.adminUser ?? 'admin' — literal default, no process.env"},
+        {"name": "adminPassword", "type": "config?.adminPassword — throws Error('FLOWABLE_REST_APP_ADMIN_PASSWORD is required') if absent, no process.env fallback"}
+      ]
+    },
+    {
+      "entity": "src/bridge-runner.ts (MODIFIED, line 44 area)",
+      "fields": [
+        {"name": "baseUrl", "type": "process.env['FLOWABLE_BASE_URL'] ?? 'http://flowable:8082/flowable-rest/service' — local read"},
+        {"name": "adminUser", "type": "process.env['FLOWABLE_REST_APP_ADMIN_USER_ID'] ?? 'admin' — local read"},
+        {"name": "adminPassword", "type": "process.env['FLOWABLE_REST_APP_ADMIN_PASSWORD'] — local read; undefined propagates to makeFlowableClient throw"},
+        {"name": "makeFlowableClient call", "type": "makeFlowableClient({ baseUrl, adminUser, adminPassword }) — explicit config"}
+      ]
+    },
+    {
+      "entity": "src/bridge-smoke-runner.ts (MODIFIED, line 76)",
+      "fields": [
+        {"name": "existing locals", "type": "baseUrl (line 259), adminUser (line 260), adminPass (line 261) — already present, no new reads needed"},
+        {"name": "makeFlowableClient call", "type": "makeFlowableClient({ baseUrl, adminUser, adminPassword: adminPass }) — explicit config"}
+      ]
+    },
+    {
+      "entity": "ci/checks/no-env-in-core.sh (NEW)",
+      "fields": [
+        {"name": "owner header", "type": "line 2 = '# T-0163 · FF-T163-3 — No process.env in src/core/ (full sweep)'"},
+        {"name": "target", "type": "src/core/ recursive (not individual file list)"},
+        {"name": "method", "type": "strip comment-only lines then grep process\\.env — same algorithm as keyed-digest-core-purity.sh"},
+        {"name": "positive self-test", "type": "plant process.env['PLANTED'] in tmp .ts file in src/core/; must detect → exit 2 if not; file removed via trap EXIT"},
+        {"name": "negative self-test", "type": "comment-only mention must not match; exit 2 if false positive"},
+        {"name": "exit codes", "type": "0=PASS, 1=violation found, 2=self-test broken"}
+      ]
+    },
+    {
+      "entity": "package.json scripts.fitness (MODIFIED)",
+      "fields": [
+        {"name": "addition", "type": "'&& bash ci/checks/no-env-in-core.sh' inserted before '&& bash ci/checks/frozen-checks-immutable.sh'"}
+      ]
+    }
+  ],
+  "contracts": [
+    "makeFlowableClient(config?: Partial<FlowableClientConfig>): FlowableClient — signature unchanged; full-config callers: identical behavior; zero-arg callers: throws on missing adminPassword (same message, env no longer consulted)",
+    "bridge-runner.ts: reads FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD from local process.env and passes explicit config to makeFlowableClient — runtime behavior identical to current (including throw when password env var absent)",
+    "bridge-smoke-runner.ts: reuses existing local variables (lines 259-261); line 76 updated to explicit config call — runtime behavior identical",
+    "src/server/lifecycle-bridge.ts: unchanged (already passes explicit config built from its env parameter)",
+    "ci/checks/no-env-in-core.sh: line 2 header '# T-0163 ·'; scans full src/core/ recursively; positive and negative self-tests; tmp files created in src/core/ and removed via trap EXIT (no repo pollution); registered in npm run fitness",
+    "ci/checks/keyed-digest-core-purity.sh: NOT modified; remains green (three masking modules have no env reads — unchanged by T-0163)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T163-1",
+      "rule": "makeFlowableClient with a fully supplied config behaves identically before and after T-0163 (AC-1 / NF-1). All existing tests in flowable-client.test.ts and flowable-client.adversarial.test.ts pass without modification.",
+      "ci_check": "vitest src/__tests__/flowable-client.test.ts src/__tests__/flowable-client.adversarial.test.ts — green, no test file changes."
+    },
+    {
+      "id": "FF-T163-2",
+      "rule": "makeFlowableClient() with zero args throws Error('FLOWABLE_REST_APP_ADMIN_PASSWORD is required'); no process.env read occurs for any of the three fields inside src/core/ (AC-2).",
+      "ci_check": "vitest: expect(() => makeFlowableClient()).toThrow('FLOWABLE_REST_APP_ADMIN_PASSWORD is required'). Existing test (lines 298-309) remains green — it passes baseUrl+adminUser without password, error message identical."
+    },
+    {
+      "id": "FF-T163-3",
+      "rule": "After T-0163, grep -rn 'process\\.env' src/core/ returns zero code-line matches. The new ci/checks/no-env-in-core.sh scans full src/core/ and exits 0 (AC-3).",
+      "ci_check": "bash ci/checks/no-env-in-core.sh — exit 0 / PASS message."
+    },
+    {
+      "id": "FF-T163-4",
+      "rule": "Positive self-test: a planted process.env['PLANTED_VIOLATION'] on a code line in a tmp file inside src/core/ is detected and the check exits 1. If the planted violation is not detected the check exits 2 — self-test broken (AC-4).",
+      "ci_check": "Embedded in no-env-in-core.sh. Tmp file created and cleaned via trap EXIT — no permanent repo artifact."
+    },
+    {
+      "id": "FF-T163-5",
+      "rule": "npm test is green after T-0163. Specifically: keyed-digest-e2e.test.ts, hash-oracle.test.ts, data-classification.test.ts, grant-resolver.test.ts, main-wired-entry.test.ts pass without modification (AC-5).",
+      "ci_check": "npm test — all green; none of those test files are modified."
+    },
+    {
+      "id": "FF-T163-6",
+      "rule": "bridge-runner.ts and bridge-smoke-runner.ts build FlowableClientConfig from local process.env reads (in src/ scope, not src/core/) and pass it explicitly to makeFlowableClient. npx tsc --noEmit passes (AC-6).",
+      "ci_check": "npx tsc --noEmit — zero type errors."
+    },
+    {
+      "id": "FF-T163-7",
+      "rule": "ci/checks/no-env-in-core.sh exists, line 2 header starts with '# T-0163 ·', and npm run fitness invokes it (AC-7).",
+      "ci_check": "grep 'no-env-in-core' package.json scripts.fitness — present; head -2 ci/checks/no-env-in-core.sh matches T-0163 pattern."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.1 full-config callers unchanged; FF-T163-1"},
+    {"ac": "AC-2", "covered_by": "§2.1 adminPassword throw, env read removed; FF-T163-2"},
+    {"ac": "AC-3", "covered_by": "§2.1 three env reads removed; §2.3 new full-core check; FF-T163-3"},
+    {"ac": "AC-4", "covered_by": "§2.3 positive self-test + trap cleanup; FF-T163-4"},
+    {"ac": "AC-5", "covered_by": "§2.1 no-change to core logic; §2.2 callers updated; FF-T163-5"},
+    {"ac": "AC-6", "covered_by": "§2.2 bridge-runner/bridge-smoke-runner explicit config; FF-T163-6"},
+    {"ac": "AC-7", "covered_by": "§2.3 new file owner T-0163 + package.json; FF-T163-7"}
+  ],
+  "runtime_target": "No infrastructure change. FLOWABLE_BASE_URL, FLOWABLE_REST_APP_ADMIN_USER_ID, FLOWABLE_REST_APP_ADMIN_PASSWORD continue to be read at startup in composition-root files (bridge-runner.ts, bridge-smoke-runner.ts, lifecycle-bridge.ts). Behavior in the production container (/srv/choros docker-compose) is identical.",
+  "adr_artifact_path": "docs/design/T-0163-no-env-in-core.adr.md",
+  "escalation": ""
+}
