@@ -2,11 +2,22 @@
 # T-0184 · Static fitness: queryGrantTrail must carry explicit WHERE tenant_id predicate.
 #
 # AC-1 / AC-5: grep confirms that src/db/audit-grant-trail.ts contains
-# a WHERE ... tenant_id = $N clause inside the queryGrantTrail query body.
-# This prevents regression to the BYPASSRLS-only-GUC pattern that T-0184 fixed.
+# a conditions.push backtick-string `tenant_id = $N` inside the queryGrantTrail
+# query body.  The pattern is anchored to the SQL condition entry in the conditions
+# array — NOT to prose comments or doc-strings that mention "WHERE tenant_id"
+# (those survive even after the real predicate is removed).
 #
-# SELF-TEST: passes a synthetic source string that lacks WHERE.*tenant_id through
-# the grep and asserts the grep fails — proving the check can go red (AC-5).
+# ANCHOR: grep -E '`tenant_id = \$[0-9]+'
+#   Matches only backtick template-literal lines that begin `tenant_id = $<digit>
+#   e.g.  `tenant_id = $2`,
+#   Does NOT match:
+#     // $2 is always the tenantId — explicit WHERE tenant_id guard ...
+#     *  - T-0184: explicit WHERE tenant_id = $N added for BYPASSRLS ...
+#
+# SELF-TEST: passes a synthetic source string that lacks the condition anchor
+# through the grep and asserts the grep fails — proving the check can go red
+# (AC-5).  The self-test fixture may contain WHERE tenant_id comments; the check
+# still correctly rejects it.
 #
 # Exit 0 on clean. Exit 1 on predicate absence (regression). Exit 2 on self-test
 # failure (the check itself is broken). grep errors are never suppressed.
@@ -28,8 +39,10 @@ if [ "${1:-}" = "--self-test" ]; then
   BROKEN_SOURCE="const sql = \`SELECT seq FROM choros.audit_event WHERE type = ANY(\\\$1::text[])\`;"
 
   # The grep must FAIL on this broken source (exit 1 = not found).
+  # Note: broken fixture may contain "WHERE tenant_id" in a comment — the anchored
+  # pattern must still reject it (proving the nit-R1 fix is effective).
   set +e
-  echo "${BROKEN_SOURCE}" | grep -qE 'WHERE[[:space:][:alnum:]_.$]*tenant_id'
+  echo "${BROKEN_SOURCE}" | grep -qE '`tenant_id = \$[0-9]+'
   GREP_RC=$?
   set -e
 
@@ -55,10 +68,12 @@ if [ ! -f "${TARGET}" ]; then
   exit 1
 fi
 
-# Grep for WHERE.*tenant_id inside the file.
-# grep errors (exit >= 2) abort via set -e — never silently swallowed.
+# Grep for the SQL condition entry in the conditions array:
+#   `tenant_id = $N`,
+# This anchors to the actual predicate line, not to prose comments that mention
+# "WHERE tenant_id".  grep errors (exit >= 2) abort via set -e — never swallowed.
 set +e
-grep -qE 'WHERE[[:space:][:alnum:]_.$]*tenant_id' "${TARGET}"
+grep -qE '`tenant_id = \$[0-9]+' "${TARGET}"
 GREP_RC=$?
 set -e
 
@@ -68,10 +83,10 @@ if [ "${GREP_RC}" -ge 2 ]; then
 fi
 
 if [ "${GREP_RC}" -ne 0 ]; then
-  echo "FAIL [T-0184]: queryGrantTrail in ${TARGET} has no WHERE.*tenant_id predicate — BYPASSRLS regression" >&2
+  echo "FAIL [T-0184]: queryGrantTrail in ${TARGET} has no \`tenant_id = \$N\` condition entry — BYPASSRLS regression" >&2
   exit 1
 fi
 
-echo "PASS [T-0184]: WHERE tenant_id predicate present in audit-grant-trail.ts"
+echo "PASS [T-0184]: \`tenant_id = \$N\` condition present in audit-grant-trail.ts"
 echo "PASS: grant-trail-bypassrls-predicate — AC-1/AC-5 green"
 exit 0
