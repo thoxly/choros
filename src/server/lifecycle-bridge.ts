@@ -5,6 +5,13 @@
  * path: wires the T-0067 external-task bridge poll loop together with the
  * audit-writing onDispatched callback, behind the FLOWABLE_BASE_URL env flag.
  *
+ * T-0170 E-N.3 wiring: makeNotificationDeliver is COMPOSED with makeExternalTaskDeliver
+ * in the production dispatch loop. Notification outbox rows (aggregateKind='notification')
+ * are handled by makeNotificationDeliver first; other rows fall through to
+ * makeExternalTaskDeliver (pass-through idempotent success for notification rows).
+ * Notification dispatcher uses maxAttempts=1 to honour immediate-dead semantics
+ * (IMMEDIATE_DEAD_ERROR_PREFIX rows die on first attempt — ADR T-0120 §2.6).
+ *
  * Degraded-without-Flowable (NF-5 / T-0067 AC-13/14): when FLOWABLE_BASE_URL is
  * absent the server still starts — startLifecycleBridge returns a no-op handle
  * (no loop, no throw). This module is invoked ONLY from the index.ts main block
@@ -18,7 +25,7 @@ import {
   startBridgePollLoop,
   makeExternalTaskDeliver,
 } from "../core/externalTaskBridge.js";
-import { startOutboxDispatcherLoop, defaultBackoff } from "../core/outboxDispatcher.js";
+import { startOutboxDispatcherLoop, defaultBackoff, type Deliver } from "../core/outboxDispatcher.js";
 import { PostgresJobStore } from "../core/jobStore.js";
 import { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
 import {
@@ -33,6 +40,12 @@ import {
   type ActorType,
 } from "../core/lifecycle-audit.js";
 import type { OutboxRow } from "../core/outboxTypes.js";
+// T-0170 E-N.3: notification routing (makeNotificationDeliver + channel registry)
+import {
+  makeNotificationDeliver,
+  inAppNoOpDriver,
+  type ChannelRegistry,
+} from "../core/notification-router.js";
 
 /** Handle returned by startLifecycleBridge; stop() is idempotent. */
 export interface LifecycleBridgeHandle {
@@ -66,6 +79,13 @@ export interface LifecycleBridgeDeps {
   intervalMs?: number;
   /** Injectable setInterval for deterministic tests. */
   setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  /**
+   * T-0170 E-N.3 wiring: notification channel registry for makeNotificationDeliver.
+   * Production: Map with inAppNoOpDriver + EmailChannelDriver.
+   * Tests: override with a stub registry (e.g. Map with a stub email driver).
+   * When absent (undefined), defaults to a Map with only inAppNoOpDriver.
+   */
+  notificationRegistry?: ChannelRegistry;
 }
 
 /**
@@ -233,7 +253,28 @@ export function startLifecycleBridge(
     deps.auditWriter,
     deps.withTenantTx,
   );
-  const deliver = makeExternalTaskDeliver(flowableClient, deps.jobStore);
+
+  // T-0170 E-N.3 wiring: compose makeNotificationDeliver + makeExternalTaskDeliver.
+  // Notification rows (aggregateKind='notification') are handled by notificationDeliver
+  // first; makeNotificationDeliver returns idempotentSuccess=true for non-notification
+  // rows, so external-task rows fall through to externalTaskDeliver cleanly.
+  // maxAttempts=1 for the notification path: immediate-dead semantics (ADR §2.6,
+  // IMMEDIATE_DEAD_ERROR_PREFIX rows die on first attempt without back-off cycle).
+  const registry: ChannelRegistry =
+    deps.notificationRegistry ?? new Map([[inAppNoOpDriver.key, inAppNoOpDriver]]);
+  const notificationDeliver = makeNotificationDeliver(registry);
+  const externalTaskDeliver = makeExternalTaskDeliver(flowableClient, deps.jobStore);
+
+  // Composed deliver: notification rows handled by notificationDeliver,
+  // all other rows (pass-through {ok:true,idempotentSuccess:true} from notificationDeliver)
+  // re-routed to externalTaskDeliver for their actual delivery.
+  const deliver: Deliver = async (row) => {
+    if (row.aggregateKind === "notification") {
+      return notificationDeliver(row);
+    }
+    return externalTaskDeliver(row);
+  };
+
   const dispatchLoop = startOutboxDispatcherLoop(deps.outboxStore, deliver, {
     batchLimit: 10,
     maxAttempts: 5,
