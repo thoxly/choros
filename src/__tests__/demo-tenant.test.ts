@@ -83,13 +83,13 @@ async function get(baseUrl: string, path: string, headers?: Record<string, strin
 describe("loadShowcasePack (ADR §4.1 probe 2)", () => {
   beforeEach(() => {
     clearPackCache();
-    // Point PACK_DIR at the real seed directory (from project root)
-    process.env["PACK_DIR"] = path.resolve(process.cwd(), "seed");
+    // Point CHOROS_PACK_DIR at the real seed directory (from project root)
+    process.env["CHOROS_PACK_DIR"] = path.resolve(process.cwd(), "seed");
   });
 
   afterEach(() => {
     clearPackCache();
-    delete process.env["PACK_DIR"];
+    delete process.env["CHOROS_PACK_DIR"];
   });
 
   it("rights_cards.length === 8", () => {
@@ -197,7 +197,7 @@ describe("GET /api/rights pack-file path (DATABASE_URL set, AC-11)", () => {
     clearPackCache();
     const result = await startServer({
       DATABASE_URL: "postgres://mock:mock@127.0.0.1:59999/mock_nonexistent",
-      PACK_DIR: path.resolve(process.cwd(), "seed"),
+      CHOROS_PACK_DIR: path.resolve(process.cwd(), "seed"),
     });
     baseUrl = result.baseUrl;
     cleanup = result.cleanup;
@@ -253,12 +253,12 @@ describe("GET /api/rights pack-file path (DATABASE_URL set, AC-11)", () => {
 describe("rights_cards shape mapping (ADR §3.5)", () => {
   beforeEach(() => {
     clearPackCache();
-    process.env["PACK_DIR"] = path.resolve(process.cwd(), "seed");
+    process.env["CHOROS_PACK_DIR"] = path.resolve(process.cwd(), "seed");
   });
 
   afterEach(() => {
     clearPackCache();
-    delete process.env["PACK_DIR"];
+    delete process.env["CHOROS_PACK_DIR"];
   });
 
   it("all rights_cards have non-empty role_slug that starts with 'role-' or is system", () => {

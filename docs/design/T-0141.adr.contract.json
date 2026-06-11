@@ -60,10 +60,10 @@
       ]
     },
     {
-      "entity": "EnvVar:PACK_DIR",
+      "entity": "EnvVar:CHOROS_PACK_DIR",
       "fields": [
-        {"name": "default", "type": "\"seed\""},
-        {"name": "purpose", "type": "Base directory for pack files — optional CI override"}
+        {"name": "default", "type": "\"seed\" (module-relative)"},
+        {"name": "purpose", "type": "Base directory for pack files — optional CI override (canonical env-seam, follows CHOROS_WEB_DIST pattern; legacy PACK_DIR accepted as fallback)"}
       ]
     },
     {
@@ -100,7 +100,7 @@
     {
       "id": "FF-PACK-2",
       "rule": "Pack-file-serve path returns correct counts when DATABASE_URL set: GET /api/rights → 8 role cards, GET /api/processes → 8 instances. Self-test: wrong-pack path must return non-zero exit.",
-      "ci_check": "ci/checks/demo/pack-serve-counts.sh — starts server with DATABASE_URL and PACK_DIR pointing at test fixture; asserts counts; includes SELF-TEST block. Always-on CI (no live DB needed with test fixture). Covers FR-9/FR-10/AC-11/AC-18."
+      "ci_check": "ci/checks/demo/pack-serve-counts.sh — starts server with DATABASE_URL and CHOROS_PACK_DIR pointing at test fixture; asserts counts; includes SELF-TEST block (random free port, no collision). Always-on CI (no live DB needed with test fixture). Covers FR-9/FR-10/AC-11/AC-18."
     },
     {
       "id": "FF-SCOPE-3",
