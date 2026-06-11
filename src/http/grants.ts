@@ -109,6 +109,17 @@ function assertUuidShape(value: string, label: string): void {
   }
 }
 
+/**
+ * D-1 (T-0039): Parse proposed_by from request body as a provenance stamp.
+ * Returns the value ONLY if it is a valid UUID; otherwise null.
+ * This confers NO authority — authority is always derived from the authenticated
+ * actor (confirmed_by). An attacker who forges proposed_by gains nothing.
+ */
+function parseProvenance(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return UUID_RE.test(value) ? value : null;
+}
+
 async function withTenantTx<T>(
   pool: pg.Pool,
   tenantId: string,
@@ -301,7 +312,8 @@ async function loadRoleEffectiveGrants(
             operation, scope, "constraint", delegable,
             granted_by, valid_from, valid_until, created_at
        FROM choros."grant"
-      WHERE tenant_id = $1 AND role_id = $2`,
+      WHERE tenant_id = $1 AND role_id = $2
+        AND confirmed_by IS NOT NULL`,
     [tenantId, roleId],
   );
   return rows.map((g) => ({
@@ -609,7 +621,7 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
             operation, JSON.stringify(scope),
             constraint !== null ? JSON.stringify(constraint) : null,
             delegable, grantedBy, validFrom, validUntil, nowMs,
-            null,       // proposed_by (no separate proposer day-1)
+            parseProvenance(b["proposed_by"]) ?? null, // proposed_by = UUID-validated body field (D-1 provenance stamp, no authority)
             actorId,    // confirmed_by = authenticated actor (R-AUTH)
             null,       // confirmed2_by stays NULL (routine → active)
           ],
@@ -628,12 +640,15 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
         });
 
         // Existing grant.create audit (sibling event, same tx — NF-7).
+        // AC-04 (T-0039): proposedBy mirrors the parsed UUID written to the grant row.
+        const parsedProposedBy = parseProvenance(b["proposed_by"]);
         await writeGrantAuditEvent(client, tenantId, {
           kind: "grant.create",
           actor: actorId,
           subjectRoleId: roleId,
           capability: { resourceType, operation, resourceFacet: resourceFacet ?? undefined },
           scope: scope as unknown as ScopeElement,
+          proposedBy: parsedProposedBy ?? undefined,
           confirmedBy: actorId,
         }, nowMs);
 

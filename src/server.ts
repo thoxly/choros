@@ -14,6 +14,7 @@ import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
 import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
 import { registerInvokeRoutes } from "./http/invoke.js";
+import { registerGrantProposeRoute } from "./http/grant-propose.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
@@ -176,6 +177,11 @@ function buildRouter(
     registerGrantsRoutes(router, grantsPool);
     // Register invoke routes (T-0024 E5.4).
     registerInvokeRoutes(router, grantsPool);
+    // Register grant proposal endpoint (T-0039). Must come AFTER registerGrantsRoutes
+    // so the literal '/api/grants/propose' path is not confused with ':id' patterns.
+    // The path is a distinct fixed segment — it is never captured by the
+    // existing '/api/grants/:id/revoke' pattern.
+    registerGrantProposeRoute(router, grantsPool);
   }
 
   // Register processes endpoints

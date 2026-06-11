@@ -29,12 +29,7 @@ const INITIAL_GRANTS = [
   { uri: "mcp://payments.initiate", ops: ["exec"], nodes: ["fin-approve"], tags: ["payments"], range: "≤ ₽50 000" },
 ];
 
-/* --- предложения LLM (появляются после «предложить») --- */
-const LLM_PROPOSALS = [
-  { uri: "mcp://ocr.extract", name: "OCR-распознавание", ops: ["exec"], nodes: ["fin-approve"], tags: [], range: "", reason: "для извлечения сумм со сканов счетов" },
-  { uri: "mcp://ledger.invoices", name: "Реестр счетов", ops: ["read"], nodes: ["fin-approve"], tags: [], range: "", reason: "чтение счёта перед согласованием" },
-  { uri: "mcp://payments.refund", name: "Возвраты средств", ops: ["exec"], nodes: ["fin"], tags: ["payments"], range: "≤ ₽20 000", reason: "корректировка переплат", heavy: true },
-];
+// Static mock removed (AC-14 / T-0039). propose() makes a live HTTP call.
 
 /* ---------------- ScopePicker — закрытая решётка ---------------- */
 function ScopePicker({ grant, onChange, onClose }) {
@@ -210,6 +205,8 @@ function RoleEditorScreen() {
   const [llmText, setLlmText] = useState("Агент-помощник согласования: читает счёт и договор, распознаёт суммы со сканов, готовит решение до ₽50 000. Платежи не инициирует.");
   const [proposed, setProposed] = useState([]);
   const [proposedShown, setProposedShown] = useState(false);
+  // proposalAgentId: UUID of the BYO agent returned by /api/grants/propose (AC-15).
+  const [proposalAgentId, setProposalAgentId] = useState(null);
   // Submit state: null | "loading" | { errors: [{ uri, reason }], success: number }
   const [submitResult, setSubmitResult] = useState(null);
 
@@ -287,14 +284,81 @@ function RoleEditorScreen() {
     setSubmitResult({ errors, success: successCount });
   };
 
-  const propose = () => {
-    setProposed(LLM_PROPOSALS.map((p) => ({ ...p, status: "pending" })));
-    setProposedShown(true);
+  // propose() — live HTTP call to POST /api/grants/propose (AC-14 / T-0039).
+  // On success: stores proposal_agent_id (AC-15) and maps ScopeElement atoms
+  // back to UI grant shape. On 503: shows "BYO-агент не настроен".
+  const propose = async () => {
+    try {
+      const resp = await fetch("/api/grants/propose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-dev-user": ACTOR_ID },
+        body: JSON.stringify({ text: llmText, role_id: EDITOR_ROLE_ID }),
+      });
+      if (resp.status === 503) {
+        const err = await resp.json().catch(() => ({}));
+        const code = err?.error?.code || "NO_PROPOSAL_AGENT";
+        if (code === "NO_PROPOSAL_AGENT") {
+          setProposed([{ _error: "BYO-агент не настроен", status: "error" }]);
+          setProposalAgentId(null);
+          setProposedShown(true);
+          return;
+        }
+      }
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        setProposed([{ _error: err?.error?.code || String(resp.status), status: "error" }]);
+        setProposalAgentId(null);
+        setProposedShown(true);
+        return;
+      }
+      const data = await resp.json();
+      // Store the agent UUID for threading into confirmProposed (AC-15).
+      setProposalAgentId(data.proposal_agent_id || null);
+      // Map ProposedGrantAtom[] → UI grant shape (inverse of nodeToScope).
+      const atoms = (data.proposed || []).map((atom) => {
+        // Extract nodes/range from scope for UI display.
+        const scope = atom.scope || {};
+        const nodes = [];
+        let range = "";
+        if (scope.kind === "node") {
+          nodes.push(scope.nodeId);
+        } else if (scope.kind === "set" && Array.isArray(scope.members)) {
+          for (const m of scope.members) {
+            if (m.kind === "node") nodes.push(m.nodeId);
+            if (m.kind === "interval" && m.axis === "amount_rub") {
+              range = `≤ ₽${Number(m.hi).toLocaleString("ru-RU")}`;
+            }
+          }
+        } else if (scope.kind === "interval" && scope.axis === "amount_rub") {
+          range = `≤ ₽${Number(scope.hi).toLocaleString("ru-RU")}`;
+        }
+        const res = RES_BY_URI[atom.resource_type];
+        return {
+          uri: atom.resource_type,
+          name: res?.name || atom.resource_type,
+          ops: [atom.operation],
+          nodes: nodes.length ? nodes : ["fin"],
+          tags: [],
+          range,
+          reason: atom.reason || "",
+          status: "pending",
+        };
+      });
+      setProposed(atoms);
+      setProposedShown(true);
+    } catch (e) {
+      setProposed([{ _error: String(e?.message || e), status: "error" }]);
+      setProposalAgentId(null);
+      setProposedShown(true);
+    }
   };
   const setProposal = (i, status) => setProposed((ps) => ps.map((p, j) => (j === i ? { ...p, status } : p)));
   const confirmProposed = async (i) => {
     const p = proposed[i];
-    // Post as proposal (proposed_by=llm, confirmed_by=ACTOR_ID — AC-14/FR-7).
+    // D-1 (T-0039): proposed_by = agent-employee UUID from the proposal response
+    // envelope (AC-15), NOT the legacy string "llm". The UUID confers no authority;
+    // confirmed_by is derived from the authenticated actor on the server (R-AUTH).
+    // Body confirmed_by is intentionally omitted — the server ignores it (D-1).
     const scope = nodeToScope(p.nodes || [], p.range || "");
     const atom = {
       role_id: EDITOR_ROLE_ID,
@@ -302,8 +366,7 @@ function RoleEditorScreen() {
       operation: mapOp(p.ops[0] || "read"),
       scope,
       granted_by: ACTOR_ID,
-      proposed_by: "llm",
-      confirmed_by: ACTOR_ID,
+      proposed_by: proposalAgentId, // UUID from proposal response (AC-15)
       delegable: true,
     };
     await postGrant(atom, ACTOR_ID);
@@ -442,27 +505,37 @@ function RoleEditorScreen() {
                   <ProvenanceTag by="llm" />
                   <span className="chs-proposed__count">{pendingCount > 0 ? `${pendingCount} ждут подтверждения` : "все обработаны"}</span>
                 </div>
-                {proposed.map((p, i) => (
-                  <div key={i} className={`chs-prop chs-prop--${p.status}`}>
-                    <div className="chs-prop__main">
-                      <div className="chs-prop__res">
-                        <span className="chs-prop__resname">{p.name}{p.heavy && <span className="chs-prop__heavy">поднимет критичность</span>}</span>
-                        <span className="chs-prop__uri">{p.uri}</span>
+                {proposed.map((p, i) => {
+                  // Error / 503 sentinel row from propose().
+                  if (p._error) {
+                    return (
+                      <div key={i} className="chs-prop chs-prop--error" style={{ color: "var(--chs-color-danger, red)", padding: "var(--chs-space-3)" }}>
+                        {p._error}
                       </div>
-                      <div className="chs-prop__ops">{p.ops.map((op) => <OpChip key={op} op={op} />)}</div>
-                      <div className="chs-prop__scope">{scopeSummary(p).map((s, j) => <ScopeToken key={j} kind={j === 0 ? "node" : "tag"}>{s}</ScopeToken>)}</div>
+                    );
+                  }
+                  return (
+                    <div key={i} className={`chs-prop chs-prop--${p.status}`}>
+                      <div className="chs-prop__main">
+                        <div className="chs-prop__res">
+                          <span className="chs-prop__resname">{p.name}{p.heavy && <span className="chs-prop__heavy">поднимет критичность</span>}</span>
+                          <span className="chs-prop__uri">{p.uri}</span>
+                        </div>
+                        <div className="chs-prop__ops">{p.ops.map((op) => <OpChip key={op} op={op} />)}</div>
+                        <div className="chs-prop__scope">{scopeSummary(p).map((s, j) => <ScopeToken key={j} kind={j === 0 ? "node" : "tag"}>{s}</ScopeToken>)}</div>
+                      </div>
+                      <div className="chs-prop__reason">↳ {p.reason}</div>
+                      <div className="chs-prop__act">
+                        {p.status === "pending" && <>
+                          <button type="button" className="chs-prop__reject" onClick={() => setProposal(i, "rejected")}>Отклонить</button>
+                          <button type="button" className="chs-prop__confirm" onClick={() => confirmProposed(i)}>Подтвердить грант</button>
+                        </>}
+                        {p.status === "confirmed" && <span className="chs-prop__state chs-prop__state--ok">✓ подтверждено · confirmed_by М. Соколов</span>}
+                        {p.status === "rejected" && <span className="chs-prop__state chs-prop__state--no">✕ отклонено</span>}
+                      </div>
                     </div>
-                    <div className="chs-prop__reason">↳ {p.reason}</div>
-                    <div className="chs-prop__act">
-                      {p.status === "pending" && <>
-                        <button type="button" className="chs-prop__reject" onClick={() => setProposal(i, "rejected")}>Отклонить</button>
-                        <button type="button" className="chs-prop__confirm" onClick={() => confirmProposed(i)}>Подтвердить грант</button>
-                      </>}
-                      {p.status === "confirmed" && <span className="chs-prop__state chs-prop__state--ok">✓ подтверждено · confirmed_by М. Соколов</span>}
-                      {p.status === "rejected" && <span className="chs-prop__state chs-prop__state--no">✕ отклонено</span>}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

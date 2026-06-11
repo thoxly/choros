@@ -234,9 +234,14 @@ if [[ ${ERRORS} -eq ${before} ]]; then
 fi
 
 # ---- FF-DC11: authenticated-only approver provenance (R-AUTH) ---------------
-# The dual-control gate call-site must source proposedBy/confirmed columns from
-# extractActor, never from the request body. Ban body-sourced approver ids and
-# the pre-existing confirmed_by=b["confirmed_by"] body-assertion.
+# The dual-control gate call-site must source authority-bearing approver columns
+# (confirmed_by, confirmed2_by) from extractActor (authenticated), never from the
+# request body.
+#
+# T-0039 D-1 EXCEPTION: b["proposed_by"] is explicitly ALLOWED as a no-authority
+# provenance stamp (the agent UUID that suggested the grant). This confers zero
+# authority; the gate still fires on the authenticated confirmed_by. The ADR §3
+# documents this design split and allows the body read for proposed_by only.
 before=${ERRORS}
 NONCOMMENT_GRANTS="$(noncomment "${GRANTS}")"
 # 1) dualControlDecision must be called with proposedBy from the authenticated actor.
@@ -244,18 +249,18 @@ if ! echo "${NONCOMMENT_GRANTS}" | grep -Eq "proposedBy:[[:space:]]*actorId"; th
   echo "FAIL [FF-DC11]: dualControlDecision is not called with proposedBy = actorId (authenticated)"
   ERRORS=$((ERRORS + 1))
 fi
-# 2) BAN body-sourced approver ids feeding the gate / INSERT (decorative dual-control).
+# 2) BAN body-sourced AUTHORITY-BEARING approver ids (confirmed_by / confirmed2_by).
+# Note: b["proposed_by"] is explicitly excluded from this ban (T-0039 D-1 provenance stamp).
 BANNED_BODY_APPROVER=(
   'b\["approvers"\]'
   'body\.approvers'
   'b\["confirmed_by"\]'
   'b\["confirmed2_by"\]'
-  'b\["proposed_by"\]'
   'body\.confirmed2_by'
 )
 for pat in "${BANNED_BODY_APPROVER[@]}"; do
   if echo "${NONCOMMENT_GRANTS}" | grep -Eq "${pat}"; then
-    echo "FAIL [FF-DC11]: grants.ts reads approver identity from the request body ('${pat}') — R-AUTH bans body-asserted approvers"
+    echo "FAIL [FF-DC11]: grants.ts reads authority-bearing approver identity from the request body ('${pat}') — R-AUTH bans body-asserted approvers"
     ERRORS=$((ERRORS + 1))
   fi
 done
@@ -264,8 +269,15 @@ if ! grep -qE "confirmed2_by" "${GRANTS}"; then
   echo "FAIL [FF-DC11]: grants.ts does not write confirmed2_by (second authenticated approver column)"
   ERRORS=$((ERRORS + 1))
 fi
+# 4) T-0039 D-1 guard: b["proposed_by"] must pass through parseProvenance (UUID-validation).
+#    It must NOT be used raw for any authority check.
+if echo "${NONCOMMENT_GRANTS}" | grep -Eq 'b\["proposed_by"\]' && \
+   ! echo "${NONCOMMENT_GRANTS}" | grep -Eq 'parseProvenance\(b\["proposed_by"\]\)'; then
+  echo "FAIL [FF-DC11]: grants.ts reads b[\"proposed_by\"] without the parseProvenance UUID-validation guard (T-0039 D-1)"
+  ERRORS=$((ERRORS + 1))
+fi
 if [[ ${ERRORS} -eq ${before} ]]; then
-  echo "PASS [FF-DC11]: authenticated-only approver provenance; no body-asserted approvers"
+  echo "PASS [FF-DC11]: authenticated-only approver provenance; no body-asserted authority; proposed_by provenance stamp guarded by parseProvenance (D-1)"
 fi
 
 # ---- Result -----------------------------------------------------------------

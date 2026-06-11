@@ -1,0 +1,165 @@
+{
+  "task_id": "T-0039",
+  "status": "ready",
+  "decision": "Add one ephemeral read-only endpoint POST /api/grants/propose in a new module src/http/grant-propose.ts that resolves the tenant's BYO proposal-agent from agent_card by a well-known slug, resolves its llm_secret_handle via an injected RL-3 secret-resolver port (custody owned by T-0025, never implemented here), calls the agent's llm_endpoint over plain globalThis.fetch (no LLM SDK, no platform key), sanitizes every returned atom through the existing exported parseScopeElement (freeform dropped, never 500), writes NO grant row, and emits one informational grant.proposal_requested audit row through the canonical audit sink. Confirmation reuses the unchanged POST /api/grants write-path. The crux (D-1) is that proposed_by is recorded as a no-authority provenance stamp (agent-employee UUID echoed from the proposal response, validated as UUID), while dual-control approver identity (confirmed_by/confirmed2_by) stays R-AUTH-bound to the authenticated actor, so T-0044's body-assertion close and scoped-admin.ts are not weakened. AC-05 (no grant active without confirmation) is enforced as a confirmed_by IS NOT NULL predicate on the active-grant load DAO (D-2). The static LLM_PROPOSALS UI mock is deleted and propose() becomes a live fetch threading proposal_agent_id into the confirm POST. No new table, no migration, no new scope algebra, no LLM dependency.",
+  "rejected_alternatives": [
+    {
+      "option": "Re-open POST /api/grants to read proposed_by AND confirmed_by from the request body (the literal spec reading of AC-03)",
+      "why_not": "Re-introduces the exact body-assertion vulnerability T-0044 rev-2 R-AUTH closed (grants.ts:511-515): a proposer could name their own confirmer and bypass dual-control. D-1 instead splits provenance (proposed_by, no authority) from approver identity (confirmed_by, authenticated-only) — records the agent UUID without weakening the gate."
+    },
+    {
+      "option": "Persist proposals as draft rows in a new proposal table with a status column",
+      "why_not": "Spec §4 explicitly scopes proposals as ephemeral (HTTP-response-only); a new table adds RLS surface, a migration, and a known_tenant_tables.txt entry for zero day-1 value. Rejection is already implicit (admin simply does not confirm). Proportionality (rubric axis 5)."
+    },
+    {
+      "option": "Add a platform-hosted LLM fallback when no BYO agent is configured",
+      "why_not": "Violates the signed RL-3 / kickoff §4.5 'platform governs, client hosts' posture (NF-1/FR-7): the platform must hold no LLM credential. Absence of a BYO agent is a 503 NO_PROPOSAL_AGENT, not a fallback. Also keeps E4.8 egress-policy and E5.5 secret-custody invariants coherent."
+    },
+    {
+      "option": "Append the propose route + LLM call code into src/http/grants.ts",
+      "why_not": "grants.ts structure is asserted by the frozen grant-editor-isolation.sh; piling the only network-egress path in the rights surface into it churns a frozen file and mixes pure write-path logic with outbound IO. A separate module src/http/grant-propose.ts that imports parseScopeElement keeps one scope parser, isolates egress, and leaves the frozen checks green."
+    },
+    {
+      "option": "Implement the llm_secret_handle resolver (raw-key custody) inside T-0039",
+      "why_not": "Secret custody is E5.5 / T-0025's owned scope (parallel). Implementing it here would duplicate custody logic and risk the platform touching raw keys. T-0039 depends on it only as an injected resolveSecret port (interface), honoring the 'governs handle, never raw key' invariant."
+    },
+    {
+      "option": "Filter confirmed_by inside grant_resolver (resolveFor) itself",
+      "why_not": "resolveFor (T-0021) is a pure, IO-free decision core that receives coveringGrants as input; adding a DB-shaped predicate there breaks its purity and the single-resolver fitness invariant. AC-05 belongs on the active-grant LOAD DAO (the query that produces coveringGrants), expressed as D-2 + a fitness grep."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "ProposedGrantAtom (ephemeral, HTTP response only — not persisted)",
+      "fields": [
+        {"name": "resource_type", "type": "string"},
+        {"name": "operation", "type": "string"},
+        {"name": "scope", "type": "ScopeElement (post-parseScopeElement; node|tags|interval|set; never freeform)"},
+        {"name": "reason", "type": "string (optional)"}
+      ]
+    },
+    {
+      "entity": "GrantProposeResponse (200 envelope)",
+      "fields": [
+        {"name": "proposal_agent_id", "type": "uuid (agent-employee id; threaded into confirm POST as proposed_by)"},
+        {"name": "proposed", "type": "ProposedGrantAtom[]"}
+      ]
+    },
+    {
+      "entity": "GrantProposeRequest (body)",
+      "fields": [
+        {"name": "text", "type": "string (natural-language role description)"},
+        {"name": "role_id", "type": "uuid (target role)"}
+      ]
+    },
+    {
+      "entity": "GrantProposeDeps (injected port bag — testability + custody boundary)",
+      "fields": [
+        {"name": "resolveSecret", "type": "(handle: string, ctx: {tenantId: string}) => Promise<string>  // RL-3 port, T-0025 owns impl; resolved value never logged/returned"},
+        {"name": "callLlm", "type": "(req: LlmProposeRequest) => Promise<LlmProposeResponse>  // default = globalThis.fetch to llm_endpoint, no SDK"},
+        {"name": "now", "type": "() => number"}
+      ]
+    },
+    {
+      "entity": "ProposalAgentRow (read-only projection of agent_card JOIN employee, tenant-scoped via RLS)",
+      "fields": [
+        {"name": "employee_id", "type": "uuid (becomes proposal_agent_id)"},
+        {"name": "llm_endpoint", "type": "text (must be NON-NULL; NULL => 503 NO_PROPOSAL_AGENT)"},
+        {"name": "llm_secret_handle", "type": "text (RL-3 opaque handle; passed to resolveSecret, never logged)"},
+        {"name": "llm_model", "type": "text (nullable)"}
+      ]
+    },
+    {
+      "entity": "grant.proposal_requested AuditEventInput (informational, NOT a GrantAuditEvent — no grant row)",
+      "fields": [
+        {"name": "type", "type": "string literal 'grant.proposal_requested'"},
+        {"name": "actor", "type": "string (admin who clicked propose)"},
+        {"name": "subject", "type": "string (role_id)"},
+        {"name": "via", "type": "string literal 'grant-propose'"},
+        {"name": "payload", "type": "{ proposalAgentId, proposedCount, model } — NO secret, NO credential (NF-4/AC-13)"}
+      ]
+    },
+    {
+      "entity": "grant row provenance (existing choros.\"grant\" columns — D-1 semantics)",
+      "fields": [
+        {"name": "proposed_by", "type": "text NULL — provenance stamp (agent-employee UUID on LLM-confirm path); confers NO authority; body-sourced, UUID-validated"},
+        {"name": "confirmed_by", "type": "text NULL — dual-control approver identity; authenticated actor ONLY (R-AUTH); never body-sourced"},
+        {"name": "confirmed2_by", "type": "text NULL — second approver (escalating); authenticated actor ONLY (R-AUTH)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "POST /api/grants/propose  body {text:string, role_id:uuid}  ->  200 {proposal_agent_id:uuid, proposed:ProposedGrantAtom[]} | 503 {error:{code:'NO_PROPOSAL_AGENT'}} | 400 {error:{code:'VALIDATION'}}",
+    "registerGrantProposeRoute(router: Router, pool: pg.Pool, deps: GrantProposeDeps): void  — new additive export in src/http/grant-propose.ts",
+    "src/http/grant-propose.ts imports parseScopeElement from ./grants.js (single scope parser; compatibility contract — do not inline a copy)",
+    "Proposal-agent resolution: tenant-scoped (withTenantTx SET LOCAL choros.tenant_id) SELECT from agent_card JOIN employee by well-known slug (default 'proposal-agent', env PROPOSAL_AGENT_SLUG); llm_endpoint IS NOT NULL required else 503; cross-tenant impossible by RLS+GUC (FR-8/AC-12)",
+    "Sanitization: every returned atom passes parseScopeElement; null (invalid OR freeform) => atom dropped, never 500 (NF-2/NF-3/AC-06/AC-11)",
+    "Audit: one canonical appendAuditEventInput of type='grant.proposal_requested', via='grant-propose', inside the same withTenantTx; emitted whether or not admin confirms (FR-9/AC-09); credential never in payload (AC-13)",
+    "D-1 confirm-path (grants.ts, minimal additive edit): routine INSERT binds proposed_by = UUID-validated(b['proposed_by']) ?? null; confirmed_by stays actorId (R-AUTH); validateAdminDelegation and scoped-admin.ts UNCHANGED (NF-6); GrantAuditEvent.proposedBy mirrors the parsed UUID (AC-04)",
+    "D-2 active-grant load: every SQL loading grants as active/effective filters 'confirmed_by IS NOT NULL'; applied to loadRoleEffectiveGrants in grants.ts (the live reader); the T-0053 PDP load DAO inherits the same predicate (AC-05)",
+    "UI (ra-role-editor.jsx): delete LLM_PROPOSALS const; propose() => async fetch('/api/grants/propose'); confirmProposed sends proposed_by = proposal_agent_id (UUID, not 'llm'), drops body confirmed_by (AC-14/AC-15)",
+    "No new table, no migration, no new ScopeElement kind, no LLM SDK / npm dep; outbound call via globalThis.fetch (mirrors flowable-client.ts precedent)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-39-1",
+      "rule": "POST /api/grants/propose exists and is registered: registerGrantProposeRoute is an exported function in src/http/grant-propose.ts and is called in src/server.ts; the route does NOT execute any INSERT INTO choros.\"grant\" (AC-01/AC-02 — propose never writes a grant row).",
+      "ci_check": "ci/checks/grant-propose-isolation.sh: grep -q 'export function registerGrantProposeRoute' src/http/grant-propose.ts && grep -q 'registerGrantProposeRoute(' src/server.ts && ! grep -qE 'INSERT INTO choros\\.\"grant\"' src/http/grant-propose.ts"
+    },
+    {
+      "id": "FF-39-2",
+      "rule": "Platform holds no LLM key and imports no LLM SDK (AC-07/NF-1): no OPENAI_API_KEY/ANTHROPIC_API_KEY/sk- literal and no import of a known LLM SDK in src/ production paths (test fixtures with placeholders excluded).",
+      "ci_check": "grep -rE 'OPENAI_API_KEY|ANTHROPIC_API_KEY|sk-[A-Za-z0-9]{8,}' src/ --include='*.ts' | grep -v '__tests__' | grep -v '\\.test\\.' returns empty; AND grep -rE \"from ['\\\"](openai|@anthropic-ai/sdk|@google/generative-ai|cohere-ai|@mistralai)\" src/ --include='*.ts' returns empty (folded into grant-propose-isolation.sh)."
+    },
+    {
+      "id": "FF-39-3",
+      "rule": "Static LLM_PROPOSALS mock removed and propose() makes a real HTTP call (AC-14): no LLM_PROPOSALS identifier remains in the UI, and propose() references fetch('/api/grants/propose').",
+      "ci_check": "! grep -q 'LLM_PROPOSALS' web/src/screens/rights/ra-role-editor.jsx && grep -q \"/api/grants/propose\" web/src/screens/rights/ra-role-editor.jsx"
+    },
+    {
+      "id": "FF-39-4",
+      "rule": "AC-05 active-grant load predicate (D-2): every SQL in src/ that loads grant rows as active/effective for the PDP/criticality fold carries 'confirmed_by IS NOT NULL'. Day-1 target: loadRoleEffectiveGrants in grants.ts.",
+      "ci_check": "ci/checks/grant-propose-isolation.sh asserts: the SELECT in loadRoleEffectiveGrants (and any 'FROM choros.\"grant\"' active-load in src/) includes a 'confirmed_by IS NOT NULL' predicate (awk the loadRoleEffectiveGrants body, grep -q 'confirmed_by IS NOT NULL')."
+    },
+    {
+      "id": "FF-39-5",
+      "rule": "No second authority subsystem / no new scope algebra (proportionality): grant-propose.ts imports parseScopeElement from ./grants.js, defines no new ScopeElement kind and no parallel scope parser; no new table/migration is added by T-0039.",
+      "ci_check": "grep -q \"parseScopeElement\" src/http/grant-propose.ts && grep -q \"from ['\\\"]\\./grants\" src/http/grant-propose.ts && ! grep -qE 'kind:\\s*[\\\"\\x27](node|tags|interval|set)[\\\"\\x27]' src/http/grant-propose.ts ; AND git diff --name-only base..HEAD migrations/ returns empty (no new migration)."
+    },
+    {
+      "id": "FF-39-6",
+      "rule": "NF-6: src/core/scoped-admin.ts is byte-for-byte unchanged by T-0039 (validateAdminDelegation gate untouched); the existing scoped-admin-isolation.sh FF-11 stays green.",
+      "ci_check": "git diff --quiet base..HEAD -- src/core/scoped-admin.ts (no change); existing ci/checks/scoped-admin-isolation.sh passes."
+    },
+    {
+      "id": "FF-39-7",
+      "rule": "503 NO_PROPOSAL_AGENT when no BYO agent configured and no platform fallback (FR-7/AC-08): grant-propose.ts emits a 503 with code NO_PROPOSAL_AGENT and there is no branch that proceeds to an LLM call when llm_endpoint is NULL/absent.",
+      "ci_check": "grep -q 'NO_PROPOSAL_AGENT' src/http/grant-propose.ts && grep -q '503' src/http/grant-propose.ts (asserted in grant-propose-isolation.sh); integration test: no agent seeded => 503 + code."
+    },
+    {
+      "id": "FF-39-8",
+      "rule": "NF-4/AC-13: the resolved llm_secret_handle credential never reaches logs, the HTTP response body, or audit_event.payload — grant-propose.ts does not console.log the resolveSecret result and the proposal_requested payload contains only {proposalAgentId, proposedCount, model}.",
+      "ci_check": "ci/checks/grant-propose-isolation.sh: assert no 'console.log'/'console.error' line in grant-propose.ts references the secret/credential variable, and the audit payload object literal lists no secret field; integration test captures stdout+response+audit row and asserts the credential string is absent."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-01", "covered_by": "§2.1/§2.3 endpoint + ProposedGrantAtom shape; FF-39-1; integration test with stub BYO server"},
+    {"ac": "AC-02", "covered_by": "§2.3/§2.5 endpoint writes no grant row; FF-39-1 (no INSERT INTO grant); integration test row-count unchanged"},
+    {"ac": "AC-03", "covered_by": "§3 D-1 provenance stamp — routine INSERT binds proposed_by=UUID(body), confirmed_by=actor; integration propose->confirm test"},
+    {"ac": "AC-04", "covered_by": "§3 — GrantAuditEvent.proposedBy mirrors the parsed UUID via writeGrantAuditEvent; integration audit_event assertion"},
+    {"ac": "AC-05", "covered_by": "§4 D-2 — confirmed_by IS NOT NULL on active-grant load; FF-39-4; integration: unconfirmed grant => resolver yields nothing"},
+    {"ac": "AC-06", "covered_by": "§2.5 step 3 — parseScopeElement returns null for freeform => atom dropped; FF-39-5; unit test"},
+    {"ac": "AC-07", "covered_by": "§2.2/§9 no platform key, no SDK; FF-39-2 (grep)"},
+    {"ac": "AC-08", "covered_by": "§2.4 — zero rows or llm_endpoint NULL => 503 NO_PROPOSAL_AGENT; FF-39-7; integration test"},
+    {"ac": "AC-09", "covered_by": "§2.6 — canonical grant.proposal_requested AuditEventInput, via='grant-propose'; integration audit_event assertion"},
+    {"ac": "AC-10", "covered_by": "§2.7/§3 — confirm reuses unchanged POST /api/grants; validateAdminDelegation fires on the authenticated confirmer; 403 ADMIN_GATE_REJECTED; integration test"},
+    {"ac": "AC-11", "covered_by": "§2.5 step 3 — invalid atoms dropped, never 500; unit test mixed valid/invalid atoms"},
+    {"ac": "AC-12", "covered_by": "§2.4 — agent lookup inside withTenantTx RLS+GUC; FR-8; two-tenant integration test"},
+    {"ac": "AC-13", "covered_by": "§2.2/§2.6 — resolveSecret value never logged/returned; payload excludes credential; FF-39-8; integration capture test"},
+    {"ac": "AC-14", "covered_by": "§5 — LLM_PROPOSALS deleted, propose() => fetch('/api/grants/propose'); FF-39-3 (grep)"},
+    {"ac": "AC-15", "covered_by": "§5/§3 — confirmProposed sends proposed_by=proposal_agent_id (UUID), routine INSERT records it; integration propose->confirm UUID assertion"}
+  ],
+  "runtime_target": "контейнер — Choros dev stack (/srv/choros, homeserver-vm, T-0065). Outbound HTTP to a CLIENT-hosted BYO LLM endpoint configured per-tenant in agent_card; platform requests NO new external resource and NO platform LLM credential (NF-1). No GT-4 provision.",
+  "adr_artifact_path": "docs/design/T-0039-llm-proposes-grants.adr.md",
+  "escalation": ""
+}
