@@ -260,11 +260,13 @@ function verifyEcSignature(
 ): boolean {
   try {
     const keyObject = crypto.createPublicKey({ key: jwk as unknown as crypto.JsonWebKey, format: "jwk" });
-    // ES256 signatures are DER-encoded. Node's crypto.verify handles SPKI+SHA256 with EC keys.
+    // JWT ES256 signatures use IEEE P1363 raw R||S format (64 bytes for P-256).
+    // Node's crypto.verify with an EC key expects DER-encoded signatures by default.
+    // Passing dsaEncoding:'ieee-p1363' tells Node to accept the raw R||S directly.
     return crypto.verify(
       "SHA256",
       Buffer.from(signingInput, "utf8"),
-      keyObject,
+      { key: keyObject, dsaEncoding: "ieee-p1363" },
       signatureBuffer
     );
   } catch {
