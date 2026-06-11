@@ -1,0 +1,133 @@
+{
+  "task_id": "T-0140",
+  "status": "ready",
+  "decision": "Declarative slug-keyed JSON seed-pack (seed/<name>/pack.json + seed/pack.schema.json draft-07) with a two-plane content model — a live plane (tenant/departments/positions/employees/roles/role_assignments/grants written through public REST APIs into RLS-protected choros.* tables) and a display plane (process_instances + rights_cards served verbatim from the pack, the single documented I-1 exception) — applied by a TypeScript HTTP-only importer (seed/importer.ts) and CLI (seed/cli.ts) exposing apply/reset; five new write endpoints (POST /api/tenants|departments|positions|employees|roles) reuse the existing extractActor->loadAdminContext->validateAdminDelegation seam, are idempotent on their slug UNIQUE constraints (201/409-as-no-op), and consolidate ORG_SEED/RIGHTS_SEED/PROCESSES_SEED into one authoritative source (I-2); reset diff-reconciles the live plane with a hard exclude-list protecting genesis-owner and system roles (I-3); runtime_target=local/dev-container, public stand is T-0142 (out of scope).",
+  "rejected_alternatives": [
+    {"option": "YAML pack format", "why_not": "No YAML parser in-repo; adding js-yaml violates the zero-runtime-dep convention (only pg); validate.py + JSON Schema draft-07 already cover JSON. Spec leaves the choice open."},
+    {"option": "Raw-SQL / migration-based seed apply", "why_not": "Violates I-1 — the point is API-time CI breakage on schema drift, not silent SQL inserts that rot data."},
+    {"option": "One-plane pack: force role-cards and process-instances through live POSTs", "why_not": "RIGHTS_SEED is a denormalized UI projection with no structural-grant isomorphism; process-instances have no public write-API (Flowable state). Forcing them live explodes scope past 'consolidate seeds' and is impossible for processes."},
+    {"option": "UUID-keyed pack (copy migration 014-016 UUIDs into the pack)", "why_not": "Creates a second copy of IDs (violates I-2), breaks on DB reset (UUIDs are server-allocated), and couples the pack to migration internals. Slug-keyed + apply-time slug->id map is the idempotent, decoupled path."},
+    {"option": "Extend grant vocabulary with mgmt_object:{tenant,department,position,employee} now (option A)", "why_not": "High blast radius (MGMT_OBJECT_KINDS, scoped-admin, SoD, role-migration-set fitness); only consumer is the seed importer -> disproportionate (rubric axis 5). Flagged to founder as the path if full-lattice coverage is wanted as a separate authority-core task."},
+    {"option": "Hardcoded isOwner = slug === 'e-owner' shortcut in the new handlers", "why_not": "Duplicates a second authority truth, diverges from grants.ts DB-resolved owner-ness, and would fail isolation-style invariants. FF-6 forbids it."}
+  ],
+  "object_model": [
+    {"entity": "pack.meta", "fields": [
+      {"name": "name", "type": "string (== directory name, FF-5)"},
+      {"name": "version", "type": "string"},
+      {"name": "description", "type": "string"}
+    ]},
+    {"entity": "pack.tenant", "fields": [
+      {"name": "slug", "type": "string (idempotency key, UNIQUE(slug) on choros.tenant)"},
+      {"name": "display_name", "type": "string"}
+    ]},
+    {"entity": "pack.departments[]", "fields": [
+      {"name": "slug", "type": "string (idempotency key within tenant)"},
+      {"name": "display_name", "type": "string"},
+      {"name": "parent_slug", "type": "string | null (cross-ref; null = root)"}
+    ]},
+    {"entity": "pack.positions[]", "fields": [
+      {"name": "slug", "type": "string (unique within tenant,department)"},
+      {"name": "title", "type": "string"},
+      {"name": "department_slug", "type": "string (cross-ref -> departments[].slug)"}
+    ]},
+    {"entity": "pack.employees[]", "fields": [
+      {"name": "slug", "type": "string (idempotency key within tenant)"},
+      {"name": "display_name", "type": "string"},
+      {"name": "kind", "type": "'human' | 'agent' (choros.employee.kind CHECK)"},
+      {"name": "position_slug", "type": "string | null (cross-ref -> positions[].slug)"}
+    ]},
+    {"entity": "pack.roles[] (live plane)", "fields": [
+      {"name": "slug", "type": "string (idempotency key, UNIQUE(tenant,slug))"},
+      {"name": "display_name", "type": "string"},
+      {"name": "description", "type": "string | null"},
+      {"name": "system", "type": "boolean (true => referenced not created; e.g. tenant-owner, budget-approver)"}
+    ]},
+    {"entity": "pack.role_assignments[] (live plane)", "fields": [
+      {"name": "employee_slug", "type": "string (cross-ref -> employees[].slug)"},
+      {"name": "role_slug", "type": "string (cross-ref -> roles[].slug)"},
+      {"name": "org_scope", "type": "object (choros.role_assignment.org_scope scope element)"}
+    ]},
+    {"entity": "pack.grants[] (live plane)", "fields": [
+      {"name": "role_slug", "type": "string (cross-ref -> roles[].slug)"},
+      {"name": "resource_type", "type": "string (existing vocabulary, e.g. mgmt_object:role)"},
+      {"name": "operation", "type": "string (create|read|update|delete|exec|invoke)"},
+      {"name": "scope", "type": "object (scope element)"},
+      {"name": "delegable", "type": "boolean"}
+    ]},
+    {"entity": "pack.rights_cards[] (display plane, served by GET /api/rights)", "fields": [
+      {"name": "role_slug", "type": "string (MUST match roles[].slug, FF-8)"},
+      {"name": "name", "type": "string"},
+      {"name": "dept", "type": "string"},
+      {"name": "scope", "type": "string"},
+      {"name": "holders", "type": "array<{type,name}>"},
+      {"name": "grants", "type": "array<{res,uri,ops[],scope}>"},
+      {"name": "fields", "type": "array<{name, a:'read'|'write'|'hidden'}>"}
+    ]},
+    {"entity": "pack.process_instances[] (display plane, served by GET /api/processes)", "fields": [
+      {"name": "id", "type": "string"},
+      {"name": "name", "type": "string"},
+      {"name": "procId", "type": "string"},
+      {"name": "status", "type": "'running'|'waiting'|'done'|'failed'"},
+      {"name": "node", "type": "string"},
+      {"name": "started", "type": "string"},
+      {"name": "elapsed", "type": "string"},
+      {"name": "progress", "type": "{done:number,total:number}"},
+      {"name": "execs", "type": "array<'human'|'agent'|'service'>"}
+    ]},
+    {"entity": "ApplySummary (importer return)", "fields": [
+      {"name": "created", "type": "Record<entity, number>"},
+      {"name": "skipped", "type": "Record<entity, number>"}
+    ]}
+  ],
+  "contracts": [
+    "POST /api/tenants  body {slug:string, display_name:string} -> 201 {id:uuid, slug:string} | 409 CONFLICT (slug exists); gate=isGenesisOwner (bootstrap-class)",
+    "POST /api/departments  body {tenant_id:uuid, slug:string, display_name:string, parent_id?:uuid|null} -> 201 {id:uuid, slug:string} | 409 (tenant_id,slug) exists; gate=isGenesisOwner",
+    "POST /api/positions  body {tenant_id:uuid, department_id:uuid, slug:string, title:string} -> 201 {id:uuid, slug:string} | 409 (tenant_id,department_id,slug) exists; gate=isGenesisOwner",
+    "POST /api/employees  body {tenant_id:uuid, position_id?:uuid|null, kind:'human'|'agent', slug:string, display_name:string} -> 201 {id:uuid, slug:string} | 409 (tenant_id,slug) exists | 400 bad kind; gate=isGenesisOwner",
+    "POST /api/roles  body {tenant_id:uuid, slug:string, display_name:string, description?:string|null} -> 201 {id:uuid, slug:string} | 409 (tenant_id,slug) exists; gate=mgmt_object:role:create grant (existing, held by genesis-owner)",
+    "All 5 handlers: auth via X-Dev-User header; non-owner/insufficient-delegation -> 403 NOT_OWNER; error envelope {error:{code,message}}; INSERT inside withTenant tenant-scoped tx; gate runs BEFORE INSERT (FF-6)",
+    "Importer takes UUID FKs in bodies but the PACK is slug-keyed; importer accumulates a per-entity slug->id map from 201 responses while walking dependency order (pack stays UUID-free, I-2)",
+    "seed/importer.ts: applyPack({baseUrl, tenantSlug, packName, devUser?='e-owner'}): Promise<ApplySummary>",
+    "seed/importer.ts: resetPack({baseUrl, tenantSlug, packName, devUser?}): Promise<ResetSummary> — delete-extra+upsert-diff over LIVE plane only; exclude-list {employee:'e-owner', role:'tenant-owner', role:'budget-approver'} never deleted (AC-10/I-3)",
+    "seed/importer.ts: loadPack(packName): Pack — reads + schema-validates seed/<name>/pack.json, fail-closed before any HTTP call",
+    "seed/cli.ts -> seed/cli.js: node seed/cli.js apply --tenant <slug> --pack <name> [--base-url http://localhost:8080]; reset --tenant <slug> [--pack <name>]; exit 0 ok / non-zero on first error; structured-JSON summary to stdout, errors to stderr (NF-4/AC-15); default devUser=e-owner (AC-18)",
+    "applyPack order: tenant -> departments -> positions -> employees -> roles -> role_assignments -> grants; display plane NOT applied (FF-7); per entity GET-check-by-slug or POST-treat-409-as-skipped (AC-8)",
+    "Existing endpoints reused (NO new endpoint): POST /api/grants, POST /api/role-assignments for the live grants/role_assignments sections",
+    "DELETE endpoints for org entities (departments/positions/employees/roles) are a coder-surfaced dependency for reset delete-extra (AC-9) — same isGenesisOwner gate; see ADR section 6"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "seed/pack.schema.json exists (JSON Schema draft-07) and validates every seed/*/pack.json with zero errors (AC-12).", "ci_check": "ci/checks/seed/pack-schema-valid.sh -> runs validate.py (or node JSON-Schema validator) over each seed/*/pack.json against seed/pack.schema.json; non-zero on any error."},
+    {"id": "FF-2", "rule": "No direct DB access in seed tooling: seed/*.ts import neither pg nor src/db/* — all writes through HTTP (AC-13/NF-2).", "ci_check": "ci/checks/seed/no-direct-pg-in-importer.sh -> grep -REn \"from ['\\\"]pg['\\\"]|require\\(['\\\"]pg['\\\"]\\)|from ['\\\"].*src/db\" seed/ returns zero matches."},
+    {"id": "FF-3", "rule": "No secrets/credentials committed under seed/ (AC-14/NF-5).", "ci_check": "ci/checks/seed/no-seed-secret.sh (or extend no-committed-secret.sh glob to seed/**) -> scans seed/** for credential patterns; zero matches."},
+    {"id": "FF-4", "rule": "Single source of truth (I-2): no NEW hardcoded copy of org/role/process demo IDs outside the pack; the three existing in-memory *_SEED fallbacks (org.ts/processes.ts/rights.ts) are the only permitted second locus and are frozen.", "ci_check": "ci/checks/seed/single-source.sh -> asserts exactly one seed/showcase/pack.json; no *_SEED const in src/ outside the known allow-list; no .ts/.json under src/|test/ re-declares the showcase department/employee/role slug set."},
+    {"id": "FF-5", "rule": "Pack integrity: meta.name == directory name; all cross-refs resolve (position.department_slug in departments; employee.position_slug in positions or null; role_assignment.{employee_slug,role_slug} resolve).", "ci_check": "ci/checks/seed/pack-refs-resolve.sh -> node script loads each pack, asserts referential closure; non-zero on dangling ref."},
+    {"id": "FF-6", "rule": "Importer auth seam preserved: each of the 5 new write handlers calls loadAdminContext/isGenesisOwnerForTenant and gates BEFORE INSERT; no hardcoded owner-slug bypass (AC-18).", "ci_check": "ci/checks/seed/write-api-auth-gate.sh -> for each tenants|departments|positions|employees|roles route, assert handler references loadAdminContext/isGenesisOwnerForTenant/validateAdminDelegation and contains no literal === 'e-owner' / === \"e-owner\" comparison."},
+    {"id": "FF-7", "rule": "I-1 exception fence: importer apply path NEVER issues an HTTP write for display-plane sections (process_instances, rights_cards) — display data is load-and-serve only.", "ci_check": "ci/checks/seed/display-plane-no-write.sh -> grep asserts seed/importer.ts references process_instances/rights_cards only inside loadPack/serve helpers, never inside the apply/POST loop (POST loop iterates an explicit live-entity allow-list, not the whole pack object)."},
+    {"id": "FF-8", "rule": "Display<->live consistency: every rights_cards[].role_slug matches a roles[].slug in the same pack (display plane cannot drift from structural plane).", "ci_check": "folded into ci/checks/seed/pack-refs-resolve.sh (FF-5): asserts rights_cards[].role_slug subset of roles[].slug."},
+    {"id": "FF-9", "rule": "Smoke-apply on clean DB: seed apply --tenant showcase --pack showcase on a migrated empty DB exits 0 and GET /api/org returns 3 depts/7 positions/12 employees, GET /api/rights returns 8 roles (AC-7/AC-11/FR-7).", "ci_check": "npm run seed:smoke (new script) wired after npm run migrate; runs apply then asserts the GET /api/org and GET /api/rights counts; runs under DB-available gating (fitness:db style)."},
+    {"id": "FF-10", "rule": "e2e fixtures read IDs from the pack, not hardcoded duplicates: no test file hardcodes a department/employee/role slug or UUID that also lives in the pack (AC-17/FR-8).", "ci_check": "ci/checks/seed/no-hardcoded-fixture-ids.sh -> grep test/ for the showcase slug/UUID set; any match outside a loadPack-derived reference fails."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR section 4 POST /api/tenants 201/409; FF-9"},
+    {"ac": "AC-2", "covered_by": "ADR section 4 POST /api/departments 201/409"},
+    {"ac": "AC-3", "covered_by": "ADR section 4 POST /api/positions 201/409"},
+    {"ac": "AC-4", "covered_by": "ADR section 4 POST /api/employees kind=human 201/409"},
+    {"ac": "AC-5", "covered_by": "ADR section 4 POST /api/employees kind=agent 201/409"},
+    {"ac": "AC-6", "covered_by": "ADR section 4 POST /api/roles 201/409 (mgmt_object:role:create gate)"},
+    {"ac": "AC-7", "covered_by": "ADR section 4.1 applyPack order; FF-9 smoke (3/7/12 via GET /api/org)"},
+    {"ac": "AC-8", "covered_by": "ADR section 2.1 slug-idempotency + 4.1 GET-check/409-no-op; FF-9"},
+    {"ac": "AC-9", "covered_by": "ADR section 4.1 resetPack delete-extra; section 6 DELETE-endpoint dependency"},
+    {"ac": "AC-10", "covered_by": "ADR section 4.1 resetPack exclude-list {e-owner, tenant-owner, budget-approver}; I-3"},
+    {"ac": "AC-11", "covered_by": "ADR section 2.2 display plane rights_cards served by GET /api/rights; FF-9"},
+    {"ac": "AC-12", "covered_by": "ADR section 2.1 / FF-1 pack-schema-valid"},
+    {"ac": "AC-13", "covered_by": "FF-2 no-direct-pg-in-importer"},
+    {"ac": "AC-14", "covered_by": "FF-3 no-seed-secret"},
+    {"ac": "AC-15", "covered_by": "ADR section 4.1 ApplySummary structured summary (NF-4)"},
+    {"ac": "AC-16", "covered_by": "ADR section 3.10 process_instances display plane served by GET /api/processes"},
+    {"ac": "AC-17", "covered_by": "FF-10 no-hardcoded-fixture-ids"},
+    {"ac": "AC-18", "covered_by": "ADR section 2.3 extractActor->loadAdminContext gate (e-owner=owner, non-owner->403); FF-6"}
+  ],
+  "runtime_target": "локально / dev-контейнер (X-Dev-User auth-mode, single-Postgres substrate). Внешний ресурс НЕ запрашивается. Публичный стенд = T-0142 (founder-gated GT-4), вне скоупа.",
+  "adr_artifact_path": "docs/design/T-0140-seed-pack-showcase.adr.md",
+  "escalation": "status=ready, не блокер. Один продуктовый флаг для фаундера (не гейт): решение C в ADR section 2.3 кладёт авторитет на создание tenant/department/position/employee на булеву genesis-owner (isGenesisOwner, резолвится из БД), а не на per-resource mgmt_object-грант грант-решётки — потому что такого словаря грантов сегодня нет, и единственным потребителем был бы seed-импортёр. Соразмерно для MVP-демостенда и сохраняет 403-для-не-владельца (AC-18, FF-6). Если фаундер хочет, чтобы грант-решётка управляла записью оргструктуры end-to-end (полное покрытие E2 authority-core, опция A: расширить MGMT_OBJECT_KINDS + genesis-гранты + SoD) — это отдельная задача более высокого рычага (post-MVP, E2/E11-E12); FF-6 пинит выбранный гейт, чтобы выбор был явным и CI-enforced, не молчаливым."
+}

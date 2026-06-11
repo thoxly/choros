@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "name": "blank",
+    "version": "1.0.0",
+    "description": "Minimal blank pack template for trial-tenant bootstrap (T-0141+). No demo data."
+  },
+  "tenant": {
+    "slug": "blank",
+    "display_name": "New Tenant"
+  },
+  "departments": [],
+  "positions": [],
+  "employees": [],
+  "roles": [],
+  "role_assignments": [],
+  "grants": [],
+  "rights_cards": [],
+  "process_instances": []
+}
