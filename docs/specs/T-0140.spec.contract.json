@@ -1,0 +1,132 @@
+{
+  "task_id": "T-0140",
+  "status": "ready",
+  "summary": "Declarative seed-pack format (seed/showcase/) + importer via public REST APIs + CLI seed apply/reset, consolidating ORG_SEED/PROCESSES_SEED/migration demo-INSERTs 013-019 into one authoritative source",
+  "functional": [
+    "FR-1: Pack is a schema-validated directory seed/<pack-name>/ with meta, tenant, departments, positions, employees, roles, role_assignments, grants, and optional process_instances fields",
+    "FR-2: TypeScript importer applies entities in dependency order through public REST APIs only (no direct pg access); idempotent per entity via GET-check or 409 handling",
+    "FR-3: CLI seed apply --tenant <slug> --pack <name> exits 0 on success, structured summary printed",
+    "FR-4: CLI seed reset --tenant <slug> restores tenant to pack reference state; does NOT delete genesis-owner employee (migration 026)",
+    "FR-5: showcase pack consolidates ORG_SEED (3 depts/7 positions/12 employees), PROCESSES_SEED (8 instances, display-only), RIGHTS_SEED (8 roles with grants); stable UUIDs/slugs preserved",
+    "FR-6: blank pack template seed/blank/ created for trial-tenant bootstrap",
+    "FR-7: CI gate npm run seed:smoke runs seed apply on clean DB and verifies GET /api/org and GET /api/rights return expected data",
+    "FR-8: existing e2e tests read entity IDs from pack file, not hard-coded duplicate maps",
+    "FR-NEW-1: POST /api/tenants -> 201 {id, slug} or 409 if slug exists",
+    "FR-NEW-2: POST /api/departments -> 201 {id, slug} or 409 if (tenant_id, slug) exists",
+    "FR-NEW-3: POST /api/positions -> 201 {id, slug} or 409 if (tenant_id, department_id, slug) exists",
+    "FR-NEW-4: POST /api/employees -> 201 {id, slug} or 409 if (tenant_id, slug) exists; kind in {human, agent}",
+    "FR-NEW-5: POST /api/roles -> 201 {id, slug} or 409 if (tenant_id, slug) exists"
+  ],
+  "non_functional": [
+    "NF-1: seed/pack.schema.json is JSON Schema draft-07, validated in CI",
+    "NF-2: importer has zero direct pg imports — all writes via HTTP (fitness check)",
+    "NF-3: seed apply on already-applied pack completes under 10 seconds on dev",
+    "NF-4: CLI error output is structured JSON to stderr, exit code non-zero on failure",
+    "NF-5: pack files contain no credentials/tokens/secrets (covered by existing CI secret-scan)"
+  ],
+  "out_of_scope": [
+    "Public demo stand deployment (T-0142, stage 2)",
+    "seed reset cron scheduling (T-0142)",
+    "Genesis-owner employee and grants (migrations/026 stays as-is)",
+    "Flowable BPMN process definition import/deploy (T-0058)",
+    "Agent card creation (agent_card table, T-0020)",
+    "Creating live Flowable process instances via API (PROCESSES_SEED is display-only)",
+    "Multi-pack composition or inheritance",
+    "Keycloak realm synchronization (T-0054)",
+    "Removal of in-memory ORG_SEED/PROCESSES_SEED/RIGHTS_SEED fallback constants in src/http/"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "POST /api/tenants with { slug: 'showcase', display_name: '...' } returns 201 and a row exists in choros.tenant with that slug",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "POST /api/departments with valid body returns 201 and row in choros.department; re-POSTing same slug returns 409",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "POST /api/positions with valid body returns 201 and row in choros.position; re-POSTing same (department_id, slug) returns 409",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "POST /api/employees with kind='human' returns 201 and row in choros.employee with kind='human'; re-POST same slug returns 409",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "POST /api/employees with kind='agent' returns 201 and row in choros.employee with kind='agent'; re-Post same slug returns 409",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "POST /api/roles with valid body returns 201 and row in choros.role; re-POST same slug returns 409",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "seed apply --tenant showcase --pack showcase on a clean post-migration DB exits 0 and GET /api/org returns exactly 3 departments, 7 positions, 12 employees matching ORG_SEED content",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Running seed apply --tenant showcase --pack showcase twice on the same DB exits 0 both times and yields identical GET /api/org responses (no duplicates)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "seed reset --tenant showcase after manually inserting an extra department removes the extra department and GET /api/org returns only pack-defined departments",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "seed reset --tenant showcase does NOT delete the genesis-owner employee (slug='e-owner', added by migration 026)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "GET /api/rights after seed apply returns exactly 8 roles matching the RIGHTS_SEED content",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "seed/pack.schema.json exists and validation of seed/showcase/pack.json (or equivalent) via JSON Schema validator reports zero errors",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Fitness check confirms seed/*.ts importer files contain no direct 'pg' imports (grep for import.*from.*pg returns zero matches in seed/ directory)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "CI secret-scan check covers seed/ directory and reports no credentials or tokens in pack files",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "seed apply prints a human-readable structured summary listing count of entities created and entities skipped (already existing) per type",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-16",
+      "text": "showcase pack file contains the 8 PROCESSES_SEED process instances and GET /api/processes after seed apply returns all 8 with correct id/name/status fields",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-17",
+      "text": "No e2e test file contains a hard-coded duplicate of employee/department/role UUID or slug that also appears in the pack file (grep-based fitness check)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "seed apply uses X-Dev-User: e-owner for all privileged writes; POST /api/employees with a non-owner dev-user who lacks mgmt grants returns 403",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0140-seed-pack-showcase.spec.md"
+}
