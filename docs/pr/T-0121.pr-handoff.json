@@ -1,0 +1,159 @@
+{
+  "task_id": "T-0121",
+  "status": "pr_open",
+  "branch": "task/T-0121",
+  "merge_target": "dev",
+  "base_commit": "873c69c",
+  "head_commit": "9b93672",
+  "pr_url": "https://github.com/thoxly/choros/pull/13",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true,
+    "note": "Design-only branch (docs/**). Product CI unaffected — baseline identical to dev (D-056 integration-honest)."
+  },
+  "summary": "Design-задача T-0121: ADR «Отчёты как кастомные UI-страницы (two-floor) + реестр зависимостей страниц от полей схемы». Деливерабл — документы: report_page/report_page_dep (миграции ≥046/≥047), classifyReportPageFloor + checkReportPageDepFields (pure functions), default-DENY деструктива схемы, MCP-tool author_report_page (DRAFT-only, dev-тенант), 14 fitness-функций, декомпозиция T-0121a..h. Review approved 22/22 AC, 2 nit fixed (ce5c350). Docs-gate pass 22/22. PR #13 открыт против dev.",
+  "commits": [
+    {
+      "sha": "84462ed",
+      "phase": "SPEC",
+      "message": "T-0121 SPEC: требования к дизайну отчётов-страниц — реестр зависимостей, расширение bundle-coherence, 22 AC"
+    },
+    {
+      "sha": "77509b1",
+      "phase": "DESIGN",
+      "message": "T-0121 DESIGN: ADR отчёты-страницы — report_page/report_page_dep, classifyReportPageFloor, default-DENY деструктива, 8 build-задач, 14 FF"
+    },
+    {
+      "sha": "d85f8c9",
+      "phase": "REVIEW",
+      "message": "T-0121 REVIEW: approved — шов добивки чист (контракт 1:1 c ADR), 22/22 AC; 2 nit (слот-формулировка §2, тенант-warning сида)"
+    },
+    {
+      "sha": "ce5c350",
+      "phase": "DESIGN-fix",
+      "message": "T-0121 DESIGN-fix: 2 nit ревьюера (fallback-слоты в §2, тенант-warning сида)"
+    },
+    {
+      "sha": "9b93672",
+      "phase": "TEST",
+      "message": "T-0121 TEST: docs-gate pass"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "iteration": 1,
+      "review_commit": "d85f8c9",
+      "nit_fix_commit": "ce5c350",
+      "nits_fixed": [
+        {
+          "id": "T-0121-F-001",
+          "disposition": "fixed — §2.1/§2.2 заголовки migration-слотов дополнены fallback «или следующий свободный ≥046/≥047 при материализации, см. §0»"
+        },
+        {
+          "id": "T-0121-F-002",
+          "disposition": "fixed — §6.1 добавлен WARNING: seed author_report_page обязан в dev-тенант a0000000-0000-0000-0000-000000000001 (T-0077 §2.3 урок); контракт обновлён"
+        }
+      ],
+      "artifacts": [
+        "docs/reviews/T-0121.review.json"
+      ]
+    },
+    "docs_gate_pass": {
+      "verdict": "pass",
+      "test_commit": "9b93672",
+      "diff_gate": "pass (5 файлов строго docs/**, 0 вне)",
+      "artifact_validity": "pass (spec.contract, adr.contract, review — валидный JSON)",
+      "traceability": "22/22 AC → якоря ADR §11",
+      "slot_conflict": "pass (044/045 не «свои» — T-0077/T-0072 ссылки)",
+      "artifacts": [
+        "docs/test-reports/T-0121.test-report.json"
+      ]
+    }
+  },
+  "deliverables": [
+    "docs/design/T-0121-reports-pages.adr.md",
+    "docs/design/T-0121.adr.contract.json",
+    "docs/reviews/T-0121.review.json",
+    "docs/specs/T-0121-reports-pages-design.spec.md",
+    "docs/specs/T-0121.spec.contract.json",
+    "docs/test-reports/T-0121.test-report.json",
+    "docs/pr/T-0121.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/** (spec + ADR + review + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI зелёный, docs-only ветка — baseline=dev). D-056: integration-honest gate пройден.",
+    "2 nit-fix (ce5c350): формулировки §2 и §6.1 уточнены по ревью — не семантическое изменение ADR, только точность спецификации."
+  ],
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-0121a",
+      "title": "[impl] report_page + report_page_dep DDL (migrations 046/047) + known_tenant_tables",
+      "scope": "migration 046_report_page.sql + 047_report_page_dep.sql; FORCE RLS; known_tenant_tables.txt; T-0013-пробы зелёные.",
+      "gates": "FF-T13-PAGE, FF-SCHEMA-046",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121b",
+      "title": "[impl] core/report-page-compat.ts — checkReportPageDepFields + classifyReportPageFloor (pure)",
+      "scope": "src/core/report-page-compat.ts (pure, no I/O); src/__tests__/report-page-compat.test.ts; зеркало checkBindingCompat (T-0072).",
+      "gates": "FF-COMPAT-PURE, FF-COMPAT-BEHAVIOR, FF-FLOOR",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121c",
+      "title": "[impl] registry_def schema-change API: soft-warning + destructive-deny + force-escape-hatch",
+      "scope": "PUT/PATCH /api/registry-defs/:id — soft warnings[], 409 деструктив, force+grant+stale+депромоут+audit.",
+      "gates": "FF-SOFT-WARN, FF-DESTRUCTIVE-DENY, FF-FORCE-DEMOTE",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121d",
+      "title": "[impl] report_page CRUD API + author/promote + report_page_dep registration (PDP-gated)",
+      "scope": "CRUD /api/report-pages; PDP T-0021; dep registration 422 on bad field_key; promote human-gate.",
+      "gates": "FF-DEP-VALIDATE, FF-PROMOTE-GATE, FF-NO-2ND-AUTHZ, FF-AUDIT-EVENTS",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121e",
+      "title": "[impl] bundle-coherence check-report-page-deps + bundle_members.txt",
+      "scope": "ci/checks/bundle-coherence.sh расширение; report_page_dep в bundle_members.txt (kind=choros_table).",
+      "gates": "FF-BUNDLE-DEPS",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121f",
+      "title": "[seed] mcp_tool author_report_page для config-агента (паттерн T-0077)",
+      "scope": "choros.mcp_tool seed в dev-тенант a0000000-0000-0000-0000-000000000001; authoring_draft-only гранты; DRAFT-only структурно.",
+      "gates": "author_report_page reachable в resolveAgentToolset, только authoring_draft-гранты",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121g",
+      "title": "[impl] Floor-1 server-side агрегат-рендерер + Floor-2 RLS-gated data API",
+      "scope": "Floor-1 детерминированный агрегат server-side; Floor-2 данные только через RLS-gated API (нет DB-credentials в клиентском бандле).",
+      "gates": "FF-FLOOR2-RLS, NF-4",
+      "status": "awaiting_materialization"
+    },
+    {
+      "suggested_id": "T-0121h",
+      "title": "[impl] статический анализ Floor-2 React → автоизвлечение field-deps (Stage-2)",
+      "scope": "best-effort React-парсер; ложные отрицания ок, ложные срабатывания нет. out-of-scope day-1.",
+      "gates": "паттерн T-0072 NF-5",
+      "status": "stage_2_parked"
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "rebase_note": "Docs-only ветка — конфликты маловероятны. Оркестратор rebases при необходимости перед merge (D-056).",
+    "what_to_verify": [
+      "docs/design/T-0121-reports-pages.adr.md: §2.1/§2.2 с fallback-ссылкой на §0; §6.1 с WARNING о dev-тенанте",
+      "docs/reviews/T-0121.review.json: verdict=approved, 22/22 AC covered",
+      "docs/test-reports/T-0121.test-report.json: verdict=pass, 22/22 трассируемость, diff-gate docs-only"
+    ],
+    "infra_changes": "Нет src/ изменений, нет миграций, нет docker-compose изменений. Design-only."
+  },
+  "friction_events": []
+}
