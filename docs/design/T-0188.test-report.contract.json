@@ -1,0 +1,84 @@
+{
+  "task_id": "T-0188",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1107,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-CT-1: seedRowForTable has explicit case entries for all 6 missing tables",
+      "test": "cross_tenant.test.ts — switch cases invoke_proposal / notification / email_channel_config / notification_preference / report_page / report_page_dep all present and exercised",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-2: beforeAll completes without error (0 beforeAll failures)",
+      "test": "cross_tenant.test.ts — 115 tests ran, 0 skipped (beforeAll did not throw)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-3: 0 skipped tests in cross_tenant.test.ts when run against live DB",
+      "test": "cross_tenant.test.ts — 115/115 pass, 0 skipped (was ≥75 skipped before T-0188)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-4: Guard test fails if a table in KNOWN_TENANT_TABLES is absent from SEEDED_TABLES",
+      "test": "cross_tenant.test.ts > AC-CT-4 guard — 36 table guard tests all green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-5: Two consecutive npm run fitness:db runs produce identical results (idempotency)",
+      "test": "fitness:db run twice: 529/529 both runs; ON CONFLICT DO NOTHING confirmed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-6: tsc --noEmit exits 0",
+      "test": "npm run ci — tsc --noEmit exit 0, 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-7: npm run fitness exits 0",
+      "test": "npm run ci — npm run fitness exit 0, all static checks green",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "fitness:db total: 529/529 passed — full suite clean, no pre-existing fails blocking",
+      "result": "pass",
+      "note": "All 33 db test files pass; 0 pre-existing failures in this run (dev DB state clean)"
+    },
+    {
+      "check": "Guard test structure: SEEDED_TABLES covers all 36 known_tenant_tables.txt entries",
+      "result": "pass",
+      "note": "Future table additions to known_tenant_tables.txt without a seeder will immediately red"
+    }
+  ],
+  "failures": [],
+  "known_red": {
+    "R-N1": {
+      "severity": "nit",
+      "location": "ci/checks/db/cross_tenant.test.ts:493 seedEmailChannelConfig",
+      "reason": "Returns void — caller cannot distinguish inserted-now vs ON CONFLICT DO NOTHING. Not a correctness issue.",
+      "is_product_defect": false
+    },
+    "R-N2": {
+      "severity": "nit",
+      "location": "ci/checks/db/cross_tenant.test.ts:734",
+      "reason": "Pre-existing effect_resource fall-through (missing break before case 'outbox'). Out of scope per T-0188 spec. Follow-up T-0189 created.",
+      "is_product_defect": false
+    }
+  },
+  "tested_commit": "34c817c",
+  "branch": "task/T-0188-cross-tenant-seeders",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+    "fitness_static": "PASS — all checks green",
+    "vitest_unit": "1107/1107 passed, 6 skipped",
+    "fitness_db_cross_tenant": "115/115 PASS — 0 skipped (was ≥75 skipped before T-0188)",
+    "fitness_db_total": "529/529 passed, 0 failed",
+    "fitness_db_idempotency": "529/529 passed on second consecutive run (AC-CT-5)"
+  }
+}

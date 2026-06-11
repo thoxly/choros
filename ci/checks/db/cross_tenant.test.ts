@@ -449,6 +449,118 @@ async function seedSpendLedger(
   );
 }
 
+/** Seed one row into choros.invoke_proposal (T-0024 migration 043).
+ * caller_id and target_id are logical employee references — no FK is declared.
+ */
+async function seedInvokeProposal(c: pg.Client, tenantId: string): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.invoke_proposal
+       (tenant_id, id, caller_id, target_id, goal, context, status, created_at)
+     VALUES ($1, $2, $3, $4, 'ct-goal', NULL, 'proposed', 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, uuid(), uuid()],
+  );
+  return id;
+}
+
+/** Seed one row into choros.notification (T-0168 migration 046).
+ * FK: (tenant_id, recipient_id) → employee(tenant_id, id).
+ * Must be seeded after employee.
+ */
+async function seedNotification(
+  c: pg.Client,
+  tenantId: string,
+  recipientId: string,
+): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.notification
+       (tenant_id, id, recipient_id, event_kind, title, body,
+        object_ref, is_read, created_at, expires_at)
+     VALUES ($1, $2, $3, 'ct-event', 'ct-title', 'ct-body',
+             NULL, false, 0, NULL)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, recipientId],
+  );
+  return id;
+}
+
+/** Seed one row into choros.email_channel_config (T-0168 migration 047).
+ * PK is (tenant_id) — single row per tenant; idempotent via ON CONFLICT DO NOTHING.
+ * No FK deps beyond tenant_id.
+ */
+async function seedEmailChannelConfig(c: pg.Client, tenantId: string): Promise<void> {
+  await c.query(
+    `INSERT INTO choros.email_channel_config
+       (tenant_id, smtp_host, smtp_port, smtp_tls, from_address, from_name,
+        smtp_handle, is_enabled, updated_by, updated_at)
+     VALUES ($1, 'ct-smtp.example', 587, false, 'ct@example.com', NULL,
+             'ct-handle', false, 'ct-seed', 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId],
+  );
+}
+
+/** Seed one row into choros.notification_preference (T-0168 migration 048).
+ * PK is (tenant_id, event_kind, recipient_scope) — no cross-table FK (T-0017 discipline).
+ */
+async function seedNotificationPreference(c: pg.Client, tenantId: string): Promise<void> {
+  const scope = `actor:${uuid()}`;
+  await c.query(
+    `INSERT INTO choros.notification_preference
+       (tenant_id, event_kind, recipient_scope, channels, updated_by, updated_at)
+     VALUES ($1, 'ct-event', $2, ARRAY['in_app'], 'ct-seed', 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, scope],
+  );
+}
+
+/** Seed one row into choros.report_page (T-0175 migration 051).
+ * FK: (tenant_id, app_id) → application(tenant_id, id).
+ * Must be seeded after application. Returns the report_page id.
+ */
+async function seedReportPage(
+  c: pg.Client,
+  tenantId: string,
+  appId: string,
+): Promise<string> {
+  const id = uuid();
+  const slug = `ct-rp-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.report_page
+       (tenant_id, id, app_id, slug, title, floor, tier,
+        page_def, page_code, bundle_ref, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, 'ct-title', '1', 'draft',
+             '{}'::jsonb, NULL, NULL, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, appId, slug],
+  );
+  return id;
+}
+
+/** Seed one row into choros.report_page_dep (T-0175 migration 052).
+ * FK: (tenant_id, page_id) → report_page(tenant_id, id)
+ * FK: (tenant_id, registry_def_id) → registry_def(tenant_id, id)
+ * Must be seeded after both report_page and registry_def.
+ */
+async function seedReportPageDep(
+  c: pg.Client,
+  tenantId: string,
+  pageId: string,
+  registryDefId: string,
+): Promise<void> {
+  const id = uuid();
+  const fieldKey = `ct-field-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.report_page_dep
+       (tenant_id, id, page_id, registry_def_id, field_key, dep_kind, stale, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'read', false, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, pageId, registryDefId, fieldKey],
+  );
+}
+
 async function seedSubstitutionRule(
   c: pg.Client,
   tenantId: string,
@@ -511,6 +623,9 @@ const seedState = {
   instanceBudgetIdB: '',
   reservationIdA: '',
   reservationIdB: '',
+  // T-0175 chain: report_page → report_page_dep (page_id FK)
+  reportPageIdA: '',
+  reportPageIdB: '',
 };
 
 /**
@@ -697,6 +812,43 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
          ON CONFLICT DO NOTHING`,
         [tenantId, id, procKey, formKey],
       );
+      break;
+    }
+    case 'invoke_proposal':
+      // T-0024 (migration 043) — no FK deps; caller_id/target_id are logical.
+      await seedInvokeProposal(c, tenantId);
+      break;
+    case 'notification': {
+      // T-0168 (migration 046) — FK to employee via recipient_id.
+      // KNOWN_TENANT_TABLES order (…, employee, …, notification) guarantees employee is seeded.
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      await seedNotification(c, tenantId, empId);
+      break;
+    }
+    case 'email_channel_config':
+      // T-0168 (migration 047) — PK=(tenant_id), single row per tenant, no FK deps.
+      await seedEmailChannelConfig(c, tenantId);
+      break;
+    case 'notification_preference':
+      // T-0168 (migration 048) — PK=(tenant_id, event_kind, recipient_scope), no FK deps.
+      await seedNotificationPreference(c, tenantId);
+      break;
+    case 'report_page': {
+      // T-0175 (migration 051) — FK to application via app_id.
+      // Store page id for downstream report_page_dep seed.
+      const appId = tenantId === TENANT_A ? seedState.appIdA : seedState.appIdB;
+      const pageId = await seedReportPage(c, tenantId, appId);
+      if (tenantId === TENANT_A) seedState.reportPageIdA = pageId;
+      else seedState.reportPageIdB = pageId;
+      break;
+    }
+    case 'report_page_dep': {
+      // T-0175 (migration 052) — FK to report_page (page_id) + registry_def (registry_def_id).
+      // KNOWN_TENANT_TABLES order (…, registry_def, …, report_page, report_page_dep)
+      // guarantees both FK targets are already seeded.
+      const pageId = tenantId === TENANT_A ? seedState.reportPageIdA : seedState.reportPageIdB;
+      const regId  = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      await seedReportPageDep(c, tenantId, pageId, regId);
       break;
     }
     default:
@@ -980,4 +1132,72 @@ describe('AC-9 · FF-CT9: SET LOCAL scope isolation — GUC cleared after COMMIT
       expect(rows[0].n, 'session-level SET for TENANT_A must not expose TENANT_B rows').toBe(0);
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// AC-CT-4 · Seeder completeness guard (T-0188)
+//
+// Every table listed in known_tenant_tables.txt MUST have an explicit case in
+// seedRowForTable. This describe block encodes that invariant statically: any
+// future table added to known_tenant_tables.txt without a matching seeder will
+// immediately produce a failing (not skipped) test, catching the gap before
+// CI runs live DB probes.
+//
+// SEEDED_TABLES must be kept in sync with the switch cases above.
+// ---------------------------------------------------------------------------
+
+/**
+ * The exhaustive list of tables with seeder cases in seedRowForTable above.
+ * If a table appears in KNOWN_TENANT_TABLES but NOT here, the guard test below
+ * will fail (red), preventing silent skip masking.
+ */
+const SEEDED_TABLES = new Set<string>([
+  'agent_card',
+  'job',
+  'application',
+  'registry_def',
+  'record',
+  'audit_event',
+  'audit_head',
+  'grant',
+  'mcp_tool',
+  'object_handle',
+  'app_timer',
+  'tenant',
+  'department',
+  'position',
+  'employee',
+  'actor_event',
+  'actor_event_seq',
+  'data_classification',
+  'role',
+  'role_assignment',
+  'effect_resource',
+  'egress_policy',
+  'outbox',
+  'sod_constraint',
+  'instance_budget',
+  'agent_budget',
+  'reservation',
+  'spend_ledger',
+  'substitution_rule',
+  'invoke_proposal',
+  'form_binding',
+  'notification',
+  'email_channel_config',
+  'notification_preference',
+  'report_page',
+  'report_page_dep',
+]);
+
+describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
+  for (const tableName of KNOWN_TENANT_TABLES) {
+    it(`table ${tableName} has a seeder in seedRowForTable`, () => {
+      expect(
+        SEEDED_TABLES.has(tableName),
+        `Table '${tableName}' is in known_tenant_tables.txt but has no case in seedRowForTable. ` +
+        `Add a seeder function and a case entry, then add '${tableName}' to SEEDED_TABLES.`,
+      ).toBe(true);
+    });
+  }
 });

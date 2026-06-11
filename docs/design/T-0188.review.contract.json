@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0188",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/db/cross_tenant.test.ts:493",
+      "issue": "seedEmailChannelConfig returns void — caller cannot distinguish 'inserted now' from 'row already existed (ON CONFLICT DO NOTHING)'. Not a correctness issue since probes only need the row to exist.",
+      "suggestion": "Optionally return rowCount or boolean for debuggability; no functional change needed."
+    },
+    {
+      "id": "R-N2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/cross_tenant.test.ts:734",
+      "issue": "Pre-existing effect_resource fall-through (missing break before case 'outbox') causes double-seeding of outbox. Out-of-scope for T-0188 per spec; documented as known side-finding.",
+      "suggestion": "Open a separate follow-up task to add the missing break and verify outbox seeder idempotency."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-CT-1", "covered": true},
+    {"ac": "AC-CT-2", "covered": true},
+    {"ac": "AC-CT-3", "covered": true},
+    {"ac": "AC-CT-4", "covered": true},
+    {"ac": "AC-CT-5", "covered": true},
+    {"ac": "AC-CT-6", "covered": true},
+    {"ac": "AC-CT-7", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Pre-existing effect_resource fall-through (cross_tenant.test.ts:734): double-seeds outbox. Documented in T-0188 spec as known side-finding; candidate for a dedicated follow-up task (not a security or correctness gap for T-0188)."
+  ]
+}
