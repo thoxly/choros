@@ -22,3 +22,4 @@ effect_resource
 egress_policy
 outbox
 sod_constraint
+invoke_proposal
