@@ -4,36 +4,36 @@
   "ci_seen": {"green": true},
   "findings": [
     {
-      "id": "R-1",
+      "id": "R-NEW",
       "severity": "blocking",
       "axis": 1,
-      "location": "src/server/lifecycle-bridge.ts:280",
-      "issue": "maxAttempts: 5 в единственном startOutboxDispatcherLoop — нарушает immediate-dead семантику. Spec AC-13/FR-8 требует maxAttempts=1 для notification dispatcher (или equivalent: row dies on attempt 1). IMMEDIATE_DEAD_ERROR_PREFIX не обрабатывается runOutboxOnce как per-row override (notification-router.ts:481-494 явно документирует этот gap). При maxAttempts=5 и attempts=0: 0+1=1 < 5 → state='pending' (не dead). Строка повторяется ещё 4 раза вместо немедленной смерти. Комментарий строка 261 'maxAttempts=1 for the notification path' — ложное обещание.",
-      "suggestion": "Вариант (a): создать отдельный startOutboxDispatcherLoop для notification rows с maxAttempts=1 и своим интервалом; externalTask-loop остаётся с maxAttempts=5. Вариант (b): расширить runOutboxOnce с per-row maxAttempts override при IMMEDIATE_DEAD_ERROR_PREFIX → markRetry(…, 1). Вариант (a) проще и не меняет T-0062."
+      "location": "src/core/outboxDispatcher.ts:177-182",
+      "issue": "startOutboxDispatcherLoop не передаёт perRowMaxAttempts в runOpts. Callback принимается TypeScript (OutboxDispatcherLoopOptions extends RunOutboxOptions), но NOT включён при построении runOpts (строки 177-182: только batchLimit/maxAttempts/backoff/onDispatched). runOutboxOnce вызывается без perRowMaxAttempts → IMMEDIATE_DEAD rows в production получают maxAttempts=5 (не 1). Тесты R-1 проверяют runOutboxOnce напрямую — они обходят startOutboxDispatcherLoop и не обнаруживают проблему. AC-13/FR-8 не выполнен в production runtime path.",
+      "suggestion": "В startOutboxDispatcherLoop добавить в runOpts: ...(opts.perRowMaxAttempts !== undefined ? { perRowMaxAttempts: opts.perRowMaxAttempts } : {}). Одна строка. Не меняет поведение для вызывающих без perRowMaxAttempts (default=undefined)."
     },
     {
       "id": "R-2",
       "severity": "blocking",
       "axis": 1,
-      "location": "src/main.ts (отсутствие instantiation EmailChannelDriver)",
-      "issue": "EmailChannelDriver не инстанциируется в production. main.ts вызывает startLifecycleBridge без notificationRegistry, поэтому lifecycle-bridge использует дефолт Map([inAppNoOpDriver]). Email channel недостижим в production — любой notification outbox-ряд с channel='email' получит IMMEDIATE_DEAD:no ChannelDriver registered for channel 'email'. FR-9 требует 'Registry включает inAppNoOpDriver и emailChannelDriver' — не выполнен. Wired-entry тест (AC-12) инжектирует stub registry самостоятельно и не проверяет production default.",
-      "suggestion": "В main.ts при startLifecycleBridge() создать notificationRegistry = new Map([[inAppNoOpDriver.key, inAppNoOpDriver], [emailDriver.key, emailDriver]]) с реальным EmailChannelDriver(pgEmailConfigStore, makeDirectStringSmtpResolver(), nodeMailerSender). Нужен PgEmailConfigStore (реализация EmailConfigWritePort на pool). Если PgEmailConfigStore отложен до E-N.6 — зафиксировать явно в spec out-of-scope и убрать FR-9 из T-0170 scope."
+      "location": "src/main.ts, src/server/lifecycle-bridge.ts",
+      "issue": "CLOSED: buildProductionNotificationRegistry(pool) реализован в lifecycle-bridge.ts и вызван в main.ts buildLifecycleDepsFromEnv. EmailChannelDriver инстанциируется в production. FR-9 выполнен.",
+      "suggestion": "CLOSED"
     },
     {
       "id": "R-3",
       "severity": "nit",
       "axis": 3,
       "location": "src/core/notification-email.ts:15",
-      "issue": "Jsdoc обещает 'wiring uses maxAttempts=1 in dispatcher' — нарушено R-1. После исправления R-1 jsdoc должен быть обновлён для соответствия реальной реализации.",
-      "suggestion": "После исправления R-1 обновить jsdoc: описать какой именно механизм (отдельный loop или per-row override) реализует immediate-dead."
+      "issue": "CLOSED: jsdoc обновлён — описывает механизм perRowMaxAttempts в lifecycle-bridge.",
+      "suggestion": "CLOSED"
     },
     {
       "id": "R-4",
       "severity": "nit",
       "axis": 5,
       "location": "src/server/lifecycle-bridge.ts:84",
-      "issue": "Jsdoc поля notificationRegistry говорит 'Production: Map with inAppNoOpDriver + EmailChannelDriver' — не совпадает с реальным production-wiring в main.ts (нет EmailChannelDriver). После исправления R-2 jsdoc станет честным.",
-      "suggestion": "После исправления R-2 (production wiring в main.ts) jsdoc автоматически станет верным. Или уточнить: 'Когда передаётся извне: Map with inAppNoOpDriver + EmailChannelDriver'."
+      "issue": "CLOSED: jsdoc поля notificationRegistry обновлён — упоминает buildProductionNotificationRegistry(pool) как canonical production default.",
+      "suggestion": "CLOSED"
     }
   ],
   "acceptance_coverage": [
