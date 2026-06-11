@@ -1,0 +1,97 @@
+{
+  "task_id": "T-0077",
+  "status": "pr_open",
+  "branch": "task/T-0077",
+  "merge_target": "dev",
+  "base_commit": "4765346",
+  "head_commit": "9802813",
+  "pr_url": "https://github.com/thoxly/choros/pull/11",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E11.6 config-agent как сотрудник: migration 044 (PURE DATA SEED — роль config-agent e0...003, employee d0...013 kind=agent, agent_card kc_client_id=agent-config budget_policy_id=instance_budget, role_assignment, 7 mcp_tool authoring_draft, 7 grants authoring_draft); structural DRAFT-граница (ноль authoring_published грантов); resolveAgentToolset unit-тест (6/6); fitness config-agent-seed.sh 9/9; DB-тест 8/8; адверсариальные пробы A-D (SQL-7-строк, граница-rollback, RLS-cross-tenant=0, идемпотентность-1/7/7). 15/15 AC покрыты. known_tenant_tables.txt не изменён.",
+  "commits": [
+    {
+      "sha": "2f5c7cc",
+      "phase": "SPEC",
+      "message": "T-0077 SPEC: config-agent как сотрудник — DDL+seed (роль, 7 mcp_tool authoring_draft, 7 грантов, бюджет); 15 AC"
+    },
+    {
+      "sha": "5448c92",
+      "phase": "DESIGN",
+      "message": "T-0077 DESIGN: ADR config-agent seed — один транзакционный 044 в dev-тенант, structural DRAFT-граница, 16 fitness; контракт валиден"
+    },
+    {
+      "sha": "15e752c",
+      "phase": "BUILD",
+      "message": "T-0077 BUILD: migration 044 + fitness + toolset unit test"
+    },
+    {
+      "sha": "b2ec0df",
+      "phase": "BUILD",
+      "message": "T-0077 BUILD: fix config-agent-seed.sh — exclude comment lines from static checks"
+    },
+    {
+      "sha": "ed2c384",
+      "phase": "REVIEW",
+      "message": "T-0077 REVIEW: approved — UUID/гранты построчно сверены с ADR, zero over-grant, RLS live-проверен, 2 nit"
+    },
+    {
+      "sha": "9802813",
+      "phase": "TEST",
+      "message": "T-0077 TEST: pass — 15/15 AC, адверсариальные пробы A-D (структурная DRAFT-граница, RLS, идемпотентность)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "ed2c384",
+      "blocking_findings": [],
+      "nits": ["R-1 (spec FR-3 nodeLevel typo 'org'→'department' — doc-only, code correct)", "R-2 (makeGrantSource ignores subjectId — consistent with baseline pattern, AC-07 coverage genuine)"],
+      "artifact": "docs/reviews/T-0077.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "ac_coverage": "15/15",
+      "adversarial_probes": "4/4 (A/B/C/D)",
+      "tested_commit": "9802813",
+      "run_details": {
+        "tsc": "exit 0 (0 errors)",
+        "eslint": "exit 0 (0 warnings)",
+        "vitest": "959 pass / 5 skipped (964 total) — includes config-agent-toolset.test.ts 6/6",
+        "fitness_static": "config-agent-seed.sh 9/9 PASS",
+        "fitness_db": "config-agent-seed.test.ts 8/8 PASS (live Postgres 55432, migrations 001..044)",
+        "known_sibling_red": "FF-RC5/RC6 (role-criticality-isolation.sh) — T-0040 sees 044 as added migration vs its baseline; by design, green post-merge to dev (documented pattern choros-ci-check-gotchas.md)",
+        "preexisting_db_failures": "schema.test.ts (Flowable ACT_* tables), grant-editor.test.ts (known_tenant_tables count), genesis-owner-seed.test.ts (grant inflation), cross_tenant.test.ts (invoke_proposal seed gap) — all confirmed pre-existing, not introduced by T-0077"
+      },
+      "artifact": "docs/test-reports/T-0077.test-report.json"
+    }
+  },
+  "files_changed": [
+    "migrations/044_config_agent_seed.sql",
+    "ci/checks/config-agent-seed.sh",
+    "ci/checks/db/config-agent-seed.test.ts",
+    "src/__tests__/config-agent-toolset.test.ts",
+    "package.json",
+    "docs/design/T-0077-config-agent-employee.adr.md",
+    "docs/design/T-0077.adr.contract.json",
+    "docs/specs/T-0077-config-agent-employee.spec.md",
+    "docs/specs/T-0077.spec.contract.json",
+    "docs/reviews/T-0077.review.json",
+    "docs/test-reports/T-0077.test-report.json"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator merges feature branch into dev после прохождения всех гейтов",
+    "pre_merge_sibling_red": "FF-RC5/RC6 (role-criticality-isolation.sh) — вакуумно зелёный post-merge в dev (штатный паттерн)",
+    "infra_changes": "Только DATA SEED migration 044: роль+сотрудник+agent_card+role_assignment+7 mcp_tool+7 grants. Нет DDL CREATE TABLE. known_tenant_tables.txt не изменён. docker-compose.yml не изменён. Безопасно мержить в dev.",
+    "authoring_seam": "7 authoring_draft инструментов зафиксированы как frozen seam (AC-15/ADR §1): emit_form_code, edit_jsonschema, author_dmn, scaffold_external_worker, write_object_migration, open_draft_branch, request_promote."
+  },
+  "friction_events": []
+}
