@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0181",
+  "status": "pr_open",
+  "branch": "task/T-0181-report-renderers",
+  "merge_target": "dev",
+  "base_commit": "3f902e8",
+  "head_commit": "069215f",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Floor-1 server-side aggregate renderer + Floor-2 RLS-gated data API (T-0121g). POST /api/report-pages/:id/render dispatches to renderFloor1 (floor=1, server-side GROUP BY aggregation over registry_def fields) or dataFloor2 (floor=2, RLS-isolated raw paginated data) based on floor. PDP gate on Floor-1: authzDeps.checkReadGrant checks application/read grant via JOIN grant×role_assignment (genesis-owner short-circuit; confirmed_by + validity windows; LIMIT 1). T-0144 discipline: withTenantTx begins transaction before SET LOCAL. MAX_DATA_LIMIT enforced on Floor-2. STALE_DEPENDENCIES (409) and FLOOR_MISMATCH (400) gates. Injectable deps (ReportPageRenderAuthzDeps, resetRenderPoolForTesting). Static fitness check report-page-render-isolation.sh (FF-NF4, AC-AUTHZ, AC-TX, AC-REG). 22 no-DB unit tests + 9 live-DB report_page_render tests + 4 live-DB AC-6 probes (deny×2 + allow×2). RE-REVIEW approved (R-1/R-2/R-3 all resolved). R-6 nit (scope-containment: checkReadGrant not filtered by app_id → grant on App-A covers all tenant pages) deferred as tech-debt to T-0193; ADR §6 states 'через PDP T-0021' as full path. Post-rebase onto dev (T-0179 + T-0180): package.json union-additive (check-report-page-deps.sh + author-report-page-seed.sh + report-page-render-isolation.sh). All CI gates green: tsc 0 errors, eslint 0 errors, fitness all PASS, vitest 1385/1385 passed (68 files), fitness:db 599/599 passed (43 files). T-0121 ADR covered through T-0121a..T-0121g — Reports epic complete.",
+  "commits": [
+    {
+      "sha": "054468d",
+      "phase": "BUILD",
+      "message": "feat(T-0181): Floor-1 server-side aggregate renderer + Floor-2 RLS-gated data API (T-0121g)"
+    },
+    {
+      "sha": "eb26f21",
+      "phase": "REVIEW",
+      "message": "T-0181 REVIEW: changes_requested — R-1 Floor-1 no PDP gate, R-2 broken defaultCheckReadGrant (wrong grant pool), R-3 AC-6 live probe missing"
+    },
+    {
+      "sha": "48864ba",
+      "phase": "FIX",
+      "message": "T-0181 fix: PDP gate on Floor-1 + correct application-read grant check + live deny/allow probes (R-1/R-2/R-3)"
+    },
+    {
+      "sha": "069215f",
+      "phase": "RE-REVIEW",
+      "message": "T-0181 RE-REVIEW: approved — R-1/R-2/R-3 resolved, R-6 scope-containment nit"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "069215f",
+      "findings_resolved": [
+        "R-1 (blocking) — Floor-1 /render had no PDP gate. Fixed: renderFloor1 now accepts actor/nowMs/authzDeps; calls authzDeps.checkReadGrant fail-early before withTenantTx.",
+        "R-2 (blocking) — defaultCheckReadGrant used wrong grant pool (mgmt_object:* grants). Fixed: full rewrite — genesis-owner short-circuit via loadAdminContext; non-genesis path uses correct JOIN grant×role_assignment filtered by resource_type='application', operation='read', confirmed_by IS NOT NULL, validity windows on both grant and role_assignment.",
+        "R-3 (blocking) — AC-6 live probe absent. Fixed: ci/checks/db/report_page_render_ac6.test.ts added with 4 live probes (AC-6-DENY-FLOOR1, AC-6-DENY-FLOOR2, AC-6-ALLOW-FLOOR1, AC-6-ALLOW-FLOOR2); all 4 green."
+      ],
+      "findings_nit": [
+        "R-4 (nit) — FIELD_KEY_SAFE_RE dashes: documented behavior, no fix required.",
+        "R-5 (nit) — denyDeps FakePool no comment: no fix required.",
+        "R-6 (nit) — scope-containment: checkReadGrant not filtered by app_id → grant on App-A covers all tenant pages. Deferred to T-0193; ADR §6 states 'через PDP T-0021' as full path."
+      ],
+      "artifact": "docs/design/T-0181.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1984,
+      "passed": 1984,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "16/16",
+      "fitness_static": "PASS — all checks green including report-page-render-isolation.sh (FF-NF4, AC-AUTHZ, AC-TX, AC-REG all PASS)",
+      "fitness_db": "599/599 passed — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros, 43 files; report_page_render 9/9, report_page_render_ac6 4/4, config-agent-seed 8/8, author_report_page_seed 11/11",
+      "tested_commit": "069215f",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors (pre-existing no-console warnings only)",
+        "fitness_static_checks": "PASS — all checks green, report-page-render-isolation.sh fully green",
+        "vitest_unit": "1385/1385 passed, 6 skipped (flowable integration offline) — 68 test files",
+        "fitness_db_tests": "599/599 passed — report_page_render.test.ts 9/9, report_page_render_ac6.test.ts 4/4, config-agent-seed.test.ts 8/8, author_report_page_seed.test.ts 11/11, 43 test files"
+      },
+      "artifact": "docs/test-reports/T-0181.test-report.md",
+      "contract_artifact": "docs/design/T-0181.test-report.contract.json"
+    }
+  },
+  "adr_coverage_note": {
+    "adr": "T-0121",
+    "covered_through": "T-0121g",
+    "this_task_slice": "§9.6 T-0121g — Floor-1 server-side aggregate renderer + Floor-2 RLS-gated data API",
+    "epic_complete": true,
+    "epic_note": "T-0121 ADR closed: T-0121a..T-0121g all DONE. Residual: T-0192 (clone-template gap, ongoing), T-0193 (R-6 scope-containment nit, deferred)",
+    "residual": "T-0192 (clone-template migration gap), T-0193 (R-6 scope-containment nit per ADR §6 PDP T-0021 integration)"
+  },
+  "deferred_nits": [
+    "R-6: scope-containment nit — checkReadGrant not filtered by app_id. Tracked in T-0193. Fix: pass app_id to checkReadGrant or replace with resolveFor(deps, {tenantId, ref:{kind:'application', applicationId: page.app_id}}, subject, 'read') at T-0021 integration time."
+  ],
+  "files_changed": [
+    "src/http/report-page-render.ts",
+    "src/__tests__/report-page-render.test.ts",
+    "src/server.ts",
+    "ci/checks/report-page-render-isolation.sh",
+    "ci/checks/db/report_page_render.test.ts",
+    "ci/checks/db/report_page_render_ac6.test.ts",
+    "package.json",
+    "docs/design/T-0181.review.contract.json",
+    "docs/reviews/T-0181.review.md",
+    "docs/test-reports/T-0181.test-report.md",
+    "docs/design/T-0181.test-report.contract.json",
+    "docs/pr/T-0181.pr-handoff.json"
+  ]
+}

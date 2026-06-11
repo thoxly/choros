@@ -29,6 +29,7 @@ import { type ResolverDeps } from "./core/grant-resolver.js";
 import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
+import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 
 const { Pool } = pg;
 
@@ -273,6 +274,9 @@ function buildRouter(
 
   // Register report_page CRUD + promote routes (T-0178 T-0121d).
   registerReportPageRoutes(router);
+
+  // Register Floor-1 aggregate renderer + Floor-2 RLS-gated data API (T-0181 T-0121g).
+  registerReportPageRenderRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
