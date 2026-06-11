@@ -96,6 +96,13 @@ jobs:
         run: bash ci/checks/flowable/external-task-smoke.sh
         env:
           FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      # bridge-e2e-smoke резолвит genesis-тенанта из choros-схемы (миграция 026) —
+      # compose-Postgres этого job-а девственный, миграции гоняет только job db на
+      # СВОЁМ Postgres. Локально это маскировала общая прогретая БД (FE-2026-W24-0055,
+      # второй слой). Шаг стоит ПОСЛЕ flowable-смоуков: их schema-isolation-проверки
+      # видят тот же набор схем, что и до этого фикса.
+      - name: Run choros migrations (bridge smoke needs genesis tenant)
+        run: node migrations/run.mjs
       # T-0067 · FF-T0067-14..16 (D-056 integration-honest gate):
       # Full bridge cycle: poll Flowable external tasks → enqueue in JobStore →
       # outbox deliver → completeTask in Flowable → instance completed.
