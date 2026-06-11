@@ -1,0 +1,141 @@
+{
+  "task_id": "T-0035",
+  "status": "ready",
+  "summary": "E4.7 Substitutions/absences: (1) substitution_rule table (migration 036) declaring who substitutes for whom over what role and org_scope, with proposal/confirmation contract mirroring role_assignment; (2) SubstitutionSource port + resolveSubstitution pure function in new src/core/substitution.ts; (3) Tier-1 routing-layer stand-in (no grant minted, existing role-pool used); (4) Tier-2 TTL'd delegation grant (valid_until on existing grant row, delegable=false, non_inheritable grants excluded when non_inheritable_excluded=true); (5) end-to-end on_behalf_of=absentEmployeeId / actor=substituteEmployeeId discipline threaded through GuardContext into actor_event rows. grant-resolver.ts gains only optional substitution?: SubstitutionSource on ResolverDeps — no other shared-file change.",
+  "functional": [
+    "FR-1 substitution_rule table: columns tenant_id, id, absent_employee_id, substitute_employee_id, role_id, org_scope (jsonb, T-0018 lattice hierarchy=org), ttl_grant_id (uuid NULL FK to grant), non_inheritable_excluded (boolean NOT NULL DEFAULT TRUE), proposed_by, confirmed_by, valid_from, valid_until, source, created_by, created_at, updated_at; PK(tenant_id,id); CHECK absent_employee_id != substitute_employee_id; CHECK window sanity",
+    "FR-2 confirmation contract: confirmed_by IS NULL = proposal (zero capability); confirmed_by NOT NULL = effective; mirrors role_assignment T-0022 semantics",
+    "FR-3 T-0013 isolation invariants on substitution_rule: tenant_id leading, FORCE RLS, default-DENY, choros_app SELECT/INSERT/UPDATE/DELETE only",
+    "FR-4 Tier-2 TTL'd grant: reuses existing grant.valid_until (no new column on grant); delegable=false; ttl_grant_id FK recorded in substitution_rule",
+    "FR-5 non-inheritable exclusion: grants with constraint={non_inheritable:true} are excluded from Tier-2 mint when non_inheritable_excluded=true on the rule",
+    "FR-6 SubstitutionSource port in src/core/substitution.ts: getActiveSubstitutions(tenantId, absentEmployeeId, nowMs) and getSubstitutionForSubstitute(tenantId, substituteId, absentId, roleId, nowMs); Postgres impl deferred to T-0053",
+    "FR-7 resolveSubstitution pure function: returns first matching effective rule for (employeeId, roleId, orgScope, ancestry, nowMs) using isNarrowerOrEqual + validity window + confirmed_by check; returns null on no match",
+    "FR-8 on_behalf_of threading contract: substitute actions supply onBehalfOf=absentEmployeeId and actor=substituteEmployeeId to GuardContext; actor_event rows carry both distinct; SoD attributes to COALESCE(on_behalf_of, actor)",
+    "FR-9 additive-only touch to grant-resolver.ts: one optional property substitution?: SubstitutionSource added to ResolverDeps; no other shared-file change",
+    "FR-10 known_tenant_tables.txt updated with substitution_rule (alphabetical)",
+    "FR-11 dev seed in migration 036: one confirmed substitution_rule row (a-recon substitutes e-mironov under budget-approver in fin dept), ON CONFLICT DO NOTHING"
+  ],
+  "non_functional": [
+    "NF-1 migration 036 idempotent: CREATE TABLE IF NOT EXISTS, ON CONFLICT DO NOTHING; re-run = no error",
+    "NF-2 additive parallel-safe changes: no existing export removed or signature changed in shared files",
+    "NF-3 new logic in new module src/core/substitution.ts only",
+    "NF-4 grant table unchanged except at most one additive column via 036 if architect needs a source marker; valid_until is the TTL carrier",
+    "NF-5 non-inheritable flag convention: grant.constraint jsonb {non_inheritable:true}; no new column",
+    "NF-6 tsc --noEmit, eslint, npm run fitness all green after T-0035 commit",
+    "NF-7 migration seam: T-0035 uses 036 (and optionally 037 for split); 032-035 and 038+ are forbidden"
+  ],
+  "out_of_scope": [
+    "HTTP endpoints for substitution rule CRUD",
+    "routing-engine implementation (task-pool auto-reassignment)",
+    "absence calendar / leave management integration",
+    "Stage-2 agent-to-agent substitution at A2A level",
+    "Postgres-backed SubstitutionSource implementation (T-0053)",
+    "dual-control gate for substitution-rule creation (T-0044 already covers criticality-escalating grant mints)",
+    "UI for substitution management",
+    "automatic TTL expiry cleanup jobs"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Migration file migrations/036_substitution_rule.sql exists; has CREATE TABLE choros.substitution_rule with PK (tenant_id, id), all columns from FR-1, CHECK absent_employee_id != substitute_employee_id, CHECK window sanity, and FKs to employee (both sides) and role.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "substitution_rule has FORCE ROW LEVEL SECURITY and a USING (tenant_id = current_setting('choros.tenant_id', true)::uuid) policy.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "A cross-tenant read on substitution_rule (tenant B context, tenant A data) returns 0 rows.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "A cross-tenant write on substitution_rule (tenant B context, tenant A tenant_id) is rejected (RLS violation).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "INSERT into substitution_rule with absent_employee_id = substitute_employee_id is rejected by the CHECK constraint.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "A substitution_rule with confirmed_by IS NULL is NOT returned by SubstitutionSource.getActiveSubstitutions (proposal-only, zero capability).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "A substitution_rule with valid_until in the past is NOT returned by SubstitutionSource.getActiveSubstitutions at nowMs > valid_until.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "resolveSubstitution returns null when no effective rule matches (employeeId, roleId, orgScope).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "resolveSubstitution returns the rule when an effective rule matches and isNarrowerOrEqual(orgScope, rule.orgScope, ancestry) === true.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "A Tier-2 TTL'd grant row has delegable=false and valid_until set to the substitution TTL. After nowMs > valid_until, isEffective(grant, nowMs) === false and resolveFor denies with 'no_grant'.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "A grant with constraint = {non_inheritable: true} is excluded from Tier-2 TTL'd grant minting when non_inheritable_excluded=true on the substitution_rule.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "An actor_event row produced by a substitute action has actor=substituteEmployeeId and on_behalf_of=absentEmployeeId (they are distinct).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "src/core/substitution.ts is a new file. grant-resolver.ts gains exactly one optional substitution?: SubstitutionSource on ResolverDeps and no other change. grant-lattice.ts, actor-event.ts, types.ts are unmodified.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "ci/checks/known_tenant_tables.txt contains 'substitution_rule'; the cross-tenant CI tests pass for the new table without modification to the test source.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "Dev seed: after applying migration 036, one substitution_rule row exists for a-recon substituting e-mironov under budget-approver in fin org node, with confirmed_by='seed'.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "Migration 036 is idempotent: running the migration runner twice produces no error.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-17",
+      "text": "No migration file numbered 032-035 or 038+ is introduced by T-0035's commit. Only 036 (and optionally 037 for a split) are permitted.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "tsc --noEmit, eslint, and npm run fitness (existing) are all green after T-0035's commit.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-19",
+      "text": "grant-resolver.ts resolveFor behavior is unchanged when deps.substitution is absent: all existing tests pass with no modification.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-20",
+      "text": "substitution_rule.ttl_grant_id FK references choros.grant(tenant_id, id); a Tier-1 rule with ttl_grant_id=NULL is stored without error; a Tier-2 rule with a valid grant.id FK is stored without error.",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0035-substitutions.spec.md"
+}
