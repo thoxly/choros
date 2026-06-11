@@ -69,9 +69,11 @@ services:
         condition: service_healthy
     healthcheck:
       # KC 25 image (quay.io/keycloak/keycloak:25.0.6) ships without curl.
-      # Use bash /dev/tcp to hit the management /health/ready endpoint (no extra deps).
-      # /health/ready returns HTTP 200 + JSON body; we check status line contains "200".
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KEYCLOAK_MGMT_PORT:-9000} && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <(timeout 4 cat <&3) && exec 3>&-"]
+      # Use bash /dev/tcp to hit the KC management port /health/ready endpoint.
+      # KC management port is always 9000 INSIDE the container (KC_MANAGEMENT_PORT default);
+      # KEYCLOAK_MGMT_PORT is the HOST-side mapping only — do NOT use it here.
+      # /health/ready returns HTTP 200 + JSON; we check the status line contains "200".
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <(timeout 4 cat <&3) && exec 3>&-"]
       interval: 5s
       timeout: 5s
       retries: 24
