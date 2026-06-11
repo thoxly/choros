@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0147",
+  "status": "pr_open",
+  "branch": "task/T-0147-db-test-isolation",
+  "merge_target": "dev",
+  "base_commit": "8592ac4",
+  "head_commit": "0da4964",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Реализует Postgres template-DB изоляцию для fitness:db (T-0147). Каждый запуск `npm run fitness:db` клонирует `choros_test_template` в `choros_test_<epoch>_<hex>` (globalSetup vitest), запускает тесты изолированно, дропает клон после. Параллельные прогоны из разных worktree не конфликтуют — genesis стабильно = 17 в каждом. Добавлены: ci/checks/db/globalSetup.ts, scripts/db-setup-template.ts, scripts/db-cleanup-orphans.ts, 9 FF-T147-* статических проверок. Все 9 AC закрыты. REVIEW approved (R-1/R-2 nit deferred).",
+  "commits": [
+    {
+      "sha": "d331311",
+      "phase": "SPEC",
+      "message": "T-0147 SPEC: db-test isolation"
+    },
+    {
+      "sha": "4a43027",
+      "phase": "DESIGN",
+      "message": "T-0147 DESIGN: template-DB isolation ADR"
+    },
+    {
+      "sha": "f0e345e",
+      "phase": "BUILD",
+      "message": "T-0147 BUILD: template-DB isolation for db-tests (globalSetup clone, orphan cleanup, DB_ISOLATION=off fallback)"
+    },
+    {
+      "sha": "0da4964",
+      "phase": "REVIEW",
+      "message": "T-0147 REVIEW: approved — 9 FF green, AC 1-9 covered, 2 nit"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "0da4964",
+      "findings_resolved": [],
+      "findings_deferred": [
+        "R-1 (nit): advisory lock in globalSetup.ts:128-138 serializes ALL parallel clones; can be narrowed to setup-template path only. Conservative but safe.",
+        "R-2 (nit): hardcoded placeholder 'pw' in selfTest() line 75 — only used for URL-rewriting self-test, no real connection. Rename to PLACEHOLDER for clarity."
+      ],
+      "artifact": "docs/design/T-0147.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1107,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "9/9",
+      "fitness_static": "PASS — all FF-T147-1..9 green; no sibling-gotcha (migration-free task)",
+      "fitness_db_isolation": "4 runs: 377 passed / 75 skipped each; genesis=17 stable; parallel pair distinct clones; clone time 102ms",
+      "tested_commit": "0da4964",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors",
+        "fitness_static_checks": "PASS — all checks green including all 9 FF-T147-* checks",
+        "vitest_unit": "1107/1107 passed, 6 skipped",
+        "fitness_db_run1": "377/452 passed, 75 skipped — clone choros_test_..._20f3, genesis=17",
+        "fitness_db_parallel_pair": "runs 2+3 simultaneous: _ae39 + _7968, both 377/452, distinct clones, no collision",
+        "fitness_db_run4_repeat": "377/452 passed, 75 skipped — template up-to-date, no re-setup needed",
+        "fitness_db_pre_existing_skip": "75 skipped (cross_tenant.test.ts): invoke_proposal seeder gap — pre-existing on dev, T-0147 does not touch cross_tenant.test.ts"
+      },
+      "artifact": "docs/test-reports/T-0147.test-report.md",
+      "contract_artifact": "docs/design/T-0147.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db-isolation-cleanup-registered.sh",
+    "ci/checks/db-isolation-fallback-path.sh",
+    "ci/checks/db-isolation-globalsetup-pure.sh",
+    "ci/checks/db-isolation-no-test-change.sh",
+    "ci/checks/db-isolation-run-id-pattern.sh",
+    "ci/checks/db-isolation-self-test.sh",
+    "ci/checks/db-isolation-setup-registered.sh",
+    "ci/checks/db-isolation-teardown-terminate.sh",
+    "ci/checks/db-isolation-template-url.sh",
+    "ci/checks/db/globalSetup.ts",
+    "docs/design/T-0147-db-test-isolation.adr.md",
+    "docs/design/T-0147.adr.contract.json",
+    "docs/design/T-0147.review.contract.json",
+    "docs/reviews/T-0147.review.md",
+    "docs/specs/T-0147-db-test-isolation.spec.md",
+    "docs/specs/T-0147.spec.contract.json",
+    "package.json",
+    "scripts/db-cleanup-orphans.ts",
+    "scripts/db-setup-template.ts",
+    "vitest.config.js",
+    "docs/test-reports/T-0147.test-report.md",
+    "docs/design/T-0147.test-report.contract.json",
+    "docs/pr/T-0147.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "OPERATIONAL_NOTE": "После мержа исполнители ОБЯЗАНЫ один раз прогнать `npm run fitness:db:setup-template` на каждой машине/worktree. Шаблонная база `choros_test_template` должна существовать на целевом Postgres (55432) перед первым запуском `npm run fitness:db`. Без неё fitness:db громко падает с подсказкой: 'template DB choros_test_template not found — run npm run fitness:db:setup-template first'. Команда идемпотентна — повторный запуск безопасен.",
+    "cross_tenant_invoke_proposal_gap": "Pre-existing gap: `ci/checks/db/cross_tenant.test.ts` `seedRowForTable` не имеет case для `invoke_proposal`. 75 тестов cross_tenant скипаются с 'seedRowForTable: unknown table invoke_proposal'. Баг существует на ветке dev (подтверждено). T-0147 не касается cross_tenant.test.ts (AC-4 PASS). Кандидат в бэклог: дописать seedRowForTable case для invoke_proposal.",
+    "nits_deferred": "R-1 (advisory lock scope narrowing) и R-2 (placeholder rename 'pw' → 'PLACEHOLDER') деferred. Функциональных дефектов нет.",
+    "no_migration": "T-0147 не добавляет миграций. Никаких schema_migrations действий при мерже не требуется."
+  },
+  "friction_events": []
+}

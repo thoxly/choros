@@ -1,0 +1,127 @@
+{
+  "task_id": "T-0147",
+  "status": "ready",
+  "decision": "vitest globalSetup/globalTeardown в ci/checks/db/globalSetup.ts: перед каждым fitness:db прогоном создаётся уникальная база choros_test_<epoch_ms>_<random_4hex> через CREATE DATABASE ... TEMPLATE choros_test_template (choros_migrator = superuser, CREATEDB подтверждён); DATABASE_URL и APP_DATABASE_URL мутируются в process.env до форка workers; после прогона pg_terminate_backend + DROP DATABASE. Шаблон обновляется через npm run fitness:db:setup-template (node migrations/run.mjs с DATABASE_URL→choros_test_template). Orphan-cleanup: npm run fitness:db:cleanup-orphans. Fallback: DB_ISOLATION=off пропускает механизм.",
+  "rejected_alternatives": [
+    {
+      "option": "Вариант A: BEGIN/ROLLBACK per test (savepoint isolation)",
+      "why_not": "Несовместим с multi-connection тестами: pgTimerStore AC-8 (два параллельных пула + FOR UPDATE SKIP LOCKED), cross_tenant.test.ts (migratorUrl + appUrl на разных соединениях — строки не видны до COMMIT), seed-pack/grant-editor FF-10 (реальный HTTP-сервер с собственным пулом соединений вне тестовой транзакции)."
+    },
+    {
+      "option": "npm-обёртка bash-скрипт вместо globalSetup",
+      "why_not": "Bash trap не ловит SIGKILL — orphan при OOM. globalTeardown vitest вызывается harness'ом даже при аварийном завершении тестов (не SIGKILL самого node). TypeScript соответствует стеку проекта."
+    },
+    {
+      "option": "Schema-level isolation (CREATE SCHEMA per run)",
+      "why_not": "Не изолирует schema_migrations (одна таблица на базу данных); не изолирует по Postgres-ролям; FK из keycloak/flowable-схем остаются общими."
+    },
+    {
+      "option": "Отдельный docker-compose per worktree",
+      "why_not": "Оверкилл (нарушает NF-1 — no new prod deps); требует управления портами; не соответствует размеру задачи."
+    },
+    {
+      "option": "choros_test_<pid> именование",
+      "why_not": "PID переиспользуется OS после завершения процесса — следующий прогон может столкнуться с orphan-базой того же имени."
+    },
+    {
+      "option": ".env.test файл для передачи DATABASE_URL в workers",
+      "why_not": "Гонка записи при двух параллельных прогонах одного worktree; файл потенциально попадает в git; не нужно при нативной мутации process.env в globalSetup (vitest 2.x workers наследуют env до форка)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "TestRunContext",
+      "fields": [
+        {"name": "run_id", "type": "string — choros_test_<epoch_ms>_<random_4hex>"},
+        {"name": "migrator_url", "type": "string — postgres URL (choros_migrator creds, run_id db)"},
+        {"name": "app_url", "type": "string — postgres URL (choros_app creds, run_id db)"}
+      ]
+    },
+    {
+      "entity": "TemplateSetupConfig",
+      "fields": [
+        {"name": "template_name", "type": "string — 'choros_test_template'"},
+        {"name": "migrations_dir", "type": "string — absolute path to migrations/"}
+      ]
+    },
+    {
+      "entity": "OrphanRecord",
+      "fields": [
+        {"name": "datname", "type": "string — orphan DB name matching choros_test_*"},
+        {"name": "created_at_approx", "type": "number — epoch_ms parsed from datname"}
+      ]
+    }
+  ],
+  "contracts": [
+    "export async function setup(): Promise<void>  // ci/checks/db/globalSetup.ts",
+    "export async function teardown(): Promise<void>  // ci/checks/db/globalSetup.ts",
+    "env in: DATABASE_URL (migrator, CREATEDB) — required for setup/teardown",
+    "env out: DATABASE_URL = postgres://choros_migrator:...@host:port/<run_id>",
+    "env out: APP_DATABASE_URL = postgres://choros_app:...@host:port/<run_id>",
+    "env out: CHOROS_TEST_RUN_ID = <run_id> (cross-reference for teardown)",
+    "env bypass: DB_ISOLATION=off → setup/teardown are no-ops",
+    "scripts/db-setup-template.ts: exit 0 ok, exit 1 error; env: DATABASE_URL (migrator)",
+    "scripts/db-cleanup-orphans.ts: drops all choros_test_* except choros_test_template; env: DATABASE_URL"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T147-1",
+      "rule": "vitest.config.ts регистрирует globalSetup из ci/checks/db/globalSetup.ts",
+      "ci_check": "bash ci/checks/db-isolation-setup-registered.sh — grep globalSetup в vitest.config.ts"
+    },
+    {
+      "id": "FF-T147-2",
+      "rule": "Ни один ci/checks/db/*.test.ts файл не изменён (AC-4)",
+      "ci_check": "bash ci/checks/db-isolation-no-test-change.sh — git diff HEAD -- ci/checks/db/*.test.ts пустой"
+    },
+    {
+      "id": "FF-T147-3",
+      "rule": "ci/checks/db/globalSetup.ts не импортирует src/ production-модули",
+      "ci_check": "bash ci/checks/db-isolation-globalsetup-pure.sh — grep import from 'src/' в globalSetup.ts возвращает пусто"
+    },
+    {
+      "id": "FF-T147-4",
+      "rule": "fitness:db:setup-template передаёт URL с choros_test_template, не choros",
+      "ci_check": "bash ci/checks/db-isolation-template-url.sh --self-test — static check в scripts/db-setup-template.ts"
+    },
+    {
+      "id": "FF-T147-5",
+      "rule": "scripts/db-cleanup-orphans.ts существует; package.json содержит fitness:db:cleanup-orphans",
+      "ci_check": "bash ci/checks/db-isolation-cleanup-registered.sh — [ -f scripts/db-cleanup-orphans.ts ] && grep fitness:db:cleanup-orphans package.json"
+    },
+    {
+      "id": "FF-T147-6",
+      "rule": "run_id генерируется по паттерну choros_test_<epoch_ms>_<random_4hex>",
+      "ci_check": "bash ci/checks/db-isolation-run-id-pattern.sh — grep Date.now() + randomHex в globalSetup.ts"
+    },
+    {
+      "id": "FF-T147-7",
+      "rule": "globalSetup.ts содержит fallback DB_ISOLATION=off bypass",
+      "ci_check": "bash ci/checks/db-isolation-fallback-path.sh — grep DB_ISOLATION в ci/checks/db/globalSetup.ts"
+    },
+    {
+      "id": "FF-T147-8",
+      "rule": "teardown вызывает pg_terminate_backend перед DROP DATABASE",
+      "ci_check": "bash ci/checks/db-isolation-teardown-terminate.sh — grep pg_terminate_backend в ci/checks/db/globalSetup.ts"
+    },
+    {
+      "id": "FF-T147-9",
+      "rule": "globalSetup.ts содержит --self-test путь для unit-проверки run_id генерации без реального Postgres",
+      "ci_check": "bash ci/checks/db-isolation-globalsetup-selftest.sh — grep self-test в globalSetup.ts"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§5.1 globalSetup: уникальный run_id per invocation; каждый прогон получает независимую базу"},
+    {"ac": "AC-2", "covered_by": "§4: шаблон datistemplate=true не изменяется тестами; teardown дропает только рабочую базу"},
+    {"ac": "AC-3", "covered_by": "§4.1: setup-template идемпотентен (run.mjs schema_migrations); T-0144 afterAll-слой сохраняется"},
+    {"ac": "AC-4", "covered_by": "§6 + FF-T147-2: ни один *.test.ts не изменяется; globalSetup — внешний механизм"},
+    {"ac": "AC-5", "covered_by": "§5.2 teardown + §5.3 cleanup-orphans: pg_terminate_backend + DROP IF EXISTS; паттерн choros_test_* для orphan-идентификации"},
+    {"ac": "AC-6", "covered_by": "§5.1 шаг 3: проверка template existence → exit(1) + инструкция setup-template"},
+    {"ac": "AC-7", "covered_by": "§4.1: run.mjs пропускает уже-applied версии (schema_migrations PK); datistemplate не мешает миграциям"},
+    {"ac": "AC-8", "covered_by": "§6: Postgres-роли кластерные, не DB-специфичные; choros_app/choros_migrator автоматически доступны на клоне"},
+    {"ac": "AC-9", "covered_by": "Postgres template clone = FS-level copy в кластере; типично < 1 с для ~50 migration небольших таблиц (NF-2 ≤5с)"}
+  ],
+  "runtime_target": "локально: docker-compose postgres:16 localhost:55432; choros_migrator = superuser (CREATEDB подтверждён); prod DATABASE_URL поставляется фаундером (GT-4 gate)",
+  "adr_artifact_path": "docs/design/T-0147-db-test-isolation.adr.md",
+  "escalation": ""
+}
