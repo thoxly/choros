@@ -254,10 +254,18 @@ async function httpDelete(
   baseUrl: string,
   path: string,
   devUser: string,
+  body?: unknown,
 ): Promise<FetchResult> {
+  const headers: Record<string, string> = { "x-dev-user": devUser };
+  let bodyStr: string | undefined;
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+    bodyStr = JSON.stringify(body);
+  }
   const res = await fetch(`${baseUrl}${path}`, {
     method: "DELETE",
-    headers: { "x-dev-user": devUser },
+    headers,
+    body: bodyStr,
   });
   const json = await res.json().catch(() => null);
   return { status: res.status, body: json };
@@ -306,15 +314,10 @@ export async function applyPack(opts: {
     } else {
       throw new Error(`[applyPack] POST /api/tenants → ${r.status}: ${JSON.stringify(r.body)}`);
     }
-
-    // Resolve tenant id (needed for downstream entities)
-    const tenantRes = await httpGet(baseUrl, `/api/tenants/${tenantSlug}`, devUser);
-    if (tenantRes.status !== 200) {
-      throw new Error(`[applyPack] GET /api/tenants/${tenantSlug} → ${tenantRes.status}`);
-    }
+    // R-5: duplicate GET /api/tenants/:slug removed — single resolution below
   }
 
-  // Resolve tenant UUID for FK bodies
+  // Resolve tenant UUID for FK bodies (single resolution after POST/409, R-5)
   const tenantRes = await httpGet(baseUrl, `/api/tenants/${tenantSlug}`, devUser);
   if (tenantRes.status !== 200) {
     throw new Error(`[applyPack] Cannot resolve tenant '${tenantSlug}': ${tenantRes.status}`);
@@ -546,7 +549,8 @@ export async function resetPack(opts: {
   const packDeptSlugs = new Set(pack.departments.map((d) => d.slug));
   for (const existing of state.departments) {
     if (!packDeptSlugs.has(existing.slug)) {
-      const r = await httpDelete(baseUrl, `/api/departments/${existing.id}`, devUser);
+      // Pass tenant_id in body — DELETE handlers now require it (R-1 fix)
+      const r = await httpDelete(baseUrl, `/api/departments/${existing.id}`, devUser, { tenant_id: tenantId });
       if (r.status === 200 || r.status === 404) {
         summary.deleted["departments"] = (summary.deleted["departments"] ?? 0) + 1;
       } else {
@@ -559,7 +563,7 @@ export async function resetPack(opts: {
   const packPosSlugs = new Set(pack.positions.map((p) => p.slug));
   for (const existing of state.positions) {
     if (!packPosSlugs.has(existing.slug)) {
-      const r = await httpDelete(baseUrl, `/api/positions/${existing.id}`, devUser);
+      const r = await httpDelete(baseUrl, `/api/positions/${existing.id}`, devUser, { tenant_id: tenantId });
       if (r.status === 200 || r.status === 404) {
         summary.deleted["positions"] = (summary.deleted["positions"] ?? 0) + 1;
       } else {
@@ -573,7 +577,7 @@ export async function resetPack(opts: {
   for (const existing of state.employees) {
     if (EXCLUDE_EMPLOYEE_SLUGS.has(existing.slug)) continue;
     if (!packEmpSlugs.has(existing.slug)) {
-      const r = await httpDelete(baseUrl, `/api/employees/${existing.id}`, devUser);
+      const r = await httpDelete(baseUrl, `/api/employees/${existing.id}`, devUser, { tenant_id: tenantId });
       if (r.status === 200 || r.status === 404) {
         summary.deleted["employees"] = (summary.deleted["employees"] ?? 0) + 1;
       } else {
@@ -587,7 +591,7 @@ export async function resetPack(opts: {
   for (const existing of state.roles) {
     if (EXCLUDE_ROLE_SLUGS.has(existing.slug)) continue;
     if (!packRoleSlugs.has(existing.slug)) {
-      const r = await httpDelete(baseUrl, `/api/roles/${existing.id}`, devUser);
+      const r = await httpDelete(baseUrl, `/api/roles/${existing.id}`, devUser, { tenant_id: tenantId });
       if (r.status === 200 || r.status === 404) {
         summary.deleted["roles"] = (summary.deleted["roles"] ?? 0) + 1;
       } else {

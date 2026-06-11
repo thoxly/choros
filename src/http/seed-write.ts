@@ -364,12 +364,26 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // -------------------------------------------------------------------------
   router.register("POST", "/api/roles", async (req, res) => {
     const actorId = extractActor(req);
+
+    // Read body first so we can use target tenant_id in the delegation context (R-4)
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
     // Gate: loadAdminContext → validateAdminDelegation for mgmt_object:role:create (FF-6, AC-18)
+    // Admin context uses DEV_TENANT_ID (genesis-owner lives there per ADR §2.3 option C).
+    // syntheticGrant.tenantId uses target tenant_id so delegation context is scoped
+    // to the tenant being written into (R-4).
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
 
     // Build a synthetic child grant for the gate check (resource_type=mgmt_object:role, operation=create)
     const syntheticGrant = {
-      tenantId: DEV_TENANT_ID,
+      tenantId: tenant_id,
       id: randomUUID(),
       roleId: randomUUID(),
       resourceType: "mgmt_object:role" as const,
@@ -389,15 +403,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     if (!gateResult.ok) {
       throw new HttpError(403, "NOT_OWNER", "insufficient delegation to create roles");
     }
-
-    const body = await readJsonBody(req);
-    const b = body as Record<string, unknown>;
-
-    const tenant_id = b["tenant_id"];
-    if (typeof tenant_id !== "string") {
-      throw new HttpError(400, "VALIDATION", "tenant_id is required");
-    }
-    assertUuidShape(tenant_id, "tenant_id");
 
     const slug = b["slug"];
     if (typeof slug !== "string" || slug.length === 0) {
@@ -434,21 +439,34 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // DELETE /api/departments/:id — delete a department (isGenesisOwner gate, AC-9)
+  // body: { tenant_id: uuid } — tenant_id from the target entity (R-1: must match
+  //   the tenant the entity was created in, not DEV_TENANT_ID).
+  // Auth gate uses DEV_TENANT_ID (genesis-owner is in the dev silo by construction).
+  // RLS scope and WHERE use the caller-supplied tenant_id.
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/departments/:id", async (req, res, params) => {
     const actorId = extractActor(req);
+    // Auth gate: genesis-owner check always in dev silo (ADR §2.3 option C)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete departments");
     }
 
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
     const deptId = params["id"] as string;
     assertUuidShape(deptId, "id");
 
-    await withTenantTx(pool, DEV_TENANT_ID, async (client) => {
+    await withTenantTx(pool, tenant_id, async (client) => {
       const { rowCount } = await client.query(
         `DELETE FROM choros.department WHERE tenant_id = $1 AND id = $2`,
-        [DEV_TENANT_ID, deptId],
+        [tenant_id, deptId],
       );
       if ((rowCount ?? 0) === 0) {
         throw new HttpError(404, "NOT_FOUND", `department ${deptId} not found`);
@@ -462,6 +480,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // DELETE /api/positions/:id — delete a position (isGenesisOwner gate, AC-9)
+  // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/positions/:id", async (req, res, params) => {
     const actorId = extractActor(req);
@@ -470,13 +489,21 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete positions");
     }
 
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
     const posId = params["id"] as string;
     assertUuidShape(posId, "id");
 
-    await withTenantTx(pool, DEV_TENANT_ID, async (client) => {
+    await withTenantTx(pool, tenant_id, async (client) => {
       const { rowCount } = await client.query(
         `DELETE FROM choros.position WHERE tenant_id = $1 AND id = $2`,
-        [DEV_TENANT_ID, posId],
+        [tenant_id, posId],
       );
       if ((rowCount ?? 0) === 0) {
         throw new HttpError(404, "NOT_FOUND", `position ${posId} not found`);
@@ -490,6 +517,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // DELETE /api/employees/:id — delete an employee (isGenesisOwner gate, AC-9)
+  // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/employees/:id", async (req, res, params) => {
     const actorId = extractActor(req);
@@ -498,13 +526,21 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete employees");
     }
 
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
     const empId = params["id"] as string;
     assertUuidShape(empId, "id");
 
-    await withTenantTx(pool, DEV_TENANT_ID, async (client) => {
+    await withTenantTx(pool, tenant_id, async (client) => {
       const { rowCount } = await client.query(
         `DELETE FROM choros.employee WHERE tenant_id = $1 AND id = $2`,
-        [DEV_TENANT_ID, empId],
+        [tenant_id, empId],
       );
       if ((rowCount ?? 0) === 0) {
         throw new HttpError(404, "NOT_FOUND", `employee ${empId} not found`);
@@ -518,6 +554,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // DELETE /api/roles/:id — delete a role (isGenesisOwner gate, AC-9)
+  // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/roles/:id", async (req, res, params) => {
     const actorId = extractActor(req);
@@ -526,13 +563,21 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete roles");
     }
 
+    const body = await readJsonBody(req);
+    const b = body as Record<string, unknown>;
+    const tenant_id = b["tenant_id"];
+    if (typeof tenant_id !== "string") {
+      throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
+    }
+    assertUuidShape(tenant_id, "tenant_id");
+
     const roleId = params["id"] as string;
     assertUuidShape(roleId, "id");
 
-    await withTenantTx(pool, DEV_TENANT_ID, async (client) => {
+    await withTenantTx(pool, tenant_id, async (client) => {
       const { rowCount } = await client.query(
         `DELETE FROM choros.role WHERE tenant_id = $1 AND id = $2`,
-        [DEV_TENANT_ID, roleId],
+        [tenant_id, roleId],
       );
       if ((rowCount ?? 0) === 0) {
         throw new HttpError(404, "NOT_FOUND", `role ${roleId} not found`);
@@ -567,9 +612,18 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   });
 
   // -------------------------------------------------------------------------
-  // GET /api/org/tenant — get current tenant state for reset diff (by tenant_id query param)
+  // GET /api/org/tenant-state — get current tenant state for reset diff (by tenant_id query param)
+  // Auth gate: extractActor → loadAdminContext → isGenesisOwner (R-3: same gate as write routes).
+  // The importer already sends X-Dev-User: e-owner in all requests, so this is transparent.
   // -------------------------------------------------------------------------
   router.register("GET", "/api/org/tenant-state", async (req, res) => {
+    // Auth gate: genesis-owner required (R-3)
+    const actorId = extractActor(req);
+    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to read tenant state");
+    }
+
     const url = new URL(req.url ?? "/", "http://localhost");
     const tenantId = url.searchParams.get("tenant_id");
     if (!tenantId) {
