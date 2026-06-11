@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0082",
+  "status": "ready",
+  "summary": "Формальный реестр bundle-связки (bundle_members.txt), статическая CI fitness-функция bundle-coherence.sh, проверяющая cohesion существующих членов (object-schema + grants + bpmn-linter), и explicit deferral contract для недостающих членов (form-def, BPMN-def в Flowable).",
+  "functional": [
+    "FR-1: файл ci/checks/bundle_members.txt с TSV-реестром 5 членов связки (object-schema, grants — kind=choros_table; BPMN-process, form-code, form-json-schema — kind=external с deferral)",
+    "FR-2: проверка, что record_schema каждого registry_def является валидным JSON (parse не бросает)",
+    "FR-3: проверка, что каждый grant с resource_type IN (registry, record, application) содержит непустой resource_facet при resource_type=record",
+    "FR-4: bundle-coherence.sh делегирует BPMN-член в bpmn-linter-isolation.sh (T-0027 интеграция)",
+    "FR-5: bundle-coherence.sh — единая точка входа, exit 0 = все static-чеки зелёные, exit 1 = любой красный",
+    "FR-6: bundle-coherence.sh добавлен в package.json fitness и в .github/workflows/ci.yml как blocking gate",
+    "FR-7: docs/design/T-0082-bundle-deferral-contract.md с явным описанием deferred-членов и условием включения"
+  ],
+  "non_functional": [
+    "NF-1: zero new npm/production dependencies — только bash + grep",
+    "NF-2: additive — не трогать known_tenant_tables.txt, tier_bearing_tables.txt, существующие migrations, grant-lattice.ts, types.ts, flowable-client.ts",
+    "NF-3: T-0087 non-conflict — T-0082 не добавляет tier-колонок, bundle-coherence.sh не знает о tier-семантике",
+    "NF-4: fail-closed — parse-error в bundle_members.txt или отсутствие файла = CI fail",
+    "NF-5: live-DB тест (если реализован) в ci/checks/db/bundle-coherence.test.ts по образцу cross_tenant.test.ts",
+    "NF-6: bundle_members.txt человеко-читаем (TSV + #-комментарии)"
+  ],
+  "out_of_scope": [
+    "Таблицы form_def, form_schema, process_bundle — target-state, нужен отдельный ADR+build-task",
+    "Полный git-под-капотом (content-addressed bundle commit, diff, branch-per-bundle)",
+    "Семантический changelog — T-0084",
+    "Per-record expand/contract object-schema versioning — отдельная задача",
+    "Camunda-grade live-migration mapping — on-demand эскалация, отдельная задача",
+    "Floor-1 ↔ Floor-2 boundary enforcement — T-0083",
+    "Config-агент DRAFT-only авторинг — T-0077",
+    "Promote-endpoint — T-0087 (в работе)",
+    "UI promote-экрана — дизайн-задача"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "ci/checks/bundle_members.txt существует, содержит ≥5 строк; каждая строка kind=choros_table имеет непустые table_or_path и key_column; каждая kind=external содержит deferral-запись",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "ci/checks/bundle-coherence.sh существует, исполняем, при запуске без DB завершается exit 0 для статических проверок (FR-5a/b)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "bundle-coherence.sh проверяет, что registry_def присутствует в known_tenant_tables.txt И migration 004 содержит 'record_schema jsonb NOT NULL'; отсутствие любого → exit 1",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "bundle-coherence.sh проверяет, что migration 008 содержит 'CREATE TABLE choros.\"grant\"' с 'resource_type text NOT NULL'; отсутствие → exit 1",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "bundle-coherence.sh вызывает или ссылается на bpmn-linter-isolation.sh; если bpmn-linter-isolation.sh завершается ненулём, bundle-coherence.sh тоже завершается ненулём",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "bundle-coherence.sh для каждого kind=external члена логирует строку '[bundle-deferred] <name>: deferral-contract...' и НЕ завершается ненулём (external члены не ошибка)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "docs/design/T-0082-bundle-deferral-contract.md существует и содержит секцию 'Deferred members' с form-code, form-json-schema, BPMN-def и условием 'when to promote to choros_table'",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "package.json скрипт fitness (или fitness:bundle) вызывает bundle-coherence.sh; .github/workflows/ci.yml содержит blocking step запускающий этот скрипт",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "При передаче в bundle-coherence.sh заведомо сломанного bundle_members.txt (удалённая строка object-schema) скрипт завершается exit 1",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Ни один из файлов known_tenant_tables.txt, bpmn-linter-isolation.sh, tier_bearing_tables.txt, tier-isolation.sh не изменён (T-0087 non-conflict, NF-3)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "ci/checks/bundle-coherence.sh не содержит строк с 'tier', 'draft', 'published' (не смешивает тир-модель T-0087 и bundle-coherence T-0082)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "При наличии live-DB: каждый registry_def в choros-схеме имеет record_schema, parse которой не бросает (валидный JSON); failing parse → тест red (FR-2)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "При наличии live-DB: каждый grant с resource_type='record' имеет resource_facet IS NOT NULL; null facet → тест red (FR-3)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "git diff --name-only после применения T-0082 не затрагивает src/core/grant-lattice.ts, src/core/types.ts, src/core/flowable-client.ts, src/core/bpmn-linter.ts (NF-2, architect rule 7)",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0082-bundle-coherence.spec.md"
+}

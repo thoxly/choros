@@ -1,0 +1,22 @@
+{
+  "task_id": "T-0082",
+  "status": "pr_open",
+  "branch": "task/T-0082",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/bundle_members.txt",
+    "ci/checks/bundle-coherence.sh",
+    "ci/checks/db/bundle-coherence.test.ts",
+    "docs/design/T-0082-bundle-deferral-contract.md",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": []
+}
