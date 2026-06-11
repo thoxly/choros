@@ -1,0 +1,109 @@
+{
+  "task_id": "T-0061",
+  "verdict": "fail",
+  "deterministic": {
+    "total": 15,
+    "passed": 13,
+    "failed": 2
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "FF-T61-1: docker compose (dev) config -q exits 0",                        "result": "pass"},
+    {"ac": "AC-2",  "test": "FF-T61-2: docker compose (prod) config -q exits 0 with placeholder env",   "result": "pass"},
+    {"ac": "AC-3",  "test": "FF-T61-3: no ${VAR:-default} for sensitive vars in prod overlay (static grep) + adversarial: prod up without .env.prod",  "result": "fail"},
+    {"ac": "AC-4",  "test": "FF-T61-4: prod volumes have _prod suffix; no bare choros_pgdata + adversarial isolation (marker in dev absent in prod)",    "result": "pass"},
+    {"ac": "AC-5",  "test": "FF-T61-5: .env.prod.example contains only REPLACE_* placeholders",         "result": "pass"},
+    {"ac": "AC-6",  "test": "FF-T61-6: .env.prod in .gitignore",                                        "result": "pass"},
+    {"ac": "AC-7",  "test": "FF-T61-7: choros service present in docker-compose.yml with required fields", "result": "pass"},
+    {"ac": "AC-8",  "test": "FF-T61-8: Dockerfile exists + docker build exits 0 (multi-stage verified)", "result": "pass"},
+    {"ac": "AC-9",  "test": "FF-T61-9: KC prod overlay uses 'start' not 'start-dev' + live: Profile prod activated confirmed", "result": "pass"},
+    {"ac": "AC-10", "test": "AC-10: existing KC+flowable smokes (wait-ready.sh uses curl from host, not container healthcheck) — not blocked by container healthcheck issue", "result": "pass"},
+    {"ac": "AC-11", "test": "FF-T61-10: unique host port defaults (55432/8180/9000/8082/3000)",         "result": "pass"},
+    {"ac": "AC-12", "test": "FF-T61-11: no-committed-secret.sh exits 0 on new files",                   "result": "pass"},
+    {"ac": "AC-13", "test": "FF-T61-12: docker compose up --wait — all 4 services healthy",             "result": "fail"}
+  ],
+  "secondary_ux": [],
+  "failures": [
+    {
+      "test": "AC-13 / FF-T61-12: docker compose up -d --wait fails; choros service never becomes 'healthy'",
+      "is_product_defect": true,
+      "root_class": "product-defect",
+      "detail": "choros healthcheck in docker-compose.yml uses 'wget' but Dockerfile runtime stage is node:20-slim which has NO wget binary (/bin/sh: 1: wget: not found). The healthcheck always exits 1. Since choros depends_on keycloak+flowable (service_healthy), and KC+flowable healthchecks also fail (pre-existing T-0054/T-0058 bugs), no service downstream of postgres ever becomes healthy via Docker compose --wait. docker compose up -d --wait exits non-zero. The choros healthcheck failure IS a T-0061 product defect (new code); KC/flowable healthcheck failures are pre-existing T-0054/T-0058 bugs.",
+      "pre_existing_bugs_noted": [
+        "KC healthcheck: curl not in quay.io/keycloak/keycloak:25.0.6 image (T-0054 pre-existing; healthcheck authored in T-0054 BUILD bce2ebf)",
+        "Flowable healthcheck: --password= is GNU wget syntax but BusyBox 1.36.1 in flowable-rest:7.1.0 does not support it (T-0058 pre-existing; authored in T-0058 BUILD bce2ebf)"
+      ]
+    },
+    {
+      "test": "AC-3 / adversarial probe (a): prod up without .env.prod should fail with required-var error",
+      "is_product_defect": true,
+      "root_class": "product-defect",
+      "detail": "The spec (AC-3, FR-3) requires compose to 'fail with explicit error variable VAR is not set' when .env.prod is absent. The ${VAR} syntax in docker-compose.prod.yml does NOT cause Docker Compose to fail. Compose emits warnings ('variable POSTGRES_PASSWORD is not set. Defaulting to a blank string.') and exits 0, proceeding to start services with empty passwords. To enforce hard failure, the required form must be ${VAR:?error_message} (compose-spec required syntax). The static grep check (FF-T61-3) only checks for absence of ${VAR:-default}, it does NOT verify the hard-error semantic. The spec's AC-3 claim is NOT fulfilled by ${VAR} syntax."
+    }
+  ],
+  "live_prod_stack_results": {
+    "verdict": "gap(details)",
+    "postgres": "PASS — started, choros_prod_user/choros_prod_test connected; prod volume choros_pgdata_prod (isolated from dev choros_pgdata confirmed)",
+    "keycloak": "PASS-functional, FAIL-healthcheck — 'Profile prod activated' in logs; KC runs in 'start' prod mode; KC management /health/ready returns HTTP 200 (verified from host); healthcheck fails because curl absent from KC 25 image (pre-existing T-0054 bug, not T-0061)",
+    "flowable": "PASS-functional, FAIL-healthcheck — flowable 7.1.0 management/engine API returns 200 (verified); healthcheck fails because BusyBox wget --password= not supported (pre-existing T-0058 bug, not T-0061)",
+    "choros_app": "PARTIAL — choros starts when docker start used directly (bypassing compose depends_on); /health returns HTTP 200 with status degraded (expected: no migrations run); healthcheck fails because wget absent from node:20-slim (T-0061 product defect)",
+    "migrations": "NOT RUN AT STARTUP — index.ts does not call migrations/run.mjs; migrations/ is included in image but startup doesn't trigger them; ADR §1.3 silo-upgrade semantics NOT implemented in current index.ts; /health 'degraded' is consequence; this is a seam issue (T-0061 scope says 'existing code path is sufficient' but migration call is absent from src/)",
+    "stack_isolation": "PASS — adversarial probe (b): dev marker written to t0061advdev-postgres-1 (choros_pgdata vol); absent from t0061advprod-postgres-1 (choros_pgdata_prod vol); physical volume isolation confirmed",
+    "image_cleanliness": "PASS — adversarial probe (c): docker run --rm ls: no .env*, no src/, no web/src/; only dist/, web/dist/, migrations/, node_modules, package*.json in /app"
+  },
+  "adversarial_probes": [
+    {
+      "id": "probe-a",
+      "description": "Prod stack up without .env.prod — should fail with required-var error",
+      "result": "FAIL (product defect): docker compose config -q and up -d both exit 0 with only warnings; services start with empty POSTGRES_PASSWORD, KEYCLOAK_ADMIN_PASSWORD, etc.; ${VAR} syntax does not enforce hard failure; spec requires ${VAR:?msg} form"
+    },
+    {
+      "id": "probe-b",
+      "description": "Dev and prod stacks simultaneously with separate projects — volume isolation",
+      "result": "PASS: t0061advdev_choros_pgdata (dev) and t0061advprod_choros_pgdata_prod (prod) are independent Docker volumes; marker written to dev DB absent from prod DB; physical isolation confirmed"
+    },
+    {
+      "id": "probe-c",
+      "description": "docker run --rm <image> ls — no .env*, no src/ sources in image",
+      "result": "PASS: runtime image contains only dist/, web/dist/, migrations/, node_modules, package*.json; no .env*, no src/, no web/src/ (multi-stage build confirmed clean)"
+    }
+  ],
+  "integration_honesty_d056": {
+    "ci_stack_job_present": true,
+    "uses_up_wait": true,
+    "but_up_wait_fails": "docker compose up -d --wait fails in practice: KC healthcheck (curl not in image), Flowable healthcheck (BusyBox wget --password= unsupported), choros healthcheck (wget not in node:20-slim). The CI stack job would fail on every run. This undermines the integration-honest gate for AC-13."
+  },
+  "ci_gate": {
+    "tsc": "pass (0 errors)",
+    "eslint": "pass (2 pre-existing no-console warnings, 0 errors)",
+    "fitness_static": "pass — all FF-T61-1..11 checks green including compose-prod-config.sh",
+    "vitest": "pass — 768 tests pass, 5 skipped integration, 0 failures",
+    "database_url_env": "absent during ci run (as required)"
+  },
+  "friction": [
+    {
+      "id": "FR-1",
+      "root_class": "product-defect",
+      "description": "choros healthcheck uses wget but node:20-slim has no wget. Fix: add `RUN apt-get install -y wget` to Dockerfile runtime stage, OR use node-based healthcheck: `CMD-SHELL node -e \"require('http').get('http://localhost:${PORT:-3000}/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\"`"
+    },
+    {
+      "id": "FR-2",
+      "root_class": "product-defect",
+      "description": "Required-form protection gap: ${VAR} in docker-compose.prod.yml does not cause Docker Compose to fail when var is unset. Use ${VAR:?error message} syntax to enforce hard failure. E.g. POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required for prod — set in .env.prod}"
+    },
+    {
+      "id": "FR-3",
+      "root_class": "tooling-gap",
+      "description": "Pre-existing T-0054: KC healthcheck uses curl which is absent from KC 25 image. Workaround: use wget (which IS in KC image) to hit the management health endpoint. This needs to be fixed in T-0054 scope, not T-0061."
+    },
+    {
+      "id": "FR-4",
+      "root_class": "tooling-gap",
+      "description": "Pre-existing T-0058: Flowable healthcheck uses GNU wget --password= flag which BusyBox wget 1.36.1 doesn't support. Fix: use URL-embedded credentials: wget -q -O /dev/null 'http://admin:${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}@localhost:8080/...'. This needs T-0058 scope fix."
+    },
+    {
+      "id": "FR-5",
+      "root_class": "product-defect",
+      "description": "ADR §1.3 silo-upgrade semantics claim that migrations/run.mjs runs at startup when DATABASE_URL is set. This is NOT implemented in current index.ts/server.ts. migrations/ is in the image but is never called at startup. The choros container starts with 'degraded' health because the schema does not exist. This is a seam gap between T-0061 and T-0053."
+    }
+  ]
+}
