@@ -1,0 +1,133 @@
+{
+  "task_id": "T-0042",
+  "status": "ready",
+  "decision": "Ship agent hiring as a thin HTTP route (POST /api/agents/hire) over a pure hire-service core (src/core/agent-hire.ts), composing four finished pieces atomically: (1) the existing scoped-admin.ts validateAdminDelegation gate authorizes the hire on a {mgmt_object:agent, create, org-scope} grant BEFORE any side-effect; (2) a Keycloak service-account client is created via an INJECTED KeycloakAdminPort (live HTTP adapter in src/keycloak/admin-port.ts, in-memory fake in src/keycloak/fake-admin-port.ts) — Keycloak FIRST so the DB tx is the last mutation and its ROLLBACK is the clean undo; (3) inside one withTenantTx the DAO insertAgentRows (src/db/agent-provision.ts) writes employee(kind='agent') + agent_card (Stage-2 columns NULL, kc_client_id from the port, UNIQUE(tenant_id,kc_client_id) is the conflict guard) and (4) appendAuditEvent writes one agent.hire audit row in the SAME tx. On KC-ok/DB-fail the route best-effort deletes the orphan client. No new migration (042 stays reserved): employee/agent_card/audit schema already exists. The rights layer keys on employee_id only — kc_client_id is never read by grant-resolver/grant-lattice/mcp-tool-registry, so a role-less agent resolves to an empty toolset by construction, not by deny-config.",
+  "rejected_alternatives": [
+    {"option": "DB-first then Keycloak", "why_not": "A KC failure would require deleting already-committed DB rows against RLS/append-only audit. Keycloak-first makes the DB tx the last mutation (clean ROLLBACK), with a single-client orphan window handled by one best-effort DELETE (NF-4)."},
+    {"option": "Call the Keycloak Admin API directly from the route (no port)", "why_not": "Couples the hire core to http + a live Keycloak; unit tests would need a running server (violates NF-7/AC-16). The injected KeycloakAdminPort keeps the core pure and lets the capture-log fake substitute."},
+    {"option": "New migration 042 with a hire_event table", "why_not": "Redundant with the canonical audit_event chain (FR-6 audits through the same sink as grants). A second event store violates NF-1 and the spec §7 assessment. Slot 042 stays reserved-and-clear (AC-17 vacuous)."},
+    {"option": "Add kc_client_id column/index/FK on grant/role/assignment", "why_not": "Directly violates FR-4 (identity decoupled from rights) and AC-9. The rights layer keys on employee_id; Keycloak identity is invisible by construction."},
+    {"option": "New admin flag/ACL table to authorize the hire", "why_not": "Violates NF-1/AC-13. Hire authorization is an ordinary {mgmt_object:agent, create, org-scope} grant checked by the existing validateAdminDelegation — no second authority subsystem."},
+    {"option": "Auto-assign a default agent role on hire", "why_not": "Violates FR-5: a freshly hired agent MUST have zero grants (structural least-privilege). Role assignment is a separate admin action (E3.2, out-of-scope)."},
+    {"option": "Assign a Keycloak realm role to the service account", "why_not": "Violates FR-8/AC-10. Choros rights live in the TS core; the service account carries only actor_type=agent, no realm role."},
+    {"option": "Idempotency via a new idempotency_key column", "why_not": "Over-builds the best-effort FR-7 NF. The UNIQUE(tenant_id, kc_client_id) constraint is the write-time guard (a retry deriving the same kc_client_id hits the conflict). A dedicated table is deferred."},
+    {"option": "Route the hire under the worker-API / touch JWT validation", "why_not": "T-0060's seam (E1.4). T-0042 only creates the service account, never validates the agent's token. The hire route is a human-caller admin endpoint under the existing dev-auth seam."}
+  ],
+  "object_model": [
+    {
+      "entity": "AgentHireInput (src/core/agent-hire.ts — pure request shape)",
+      "fields": [
+        {"name": "tenantId", "type": "string (UUID)"},
+        {"name": "positionId", "type": "string (UUID) — its org node is the scope the admin grant must admit (FR-1)"},
+        {"name": "slug", "type": "string — basis of kc_client_id and employee.slug UNIQUE key"},
+        {"name": "displayName", "type": "string"},
+        {"name": "llmEndpoint", "type": "string | null (optional; NULL = dormant)"},
+        {"name": "llmModel", "type": "string | null (optional; NULL = dormant)"},
+        {"name": "llmSecretHandle", "type": "string | null (optional; NULL; T-0025 owns lifecycle)"},
+        {"name": "autonomyThreshold", "type": "number | null (optional; NULL = dormant)"},
+        {"name": "nowMs", "type": "number (epoch-ms)"}
+      ]
+    },
+    {
+      "entity": "AgentHirePlan.employee (INSERT into choros.employee — additive data, no DDL)",
+      "fields": [
+        {"name": "tenantId", "type": "uuid"},
+        {"name": "id", "type": "uuid (new, minted in plan)"},
+        {"name": "positionId", "type": "uuid"},
+        {"name": "kind", "type": "text = 'agent'"},
+        {"name": "slug", "type": "text"},
+        {"name": "displayName", "type": "text"},
+        {"name": "createdAt", "type": "bigint"},
+        {"name": "updatedAt", "type": "bigint"}
+      ]
+    },
+    {
+      "entity": "AgentHirePlan.agentCard (INSERT into choros.agent_card — schema from migration 032)",
+      "fields": [
+        {"name": "tenantId", "type": "uuid"},
+        {"name": "employeeId", "type": "uuid (FK -> employee, kind='agent' discriminator)"},
+        {"name": "employeeKind", "type": "text = 'agent' (CHECK-pinned)"},
+        {"name": "kcClientId", "type": "text (from KeycloakAdminPort; UNIQUE(tenant_id,kc_client_id))"},
+        {"name": "llmEndpoint", "type": "text | null (NULL dormant)"},
+        {"name": "llmModel", "type": "text | null (NULL dormant)"},
+        {"name": "llmSecretHandle", "type": "text | null (NULL; T-0025)"},
+        {"name": "autonomyThreshold", "type": "numeric(5,4) | null (NULL dormant)"},
+        {"name": "budgetPolicyId", "type": "uuid | null = NULL (T-0023 deferred)"},
+        {"name": "escalationRuleId", "type": "uuid | null = NULL (deferred)"},
+        {"name": "createdAt", "type": "bigint"},
+        {"name": "updatedAt", "type": "bigint"}
+      ]
+    },
+    {
+      "entity": "KcClientSpec (KeycloakAdminPort.createServiceAccountClient input)",
+      "fields": [
+        {"name": "clientId", "type": "string = deriveKcClientId(slug) = 'agent-<normalized-slug>'"},
+        {"name": "serviceAccountsEnabled", "type": "true (FR-3)"},
+        {"name": "standardFlowEnabled", "type": "false"},
+        {"name": "directAccessGrantsEnabled", "type": "false (client_credentials only)"},
+        {"name": "actorType", "type": "'agent' (set on the service-account user; FR-3/AC-4)"},
+        {"name": "devSecret", "type": "string | undefined (dev only; prod secret founder-held, NF-6)"}
+      ]
+    },
+    {
+      "entity": "KeycloakAdminPort (NF-7 — the only new IO boundary; interface in core, adapters separate)",
+      "fields": [
+        {"name": "createServiceAccountClient", "type": "(spec: KcClientSpec) => Promise<{ clientId: string }>"},
+        {"name": "deleteClient", "type": "(clientId: string) => Promise<void> — best-effort orphan cleanup (NF-4)"}
+      ]
+    },
+    {
+      "entity": "AgentHireAuditEvent (encoded -> AuditEventInput, type='agent.hire', appended via the canonical sink — FR-6)",
+      "fields": [
+        {"name": "actor", "type": "string — caller employee_id (admin performing the hire)"},
+        {"name": "subject", "type": "string — new agent employee_id"},
+        {"name": "capability", "type": "{ resourceType: 'mgmt_object:agent', operation: 'create' }"},
+        {"name": "scope", "type": "ScopeElement — admitting org-scope (non-null)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "POST /api/agents/hire — body { position_id: uuid, slug: string, display_name: string, llm_endpoint?, llm_model?, llm_secret_handle?, autonomy_threshold? } -> 201 { employee_id: uuid, kc_client_id: string }; errors 403 (no_mgmt_grant / admin-gate reason), 409 (client_id_conflict), 5xx (keycloak_failed | db_failed).",
+    "src/core/agent-hire.ts: deriveKcClientId(slug: string): string  // 'agent-' + normalized(slug); pure",
+    "src/core/agent-hire.ts: buildAgentHirePlan(input: AgentHireInput): AgentHirePlan  // pure; no auth, no IO",
+    "src/core/agent-hire.ts: encodeAgentHireAuditEvent(e: AgentHireAuditEvent, nowMs: number): AuditEventInput",
+    "src/core/agent-hire.ts: export interface KeycloakAdminPort { createServiceAccountClient(spec): Promise<{clientId}>; deleteClient(clientId): Promise<void> }",
+    "src/keycloak/admin-port.ts: makeHttpKeycloakAdminPort(cfg): KeycloakAdminPort  // live Admin REST adapter; env-injected creds (NF-6)",
+    "src/keycloak/fake-admin-port.ts: InMemoryKeycloakAdminPort implements KeycloakAdminPort  // capture log + failOnCreate/failAfterCreate switches (AC-6/AC-7/AC-16)",
+    "src/db/agent-provision.ts: insertAgentRows(tx: PgClientLike, plan: AgentHirePlan): Promise<void>  // runs INSIDE caller's withTenantTx; no own BEGIN/COMMIT; INSERT employee + agent_card, tenant_id leading; 23505 -> route maps to client_id_conflict/409",
+    "src/http/agents.ts: registerAgentRoutes(router: Router, pool: pg.Pool, kcPort: KeycloakAdminPort): void  // composition: extractActor -> loadAdminContext + validateAdminDelegation (gate) -> buildAgentHirePlan -> kcPort.create (FIRST) -> withTenantTx { insertAgentRows + appendAuditEvent } -> on DB-fail best-effort kcPort.delete",
+    "REUSED VERBATIM (not modified): scoped-admin.ts validateAdminDelegation; grant-lattice.ts Grant/ScopeElement/AncestryOracle; mcp-tool-registry.ts resolveAgentToolset (read-only, AC-8); db/org.ts loadAdminContext; audit-writer.ts appendAuditEvent; audit-grant-encoder.ts AuditEventInput.",
+    "NO new migration: migration 042 reserved but UNUSED (employee/agent_card/audit schema already exist from 016/032/006-007). NO new column/FK from rights tables to agent_card/kc_client_id (FR-4)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-HIRE-1", "rule": "The hire route calls validateAdminDelegation (or loadAdminContext+gate) BEFORE any insertAgentRows / createServiceAccountClient call — authorization precedes side-effects (AC-1/AC-3).", "ci_check": "static-now: ci/checks/agent-hire-gate-order.sh — in src/http/agents.ts assert the grep -n line index of the validateAdminDelegation call is less than the first insertAgentRows / createServiceAccountClient call; a side-effect before the gate = fail. Appended to npm run fitness."},
+    {"id": "FF-HIRE-2", "rule": "Identity invisible to rights: grant-resolver.ts, grant-lattice.ts, mcp-tool-registry.ts reference no kc_client_id / agent_card / kc_ token (AC-9).", "ci_check": "static-now: ci/checks/agent-hire-identity-isolation.sh — grep -nE 'kc_client_id|agent_card|kc_' over the three core files (excluding // comment lines) returns 0 matches; non-zero = fail. Appended to npm run fitness."},
+    {"id": "FF-HIRE-3", "rule": "No second authority subsystem: the hire path (agents.ts, agent-hire.ts, agent-provision.ts) introduces no *_acl / admin-flag / ACL-store token and authorizes ONLY via validateAdminDelegation (AC-13).", "ci_check": "static-now: ci/checks/agent-hire-no-second-authority.sh — (a) grep -E '_acl|adminFlag|admin_table|aclStore' over the three files = 0; (b) grep -c 'validateAdminDelegation' src/http/agents.ts >= 1; else fail. Appended to npm run fitness."},
+    {"id": "FF-HIRE-4", "rule": "Additive-only to frozen/shared files: grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts, scoped-admin.ts unmodified; auth.ts/router.ts additive only (no deleted/changed existing lines) (AC-14, NF-2).", "ci_check": "static-now: ci/checks/agent-hire-frozen-additive.sh — git diff --stat <dev-base> over the four frozen core files shows 0 changed files; git diff --numstat for src/http/auth.ts and router.ts shows deleted == 0. Appended to npm run fitness."},
+    {"id": "FF-HIRE-5", "rule": "End-to-end hire behavior (AC-1/2/3/4/5/6/7/8/10/11/12/15): gate rejection (no rows, no KC call), success (1 employee + 1 agent_card + kc_client_id + actor_type=agent captured, no realm role), KC-fail rollback, DB-fail orphan-delete, duplicate->409, audit row present, and resolveAgentToolset(new employee) === [].", "ci_check": "test: src/__tests__/agent-hire.test.ts (vitest, runs in npm run ci) using the in-memory KeycloakAdminPort fake (capture log) + transactional DB/DAO double; the fake's failOnCreate/failAfterCreate switches drive AC-6/AC-7; CHOROS_AUTH_MODE=dev for AC-15."},
+    {"id": "FF-HIRE-6", "rule": "Keycloak port is injectable: registerAgentRoutes accepts a KeycloakAdminPort; the live HTTP adapter and the fake are SEPARATE files from the pure core; src/core/agent-hire.ts imports no node:http/pg (AC-16, NF-7).", "ci_check": "static-now: ci/checks/agent-hire-port-injectable.sh — (a) test -f src/keycloak/admin-port.ts && test -f src/keycloak/fake-admin-port.ts; (b) grep -E \"from .*['\\\"](pg|node:http|http)['\\\"]\" src/core/agent-hire.ts = 0; (c) grep 'KeycloakAdminPort' src/http/agents.ts >= 1. Appended to npm run fitness."},
+    {"id": "FF-HIRE-7", "rule": "Migration seam: NO migrations/042_*.sql is added (this task needs none); IF one is ever added it must be 042_-prefixed, additive, FORCE-RLS/default-DENY/tenant_id-leading, seeds ON CONFLICT DO NOTHING (AC-17, NF-5).", "ci_check": "static-now: ci/checks/agent-hire-migration-seam.sh — assert no migrations/04[13]_* touched; IF migrations/042_*.sql exists grep it for 'FORCE ROW LEVEL SECURITY', a leading tenant_id, and 'ON CONFLICT DO NOTHING' on any INSERT; absent file => pass (vacuous). Appended to npm run fitness."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §1 step 2 gate-before-write + §4 row 1; FF-HIRE-1, FF-HIRE-5"},
+    {"ac": "AC-2", "covered_by": "ADR §1 steps 2-4 + §3.4 DAO; FF-HIRE-5"},
+    {"ac": "AC-3", "covered_by": "ADR §1 step 2 validateAdminDelegation org-axis; FF-HIRE-5"},
+    {"ac": "AC-4", "covered_by": "ADR §3.2 KcClientSpec + §1.1 adapter; FF-HIRE-5 (fake-port capture)"},
+    {"ac": "AC-5", "covered_by": "ADR §3.3 plan + §3.4 DAO INSERT; FF-HIRE-5"},
+    {"ac": "AC-6", "covered_by": "ADR §1 step 4 KC-first + §4 row 2; FF-HIRE-5 (fake failOnCreate)"},
+    {"ac": "AC-7", "covered_by": "ADR §1 step 4 best-effort delete + §4 row 3; FF-HIRE-5 (fake failAfterCreate)"},
+    {"ac": "AC-8", "covered_by": "ADR §1.3 unmodified resolveAgentToolset; FF-HIRE-2, FF-HIRE-5"},
+    {"ac": "AC-9", "covered_by": "ADR §1.3; FF-HIRE-2 (grep rights modules)"},
+    {"ac": "AC-10", "covered_by": "ADR §3.2 (no role-mapping call) + rejected-alt; FF-HIRE-5 (fake captures no role-add)"},
+    {"ac": "AC-11", "covered_by": "ADR §1 step 4 audit-in-tx + §3.3 encoder; FF-HIRE-5"},
+    {"ac": "AC-12", "covered_by": "ADR §1 step 4 UNIQUE -> 409 + §4 row 4; FF-HIRE-5"},
+    {"ac": "AC-13", "covered_by": "ADR §1 (gate = validateAdminDelegation only); FF-HIRE-3"},
+    {"ac": "AC-14", "covered_by": "ADR §1 (no edit to frozen modules); FF-HIRE-4"},
+    {"ac": "AC-15", "covered_by": "ADR §1 step 1 extractActor/x-dev-user; FF-HIRE-5 (CHOROS_AUTH_MODE=dev) + existing suite"},
+    {"ac": "AC-16", "covered_by": "ADR §3.2 port + fake adapter; FF-HIRE-6"},
+    {"ac": "AC-17", "covered_by": "ADR §1.2 no migration (vacuous); FF-HIRE-7"}
+  ],
+  "runtime_target": "локально + silo docker-compose: hire route runs in the Choros core server and calls the Keycloak Admin REST API of the keycloak service (T-0054) over the compose network; unit/integration tests use the in-memory KeycloakAdminPort fake (no live Keycloak — NF-7). No external resource provisioned by this task (dev Keycloak already exists). Production Keycloak deploy + founder-held prod Admin secret remain E0.7, founder-gated (GT-4/RL-1); no prod credential committed.",
+  "adr_artifact_path": "docs/design/T-0042-agent-provisioning.adr.md",
+  "escalation": ""
+}
