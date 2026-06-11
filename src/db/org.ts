@@ -113,33 +113,39 @@ export async function listOrgTree(
     // Fetch all departments (root only for now; no parent_id traversal needed
     // since the dev silo has flat root departments — tree traversal is an
     // autonomous improvement for T-0022 org-scope resolution).
+    // T-0141: explicit WHERE tenant_id filter for BYPASSRLS pool connections.
+    // The GUC-based RLS policy (department_tenant_isolation) only applies to
+    // non-BYPASSRLS connections. choros_migrator is BYPASSRLS, so the explicit
+    // WHERE clause is required to scope the result to the correct tenant.
+    // This is additive — for non-BYPASSRLS connections it is redundant with RLS.
     const deptRows = await client.query<{
       id: string;
       slug: string;
       display_name: string;
     }>(
-      `SELECT id, slug, display_name FROM choros.department ORDER BY slug`,
+      `SELECT id, slug, display_name FROM choros.department WHERE tenant_id = $1 ORDER BY slug`,
+      [tenantId],
     );
 
     const departments: OrgDepartment[] = [];
 
     for (const dept of deptRows.rows) {
-      // Fetch positions for this department.
+      // Fetch positions for this department (tenant_id scoping for BYPASSRLS safety).
       const posRows = await client.query<{
         id: string;
         slug: string;
         title: string;
       }>(
         `SELECT id, slug, title FROM choros.position
-         WHERE department_id = $1
+         WHERE tenant_id = $1 AND department_id = $2
          ORDER BY slug`,
-        [dept.id],
+        [tenantId, dept.id],
       );
 
       const positions: OrgPosition[] = [];
 
       for (const pos of posRows.rows) {
-        // Fetch employees for this position.
+        // Fetch employees for this position (tenant_id scoping for BYPASSRLS safety).
         const empRows = await client.query<{
           id: string;
           slug: string;
@@ -147,9 +153,9 @@ export async function listOrgTree(
           kind: string;
         }>(
           `SELECT id, slug, display_name, kind FROM choros.employee
-           WHERE position_id = $1
+           WHERE tenant_id = $1 AND position_id = $2
            ORDER BY slug`,
-          [pos.id],
+          [tenantId, pos.id],
         );
 
         const people: OrgPerson[] = empRows.rows.map((e) => ({
@@ -194,6 +200,7 @@ export async function findEmployeeById(
       position_title: string;
       department_name: string;
     }>(
+      // T-0141: explicit WHERE tenant_id for BYPASSRLS pool connections.
       `SELECT e.slug, e.display_name, e.kind,
               p.title AS position_title,
               d.display_name AS department_name
@@ -202,8 +209,8 @@ export async function findEmployeeById(
                ON p.tenant_id = e.tenant_id AND p.id = e.position_id
          LEFT JOIN choros.department d
                ON d.tenant_id = p.tenant_id AND d.id = p.department_id
-        WHERE e.slug = $1`,
-      [slug],
+        WHERE e.tenant_id = $1 AND e.slug = $2`,
+      [tenantId, slug],
     );
 
     if (rows.length === 0) return null;
@@ -235,6 +242,7 @@ export async function listHumanEmployees(
       position_title: string;
       department_name: string;
     }>(
+      // T-0141: explicit WHERE tenant_id for BYPASSRLS pool connections.
       `SELECT e.slug, e.display_name,
               p.title AS position_title,
               d.display_name AS department_name
@@ -243,8 +251,9 @@ export async function listHumanEmployees(
                ON p.tenant_id = e.tenant_id AND p.id = e.position_id
          LEFT JOIN choros.department d
                ON d.tenant_id = p.tenant_id AND d.id = p.department_id
-        WHERE e.kind = 'human'
+        WHERE e.tenant_id = $1 AND e.kind = 'human'
         ORDER BY e.slug`,
+      [tenantId],
     );
 
     return rows.map((row) => ({
@@ -254,6 +263,77 @@ export async function listHumanEmployees(
       department: row.department_name ?? "",
     }));
   });
+}
+
+// ---------------------------------------------------------------------------
+// resolveActorTenant — T-0141: resolve tenant UUID from employee slug.
+//
+// Runs a BYPASSRLS query (same pattern as seed-write.ts:181-195 slug lookup)
+// without setting the tenant GUC, so it can find the tenant before the GUC
+// is known. Falls back to DEV_TENANT_ID if slug not found or DB unavailable.
+// ---------------------------------------------------------------------------
+
+export async function resolveActorTenant(
+  pool: pg.Pool,
+  actorSlug: string,
+): Promise<string> {
+  const demoSlug = process.env["DEMO_TENANT_SLUG"] ?? "showcase";
+  const client = await pool.connect();
+  try {
+    // Prefer the employee row belonging to the DEMO_TENANT_SLUG tenant (showcase).
+    // ORDER BY: demo tenant first (CASE), then DEV_TENANT_ID second, then any other.
+    // This handles dev DB pollution (multiple tenants with the same employee slug
+    // from test suites) without changing the BYPASSRLS query pattern.
+    const { rows } = await client.query<{ tenant_id: string }>(
+      `SELECT e.tenant_id
+         FROM choros.employee e
+         JOIN choros.tenant t ON t.id = e.tenant_id
+        WHERE e.slug = $1
+        ORDER BY
+          CASE WHEN t.slug = $2 THEN 0 ELSE 1 END,
+          e.created_at DESC
+        LIMIT 1`,
+      [actorSlug, demoSlug],
+    );
+    if (rows.length > 0 && rows[0].tenant_id) {
+      return rows[0].tenant_id;
+    }
+    return DEV_TENANT_ID;
+  } catch {
+    // DB error (e.g. connection refused) → safe fallback
+    return DEV_TENANT_ID;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// resolveTenantBySlug — T-0141: resolve tenant UUID from tenant slug.
+//
+// Used for DEMO_TENANT_SLUG resolution in /api/users (pre-login picker).
+// Falls back to DEV_TENANT_ID if slug not found or DB unavailable.
+// ---------------------------------------------------------------------------
+
+export async function resolveTenantBySlug(
+  pool: pg.Pool,
+  tenantSlug: string,
+): Promise<string> {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.tenant WHERE slug = $1 LIMIT 1`,
+      [tenantSlug],
+    );
+    if (rows.length > 0 && rows[0].id) {
+      return rows[0].id;
+    }
+    return DEV_TENANT_ID;
+  } catch {
+    // DB error → safe fallback
+    return DEV_TENANT_ID;
+  } finally {
+    client.release();
+  }
 }
 
 // ---------------------------------------------------------------------------
