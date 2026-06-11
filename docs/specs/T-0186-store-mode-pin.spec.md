@@ -108,19 +108,18 @@ two test files.
 
 ## 5. Acceptance criteria
 
-### AC-1 — externalWorker.e2e.test.ts: 22 tests pass WITHOUT DATABASE_URL (test)
+### AC-1 — externalWorker.e2e.test.ts: 18 tests pass WITHOUT DATABASE_URL (test)
 
-`npm test` (no env) runs `src/__tests__/externalWorker.e2e.test.ts` and all 22
-tests (16 in "default store" suite + 1 in "AC-6 lock-expiry" suite + other
-suites) pass. The "default store" `beforeAll` calls
-`createServer(undefined, undefined, 'memory')`.
+`npm test` (no env) runs `src/__tests__/externalWorker.e2e.test.ts` and all 18
+tests (17 in "default store" suite + 1 in "AC-6 lock-expiry" suite) pass. The
+"default store" `beforeAll` calls `createServer(undefined, undefined, 'memory')`.
 
 **Verifiable as:** test
 
-### AC-2 — externalWorker.e2e.test.ts: 22 tests pass WITH ambient DATABASE_URL (test)
+### AC-2 — externalWorker.e2e.test.ts: 18 tests pass WITH ambient DATABASE_URL (test)
 
 `DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npm test`
-runs `externalWorker.e2e.test.ts` and all 22 tests pass (store is pinned to
+runs `externalWorker.e2e.test.ts` and all 18 tests pass (store is pinned to
 memory; ambient URL is irrelevant).
 
 **Verifiable as:** test
