@@ -352,6 +352,23 @@ async function seedEgressPolicy(c: pg.Client, tenantId: string): Promise<void> {
 }
 
 /**
+ * Seed one row into choros.mcp_tool (T-0043). PK is (tenant_id, id);
+ * a pure-compute tool (empty declares, pure_compute=true, empty resource_ops)
+ * has no FKs — self-contained, keeps both tenants' seeds independent under RLS.
+ */
+async function seedMcpTool(c: pg.Client, tenantId: string): Promise<void> {
+  const id = uuid();
+  const name = `ct-mcp-${id.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.mcp_tool
+       (tenant_id, id, name, description, declares, pure_compute, resource_ops, created_at, updated_at)
+     VALUES ($1, $2, $3, NULL, '[]'::jsonb, true, '[]'::jsonb, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, name],
+  );
+}
+
+/**
  * Seed one row into choros.sod_constraint (T-0032). PK is (tenant_id, id);
  * a fresh uuid id per call keeps both tenants' seeds independent under RLS. A
  * valid `dynamic` row (self_record separation) needs no role pair, so it is
@@ -511,6 +528,9 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     case 'sod_constraint':
       await seedSodConstraint(c, tenantId);
+      break;
+    case 'mcp_tool':
+      await seedMcpTool(c, tenantId);
       break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
