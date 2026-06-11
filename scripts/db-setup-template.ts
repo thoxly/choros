@@ -1,8 +1,12 @@
 #!/usr/bin/env npx tsx
 // T-0147 · npm run fitness:db:setup-template
 //
-// Creates (or updates) the choros_test_template database used by globalSetup.ts
-// to clone per-run test databases (T-0147, FR-4, AC-7).
+// Creates (or updates) the choros_test_template_<hash8> database used by
+// globalSetup.ts to clone per-run test databases (T-0147, FR-4, AC-7).
+//
+// The template name encodes an 8-hex-char SHA-256 digest of all
+// migrations/NNN_*.sql filenames+contents, so different branches with
+// different migrations never share a template (T-0192, AC-cross-branch).
 //
 // Usage:
 //   DATABASE_URL=postgres://choros_migrator:pw@localhost:55432/choros \
@@ -17,14 +21,39 @@
 
 import pg from 'pg';
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
 
-const TEMPLATE_NAME = 'choros_test_template';
-const ADVISORY_LOCK_ID = 147_001;
+// ---------------------------------------------------------------------------
+// Migrations hash (T-0192) — 8-hex-char SHA-256 of all migrations/*.sql
+// ---------------------------------------------------------------------------
+
+/** Compute SHA-256 over sorted migration filenames+contents → first 8 hex chars. */
+function computeMigrationsHash(repoRoot: string): string {
+  const migrationsDir = join(repoRoot, 'migrations');
+  const files = readdirSync(migrationsDir)
+    .filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f))
+    .sort();
+  const h = createHash('sha256');
+  for (const f of files) {
+    h.update(f);
+    h.update(readFileSync(join(migrationsDir, f)));
+  }
+  return h.digest('hex').slice(0, 8);
+}
+
+const MIGRATIONS_HASH = computeMigrationsHash(REPO_ROOT);
+const TEMPLATE_NAME = `choros_test_template_${MIGRATIONS_HASH}`;
+
+// Per-hash advisory lock: derive a stable 32-bit int from the hash so
+// concurrent setup-template runs on different branches use different locks
+// and don't block each other needlessly.
+const ADVISORY_LOCK_ID = (parseInt(MIGRATIONS_HASH, 16) & 0x7fff_ffff) | 0x1000_0000;
 
 // ---------------------------------------------------------------------------
 // Self-test (FF-T147-4)
@@ -36,11 +65,12 @@ if (process.argv.includes('--self-test')) {
   const u = new URL(baseUrl);
   u.pathname = `/${TEMPLATE_NAME}`;
   const templateUrl = u.toString();
-  if (!templateUrl.includes(`/${TEMPLATE_NAME}`)) {
-    console.error(`[self-test] FAIL: templateUrl "${templateUrl}" does not contain /${TEMPLATE_NAME}`);
+  if (!templateUrl.includes(`/choros_test_template`)) {
+    console.error(`[self-test] FAIL: templateUrl "${templateUrl}" does not contain /choros_test_template`);
     process.exit(1);
   }
-  console.log(`[self-test] PASS — template URL contains /${TEMPLATE_NAME}: ${templateUrl}`);
+  console.log(`[self-test] PASS — template URL contains /choros_test_template: ${templateUrl}`);
+  console.log(`[self-test] template name: ${TEMPLATE_NAME} (hash=${MIGRATIONS_HASH})`);
   process.exit(0);
 }
 
@@ -73,6 +103,9 @@ async function withClient<T>(url: string, fn: (c: pg.Client) => Promise<T>): Pro
 }
 
 async function main(): Promise<void> {
+  console.log(`[setup-template] migrations hash: ${MIGRATIONS_HASH}`);
+  console.log(`[setup-template] target template: "${TEMPLATE_NAME}"`);
+
   // Advisory lock — serialize against concurrent globalSetup clone operations
   const adminClient = new pg.Client({ connectionString: adminUrl });
   await adminClient.connect();

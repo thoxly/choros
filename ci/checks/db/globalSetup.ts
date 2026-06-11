@@ -7,17 +7,48 @@
 // Mode selection:
 //   DB_ISOLATION=off  → skip isolation, pass through current DATABASE_URL (legacy).
 //   DATABASE_URL unset → skip silently (non-db vitest runs).
-//   otherwise         → clone choros_test_template → choros_test_<epoch>_<hex>
+//   otherwise         → clone choros_test_template_<hash8> → choros_test_<epoch>_<hex>
+//
+// Template name encodes 8-hex-char SHA-256 of migrations/*.sql so different
+// branches (different migration sets) never share a template (T-0192).
 //
 // Owner: T-0147 (do not edit without updating FF-T147-* checks)
 
 import pg from 'pg';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const { Client } = pg;
 
-const TEMPLATE_NAME = 'choros_test_template';
-/** Advisory lock id: hashtext('choros_test_template_setup') approximated as fixed int */
-const ADVISORY_LOCK_ID = 147_001; // stable, non-conflicting within choros cluster
+// ---------------------------------------------------------------------------
+// Migrations hash (T-0192)
+// ---------------------------------------------------------------------------
+
+const _HERE = dirname(fileURLToPath(import.meta.url));
+// globalSetup.ts lives at ci/checks/db/ → repo root = ../../../
+const _REPO_ROOT = resolve(_HERE, '..', '..', '..');
+
+/** Compute SHA-256 over sorted migration filenames+contents → first 8 hex chars. */
+function computeMigrationsHash(repoRoot: string): string {
+  const migrationsDir = join(repoRoot, 'migrations');
+  const files = readdirSync(migrationsDir)
+    .filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f))
+    .sort();
+  const h = createHash('sha256');
+  for (const f of files) {
+    h.update(f);
+    h.update(readFileSync(join(migrationsDir, f)));
+  }
+  return h.digest('hex').slice(0, 8);
+}
+
+const MIGRATIONS_HASH = computeMigrationsHash(_REPO_ROOT);
+const TEMPLATE_NAME = `choros_test_template_${MIGRATIONS_HASH}`;
+
+/** Advisory lock id: per-hash to avoid blocking branches with different migrations */
+const ADVISORY_LOCK_ID = (parseInt(MIGRATIONS_HASH, 16) & 0x7fff_ffff) | 0x1000_0000;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -82,8 +113,20 @@ async function selfTest(): Promise<void> {
   if (!admin.endsWith('/postgres')) {
     throw new Error(`adminUrl failed: got ${admin}`);
   }
+  // Verify TEMPLATE_NAME follows choros_test_template_<hash8> pattern (T-0192)
+  const TEMPLATE_RE = /^choros_test_template_[0-9a-f]{8}$/;
+  if (!TEMPLATE_RE.test(TEMPLATE_NAME)) {
+    throw new Error(
+      `TEMPLATE_NAME "${TEMPLATE_NAME}" does not match expected pattern ${TEMPLATE_RE}`,
+    );
+  }
+  // Verify migrations hash is 8 hex chars
+  if (!/^[0-9a-f]{8}$/.test(MIGRATIONS_HASH)) {
+    throw new Error(`MIGRATIONS_HASH "${MIGRATIONS_HASH}" is not 8 lowercase hex chars`);
+  }
   console.log('[globalSetup self-test] PASS — run_id pattern and URL rewriting OK');
   console.log(`[globalSetup self-test] sample run_id: ${id}`);
+  console.log(`[globalSetup self-test] template name: ${TEMPLATE_NAME} (hash=${MIGRATIONS_HASH})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +145,8 @@ export async function setup(): Promise<void> {
     // No DATABASE_URL → not a db-tier run, skip silently
     return;
   }
+
+  console.log(`[T-0147] migrations hash: ${MIGRATIONS_HASH}, template: ${TEMPLATE_NAME}`);
 
   // --- AC-6: verify template exists ---
   const templateExists = await withClient(adminUrl(databaseUrl), async (c) => {
