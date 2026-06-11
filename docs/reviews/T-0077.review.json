@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0077",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/specs/T-0077-config-agent-employee.spec.md:84 (FR-3)",
+      "issue": "Spec FR-3 states grant scope nodeLevel:'org', which is not a valid NodeLevel value (grant-lattice.ts NodeLevel union = application|registry|record|department|position). The migration correctly uses nodeLevel:'department' consistent with spec §6's migration contract and ADR §5. This is a spec doc typo — the code follows the correct value from the authoritative §6 contract. The role-assignment-scope DB fitness test passes, confirming all seeded org_scope values are valid lattice elements.",
+      "suggestion": "Fix the typo in spec FR-3 to match §6: nodeLevel:'department' instead of nodeLevel:'org'. No code change required."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/config-agent-toolset.test.ts:218-228 (makeGrantSource)",
+      "issue": "The fake GrantSource ignores subjectId — it returns all grants for matching tenantId regardless of which employee is queried. This is the identical pattern to the existing mcp-tool-registry.test.ts baseline (L108-114). AC-07 correctly covers the zero-grant case by passing makeGrantSource([]) which forces an empty result. The pattern is accepted convention for this codebase, not a test integrity hole. Noted for completeness.",
+      "suggestion": "No action required. Pattern is consistent with the pre-existing test baseline (mcp-tool-registry.test.ts L108-114). AC-07 coverage is genuine."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-01", "covered": true, "note": "DB test: role config-agent uuid+slug confirmed on live DB (8/8 suite)." },
+    { "ac": "AC-02", "covered": true, "note": "DB test: exactly 7 mcp_tool rows with authoring_draft resource_ops." },
+    { "ac": "AC-03", "covered": true, "note": "DB test: zero rows with pure_compute=false among authoring_draft tools." },
+    { "ac": "AC-04", "covered": true, "note": "DB test: exactly 7 grants with resource_type=authoring_draft for config-agent." },
+    { "ac": "AC-05", "covered": true, "note": "DB test: zero authoring_published grants. Migration grep confirms no 'authoring_published' in non-comment lines (Check-4 PASS)." },
+    { "ac": "AC-06", "covered": true, "note": "Unit test: resolveAgentToolset returns 7 tools for seed config-agent with correct names (959/5 vitest)." },
+    { "ac": "AC-07", "covered": true, "note": "Unit test: resolveAgentToolset returns [] for agent with zero grants (authoring_draft tools in pool)." },
+    { "ac": "AC-08", "covered": true, "note": "Unit test: no tool in config-agent toolset has resourceType=authoring_published; hypothetical published tool excluded without matching grant." },
+    { "ac": "AC-09", "covered": true, "note": "DB test: re-running seed INSERTs leaves row counts unchanged (ON CONFLICT DO NOTHING verified on live DB)." },
+    { "ac": "AC-10", "covered": true, "note": "config-agent-seed.sh Check-6: all 6 frozen files unmodified vs merge-base (PASS). git diff 4765346..b2ec0df confirms zero diff on grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts, agents.ts, grants.ts, audit-writer.ts." },
+    { "ac": "AC-11", "covered": true, "note": "config-agent-seed.sh Check-9: no new .ts files in src/ outside __tests__ (PASS)." },
+    { "ac": "AC-12", "covered": true, "note": "DB test: choros_app session bound to OTHER_TENANT sees 0 authoring_draft tools. Manually verified: SET LOCAL choros.tenant_id='11111111-...'; SELECT count(*) = 0 (correct). Initial test run failure was pure local env issue (APP_DATABASE_URL password typo choros_app_pw vs choros_app_dev_pw from migration 001). With correct password all 8 config-agent-seed DB tests green." },
+    { "ac": "AC-13", "covered": true, "note": "DB test: agent_card for d0...013 has non-null budget_policy_id joining to instance_budget (8/8 suite)." },
+    { "ac": "AC-14", "covered": true, "note": "config-agent-seed.sh Check-1: migrations/044_config_agent_seed.sql exists. git diff confirms migrations/041/042/043 untouched." },
+    { "ac": "AC-15", "covered": true, "note": "ADR §1 documents all 7 audit event types (authoring.form_code.emitted .. authoring.promote.requested) as frozen seam for E11.x. Manual verification." }
+  ],
+  "role_gap_evidence": [
+    "genesis-owner-seed.test.ts reports 150 mgmt_object grants vs expected 17 — this is a PRE-EXISTING test divergence on the live DB (migration 026 seed has grown with additional grant migrations). Not introduced by T-0077; migration 044 adds zero mgmt_object grants.",
+    "choros_app password convention: local dev DB uses 'choros_app_dev_pw' (migration 001 default) but the _helpers.ts APP_DATABASE_URL default uses 'choros_app_pw', causing auth failures for all choros_app-requiring DB tests when run without correct env. This is a local-env friction, not a T-0077 issue. Candidate for a dev-env README or fixtures improvement."
+  ]
+}
