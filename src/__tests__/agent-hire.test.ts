@@ -345,21 +345,55 @@ function makePostRequest(
 }
 
 // Fake pool that simulates genesis-owner context and successful DB writes
+//
+// Extended options:
+//   adminGrants  — rows returned for the mgmt_object:% grant query (non-owner path).
+//                  Each element must match the DB row shape expected by loadAdminContext.
+//   raOrgScope   — org_scope returned in the role_assignment row for non-owner path.
+//                  Defaults to covering the whole org when isGenesisOwner=true.
+//   positionDeptId — department_id returned for the position lookup (default: "b0000000-0000-0000-0000-000000000001").
 function makeFakePool(opts: {
   isGenesisOwner?: boolean;
   positionExists?: boolean;
   insertFails?: boolean;
   insertFailsWithConflict?: boolean;
+  // Non-owner path controls (ignored when isGenesisOwner=true)
+  adminGrants?: Array<{
+    id: string;
+    role_id: string;
+    resource_type: string;
+    resource_facet: unknown;
+    operation: string;
+    scope: unknown;
+    constraint: unknown;
+    delegable: boolean;
+    granted_by: string;
+    valid_from: string | null;
+    valid_until: string | null;
+    created_at: string;
+  }>;
+  raOrgScope?: unknown;
+  positionDeptId?: string;
 } = {}): pg.Pool {
   const {
     isGenesisOwner = true,
     positionExists = true,
     insertFails = false,
     insertFailsWithConflict = false,
+    adminGrants = [],
+    raOrgScope,
+    positionDeptId = "b0000000-0000-0000-0000-000000000001",
   } = opts;
+
+  // When isGenesisOwner=false and raOrgScope not set, use the same dept as the
+  // position so any scope-narrowing test that wants disjoint depts must set both
+  // positionDeptId and raOrgScope explicitly.
+  const nonOwnerRaOrgScope = raOrgScope ?? { kind: "node", hierarchy: "org", nodeId: positionDeptId, nodeLevel: "department" };
 
   // We monkey-patch a minimal fake pool object
   const fakePool = {
+    // Captured INSERT calls — used by tests to assert zero side-effects on 403.
+    _insertCalls: [] as string[],
     connect: async () => {
       const client = {
         _queryCount: 0 as number,
@@ -374,7 +408,7 @@ function makeFakePool(opts: {
           // position lookup
           if (sql.includes("FROM choros.position")) {
             if (!positionExists) return { rows: [] };
-            return { rows: [{ id: "pos-uuid-1", department_id: "b0000000-0000-0000-0000-000000000001" }] };
+            return { rows: [{ id: "pos-uuid-1", department_id: positionDeptId }] };
           }
 
           // isGenesisOwner / loadAdminContext queries
@@ -383,11 +417,18 @@ function makeFakePool(opts: {
           }
           // role_assignment load
           if (sql.includes("FROM choros.role_assignment ra") && sql.includes("ra.employee_id")) {
-            return { rows: isGenesisOwner ? [{ id: "ra-1", role_id: "role-owner", org_scope: { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" } }] : [] };
+            if (isGenesisOwner) {
+              return { rows: [{ id: "ra-1", role_id: "role-owner", org_scope: { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" } }] };
+            }
+            // Non-owner: return an assignment row only if adminGrants are supplied
+            // (so that "no grants at all" can be simulated by passing adminGrants=[]).
+            return adminGrants.length > 0
+              ? { rows: [{ id: "ra-non-owner", role_id: "role-limited", org_scope: nonOwnerRaOrgScope }] }
+              : { rows: [] };
           }
           // grant load for admin grants
           if (sql.includes("FROM choros.\"grant\" g") && sql.includes("mgmt_object:%")) {
-            return { rows: isGenesisOwner ? [] : [] }; // genesis owner skips grant check
+            return { rows: adminGrants };
           }
 
           // audit_head seed
@@ -620,5 +661,182 @@ describe("POST /api/agents/hire — HTTP route integration (FF-HIRE-5)", () => {
       genesisUser,
     );
     expect(resp.statusCode).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-1 (AC-1 HTTP): authenticated caller with NO {mgmt_object:agent, create}
+// grant → 403, zero DB rows, zero Keycloak calls.
+// ---------------------------------------------------------------------------
+
+describe("R-1 (AC-1) — authenticated caller without mgmt_object:agent grant → 403", () => {
+  // This describe spins up its own server with a non-genesis pool that has
+  // no role assignments (and therefore no adminGrants). The gate must reject
+  // BEFORE any KC call or INSERT.
+
+  let server: http.Server;
+  let baseUrl: string;
+  let fakeKc: InMemoryKeycloakAdminPort;
+
+  const tenantId = "a0000000-0000-0000-0000-000000000001";
+
+  const validBody = {
+    position_id: "b0000000-0000-0000-0000-000000000001",
+    slug: "no-grant-agent",
+    display_name: "No Grant Agent",
+  };
+
+  beforeAll(async () => {
+    fakeKc = new InMemoryKeycloakAdminPort();
+    const router = new Router();
+
+    // Non-genesis pool: isGenesisOwner=false, adminGrants=[] (no grants at all).
+    // The role_assignment query returns [] → loadAdminContext yields
+    // { isGenesisOwner: false, adminGrants: [], adminOrgScope: {kind:"set",members:[]} }.
+    // validateAdminDelegation step 4 returns { ok: false, reason: "no_admin_authority" }
+    // → HTTP 403.
+    const pool = makeFakePool({ isGenesisOwner: false, adminGrants: [] });
+
+    process.env["DEV_TENANT_ID"] = tenantId;
+    registerAgentRoutes(router, pool, fakeKc);
+
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          baseUrl = `http://localhost:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("returns 403 when authenticated caller holds no mgmt_object:agent grant", async () => {
+    fakeKc.reset();
+
+    // Send a valid x-dev-user header (authenticated) but the pool has no grants.
+    const resp = await makePostRequest(
+      baseUrl,
+      "/api/agents/hire",
+      validBody,
+      "non-owner-user",  // authenticated user — NOT genesis-owner
+    );
+
+    // AC-1: gate must reject with 403 (no_mgmt_grant)
+    expect(resp.statusCode).toBe(403);
+
+    // Zero Keycloak calls — gate fires before any KC side-effect
+    expect(fakeKc.created.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-2 (AC-3 HTTP): admin with grant on dept D2, target position in disjoint
+// dept D1 → 403 (org_scope_widens). Proves scope-narrowing via the /api/agents/hire
+// route end-to-end, not just at the pure-core layer.
+//
+// Org tree (from ORG_SEED_CHILDREN in agents.ts):
+//   "b0000000-0000-0000-0000-000000000002"  ← admin's grant scope (D2 leaf)
+//   "b0000000-0000-0000-0000-000000000001"  ← position's dept_id  (D1 leaf)
+// Both are leaves with no shared ancestor → isDescendantOrSelf(D1, D2) = false
+// → validateAdminDelegation step 2 → org_scope_widens → 403.
+// ---------------------------------------------------------------------------
+
+describe("R-2 (AC-3) — admin grant covers dept D2, position in disjoint dept D1 → 403", () => {
+  let server: http.Server;
+  let baseUrl: string;
+  let fakeKc: InMemoryKeycloakAdminPort;
+
+  // Dept IDs that are both leaves in the seed tree (no shared ancestor):
+  const ADMIN_DEPT = "b0000000-0000-0000-0000-000000000002"; // admin's org ceiling
+  const POSITION_DEPT = "b0000000-0000-0000-0000-000000000001"; // position's dept (disjoint)
+
+  const tenantId = "a0000000-0000-0000-0000-000000000001";
+
+  const validBody = {
+    position_id: "b0000000-0000-0000-0000-000000000001",
+    slug: "scope-test-agent",
+    display_name: "Scope Test Agent",
+  };
+
+  beforeAll(async () => {
+    fakeKc = new InMemoryKeycloakAdminPort();
+    const router = new Router();
+
+    // Build a grant row that covers ADMIN_DEPT (D2). The grant has:
+    //   resource_type = "mgmt_object:agent"
+    //   operation     = "create"
+    //   scope         = { kind: "node", hierarchy: "org", nodeId: ADMIN_DEPT, nodeLevel: "department" }
+    //   delegable     = true
+    // The admin's raOrgScope (org ceiling) is also ADMIN_DEPT.
+    // The target position's department_id is POSITION_DEPT (D1) — disjoint.
+    // Result: validateAdminDelegation checks isDescendantOrSelf(POSITION_DEPT, ADMIN_DEPT)
+    // → false → org_scope_widens → { ok: false } → HTTP 403.
+    const scopedAdminGrant = {
+      id: "grant-d2-agent-create",
+      role_id: "role-limited",
+      resource_type: "mgmt_object:agent",
+      resource_facet: null,
+      operation: "create",
+      scope: { kind: "node", hierarchy: "org", nodeId: ADMIN_DEPT, nodeLevel: "department" },
+      constraint: null,
+      delegable: true,
+      granted_by: "seed",
+      valid_from: null,
+      valid_until: null,
+      created_at: "0",
+    };
+
+    const pool = makeFakePool({
+      isGenesisOwner: false,
+      adminGrants: [scopedAdminGrant],
+      // Admin's org ceiling = ADMIN_DEPT (D2)
+      raOrgScope: { kind: "node", hierarchy: "org", nodeId: ADMIN_DEPT, nodeLevel: "department" },
+      // Position's department is POSITION_DEPT (D1) — disjoint from D2
+      positionDeptId: POSITION_DEPT,
+    });
+
+    process.env["DEV_TENANT_ID"] = tenantId;
+    registerAgentRoutes(router, pool, fakeKc);
+
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          baseUrl = `http://localhost:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("returns 403 when target position is in dept D1 but admin's grant covers disjoint dept D2", async () => {
+    fakeKc.reset();
+
+    // Admin is authenticated and holds a grant (mgmt_object:agent, create) scoped to D2.
+    // Target position lives in D1 (disjoint from D2).
+    // Gate must fire org_scope_widens → 403, before any KC or INSERT side-effect.
+    const resp = await makePostRequest(
+      baseUrl,
+      "/api/agents/hire",
+      validBody,
+      "scoped-admin-user",
+    );
+
+    // AC-3: scope narrowing (org_scope_widens) → 403
+    expect(resp.statusCode).toBe(403);
+
+    // Zero Keycloak calls — gate fires before KC
+    expect(fakeKc.created.length).toBe(0);
   });
 });
