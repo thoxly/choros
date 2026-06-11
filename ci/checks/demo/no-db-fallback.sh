@@ -10,10 +10,16 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-# Build if needed
-if [[ ! -f "$REPO_ROOT/dist/index.js" ]]; then
-  echo "[FF-FALLBACK-6] Building TypeScript..."
-  cd "$REPO_ROOT" && npm run build 2>/dev/null
+# D-056: ambient-build honesty — this check MUST NOT depend on an externally-supplied
+# dist. We ensure a fresh build by verifying the compiled output contains the
+# CHOROS_PACK_DIR seam introduced by T-0141.  A stale dist (pre-T-0141) on a dev
+# checkout passes the "file exists" test but ignores the env, so fallback behaviour
+# under a mock DATABASE_URL is untested against the real new code paths.  Grepping
+# for the literal string is O(ms) when fresh and triggers a full rebuild only when
+# needed (tsc is incremental — subsequent runs take seconds).
+if ! grep -q "CHOROS_PACK_DIR" "$REPO_ROOT/dist/http/pack-serve.js" 2>/dev/null; then
+  echo "[FF-FALLBACK-6] dist is missing or stale (no CHOROS_PACK_DIR seam) — building..."
+  cd "$REPO_ROOT" && npm run build --silent
 fi
 
 PORT=18143

@@ -14,10 +14,15 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-# Build first if dist/index.js missing
-if [[ ! -f "$REPO_ROOT/dist/index.js" ]]; then
-  echo "[FF-PACK-2] Building TypeScript..."
-  cd "$REPO_ROOT" && npm run build 2>/dev/null
+# D-056: ambient-build honesty — this check MUST NOT depend on an externally-supplied
+# dist. We ensure a fresh build by verifying the compiled output contains the
+# CHOROS_PACK_DIR seam introduced by T-0141.  A stale dist (pre-T-0141) on a dev
+# checkout passes the "file exists" test but ignores the env and silently returns
+# 8 items even with a bad pack path, breaking FF-SELFTEST-8.  Grepping for the
+# literal string is O(ms) when fresh and triggers a full rebuild only when needed.
+if ! grep -q "CHOROS_PACK_DIR" "$REPO_ROOT/dist/http/pack-serve.js" 2>/dev/null; then
+  echo "[FF-PACK-2] dist is missing or stale (no CHOROS_PACK_DIR seam) — building..."
+  cd "$REPO_ROOT" && npm run build --silent
 fi
 
 # Pick two free ports (main + self-test) — python3 socket trick guarantees no collision
