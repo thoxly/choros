@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0163",
+  "status": "pr_open",
+  "branch": "task/T-0163",
+  "merge_target": "dev",
+  "base_commit": "8592ac4887ad66bfb296675c3de32dccb03dd83b",
+  "head_commit": "ead0cbf",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0163 hoists the three process.env reads from src/core/flowable-client.ts (lines ~264/269/274) to the composition root (bridge-runner.ts, bridge-smoke-runner.ts) and adds ci/checks/no-env-in-core.sh — a full src/core/ sweep with positive/negative self-tests that enforces the no-env-in-core invariant. All existing flowable-client tests pass without modification (explicit config). tsc --noEmit exits 0. npm run ci: 57/57 test files, 1107/1107 tests passed. CI env-name alignment verified: FLOWABLE_BASE_URL / FLOWABLE_REST_APP_ADMIN_PASSWORD match review contract; FLOWABLE_REST_APP_ADMIN_USER_ID default 'admin' consistent. Nit R-1 (pre-existing duplicate fitness key) deferred to separate cleanup task.",
+  "commits": [
+    {
+      "sha": "0725006",
+      "phase": "SPEC",
+      "message": "T-0163 SPEC: no-env-in-core — flowable-client 264/269/274 единственный нарушитель, вынос в callers, полный чек src/core/"
+    },
+    {
+      "sha": "c4d19ff",
+      "phase": "DESIGN",
+      "message": "T-0163 DESIGN: ADR — новый no-env-in-core.sh (FCI-ADD легален), сигнатура не ломается, trap-very negative self-test"
+    },
+    {
+      "sha": "ae2d02a",
+      "phase": "BUILD",
+      "message": "T-0163 BUILD: hoist env reads from flowable-client to composition root + no-env-in-core check"
+    },
+    {
+      "sha": "ead0cbf",
+      "phase": "REVIEW",
+      "message": "T-0163 REVIEW: approved — env-hoist to composition root, no-env-in-core.sh, all ACs green"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "ead0cbf",
+      "findings_resolved": [],
+      "findings_nit": [
+        "R-1 — pre-existing duplicate fitness key in package.json:13-14; deferred to separate cleanup task (T-0163 invariant enforced via KEY2)"
+      ],
+      "artifact": "docs/design/T-0163.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1107,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "7/7",
+      "fitness_static": "PASS — no-env-in-core.sh green (real + self-test × 2); keyed-digest-core-purity.sh green; all 70+ checks green",
+      "tested_commit": "ead0cbf",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing bridge-runner.ts + externalTaskBridge.ts), 0 errors",
+        "fitness_static_checks": "PASS — all checks green including no-env-in-core.sh (self-test 1: planted violation detected exit 1; self-test 2: comment-only not matched)",
+        "vitest_unit": "1107/1107 passed, 6 skipped (flowable integration + kc e2e offline)",
+        "env_name_verification": "FLOWABLE_BASE_URL (bridge-runner:43, bridge-smoke-runner:73) and FLOWABLE_REST_APP_ADMIN_PASSWORD (bridge-runner:45, bridge-smoke-runner:75) match review contract; FLOWABLE_REST_APP_ADMIN_USER_ID default 'admin' consistent"
+      },
+      "artifact": "docs/test-reports/T-0163.test-report.md",
+      "contract_artifact": "docs/design/T-0163.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/flowable-client.ts",
+    "src/bridge-runner.ts",
+    "src/bridge-smoke-runner.ts",
+    "ci/checks/no-env-in-core.sh",
+    "package.json",
+    "docs/specs/T-0163-no-env-in-core.spec.md",
+    "docs/specs/T-0163.spec.contract.json",
+    "docs/design/T-0163-no-env-in-core.adr.md",
+    "docs/design/T-0163.adr.contract.json",
+    "docs/design/T-0163.review.contract.json",
+    "docs/reviews/T-0163.review.md",
+    "docs/test-reports/T-0163.test-report.md",
+    "docs/design/T-0163.test-report.contract.json",
+    "docs/pr/T-0163.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-1-duplicate-fitness-key",
+      "severity": "nit",
+      "description": "Pre-existing duplicate 'fitness' key in package.json. npm uses KEY2 (last key); no-env-in-core.sh is wired into KEY2 so the invariant is enforced. KEY1 includes named-binding-isolation.sh + npm run build not present in KEY2.",
+      "follow_up_candidate": "Separate cleanup task to merge the two duplicate fitness keys into one canonical line."
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migrations": "T-0163 adds no SQL migrations, no DDL changes, no known_tenant_tables.txt changes. Pure application-layer refactor (env hoist + new fitness check).",
+    "no_gotchas": "no-env-in-core.sh is a new frozen check wired into KEY2 fitness. frozen-checks-immutable.sh validates ownership. No sibling-frozen-file false-positives expected.",
+    "downstream_effect": "src/core/ is now fully process.env-free. Any future env read accidentally added to src/core/ will cause npm run fitness to exit 1. Bridge runners remain behaviourally identical at runtime."
+  },
+  "friction_events": []
+}
