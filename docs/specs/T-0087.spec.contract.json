@@ -1,0 +1,84 @@
+{
+  "task_id": "T-0087",
+  "status": "ready",
+  "summary": "Два логических тира (draft→published) конфигурации клиента в одном silo: config-only promotion, prod managed/locked, данные не копируются, физический контур — only on-demand.",
+  "functional": [
+    "FR-1: конфигурационные артефакты тенанта имеют тир-атрибут draft или published; оба тира в одной БД",
+    "FR-2: запись в draft-тир разрешена авторизованным субъектам; прямая запись в published-тир отклонена с явной ошибкой",
+    "FR-3: promote (draft→published) — config-only, human-gated; данные (records, instances, audit) не копируются",
+    "FR-4: published-тир managed/locked — изменение только через новый promote, не прямой записью",
+    "FR-5: draft-данные (тестовые записи, draft-инстансы) изолированы от published-контекста",
+    "FR-6: тиры draft/published ортогональны SDLC dev/prod окружениям Choros — не смешиваются",
+    "FR-7: физический контур (отдельная БД) — явная on-demand эскалация с human-gate, не автоматический дефолт"
+  ],
+  "non_functional": [
+    "NF-1: принудительный контроль тиров на уровне приложения; tier-атрибут доступен без join-ов",
+    "NF-2: promote — атомарная транзакция; нет промежуточного состояния",
+    "NF-3: каждый promote фиксируется в аудит-логе (T-0016) атомарно с изменением tier",
+    "NF-4: добавление тиров не требует нового Postgres-контейнера или схемы; работает в single-silo"
+  ],
+  "out_of_scope": [
+    "Bundle-coherence BPMN↔форма↔схема↔гранты — T-0082 (E12.1)",
+    "Config-агент как сотрудник (DRAFT-only governance-аппарат) — T-0077 (E11.6)",
+    "Симуляция и прогон в draft-тире — T-0130 (ссылается на T-0087 как несущее)",
+    "Camunda-grade маппинг live-инстансов между версиями",
+    "Физический контур (отдельная БД/silo) — вне дельты T-0087",
+    "UI promote-экрана (design-задача)",
+    "Changelog / diff-поверхность для promote — T-0084",
+    "Миграция данных между тирами (данные не мигрируют); expand/contract схемы — T-0082"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "В схеме БД у таблиц конфигурационных артефактов (process_definition, form_definition, object_schema, grant, dmn_table, nav_config) существует колонка tier с check-constraint (tier IN ('draft', 'published')), NOT NULL DEFAULT 'draft'. Migration-тест проверяет constraint на каждой таблице.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "POST /api/artifacts/<id>/edit для артефакта с tier='published' → HTTP 409/403 с кодом PUBLISHED_LOCKED; артефакт в БД не изменился. Проверено для process_definition и form_definition.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Promote артефакта A: A.tier = 'published' после promote; записи данных (records, instances), помеченные draft, не появляются в published-контексте (count WHERE tier='published' = 0).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Сбой в середине promote (исключение после обновления tier, до записи аудита) → артефакт остаётся в draft, аудит-событие не записано, нет промежуточных состояний.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "После promote в аудит-логе (T-0016) присутствует запись event_type='artifact.promoted' с artifact_id, actor_id, tier_from='draft', tier_to='published'. Записана атомарно с изменением tier.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "GET /api/records и GET /api/instances в published-контексте (без explicit draft-флага) не возвращают ни одной draft-строки (count = 0).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Вызов promote через service-token агента без human-confirmation токена → 403 FORBIDDEN_AGENT_SELF_PROMOTE. Тот же promote с валидным human-confirmation токеном → 200 OK.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "В путях автоматического провижнинга тенанта нет вызова createDatabase/provisionContour или аналога. Grep: ни одного автоматического физического-контур-провижнинга при создании тенанта.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "В dev-окружении Choros можно создать published-артефакт без ошибки. В конфигурации приложения нет маппинга tier→SDLC-окружение.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "В кодовой базе все присвоения tier='published' — только через promoteTier() или аналог. Grep: нет прямых UPDATE artifact SET tier='published' вне promote-модуля.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0087-client-env-tiers.spec.md"
+}
