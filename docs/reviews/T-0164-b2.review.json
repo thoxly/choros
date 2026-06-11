@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0164",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "T-0164-B2-F-001",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/role-criticality-isolation.sh:180",
+      "issue": "stem extraction via `awk '{print $1}'` does not sanitize regex metacharacters. A stem like '.*' would produce RE ^migrations/(.*)\\. sql$ (matches all migrations). This is an over-exclusion path, not a shell-injection path (grep -E patterns are not evaluated as bash). Shell injection ($(cmd), backticks) is fully neutralized because the string is only passed to grep as a pattern, not eval'd. Pipe injection (030|migrations/.*) is neutralized by the ^migrations/( ) anchor — the content inside the group sees only the filename tail, not the full path, so a pipe-extended group cannot reach a different prefix. The only practical regex-injection is '.*' or similar wildcards that over-exclude within migrations/. Every such entry is a visible line in the PR diff.",
+      "suggestion": "Optional hardening: add stem validation (e.g. `[[ \"${stem}\" =~ ^[0-9]+_[a-zA-Z0-9_-]+$ ]]`) before appending to the array. This closes the wildcard over-exclusion path and is one line. Not blocking because the PR diff is the primary mitigation at the agreed threat model (enforcement.md §7: erring agent, not adversary)."
+    },
+    {
+      "id": "T-0164-B2-F-002",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/role-criticality-migration-excludes.txt:17-19",
+      "issue": "The `# T-XXXX` attribution comment in each data line is documentation only — there is no automated enforcement that the attributed T-ID matches the task that wrote the line. This is intentional (matching the residual-risk posture of T-0146/R-2), but worth noting explicitly in the file header for future reviewers.",
+      "suggestion": "Add one sentence to the file header: 'Attribution comments (# T-XXXX) are informational; enforcement relies on PR review.' Already implicit; call it out."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-diff-size: exactly 2 files changed (role-criticality-isolation.sh + role-criticality-migration-excludes.txt)",
+      "covered": true
+    },
+    {
+      "ac": "AC-header-unchanged: line 2 of role-criticality-isolation.sh remains '# T-0040 · FF-RC1 / ...'; ownership anchor intact; frozen-checks-immutable passes (PASS [FF-FCI1])",
+      "covered": true
+    },
+    {
+      "ac": "AC-re-equivalence: reader-loop on current .txt produces RE byte-identical to the old hardcoded RE for all 3 current stems (verified: OLD==NEW)",
+      "covered": true
+    },
+    {
+      "ac": "AC-fail-closed: absent file → MIGRATION_EXCLUDE_RE remains '' → CHANGED_FILTERED=CHANGED → all migrations flagged (verified by simulation)",
+      "covered": true
+    },
+    {
+      "ac": "AC-fail-closed-empty: empty list (file exists but no non-comment lines) → stems array empty → RE not built → same '' path",
+      "covered": true
+    },
+    {
+      "ac": "AC-no-shell-injection: stems are used as grep -E pattern strings, not eval'd; $() and backticks in a stem are regex literals, not subshell commands",
+      "covered": true
+    },
+    {
+      "ac": "AC-t0146-gate-passes: frozen-checks-immutable.sh exits 0; .txt addition is FF-FCI4 (new file, not a .sh), so it is out of T-0146 scope by design",
+      "covered": true
+    },
+    {
+      "ac": "AC-ci-green: npm run ci (tsc --noEmit + eslint + fitness + vitest) all pass; 53 test files, 1042 tests, 0 failures",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": [
+    "NEW VECTOR JUDGMENT (T-0164-B2 specific, axis 5 / enforcement.md §7): The .txt data file is writable by any task without T-0146 meta-gate (T-0146 glob covers only ci/checks/[^/]+\\.sh). A task could add any migration stem (including '.*') to over-exclude migrations from the T-0040 frozen-diff check. HOWEVER: (1) The T-0040 frozen-diff check is task-specific — it verifies that T-0040's own branch did not touch foundation files or add migrations. Over-excluding a sibling migration from T-0040's check does not hide that migration from its own task's isolation check (dual-control-isolation.sh, invoke-grant-isolation.sh, etc.) which run independently. (2) A wildcard '.*' stem in the .txt would be a visible, anomalous line in the PR diff — detectable by any reviewer. (3) The threat model is enforcement.md §7: erring/drifting agent, not an adversarial actor. An erring agent adding a spurious stem is visible in PR review, same class of residual risk as T-0146/R-2 (branch-name spoof also requires a reviewer to catch the mismatch). VERDICT ON VECTOR: proportionate mitigation. Attribution `# T-XXXX` per line + PR review constitutes the same detection layer as T-0146's documented R-2 residual. The vector does not enable hiding a migration from all gates simultaneously — only from T-0040's single check. Acceptable at the defined threat tier. No blocking finding.",
+    "Frozen-checks-immutable run output: PASS [FF-FCI1]: ci/checks/role-criticality-isolation.sh is own check for T-0040 (BASE_REF/HEAD header), modification allowed. PASS: frozen-checks-immutable — all ci/checks/*.sh changes are owned by T-0040.",
+    "Full npm run ci: tsc 0 errors (2 lint warnings pre-existing), fitness 100% PASS, vitest 53 files / 1042 tests / 0 failures."
+  ]
+}
