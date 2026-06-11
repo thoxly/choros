@@ -10,6 +10,8 @@
     "tests": true,
     "fitness": true
   },
+  "head_sha": "c19d99b91d23d35fd52564b359129d2aa7af26af",
+  "review_sha": "aad6c00",
   "files_changed": [
     "seed/pack.schema.json",
     "seed/showcase/pack.json",
@@ -27,13 +29,14 @@
     "ci/checks/seed/write-api-auth-gate.sh",
     "ci/checks/seed/display-plane-no-write.sh",
     "ci/checks/seed/no-hardcoded-fixture-ids.sh",
+    "ci/checks/db/seed-pack.test.ts",
     "package.json",
     "docs/pr/T-0140.pr-handoff.json"
   ],
   "deviations_from_adr": [
-    "FF-9 smoke-apply (npm run seed:smoke) not wired as a CI step in package.json — the smoke test requires a live Postgres DB and is gated under fitness:db. The 3/7/12 entity counts are verified by the in-memory fallback shape tests (org.e2e.test.ts, processes.e2e.test.ts, rights.e2e.test.ts) which confirm ORG_SEED/PROCESSES_SEED/RIGHTS_SEED shapes. Full FF-9 DB-path smoke is a fitness:db concern requiring the live server; the script infra is in place (applyPack, CLI, endpoints) but the npm run seed:smoke hook is not added since it would require the DB service in ambient-free CI. The ADR says 'wired after npm run migrate' — this is a DB-gated step.",
-    "GET /api/tenants/:slug and GET /api/org/tenant-state helper endpoints added (not in ADR §4) — these are importer-internal helpers required to resolve tenant UUID and current state for idempotent apply/reset. They are gated behind grantsPool (DATABASE_URL required), not accessible in no-DB path.",
-    "DELETE /api/departments|positions|employees|roles added (ADR §6 flagged these as coder-surfaced dependency for AC-9 reset delete-extra) — implemented behind isGenesisOwner gate as recommended."
+    "FF-9 smoke-apply (npm run seed:smoke) not wired as a CI step in package.json — the smoke test requires a live Postgres DB and is gated under fitness:db. AC-7/8/9/10 are now covered by ci/checks/db/seed-pack.test.ts (R-2 resolved). The npm run seed:smoke hook as a separate CI step is not added since it would require the DB service in ambient-free CI — fitness:db is the correct gate per the ADR pattern.",
+    "GET /api/tenants/:slug and GET /api/org/tenant-state helper endpoints added (not in ADR §4) — these are importer-internal helpers required to resolve tenant UUID and current state for idempotent apply/reset. GET /api/org/tenant-state is now gated behind isGenesisOwner (R-3 resolved). Both are gated behind grantsPool (DATABASE_URL required), not accessible in no-DB path.",
+    "DELETE /api/departments|positions|employees|roles added (ADR §6 flagged these as coder-surfaced dependency for AC-9 reset delete-extra) — implemented behind isGenesisOwner gate. Now accept tenant_id in request body for correct RLS scoping (R-1 resolved)."
   ],
   "blocked_reason": "",
   "friction_events": []
