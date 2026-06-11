@@ -149,20 +149,22 @@ if [[ -f "${MIG}" ]]; then
   fi
 fi
 
-# ---- Check-9: no new .ts files in src/ (excluding __tests__) ---------------
+# ---- Check-9: no src/ runtime module for config-agent (self-scope) ---------
+# T-0077 invariant: config-agent is delivered as data-seed only (migration 044
+# mcp_tool rows); it must NOT have a runtime src/ implementation module.
+# The old check (merge-base diff --diff-filter=A on all src/**/*.ts) blocked
+# every future feature branch that adds any src file — that was never the
+# T-0077 invariant, only a self-scope accident.  Replaced with a direct scan
+# for config-agent runtime files in src/ (outside __tests__).
 echo ""
-echo "Check-9: no new .ts files in src/ (except __tests__)"
-if [[ -z "${BASE}" ]]; then
-  echo "WARN: cannot determine merge-base; skipping src/ new-file check"
+echo "Check-9: no src/ runtime module for config-agent (self-scope: data-seed only)"
+CA_RUNTIME=$(find "${ROOT}/src" -type f -name 'config-agent*.ts' \
+  | grep -v '__tests__' || true)
+if [[ -n "${CA_RUNTIME}" ]]; then
+  echo "FAIL: config-agent runtime src/ file(s) found — T-0077 invariant: seed-only delivery: ${CA_RUNTIME}" >&2
+  ERRORS=$((ERRORS + 1))
 else
-  NEW_SRC=$(git -C "${ROOT}" diff --name-only --diff-filter=A "${BASE}" -- 'src/**/*.ts' 2>/dev/null \
-    | grep -v '__tests__' || true)
-  if [[ -n "${NEW_SRC}" ]]; then
-    echo "FAIL: new .ts file(s) in src/ (not __tests__): ${NEW_SRC}" >&2
-    ERRORS=$((ERRORS + 1))
-  else
-    echo "PASS: no new .ts files in src/ outside __tests__"
-  fi
+  echo "PASS: no config-agent runtime src/ module (seed-only delivery confirmed)"
 fi
 
 echo ""
