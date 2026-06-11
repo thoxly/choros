@@ -26,6 +26,7 @@ import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
+import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 
 const { Pool } = pg;
 
@@ -230,6 +231,11 @@ function buildRouter(
 
   // Register artifact tier-promote endpoint (T-0087 E12.6).
   registerArtifactRoutes(router);
+
+  // Register notification preference endpoints (T-0171 E-N.4).
+  if (grantsPool) {
+    registerNotificationPrefRoutes(router, grantsPool);
+  }
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
