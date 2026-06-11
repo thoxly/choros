@@ -329,4 +329,53 @@ grep -q "pg_terminate_backend" ci/checks/db/globalSetup.ts || exit 1
 
 ---
 
+## Поправка T-0192 · Имя шаблона включает migrations-hash (кросс-веточная изоляция)
+
+**Дата:** 2026-06-12
+**Задача:** T-0192 — кросс-веточное загрязнение шаблона (живой прецедент T-0179×T-0180)
+
+### Проблема
+
+Исходная схема использует одно фиксированное имя `choros_test_template`. Две ветки с разными наборами миграций (разные `migrations/*.sql`) делят один шаблон: та ветка, что запустила `setup-template` последней, «перебивает» шаблон для соседней. Это провоцирует непредсказуемые сбои тестов на соседних worktree.
+
+### Решение (T-0192)
+
+Имя шаблона = `choros_test_template_<hash8>`, где `<hash8>` — первые 8 шестнадцатеричных символов SHA-256, вычисленного по всем отсортированным `migrations/NNN_*.sql` (имена файлов + содержимое). Ветки с идентичными наборами миграций делят шаблон (нормально — шаблон идемпотентен). Ветки с разными наборами получают свои шаблоны.
+
+### Advisory lock
+
+Per-hash: `(parseInt(hash, 16) & 0x7fff_ffff) | 0x1000_0000`. Две ветки с разными хешами не блокируют друг друга при параллельном `setup-template`.
+
+### Orphan-cleanup
+
+`db-cleanup-orphans.ts` исключает шаблоны через `TEMPLATE_RE = /^choros_test_template_[0-9a-f]{8}$/` (вместо `!= 'choros_test_template'`). Добавлен флаг `--stale-templates` для явного удаления шаблонов с устаревшим хешем.
+
+### Совместимость с FF-T147-* (frozen, чужие — не трогаем)
+
+| Чек | Патч потребовался? | Почему |
+|---|---|---|
+| FF-T147-1 | Нет | globalSetup по имени файла — не зависит от имени шаблона |
+| FF-T147-2 | Нет | Только проверяет изменения в `*.test.ts` |
+| FF-T147-3 | Нет | Грепает `import.*src/` — не задет |
+| FF-T147-4 | Нет | `grep -q "choros_test_template"` — подстрока `choros_test_template` есть в новом имени |
+| FF-T147-5 | Нет | Только file existence + package.json |
+| FF-T147-6 | Нет | Грепает `choros_test.*Date\.now\(\)` — run_id не изменился |
+| FF-T147-7 | Нет | Грепает `DB_ISOLATION` |
+| FF-T147-8 | Нет | Грепает `pg_terminate_backend` |
+| FF-T147-9 | Нет | selfTest() внутренне проверяет `withDbName(..., 'choros_test_template')` — константа в тест-коде |
+
+### AC-cross-branch
+
+Две ветки с разными наборами миграций создают `choros_test_template_<hashA>` и `choros_test_template_<hashB>` — независимые шаблоны. `CREATE DATABASE run_id TEMPLATE choros_test_template_<hash>` клонирует только ту схему, что соответствует своим миграциям.
+
+### Примечание по handoff
+
+Старый `choros_test_template` (без суффикса) остаётся в Postgres — его не удаляем, пока другие ветки ещё работают со старым кодом. После прокатки всех веток на новый код выполнить вручную:
+```sql
+UPDATE pg_database SET datistemplate = false WHERE datname = 'choros_test_template';
+DROP DATABASE IF EXISTS choros_test_template;
+```
+
+---
+
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
