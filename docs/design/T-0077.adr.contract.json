@@ -1,0 +1,202 @@
+{
+  "task_id": "T-0077",
+  "status": "ready",
+  "decision": "Материализовать governance-аппарат системного config-агента как первоклассного сотрудника ИСКЛЮЧИТЕЛЬНО через идемпотентный data-seed migration 044 (один транзакционный файл, 6 шагов в порядке FK): роль config-agent (e0...003, dev-tenant a0...001), seed-employee config-agent-seed (d0...013, kind=agent, position_id=NULL), agent_card с budget_policy_id→instance_budget(b0...001), CONFIRMED role_assignment, 7 mcp_tool строк (declares='[]', pure_compute=true, resource_ops=[{resourceType:'authoring_draft',operation:<op>}]), 7 grant строк (resource_type='authoring_draft', role_id=e0...003, delegable=false). DRAFT-граница СТРУКТУРНА: ноль грантов authoring_published. Ноль новых TS-модулей в src/, ноль правок frozen-файлов, ноль новых таблиц (known_tenant_tables.txt не меняется), authoring_draft = TEXT-дескриптор без правки TS-union ResourceType (паттерн T-0024 'agent'). Audit-типы authoring.* зафиксированы как frozen seam для E11.x. Сид целиком в dev-tenant a0...001 (тот же, где гранты/employee), ON CONFLICT DO NOTHING + schema_migrations версионирование обеспечивают идемпотентность.",
+  "rejected_alternatives": [
+    {
+      "option": "Сид mcp_tool строк в тенант 00000000-...-001 (как существующий seed 040)",
+      "why_not": "resolveAgentToolset(tenantId) читает гранты И tools по одному tenantId; гранты/employee config-агента живут в a0...001. Tools в другом тенанте → RLS-изоляция → toolset молча пуст → AC-02/AC-06 провалятся в рантайме, а не на гейте. Сидим в a0...001."
+    },
+    {
+      "option": "authoring_published грант с draft-only флагом в constraint jsonb",
+      "why_not": "Конфигурационная граница подделываема правкой constraint. ADR §4 требует физической границы. Структурное ОТСУТСТВИЕ гранта на authoring_published неподделываемо — это и есть DRAFT-boundary."
+    },
+    {
+      "option": "Новая таблица authoring_draft / отдельный authority-store",
+      "why_not": "NF-1: один control plane. authoring_draft — content-tier ресурс (E11.3+), не tenant-table; в T-0077 это строковый resource_type-дескриптор как effect_resource. Новая таблица нарушила бы grant-trail-no-new-table (Check-1/2) и known_tenant_tables.txt."
+    },
+    {
+      "option": "Правка TS-union ResourceType в grant-lattice.ts под authoring_draft",
+      "why_not": "grant-lattice.ts — frozen seam (FR-10/AC-10). T-0024 доказал паттерн: out-of-union resource_type живёт как TEXT в DB + widening-cast 'authoring_draft' as Grant['resourceType'] только в тесте/на HTTP-границе. Правка union сломала бы AC-10."
+    },
+    {
+      "option": "role_assignment с confirmed_by=NULL",
+      "why_not": "Migration 020 контракт: confirmed_by IS NULL ⇒ proposal ⇒ ZERO грантов резолверу. Seed config-агента обязан быть CONFIRMED (confirmed_by NOT NULL), иначе resolveAgentToolset вернёт [] и AC-06 (7 инструментов) провалится."
+    },
+    {
+      "option": "position_id для config-агента",
+      "why_not": "employee.position_id nullable; агенты могут быть без позиции. Системный config-агент не слотится в оргпозицию — position_id=NULL (паттерн genesis e-owner d0...0ff)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "role (seed row, existing table)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid = a0000000-0000-0000-0000-000000000001"},
+        {"name": "id", "type": "uuid = e0000000-0000-0000-0000-000000000003"},
+        {"name": "slug", "type": "text = 'config-agent'"},
+        {"name": "display_name", "type": "text = 'Config Agent'"}
+      ]
+    },
+    {
+      "entity": "employee (seed row, existing table)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid = a0000000-0000-0000-0000-000000000001"},
+        {"name": "id", "type": "uuid = d0000000-0000-0000-0000-000000000013"},
+        {"name": "position_id", "type": "uuid NULL"},
+        {"name": "kind", "type": "text = 'agent'"},
+        {"name": "slug", "type": "text = 'config-agent-seed'"}
+      ]
+    },
+    {
+      "entity": "agent_card (seed row, existing table)",
+      "fields": [
+        {"name": "employee_id", "type": "uuid = d0000000-0000-0000-0000-000000000013"},
+        {"name": "employee_kind", "type": "text = 'agent'"},
+        {"name": "kc_client_id", "type": "text = 'agent-config'"},
+        {"name": "budget_policy_id", "type": "uuid = b0000000-0000-0000-0000-000000000001 (FK instance_budget)"},
+        {"name": "llm_endpoint", "type": "text NULL (dormant)"}
+      ]
+    },
+    {
+      "entity": "role_assignment (seed row, existing table)",
+      "fields": [
+        {"name": "id", "type": "uuid (stable, prefix f0...)"},
+        {"name": "employee_id", "type": "uuid = d0000000-0000-0000-0000-000000000013"},
+        {"name": "role_id", "type": "uuid = e0000000-0000-0000-0000-000000000003"},
+        {"name": "org_scope", "type": "jsonb = root org node (b0000000-...-001 department)"},
+        {"name": "confirmed_by", "type": "text NOT NULL = 'seed' (CONFIRMED ⇒ effective)"}
+      ]
+    },
+    {
+      "entity": "mcp_tool (7 seed rows, existing table)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid = a0000000-0000-0000-0000-000000000001"},
+        {"name": "id", "type": "uuid (stable 10000000-...-004 .. 00a)"},
+        {"name": "name", "type": "text ∈ {emit_form_code, edit_jsonschema, author_dmn, scaffold_external_worker, write_object_migration, open_draft_branch, request_promote}"},
+        {"name": "declares", "type": "jsonb = '[]'"},
+        {"name": "pure_compute", "type": "boolean = true"},
+        {"name": "resource_ops", "type": "jsonb = '[{\"resourceType\":\"authoring_draft\",\"operation\":<op>}]'"}
+      ]
+    },
+    {
+      "entity": "grant (7 seed rows, existing table)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid = a0000000-0000-0000-0000-000000000001"},
+        {"name": "id", "type": "uuid (stable e2000000-...-001 .. 007)"},
+        {"name": "role_id", "type": "uuid = e0000000-0000-0000-0000-000000000003"},
+        {"name": "resource_type", "type": "text = 'authoring_draft'"},
+        {"name": "operation", "type": "text ∈ {create, update} (парный к tool)"},
+        {"name": "scope", "type": "jsonb = root org node"},
+        {"name": "delegable", "type": "boolean = false"}
+      ]
+    }
+  ],
+  "contracts": [
+    "Audit event-types (frozen seam для E11.x): authoring.form_code.emitted, authoring.jsonschema.edited, authoring.dmn.authored, authoring.external_worker.scaffolded, authoring.object_migration.written, authoring.draft_branch.opened, authoring.promote.requested",
+    "resource_ops jsonb форма: [{\"resourceType\":\"authoring_draft\",\"operation\":\"<op>\"}] — camelCase ключи, байт-в-байт как seed 040, совместимо с McpToolRow.resourceOps (mcp-tool-registry.ts)",
+    "DRAFT-boundary инвариант: ∄ grant с resource_type='authoring_published' для role_id=e0000000-...-003",
+    "Frozen files (не редактируются): src/core/grant-lattice.ts, src/core/grant-resolver.ts, src/core/mcp-tool-registry.ts, src/http/agents.ts, src/http/grants.ts, src/db/audit-writer.ts",
+    "Migration ownership: только слот 044; 041/042/043 не трогаются; known_tenant_tables.txt не меняется"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T0077-01",
+      "rule": "После migration 044 в dev-silo (tenant a0...001) существует ровно одна role со slug='config-agent' и id='e0000000-0000-0000-0000-000000000003'",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — SELECT slug FROM choros.role WHERE tenant_id=$dev AND id='e0...003' → 1 строка 'config-agent'"
+    },
+    {
+      "id": "FF-T0077-02",
+      "rule": "В choros.mcp_tool ровно 7 строк (tenant a0...001) с resource_ops @> '[{\"resourceType\":\"authoring_draft\"}]'; имена = {emit_form_code, edit_jsonschema, author_dmn, scaffold_external_worker, write_object_migration, open_draft_branch, request_promote}",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — SELECT name FROM choros.mcp_tool WHERE tenant_id=$dev AND resource_ops @> '[{\"resourceType\":\"authoring_draft\"}]'::jsonb → 7 имён"
+    },
+    {
+      "id": "FF-T0077-03",
+      "rule": "Все 7 authoring mcp_tool строк имеют pure_compute=true И declares='[]'::jsonb",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — count(*) WHERE authoring_draft AND (pure_compute=false OR declares<>'[]') → 0"
+    },
+    {
+      "id": "FF-T0077-04",
+      "rule": "В choros.grant ровно 7 строк с resource_type='authoring_draft' и role_id='e0000000-0000-0000-0000-000000000003' (tenant a0...001)",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — SELECT count(*) FROM choros.\"grant\" WHERE tenant_id=$dev AND resource_type='authoring_draft' AND role_id='e0...003' → 7"
+    },
+    {
+      "id": "FF-T0077-05",
+      "rule": "DRAFT-boundary: ноль grant-строк с resource_type='authoring_published' для роли config-agent (физическая граница)",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — SELECT count(*) WHERE resource_type='authoring_published' AND role_id='e0...003' → 0"
+    },
+    {
+      "id": "FF-T0077-06",
+      "rule": "resolveAgentToolset для seed config-агента (employeeId=d0...013) с seed-derived grant+tool sources возвращает массив длиной 7, каждый McpToolRow с resourceOps[0].resourceType==='authoring_draft'",
+      "ci_check": "src/__tests__/config-agent-toolset.test.ts — in-memory makeGrantSource/makeToolSource из seed; expect(result).toHaveLength(7)"
+    },
+    {
+      "id": "FF-T0077-07",
+      "rule": "resolveAgentToolset для fresh employee без role_assignment (zero grants) возвращает [] для authoring_draft tools",
+      "ci_check": "src/__tests__/config-agent-toolset.test.ts — makeGrantSource([]) + authoring tools → expect([])"
+    },
+    {
+      "id": "FF-T0077-08",
+      "rule": "Ни один McpToolRow из toolset config-агента не содержит resourceType='authoring_published' в resourceOps",
+      "ci_check": "src/__tests__/config-agent-toolset.test.ts — toolset.every(t => !t.resourceOps.some(o => o.resourceType==='authoring_published'))"
+    },
+    {
+      "id": "FF-T0077-09",
+      "rule": "Migration 044 идемпотентна: двойной run.mjs — второй проход 'nothing to apply', счёт строк в role/mcp_tool/grant/employee/agent_card/role_assignment неизменен; каждый INSERT несёт ON CONFLICT DO NOTHING",
+      "ci_check": "ci/checks/config-agent-seed.sh (статика: grep 'ON CONFLICT' для каждого INSERT в 044) + ci/checks/db/config-agent-seed.test.ts (повторный apply → count неизменен); grant-trail-no-new-table.sh Check-3"
+    },
+    {
+      "id": "FF-T0077-10",
+      "rule": "Frozen files не изменены относительно dev-base: grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts, agents.ts, grants.ts, audit-writer.ts",
+      "ci_check": "ci/checks/config-agent-seed.sh — git diff --exit-code <dev-base> -- <6 frozen files> → exit 0"
+    },
+    {
+      "id": "FF-T0077-11",
+      "rule": "Ноль новых .ts файлов в src/ кроме __tests__",
+      "ci_check": "ci/checks/config-agent-seed.sh — git diff --name-only <dev-base> -- 'src/**/*.ts' | grep -v '__tests__' → 0 строк"
+    },
+    {
+      "id": "FF-T0077-12",
+      "rule": "RLS: cross-tenant SELECT (SET LOCAL choros.tenant_id='<other>') к mcp_tool WHERE authoring_draft возвращает 0 строк под choros_app",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — SET LOCAL choros.tenant_id='<other>'; SELECT ... authoring_draft → 0"
+    },
+    {
+      "id": "FF-T0077-13",
+      "rule": "agent_card seed config-агента (d0...013) имеет ненулевой budget_policy_id, разрешаемый JOIN-ом в instance_budget (FK agent_card_budget_policy_fk из 034)",
+      "ci_check": "ci/checks/db/config-agent-seed.test.ts — JOIN agent_card×instance_budget по (tenant_id, budget_policy_id=id) WHERE employee_id='d0...013' → 1 строка"
+    },
+    {
+      "id": "FF-T0077-14",
+      "rule": "Migration discipline: только 044 затронут; 041/042/043 не изменены; migrations/044_config_agent_seed.sql существует (ровно один файл)",
+      "ci_check": "ci/checks/config-agent-seed.sh — git diff --name-only <dev-base> -- migrations/ | grep -E '^migrations/04[123]_' → 0; ls migrations/044_*.sql → 1"
+    },
+    {
+      "id": "FF-T0077-15",
+      "rule": "Audit event-типы authoring.* зафиксированы в ADR/spec как contract для E11.x (7 типов)",
+      "ci_check": "manual: docs/design/T-0077-config-agent-employee.adr.md §1 содержит список из 7 authoring.* типов"
+    },
+    {
+      "id": "FF-T0077-16",
+      "rule": "No-new-table: migration 044 (≥031) не содержит CREATE TABLE; known_tenant_tables.txt не изменён относительно dev-base",
+      "ci_check": "ci/checks/grant-trail-no-new-table.sh — Check-1 (known_tenant_tables unchanged) + Check-2 (no CREATE TABLE в 031+)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-01", "covered_by": "FF-T0077-01"},
+    {"ac": "AC-02", "covered_by": "FF-T0077-02"},
+    {"ac": "AC-03", "covered_by": "FF-T0077-03"},
+    {"ac": "AC-04", "covered_by": "FF-T0077-04"},
+    {"ac": "AC-05", "covered_by": "FF-T0077-05"},
+    {"ac": "AC-06", "covered_by": "FF-T0077-06"},
+    {"ac": "AC-07", "covered_by": "FF-T0077-07"},
+    {"ac": "AC-08", "covered_by": "FF-T0077-08"},
+    {"ac": "AC-09", "covered_by": "FF-T0077-09"},
+    {"ac": "AC-10", "covered_by": "FF-T0077-10"},
+    {"ac": "AC-11", "covered_by": "FF-T0077-11"},
+    {"ac": "AC-12", "covered_by": "FF-T0077-12"},
+    {"ac": "AC-13", "covered_by": "FF-T0077-13"},
+    {"ac": "AC-14", "covered_by": "FF-T0077-14"},
+    {"ac": "AC-15", "covered_by": "FF-T0077-15"}
+  ],
+  "adr_artifact_path": "docs/design/T-0077-config-agent-employee.adr.md"
+}
