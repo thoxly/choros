@@ -1,0 +1,87 @@
+{
+  "task_id": "T-0140",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/http/seed-write.ts:448,451,476,479,504,507,532,535",
+      "issue": "Все четыре DELETE-хендлера (departments, positions, employees, roles) используют DEV_TENANT_ID как в withTenantTx, так и в WHERE-предикате SQL. resetPack в importer.ts создаёт showcase-тенант через POST /api/tenants и получает его UUID (отличный от DEV_TENANT_ID), разрешает entity ID через GET /api/org/tenant-state?tenant_id=<showcase_uuid>, затем вызывает DELETE /api/departments/:id — но хендлер выполняет DELETE WHERE tenant_id = DEV_TENANT_ID AND id = $2. Итог: DELETE ищет сущность не в том тенанте, rowCount=0, выбрасывает 404. AC-9 (reset удаляет лишний департамент) невыполним для любого тенанта, UUID которого отличается от DEV_TENANT_ID.",
+      "suggestion": "DELETE-хендлеры должны принимать tenant_id из тела запроса (аналогично POST-хендлерам) или от клиента передавать тело/параметр с tenant_id. withTenantTx и WHERE-предикат должны использовать тот же tenant_id, что и создавшая сущность операция. Вся authz (loadAdminContext + isGenesisOwner) при этом может остаться с DEV_TENANT_ID как контекстом проверки (genesis-owner привязан к dev-тенанту по миграции), только RLS-скоп и WHERE должны быть корректными."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "seed/importer.ts:596 + src/__tests__/seed-write.e2e.test.ts (all 8 tests)",
+      "issue": "AC-7 требует: 'seed apply на чистой DB → GET /api/org возвращает 3 dept / 7 positions / 12 employees'. AC-9 требует live-test: reset удаляет вручную вставленный лишний департамент. AC-8 требует: второй запуск apply возвращает те же данные. Ни один из 8 тестов в seed-write.e2e.test.ts не покрывает ни одно из этих требований с реальной БД: тесты работают в no-DB режиме и проверяют только коды ответа (404/401/500). Промисы spec по AC-7/8/9 требуют fitness:db-уровня, однако DB-тест в ci/checks/db/ для T-0140 отсутствует. Кодер задекларировал FF-9 smoke-apply как единственного покрывателя AC-7/8/11, и именно его пропуск как CI-шага создаёт дыру трассировки. CI зелёный, но AC-7/8/9 фактически непокрыты на DB-пути.",
+      "suggestion": "Добавить ci/checks/db/seed-apply.test.ts с тестами: (1) applyPack через HTTP→локальный сервер с live DB → GET /api/org returns exactly 3/7/12, GET /api/rights returns 8 roles; (2) второй applyPack → no duplicates; (3) ручная вставка лишнего dept → resetPack → только pack-dept остаются; (4) resetPack не удаляет e-owner. Это стандартный fitness:db-паттерн, уже применённый для org-structure.test.ts. Альтернатива — добавить npm run seed:smoke как CI-шаг при условии наличия DB-сервиса (аналогично fitness:db в ci.yml), но smoke-скрипт тоже нужно написать."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/http/seed-write.ts:572-608 (GET /api/org/tenant-state)",
+      "issue": "GET /api/org/tenant-state принимает tenant_id как query-параметр и выполняет SELECT по нему через withTenantTx, тем самым возвращая полную структуру (departments, positions, employees, roles) любому вызывающему без аутентификации. extractActor / isGenesisOwner не вызывается. Это internal helper endpoint для importer, но он зарегистрирован в API без auth gate. Любой, знающий UUID тенанта, может сдампить всю его org-структуру. ADR §4 не специфицировал этот эндпоинт — он добавлен coder как deviation. ADR §2.3 говорит 'No new authority subsystem': здесь нет нового subsystem, но открытый read-endpoint нарушает принцип наименьших привилегий.",
+      "suggestion": "Добавить extractActor(req) + loadAdminContext + isGenesisOwner gate на GET /api/org/tenant-state (аналогично POST-хендлерам). Для importer это не проблема — он уже передаёт X-Dev-User: e-owner во всех запросах."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/seed-write.ts:368-386 (POST /api/roles syntheticGrant)",
+      "issue": "validateAdminDelegation вызывается с syntheticGrant.tenantId = DEV_TENANT_ID и targetOrgScope = admin.adminOrgScope, где admin загружен из DEV_TENANT_ID. Тело запроса содержит tenant_id который может отличаться от DEV_TENANT_ID (если showcase-тенант создаётся с другим UUID). Роль вставляется в body.tenant_id, но delegation проверяется по контексту DEV_TENANT. Для dev-only runtime (runtime_target: local) это приемлемо, но логика делегирования оторвана от target-тенанта.",
+      "suggestion": "Использовать tenant_id из тела как контекст для loadAdminContext вместо DEV_TENANT_ID (или документировать, что genesis-owner delegation всегда проверяется в DEV_TENANT_ID как bootstrap-authority-root — если это сознательное design decision)."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 4,
+      "location": "seed/importer.ts:307-315 (applyPack: двойной GET /api/tenants/:slug)",
+      "issue": "В applyPack после POST /api/tenants сразу вызывается GET /api/tenants/:slug внутри блока (строка 311), а затем СНОВА вызывается тот же GET /api/tenants/:slug вне блока (строки 318-322). Первый вызов (строка 311) никогда не использует результат (tenantRes не сохраняется в переменную с использованием). Лишний HTTP-запрос при каждом apply.",
+      "suggestion": "Убрать дублирующий GET внутри блока (строки 310-315) — оставить только одно разрешение tenant UUID после POST/409."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": true,  "note": "POST /api/tenants 201/409 реализован; in-memory shape-тест подтверждает регистрацию маршрута; DB-путь непроверен в CI" },
+    { "ac": "AC-2",  "covered": true,  "note": "POST /api/departments 201/409 реализован; аналогично" },
+    { "ac": "AC-3",  "covered": true,  "note": "POST /api/positions 201/409 реализован" },
+    { "ac": "AC-4",  "covered": true,  "note": "POST /api/employees kind=human реализован" },
+    { "ac": "AC-5",  "covered": true,  "note": "POST /api/employees kind=agent реализован" },
+    { "ac": "AC-6",  "covered": true,  "note": "POST /api/roles с mgmt_object:role:create gate реализован" },
+    { "ac": "AC-7",  "covered": false, "note": "BLOCKING R-2: 3/7/12 count after apply NOT verified в CI DB-пути. Frozen e2e тесты используют ORG_SEED in-memory fallback, а не pack-driven DB path. FF-9 not wired." },
+    { "ac": "AC-8",  "covered": false, "note": "BLOCKING R-2: idempotency (second apply = same state) не покрыта тестами — только структурная логика 409-as-skip без DB-проверки" },
+    { "ac": "AC-9",  "covered": false, "note": "BLOCKING R-1+R-2: reset deletes extra dept — DELETE handlers hardcode DEV_TENANT_ID (R-1) + нет DB-теста (R-2)" },
+    { "ac": "AC-10", "covered": true,  "note": "EXCLUDE_EMPLOYEE_SLUGS.has('e-owner') реализован в resetPack:574; нет DB-теста, но логика верна" },
+    { "ac": "AC-11", "covered": true,  "note": "GET /api/rights возвращает 8 roles через RIGHTS_SEED in-memory (seed-write.e2e.test.ts:122-127). Фактически pack-права не управляют ответом — это работает через legacy fallback, что технически удовлетворяет AC-11 для текущей реализации" },
+    { "ac": "AC-12", "covered": true,  "note": "FF-1 pack-schema-valid PASS; CLI fail-closed на invalid pack" },
+    { "ac": "AC-13", "covered": true,  "note": "FF-2 no-direct-pg-in-importer PASS" },
+    { "ac": "AC-14", "covered": true,  "note": "FF-3 no-seed-secret PASS" },
+    { "ac": "AC-15", "covered": true,  "note": "CLI выводит structured JSON summary в stdout; errors → stderr" },
+    { "ac": "AC-16", "covered": true,  "note": "GET /api/processes возвращает 8 instances через PROCESSES_SEED fallback; analogous to AC-11" },
+    { "ac": "AC-17", "covered": true,  "note": "FF-10 no-hardcoded-fixture-ids PASS (WARN-и в тестах — legacy тесты других задач, не showcase-IDs)" },
+    { "ac": "AC-18", "covered": true,  "note": "FF-6 write-api-auth-gate PASS; extractActor + isGenesisOwner/validateAdminDelegation на всех write-хендлерах" }
+  ],
+  "special_attention_verdicts": {
+    "FF9_smoke_apply": "BLOCKING (R-2). Deviation принята: FF-9 не добавлен в npm run ci как шаг — обоснование (live DB нужен) корректно. Однако это НЕ означает, что 3/7/12 count покрыты in-memory тестами. Frozen e2e тесты (org/processes/rights.e2e.test.ts) работают ТОЛЬКО с ORG_SEED/PROCESSES_SEED/RIGHTS_SEED in-memory fallback, не с DB-path после apply. Счёт 3/7/12 фактически не верифицирован нигде в CI. ADR §5 FF-9: 'npm run seed:smoke wired into CI after npm run migrate' — не сделано. Spec AC-7/8: 'test'. Дыра трассировки — blocking.",
+    "extra_endpoints": "PARTLY_BLOCKING (R-3). GET /api/tenants/:slug и GET /api/org/tenant-state добавлены как необходимые helpers для importer — обоснование принято (coder-surfaced dependency). DELETE-роуты добавлены и гейтованы isGenesisOwner — соразмерно и по ADR §6. Проблема: GET /api/org/tenant-state не имеет auth gate — blocking. Все POST-роуты соразмерны, FF-6 pass.",
+    "I1_FF7_display_plane": "PASS. applyPack итерирует строго LIVE_ENTITY_ORDER (без process_instances/rights_cards). FF-7 fitness check проходит. Имплементация корректна: display plane реально не попадает в write-loop. Наблюдение: GET /api/rights и GET /api/processes продолжают читать из RIGHTS_SEED/PROCESSES_SEED in-memory константы, а не из pack-файла — это разрешено spec (in-memory fallback сохраняется, FR-5/§4.9), но означает что pack как 'single authoritative source' для display plane лишь в смысле schema-valuation и I-2 'нет второй копии контента', а не в смысле 'GET endpoint читает из pack'.",
+    "I2_no_double_copies": "PASS. ORG_SEED/PROCESSES_SEED/RIGHTS_SEED не дублированы в pack. FF-4 single-source PASS. Frozen e2e тесты не меняли свои expectations (shape-only). Нет новых hardcoded-копий (FF-10 PASS). I-2 выполнен в смысле 'content не задублирован', хотя pack-файл и in-memory constants существуют параллельно — что spec явно разрешает (FR-5).",
+    "AC8_AC10_test_coverage": "PARTIAL. AC-10 (e-owner не удаляется): EXCLUDE_EMPLOYEE_SLUGS проверен в коде, но нет DB-теста подтверждающего это поведение в реальном сценарии. AC-8 (идемпотентность): 409-as-skip логически корректна, но тест 'запусти apply дважды' отсутствует. Структурно оба выглядят верно, но missing DB coverage — часть R-2."
+  },
+  "role_gap_evidence": [
+    "Паттерн: DELETE-хендлеры для ID-based операций должны получать tenant context из тела/параметра запроса, а не из env-переменной (DEV_TENANT_ID). Аналогичный класс багов ловился в T-0116 (R-1/R-2: tenantId принимался но не использовался в WHERE). Кандидат на fitness-правило: 'каждый DELETE-handler с tenantId-gated resource должен содержать tenant_id в теле или path-параметре И использовать его в WHERE-предикате' — не только в RLS GUC.",
+    "Паттерн: importer-internal helper-эндпоинты (GET /api/org/tenant-state) не должны быть открытыми — их необходимо гейтовать тем же auth-seam, что и write-эндпоинты. Кандидат в ledgers/role-gaps.md: 'read-helper endpoints exposed for internal tooling must carry same auth gate as write endpoints they support'."
+  ],
+  "_review_meta": {
+    "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+    "date": "2026-06-11",
+    "ci_run": "npm run ci: tsc (0 errors, 2 warnings pre-existing) + eslint (warnings only) + fitness (all 47 checks PASS including FF-1..FF-10) + vitest (877 passed, 5 skipped, 45 files)",
+    "blocking_count": 3,
+    "nit_count": 2,
+    "base_sha": "14d4f1c",
+    "head_sha": "d6874bb"
+  }
+}
