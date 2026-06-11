@@ -2,6 +2,7 @@
 
 **Status:** ready (no founder escalation — направление задано фаундером в gap-map §3а; единственная развилка уровня фаундера — анти-DoS/rate-limit-бюджет и срок-дефолт TTL внешней ссылки — вынесена как **deploy-time параметр** за конфигурацию, §8/§10)
 **Phase:** DESIGN · **Date:** 2026-06-11
+**Iteration:** iter-2 (исправление по ревью `docs/reviews/T-0122.review.md` — 3 blocking R-1/R-2/R-3 + ниты R-4/R-5/R-6; каждый шов сверен с живым кодом/миграцией: `src/core/grant-resolver.ts`, `src/core/object-handle.ts`, `migrations/019_role.sql`, `020_role_assignment.sql`, `008_grant.sql`, `021_grant_role_fk.sql`, `004_registry_def.sql`, `001_roles_and_schema.sql`, `ci/checks/db/schema.test.ts`, `force_rls.sql`. Изменения помечены `[iter-2, R-N]`.)
 **Task:** T-0122 (product=choros, type=design, prio 55)
 **Spec consumed:** `docs/specs/T-0122-external-participant.spec.md` (status: ready, AC-1..AC-15) · `docs/specs/T-0122.spec.contract.json`
 **Решение фаундера (данность, НЕ развилка):** внешний участник как ДАННЫЕ = запись справочника (record, T-0014), НЕ учётка Keycloak; канал = примитив «внешняя поверхность» = токенизированный доступ без учётки к узкому срезу {скачать, проверить, загрузить} с аудитом; один механизм прав (производный грант внутри T-0018); снапшот vs живой документ — недвусмысленно (gap-map §4б инвариант 1).
@@ -96,8 +97,14 @@ JWT-сессию ядра. (Для QR-кейса даже запись-конт�
   lookup-индекс по `token_hash` (см. §2.4 про tenant-вывод); `created_by/at`. Одна поверхность ↔
   1…N токенов (ротация без переиздания поверхности).
 - Обе — обычные T-0013 tenant-таблицы (FORCE RLS, default-DENY, `tenant_id`-leading, `choros_app`
-  DML-only), заносятся в `known_tenant_tables.txt`. **Никаких новых isolation-кодпутей** — те же
-  FF T-0013/T-0115 покрывают их.
+  DML-only), заносятся в `known_tenant_tables.txt` (обязательно — anti-decorative strict-чек
+  `ci/checks/db/schema.test.ts:74-107` падает на любой таблице на диске без записи в фикстуре).
+  **[iter-2, R-2] Уточнение (снимает противоречие с §2.4):** для `choros_app`-пути под
+  tenant-контекстом — да, обычные таблицы, те же FF T-0013/T-0115. НО `external_token` несёт
+  **одно явно помеченное, узкое исключение** — пре-контекстный routing-lookup роли
+  `choros_token_lookup` (§2.4). Это **не** «никаких новых isolation-кодпутей» вообще, а **ровно
+  один**, структурно ограниченный и fitness-охраняемый кодпуть; формулировка §2.2 здесь
+  скорректирована, чтобы не противоречить §2.4 (это была неточность iter-1).
 
 ### 2.3 Токен → производный ОГРАНИЧЕННЫЙ грант (FR-3, несущий инвариант NF-1)
 
@@ -106,16 +113,92 @@ JWT-сессию ядра. (Для QR-кейса даже запись-конт�
 а НЕ выводимая ad-hoc resolve-time. Обоснование — §3 (rejected: ad-hoc-грант-resolve-time).
 
 - **Принципал.** Каждая `external_surface` владеет ровно одной **синтетической ролью**
-  `role` (T-0022) с `is_external = true` (флаг как `is_system` у `registry_def`): эта роль — никому
-  не назначаемый principal, существующий только как держатель грантов поверхности.
-  `ResolveSubject.subjectId` для внешнего = id этой роли; никакого `assignment` на человека нет
-  (внешний не tenant-пользователь). Грант привязан к **роли**, как требует T-0018 (грант не
-  цепляется к личности) — поверхность и есть «личность» в смысле принципала.
+  `role` (T-0022, миграция `019_role.sql:23`) с `is_external = true` (аддитивная колонка как
+  `registry_def.is_system`, `migrations/004_registry_def.sql:16`): эта роль — никому не
+  назначаемый principal, существующий только как держатель грантов поверхности.
+  `ResolveSubject.subjectId` для внешнего = id этой роли; никакого `role_assignment` на человека
+  нет (внешний не tenant-пользователь). Грант привязан к **роли** через `grant.role_id`
+  (FK `grant_role_id_fkey → role(tenant_id, id)`, `migrations/021_grant_role_fk.sql:27`), как
+  требует T-0018 — поверхность и есть «личность» в смысле принципала.
+
+  **[iter-2, R-1] Как `getGrants` находит грант роли-без-assignment — шов закрыт без ветки в
+  резолвере.** Сверка с живым кодом: `ResolveSubject = {tenantId, subjectId}` —
+  **identity-only, opaque `string`** (`src/core/object-handle.ts:84-87`); `subjectId` — НЕ
+  типизирован как `employee.id`, это непрозрачная строка. Резолвер-ядро
+  (`src/core/grant-resolver.ts:489-504`) НЕ ветвится на «вид субъекта» — оно лишь зовёт
+  инжектированный порт `deps.grants.getGrants(subject, now)` (`grant-resolver.ts:86-88,504`).
+  Сам DB-backed `getGrants` (JOIN-реализация порта) **ещё не написан** — он явно отложен в
+  **T-0053** (`grant-resolver.ts:84-88` «In-memory now; an RLS-scoped DB query in T-0053»;
+  `:161-162`). Значит шов находится **внутри T-0053-реализации порта `getGrants`, НЕ в
+  `grant-resolver.ts`** — править frozen-резолвер не нужно и нельзя.
+
+  Действующий assignment-путь (T-0022 §4 / `migrations/020_role_assignment.sql:8-14`):
+  «effective grants = `grant`-строки, привязанные через `grant.role_id` к ролям, для которых у
+  субъекта есть **confirmed** `role_assignment`». То есть JOIN T-0053 уже сейчас идёт
+  `subject → role_assignment(employee_id) → role → grant(role_id)`. external-роль не имеет
+  `role_assignment` **по построению** (а создать его нельзя без строки `employee`: FK
+  `role_assignment.employee_id → employee(tenant_id, id)`, `migrations/020_role_assignment.sql:57-58` —
+  внешний НЕ employee, заводить фейкового сотрудника = загрязнять штатку/инбоксы).
+
+  **Решение (выбрано):** DB-backed `getGrants` в T-0053 резолвит гранты субъекта как
+  **`assignment-derived ∪ directly-held`** одним запросом/портом:
+
+  ```sql
+  -- T-0053 getGrants(subject, now), под RLS-контекстом subject.tenantId:
+  SELECT g.* FROM choros."grant" g
+    JOIN choros.role r ON (r.tenant_id, r.id) = (g.tenant_id, g.role_id)
+   WHERE g.tenant_id = $tenant
+     AND (
+       -- ветвь A: assignment-derived (внутренние субъекты — employee.id)
+       EXISTS (SELECT 1 FROM choros.role_assignment ra
+                WHERE ra.tenant_id = g.tenant_id AND ra.role_id = g.role_id
+                  AND ra.employee_id = $subjectId          -- subjectId = employee.id
+                  AND ra.confirmed_by IS NOT NULL)
+       -- ветвь B: directly-held (external-роль-принципал — subjectId = role.id)
+       OR (g.role_id = $subjectId AND r.is_external = true)
+     )
+  ```
+
+  Ключевое: **обе ветви — один SELECT, один порт, одна проекция в `resolveFor`**. Ветвь B
+  включается только для `r.is_external = true` (а такие роли никому не назначаются ⇒ ветвь A для
+  них всегда пуста, ветвь B для обычных ролей всегда пуста — множества структурно
+  непересекаемы). Это **не** «ветка `это внешний?`» в `grant-resolver.ts` (T-0021 FF-R5/R6
+  сохранены: резолвер-ядро не меняется, не импортирует `external_surface`, не знает про
+  внешних); это семантика самого SQL-предиката `getGrants`, который и сегодня знает про
+  `role.is_external`-флаг как про обычную колонку `role`. Внутренний субъект (`subjectId =
+  employee.id`) никогда не равен `role.id` (разные UUID-пространства, разные FK), поэтому ветвь B
+  для него не срабатывает — divergence невозможен.
+
+  **Инвариант невидимости (R-1 + adversarial-вектор «внешний в штатке»):** external-роль
+  **остаётся невидимой** в people/штатке-выборках — те идут по `employee`/`role_assignment`
+  (`GET /api/org`, инбоксы), а у external-роли `role_assignment`-строки нет (ветвь A пуста). То
+  есть «нет assignment» одновременно (i) держит external-роль вне штатки и (ii) НЕ ломает
+  резолюцию — потому что её грант находит ветвь B. Это две стороны одного шва, и обе закрыты
+  одним решением.
+
+  Согласование с T-0022 §4: downstream resolution contract T-0022 знал только assignment-путь
+  (ветвь A). T-0122 **расширяет** его ветвью B (directly-held на `is_external`-роль) —
+  аддитивно, как дизъюнкт того же `getGrants`, без переписывания ветви A. T-0053-кодер ОБЯЗАН
+  реализовать `getGrants` как UNION/дизъюнкт обеих ветвей (FF-EXTERNAL-GETGRANTS, §6).
 - **Сужение (subset gate, T-0018 §4.3).** Грант(ы) поверхности проходят `validateNarrowing` против
   гранта **выдавшего принципала** при создании: `surface.scope ⊑ target_ref-scope` (≤ scope
   записи-цели), `operation ∈ {read, create, update}`-отображение (§2.5), `resource_facet ⊑`
   опубликованного среза, `delegable = false` (внешний не переделегирует). Поверхность **структурно
   не может** дать шире, чем выдавший имел право (write-time, до персиста).
+
+  **[iter-2, R-5] Судьба external-гранта при отзыве прав ВЫДАВШЕГО.** Subset gate проверяется
+  **mint-time** против гранта выдавшего; external-грант — **самостоятельная `grant`-строка** на
+  `is_external`-роли (не производная от живого гранта granter'а). Если у выдавшего (менеджера)
+  ПОЗЖЕ отзовут `read` на договор, external-грант **остаётся effective** — это **согласовано с
+  семантикой делегирования T-0018** (делегированный грант — отдельная строка, каскадного
+  revoke-по-родителю в модели нет; T-0018 §2). Т.е. **не новая дыра**, но на публичной
+  поверхности неинтуитивно («уволили сотрудника — его QR-ссылки живут»). Зафиксировано осознанно:
+  отзыв внешнего доступа = **явный** revoke `external_surface.revoked_at` или гранта поверхности
+  (§2.6), не побочный эффект revoke прав granter'а. Каскадный revoke-по-granter — вне day-1
+  (Stage-2), отмечено как осознанный выбор. Это снимает кажущееся противоречие с
+  action-time-риторикой ADR: action-time-fail-closed верен для **самого** external-гранта (его
+  TTL/revoke действуют на следующем resolve), но связь granter↔surface — mint-time-снимок прав
+  granter'а, не живая.
 - **Резолв.** Решение «что видит/может внешний» принимает **тот же** `resolveFor(handle, subject,
   op)` (T-0021), action-time, fail-closed. Внешний субъект `{tenantId, subjectId: externalRoleId}`
   предъявляется резолверу как любой субъект; `projectFields` применяется к нему **идентично**
@@ -131,11 +214,10 @@ Tenant **детерминируется токеном, внешний его н
 **не принимает** tenant-параметр. Последовательность на входящем запросе с секретом `s`:
 
 1. `h = sha256(s)`. Lookup `external_token` по `token_hash = h`. Этот единственный lookup —
-   **системная операция вне RLS-tenant-контекста** (специальная роль `choros_token_lookup` с
-   доступом ТОЛЬКО к `(tenant_id, surface_id)` по `token_hash`, **не** к контенту/данным) — он
-   возвращает **только** `tenant_id` поверхности (и `surface_id`). Это единственное место, где
-   читается до установки tenant-контекста, и оно по построению не отдаёт ни байта прикладных
-   данных (§3, rejected: tenant в открытом токене).
+   **узкая, явно помеченная, fitness-охраняемая пре-контекстная операция** (роль
+   `choros_token_lookup`, см. RLS-механику ниже): он возвращает **только** `(tenant_id,
+   surface_id)` поверхности — **не** контент, **не** прикладные данные. Это единственное место,
+   где читается до установки tenant-контекста (§3, rejected: tenant в открытом токене).
 2. **Установить tenant-контекст** (`SET LOCAL choros.tenant_id = <tenant из шага 1>`) ДО любого
    прикладного доступа (tenancy §9 п.7 fail-closed). Дальше всё под RLS этого tenant.
 3. Только теперь — валидация поверхности (валидна/не отозвана/в окне/лимит), резолв гранта,
@@ -148,6 +230,55 @@ Tenant **детерминируется токеном, внешний его н
 > Структурный замок (как cross-tenant ключ в T-0119): tenant — **производное от секрета,
 > известного только держателю токена**, а не вход запроса. Подделать чужой tenant = подделать
 > чужой высокоэнтропийный секрет (вычислительно неосуществимо, §2.7).
+
+#### 2.4.1 RLS-механика пре-контекстного lookup (iter-2, R-2 — первоклассное design-решение)
+
+T-0013 §1 — несущий, фаундер-ратифицированный инвариант: изоляция = **структурное свойство БД**,
+не дисциплина кода («один cross-tenant-инцидент = смерть GTM»). Сверка с живой реализацией:
+T-0013 реализует RLS как `ENABLE + FORCE ROW LEVEL SECURITY` + одна `USING/WITH CHECK`-политика
+`tenant_id = current_setting('choros.tenant_id', true)::uuid` на каждой таблице (живой образец:
+`migrations/019_role.sql:35-40`, `020_role_assignment.sql:63-68`, `008_grant.sql:32-37`); без GUC
+`current_setting(...,true)` → NULL → предикат false → **0 строк** (default-DENY). Роли:
+`choros_app` = `NOBYPASSRLS` (`migrations/001_roles_and_schema.sql:28-30`), FF
+`schema.test.ts:282-289` ассертит `rolbypassrls=false` для `current_user` (= `choros_app`);
+`choros_migrator` владеет таблицами. «Вне RLS» технически = роль, для которой политика отдаёт
+строку без сравнения с GUC.
+
+**Решение — НЕ BYPASSRLS, а узкая колоночно-ограниченная политика на одной роли:**
+
+1. `external_token` **остаётся FORCE-RLS-таблицей** (проходит `force_rls.sql` /
+   `schema.test.ts:60-67` как все). Она получает **ДВЕ именованные политики**:
+   - `external_token_tenant_isolation` — обычная T-0013 default-DENY на `choros.tenant_id` GUC,
+     `TO choros_app` (путь под контекстом, идентично `019/020/008`);
+   - `external_token_lookup_routing` — **`TO choros_token_lookup`**, `USING (true)` (без
+     tenant-предиката: tenant ещё неизвестен — он и выводится отсюда). Это единственная политика,
+     дающая cross-tenant-видимость, и она привязана **только** к роли lookup.
+2. `choros_token_lookup` создаётся как **`NOBYPASSRLS NOSUPERUSER LOGIN`** (как `choros_app`,
+   `001:28-30`) — она НЕ обходит RLS, она видит cross-tenant-строки **лишь** через явную
+   политику `external_token_lookup_routing`. Это сохраняет дух FF-1: cross-tenant-видимость
+   существует только как **именованный, CI-видимый объект политики**, а не как атрибут роли.
+3. **Колоночное ограничение (не «row-level на колонки» — RLS колонок не ограничивает; это
+   `GRANT`-привилегия):** lookup-роли выдаётся **`GRANT SELECT (token_hash, tenant_id,
+   surface_id) ON external_token TO choros_token_lookup`** — и НИ на какие иные колонки (их в
+   `external_token` и нет — таблица by design содержит **только routing-данные**, §4.2). У роли
+   **нет** `SELECT` на `external_surface`/`record`/контент вообще. Любая попытка прочитать
+   `target_ref`/`facet`/данные этой ролью → `42501`. То есть «не отдаёт ни байта прикладных
+   данных» — **структурно** (нет привилегии), не «на словах».
+
+> `external_token` — by design **не tenant-данные, а таблица маршрутизации**: её строка несёт
+> лишь `token_hash → (tenant_id, surface_id)`. Явный ADR-инвариант: **в `external_token` нет
+> прикладных tenant-данных, только routing.** Поэтому пре-контекстное чтение её
+> `(tenant_id, surface_id)` не нарушает T-0013-инвариант «tenant-данные не читаются вне
+> контекста» — здесь нет tenant-данных для чтения. Это узкое, помеченное исключение, а не общий
+> bypass.
+
+4. **Анти-оракул на пре-контекстном шаге (закрытие тайминг-оракула).** Шаг 1 не должен различать
+   по времени «хэш найден (в любом тенанте)» vs «не найден»: `resolveTenantByToken` возвращает
+   `{tenant,surface}` и `null` через **один и тот же путь** (no early-return, без ранней ветки на
+   miss), а вызывающий `handleExternalAction` сводит и `null`, и любой последующий deny в **один**
+   uniform-deny-исход (§2.7) с неразличимым по времени ответом эндпоинта (constant-time на уровне
+   ответа эндпоинта, не только на equality хэшей). Энумерация 256-бит хэшей перебором
+   неосуществима (§2.7); тайминг hit/miss этого шага также не различается. (FF-T13-LOOKUP §6.)
 
 ### 2.5 Три действия = три отдельные операции под PDP (FR-5, набор day-1 ЗАКРЫТ)
 
@@ -173,10 +304,52 @@ Tenant **детерминируется токеном, внешний его н
   отзыв = инвалидация гранта/поверхности; `resolveFor` перестаёт находить покрывающий effective
   грант ⇒ `no_grant`. Revoke токена (а не всей поверхности) = удаление/инвалидация строки
   `external_token` (хэш перестаёт находиться).
+  **[iter-2, R-6] Остаточное окно presigned-URL.** Отзыв поверхности действует на **следующий**
+  presign/resolve; уже выпущенный presigned-URL остаётся валиден до **своего** TTL
+  (T-0119, ≤300с, deploy-time) — S3 не знает про revoke поверхности. Это наследуется из T-0119
+  (то же верно для любого внутреннего download) и **осознано**: остаточное окно ограничено
+  presign-TTL; мгновенный отзыв уже-выпущенного URL = вне S3-модели, не day-1. presign-TTL
+  external-поверхности дополнительно **ограничен сверху остатком token/surface-TTL**: presign не
+  выпускается с `expiresAt` позже `min(now+presignTTL, valid_until)` — за пределами окна
+  поверхности новый URL не выдаётся вовсе.
 - **Одноразовость (развилка (д), решена):** `max_uses` — **декларативный атрибут** поверхности
-  (NULL ⇒ многоразовый; N ⇒ лимит). `use_count` инкрементируется атомарно при успешном действии;
-  `use_count ≥ max_uses` ⇒ поверхность исчерпана ⇒ тот же fail-closed отказ. Day-1 поддержаны оба
-  режима; счётчик — атрибут поверхности, не отдельный механизм.
+  (NULL ⇒ многоразовый; N ⇒ лимит). Day-1 поддержаны оба режима; счётчик — атрибут поверхности,
+  не отдельный механизм.
+
+  **[iter-2, R-3] Атомарная проверка-и-резерв вместо check-then-act.** iter-1 описывал
+  последовательность check (step 3: `use_count < max_uses`) → действие → increment (step 5) — это
+  TOCTOU: две параллельные загрузки single-use токена (`max_uses=1`) обе прошли бы step-3
+  (обе видят `use_count=0`) ⇒ двойное использование одноразовой ссылки. Исправление: проверка и
+  резерв — **одна атомарная операция** (условный инкремент), а не две. Под установленным
+  tenant-контекстом (RLS, шаг 2) выполняется **единый условный `UPDATE`** (стиль БД-слоя —
+  `RETURNING`, как в существующих атомиках типа `migrations/010_job_available_at.sql` /
+  outbox-claim):
+
+  ```sql
+  UPDATE choros.external_surface
+     SET use_count = use_count + 1
+   WHERE tenant_id = current_setting('choros.tenant_id', true)::uuid
+     AND id = $surfaceId
+     AND revoked_at IS NULL
+     AND (now() в окне [valid_from, valid_until))
+     AND (max_uses IS NULL OR use_count < max_uses)
+  RETURNING use_count, max_uses;
+  ```
+
+  **0 затронутых строк ⇒ uniform-deny** (исчерпана/отозвана/вне окна — наружу неразличимо, §2.7):
+  атомарность Postgres-`UPDATE` (row-lock на затронутой строке) гарантирует, что из N
+  параллельных предъявлений single-use ровно **один** получит `RETURNING`, остальные — 0 строк.
+  Действие (presign/verify/upload) выполняется **ТОЛЬКО** при успешном `RETURNING` (резерв
+  получен). При `max_uses IS NULL` (многоразовый) условие `use_count < max_uses` тривиально
+  истинно — инкремент остаётся атомарным, но не лимитирует.
+
+  **Семантика компенсации (выбор DESIGN, зафиксирован):** резерв (`use_count`-инкремент) берётся
+  ПЕРЕД действием; если последующее действие (presign/upload) **проваливается на стороне
+  T-0119/S3**, выбран **fail-closed без компенсации** — резерв «сгорает» (попытка засчитана). Это
+  безопасный край для single-use (лучше «использование засчитано, контент не отдан» — внешний
+  повторит mint у выдавшего, чем «контент отдан, использование не засчитано» = двойная выдача).
+  Compensating-rollback (resv→commit двухфазно) — осознанно вне day-1 (соразмерность, ось 5).
+  (FF-EXTERNAL-MAXUSES-RACE §6.)
 
 ### 2.7 Анти-абьюз + анти-оракул (FR-8, NF-6)
 
@@ -286,6 +459,16 @@ QR-кейс: `external_surface{ actions:["verify","download"], facet:<публи
 | `created_at` | `bigint NOT NULL` | epoch ms |
 | | PK `(tenant_id, id)`; FK `(tenant_id, surface_id)`; UNIQUE `(tenant_id, token_hash)`; lookup-индекс на `token_hash` (для tenant-вывода §2.4) |
 
+> **[iter-2, R-2] `external_token` = таблица МАРШРУТИЗАЦИИ, не tenant-данные.** Все её колонки —
+> идентичность/routing (`token_hash → tenant_id, surface_id`) + аудит-метаданные; **никаких
+> прикладных/контентных полей** (`target_ref`/`facet`/данные живут в `external_surface`/`record`).
+> Это by-design-инвариант, на котором держится узость пре-контекстного lookup (§2.4.1): роль
+> `choros_token_lookup` (NOBYPASSRLS) видит её строки cross-tenant через политику
+> `external_token_lookup_routing`, но `GRANT SELECT` у неё только на `(token_hash, tenant_id,
+> surface_id)` — отдать «ни байта прикладных данных» нечего и нечем (FF-T13-LOOKUP). Две
+> именованные политики на таблице: `external_token_tenant_isolation` (default-DENY, `choros_app`)
+> + `external_token_lookup_routing` (`USING(true)`, `choros_token_lookup`).
+
 ### 4.3 Contracts (signatures — impl реализует; ADR фиксирует форму)
 
 ```ts
@@ -320,8 +503,8 @@ export function resolveTenantByToken(
 ): Promise<{ tenantId: string; surfaceId: string } | null>;
 
 // Единый вход внешнего действия. Внутри: (1) resolveTenantByToken → (2) SET tenant-контекст →
-// (3) валидация поверхности (effective/не отозвана/в окне/use_count<max_uses) →
-// (4) PDP resolveFor / presign-after-allow (T-0119) → (5) audit (успех И отказ).
+// (3) валидация + АТОМАРНЫЙ резерв (UPDATE … WHERE … AND use_count<max_uses RETURNING; 0 строк ⇒ deny) →
+// (4) PDP resolveFor(deps.resolver, handle, subject, op) / presign-after-allow (T-0119) → (5) audit (успех И отказ).
 // Любой неуспех ⇒ единообразный uniform deny наружу (внутренний reason только в аудит).
 export function handleExternalAction(
   deps: ExternalDeps,                      // resolver (T-0021), files (T-0119), audit (T-0016), rateLimit, surfaceSource
@@ -341,12 +524,20 @@ export function handleExternalAction(
 1. **Token→tenant (pre-context):** `h = hashToken(secret)`; `resolveTenantByToken` через
    `choros_token_lookup` (только `(tenant_id, surface_id)`); `null` ⇒ **uniform deny** (нет утечки).
 2. **Set tenant-контекст fail-closed** (tenancy §9 п.7): `SET LOCAL choros.tenant_id`; дальше всё под RLS.
-3. **Валидация поверхности (под RLS):** `external_surface` найдена, `revoked_at IS NULL`, `now`
-   в окне, `action ∈ actions`, `use_count < max_uses` (если задан). Любой провал ⇒ **uniform deny** + аудит.
-4. **PDP-allow по записи-цели:** `resolveFor(handleOf(target_ref), {tenantId, subjectId: external_role_id}, op)`
-   (op по §2.5). `{denied:true}` ⇒ **uniform deny** + аудит. Это **тот же резолвер** — никакого внешнего код-пути.
-5. **Действие только при allow:** download → `getFileContentUrl` (T-0119, presign после allow);
-   verify → `projectFields`; upload → `addVersion` (T-0119, declared-лимиты). Инкремент `use_count` атомарно.
+3. **Валидация + атомарный резерв (под RLS) [iter-2, R-3]:** `external_surface` найдена,
+   `action ∈ actions`, и — **единым условным `UPDATE … WHERE revoked_at IS NULL AND now-в-окне
+   AND (max_uses IS NULL OR use_count < max_uses) … RETURNING`** (§2.6) — берётся атомарный
+   резерв. 0 строк ⇒ **uniform deny** + аудит (исчерпана/отозвана/вне окна, неразличимо наружу).
+   Проверка-и-инкремент — **одна** операция, не check-then-act.
+4. **PDP-allow по записи-цели [iter-2, R-4 — каноническая сигнатура T-0021]:**
+   `resolveFor(deps.resolver, handleOf(target_ref), {tenantId, subjectId: external_role_id}, op)`
+   (op по §2.5; первый аргумент `deps: ResolverDeps` — реальный порт, `src/core/grant-resolver.ts:489-496`).
+   `{denied:true}` ⇒ **uniform deny** + аудит. Это **тот же резолвер** — никакого внешнего
+   код-пути. `getGrants` находит грант external-роли ветвью B (§2.3, R-1).
+5. **Действие только при успешном резерве (3) И allow (4):** download → `getFileContentUrl`
+   (T-0119, presign после allow); verify → `projectFields`; upload → `addVersion` (T-0119,
+   declared-лимиты). Резерв `use_count` уже взят атомарно на шаге 3 (при провале действия
+   на стороне T-0119/S3 — fail-closed без компенсации, §2.6).
 6. **Аудит** (T-0016) — на каждом исходе (allow/deny), актор=поверхность, subject=запись-цель, секрет не пишется.
 
 ---
@@ -404,7 +595,10 @@ self-теста ⇒ exit 2 (свежий урок: чек обязан УМЕТ�
 | **FF-FAILCLOSED** | Fail-closed tenant-контекст: без установленного tenant (token не найден/нет контекста) presign/verify/upload отказывают, ноль обращений к данным; tenant ставится ДО прикладного доступа. | unit: `resolveTenantByToken→null` ⇒ uniform deny, ноль вызовов `resolver`/`files`; assert порядок (set-context перед resolveFor). `vitest run … -t "fail-closed"`. | static-now |
 | **FF-ACTIONS-CLOSED** | Набор действий закрыт day-1: `actions` ⊆ `{download, verify, upload}` (CHECK в миграции + тип-юнион в TS); неизвестное действие ⇒ отказ, не «новый примитив». | `grep` CHECK-constraint на `actions` в миграции; `tsc --noEmit` на юнионе `"download"|"verify"|"upload"`. **Self-test:** plant `actions` без CHECK ⇒ детект. | static-now |
 | **FF-AUDIT-EVENTS** | Аудит на каждое действие (успех И отказ): `external.{download,verify,upload,deny,throttle}` = строки `audit_event` (open-vocab, новых таблиц нет); `actor=external-surface:<id>`, `subject=target_ref`, секрет НЕ в payload; `known_tenant_tables` не получает audit-дубль. | unit: каждый исход эмитит ожидаемое `audit_event`; assert нет `token_hash`/секрета в `payload`; assert нет `external_access_log` таблицы. `vitest run … -t "audit-events"`. | static-now |
-| **FF-T13** | T-0013-контракт: `external_surface`/`external_token` — `tenant_id`-leading PK/FK, ENABLE+FORCE RLS, default-DENY на `choros.tenant_id`, `choros_app` DML-only, занесены в `known_tenant_tables.txt`. `choros_token_lookup` — отдельная роль ТОЛЬКО с SELECT `(tenant_id, surface_id)` по `token_hash`, без доступа к данным. | существующие T-0013/T-0115 пробы (`tenant_id_leading.sql`, `cross-tenant-fitness.sh`) на новых таблицах после внесения в фикстуру; assert grants `choros_token_lookup` минимальны. | live-impl (T-0013 apparatus) |
+| **FF-T13** | T-0013-контракт: `external_surface`/`external_token` — `tenant_id`-leading PK/FK, ENABLE+FORCE RLS, default-DENY на `choros.tenant_id`, `choros_app` DML-only, занесены в `known_tenant_tables.txt`. Обе проходят `force_rls.sql`/`tenant_id_leading.sql`/`schema.test.ts` (FF-RLS+anti-decorative). | существующие T-0013/T-0115 пробы (`tenant_id_leading.sql`, `force_rls.sql`, `schema.test.ts:60-107` strict-фикстура) на новых таблицах после внесения в `known_tenant_tables.txt`. | live-impl (T-0013 apparatus) |
+| **FF-T13-LOOKUP** (iter-2, R-2) | Пре-контекстный lookup структурно узок: `external_token` имеет **ровно две** именованные политики — `external_token_tenant_isolation` (default-DENY на GUC, `TO choros_app`) и `external_token_lookup_routing` (`USING(true)`, `TO choros_token_lookup`); роль `choros_token_lookup` = **NOBYPASSRLS** (как `choros_app`, не обходит RLS); у неё `SELECT` **только** на колонки `(token_hash, tenant_id, surface_id)` `external_token` и НИ на `external_surface`/`record`/контент; `external_token` by design содержит только routing-колонки (нет `target_ref`/`facet`/данных). Тайминг hit/miss пре-контекстного шага неразличим (`resolveTenantByToken` hit и `null` идут в один uniform-deny путь). | live-impl: `SELECT rolbypassrls FROM pg_roles WHERE rolname='choros_token_lookup'` ⇒ false (расширяет `schema.test.ts:282`-стиль на третью роль = CI-видимое ожидаемое добавление в FF-1 allowlist); `pg_policy` на `external_token` = ровно 2 именованные; `has_column_privilege('choros_token_lookup', 'external_token', 'target_ref'/...)` отсутствует (нет такой колонки) и `SELECT` на content-колонок прочих таблиц ⇒ 42501; unit: `resolveTenantByToken→null` и `→{tenant}` дают один и тот же внешний deny-путь (нет early-return на miss). **Self-test:** добавить третью политику / BYPASSRLS / лишний column-grant ⇒ детект; exit 2. | live-impl |
+| **FF-EXTERNAL-GETGRANTS** (iter-2, R-1) | `getGrants` (DB-backed, T-0053) находит грант external-роли-БЕЗ-assignment ветвью `directly-held`: для `subjectId = <is_external role.id>` без `role_assignment` возвращается её mint-грант (`grant.role_id = subjectId AND role.is_external`); JOIN = `assignment-derived ∪ directly-held` ОДНИМ запросом; `grant-resolver.ts` НЕ меняется (нет ветки «это внешний?», T-0021 FF-R5/R6) и НЕ импортирует `external_surface`. Инвариант невидимости: external-роль не появляется в people/штатке-выборках (`GET /api/org`, инбоксы по `role_assignment`). | live-impl probe: seed `is_external`-роль + grant, БЕЗ `role_assignment`; `getGrants({tenantId, subjectId: roleId}, now)` ⇒ грант найден; `getGrants` для обычного employee не возвращает чужой directly-held; `GET /api/org`/people-выборка НЕ содержит external-роль. static-now: `grant-resolver.ts` не импортирует `external_surface` (греп, `single-resolver.sh`-стиль). **Self-test:** реализация `getGrants` без ветви B ⇒ external-грант не найден (детект); ветка в `grant-resolver.ts` ⇒ детект. | live-impl + static-now (греп резолвера) |
+| **FF-EXTERNAL-MAXUSES-RACE** (iter-2, R-3) | Одноразовость атомарна: N параллельных предъявлений single-use токена (`max_uses=1`) ⇒ **ровно 1** успех, N−1 uniform-deny; `use_count` финально = `min(N, max_uses)`. Резерв = условный `UPDATE … WHERE … AND (max_uses IS NULL OR use_count<max_uses) RETURNING`; 0 строк ⇒ deny; действие только при `RETURNING`. Не check-then-act. | live-impl probe (concurrency): запустить N конкурентных `handleExternalAction` на одном single-use токене ⇒ assert ровно 1 не-deny, `use_count=1`; assert код БД-слоя использует один conditional-`UPDATE … RETURNING`, не отдельные `SELECT`+`UPDATE`. **Self-test:** заменить на check-then-act (SELECT-then-UPDATE) ⇒ под нагрузкой >1 успех (детект); exit 2. | live-impl |
 | **FF-EXTERNAL-SCOPE** | Post-impl (AC-11): валидный токен даёт доступ РОВНО к опубликованному срезу (download/verify/upload) и НИ к чему шире; операция вне `actions` или поле вне `facet` ⇒ `no_grant`/отсутствует; решает PDP T-0021. | live-impl probe: seed запись+поверхность, предъявить токен, assert allow на опубликованном, deny/absent вне его; проверить через `makeGrantResolver`. | live-impl |
 | **FF-EXTERNAL-TTL-REVOKE** | Post-impl (AC-12): истёкший/отозванный/исчерпанный токен ⇒ uniform deny на следующем resolve; до отзыва — доступ, после — немедленно нет (action-time, без mint-time снапшота). | live-impl probe: токен работает t0; `revoked_at`/просрочка/`use_count≥max_uses` ⇒ t1 deny; assert no capability. | live-impl |
 | **FF-EXTERNAL-CROSS-TENANT** | Post-impl (AC-13): токен tenant B в любом эндпоинте ⇒ резолвится в контекст B, запись A недостижима; ни байта контента A; tenant из токена, не из запроса. | live-impl probe (стиль `ci/checks/db/cross_tenant.test.ts`): предъявить токен B, попытаться достать запись A ⇒ deny/cross-context; assert presign A не выпущен. | live-impl |
@@ -455,18 +649,34 @@ deny), а конкретные **пороги/окна/бюджет = deploy-tim
 
 - **Implements, does not change, T-0021.** Внешний резолв переиспользует `resolveFor`/`makeGrantResolver`
   и reason-union verbatim; новых reason-значений, новой permission-функции, нового handle→fields-ребра
-  НЕ вводится (honors `single-resolver.sh`, T-0021 FF-R5/R6). `ResolveSubject` остаётся identity-only —
-  внешний субъект = `{tenantId, subjectId: external_role_id}`, без caller-kind флага.
+  НЕ вводится (honors `single-resolver.sh`, T-0021 FF-R5/R6). `ResolveSubject` остаётся identity-only
+  (`src/core/object-handle.ts:84-87`, opaque `subjectId: string`) — внешний субъект =
+  `{tenantId, subjectId: external_role_id}`, без caller-kind флага.
+- **[iter-2, R-1] getGrants-шов — в T-0053-реализации порта, не в резолвере.** Резолвер-ядро
+  (`grant-resolver.ts:489-504`) зовёт лишь инжектированный `deps.grants.getGrants(subject, now)`;
+  DB-backed JOIN отложен в T-0053 (`grant-resolver.ts:84-88,161-162`). external-роль (без
+  `role_assignment` — FK `020_role_assignment.sql:57` требует `employee`, внешний не employee)
+  находится ветвью `directly-held(grant.role_id = subjectId AND role.is_external)`, дизъюнкт того
+  же `getGrants`-запроса (assignment-derived ∪ directly-held, §2.3). `grant-resolver.ts` НЕ
+  ветвится и НЕ импортирует `external_surface` (FF-EXTERNAL-GETGRANTS). T-0022 §4 resolution
+  contract расширяется аддитивно (ветвь B), assignment-путь (ветвь A) не переписан.
 - **Implements, does not change, T-0119.** download/upload идут через `getFileContentUrl`/`addVersion`
   verbatim (presign-after-allow, declared-лимиты); путь контента — производный грант, не второй механизм
   (T-0119 §2.5 явно это предусмотрел).
 - **Honors T-0018 §2 / NF-1:** право внешнего = `grant`-строка, прошедшая `validateNarrowing`;
   FF-NOACL греп-лайнтит параллельный authority-store (`external_acl`/`public_share`/`visibility`).
   Грант привязан к `is_external`-роли (T-0018: грант на роль, не на личность).
-- **Honors T-0013/T-0115:** `external_surface`/`external_token` — обычные tenant-таблицы; внесение в
-  `known_tenant_tables.txt` — единственное (ожидаемое) изменение фикстуры. Роль `choros_token_lookup` —
-  единственное расширение ролевой посадки: минимальный SELECT на `(tenant_id, surface_id)` по `token_hash`,
-  без доступа к прикладным данным (FF-T13). Это легитимное добавление, не нарушение
+- **Honors T-0013/T-0115:** `external_surface`/`external_token` — обычные tenant-таблицы (ENABLE+FORCE
+  RLS, default-DENY на GUC, образец `019_role.sql:35-40`); внесение в `known_tenant_tables.txt` —
+  обязательное и ожидаемое (anti-decorative strict-чек `schema.test.ts:74-107`). **[iter-2, R-2]**
+  `choros_token_lookup` — единственное расширение ролевой посадки, оформленное **структурно**:
+  роль = `NOBYPASSRLS` (как `choros_app`, `001:28-30`), видит cross-tenant `external_token` лишь
+  через именованную политику `external_token_lookup_routing` (`USING(true)`, `TO choros_token_lookup`);
+  column-`GRANT SELECT (token_hash, tenant_id, surface_id)` — и ни на какие иные колонки/таблицы
+  (FF-T13-LOOKUP). `external_token` by design = routing-таблица (нет прикладных tenant-данных),
+  поэтому пре-контекстное чтение её routing-колонок не нарушает T-0013-инвариант. Третья роль =
+  **CI-видимое ожидаемое добавление** в FF-1 allowlist (`schema.test.ts:282`-стиль расширяется
+  пробой на `rolbypassrls=false` для `choros_token_lookup`), не молчаливое. Не нарушение
   `grant-trail-no-new-table.sh` (та проба специфична T-0031).
 - **Honors T-0016:** действия внешнего = строки `audit_event` с open-vocab `type` (`external.*`);
   новых аудит-таблиц нет (как `grant.*`/`file.*` — строки, не таблицы).
