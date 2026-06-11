@@ -72,6 +72,7 @@ import {
   type ActorEventVerb,
   actorEventPrincipal,
 } from "./actor-event.js";
+import { type SubstitutionSource } from "./substitution.js";
 
 // ---------------------------------------------------------------------------
 // Injected ports (pure static-now; Postgres + RLS DAO in T-0053)
@@ -148,6 +149,15 @@ export interface ResolverDeps {
    * (ops-custodied silo secret — never read under `src/core/`).
    */
   keyedDigest?: KeyedDigest;
+  /**
+   * T-0035 (E4.7) — Substitutions / absences port. OPTIONAL: wired here for
+   * the future routing layer and composition root so they can inject the
+   * SubstitutionSource without a later signature break. NOT consulted inside
+   * resolveFor — the PDP continues to decide purely on T-0018 grant rows (a
+   * Tier-2 substitution grant is just a grant to the PDP). Backward-compatible:
+   * resolveFor behavior is byte-identical when this property is absent.
+   */
+  substitution?: SubstitutionSource;
   now?: () => number;
 }
 

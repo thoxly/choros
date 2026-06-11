@@ -96,19 +96,20 @@ describe('FF-2 (static): isGenesisOwner not hardcoded outside src/db/org.ts', ()
 // FF-5 / AC-19 (static): known_tenant_tables.txt length unchanged
 // ---------------------------------------------------------------------------
 describe('FF-5 / AC-19 (static): known_tenant_tables.txt unchanged', () => {
-  it('has exactly 28 entries (24 pre-T-0023 incl. agent_card + 4 budget tables: instance_budget, agent_budget, reservation, spend_ledger)', () => {
+  it('has exactly 29 entries (28 pre-T-0035 incl. agent_card + 4 budget tables + T-0035 substitution_rule)', () => {
     const content = readFileSync(
       join(REPO_ROOT, 'ci', 'checks', 'known_tenant_tables.txt'),
       'utf8',
     );
     const lines = content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-    expect(lines.length, 'known_tenant_tables.txt must have exactly 28 entries').toBe(28);
+    expect(lines.length, 'known_tenant_tables.txt must have exactly 29 entries').toBe(29);
     expect(lines).toContain('grant');
     expect(lines).toContain('role_assignment');
     expect(lines).toContain('instance_budget');
     expect(lines).toContain('agent_budget');
     expect(lines).toContain('reservation');
     expect(lines).toContain('spend_ledger');
+    expect(lines).toContain('substitution_rule');
   });
 });
 
