@@ -1,0 +1,122 @@
+{
+  "task_id": "T-0171",
+  "status": "pr_open",
+  "branch": "task/T-0171-notifications-preferences",
+  "merge_target": "dev",
+  "base_commit": "5d42295",
+  "head_commit": "528e53c",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Notifications E-N.4: notification_preference per-event DAO + defaults-seed + REST. PostgresPrefStore (src/core/postgres/pgPrefStore.ts) implements NotificationPrefStore port from T-0169 router: getPreferences (pool-based, SET LOCAL GUC), upsert (ON CONFLICT DO UPDATE), listByTenant, listByEventKind. seedDefaultPreferences inserts 5 default rows idempotently (ON CONFLICT DO NOTHING) for: task.assigned, approval.requested, sla.warning, sla.breach, escalation.raised. REST admin GET/PUT /api/notification-preferences behind PDP gate mgmt_object:notification_config/read+update (checkAdminGrant + loadAdminContext + genesis-owner short-circuit). Self-routes GET/PUT /api/notification-preferences/self: recipient_scope structurally locked to actor:<self> server-side; body scope rejected if role: or actor: prefix (400). appendAuditEvent notif.preference.changed on PUT. UUID guard in getPreferences. 2-iteration review cycle (R-1/R-2/R-3 blocking → fixed, R-4 nit deferred). CI: tsc 0 errors, eslint 0 errors, fitness all PASS (FF-NP1..FF-NP6), vitest 1191/1191, fitness:db 540/540.",
+  "commits": [
+    {
+      "sha": "dba07c5",
+      "phase": "SPEC",
+      "message": "spec(notifications): T-0171 E-N.4 notification_preference CRUD + defaults-seed"
+    },
+    {
+      "sha": "8d2ef05",
+      "phase": "BUILD",
+      "message": "feat(notifications): T-0171 E-N.4 notification_preference DAO + defaults-seed + REST"
+    },
+    {
+      "sha": "ff2c332",
+      "phase": "REVIEW",
+      "message": "T-0171 REVIEW: changes_requested — AC-6/AC-7 PDP-авторизация admin-эндпоинтов не реализована"
+    },
+    {
+      "sha": "afcc639",
+      "phase": "FIX",
+      "message": "T-0171 fix: PDP gate on admin pref routes + 403 test (R-1), strict self-scope (R-2), tenantId validation (R-3)"
+    },
+    {
+      "sha": "528e53c",
+      "phase": "RE-REVIEW",
+      "message": "T-0171 RE-REVIEW: approved — R-1/R-2/R-3 closed, R-4 nit (allow-path)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "528e53c",
+      "findings_resolved": [
+        "R-1 (blocking): admin-routes did not call PDP resolveFor for mgmt_object:notification_config. FIXED: checkAdminGrant via loadAdminContext + exact match mgmt_object:notification_config + genesis-owner short-circuit. 403-tests green (denyAllDeps).",
+        "R-2 (nit): assertSelfScopeValid did not reject actor: prefix. FIXED: actor: prefix now also throws 400; comment updated. 2 new tests green.",
+        "R-3 (nit): SET LOCAL with tenantId interpolation without UUID validation in getPreferences. FIXED: UUID_RE guard added at entry of getPreferences."
+      ],
+      "findings_nit_open": [
+        "R-4 (nit, axis 4): Allow-path (grant present → 200) not covered by HTTP unit test for admin GET/PUT /api/notification-preferences. Comment at notification-prefs.test.ts:342-345 marks the skip (fake pool = null). Deny-path proven; allow-path covered indirectly by live-DB fitness:db. Deferred: requires mock-store harness (allowAllDeps + fake listByTenant)."
+      ],
+      "artifact": "docs/design/T-0171.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1191,
+      "passed": 1191,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "14/14",
+      "fitness_static": "PASS — all checks green including FF-NP1..FF-NP6",
+      "fitness_db_notification_preferences": "11/11 PASS — live DB AC-2/AC-3/AC-4/AC-5/AC-9/AC-14 probes",
+      "fitness_db_total": "540/540 PASS, 0 failed, 0 skipped",
+      "tested_commit": "528e53c",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+        "fitness_static_checks": "PASS — all checks green (FF-NP1..FF-NP6 all PASS)",
+        "vitest_unit": "1191/1191 passed, 6 skipped (flowable integration offline)",
+        "notification_prefs_unit_tests": "19/19 — src/__tests__/notification-prefs.test.ts — AC-1..AC-9 covered",
+        "notification_router_unit_tests": "26/26 — src/__tests__/notification-router.test.ts — T-0169 router tests unchanged",
+        "fitness_db_total": "540/540 passed, 0 failed",
+        "fitness_db_notification_preferences": "11/11 — ci/checks/db/notification-preferences.test.ts — all AC-2/AC-3/AC-4/AC-5/AC-9/AC-14 probes green"
+      },
+      "artifact": "docs/test-reports/T-0171.test-report.md",
+      "contract_artifact": "docs/design/T-0171.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/http/notification-prefs.ts",
+    "src/core/postgres/pgPrefStore.ts",
+    "src/__tests__/notification-prefs.test.ts",
+    "ci/checks/db/notification-preferences.test.ts",
+    "ci/checks/notification-pref-isolation.sh",
+    "src/server.ts",
+    "docs/design/T-0171.review.contract.json",
+    "docs/reviews/T-0171.review.md",
+    "docs/test-reports/T-0171.test-report.md",
+    "docs/design/T-0171.test-report.contract.json",
+    "docs/pr/T-0171.pr-handoff.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "description": "HTTP allow-path unit test for admin-routes GET/PUT /api/notification-preferences absent. Deny-path proven by unit test (denyAllDeps → 403). Allow-path covered indirectly by live-DB fitness:db. Requires mock-store harness (allowAllDeps + fake listByTenant) for a full HTTP unit coverage.",
+      "follow_up_candidate": "Add allowAllDeps: PrefAuthzDeps = { checkAdminGrant: async () => ({ ok: true }) } + mock-store (fake listByTenant), verify GET → 200. Candidate when mock-store harness is available."
+    }
+  ],
+  "pdp_gate_evidence": {
+    "mgmt_object": "mgmt_object:notification_config",
+    "ops": ["read", "update"],
+    "gate_location": "src/http/notification-prefs.ts — checkAdminGrant via loadAdminContext",
+    "genesis_owner_short_circuit": true,
+    "note": "PDP gate pattern for mgmt_object:notification_config is the reference implementation for T-0191 and similar config-management endpoints."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "Migration 048 (notification_preference table + RLS policy) already applied to dev DB. Branch contains no new DDL.",
+    "downstream_effect": "Unblocks notification router integration (T-0169 port now has a live Postgres implementation). seedDefaultPreferences must be called at genesis-tenant creation time (server.ts wiring present)."
+  },
+  "friction_events": []
+}

@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0171",
+  "status": "ready",
+  "summary": "Notifications E-N.4: notification_preference per-событие + defaults-seed. Postgres-DAO (pgPrefStore.ts) реализует порт NotificationPrefStore из T-0169 router + UPSERT/list/delete; defaults-seed (5 строк идемпотентно при genesis-tenant); REST admin (GET/PUT /api/notification-preferences) + self (GET/PUT /api/notification-preferences/self, структурно ограничен actor:<self>); аудит notif.preference.changed через appendAuditEvent.",
+  "functional": [
+    "FR-1: pgPrefStore реализует NotificationPrefStore (getPreferences) из notification-router T-0169",
+    "FR-2: pgPrefStore реализует upsert / listByTenant / delete для REST-хендлеров",
+    "FR-3: seedDefaultPreferences — 5 дефолтных подписок при genesis (idempotent, ON CONFLICT DO NOTHING)",
+    "FR-4: GET /api/notification-preferences — admin, PDP mgmt_object:notification_config/read",
+    "FR-5: PUT /api/notification-preferences — admin, PDP mgmt_object:notification_config/update",
+    "FR-6: GET /api/notification-preferences/self — только actor:<self> строки",
+    "FR-7: PUT /api/notification-preferences/self — recipient_scope жёстко = actor:<self>, body-значение игнорируется",
+    "FR-8: appendAuditEvent notif.preference.changed при admin и self PUT",
+    "FR-9: pgPrefStore в src/core/postgres/pgPrefStore.ts; импортирует порт из notification-router.ts"
+  ],
+  "non_functional": [
+    "NF-1: авторизация через PDP resolveFor, нет нового ACL-механизма (FF-PREF-AUTHZ)",
+    "NF-2: self-эндпоинт структурно recipient_scope = actor:<self> (FF-SELF-PREF-SCOPED)",
+    "NF-3: seed идемпотентен, ON CONFLICT DO NOTHING (аналог T-0026)",
+    "NF-4: pgPrefStore.ts без посторонних IO-зависимостей",
+    "NF-5: audit через AuditWriter, не дублирует механизм (FF-AUDIT-CONFIG-ONLY)",
+    "NF-6: getPreferences fail-closed без GUC (RLS-ответственность)"
+  ],
+  "out_of_scope": [
+    "Email-драйвер, email_channel_config-CRUD, SMTP-адаптер — E-N.3 / T-0170",
+    "renderTemplate, notification-templates.ts — E-N.5",
+    "REST API notification center GET/POST notifications — E-N.6",
+    "audit notif.email_config.* — E-N.3/E-N.7",
+    "SLA-watchdog / эскалации как продюсеры NotificationEvent — T-0095/E7",
+    "Full notification center UI — Stage-2",
+    "Tenant-configurable шаблоны — Stage-2"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "pgPrefStore.ts структурно совместим с NotificationPrefStore под tsc --noEmit",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "getPreferences возвращает строки при SET GUC; без GUC — [] (RLS)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "upsert создаёт новую строку; повторный upsert обновляет channels (ON CONFLICT DO UPDATE)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "seedDefaultPreferences вставляет ровно 5 строк при первом вызове; идемпотентен при повторе",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Все 5 defaults имеют корректные event_kind / recipient_scope / channels по ADR §2.4",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "GET /api/notification-preferences: 403 без grant; список подписок при гранте",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "PUT /api/notification-preferences: 403 без grant; UPSERT + notif.preference.changed audit при гранте",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "PUT /api/notification-preferences/self с role: в body → 400; с корректным event_kind → 200, сохранён actor:<self>",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "GET /api/notification-preferences/self возвращает только actor:<self> строки",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Нет нового ACL-механизма: grep нет notification_acl/pref_rights; вызов resolveFor присутствует (FF-PREF-AUTHZ)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "tsc --noEmit и npm test (vitest) проходят без новых ошибок",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "npm run fitness (включая notification-isolation.sh и notification-pref-isolation.sh) зелёный",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "ci/checks/notification-pref-isolation.sh (owner T-0171) зелёный: FF-PREF-AUTHZ, FF-SELF-PREF-SCOPED, FF-DEFAULTS-SEED",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "fitness:db тест notification-preferences.test.ts зелёный: getPreferences + UPSERT + seed + cross-tenant isolation",
+      "verifiable_as": "test"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0171-notification-preferences.spec.md"
+}
