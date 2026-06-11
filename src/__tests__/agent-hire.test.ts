@@ -736,6 +736,167 @@ describe("R-1 (AC-1) — authenticated caller without mgmt_object:agent grant �
 });
 
 // ---------------------------------------------------------------------------
+// ── C-6 (ADR §13.4): Custody-gate tests for llm_secret_handle in hire path ─
+//
+// Three cases per ADR §13.4 C-6:
+//   C6-1  hire with raw sk-… llm_secret_handle → 400 INVALID_HANDLE, zero side-effects
+//   C6-2  hire with valid opaque handle → 201, TWO audit rows (agent.hire + set_llm_secret_handle)
+//   C6-3  hire with NULL handle (omitted) → 201, ONE audit row (agent.hire only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pool factory that tracks audit_event INSERT payloads so tests can assert the
+ * number of audit rows and their types, without a live Postgres.
+ *
+ * The pool records each params[2] (the `type` positional $3 in the audit INSERT)
+ * in `capturedAuditTypes` for per-tenant assertion.
+ */
+function makeAuditTrackingPool(): { pool: pg.Pool; capturedAuditTypes: string[] } {
+  const capturedAuditTypes: string[] = [];
+  const pool = {
+    connect: async () => {
+      const client = {
+        query: async (sql: string, params?: unknown[]) => {
+          if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+          if (sql.startsWith("SET LOCAL")) return { rows: [] };
+
+          if (sql.includes("FROM choros.position")) {
+            return { rows: [{ id: "pos-uuid-1", department_id: "b0000000-0000-0000-0000-000000000001" }] };
+          }
+          if (sql.includes("r.slug = 'tenant-owner'")) {
+            return { rows: [{ id: "ra-1" }] }; // genesis-owner
+          }
+          if (sql.includes("FROM choros.role_assignment ra") && sql.includes("ra.employee_id")) {
+            return { rows: [{ id: "ra-1", role_id: "role-owner", org_scope: { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" } }] };
+          }
+          if (sql.includes("FROM choros.\"grant\" g") && sql.includes("mgmt_object:%")) {
+            return { rows: [] };
+          }
+          if (sql.includes("INSERT INTO choros.audit_head")) return { rows: [] };
+          if (sql.includes("FROM choros.audit_head")) {
+            return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+          }
+          if (sql.includes("INSERT INTO choros.audit_event")) {
+            // params[2] = $3 = type (index 2 in 0-based)
+            if (Array.isArray(params) && typeof params[2] === "string") {
+              capturedAuditTypes.push(params[2]);
+            }
+            return { rows: [] };
+          }
+          if (sql.includes("UPDATE choros.audit_head")) return { rows: [] };
+          if (sql.includes("current_setting")) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
+          if (sql.includes("INSERT INTO choros.employee")) return { rows: [] };
+          if (sql.includes("INSERT INTO choros.agent_card")) return { rows: [] };
+          return { rows: [] };
+        },
+        release: () => {},
+      };
+      return client;
+    },
+  } as unknown as pg.Pool;
+  return { pool, capturedAuditTypes };
+}
+
+describe("C-6 (ADR §13.4) — llm_secret_handle guard on hire route", () => {
+  const tenantId = "a0000000-0000-0000-0000-000000000001";
+  const genesisUser = "genesis-owner";
+
+  const baseHireBody = {
+    position_id: "b0000000-0000-0000-0000-000000000001",
+    slug: "custody-guard-agent",
+    display_name: "Custody Guard Agent",
+  };
+
+  async function spawnServer(pool: pg.Pool, kc: InMemoryKeycloakAdminPort): Promise<{ server: http.Server; url: string }> {
+    const router = new Router();
+    process.env["DEV_TENANT_ID"] = tenantId;
+    registerAgentRoutes(router, pool, kc);
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    const url = await new Promise<string>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") resolve(`http://localhost:${addr.port}`);
+      });
+    });
+    return { server, url };
+  }
+
+  it("C6-1: raw sk-… handle → 400 INVALID_HANDLE(vendor_key_prefix), zero side-effects", async () => {
+    const kc = new InMemoryKeycloakAdminPort();
+    const { pool, capturedAuditTypes } = makeAuditTrackingPool();
+    const { server, url } = await spawnServer(pool, kc);
+    try {
+      const resp = await makePostRequest(
+        url,
+        "/api/agents/hire",
+        { ...baseHireBody, llm_secret_handle: "sk-realApiKey1234" },
+        genesisUser,
+      );
+      expect(resp.statusCode).toBe(400);
+      const body = resp.body as Record<string, unknown>;
+      const err = body["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe("INVALID_HANDLE");
+      // message must be the reason code, not the raw handle value
+      expect(err["message"]).toBe("vendor_key_prefix");
+      expect((err["message"] as string)).not.toContain("sk-");
+      // Zero KC calls — validation fires before any side-effect
+      expect(kc.created.length).toBe(0);
+      // Zero audit rows — rollback means no rows persisted (also validated by empty audit types)
+      expect(capturedAuditTypes.length).toBe(0);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("C6-2: valid opaque handle → 201, TWO audit rows (agent.hire + set_llm_secret_handle)", async () => {
+    const kc = new InMemoryKeycloakAdminPort();
+    const { pool, capturedAuditTypes } = makeAuditTrackingPool();
+    const { server, url } = await spawnServer(pool, kc);
+    try {
+      const resp = await makePostRequest(
+        url,
+        "/api/agents/hire",
+        { ...baseHireBody, llm_secret_handle: "vault://secrets/llm-key" },
+        genesisUser,
+      );
+      expect(resp.statusCode).toBe(201);
+      // Two audit rows: agent.hire and set_llm_secret_handle
+      expect(capturedAuditTypes).toContain("agent.hire");
+      expect(capturedAuditTypes).toContain("set_llm_secret_handle");
+      expect(capturedAuditTypes.length).toBe(2);
+      // Neither audit row may carry the handle value — checked by verifying the
+      // type field only (the fake pool does not capture payload; the static FF-25-4
+      // grep covers the source invariant). The key invariant is the count = 2.
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("C6-3: NULL handle (omitted) → 201, ONE audit row (agent.hire only)", async () => {
+    const kc = new InMemoryKeycloakAdminPort();
+    const { pool, capturedAuditTypes } = makeAuditTrackingPool();
+    const { server, url } = await spawnServer(pool, kc);
+    try {
+      const resp = await makePostRequest(
+        url,
+        "/api/agents/hire",
+        baseHireBody,  // no llm_secret_handle field → null
+        genesisUser,
+      );
+      expect(resp.statusCode).toBe(201);
+      // One audit row only: agent.hire
+      expect(capturedAuditTypes).toContain("agent.hire");
+      expect(capturedAuditTypes).not.toContain("set_llm_secret_handle");
+      expect(capturedAuditTypes.length).toBe(1);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // R-2 (AC-3 HTTP): admin with grant on dept D2, target position in disjoint
 // dept D1 → 403 (org_scope_widens). Proves scope-narrowing via the /api/agents/hire
 // route end-to-end, not just at the pure-core layer.

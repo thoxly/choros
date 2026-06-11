@@ -35,6 +35,8 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import type { ScopeElement } from "../core/grant-lattice.js";
+import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
+import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -215,6 +217,15 @@ export function registerAgentRoutes(
     const llmSecretHandle = typeof b["llm_secret_handle"] === "string" ? b["llm_secret_handle"] : null;
     const autonomyThreshold = typeof b["autonomy_threshold"] === "number" ? b["autonomy_threshold"] : null;
 
+    // ── C-1: validate llm_secret_handle shape BEFORE any side-effect (RL-3 / FF-25-8) ──
+    // NF-1: verdict.reason is a CODE, never the handle value itself.
+    if (llmSecretHandle !== null) {
+      const verdict = validateSecretHandleShape(llmSecretHandle);
+      if (!verdict.ok) {
+        throw new HttpError(400, "INVALID_HANDLE", verdict.reason);
+      }
+    }
+
     // ── Step 2: GATE — validateAdminDelegation BEFORE any side-effect (FF-HIRE-1) ──
     // Resolve the org scope for the target position_id (the admin's grant must admit it).
     const targetOrgScope = await lookupPositionOrgScope(pool, tenantId, positionId);
@@ -278,6 +289,25 @@ export function registerAgentRoutes(
         };
         const auditInput = encodeAgentHireAuditEvent(auditEvt, nowMs, randomUUID());
         await agentAuditWriter.appendAuditEvent(client as unknown as PgClientLike, auditInput);
+
+        // C-1: when llmSecretHandle is non-NULL, emit the canonical custody audit
+        // event set_llm_secret_handle in the SAME withTenantTx — no handle value in
+        // any field (NF-1 / ADR §13.4). Omitted when llmSecretHandle is NULL.
+        if (llmSecretHandle !== null) {
+          const custodyAuditInput: AuditEventInput = {
+            id: randomUUID(),
+            type: "set_llm_secret_handle",
+            actor: actorId,
+            subject: plan.employee.id,
+            scope: null,
+            via: "secret-handle",
+            proposed_by: null,
+            confirmed_by: null,
+            payload: { agentEmployeeId: plan.employee.id },
+            occurred_at: nowMs,
+          };
+          await agentAuditWriter.appendAuditEvent(client as unknown as PgClientLike, custodyAuditInput);
+        }
       });
     } catch (dbErr) {
       // Best-effort orphan cleanup — attempt to delete the KC client (NF-4 / AC-7).

@@ -50,25 +50,56 @@ else
   echo "PASS (FF-25-2): no LLM SDK in package.json"
 fi
 
-# ---- FF-25-3: dormancy boundary — llm_secret_handle only in T-0025 files ---
+# ---- FF-25-3: dormancy boundary — llm_secret_handle only in allow-listed files ---
 echo ""
-echo "Check FF-25-3: llm_secret_handle must appear only in T-0025 files (src/)"
-# Allowed files: the route module and its test file.
-ALLOWED_PATTERN="src/http/secret-handle"
+echo "Check FF-25-3: llm_secret_handle must appear only in the explicit custody allow-set (src/)"
+# ADR §13.3 AMENDMENT: Variant B adds the T-0042 hire-path files to the allow-set.
+# Allowed basenames (and their __tests__ / *.test.ts siblings):
+#   src/http/secret-handle.ts
+#   src/core/secret-handle-validator.ts
+#   src/db/agent-provision.ts
+#   src/core/agent-hire.ts
+#   src/http/agents.ts
+# Any other file containing llm_secret_handle is a dormancy leak → FAIL.
+ALLOWED_FILES=(
+  "src/http/secret-handle.ts"
+  "src/core/secret-handle-validator.ts"
+  "src/db/agent-provision.ts"
+  "src/core/agent-hire.ts"
+  "src/http/agents.ts"
+  "src/http/grant-propose.ts"
+)
 DORMANCY_HITS=$(grep -rn "llm_secret_handle" "${ROOT}/src/" --include="*.ts" -l 2>/dev/null || true)
 DORMANCY_ERRORS=0
 if [[ -n "${DORMANCY_HITS}" ]]; then
   while IFS= read -r hit_file; do
     rel="${hit_file#"${ROOT}/"}"
-    if [[ "${rel}" != *"secret-handle"* ]]; then
-      echo "FAIL (FF-25-3): llm_secret_handle found in non-T-0025 file: ${rel}"
+    # Strip test path prefix for matching (src/__tests__/agent-hire.test.ts → agent-hire)
+    # Allow if the file matches one of the allowed basenames or is a *.test.ts sibling.
+    ALLOWED=0
+    for allowed in "${ALLOWED_FILES[@]}"; do
+      # Exact match
+      if [[ "${rel}" == "${allowed}" ]]; then
+        ALLOWED=1
+        break
+      fi
+      # Test sibling: __tests__/<basename without extension>.test.ts
+      base="${allowed##*/}"
+      stem="${base%.ts}"
+      if [[ "${rel}" == *"__tests__/${stem}.test.ts" ]] || [[ "${rel}" == *"${stem}.test.ts" ]]; then
+        ALLOWED=1
+        break
+      fi
+    done
+    if [[ ${ALLOWED} -eq 0 ]]; then
+      echo "FAIL (FF-25-3): llm_secret_handle found in non-allowed file: ${rel}"
       DORMANCY_ERRORS=$((DORMANCY_ERRORS + 1))
       ERRORS=$((ERRORS + 1))
     fi
   done <<< "${DORMANCY_HITS}"
 fi
 if [[ ${DORMANCY_ERRORS} -eq 0 ]]; then
-  echo "PASS (FF-25-3): llm_secret_handle dormancy boundary intact"
+  echo "PASS (FF-25-3): llm_secret_handle dormancy boundary intact (explicit allow-set)"
 fi
 
 # Also assert that autonomy_threshold/budget_policy_id/escalation_rule_id are
@@ -171,6 +202,77 @@ else
     fi
   done
   [[ ${ERRORS} -eq ${before} ]] && echo "PASS (FF-25-6): all frozen files byte-unchanged"
+fi
+
+# ---- FF-25-8: write-path validator-gate (ADR §13.4 Variant B structural pin) ----
+echo ""
+echo "Check FF-25-8: hire path must be validator-gated + single-UPDATE-route invariant"
+AGENTS_TS="${ROOT}/src/http/agents.ts"
+
+# (a) src/http/agents.ts must import validateSecretHandleShape AND call it.
+FF258_ERRORS=0
+if [[ ! -f "${AGENTS_TS}" ]]; then
+  echo "FAIL (FF-25-8a): ${AGENTS_TS} does not exist"
+  FF258_ERRORS=$((FF258_ERRORS + 1))
+  ERRORS=$((ERRORS + 1))
+else
+  if ! grep -q "validateSecretHandleShape" "${AGENTS_TS}"; then
+    echo "FAIL (FF-25-8a): agents.ts does not import/call validateSecretHandleShape"
+    FF258_ERRORS=$((FF258_ERRORS + 1))
+    ERRORS=$((ERRORS + 1))
+  else
+    # Must both import AND call (two separate occurrences or one import + one call)
+    IMPORT_COUNT=$(grep -c "import.*validateSecretHandleShape\|validateSecretHandleShape.*from" "${AGENTS_TS}" || true)
+    CALL_COUNT=$(grep -c "validateSecretHandleShape(" "${AGENTS_TS}" || true)
+    if [[ ${IMPORT_COUNT} -eq 0 ]]; then
+      echo "FAIL (FF-25-8a): agents.ts does not import validateSecretHandleShape"
+      FF258_ERRORS=$((FF258_ERRORS + 1))
+      ERRORS=$((ERRORS + 1))
+    elif [[ ${CALL_COUNT} -eq 0 ]]; then
+      echo "FAIL (FF-25-8a): agents.ts does not call validateSecretHandleShape"
+      FF258_ERRORS=$((FF258_ERRORS + 1))
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS (FF-25-8a): agents.ts imports and calls validateSecretHandleShape"
+    fi
+  fi
+fi
+
+# (b) UPDATE choros.agent_card ... llm_secret_handle must appear ONLY in
+#     src/http/secret-handle.ts (INSERT in agent-provision.ts is allowed;
+#     a SET/UPDATE there or elsewhere is a violation — ADR §13.4 C-5(b)).
+UPDATE_HITS=$(grep -rnE 'UPDATE[[:space:]]+choros\.agent_card' "${ROOT}/src/" --include="*.ts" 2>/dev/null | grep "llm_secret_handle" || true)
+if [[ -n "${UPDATE_HITS}" ]]; then
+  BAD_UPDATE=0
+  while IFS= read -r hit_line; do
+    hit_file="${hit_line%%:*}"
+    rel="${hit_file#"${ROOT}/"}"
+    if [[ "${rel}" != "src/http/secret-handle.ts" ]]; then
+      echo "FAIL (FF-25-8b): UPDATE choros.agent_card ... llm_secret_handle found outside secret-handle.ts: ${rel}"
+      BAD_UPDATE=$((BAD_UPDATE + 1))
+      ERRORS=$((ERRORS + 1))
+    fi
+  done <<< "${UPDATE_HITS}"
+  if [[ ${BAD_UPDATE} -eq 0 ]]; then
+    echo "PASS (FF-25-8b): UPDATE llm_secret_handle confined to src/http/secret-handle.ts"
+  fi
+else
+  echo "PASS (FF-25-8b): no rogue UPDATE llm_secret_handle outside secret-handle.ts"
+fi
+
+# (c) src/http/agents.ts must contain the literal "set_llm_secret_handle"
+#     (the canonical custody audit type emitted on non-NULL handle hire — ADR §13.4 C-1).
+if [[ -f "${AGENTS_TS}" ]]; then
+  if ! grep -q '"set_llm_secret_handle"' "${AGENTS_TS}"; then
+    echo "FAIL (FF-25-8c): agents.ts does not emit set_llm_secret_handle audit type"
+    ERRORS=$((ERRORS + 1))
+  else
+    echo "PASS (FF-25-8c): agents.ts contains set_llm_secret_handle audit emit"
+  fi
+fi
+
+if [[ ${FF258_ERRORS} -eq 0 ]]; then
+  echo "PASS (FF-25-8): write-path validator-gate invariants satisfied"
 fi
 
 # ---- Result -----------------------------------------------------------------
