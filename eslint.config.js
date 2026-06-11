@@ -37,8 +37,9 @@ export default [
     },
     rules: {
       "no-fallthrough": "error",
-      // Disable all rules inherited from flat/recommended for this glob to
-      // avoid surfacing pre-existing violations in unrelated test files.
+      // Disable the three most noisy TS-specific rules inherited from
+      // flat/recommended to avoid surfacing pre-existing violations in
+      // unrelated test files (prefer-const and others remain active).
       "@typescript-eslint/no-unused-vars": "off",
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-require-imports": "off",
