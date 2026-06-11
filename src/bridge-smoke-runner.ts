@@ -69,11 +69,19 @@ async function main(): Promise<void> {
   if (!instanceId) fail("BRIDGE_INSTANCE_ID is required");
 
   const workerId = process.env["BRIDGE_WORKER_ID"] ?? "choros-bridge-smoke";
+  const flowableBaseUrl =
+    process.env["FLOWABLE_BASE_URL"] ?? "http://localhost:18085/flowable-rest/service";
+  const flowableAdminUser = process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin";
+  const flowableAdminPass = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"] ?? "choros_flowable_dev_pw";
 
   const pool = new Pool({ connectionString: dbUrl });
   const jobStore = new PostgresJobStore(pool);
   const outboxStore = new PostgresOutboxStore(pool);
-  const flowableClient = makeFlowableClient();
+  const flowableClient = makeFlowableClient({
+    baseUrl: flowableBaseUrl,
+    adminUser: flowableAdminUser,
+    adminPassword: flowableAdminPass,
+  });
 
   // -------------------------------------------------------------------------
   // Tenant GUC setup: use the pool-level connect event with a post-connect

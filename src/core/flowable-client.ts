@@ -253,25 +253,19 @@ function fromFlowableVars(
 
 /**
  * Factory: returns a FlowableClient bound to resolved config (FR-6).
- * Config values read from env at call time when not overridden.
- * Throws if FLOWABLE_REST_APP_ADMIN_PASSWORD is absent and not overridden.
+ * process.env reads are NOT performed here — callers in composition root must
+ * supply all required config fields (T-0163: NF-1 env boundary).
+ * Throws if adminPassword is absent.
  */
 export function makeFlowableClient(
   config?: Partial<FlowableClientConfig>,
 ): FlowableClient {
   const baseUrl =
-    config?.baseUrl ??
-    process.env["FLOWABLE_BASE_URL"] ??
-    "http://flowable:8082/flowable-rest/service";
+    config?.baseUrl ?? "http://flowable:8082/flowable-rest/service";
 
-  const adminUser =
-    config?.adminUser ??
-    process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ??
-    "admin";
+  const adminUser = config?.adminUser ?? "admin";
 
-  const adminPassword =
-    config?.adminPassword ??
-    process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  const adminPassword = config?.adminPassword;
 
   if (!adminPassword) {
     throw new Error("FLOWABLE_REST_APP_ADMIN_PASSWORD is required");
