@@ -532,6 +532,19 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
     case 'mcp_tool':
       await seedMcpTool(c, tenantId);
       break;
+    case 'agent_card': {
+      // self-sufficient: seed a dedicated kind='agent' employee + its card.
+      // Does NOT depend on KNOWN_TENANT_TABLES order or on the shared human empId.
+      const id = uuid();
+      const slug = `ct-agent-${id.slice(0,8)}`;
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id,id,position_id,kind,slug,display_name,created_at,updated_at)
+         VALUES ($1,$2,NULL,'agent',$3,$3,0,0) ON CONFLICT DO NOTHING`, [tenantId, id, slug]);
+      await c.query(
+        `INSERT INTO choros.agent_card (tenant_id,employee_id,kc_client_id,created_at,updated_at)
+         VALUES ($1,$2,$3,0,0) ON CONFLICT DO NOTHING`, [tenantId, id, `ct-kc-${id.slice(0,8)}`]);
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
