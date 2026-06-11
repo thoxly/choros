@@ -164,17 +164,28 @@ done
 
 FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|src/core/effect-resource\.ts|src/core/grant-resolver\.ts|src/core/object-handle\.ts|migrations/.*\.sql)$'
 
-# T-0030 integration note: migration 030 (migrations/030_grant_proposed_confirmed.sql)
-# was added by T-0030 (grant editor) — a sibling task that predates T-0040 and is
-# legitimately allowed to add this migration.  Excluding it from the T-0040 frozen-file
-# check prevents a false positive when T-0030 is rebased onto a dev that already
-# contains T-0040.  The exclusion list must only name migrations owned by other
-# known tasks; any new T-0040 migration would still be caught.
-# T-0044 integration note: migration 031 (migrations/031_grant_confirmed2_by.sql)
-# is the additive ADD COLUMN confirmed2_by owned by T-0044 (dual-control gate),
-# a sibling task. Excluded here for the same reason as 030; any NEW T-0040
-# migration would still be caught (031 is owned + asserted by dual-control-isolation.sh).
-MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by|043_invoke_proposal)\.sql$'
+# Sibling-migration exclusions are kept in a data file so that future tasks can
+# add their own entries without touching this .sh file (which is frozen to T-0040
+# per the T-0146 meta-gate on ci/checks/[^/]+\.sh).
+# Format: one stem per line, comments/blanks ignored.
+# See ci/checks/role-criticality-migration-excludes.txt for current entries.
+EXCLUDES_FILE="${SCRIPT_DIR}/role-criticality-migration-excludes.txt"
+MIGRATION_EXCLUDE_RE=""
+if [[ -f "${EXCLUDES_FILE}" ]]; then
+  # Build alternation RE from non-blank, non-comment lines (first word on each line).
+  stems=()
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// }" ]] && continue
+    stem="$(echo "${line}" | awk '{print $1}')"
+    [[ -n "${stem}" ]] && stems+=("${stem}")
+  done < "${EXCLUDES_FILE}"
+  if [[ ${#stems[@]} -gt 0 ]]; then
+    joined="$(IFS='|'; echo "${stems[*]}")"
+    MIGRATION_EXCLUDE_RE="^migrations/(${joined})\.sql$"
+  fi
+fi
+# Absent file or empty list → MIGRATION_EXCLUDE_RE="" → no exclusions applied (fail-closed).
 
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then
@@ -197,7 +208,12 @@ else
 fi
 
 # Remove known-other-task migrations from the diff before checking T-0040's constraints.
-CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" || true)"
+# Empty MIGRATION_EXCLUDE_RE → no exclusions (fail-closed: all migrations are flagged).
+if [[ -n "${MIGRATION_EXCLUDE_RE}" ]]; then
+  CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" || true)"
+else
+  CHANGED_FILTERED="${CHANGED}"
+fi
 
 FROZEN_HITS="$(echo "${CHANGED_FILTERED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
