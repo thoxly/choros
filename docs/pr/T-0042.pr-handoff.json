@@ -1,0 +1,136 @@
+{
+  "task_id": "T-0042",
+  "status": "pr_open",
+  "branch": "task/T-0042",
+  "merge_target": "dev",
+  "base_commit": "dcd5a78",
+  "head_commit": "52d0751",
+  "pr_url": "https://github.com/thoxly/choros/pull/7",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0042: agent-hire маршрут (POST /api/agents/hire). KC-первый порядок: KC createServiceAccountClient → DB insertAgentRows (atomicity через KC orphan-delete при DB-сбое). Инъецируемый KeycloakAdminPort с InMemoryKeycloakAdminPort для тестов. identity⊥rights: kc_client_id живёт только в agent_card; resolveAgentToolset принимает employeeId, не kc_client_id. Права через validateAdminDelegation (единственный авторизационный гейт). Ревью R-1/R-2 закрыты (573542d): HTTP-тесты 403-no-grant и scope-narrowing. 17/17 AC покрыты; 46 fitness-проверок включая FF-HIRE-1..7; 895 pass vitest, tsc 0 ошибок. Известное ограничение: live-KC адаптер не запускается локально (InMemoryKeycloakAdminPort), живая KC-интеграция деферрирована в dev-стенд/T-0060.",
+  "commits": [
+    {
+      "sha": "fdaf841",
+      "phase": "SPEC",
+      "message": "T-0042 SPEC: agent provisioning (hire=grant, service-account, структурный least-privilege) — спека аналитика, контракт валиден"
+    },
+    {
+      "sha": "36a9ded",
+      "phase": "DESIGN",
+      "message": "T-0042 DESIGN: ADR agent provisioning — KC-first атомарность, инъецируемый KeycloakAdminPort, identity⊥rights; контракт валиден"
+    },
+    {
+      "sha": "71ae960",
+      "phase": "BUILD",
+      "message": "T-0042 BUILD: core modules — agent-hire.ts, admin-port.ts, fake-admin-port.ts, agent-provision.ts"
+    },
+    {
+      "sha": "b8e1e2e",
+      "phase": "BUILD",
+      "message": "T-0042 BUILD: HTTP route agents.ts + server.ts wiring (additive)"
+    },
+    {
+      "sha": "f45f41c",
+      "phase": "BUILD",
+      "message": "T-0042 BUILD: FF-HIRE-5 test — agent-hire.test.ts (24 cases, all green)"
+    },
+    {
+      "sha": "dadfdf8",
+      "phase": "BUILD",
+      "message": "T-0042 BUILD: fitness checks FF-HIRE-1..7 + package.json wiring"
+    },
+    {
+      "sha": "e37c368",
+      "phase": "REVIEW",
+      "message": "T-0042 REVIEW: changes_requested — R-1 (AC-1 403-no-grant без HTTP-теста), R-2 (AC-3 scope-narrowing без покрытия)"
+    },
+    {
+      "sha": "573542d",
+      "phase": "BUILD",
+      "message": "T-0042 BUILD-fix: review R-1/R-2 — HTTP-тесты 403-без-гранта и scope-narrowing"
+    },
+    {
+      "sha": "0281d00",
+      "phase": "REVIEW",
+      "message": "T-0042 REVIEW: approved — R-1/R-2 resolved (573542d), 895 pass, fitness зелёный"
+    },
+    {
+      "sha": "52d0751",
+      "phase": "TEST",
+      "message": "T-0042 TEST: pass — 17/17 AC, edge-кейсы (дубль-hire 409, двойной сбой не маскируется), дефектов нет"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "573542d",
+      "first_review_commit": "e37c368",
+      "blocking_resolved": ["R-1", "R-2"],
+      "nits_non_blocking": ["R-3", "R-4"],
+      "r3_note": "R-3 (нит): SET LOCAL choros.tenant_id = '${tenantId}' — строковая интерполяция, но tenantId UUID-validated через assertUuidShape() перед вызовом withTenantTx. Паттерн принят в grants.ts; PostgreSQL SET LOCAL не поддерживает параметризованные запросы.",
+      "r4_note": "R-4 (нит): getAdminToken пробрасывает raw KC body в сообщении ошибки → HTTP 503. Допустимо для dev; на проде скраб до generic-сообщения.",
+      "artifact": "docs/reviews/T-0042.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 900,
+      "passed": 895,
+      "skipped": 5,
+      "failed": 0,
+      "ac_coverage": "17/17",
+      "tested_commit": "52d0751",
+      "run_details": {
+        "tsc": "exit 0 (0 errors)",
+        "vitest_run": "895 passed, 5 skipped (flowable-client.integration — live KC/Flowable), 0 failed",
+        "fitness": "46 fitness checks green, включая FF-HIRE-1 (gate order), FF-HIRE-2 (identity isolation), FF-HIRE-3 (no second authority), FF-HIRE-4 (frozen additive), FF-HIRE-6 (port injectable), FF-HIRE-7 (migration seam)",
+        "live_kc_adapter": "not-run-live: InMemoryKeycloakAdminPort fake покрывает все AC. Живая KC-интеграция деферрирована в dev-стенд/T-0060 (kc CI-джоб и dev-сервер).",
+        "edge_cases": "E-1 (несуществующий position_id → 400), E-2 (malformed UUID → 400), E-3 (дубль-hire 23505 → 409 client_id_conflict + KC orphan delete), E-4 (двойной сбой: DB + deleteClient — DB-ошибка поверхностна, deleteClient-ошибка проглочена, нет зависания)"
+      },
+      "artifact": "docs/test-reports/T-0042.test-report.json"
+    },
+    "ci_local": {
+      "tsc_noEmit": "pass (0 errors)",
+      "vitest_run": "pass (895/900, 5 skipped expected)",
+      "fitness_all": "pass (46 checks green, FF-HIRE-1..7 all PASS)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/agent-hire-frozen-additive.sh",
+    "ci/checks/agent-hire-gate-order.sh",
+    "ci/checks/agent-hire-identity-isolation.sh",
+    "ci/checks/agent-hire-migration-seam.sh",
+    "ci/checks/agent-hire-no-second-authority.sh",
+    "ci/checks/agent-hire-port-injectable.sh",
+    "docs/design/T-0042-agent-provisioning.adr.md",
+    "docs/design/T-0042.adr.contract.json",
+    "docs/reviews/T-0042.review.json",
+    "docs/specs/T-0042-agent-provisioning.spec.md",
+    "docs/specs/T-0042.spec.contract.json",
+    "docs/test-reports/T-0042.test-report.json",
+    "package.json",
+    "src/__tests__/agent-hire.test.ts",
+    "src/core/agent-hire.ts",
+    "src/db/agent-provision.ts",
+    "src/http/agents.ts",
+    "src/keycloak/admin-port.ts",
+    "src/keycloak/fake-admin-port.ts",
+    "src/server.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — оркестратор (D-053) мержит feature-ветку в dev после прохождения всех гейтов; rebase на текущий dev HEAD выполняется оркестратором",
+    "founder_gate_GT-3": "dev→main продвижение под фаундером (GT-3). Что проверить: (1) POST /api/agents/hire регистрирует KC service-account + DB employee(kind=agent) + agent_card за одну атомарную операцию с KC-orphan cleanup при сбое; (2) identity⊥rights: kc_client_id хранится только в agent_card, resolveAgentToolset принимает employeeId; (3) авторизационный гейт единственный — validateAdminDelegation; (4) vitest 895 pass, tsc 0, fitness 46 зелёных; (5) live-KC нужен dev-стенд (T-0060). One-click promote dev→main когда удовлетворён.",
+    "infra_changes": "Нет новых миграций (AC-17, FF-HIRE-7 подтверждено). Additive-only: новые файлы src/core/agent-hire.ts, src/db/agent-provision.ts, src/http/agents.ts, src/keycloak/admin-port.ts, src/keycloak/fake-admin-port.ts; additive wiring в src/server.ts. Frozen files grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts байт-идентичны dcd5a78.",
+    "kc_live_note": "Живой KC-адаптер (createServiceAccountClient) не тестируется локально — только InMemoryKeycloakAdminPort. Живая интеграция запускается kc-джобом CI и на dev-стенде (Tailscale 100.121.76.86:3000). T-0060 — гейт prod-KC.",
+    "downstream_note": "T-0042 закрывает E2-блок hire-роута (agent provisioning). Зависит от agent_card-схемы (T-0020). Следующий: T-0060 (live KC), права и инструменты агента."
+  },
+  "friction_events": []
+}
