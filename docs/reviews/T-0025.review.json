@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0025",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/__tests__/secret-handle.test.ts:1-14",
+      "issue": "AC-1, AC-7, AC-8, AC-9, AC-10, AC-12, AC-13, AC-14 are all marked 'verifiable_as: test' in the spec contract but have no behavioral test coverage. The test file explicitly acknowledges the gap ('Tests that require live Postgres (AC-1, 7, 8, 9, 10) are not included here — they rely on the route handlers exercised in integration') but no ci/checks/db/secret-handle.test.ts exists. AC-12/13/14 are covered only by static source-file grep (confirms audit type constants exist in the module, but does not assert an audit_event row is written to the DB). The codebase pattern is clear: T-0030 has ci/checks/db/grant-editor.test.ts covering its analogous DB-backed ACs (AC-01/07/12/13 etc.). T-0025 has no equivalent. Spec says 'test'; zero behavioral route-level tests exist.",
+      "suggestion": "Add ci/checks/db/secret-handle.test.ts (run via npm run fitness:db, requires DATABASE_URL) covering: AC-1 (POST sets column, DB read confirms non-NULL), AC-7 (PUT atomically overwrites), AC-8 (DELETE sets NULL, GET status returns {bound:false}), AC-9 (GET status returns {bound:true, summary:...} without the full handle in body), AC-10 (cross-tenant write returns 404, target tenant row unchanged), AC-12/13/14 (query audit_event after each mutating op, assert correct type + no handle in payload). Use the pattern from ci/checks/db/grant-editor.test.ts (createServer() + fetch against test port + real DB)."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/secret-handle.test.ts:198-223",
+      "issue": "AC-11 test covers validator isolation only (validateSecretHandleShape and redactHandle do not call console.*). This is the pure-function path. The AC spec says 'Every setSecretHandle call (success AND rejection) produces NO log line containing the submitted handle value'. The HTTP route handler (handleSetSecretHandle) receives handleValue and passes it to SQL. If a future debug log is added to the route handler, this test would not catch it. The static FF-25-4 grep catches console.* calls, which is a good backstop — but the behavioral route-level test (R-1 above) is where a real runtime check would land.",
+      "suggestion": "In the DB-backed test suite (R-1), capture stdout/stderr around the HTTP call and assert the handle value does not appear in captured output (matching the full AC-11 spec intent, not just the validator half)."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/secret-handle.ts:54-77",
+      "issue": "ORG_SEED_CHILDREN is re-declared in secret-handle.ts (lines 54-62). The identical seed oracle also exists in grants.ts. Two copies of the same hard-coded org tree means any future seed change requires two edits. This is acknowledged as 'duplication by precedent' in the ADR (write-path own transaction), but the SEED_ORACLE is not a transaction primitive — it is a business-fixture constant. A future T-0053 DAO extraction could unify them; not blocking now but worth tracking.",
+      "suggestion": "Track as a cleanup candidate when T-0053 (DAO extraction) lands. No change required for this task."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1",  "covered": false, "note": "No behavioral test; DB write path untested. Covered only by structural implementation." },
+    { "ac": "AC-2",  "covered": true  },
+    { "ac": "AC-3",  "covered": true  },
+    { "ac": "AC-4",  "covered": true  },
+    { "ac": "AC-5",  "covered": true  },
+    { "ac": "AC-6",  "covered": true  },
+    { "ac": "AC-7",  "covered": false, "note": "No behavioral test; atomic rotation not exercised." },
+    { "ac": "AC-8",  "covered": false, "note": "No behavioral test; revoke+status round-trip not exercised." },
+    { "ac": "AC-9",  "covered": false, "note": "No behavioral test; status response value-absence not exercised." },
+    { "ac": "AC-10", "covered": false, "note": "No behavioral test; cross-tenant isolation not exercised." },
+    { "ac": "AC-11", "covered": true,  "note": "Partially: validator path tested via console spy. Route handler path covered by FF-25-4 static grep (no console.* calls). Full behavioral coverage pending R-1." },
+    { "ac": "AC-12", "covered": false, "note": "Source-grep confirms constant 'set_llm_secret_handle' exists; no DB row assertion." },
+    { "ac": "AC-13", "covered": false, "note": "Source-grep confirms constant 'rotate_llm_secret_handle' exists; no DB row assertion." },
+    { "ac": "AC-14", "covered": false, "note": "Source-grep confirms constant 'revoke_llm_secret_handle' exists; no DB row assertion." },
+    { "ac": "AC-15", "covered": true  },
+    { "ac": "AC-16", "covered": true  },
+    { "ac": "AC-17", "covered": true  },
+    { "ac": "AC-18", "covered": true,  "note": "Source-grep confirms holdsAgentMgmtUpdate exists and checks mgmt_object:agent/update + 403 response. Full behavioral coverage pending R-1." },
+    { "ac": "AC-19", "covered": true  }
+  ],
+  "special_attention_verdicts": {
+    "withTenantTx_duplication": "PASS. Implementation is byte-identical to grants.ts: assertUuidShape(tenantId) before string interpolation, BEGIN + SET LOCAL choros.tenant_id + SET LOCAL search_path TO choros + COMMIT/ROLLBACK. Pattern is a documented codebase precedent. FORCE RLS on agent_card enforces isolation via the GUC. No deviation.",
+    "rl3_handle_not_in_logs": "PASS. handleValue used only in validateSecretHandleShape(handleValue) and parameterized SQL $2 bind. It never appears in an error message (HttpError messages use literal field-name strings or reason codes), in a template literal, in a console call, or in the audit payload (payload: { agentEmployeeId: agentId }). Static FF-25-4 grep confirmed; no console.*/logger.* calls in either new file.",
+    "resolve_secret_not_implemented": "PASS. SecretResolverPort is exported as an interface from src/core/secret-handle-validator.ts. It is never instantiated, injected, or called anywhere in the T-0025 code. The route module comment explicitly marks it 'resolveSecret port is declared, NEVER invoked here (FR-6 / Stage-2)'. Test at secret-handle.test.ts:348 asserts the route module contains no .resolveSecret( or resolveSecret( invocation.",
+    "frozen_files": "PASS. git diff 14d4f1c..HEAD on src/core/scoped-admin.ts, src/core/grant-lattice.ts, src/core/object-handle.ts produces empty output. CI FF-25-6 passed.",
+    "authz_holdsAgentMgmtUpdate": "PASS. Reuses loadAdminContext (confirmed tenant-scoped via org.ts withTenant) and calls isNarrowerOrEqual from scoped-admin.ts. Checks g.resourceType === 'mgmt_object:agent' && g.operation === 'update' && g.delegable. isGenesisOwner short-circuit mirrors grants.ts pattern. No new authority algebra in scoped-admin.ts. Without covering grant: 403 ADMIN_GATE_REJECTED, agent_card UPDATE never reached.",
+    "validator_io_free": "PASS. No pg/fetch/http/https/net/child_process imports. Rejects: (1) too_short (<8 chars), (2) vendor_key_prefix (sk-, xai-, AIza — sk-proj- caught by sk- prefix rule, confirmed by node eval), (3) bare_hex_token (/^[0-9a-fA-F]{32,}$/), (4) jwt_shape (/^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*$/). All 4 rules tested with boundary cases. ADR §2.1 rejection order preserved."
+  },
+  "role_gap_evidence": []
+}
