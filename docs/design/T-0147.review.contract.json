@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0147",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/globalSetup.ts:128-138",
+      "issue": "Advisory lock serializes ALL parallel clone operations, but ADR §4.3 specifies it is only needed to protect against concurrent setup-template. Postgres allows parallel CREATE DATABASE … TEMPLATE without mutual exclusion. Result: conservative but safe. No functional defect.",
+      "suggestion": "Post-approve: advisory lock scope can be narrowed so parallel fitness:db runs clone concurrently. Lock only when setup-template is active."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/db/globalSetup.ts:75",
+      "issue": "Hardcoded password placeholder 'pw' in selfTest() utility. Used only in --self-test path for URL-rewriting check (no real connection). Not a real secret, but visually ambiguous.",
+      "suggestion": "Rename to obvious placeholder like 'PLACEHOLDER' or 'x' to signal it is not a real credential."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
