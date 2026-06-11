@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0066",
+  "status": "pr_open",
+  "branch": "task/T-0066",
+  "merge_target": "dev",
+  "pr_url": "https://github.com/thoxly/choros/pull/10",
+  "base_commit": "5127a40",
+  "head_commit": "a03162c",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E1.5: полная reference-документация external-worker API (docs/worker-api.md). 8 разделов: pull-модель, happy-path walkthrough (enqueue→fetch-and-lock→complete/fail), оба auth-режима (dev + Keycloak), типы данных + жизненный цикл состояний, все 4 эндпоинта с curl, retry-семантика + lock-reclaim, idempotencyKey, Python stdlib worker example. FF-9 fitness (worker-api-docs.sh, 14 AC grep-инварианты) вписан в static-now цепочку. Живой walkthrough: все пути подтверждены против работающего сервера.",
+  "commits": [
+    {
+      "sha": "5127a40",
+      "phase": "SPEC",
+      "message": "T-0066 SPEC: дока external-worker API — 14 машинных AC, fitness-grep полноты"
+    },
+    {
+      "sha": "26a45f6",
+      "phase": "DESIGN",
+      "message": "T-0066 DESIGN: ADR доки worker-API — grep-инварианты против дрейфа кода, Python инлайн, чек в static-now цепочку"
+    },
+    {
+      "sha": "35085e7",
+      "phase": "BUILD",
+      "message": "T-0066 BUILD: docs/worker-api.md"
+    },
+    {
+      "sha": "0c1f9c2",
+      "phase": "BUILD",
+      "message": "T-0066 BUILD: fitness worker-api-docs.sh + wiring"
+    },
+    {
+      "sha": "015acb1",
+      "phase": "REVIEW",
+      "message": "T-0066 REVIEW: changes_requested — R-1 lockOwner/lockExpiry в JSON отсутствуют, не null; R-2 nit RECORD_IN_PAYLOAD недостижим по HTTP"
+    },
+    {
+      "sha": "1033337",
+      "phase": "BUILD",
+      "message": "T-0066 BUILD-fix: review R-1 absent-not-null lockOwner/lockExpiry + R-2 сноска"
+    },
+    {
+      "sha": "24c8e0a",
+      "phase": "REVIEW",
+      "message": "T-0066 REVIEW: approved — R-1/R-2 resolved (1033337)"
+    },
+    {
+      "sha": "7d5b5ee",
+      "phase": "TEST",
+      "message": "T-0066 TEST: pass — живой walkthrough (curl+Python против сервера), все коды ошибок подтверждены; 2 editorial-низких"
+    },
+    {
+      "sha": "a03162c",
+      "phase": "PR",
+      "message": "T-0066 PR: editorial F-1/F-2 тестера (указатель запуска, опциональность x-dev-user в dev)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "24c8e0a",
+      "first_review_commit": "015acb1",
+      "blocking_resolved": ["R-1", "R-2"],
+      "artifact": "docs/reviews/T-0066.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 987,
+      "passed": 981,
+      "failed": 0,
+      "ac_coverage": "14/14",
+      "tested_commit": "7d5b5ee",
+      "run_details": {
+        "vitest": "981/987 pass (6 pre-existing skip in unrelated suites), 0 failed",
+        "fitness_ff9": "worker-api-docs.sh — PASS: 14 AC green",
+        "live_walkthrough_enqueue": "pass — HTTP 201, Job-объект, lockOwner/lockExpiry отсутствуют",
+        "live_walkthrough_fetch_and_lock": "pass — HTTP 200, state=LOCKED, lockOwner+lockExpiry присутствуют",
+        "live_walkthrough_complete": "pass — HTTP 200 {\"ok\":true}",
+        "live_walkthrough_fail": "pass — HTTP 200, job→CREATED, available_at += retryTimeoutMs=1000",
+        "live_walkthrough_python": "pass — stdlib urllib poll-цикл: fetch-and-lock + complete без ошибок",
+        "live_walkthrough_idempotency": "pass — два enqueue с одним idempotencyKey → один job id",
+        "live_walkthrough_error_codes": "pass — 400 VALIDATION, 400 INVALID_JSON, 403 NOT_OWNER, 404 NOT_FOUND, 409 NOT_LOCKED, 413 PAYLOAD_TOO_LARGE — все подтверждены"
+      },
+      "artifact": "docs/test-reports/T-0066.test-report.json"
+    }
+  },
+  "files_changed": [
+    "docs/worker-api.md",
+    "ci/checks/worker-api-docs.sh",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — оркестратор (D-053) мержит task/T-0066 в dev после прохождения всех гейтов",
+    "founder_gate": "dev→main promotion founder-gated (GT-3). Что проверить: (1) docs/worker-api.md содержит все 4 эндпоинта с curl и Python примером; (2) ci/checks/worker-api-docs.sh проходит зелёным; (3) fitness:static цепочка включает worker-api-docs. One-click promote dev→main когда удовлетворён.",
+    "no_infra_changes": "T-0066 — только docs + ci/checks. Нет новых migrations, нет изменений docker-compose.yml, нет изменений src/. Безопасно мержить в dev."
+  },
+  "friction_events": []
+}
