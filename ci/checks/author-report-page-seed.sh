@@ -80,7 +80,7 @@ fi
 echo ""
 echo "ARP-5: all mcp_tool inserts have pure_compute=true"
 if [[ -f "${MIG}" ]]; then
-  if grep -q 'pure_compute.*false' "${MIG}" 2>/dev/null; then
+  if grep -q 'pure_compute=false' "${MIG}" 2>/dev/null; then
     echo "FAIL: found pure_compute=false in migration 053" >&2
     ERRORS=$((ERRORS + 1))
   else
