@@ -32,6 +32,23 @@ import { registerNotificationRoutes } from "./http/notifications.js";
 const { Pool } = pg;
 
 // ---------------------------------------------------------------------------
+// Store-mode type (T-0186)
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls which store implementation the factory functions produce.
+ *
+ * - 'auto'   (default) — read DATABASE_URL from the environment; create a
+ *            PostgresJobStore when the URL is present, InMemoryJobStore otherwise.
+ *            This is the production path and the default for all call sites that
+ *            do not pass an explicit mode.
+ * - 'memory' — always return the InMemoryJobStore regardless of DATABASE_URL.
+ *            Used by tests that need to pin their store implementation and must
+ *            remain green whether or not an ambient DATABASE_URL is present (D-056).
+ */
+export type StoreMode = "auto" | "memory";
+
+// ---------------------------------------------------------------------------
 // Store factory (ADR §4.1)
 // ---------------------------------------------------------------------------
 
@@ -43,9 +60,13 @@ const { Pool } = pg;
  * Exported so startMain (src/main.ts) can call it explicitly before passing both
  * the store AND a resolverDepsObj to createServer() — required when T-0143 threads
  * ResolverDeps through the composition stack (ADR §4.3: single allocation).
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', the function
+ * always returns InMemoryJobStore regardless of DATABASE_URL. Default is 'auto'
+ * (existing behaviour preserved for all callers that omit the parameter).
  */
-export function createJobStore(clock?: Clock): PostgresJobStore | InMemoryJobStore {
-  const url = process.env["DATABASE_URL"];
+export function createJobStore(clock?: Clock, mode?: StoreMode): PostgresJobStore | InMemoryJobStore {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
   if (url) {
     const pool = new Pool({ connectionString: url });
     return new PostgresJobStore(pool, clock);
@@ -56,9 +77,12 @@ export function createJobStore(clock?: Clock): PostgresJobStore | InMemoryJobSto
 /**
  * Creates a PostgresTimerStore if DATABASE_URL is set, otherwise undefined.
  * Timer health is only available when Postgres is configured.
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', always
+ * returns undefined (no timer store in memory mode).
  */
-function createTimerStore(clock?: Clock): PostgresTimerStore | undefined {
-  const url = process.env["DATABASE_URL"];
+function createTimerStore(clock?: Clock, mode?: StoreMode): PostgresTimerStore | undefined {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
   if (url) {
     const pool = new Pool({ connectionString: url });
     return new PostgresTimerStore(pool, clock);
@@ -69,9 +93,12 @@ function createTimerStore(clock?: Clock): PostgresTimerStore | undefined {
 /**
  * Creates a PostgresOutboxStore if DATABASE_URL is set, otherwise undefined.
  * Outbox health (T-0062) is only available when Postgres is configured.
+ *
+ * T-0186: additive optional `mode` parameter. When mode === 'memory', always
+ * returns undefined (no outbox store in memory mode).
  */
-function createOutboxStore(clock?: Clock): PostgresOutboxStore | undefined {
-  const url = process.env["DATABASE_URL"];
+function createOutboxStore(clock?: Clock, mode?: StoreMode): PostgresOutboxStore | undefined {
+  const url = mode !== "memory" ? process.env["DATABASE_URL"] : undefined;
   if (url) {
     const pool = new Pool({ connectionString: url });
     return new PostgresOutboxStore(pool, clock);
@@ -261,16 +288,27 @@ function buildRouter(
  * Zero-arg and one-arg callers are unaffected (additive optional parameter).
  * When absent, `hash` fields drop honestly (FR-2 / NF-3).
  *
+ * T-0186: additive optional third parameter `storeMode?: StoreMode`. When
+ * `storeMode === 'memory'`, forces all store factories (job/timer/outbox) to
+ * return in-memory implementations regardless of DATABASE_URL. Tests that need
+ * to remain green under ambient DATABASE_URL pass 'memory' here. Production
+ * callers that omit the parameter get the default 'auto' behaviour (env-based
+ * store selection preserved). When an explicit `store` is already provided as the
+ * first argument, `storeMode` only affects the timer and outbox stores.
+ *
  * Does NOT call .listen() — that is the caller's responsibility.
  */
 export function createServer(
-  store: JobStore | PostgresJobStore | InMemoryJobStore = createJobStore(),
+  store?: JobStore | PostgresJobStore | InMemoryJobStore,
   // Partial<ResolverDeps>: at composition-root time only keyedDigest is available;
   // per-request sources (grants/records/ancestry) are assembled at the route (T-0143 §4.3 amendment).
   // Absent => hash fields drop honestly (FR-2 / NF-3).
-  resolverDeps?: Partial<ResolverDeps>
+  resolverDeps?: Partial<ResolverDeps>,
+  // T-0186: explicit store mode; 'memory' pins to InMemoryJobStore regardless of DATABASE_URL.
+  storeMode?: StoreMode
 ): http.Server {
-  const router = buildRouter(store, createTimerStore(), createOutboxStore(), resolverDeps);
+  const resolvedStore = store ?? createJobStore(undefined, storeMode);
+  const router = buildRouter(resolvedStore, createTimerStore(undefined, storeMode), createOutboxStore(undefined, storeMode), resolverDeps);
   return http.createServer(router.dispatch.bind(router));
 }
 
@@ -282,15 +320,23 @@ export function createServer(
  * external-worker routes) behave identically to what createServer() would produce.
  * Lazy evaluation ensures environment variables (e.g., CHOROS_WEB_DIST) set by
  * test harnesses are respected.
+ *
+ * T-0186: additive optional third parameter `storeMode?: StoreMode`. Routers are
+ * cached separately per mode so that a 'memory'-mode call and a subsequent
+ * 'auto'-mode call each get their own valid cached router without
+ * cross-contamination. Tests pin 'memory' to remain green under ambient
+ * DATABASE_URL; production callers omit the parameter (default 'auto' path).
  */
-let _defaultRouter: Router | null = null;
+const _routerCache: Partial<Record<StoreMode, Router>> = {};
 
 export const handleRequest = (
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
+  storeMode?: StoreMode
 ): void => {
-  if (!_defaultRouter) {
-    _defaultRouter = buildRouter(createJobStore(), createTimerStore(), createOutboxStore());
+  const mode: StoreMode = storeMode ?? "auto";
+  if (!_routerCache[mode]) {
+    _routerCache[mode] = buildRouter(createJobStore(undefined, mode), createTimerStore(undefined, mode), createOutboxStore(undefined, mode));
   }
-  _defaultRouter.dispatch(req, res);
+  _routerCache[mode]!.dispatch(req, res);
 };
