@@ -15,6 +15,7 @@
 
 import {
   type EffectDeclaration,         // re-used, NOT re-declared (AC-17)
+  type EffectKind,                // re-used, NOT re-declared (AC-17)
   classifyTool,                   // pure linter; derives pure_compute
 } from "./effect-resource.js";
 import {
@@ -30,6 +31,10 @@ import {
 // ---------------------------------------------------------------------------
 // Re-exported types from dependencies (AC-17 — no local re-declaration)
 // ---------------------------------------------------------------------------
+
+// EffectKind is re-exported so callers of this module never need to reach
+// directly into effect-resource.ts for it (AC-17, zero-runtime).
+export type { EffectKind };
 
 // ResourceType and Operation are imported above for use in ResourceOp — they
 // are NOT re-declared here (no `type ResourceType = ...` or `type Operation = ...`).
