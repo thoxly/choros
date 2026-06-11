@@ -1,0 +1,65 @@
+{
+  "task_id": "T-0174",
+  "status": "ready",
+  "summary": "Notifications E-N.7: audit wiring confirmation + e2e delivery test. Gap analysis shows email_config audit (T-0170) and preference audit (T-0171) wiring is already in production code. Remaining: (1) unit test proving notif.preference.changed audit event is emitted, (2) wired-pipeline test driving publishNotificationEvent → fanout (prefs+templates) → notification row + outbox → runOutboxOnce → in-app noop + FakeSmtpSender email. No new production code expected.",
+  "functional": [
+    "FR-1: unit test for notif.preference.changed audit emission (InMemoryAuditWriter, type check, no smtp_handle)",
+    "FR-2: wired-pipeline test notification-e2e.test.ts — publishNotificationEvent → outbox → runOutboxOnce → FakeSmtpSender",
+    "FR-3: FakeSmtpSender (no real SMTP/network), makeDirectStringSmtpResolver, in-memory config with is_enabled=true",
+    "FR-4: real production modules used (publishNotificationEvent, makeNotificationDeliver, EmailChannelDriver, renderTemplate, runOutboxOnce)",
+    "FR-5: immediate-dead path: FailingSmtpSender(retryable=false) → email row dead=1 on first attempt"
+  ],
+  "non_functional": [
+    "NF-1: no DATABASE_URL / live Postgres in these tests (npm test, not fitness:db)",
+    "NF-2: test file src/__tests__/notification-e2e.test.ts (pref audit test may be in notification-prefs.test.ts)",
+    "NF-3: no new production files — test-only change",
+    "NF-4: runOutboxOnce/makeNotificationDeliver/EmailChannelDriver are NOT mocked",
+    "NF-5: in-memory fakes implement minimal store interfaces for both publishers and dispatcher"
+  ],
+  "out_of_scope": [
+    "SLA-watchdog / escalations as NotificationEvent producers — T-0095/E7",
+    "Full notification center UI — Stage-2",
+    "Tenant-configurable templates — Stage-2",
+    "Real SmtpSecretResolver (vault/env) — Stage-2",
+    "Live Postgres e2e test — already covered by ci/checks/db/notifications.test.ts etc.",
+    "New production migrations or modules"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "notif.preference.changed audit test: audit path emits audit_event with type='notif.preference.changed'; payload has event_kind/recipient_scope/channels; no smtp_handle",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Pipeline test: publishNotificationEvent with actor:user1 scope + [in_app, email] → inAppCreated=1, outboxEnqueued=2",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Pipeline test: runOutboxOnce processes both rows → dispatched=2, failed=0, dead=0; FakeSmtpSender.sent has one email with correct from/to",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Immediate-dead path: FailingSmtpSender(retryable=false) → email outbox row dead=1 on first attempt via perRowMaxAttempts=1",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "No new production modules or migrations (test-only change confirmed by git diff)",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "tsc --noEmit and npm test (vitest run) pass without new errors",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "npm run fitness (including notification-isolation.sh, notification-email.sh, notification-pref-isolation.sh, notification-center-isolation.sh) passes",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0174-notifications-e2e.spec.md"
+}

@@ -1,0 +1,25 @@
+{
+  "task_id": "T-0174",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/__tests__/notification-e2e.test.ts:291-302",
+      "issue": "In AC-2 describe, EmailChannelDriver is constructed twice (once for registry key lookup, once as value) — both with a new FakeSmtpSender(). The second instance's FakeSmtpSender is unused for assertion since AC-2 only asserts enqueue counts. Dead construction in test fixture.",
+      "suggestion": "Reuse a single emailDriver instance for the AC-2 registry, or drop the second construction since AC-2 does not assert SMTP delivery."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
