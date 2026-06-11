@@ -5,6 +5,7 @@ record
 audit_event
 audit_head
 grant
+mcp_tool
 object_handle
 app_timer
 tenant
