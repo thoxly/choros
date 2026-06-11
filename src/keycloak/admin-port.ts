@@ -1,0 +1,218 @@
+/**
+ * src/keycloak/admin-port.ts — T-0042 (E5.2): Live Keycloak Admin REST adapter.
+ *
+ * Implements KeycloakAdminPort against the Keycloak Admin REST API:
+ *   - Obtains an admin token via client_credentials (realm admin client).
+ *   - POST /admin/realms/<realm>/clients — creates the confidential OIDC client
+ *     with serviceAccountsEnabled:true, directAccessGrantsEnabled:false.
+ *   - Sets actor_type=agent attribute on the auto-created service-account user.
+ *   - DELETE /admin/realms/<realm>/clients/<id> — best-effort orphan cleanup (NF-4).
+ *
+ * Admin credentials are read from environment variables (NF-6):
+ *   KEYCLOAK_BASE_URL     — e.g. http://localhost:8080
+ *   KEYCLOAK_REALM        — e.g. choros
+ *   KEYCLOAK_ADMIN_CLIENT — e.g. admin-cli
+ *   KEYCLOAK_ADMIN        — admin client_id (or username for direct grant)
+ *   KEYCLOAK_ADMIN_PASSWORD — admin client_secret (or password)
+ *
+ * No production secrets are committed here (NF-6 / RL-1).
+ *
+ * This file is SEPARATE from src/core/agent-hire.ts so the pure core never
+ * imports http (AC-16 / NF-7 / FF-HIRE-6).
+ */
+
+import { request as httpsRequest } from "node:https";
+import { request as httpRequest } from "node:http";
+import { URL } from "node:url";
+import type { KeycloakAdminPort, KcClientSpec } from "../core/agent-hire.js";
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+export interface KcAdminConfig {
+  baseUrl: string;        // e.g. "http://localhost:8080"
+  realm: string;          // e.g. "choros"
+  adminClient: string;    // client_id for admin token request (e.g. "admin-cli")
+  adminSecret: string;    // client_secret (or password for password grant)
+  devSecret?: string;     // optional dev client secret to set on created clients
+}
+
+function resolveConfig(): KcAdminConfig {
+  return {
+    baseUrl: process.env["KEYCLOAK_BASE_URL"] ?? "http://localhost:8080",
+    realm: process.env["KEYCLOAK_REALM"] ?? "choros",
+    adminClient: process.env["KEYCLOAK_ADMIN"] ?? "admin-cli",
+    adminSecret: process.env["KEYCLOAK_ADMIN_PASSWORD"] ?? "admin",
+    devSecret: process.env["KEYCLOAK_DEV_CLIENT_SECRET"],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Minimal fetch helper (stdlib only — no node-fetch / axios)
+// ---------------------------------------------------------------------------
+
+function doRequest(
+  url: string,
+  method: string,
+  body: string | null,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const isHttps = parsed.protocol === "https:";
+    const req = (isHttps ? httpsRequest : httpRequest)(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: {
+          ...headers,
+          ...(body !== null ? { "Content-Length": Buffer.byteLength(body).toString() } : {}),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () =>
+          resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    if (body !== null) req.write(body);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Admin token acquisition
+// ---------------------------------------------------------------------------
+
+async function getAdminToken(cfg: KcAdminConfig): Promise<string> {
+  const tokenUrl = `${cfg.baseUrl}/realms/${cfg.realm}/protocol/openid-connect/token`;
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: cfg.adminClient,
+    client_secret: cfg.adminSecret,
+  }).toString();
+  const resp = await doRequest(tokenUrl, "POST", body, {
+    "Content-Type": "application/x-www-form-urlencoded",
+  });
+  if (resp.status !== 200) {
+    throw new Error(`KC admin token failed: ${resp.status} ${resp.body}`);
+  }
+  const json = JSON.parse(resp.body) as { access_token: string };
+  return json.access_token;
+}
+
+// ---------------------------------------------------------------------------
+// Live adapter factory
+// ---------------------------------------------------------------------------
+
+/**
+ * makeHttpKeycloakAdminPort — the live HTTP adapter implementing KeycloakAdminPort.
+ * Reads config from environment variables unless overridden via cfg parameter.
+ * Injected into registerAgentRoutes; unit tests use InMemoryKeycloakAdminPort instead.
+ */
+export function makeHttpKeycloakAdminPort(cfg?: KcAdminConfig): KeycloakAdminPort {
+  const config = cfg ?? resolveConfig();
+
+  return {
+    async createServiceAccountClient(spec: KcClientSpec): Promise<{ clientId: string }> {
+      const token = await getAdminToken(config);
+      const clientsUrl = `${config.baseUrl}/admin/realms/${config.realm}/clients`;
+
+      const clientBody: Record<string, unknown> = {
+        clientId: spec.clientId,
+        serviceAccountsEnabled: true,
+        standardFlowEnabled: false,
+        directAccessGrantsEnabled: false,
+        publicClient: false,
+        protocol: "openid-connect",
+        ...(config.devSecret !== undefined
+          ? { secret: config.devSecret, clientAuthenticatorType: "client-secret" }
+          : {}),
+      };
+
+      const createResp = await doRequest(
+        clientsUrl,
+        "POST",
+        JSON.stringify(clientBody),
+        {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      );
+
+      if (createResp.status !== 201) {
+        throw new Error(`KC create client failed: ${createResp.status} ${createResp.body}`);
+      }
+
+      // Keycloak returns Location: .../clients/<uuid>. Resolve the client UUID
+      // so we can set the service-account user attribute.
+      // We use the Location header path to extract the internal UUID,
+      // then GET the client by clientId to confirm it was created.
+      const getResp = await doRequest(
+        `${clientsUrl}?clientId=${encodeURIComponent(spec.clientId)}`,
+        "GET",
+        null,
+        { Authorization: `Bearer ${token}` },
+      );
+      if (getResp.status !== 200) {
+        throw new Error(`KC get client failed: ${getResp.status} ${getResp.body}`);
+      }
+      const clients = JSON.parse(getResp.body) as Array<{ id: string; clientId: string }>;
+      if (clients.length === 0) {
+        throw new Error(`KC client ${spec.clientId} not found after create`);
+      }
+      const kcId = clients[0].id;
+
+      // Set actor_type=agent on the service-account user (FR-3 / AC-4).
+      const saUserUrl = `${config.baseUrl}/admin/realms/${config.realm}/clients/${kcId}/service-account-user`;
+      const saResp = await doRequest(saUserUrl, "GET", null, {
+        Authorization: `Bearer ${token}`,
+      });
+      if (saResp.status === 200) {
+        const saUser = JSON.parse(saResp.body) as { id: string; attributes?: Record<string, unknown> };
+        const userId = saUser.id;
+        // PATCH the user attributes to add actor_type=agent
+        const updateUserUrl = `${config.baseUrl}/admin/realms/${config.realm}/users/${userId}`;
+        const attributes = { ...(saUser.attributes ?? {}), actor_type: ["agent"] };
+        await doRequest(
+          updateUserUrl,
+          "PUT",
+          JSON.stringify({ ...saUser, attributes }),
+          { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        );
+      }
+
+      return { clientId: spec.clientId };
+    },
+
+    async deleteClient(clientId: string): Promise<void> {
+      try {
+        const token = await getAdminToken(config);
+        const clientsUrl = `${config.baseUrl}/admin/realms/${config.realm}/clients`;
+        // Find the internal KC UUID first
+        const getResp = await doRequest(
+          `${clientsUrl}?clientId=${encodeURIComponent(clientId)}`,
+          "GET",
+          null,
+          { Authorization: `Bearer ${token}` },
+        );
+        if (getResp.status !== 200) return; // best-effort: not found = already gone
+        const clients = JSON.parse(getResp.body) as Array<{ id: string }>;
+        if (clients.length === 0) return;
+        const kcId = clients[0].id;
+        await doRequest(`${clientsUrl}/${kcId}`, "DELETE", null, {
+          Authorization: `Bearer ${token}`,
+        });
+      } catch {
+        // Best-effort: swallow errors on orphan cleanup (NF-4)
+      }
+    },
+  };
+}
