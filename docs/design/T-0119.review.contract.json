@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0119",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0119-files-attachments.adr.md §4.3 getFileContentUrl / §4.4 step1-2",
+      "issue": "getFileContentUrl принимает fileVersionId, авторизация идёт по записи-владельцу, но ADR не делает явным, что резолюция fileVersionId→file_id→record_id обязана происходить под tenant-RLS ДО PDP-проверки. Структурно уже закрыто FORCE RLS на file_version (FF-T13) + cross_tenant-чеком §4.4 step1, поэтому не blocking; но load-bearing для AC-10 инвариант держится частично на дисциплине impl.",
+      "suggestion": "Добавить в §4.4 явный шаг между step1 и step2: 'resolve version→file→record под tenant-RLS, затем PDP по record'. FF-FAILCLOSED/FF-CROSS-TENANT проверят на live-probe."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0119-files-attachments.adr.md §2.8",
+      "issue": "Лимиты размера/MIME помечены 'tenant-конфигурируемы либо фиксированы day-1' — развилка не закрыта в day-1-схеме. Для дизайн-объёма допустимо (declared, не unbounded — AC-13 выполнен), но оставляет выбор impl-задаче.",
+      "suggestion": "Impl-задаче зафиксировать day-1-дефолт как фикс (не tenant_config), чтобы не плодить раннюю конфиг-поверхность."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
