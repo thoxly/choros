@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0185",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1107,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "DEL-1: DELETE draft row succeeds (rowCount=1, row absent post-DELETE)",
+      "test": "tier_delete_fix.test.ts > T-0185 DEL-1: DELETE draft application removes the row",
+      "result": "pass"
+    },
+    {
+      "ac": "DEL-1 idempotency: second DELETE draft pass confirms fix is stable",
+      "test": "tier_delete_fix.test.ts > T-0185 DEL-1 (idempotency): re-run DELETE draft confirmation",
+      "result": "pass"
+    },
+    {
+      "ac": "DEL-2: DELETE published row raises published-locked exception (no GUC)",
+      "test": "tier_delete_fix.test.ts > T-0185 DEL-2: DELETE published application raises",
+      "result": "pass"
+    },
+    {
+      "ac": "DEL-3: DELETE published with promoting GUC succeeds (rowCount=1)",
+      "test": "tier_delete_fix.test.ts > T-0185 DEL-3: DELETE published with promoting GUC succeeds",
+      "result": "pass"
+    },
+    {
+      "ac": "DEL-4: UPDATE on published row still raises (049 semantics regression guard)",
+      "test": "tier_delete_fix.test.ts > T-0185 DEL-4: UPDATE on published row still raises",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "tier_promote_atomic.test.ts 7/7 — 049 semantics unaffected",
+      "result": "pass",
+      "note": "promote/lock/guard/audit paths untouched by 050 fix"
+    },
+    {
+      "check": "Migration idempotency (CREATE OR REPLACE + DROP/CREATE trigger)",
+      "result": "pass",
+      "note": "050 already applied to dev-DB; re-run post-merge is safe no-op"
+    },
+    {
+      "check": "afterEach cleanup: del-app-* rows = 0",
+      "result": "pass",
+      "note": "confirmed by review contract re_review.db_cleanup_confirmed"
+    }
+  ],
+  "failures": [],
+  "known_red": {
+    "ci": {
+      "check": "FF-DC7 (dual-control-isolation.sh)",
+      "reason": "sibling-check gotcha: dual-control-isolation.sh rejects 050_tier_delete_fix.sql as unexpected for T-0044; T-0185 owns 050, not T-0044. Green post-merge to dev by design.",
+      "is_product_defect": false
+    },
+    "fitness_db": {
+      "count": 6,
+      "reason": "pre-existing on dev DB: FF-ACT (Flowable tables), ADV-2 (self-elevation), genesis-owner-grant count drift, grant-trail filter, bundle-coherence record grants, seed-pack resetPack flakiness. None touch tier tables.",
+      "is_product_defect": false
+    }
+  },
+  "tested_commit": "4457c6f",
+  "branch": "task/T-0185-tier-delete-trigger-fix",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors",
+    "fitness_static": "PASS (FF-DC7 is the sole FAIL; known sibling-gotcha)",
+    "vitest_unit": "1107/1107 passed, 6 skipped",
+    "fitness_db_tier": "5/5 tier_delete_fix + 7/7 tier_promote_atomic PASS",
+    "fitness_db_pre_existing_fails": "6 fails (FF-ACT, ADV-2, genesis-grant drift, grant-trail, bundle-coherence, seed-pack) — all pre-existing, do not touch T-0185 scope"
+  }
+}

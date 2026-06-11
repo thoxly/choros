@@ -21,3 +21,4 @@
 047_email_channel_config      # T-0168 — notifications E-N.1 migrations (choros.email_channel_config)
 048_notification_preference   # T-0168 — notifications E-N.1 migrations (choros.notification_preference)
 049_tier                      # T-0087 — tier column + published-locked trigger (E12.6)
+050_tier_delete_fix           # T-0185 — tier DELETE suppression bugfix
