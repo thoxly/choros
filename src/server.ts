@@ -18,6 +18,7 @@ import { registerGrantProposeRoute } from "./http/grant-propose.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
+import { registerBindingRoutes } from "./http/binding.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 
@@ -194,6 +195,11 @@ function buildRouter(
   if (grantsPool) {
     const kcPort = makeHttpKeycloakAdminPort();
     registerAgentRoutes(router, grantsPool, kcPort);
+  }
+
+  // Register named-binding endpoints (T-0072 E11.1 — additive)
+  if (grantsPool) {
+    registerBindingRoutes(router, grantsPool);
   }
 
   // Set static file handler as fallback for everything else
