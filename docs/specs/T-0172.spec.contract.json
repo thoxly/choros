@@ -1,0 +1,105 @@
+{
+  "task_id": "T-0172",
+  "status": "ready",
+  "summary": "Реализует E-N.5: code-bundled Map event_kind→{title,body} для 5 day-1 event_kind, renderTemplate ({{var}}-подстановка, HTML-escape при html=true, без LLM/зависимостей), defaultTemplateRenderer как TemplateRendererPort для инъекции в publishNotificationEvent fanout. Fail-closed: отсутствующий var → пустая строка; неизвестный event_kind → fallback. XSS-барьер: payload-переменные HTML-экранируются при html=true.",
+  "functional": [
+    "NOTIFICATION_TEMPLATES: ReadonlyMap<string, {title: string; body: string}> — 5 code-bundled шаблонов (task.assigned, approval.requested, sla.warning, sla.breach, escalation.raised)",
+    "renderTemplate(tmpl, payload, opts): {title, body} — {{var}}-подстановка, HTML-escape при opts.html=true, без LLM/eval/template-engine",
+    "escapeHtml(s): string — экранирование &, <, >, \", ' → HTML-entities; экспортируется для тестирования",
+    "renderNotification(eventKind, payload, opts): {title, body} — обёртка с fallback для неизвестных event_kind",
+    "defaultTemplateRenderer: TemplateRendererPort — plain-text реализация порта для publishNotificationEvent",
+    "Отсутствующая переменная → пустая строка (не throw, не raw-объект)",
+    "Неизвестный event_kind → fallback {title: eventKind, body: ''}",
+    "DataClass импортирован из data-classification.ts, не редекларирован",
+    "Pure-core модуль: нет pg, нет IO, нет LLM, нет eval"
+  ],
+  "non_functional": [
+    "HTML-escape обязателен для XSS-защиты: <script> в payload → &lt;script&gt; при html=true",
+    "plain-text при html=false — без экранирования",
+    "Нет внешних зависимостей (только stdlib TypeScript)",
+    "Нет switch/enum по event_kind — доступ через Map.get только",
+    "Тестируется без DATABASE_URL (pure-core)",
+    "Нет audit_event в рендер-пути (pure-function)"
+  ],
+  "out_of_scope": [
+    "Tenant-configurable шаблоны (notification_template таблица) — Stage-2",
+    "Полноценный template-engine с выражениями — отклонён",
+    "LLM-генерация текстов — не-MVP",
+    "Conditional sections {{#var}}…{{/var}} — опционально (coder-решение)",
+    "Egress runtime-гейт DataClass — Stage-2",
+    "REST API notification center, email-channel config — E-N.6/E-N.3"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "NOTIFICATION_TEMPLATES содержит ровно 5 записей для task.assigned, approval.requested, sla.warning, sla.breach, escalation.raised; каждая — {title: string, body: string}",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "renderTemplate({title:'Hello {{name}}', body:'Body {{val}}'}, {name:'Alice', val:'X'}, {html:false}) → {title:'Hello Alice', body:'Body X'}",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "renderTemplate при отсутствующем ключе: {{missing}} → '' (пустая строка, не throw)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "renderTemplate с html=true и payload {name: '<script>alert(1)</script>'} → результат содержит &lt;script&gt;alert(1)&lt;/script&gt; (XSS-проба)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "escapeHtml('<>&\"\\''') → '&lt;&gt;&amp;&quot;&#39;' (все 5 опасных символов экранированы)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "renderNotification('task.assigned', {taskName: 'MyTask'}, {html:false}) → {title, body} содержат 'MyTask'",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "renderNotification('unknown.event_kind', {}, {html:false}) → fallback {title: 'unknown.event_kind', body: ''}, не throw",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "defaultTemplateRenderer.render('task.assigned', {taskName: 'T'}) → {title, body} без HTML-escape (plain-text)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "XSS-проба сквозная: renderNotification('task.assigned', {taskName: '<img src=x onerror=alert(1)>'}, {html:true}) → title/body содержат &lt;img, не <img",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "tsc --noEmit без ошибок: DataClass импортирован из data-classification.ts, defaultTemplateRenderer структурно совместим с TemplateRendererPort",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "notification-templates.ts не содержит import pg, eval(, LLM/template-engine импортов",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Все вхождения одного {{var}} в строке заменяются: renderTemplate с body '{{name}} & {{name}}' → оба вхождения заменены",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "renderTemplate с html=false и payload {val: '<b>text</b>'} → результат содержит <b>text</b> без экранирования",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "npm test (vitest без DATABASE_URL) зелёный, npm run fitness проходит",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0172-notification-templates.spec.md"
+}

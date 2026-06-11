@@ -1,0 +1,45 @@
+{
+  "task_id": "T-0172",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1297,
+    "passed": 1297,
+    "failed": 0,
+    "skipped": 6
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "NOTIFICATION_TEMPLATES — 7 unit tests + FF-NT8 fitness", "result": "pass" },
+    { "ac": "AC-2",  "test": "renderTemplate base substitution — 4 unit tests", "result": "pass" },
+    { "ac": "AC-3",  "test": "missing variable → empty string — 3 unit tests (missing key, undefined, null)", "result": "pass" },
+    { "ac": "AC-4",  "test": "html=true XSS probes — 4 unit tests: script, all-5-chars, ampersand-order, img", "result": "pass" },
+    { "ac": "AC-5",  "test": "escapeHtml 9 unit tests: each char, combinations, empty string", "result": "pass" },
+    { "ac": "AC-6",  "test": "renderNotification all 5 event_kinds — 5 unit tests", "result": "pass" },
+    { "ac": "AC-7",  "test": "fallback unknown event_kind — 3 unit tests: unknown, empty, no-throw", "result": "pass" },
+    { "ac": "AC-8",  "test": "defaultTemplateRenderer plain-text — 3 unit tests", "result": "pass" },
+    { "ac": "AC-9",  "test": "XSS sквозные пробы: img onerror, script all-5-kinds, quote injection — 3 unit tests", "result": "pass" },
+    { "ac": "AC-10", "test": "tsc exit 0; FF-NT4/NT6 green; 2 structural unit tests", "result": "pass" },
+    { "ac": "AC-11", "test": "FF-NT1/NT3 green: no eval, no LLM, no IO imports", "result": "pass" },
+    { "ac": "AC-12", "test": "global regex all-occurrences — 3 unit tests", "result": "pass" },
+    { "ac": "AC-13", "test": "html=false plain-text verbatim — 3 unit tests", "result": "pass" },
+    { "ac": "AC-14", "test": "vitest 1297/1297 + fitness exit 0", "result": "pass" }
+  ],
+  "secondary_ux": [
+    { "check": "fitness FF-NT1 — no eval/LLM/template-engine", "result": "pass" },
+    { "check": "fitness FF-NT2a/NT2b — escapeHtml exported + called (2 sites)", "result": "pass" },
+    { "check": "fitness FF-NT3 — no IO imports (pure-core)", "result": "pass" },
+    { "check": "fitness FF-NT4a/NT4b — DataClass import not redeclaration", "result": "pass" },
+    { "check": "fitness FF-NT5 — no appendAuditEvent", "result": "pass" },
+    { "check": "fitness FF-NT6a/NT6b — TemplateRendererPort + defaultTemplateRenderer", "result": "pass" },
+    { "check": "fitness FF-NT7a/NT7b/NT7c/NT7d — Map-only lookup, no switch", "result": "pass" },
+    { "check": "fitness FF-NT8 — all 5 day-1 event_kinds present", "result": "pass" }
+  ],
+  "failures": [],
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+    "fitness_static_checks": "PASS — all checks green (FF-NT1..FF-NT8 all PASS)",
+    "vitest_unit": "1297/1297 passed, 6 skipped (flowable integration offline + kc e2e offline)",
+    "notification_templates_unit_tests": "51/51 — src/__tests__/notification-templates.test.ts — AC-1..AC-14 covered",
+    "fitness_db": "not required — pure-core module, no DATABASE_URL needed"
+  }
+}

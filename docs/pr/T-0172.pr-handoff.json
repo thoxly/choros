@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0172",
+  "status": "pr_open",
+  "branch": "task/T-0172-notification-templates",
+  "merge_target": "dev",
+  "base_commit": "fc39382",
+  "head_commit": "3e4e6ec",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Notifications E-N.5: code-bundled Map NOTIFICATION_TEMPLATES + renderTemplate + HTML-escape + defaultTemplateRenderer (TemplateRendererPort impl). src/core/notification-templates.ts (239 lines): escapeHtml (5 chars, & first), renderTemplate (global {{var}} substitution, html=true XSS barrier, fail-closed missing→''), renderNotification (Map-only lookup, fallback for unknown event_kind), defaultTemplateRenderer (plain-text TemplateRendererPort). 5 day-1 templates: task.assigned/approval.requested/sla.warning/sla.breach/escalation.raised — synced with T-0171 DEFAULT_PREFERENCES. Pure-core: no pg/http/eval. 51 unit tests (AC-1..AC-14 + XSS adversarial probes). FF-NT1..FF-NT8 green. CI: tsc 0 errors, eslint 0 errors, fitness all PASS, vitest 1297/1297. 1 review iteration (R-1/R-2 nits only — approved first pass). Dead-wiring known-acceptable (fanout wiring = E-N.6/E-N.7, out-of-scope per spec §5).",
+  "commits": [
+    {
+      "sha": "0874abf",
+      "phase": "SPEC",
+      "message": "spec(T-0172): notification templates E-N.5 — code-bundled Map + renderTemplate + HTML-escape"
+    },
+    {
+      "sha": "bb8f7c7",
+      "phase": "BUILD",
+      "message": "feat(T-0172): notification templates E-N.5 — code-bundled Map + renderTemplate + HTML-escape"
+    },
+    {
+      "sha": "3e4e6ec",
+      "phase": "REVIEW",
+      "message": "T-0172 REVIEW: approved — XSS barrier solid, 14 AC covered, 2 nits"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "3e4e6ec",
+      "findings_resolved": [],
+      "findings_nit_open": [
+        "R-1 (nit, axis 3): defaultTemplateRenderer uses html=false; EmailChannelDriver (T-0170) receives pre-rendered job.body (text: field). If/when HTML email bodies are introduced, caller must call renderNotification(..., {html:true}) separately before SMTP. Documented in code comment. Follow-up: 'HTML email render path' task when HTML email transition occurs in E-N roadmap.",
+        "R-2 (nit, axis 4): No explicit test for fullwidth Unicode lookalike chars (U+FF1C ＜, U+FF1E ＞). Not a security gap — HTML parsers do not interpret fullwidth as tags. Osознанно not a threat. Deferred."
+      ],
+      "artifact": "docs/design/T-0172.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1297,
+      "passed": 1297,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "14/14",
+      "fitness_static": "PASS — all checks green including FF-NT1..FF-NT8",
+      "fitness_db": "not required — pure-core module, no DATABASE_URL needed",
+      "tested_commit": "3e4e6ec",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings",
+        "fitness_static_checks": "PASS — all checks green (FF-NT1..FF-NT8 all PASS)",
+        "vitest_unit": "1297/1297 passed, 6 skipped (flowable integration offline + kc e2e offline)",
+        "notification_templates_unit_tests": "51/51 — src/__tests__/notification-templates.test.ts — AC-1..AC-14 covered"
+      },
+      "artifact": "docs/test-reports/T-0172.test-report.md",
+      "contract_artifact": "docs/design/T-0172.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/notification-templates.ts",
+    "src/__tests__/notification-templates.test.ts",
+    "ci/checks/notification-templates.sh",
+    "docs/specs/T-0172-notification-templates.spec.md",
+    "docs/specs/T-0172.spec.contract.json",
+    "docs/design/T-0172.review.contract.json",
+    "docs/reviews/T-0172.review.md",
+    "package.json",
+    "docs/test-reports/T-0172.test-report.md",
+    "docs/design/T-0172.test-report.contract.json",
+    "docs/pr/T-0172.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "description": "HTML email render path: defaultTemplateRenderer uses html=false (plain-text). EmailChannelDriver (T-0170) receives pre-rendered job.body via outbox — it uses text: job.body (SMTP text part). If HTML email bodies are introduced in E-N.x, the email channel must call renderNotification(..., {html:true}) before building the SMTP message — not use defaultTemplateRenderer directly. Gap is safe for day-1 (no HTML email today). Code comment documents the expectation. Follow-up task needed at HTML email transition.",
+      "follow_up_candidate": "Create task 'E-N.x HTML email render path: EmailChannelDriver calls renderNotification({html:true}) for HTML SMTP bodies'. Triggers when HTML email bodies are introduced."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "description": "No explicit test for fullwidth Unicode lookalike chars (U+FF1C ＜ / U+FF1E ＞) documenting they are not HTML-dangerous. HTML parsers do not interpret fullwidth as tags — this is osознанно not a security gap. An explicit test would make the decision auditable in the test suite.",
+      "follow_up_candidate": "Add: it('escapeHtml: fullwidth < and > are not HTML-dangerous, not escaped', () => { expect(escapeHtml('＜script＞')).toBe('＜script＞'); }); — nit-sweep candidate."
+    }
+  ],
+  "architecture_notes": {
+    "pure_core": "notification-templates.ts is pure-function: no pg, no http, no eval, no LLM. Zero runtime deps except type imports. Testable without DATABASE_URL.",
+    "dead_wiring": "defaultTemplateRenderer is exported and implements TemplateRendererPort but is not yet wired into publishNotificationEvent in production. This is known-acceptable dead-wiring (analogous to T-0171 PostgresPrefStore). Full production wiring falls on E-N.6/E-N.7 per spec §5 out-of-scope.",
+    "template_sync": "NOTIFICATION_TEMPLATES (5 entries) exactly matches T-0171 DEFAULT_PREFERENCES event_kinds. task.assigned body uses simplified form (no optional conditional section) — permitted per spec §4 coder-note.",
+    "xss_barrier": "escapeHtml: 5 chars, & first (no double-encode). html=true required for any HTML email rendering. html=false plain-text: verbatim output — correct for SMTP text: part and in-app channels."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "Pure TypeScript module addition. No DDL, no new tables, no migration required.",
+    "downstream_effect": "Provides TemplateRendererPort implementation for injection into publishNotificationEvent deps. Full fanout wiring (E-N.6/E-N.7) should use defaultTemplateRenderer as the injected templates dependency."
+  },
+  "friction_events": []
+}
