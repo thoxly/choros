@@ -346,6 +346,31 @@ describe("AC-14 — classifyReportPageFloor: optional fields within vocab → re
     ]);
     expect(result.requiredFloor).toBe("2");
   });
+
+  // R-2 nit: filter sub-object edge probes
+  it("filter without field_key → Floor-2", () => {
+    const result = classifyReportPageFloor([
+      {
+        source_registry_def_id: "r1",
+        field_key: "f",
+        agg: "count",
+        filter: { op: "=", value: 42 },
+      },
+    ]);
+    expect(result.requiredFloor).toBe("2");
+  });
+
+  it("filter without value → Floor-2", () => {
+    const result = classifyReportPageFloor([
+      {
+        source_registry_def_id: "r1",
+        field_key: "f",
+        agg: "sum",
+        filter: { field_key: "status", op: "=" },
+      },
+    ]);
+    expect(result.requiredFloor).toBe("2");
+  });
 });
 
 // ---------------------------------------------------------------------------
