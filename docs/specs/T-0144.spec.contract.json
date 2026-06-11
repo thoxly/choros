@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0144",
+  "status": "ready",
+  "summary": "Move inline cleanup DELETEs in grant-editor.test.ts from it() bodies to afterAll() hooks so leaked grant rows no longer accumulate in DEV_ROLE_OWNER mgmt_object:* on assertion failure, and add a one-shot idempotent sanitation script for the already-contaminated live dev silo.",
+  "functional": [
+    "FR-1: Each of the five contaminating describe blocks in grant-editor.test.ts (AC-01, AC-07, AC-14, AC-20, FF-10) must declare a describe-scoped let variable for the inserted grant ID, assign it before the first expect() on the insert result, and DELETE the row in an afterAll() using migratorUrl().",
+    "FR-2: The afterAll DELETE is WHERE id=$id; it is a no-op if the row was already removed by an earlier inline DELETE. Both running is harmless.",
+    "FR-3: The FF-10 live test must extract the HTTP-created grantId from the server response before any expect() assertion runs, storing it into the describe-scoped let variable so the afterAll can reach it even if assertions throw.",
+    "FR-4: ADV-3 in grant-editor.adversarial.test.ts already uses afterAll correctly; it must not be modified.",
+    "FR-5: No expect() assertions are removed, changed, or silently caught.",
+    "FR-6: A script scripts/cleanup-test-grants.ts is added that DELETEs from choros.\"grant\" all rows with role_id=DEV_ROLE_OWNER, resource_type LIKE 'mgmt_object:%', and granted_by IN ('test', 'd0000000-0000-0000-0000-0000000000ff') (the two known test-actor markers), prints the deleted count, and exits 0. Running it twice deletes 0 rows on the second run (idempotent). It does NOT touch rows with granted_by='seed'.",
+    "FR-7: No files under db/migrations/ are changed."
+  ],
+  "non_functional": [
+    "NF-1: No new package.json dependencies; the cleanup script uses the existing pg package.",
+    "NF-2: Two consecutive runs of npm run fitness:db against a freshly seeded DB leave the grant row counts for DEV_ROLE_OWNER + mgmt_object:* unchanged (= 17) after each run.",
+    "NF-3: ADV-1 and ADV-2 count-before/count-after probes on choros.\"grant\" remain unaffected; no ordering dependency is introduced between their cleanups and the newly moved cleanups."
+  ],
+  "out_of_scope": [
+    "Fixing test isolation for DEV_ROLE_BUDGET inserts (ADV-1, ADV-2 are already safe).",
+    "Changing genesis-owner-seed test logic.",
+    "Wrapping tests in DB transactions or savepoints.",
+    "Fixing contamination in role_assignment or any table other than choros.\"grant\".",
+    "Addressing db-tier flakiness sources beyond the inline-cleanup accumulation pattern."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Two consecutive complete runs of npm run fitness:db (no DB reset between runs) against a freshly seeded dev silo both produce COUNT(choros.\"grant\" WHERE role_id=DEV_ROLE_OWNER AND resource_type LIKE 'mgmt_object:%') = 17. genesis-owner-seed.test.ts is green both times.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "genesis-owner-seed.test.ts is green on a freshly seeded silo after an arbitrary number of npm run fitness:db runs. The exactly-17 assertion never fails due to leaked test rows.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "All assertions in grant-editor.test.ts and grant-editor.adversarial.test.ts that were passing before T-0144 remain present and passing after T-0144. No expect() call is removed or guarded with a try/catch that would suppress a failure.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "In the FF-10 live describe block, the variable holding the HTTP-created grant ID is declared at describe scope and assigned before the first expect() on the HTTP response. The afterAll uses this variable to DELETE the row.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-5",
+      "text": "Running npx tsx scripts/cleanup-test-grants.ts with DATABASE_URL pointing to a contaminated silo deletes all rows matching the test-actor markers, prints the count, exits 0, and is idempotent (second run deletes 0 rows).",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "git diff dev -- db/migrations/ is empty after T-0144 is applied: no migration files are added or modified.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0144-db-test-cleanup.spec.md"
+}
