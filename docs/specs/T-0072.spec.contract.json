@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0072",
+  "status": "ready",
+  "summary": "Единый источник истины named-binding контракта (field-key == variable-name) в tenant-таблице form_binding (migration 045) + чистая функция checkBindingCompat(fields, bpmnVarNames) для машинной compat-проверки между Floor-1 (JSON Schema) и Floor-2 (BPMN-переменные) + расширение BPMN-линтера новым типом нарушения binding_mismatch, блокирующим deploy при рассинхроне схемы и процесса.",
+  "functional": [
+    "FR-1: Tenant-таблица form_binding (T-0013-дисциплина: tenant_id leading PK, FORCE RLS): хранит одну запись на (tenant_id, process_key, form_key) с полями fields:jsonb (массив {key,type,required}), version:integer, created_at/updated_at:bigint. UNIQUE (tenant_id, process_key, form_key). Поле fields[i].key = field-key = имя переменной процесса (контракт field-key==variable-name физически выражен единственным ключом без маппинга).",
+    "FR-2: Контракт field-key==variable-name принуждается структурно: один и тот же key используется как ключ UI-поля Floor-1 и как имя переменной Flowable. Никакой трансляции между ними нет — инвариант enforced единым полем в форме записи.",
+    "FR-3: Чистая функция checkBindingCompat(fields: BindingField[], bpmnVarNames: ReadonlySet<string>): BindingCompatResult — без I/O, DB, network. Возвращает {ok:true} или {ok:false; violations:BindingViolation[]} с типами missing_in_bpmn (переменная BPMN без поля в схеме) и missing_in_schema (поле схемы без упоминания в BPMN-переменных). Экспортируется из src/core/binding-compat.ts.",
+    "FR-4: lintBpmn(xml, opts?) расширяется опциональным opts.bindingSchema:BindingField[]. При наличии — после токенизации извлекает bpmnVarNames (из атрибутов name/id элементов <in>,<out>,<formProperty>,<formField> + regex EL-парсер ${varName} в conditionExpression) и вызывает checkBindingCompat; добавляет нарушения типа binding_mismatch. Вызов без opts — поведение T-0027 без изменений (обратная совместимость).",
+    "FR-5: CLI lint-bpmn расширяется флагом --binding-schema <path> (JSON-файл BindingField[]); при несовместимости — stderr violations + exit code 1; без флага — поведение без изменений.",
+    "FR-6: HTTP POST /tenants/:tId/processes/:pKey/forms/:fKey/binding — upsert form_binding (INSERT ON CONFLICT UPDATE fields,version+=1,updated_at); требует auth с ролью process_designer. GET возвращает запись или 404.",
+    "FR-7: Миграция 045_form_binding.sql: DDL + RLS + grant choros_app DML + 1 dev-seed строка (purchase-approval/purchase-form, поля supplier/category/decision) ON CONFLICT DO NOTHING."
+  ],
+  "non_functional": [
+    "NF-1: Zero new npm dependencies; binding-compat.ts — pure TS stdlib.",
+    "NF-2: checkBindingCompat — pure function (no import pg/fs/net/http; no process.env reads).",
+    "NF-3: form_binding в ci/checks/known_tenant_tables.txt + case в cross_tenant.test.ts (FORCE RLS, tenant_id leading, T-A строка невидима для T-B).",
+    "NF-4: Расширение LintViolationType аддитивное; сигнатура lintBpmn(xml) без второго аргумента неизменна; все существующие T-0027 тесты зелёные без изменений.",
+    "NF-5: EL-парсер — best-effort regex \\$\\{(\\w+)\\}; ложные отрицания на сложных выражениях допустимы, ложные срабатывания — нет; ограничение документируется в коде.",
+    "NF-6: HTTP-эндпоинты совместимы с существующим web-слоем без нового фреймворка.",
+    "NF-7: Миграция 045 идемпотентна (повторный запуск без ошибки)."
+  ],
+  "out_of_scope": [
+    "UI-редактор форм Floor-1 (кнопочный relabel/hide/toggle) — другой E11.x.",
+    "Генератор Floor-2-кода (MCP-тул emit_form_code / edit_jsonschema) — T-0077; T-0072 задаёт контракт-рельсы.",
+    "DMN-middle, External-Task worker scaffolding.",
+    "Полный EL/MVEL/OGNL-парсер — только regex best-effort.",
+    "Versioned diff / семантический changelog между версиями binding.",
+    "Кросс-процессные переменные и межпроцессные ссылки.",
+    "Создание новой роли process_designer в DB — T-0072 проверяет её через существующий auth-middleware.",
+    "Согласование object-schema (registry_def.record_schema) с form_binding — ADR §9 гард 4, отдельная задача."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Миграция 045: form_binding создаётся с PK(tenant_id,id), UNIQUE(tenant_id,process_key,form_key), ENABLE+FORCE RLS, policy tenant_id=current_setting('choros.tenant_id',true)::uuid, GRANT DML choros_app; dev-seed строка вставляется ON CONFLICT DO NOTHING; повторная миграция без ошибки.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "form_binding присутствует в ci/checks/known_tenant_tables.txt; в cross_tenant.test.ts есть case: INSERT строки тенанта A, SELECT из сессии тенанта B → 0 строк (RLS enforced).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "checkBindingCompat(fields, bpmnVarNames) → {ok:true} когда множество bpmnVarNames совпадает с {f.key for f in fields} (оба пустых и оба непустых одинаковых наборов).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "checkBindingCompat: переменная в bpmnVarNames, отсутствующая в fields[].key → violation type='missing_in_bpmn', {ok:false}. Ключ fields[].key, отсутствующий в bpmnVarNames → violation type='missing_in_schema', {ok:false}.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "checkBindingCompat — pure function: модуль src/core/binding-compat.ts не содержит импортов pg/fs/net/http/child_process; jest coverage подтверждает отсутствие I/O при вызове.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "lintBpmn(xml, {bindingSchema:[...]}) при несовместимости (переменная BPMN отсутствует в схеме) → {ok:false, violations:[{type:'binding_mismatch',...}]}. lintBpmn(xml) без opts → результат идентичен T-0027 (все существующие тест-кейсы проходят без изменений).", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "lintBpmn извлекает bpmnVarNames из: атрибута name у <in> и <out>; атрибута id у <formProperty> и <formField>; EL-выражений ${varName} в <conditionExpression> (regex). Все эти имена участвуют в checkBindingCompat.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "CLI lint-bpmn --binding-schema ./schema.json ./process.bpmn: при binding_mismatch — нарушения в stderr, exit code 1. Без флага --binding-schema — поведение идентично T-0027 CLI.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "GET /tenants/T/processes/P/forms/F/binding → 200 {fields:[...],version:N} если строка существует; 404 если нет.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "POST /tenants/T/processes/P/forms/F/binding с {fields:[...]} → 201 при создании; повторный POST → 200, version инкрементирован на 1, fields обновлены. Запрос без auth → 401.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "Dev-seed в migration 045: GET dev-тенант/purchase-approval/purchase-form/binding → 200, fields содержит объекты с key='supplier', key='category', key='decision'.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "Типы BindingField, BindingCompatResult, BindingViolation экспортированы из src/core/binding-compat.ts. LintViolationType в src/core/bpmn-linter.ts включает строку 'binding_mismatch'. tsc --noEmit зелёный.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "Все существующие тесты src/__tests__/bpmn-linter.test.ts проходят без изменений после добавления 'binding_mismatch' в LintViolationType (аддитивное расширение не ломает union-типы).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0072-named-binding.spec.md"
+}
