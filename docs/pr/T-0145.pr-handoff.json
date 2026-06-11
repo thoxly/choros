@@ -1,0 +1,86 @@
+{
+  "task_id": "T-0145",
+  "status": "pr_open",
+  "branch": "task/T-0145",
+  "merge_target": "dev",
+  "pr_url": "https://github.com/thoxly/choros/pull/9",
+  "base_commit": "bd2f72a",
+  "head_commit": "9e21120",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "FF-5 в grant-editor.test.ts: заменён хардкод toBe(29) на toBeGreaterThan(0) + toContain-гарды по 8 критическим таблицам ADR; добавлен invoke_proposal (T-0024). Счётчик читается из known_tenant_tables.txt — добавление новой таблицы не требует правки теста. Один файл изменён: ci/checks/db/grant-editor.test.ts (+9/-5, коммит 0758e9a). Гейты: grant-editor 16/16 + adversarial 18/18 live, ambient 927/5skip, пробы позитив/негатив AC-1/AC-2 пройдены.",
+  "commits": [
+    {
+      "sha": "bd2f72a",
+      "phase": "SPEC",
+      "message": "T-0145 SPEC: счётчик таблиц из known_tenant_tables.txt вместо toBe(29) — спека, контракт валиден"
+    },
+    {
+      "sha": "0e9423a",
+      "phase": "DESIGN",
+      "message": "T-0145 DESIGN: ADR — реестр как единственный авторитет счётчика + расширенные toContain; db-тир fitness:db"
+    },
+    {
+      "sha": "0758e9a",
+      "phase": "BUILD",
+      "message": "T-0145 BUILD: счётчик таблиц из реестра (toBeGreaterThan(0) + toContain-гарды, +invoke_proposal)"
+    },
+    {
+      "sha": "864df53",
+      "phase": "REVIEW",
+      "message": "T-0145 REVIEW: approved — периметр строгий, инвариант реестр=схема цел в schema.test.ts"
+    },
+    {
+      "sha": "9e21120",
+      "phase": "TEST",
+      "message": "T-0145 TEST: pass — пробы позитив (фиктивная строка не валит) и негатив (без invoke_proposal падает)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
+      "reviewed_commit": "864df53",
+      "findings_nit": ["T-0145-F-001", "T-0145-F-002", "T-0145-F-003"],
+      "findings_note": "Все 3 финдинга — nit, pre-existing, не вызваны коммитом 0758e9a",
+      "acceptance_coverage": "6/6 AC покрыты",
+      "artifact": "docs/reviews/T-0145.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 6,
+      "passed": 6,
+      "failed": 0,
+      "ac_coverage": "6/6",
+      "run_details": {
+        "grant_editor_live_db": "16/16 pass (DATABASE_URL=postgresql://choros_migrator:choros_dev_pw@localhost:55432/choros)",
+        "grant_editor_adversarial_live_db": "18/18 pass",
+        "ambient_vitest": "927 pass / 5 skip",
+        "probe_positive_ac1": "PASS — fake_table_probe appended (31 lines), FF-5 green (toBeGreaterThan(0)); MD5 restored",
+        "probe_negative_ac2": "PASS — invoke_proposal removed (29 lines), FF-5 red at line 116 toContain('invoke_proposal'); MD5 restored"
+      },
+      "artifact": "docs/test-reports/T-0145.test-report.json"
+    },
+    "pre_existing_red_db_tier": [
+      "cross_tenant.test.ts — нет seeder для invoke_proposal (T-0024/T-0043, не T-0145); присутствовал до base 9824d17",
+      "genesis-owner-seed.test.ts — silo-загрязнение: 150 delegable mgmt_object grants вместо 17; повторные прогоны seed-seed-миграций от параллельных веток",
+      "schema.test.ts FF-ACT — Flowable в silo-БД: 56 act_* таблиц, ожидается 0"
+    ]
+  },
+  "files_changed": [
+    "ci/checks/db/grant-editor.test.ts"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — оркестратор (D-053) мержит feature branch в dev после approve",
+    "infra_changes": "Нет миграций, нет изменений docker-compose.yml, нет новых сервисов. Только тест-файл.",
+    "downstream_note": "Добавление таблиц в known_tenant_tables.txt в будущих задачах больше не требует ручной правки FF-5."
+  },
+  "friction_events": []
+}
