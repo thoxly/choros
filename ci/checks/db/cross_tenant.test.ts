@@ -333,6 +333,25 @@ async function seedEffectResource(c: pg.Client, tenantId: string): Promise<void>
 }
 
 /**
+ * Seed one row into choros.egress_policy (T-0041). PK is (tenant_id, id); a fresh
+ * uuid id per call plus a per-row unique allowed_endpoint keeps both tenants'
+ * seeds independent under RLS and clear of the (tenant_id, class, allowed_endpoint)
+ * UNIQUE constraint. A NAMED policy row (class 'confidential', a specific endpoint)
+ * — never a catch-all (deny-by-default, AC-14).
+ */
+async function seedEgressPolicy(c: pg.Client, tenantId: string): Promise<void> {
+  const id = uuid();
+  const endpoint = `https://ct-llm-${id.slice(0, 8)}.example/v1`;
+  await c.query(
+    `INSERT INTO choros.egress_policy
+       (tenant_id, id, class, allowed_endpoint, description, created_at, updated_at)
+     VALUES ($1, $2, 'confidential', $3, NULL, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, endpoint],
+  );
+}
+
+/**
  * Seed one row into choros.sod_constraint (T-0032). PK is (tenant_id, id);
  * a fresh uuid id per call keeps both tenants' seeds independent under RLS. A
  * valid `dynamic` row (self_record separation) needs no role pair, so it is
@@ -486,6 +505,9 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       await seedEffectResource(c, tenantId);
     case 'outbox':
       await seedOutboxRow(c, tenantId);
+      break;
+    case 'egress_policy':
+      await seedEgressPolicy(c, tenantId);
       break;
     case 'sod_constraint':
       await seedSodConstraint(c, tenantId);

@@ -17,5 +17,6 @@ data_classification
 role
 role_assignment
 effect_resource
+egress_policy
 outbox
 sod_constraint
