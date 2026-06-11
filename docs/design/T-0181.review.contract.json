@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0181",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "src/http/report-page-render.ts:743-756",
+      "issue": "Floor-1 /render endpoint has no PDP gate. `actor` is extracted then voided (`void actor`). `renderFloor1` does not receive actor or authzDeps and does not call `checkReadGrant`. Comment claims 'checked by PDP inside renderFloor1 via withTenantTx' but withTenantTx only enforces RLS tenant isolation, not application-read authorization. ADR §6 requires `read` on `application` for page view — this applies to both Floor-1 and Floor-2 endpoints.",
+      "suggestion": "Pass actor, nowMs, and authzDeps into renderFloor1. Call authzDeps.checkReadGrant before withTenantTx (mirror pattern from dataFloor2 lines 634-637). Add AC-10-FLOOR1 test: non-genesis without application read grant → 403."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "src/http/report-page-render.ts:136-138",
+      "issue": "defaultCheckReadGrant uses the wrong grant pool. `loadAdminContext` (org.ts:456) loads only grants with `resource_type LIKE 'mgmt_object:%'`. The condition `g.delegable && g.operation === 'read'` checks for a mgmt_object:* grant with operation 'read', which does not exist in the system (mgmt_object operations are author/promote/apply, not read). This means all non-genesis users are denied regardless of their `application read` grant. ADR §6 requires checking grant `read` on resource_type `application` via PDP T-0021, not via loadAdminContext.adminGrants. Also missing: no `resource_type` filter on the grant (no check that g.resourceType === 'application').",
+      "suggestion": "Replace defaultCheckReadGrant with a correct PDP path that queries application read grants (not mgmt_object:* grants). Add a live DB test: non-genesis user WITH application read grant → 200; without → 403."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "ci/checks/db/report_page_render.test.ts (missing AC-6 live probe)",
+      "issue": "AC-6 (NO_READ_GRANT for Floor-2) is listed in the file header comment but has no live DB test implementation. The unit test (src/__tests__/report-page-render.test.ts AC-6) uses injected denyDeps mock — it does not test the real defaultCheckReadGrant behavior. Combined with R-2, the broken PDP gate is invisible to CI.",
+      "suggestion": "Add live DB probe for AC-6 in ci/checks/db/report_page_render.test.ts: seed a non-genesis user, create a floor=2 page, call /data without application read grant → 403; with grant → 200."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/http/report-page-render.ts:1745",
+      "issue": "FIELD_KEY_SAFE_RE includes hyphen `-` (`[a-zA-Z0-9_-]`). Hyphen in a jsonb field_key is technically valid in PostgreSQL and causes no injection risk (charset guard blocks SQL metacharacters). Minor: most registry_def schemas use underscores not hyphens. No security concern.",
+      "suggestion": "Consider documenting intentional inclusion of `-` in a comment, or restrict to `[a-zA-Z0-9_]+` if product convention disallows hyphens in field keys."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/__tests__/report-page-render.test.ts:1546",
+      "issue": "AC-6 unit test passes empty FakePool `makeFakePool([])` with denyDeps. Since denyDeps fires before any pool touch, this is currently safe but fragile — if logic changes to need pool before authz check, the empty pool would silently mask issues.",
+      "suggestion": "Add comment: '// denyDeps fires before pool connect — empty pool is safe here'."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": false},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-Floor1-PDP", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "R-2 reveals a systematic PDP pattern gap: loadAdminContext is designed for mgmt_object:* admin checks (authoring, promoting), not for resource-level read grants (application read). The render module needs a separate PDP path for `application read` that is currently absent from the codebase. This is a candidate for dedicated security-reviewer attention or explicit PDP T-0021 extension: SQ11 ledger item."
+  ]
+}
