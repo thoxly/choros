@@ -15,7 +15,7 @@
  *  - Tenant isolation via withTenantTx + FORCE RLS (same pattern as invoke.ts).
  *  - No cross-table FK; tenantId validated as UUID, processKey/formKey as non-empty text.
  *  - Fields validated by validateBindingFields (KEY_RE, MAX_KEY_LEN, uniqueness).
- *  - Dev-mode (CHOROS_AUTH_MODE=dev): role check is softened to «authenticated» per
+ *  - Dev-mode (dev auth mode): role check is softened to «authenticated» per
  *    ADR §4 footnote (process_designer role not yet seeded in dev DB).
  */
 
@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthMode } from "./auth.js";
 import {
   validateBindingFields,
   type BindingField,
@@ -94,7 +94,7 @@ function extractActor(req: IncomingMessage): string {
 // ---------------------------------------------------------------------------
 // checkRole — conventional process_designer check (ADR §4)
 //
-// In dev mode (CHOROS_AUTH_MODE=dev), role check is softened to «authenticated»
+// In dev auth mode, role check is softened to «authenticated»
 // per ADR §4 footnote: process_designer not yet seeded in the dev DB.
 // In keycloak mode this would enforce a real role lookup — T-0072 wires only
 // the dev path; keycloak tightening is a later task.
@@ -105,7 +105,7 @@ async function checkRole(
   tenantId: string,
   actorId: string,
 ): Promise<void> {
-  const authMode = process.env["CHOROS_AUTH_MODE"] ?? "dev";
+  const authMode = getAuthMode();
   if (authMode !== "dev") {
     // keycloak mode: check role_assignment for process_designer
     const { rows } = await client.query<{ cnt: number }>(
