@@ -43,6 +43,14 @@ import {
   type AssignmentAuditEvent,
   type AuditEventInput,
 } from "../core/audit-grant-encoder.js";
+import { combineCriticality, criticalityDiff } from "../core/role-criticality.js";
+import {
+  dualControlDecision,
+  buildConfirmationFlag,
+  encodeDualControlAuditEvent,
+  requirementReason,
+  type ConfirmationFlag,
+} from "../core/dual-control.js";
 import { loadAdminContext } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
@@ -261,6 +269,87 @@ async function writeAssignmentAuditEvent(
 }
 
 // ---------------------------------------------------------------------------
+// T-0044 dual-control seam helpers.
+//
+// loadRoleEffectiveGrants — read the role's grant rows INSIDE the caller's
+// transaction (the live DAO binding is T-0053; day-1 reads in the existing
+// withTenantTx). The from/to criticality fold uses these effective grants.
+// writeDualControlAuditEvent — append the dualcontrol.gate WORM event via the
+// canonical appendAuditEventInput (NF-7 — no parallel audit path).
+// ---------------------------------------------------------------------------
+
+async function loadRoleEffectiveGrants(
+  client: pg.PoolClient,
+  tenantId: string,
+  roleId: string,
+): Promise<Grant[]> {
+  const { rows } = await client.query<{
+    id: string;
+    role_id: string;
+    resource_type: string;
+    resource_facet: unknown;
+    operation: string;
+    scope: unknown;
+    constraint: unknown;
+    delegable: boolean;
+    granted_by: string;
+    valid_from: string | null;
+    valid_until: string | null;
+    created_at: string;
+  }>(
+    `SELECT id, role_id, resource_type, resource_facet,
+            operation, scope, "constraint", delegable,
+            granted_by, valid_from, valid_until, created_at
+       FROM choros."grant"
+      WHERE tenant_id = $1 AND role_id = $2`,
+    [tenantId, roleId],
+  );
+  return rows.map((g) => ({
+    tenantId,
+    id: g.id,
+    roleId: g.role_id,
+    resourceType: g.resource_type as Grant["resourceType"],
+    resourceFacet: g.resource_facet ?? undefined,
+    operation: g.operation as Grant["operation"],
+    scope: g.scope as Grant["scope"],
+    constraint: g.constraint ?? undefined,
+    delegable: g.delegable,
+    grantedBy: g.granted_by,
+    validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
+    validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
+    createdAt: Number(g.created_at),
+  }));
+}
+
+async function writeDualControlAuditEvent(
+  client: pg.PoolClient,
+  tenantId: string,
+  args: {
+    flag: ConfirmationFlag;
+    decision: import("../core/dual-control.js").DualControlDecision;
+    changeKind: "grant" | "assignment";
+    actor: string;
+    proposedBy: string;
+    primaryConfirmer: string | null;
+    via?: "dual-control" | "dual-control.second-confirm";
+    nowMs: number;
+  },
+): Promise<void> {
+  const input = encodeDualControlAuditEvent({
+    id: randomUUID(),
+    flag: args.flag,
+    decision: args.decision,
+    changeKind: args.changeKind,
+    actor: args.actor,
+    proposedBy: args.proposedBy,
+    primaryConfirmer: args.primaryConfirmer,
+    via: args.via,
+    nowMs: args.nowMs,
+  });
+  await appendAuditEventInput(client, tenantId, input);
+}
+
+// ---------------------------------------------------------------------------
 // Seed dictionaries for GET /api/rights/dictionaries (FR-8 / AC-16)
 // Day-1: served from seed data (ra-data.jsx constants); no DB needed.
 // ---------------------------------------------------------------------------
@@ -347,6 +436,23 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
 
+    // T-0044 rev-2 §9.6 — CONFIRM-REQUEST #2 (second authenticated confirm) on
+    // an existing semi-confirmed grant. The phase selector rides the SAME
+    // endpoint (no new route). The second approver's identity is the
+    // authenticated actor (extractActor) — NEVER a body field (R-AUTH).
+    if (b["phase"] === "confirm2") {
+      await handleSecondConfirm({
+        pool,
+        tenantId,
+        actor: actorId, // authenticated, NOT from body
+        changeRef: b["change_ref"],
+        changeKind: "grant",
+        nowMs,
+        res,
+      });
+      return;
+    }
+
     // Load admin context once — reused for freeform admission guard and gate
     // (R-3: hoisted to avoid double DB round-trip in genesis-owner freeform path).
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
@@ -402,10 +508,11 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     if (isFreeform) {
       delegable = false;
     }
-    const proposedBy =
-      typeof b["proposed_by"] === "string" ? b["proposed_by"] : null;
-    const confirmedBy =
-      typeof b["confirmed_by"] === "string" ? b["confirmed_by"] : null;
+    // T-0044 rev-2 R-AUTH (§9.2/§9.5, FE-2026-W24-0044-C): approver identity is
+    // taken ONLY from the authenticated actor (extractActor), NEVER from the
+    // request body. This closes the pre-existing `confirmed_by = b["confirmed_by"]`
+    // body-assertion (the proposer could name their own confirmer). proposed_by /
+    // confirmed_by below are derived from the gate's two-request flow, not the body.
     const validFrom =
       typeof b["valid_from"] === "number" ? b["valid_from"] : null;
     const validUntil =
@@ -449,59 +556,152 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", gateResult.reason);
     }
 
-    // Write: INSERT + audit in one transaction (ADR §2.4 / AC-12 / FF-6).
+    // Write: gate (T-0044) + INSERT + audit in one transaction (ADR §2.4/§3.8/§9.6).
     const newId = childGrant.id;
 
-    await withTenantTx(pool, tenantId, async (client) => {
-      // INSERT INTO choros."grant" — tenant_id is $1 (FF-4 / AC-20).
+    const gateOutcome = await withTenantTx(pool, tenantId, async (client) => {
+      // T-0044 §9.6 — fold the role's EFFECTIVE criticality before/after the
+      // proposed grant (compiled, NOT a row-diff: FR-4). The live DAO is T-0053;
+      // day-1 reads inside this transaction (coder seam, ADR §8).
+      const current = await loadRoleEffectiveGrants(client, tenantId, roleId);
+      const fromCrit = combineCriticality(current, nowMs);
+      const toCrit = combineCriticality([...current, childGrant], nowMs);
+      const addedReadGrants =
+        childGrant.operation === "read" ? [childGrant] : [];
+
+      // R-AUTH (§9.6): proposer-as-only-actor at req#1; approvers === [] (a
+      // second authenticated approver arrives in a SEPARATE confirm2 request).
+      const decision = dualControlDecision({
+        from: fromCrit,
+        to: toCrit,
+        proposedBy: actorId, // authenticated actor — NOT a body field
+        approvers: [],
+        addedReadGrants,
+      });
+
+      const reqReason = requirementReason({
+        from: fromCrit,
+        to: toCrit,
+        addedReadGrants,
+      });
+
+      if (decision.required_approvers === 1) {
+        // Routine (non-escalating) path: a single authenticated approver
+        // (≠ proposer) completes in one request. R-AUTH still binds (§9.5):
+        // confirmed_by is the authenticated actor, never b["confirmed_by"].
+        // Day-1: the requesting actor IS the single scoped approver; the
+        // proposer-exclusion is structurally satisfied because there is no
+        // separate proposer (proposed_by = NULL, confirmed_by = actor). A
+        // future propose/confirm split asserts actor !== proposer here.
+        await client.query(
+          `INSERT INTO choros."grant"
+             (tenant_id, id, role_id, resource_type, resource_facet,
+              operation, scope, "constraint", delegable, granted_by,
+              valid_from, valid_until, created_at,
+              proposed_by, confirmed_by, confirmed2_by)
+           VALUES ($1, $2, $3, $4, $5::jsonb,
+                   $6, $7::jsonb, $8::jsonb, $9, $10,
+                   $11, $12, $13,
+                   $14, $15, $16)`,
+          [
+            tenantId, newId, roleId, resourceType,
+            resourceFacet !== null ? JSON.stringify(resourceFacet) : null,
+            operation, JSON.stringify(scope),
+            constraint !== null ? JSON.stringify(constraint) : null,
+            delegable, grantedBy, validFrom, validUntil, nowMs,
+            null,       // proposed_by (no separate proposer day-1)
+            actorId,    // confirmed_by = authenticated actor (R-AUTH)
+            null,       // confirmed2_by stays NULL (routine → active)
+          ],
+        );
+
+        const flag = buildConfirmationFlag({
+          changeRef: newId,
+          diff: criticalityDiff(fromCrit, toCrit),
+          approvers: [actorId],
+          status: "satisfied",
+        });
+        await writeDualControlAuditEvent(client, tenantId, {
+          flag, decision, changeKind: "grant", actor: actorId,
+          proposedBy: actorId, primaryConfirmer: actorId,
+          via: "dual-control", nowMs,
+        });
+
+        // Existing grant.create audit (sibling event, same tx — NF-7).
+        await writeGrantAuditEvent(client, tenantId, {
+          kind: "grant.create",
+          actor: actorId,
+          subjectRoleId: roleId,
+          capability: { resourceType, operation, resourceFacet: resourceFacet ?? undefined },
+          scope: scope as unknown as ScopeElement,
+          confirmedBy: actorId,
+        }, nowMs);
+
+        return { state: "confirmed" as const, reason: reqReason };
+      }
+
+      // Escalating path (required_approvers === 2): the row lands SEMI-CONFIRMED
+      // (confirmed2_by IS NULL ⇒ NOT active). The critical expansion is NOT
+      // active until a SECOND authenticated approver confirms (§9.3/§9.6).
       await client.query(
         `INSERT INTO choros."grant"
            (tenant_id, id, role_id, resource_type, resource_facet,
             operation, scope, "constraint", delegable, granted_by,
-            valid_from, valid_until, created_at, proposed_by, confirmed_by)
+            valid_from, valid_until, created_at,
+            proposed_by, confirmed_by, confirmed2_by)
          VALUES ($1, $2, $3, $4, $5::jsonb,
                  $6, $7::jsonb, $8::jsonb, $9, $10,
-                 $11, $12, $13, $14, $15)`,
+                 $11, $12, $13,
+                 $14, $15, $16)`,
         [
-          tenantId,          // $1 — tenant_id leading (FF-4)
-          newId,             // $2
-          roleId,            // $3
-          resourceType,      // $4
-          resourceFacet !== null ? JSON.stringify(resourceFacet) : null, // $5
-          operation,         // $6
-          JSON.stringify(scope), // $7
-          constraint !== null ? JSON.stringify(constraint) : null, // $8
-          delegable,         // $9
-          grantedBy,         // $10
-          validFrom,         // $11
-          validUntil,        // $12
-          nowMs,             // $13
-          proposedBy,        // $14
-          confirmedBy,       // $15
+          tenantId, newId, roleId, resourceType,
+          resourceFacet !== null ? JSON.stringify(resourceFacet) : null,
+          operation, JSON.stringify(scope),
+          constraint !== null ? JSON.stringify(constraint) : null,
+          delegable, grantedBy, validFrom, validUntil, nowMs,
+          actorId,  // proposed_by = authenticated actor
+          actorId,  // confirmed_by = approver1 (authenticated)
+          null,     // confirmed2_by = NULL → semi-confirmed, NOT active
         ],
       );
 
-      // Audit emit (AC-12 / FF-1 / FF-6 — same transaction).
-      // GrantAuditEvent.scope is Scope=ScopeElement; freeform is recorded as-is.
-      const auditEvt: GrantAuditEvent = {
+      const flag = buildConfirmationFlag({
+        changeRef: newId,
+        diff: criticalityDiff(fromCrit, toCrit),
+        approvers: [actorId], // only the first authenticated confirmer so far
+        status: "pending",
+      });
+      await writeDualControlAuditEvent(client, tenantId, {
+        flag, decision, changeKind: "grant", actor: actorId,
+        proposedBy: actorId, primaryConfirmer: actorId,
+        via: "dual-control", nowMs,
+      });
+
+      // Existing grant.create audit (sibling event, same tx).
+      await writeGrantAuditEvent(client, tenantId, {
         kind: "grant.create",
         actor: actorId,
         subjectRoleId: roleId,
-        capability: {
-          resourceType,
-          operation,
-          resourceFacet: resourceFacet ?? undefined,
-        },
+        capability: { resourceType, operation, resourceFacet: resourceFacet ?? undefined },
         scope: scope as unknown as ScopeElement,
-        proposedBy: proposedBy ?? undefined,
-        confirmedBy: confirmedBy ?? undefined,
-      };
-      await writeGrantAuditEvent(client, tenantId, auditEvt, nowMs);
+        proposedBy: actorId,
+        confirmedBy: actorId,
+      }, nowMs);
+
+      return { state: "semi-confirmed" as const, reason: reqReason };
     });
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id: newId }));
+    res.end(
+      JSON.stringify({
+        id: newId,
+        state: gateOutcome.state,
+        ...(gateOutcome.state === "semi-confirmed"
+          ? { second_approver_required: true, reason: gateOutcome.reason }
+          : {}),
+      }),
+    );
   });
 
   // ---------- POST /api/grants/:id/revoke (FR-3 / AC-07/08/13) -------------
@@ -569,6 +769,20 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
 
+    // T-0044 rev-2 §9.6 — CONFIRM-REQUEST #2 on a semi-confirmed assignment.
+    if (b["phase"] === "confirm2") {
+      await handleSecondConfirm({
+        pool,
+        tenantId,
+        actor: actorId, // authenticated, NOT from body
+        changeRef: b["change_ref"],
+        changeKind: "assignment",
+        nowMs,
+        res,
+      });
+      return;
+    }
+
     const employeeId = b["employee_id"];
     if (typeof employeeId !== "string") {
       throw new HttpError(400, "VALIDATION", "employee_id is required");
@@ -597,10 +811,10 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "granted_by is required");
     }
 
-    const proposedBy =
-      typeof b["proposed_by"] === "string" ? b["proposed_by"] : null;
-    const confirmedBy =
-      typeof b["confirmed_by"] === "string" ? b["confirmed_by"] : null;
+    // T-0044 rev-2 R-AUTH: proposed_by/confirmed_by are derived from the gate's
+    // two-request flow (authenticated actor), NOT from the request body. The
+    // pre-existing `confirmed_by = b["confirmed_by"]` body-assertion is closed
+    // (FE-2026-W24-0044-C).
     const validFrom =
       typeof b["valid_from"] === "number" ? b["valid_from"] : null;
     const validUntil =
@@ -624,49 +838,82 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
     const newId = randomUUID();
 
-    await withTenantTx(pool, tenantId, async (client) => {
-      // INSERT INTO choros.role_assignment — tenant_id is $1 (FF-4 / AC-20).
+    const gateOutcome = await withTenantTx(pool, tenantId, async (client) => {
+      // T-0044 §9.6 / FR-7 — the dual-control gate guards the assignment confirm
+      // path too. An assignment does NOT change the role's grant set, so the
+      // EFFECTIVE criticality folds identically before/after (from ≡ to ⇒ no
+      // escalation): day-1 this is a routine one-approver path. The guard is
+      // wired honestly so a future role-criticality-bearing assignment change
+      // escalates through the SAME seam (no second enforcement point).
+      const roleGrants = await loadRoleEffectiveGrants(client, tenantId, roleId);
+      const fromCrit = combineCriticality(roleGrants, nowMs);
+      const toCrit = combineCriticality(roleGrants, nowMs);
+      const decision = dualControlDecision({
+        from: fromCrit,
+        to: toCrit,
+        proposedBy: actorId,
+        approvers: [],
+        addedReadGrants: [],
+      });
+
+      const isEscalating = decision.required_approvers === 2;
+      // INSERT — confirmed_by = authenticated actor (R-AUTH); confirmed2_by is
+      // NULL at req#1 (semi-confirmed if escalating; active if routine).
       await client.query(
         `INSERT INTO choros.role_assignment
            (tenant_id, id, employee_id, role_id, org_scope,
             valid_from, valid_until, source, granted_by,
-            proposed_by, confirmed_by, created_at, updated_at)
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5::jsonb,
                  $6, $7, $8, $9,
-                 $10, $11, $12, $12)`,
+                 $10, $11, $12, $13, $13)`,
         [
-          tenantId,             // $1 — tenant_id leading (FF-4)
-          newId,                // $2
-          employeeId,           // $3
-          roleId,               // $4
-          JSON.stringify(orgScope), // $5
-          validFrom,            // $6
-          validUntil,           // $7
-          source,               // $8
-          grantedBy,            // $9
-          proposedBy,           // $10
-          confirmedBy,          // $11
-          nowMs,                // $12 → created_at + updated_at
+          tenantId, newId, employeeId, roleId, JSON.stringify(orgScope),
+          validFrom, validUntil, source, grantedBy,
+          isEscalating ? actorId : null, // proposed_by
+          actorId,                        // confirmed_by (authenticated)
+          null,                           // confirmed2_by
+          nowMs,
         ],
       );
 
-      // Audit emit (AC-12 / FR-6 / FF-6 — same transaction).
-      // role_assignment creates use encodeAssignmentAuditEvent (T-0031 seam).
-      const auditEvt: AssignmentAuditEvent = {
+      const flag = buildConfirmationFlag({
+        changeRef: newId,
+        diff: criticalityDiff(fromCrit, toCrit),
+        approvers: [actorId],
+        status: isEscalating ? "pending" : "satisfied",
+      });
+      await writeDualControlAuditEvent(client, tenantId, {
+        flag, decision, changeKind: "assignment", actor: actorId,
+        proposedBy: actorId, primaryConfirmer: actorId,
+        via: "dual-control", nowMs,
+      });
+
+      // Existing assignment.create audit (sibling event, same tx — NF-7).
+      await writeAssignmentAuditEvent(client, tenantId, {
         kind: "assignment.create",
         actor: actorId,
         employeeId,
         roleId,
         orgScope,
-        proposedBy: proposedBy ?? undefined,
-        confirmedBy: confirmedBy ?? undefined,
-      };
-      await writeAssignmentAuditEvent(client, tenantId, auditEvt, nowMs);
+        proposedBy: isEscalating ? actorId : undefined,
+        confirmedBy: actorId,
+      }, nowMs);
+
+      return { state: isEscalating ? ("semi-confirmed" as const) : ("confirmed" as const) };
     });
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ id: newId }));
+    res.end(
+      JSON.stringify({
+        id: newId,
+        state: gateOutcome.state,
+        ...(gateOutcome.state === "semi-confirmed"
+          ? { second_approver_required: true }
+          : {}),
+      }),
+    );
   });
 
   // ---------- POST /api/role-assignments/:id/revoke (FR-5 / AC-11) ---------
@@ -735,6 +982,122 @@ function extractActor(req: import("node:http").IncomingMessage): string {
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// T-0044 rev-2 §9.6 — CONFIRM-REQUEST #2 (second authenticated confirm).
+//
+// The SECOND approver of a semi-confirmed criticality-escalating change. The
+// approver's identity is the authenticated actor (passed in from extractActor)
+// — NEVER a body field (R-AUTH). The write-gard loads proposed_by/confirmed_by
+// from the DB ROW (not the body) and enforces distinctness over the THREE
+// authenticated principals: actor2 ≠ proposed_by AND actor2 ≠ confirmed_by.
+// On success it sets confirmed2_by = actor2 (semi-confirmed → confirmed) and
+// appends a second dualcontrol.gate WORM event (via: dual-control.second-confirm).
+// ---------------------------------------------------------------------------
+
+async function handleSecondConfirm(args: {
+  pool: pg.Pool;
+  tenantId: string;
+  actor: string;
+  changeRef: unknown;
+  changeKind: "grant" | "assignment";
+  nowMs: number;
+  res: import("node:http").ServerResponse;
+}): Promise<void> {
+  const { pool, tenantId, actor, changeKind, nowMs, res } = args;
+  if (typeof args.changeRef !== "string") {
+    throw new HttpError(400, "VALIDATION", "change_ref is required for phase=confirm2");
+  }
+  const changeRef = args.changeRef;
+  assertUuidShape(changeRef, "change_ref");
+
+  const table = changeKind === "grant" ? 'choros."grant"' : "choros.role_assignment";
+
+  await withTenantTx(pool, tenantId, async (client) => {
+    // Load the target row's approver columns from the DB — NOT the body (R-AUTH).
+    const { rows } = await client.query<{
+      proposed_by: string | null;
+      confirmed_by: string | null;
+      confirmed2_by: string | null;
+    }>(
+      `SELECT proposed_by, confirmed_by, confirmed2_by
+         FROM ${table} WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [tenantId, changeRef],
+    );
+    if (rows.length === 0) {
+      throw new HttpError(404, "NOT_FOUND", `${changeKind} ${changeRef} not found`);
+    }
+    const row = rows[0];
+
+    // Already confirmed by a second approver → reject (idempotent guard).
+    if (row.confirmed2_by !== null) {
+      throw new HttpError(
+        409,
+        "DUAL_CONTROL_UNSATISFIED",
+        "already_confirmed",
+      );
+    }
+
+    // Distinctness over AUTHENTICATED ids: actor2 must differ from BOTH the
+    // proposer and the first confirmer (§9.6). A self-confirm is rejected.
+    if (actor === row.proposed_by || actor === row.confirmed_by) {
+      throw new HttpError(
+        409,
+        "DUAL_CONTROL_UNSATISFIED",
+        "self_confirm",
+      );
+    }
+
+    // Transition semi-confirmed → confirmed. The `AND confirmed2_by IS NULL`
+    // guard makes the UPDATE a no-op under a concurrent double-confirm race.
+    const upd = await client.query(
+      `UPDATE ${table}
+          SET confirmed2_by = $3${changeKind === "assignment" ? ", updated_at = $4" : ""}
+        WHERE tenant_id = $1 AND id = $2 AND confirmed2_by IS NULL`,
+      changeKind === "assignment"
+        ? [tenantId, changeRef, actor, nowMs]
+        : [tenantId, changeRef, actor],
+    );
+    if (upd.rowCount === 0) {
+      // Lost the race — another second approver landed first.
+      throw new HttpError(409, "DUAL_CONTROL_UNSATISFIED", "already_confirmed");
+    }
+
+    // The distinct approver set is now {confirmed_by(req#1), confirmed2_by(req#2)}
+    // — both authenticated, never body-asserted.
+    const approvers = [row.confirmed_by, actor].filter(
+      (a): a is string => typeof a === "string",
+    );
+    const flag = buildConfirmationFlag({
+      changeRef,
+      // The effective_diff was recorded on req#1's pending event; req#2 records
+      // the satisfied transition. The expansion bits are carried in the prior
+      // event; here we emit the second-confirm with an escalating diff marker.
+      diff: { expanded: { approve_or_transition: false, external_invoke: false, sensitive_read: false }, escalates: true },
+      approvers,
+      status: "satisfied",
+    });
+    await writeDualControlAuditEvent(client, tenantId, {
+      flag,
+      decision: {
+        required_approvers: 2,
+        distinct_ok: true,
+        satisfied: true,
+        reason: "satisfied",
+      },
+      changeKind,
+      actor,
+      proposedBy: row.proposed_by ?? actor,
+      primaryConfirmer: actor,
+      via: "dual-control.second-confirm",
+      nowMs,
+    });
+  });
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify({ id: changeRef, state: "confirmed" }));
 }
 
 async function assertRoleExists(
