@@ -62,19 +62,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# FF-T61-3 · AC-3 · no ${VAR:-default} for sensitive vars in prod overlay
+# FF-T61-3 · AC-3 · sensitive vars in prod overlay use required-form ${VAR:?msg}
+#
+# Two checks:
+#   (a) No ${VAR:-default} for sensitive vars — soft-default form is banned.
+#   (b) Every sensitive var reference uses ${VAR:?...} — hard-error form required.
+#       Without :?, docker compose emits a warning and proceeds with empty value,
+#       which is indistinguishable from a missing .env.prod (spec AC-3 / FR-3).
 # ---------------------------------------------------------------------------
-echo "--- FF-T61-3: no default-form creds in prod overlay ---"
+echo "--- FF-T61-3: required-form (:?) creds in prod overlay (no :- allowed) ---"
 if [[ ! -f "${COMPOSE_PROD}" ]]; then
   fail "docker-compose.prod.yml not found"
 else
+  # (a) Reject any ${VAR:-default} on sensitive lines
   BAD_DEFAULTS=$(grep -iE '(PASSWORD|SECRET|TOKEN|KEY)' "${COMPOSE_PROD}" | grep ':-' || true)
   if [[ -n "${BAD_DEFAULTS}" ]]; then
-    fail "prod overlay contains \${VAR:-default} for sensitive vars:"
+    fail "prod overlay contains \${VAR:-default} for sensitive vars (use \${VAR:?msg} instead):"
     echo "${BAD_DEFAULTS}"
     ERRORS=$((ERRORS + 1))
   else
     pass "prod overlay has no \${VAR:-default} for PASSWORD/SECRET/TOKEN/KEY"
+  fi
+
+  # (b) Require ${VAR:?...} for all sensitive var references (hard-error form)
+  # Find lines with sensitive keywords that have a ${VAR...} reference but NOT :?
+  MISSING_REQUIRED=$(grep -iE '(PASSWORD|SECRET|TOKEN|KEY)' "${COMPOSE_PROD}" \
+    | grep -E '\$\{[A-Za-z0-9_]+[^:}]*\}' \
+    | grep -v ':\?' || true)
+  if [[ -n "${MISSING_REQUIRED}" ]]; then
+    fail "prod overlay has sensitive vars NOT in required-form \${VAR:?msg} (hard-fail on missing .env.prod):"
+    echo "${MISSING_REQUIRED}"
+    ERRORS=$((ERRORS + 1))
+  else
+    pass "prod overlay uses required-form \${VAR:?msg} for all sensitive vars"
   fi
 fi
 

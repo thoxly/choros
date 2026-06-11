@@ -44,13 +44,19 @@ COPY --from=app-builder /app/package*.json ./
 # Web static assets served by src/http/static.ts
 COPY --from=web-builder /app/web/dist ./web/dist/
 
-# Migrations run at app startup (silo-upgrade semantics, tenancy ADR §5).
-# server.ts calls migrations/run.mjs when DATABASE_URL is set.
+# Migrations run at container start via entrypoint (silo-upgrade semantics, ADR §1.3).
+# entrypoint: node migrations/run.mjs && exec node dist/index.js
+# On migration failure → container exits non-zero (intentional: silo-upgrade-by-design).
 COPY migrations/ ./migrations/
+
+# Container entrypoint (runs migrations before app start)
+COPY ops/docker-entrypoint.sh ./ops/docker-entrypoint.sh
+RUN chmod +x /app/ops/docker-entrypoint.sh
 
 # Production-only deps
 RUN npm ci --omit=dev
 
 EXPOSE 3000
 
+ENTRYPOINT ["/app/ops/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

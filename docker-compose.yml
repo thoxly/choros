@@ -68,7 +68,10 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_MGMT_PORT:-9000}/health/ready || exit 1"]
+      # KC 25 image (quay.io/keycloak/keycloak:25.0.6) ships without curl.
+      # Use bash /dev/tcp to hit the management /health/ready endpoint (no extra deps).
+      # /health/ready returns HTTP 200 + JSON body; we check status line contains "200".
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KEYCLOAK_MGMT_PORT:-9000} && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <(timeout 4 cat <&3) && exec 3>&-"]
       interval: 5s
       timeout: 5s
       retries: 24
@@ -115,7 +118,9 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null --user=admin --password=${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw} http://localhost:8080/flowable-rest/service/management/engine || exit 1"]
+      # Flowable 7.1.0 ships BusyBox 1.36.1 wget which does NOT support --password=.
+      # Use URL-embedded basic-auth (user:pass@host) — supported by all wget variants.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://admin:${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}@localhost:8080/flowable-rest/service/management/engine || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 24
@@ -152,7 +157,9 @@ services:
       flowable:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:${PORT:-3000}/health || exit 1"]
+      # node:20-slim has no wget; use the built-in Node.js fetch API (Node 18+).
+      # fetch() is available globally in Node 20. Exit 0 on HTTP 200, 1 otherwise.
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:' + (process.env.PORT||'3000') + '/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))\""]
       interval: 5s
       timeout: 5s
       retries: 24
