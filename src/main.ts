@@ -24,12 +24,23 @@ import {
   type LifecycleBridgeDeps,
   type LifecycleBridgeHandle,
 } from "./server/lifecycle-bridge.js";
+import { makeKeyedDigest, type KeyedDigest } from "./core/keyed-digest.js";
 
 export interface MainHandle {
   /** The listening HTTP server (undefined when listen is suppressed in tests). */
   server?: http.Server;
   /** The lifecycle bridge handle (no-op when degraded). */
   lifecycle: LifecycleBridgeHandle;
+  /**
+   * T-0118 (E4.3-fu): the resolver-deps fragment assembled at the composition
+   * root. Currently carries the per-tenant `KeyedDigest` port bound to the silo
+   * secret `CHOROS_MASK_DIGEST_KEY` — the request-path `makeGrantResolver`
+   * assembly (not yet wired in this entry, ADR §4.4 NOTE) spreads this into its
+   * `ResolverDeps`. `keyedDigest` is ALWAYS present (the factory honest-degrades
+   * to a digest()⇒undefined instance when the secret is absent), so `hash`
+   * fields fail closed to `drop` — never keyless, never raw (AC-6).
+   */
+  resolverDeps: { keyedDigest: KeyedDigest };
   /** Graceful shutdown: stops the bridge loops and closes the server. */
   stop: () => void;
 }
@@ -73,6 +84,26 @@ function buildLifecycleDepsFromEnv(env: NodeJS.ProcessEnv): {
 }
 
 /**
+ * T-0118 (E4.3-fu) — read the per-silo masking digest secret at the composition
+ * root (the ONLY `process.env` boundary; never under `src/core/`, FF-DC9) and
+ * bind it into a `KeyedDigest`. Honest-degrade, mirroring
+ * `buildLifecycleDepsFromEnv`: when `CHOROS_MASK_DIGEST_KEY` is absent/empty the
+ * factory returns a `KeyedDigest` whose `digest()` always yields `undefined` ⇒
+ * every `hash` field fails closed to `drop` (AC-6) — the server still starts, no
+ * keyless digest is ever emitted, raw is never revealed. The secret is decoded
+ * as hex when it is a valid even-length hex string, else base64 — matching the
+ * `.env.prod.example` guidance (`openssl rand -hex 32`). The key is read here
+ * ONLY and is NEVER logged.
+ */
+function buildKeyedDigestFromEnv(env: NodeJS.ProcessEnv): KeyedDigest {
+  const raw = env["CHOROS_MASK_DIGEST_KEY"];
+  if (raw === undefined || raw === "") return makeKeyedDigest(undefined);
+  const isHex = raw.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(raw);
+  const key = Buffer.from(raw, isHex ? "hex" : "base64");
+  return makeKeyedDigest(key.length === 0 ? undefined : key);
+}
+
+/**
  * Start the choros process: HTTP server + lifecycle-audit bridge. Pure composition
  * — no module-level side effects (importing this file starts nothing).
  */
@@ -104,9 +135,14 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   // Degraded without FLOWABLE_BASE_URL / DATABASE_URL: returns a no-op handle.
   const lifecycle = start(lifecycleDeps, env);
 
+  // T-0118: bind the silo masking secret into the KeyedDigest port at the
+  // composition root (the only process.env boundary). Honest-degrade when absent.
+  const keyedDigest = buildKeyedDigestFromEnv(env);
+
   return {
     server,
     lifecycle,
+    resolverDeps: { keyedDigest },
     stop: () => {
       lifecycle.stop();
       server?.close();

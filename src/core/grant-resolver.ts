@@ -50,6 +50,7 @@ import {
   deriveClearance,
   readFacetVersion,
 } from "./data-classification.js";
+import { type KeyedDigest } from "./keyed-digest.js";
 import {
   type EffectSource,
   type EffectDeclaration,
@@ -134,6 +135,19 @@ export interface ResolverDeps {
    * (mirrors GrantSource/RecordSource/ClassificationSource/EffectSource).
    */
   sod?: SodSource;
+  /**
+   * T-0118 (E4.3-fu) — per-tenant keyed-digest capability that closes the
+   * `hash`-transform equality-oracle (TEST T-0033 `F-1-hash-equality-oracle`).
+   * OPTIONAL and ADDITIVE (mirrors `classifications`/`effects`/`sod`). When
+   * present, a field that resolves to the `hash` transform is masked with a
+   * secret-keyed, per-`(tenant, field)` digest (HMAC-SHA256 behind the port —
+   * the impure crypto lives in `keyed-digest.ts`, never in the pure core). When
+   * ABSENT (pre-T-0118 wiring) the `hash` field FAILS CLOSED to `drop` — the
+   * keyless djb2 is removed as a reachable masking output (D-4). The secret is
+   * provisioned at the composition root from `CHOROS_MASK_DIGEST_KEY`
+   * (ops-custodied silo secret — never read under `src/core/`).
+   */
+  keyedDigest?: KeyedDigest;
   now?: () => number;
 }
 
@@ -219,11 +233,25 @@ function buildMaskContext(
   const facetSchemaVersion = readFacetVersion(handle.facet);
   const lookup = source.getClassifications(resourceType, facetSchemaVersion);
   const clearance: Clearance = deriveClearance(covering);
+  // T-0118: thread the field/tenant identity + the bound keyed-digest fn into
+  // the MaskContext so the `hash` masking path is per-tenant KEYED (closes the
+  // cross-tenant equality-oracle). `tenantId` is read from the already-validated
+  // `handle.tenantId` (=== subject.tenantId, checked above) — NOT re-fetched (C-5).
+  // `keyedDigest` is ALWAYS passed through: absent ⇒ the `hash` field fails closed
+  // to `drop` inside `maskFields` (D-4 / AC-6), even when `classifications` is
+  // present. The port returning `undefined` (no key for the tenant) likewise
+  // drops (D-3 / AC-5). Never the keyless digest, never raw.
+  const keyedDigest = deps.keyedDigest;
   return {
     governed: lookup.governed,
     rows: lookup.rows,
     clearance,
     facetSchemaVersion,
+    resourceType,
+    tenantId: handle.tenantId,
+    keyedDigest: keyedDigest
+      ? (input) => keyedDigest.digest(input)
+      : undefined,
   };
 }
 
