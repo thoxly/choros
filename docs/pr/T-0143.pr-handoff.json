@@ -1,0 +1,116 @@
+{
+  "task_id": "T-0143",
+  "status": "pr_open",
+  "branch": "task/T-0143-keyed-digest-request-path",
+  "merge_target": "dev",
+  "base_commit": "353ec791d997d0e5325ea660055188a0cf3a845d",
+  "head_commit": "20f7c5a23fd80ea5bc6c4302772fbc4253a301eb",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Wire the T-0118 KeyedDigest port from the startMain composition root into the request-path ResolverDeps. A single resolverDepsObj allocation (src/main.ts:134) is passed to createServer() AND returned on MainHandle.resolverDeps (object identity, R-2 fix). The purity fitness check (keyed-digest-core-purity.sh) is scoped to 3 masking modules with positive+negative self-tests (R-1 fix). createServer/buildRouter typed Partial<ResolverDeps> — no as-unknown-as cast (R-3 fix). 9/9 AC covered; 908/908 tests pass; 43/43 fitness checks green. Review approved (iteration 2, d7655fb). Dev gap = 8 commits (T-0145/T-0119/T-0039); rebase before merge is orchestrator's step.",
+  "commits": [
+    {
+      "sha": "1fa425d",
+      "phase": "SPEC",
+      "message": "T-0143 SPEC: wire keyedDigest into request-path ResolverDeps"
+    },
+    {
+      "sha": "c87d1a5",
+      "phase": "DESIGN",
+      "message": "T-0143 DESIGN: keyedDigest request-path seam ADR"
+    },
+    {
+      "sha": "3577e15",
+      "phase": "BUILD",
+      "message": "T-0143 BUILD: wire keyedDigest into request-path ResolverDeps"
+    },
+    {
+      "sha": "30545c4",
+      "phase": "REVIEW",
+      "message": "T-0143 REVIEW: changes_requested (R-1 broken fitness check, R-2 false object-identity, R-3 as-unknown-as masks partial ResolverDeps)"
+    },
+    {
+      "sha": "d7655fb",
+      "phase": "BUILD",
+      "message": "T-0143 BUILD-fix: working purity check + true object identity + honest seam type (review R-1/R-2/R-3)"
+    },
+    {
+      "sha": "20f7c5a",
+      "phase": "REVIEW",
+      "message": "T-0143 RE-REVIEW: approved (R-1/R-2/R-3 closed, verified adversarially)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "iteration": 2,
+      "fix_commit": "d7655fb",
+      "blocking_resolved": ["R-1", "R-2", "R-3"],
+      "nits_resolved": ["R-4"],
+      "nits_informational": ["R-5"],
+      "artifacts": [
+        "docs/reviews/T-0143.review.md",
+        "docs/design/T-0143.review.contract.json"
+      ]
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_deterministic": 908,
+      "passed": 908,
+      "failed": 0,
+      "ac_coverage": "9/9",
+      "fitness_checks": "43/43",
+      "tested_commit": "20f7c5a",
+      "artifacts": [
+        "docs/test-reports/T-0143-keyed-digest-request-path.test-report.md",
+        "docs/design/T-0143.test-report.contract.json"
+      ]
+    },
+    "ci_green": {
+      "tsc_noEmit": "pass (0 errors)",
+      "eslint_src": "pass (2 pre-existing no-console warnings, 0 errors)",
+      "vitest_run": "pass (908/908 tests, 5 skipped integration)",
+      "fitness": "pass (43/43 static checks, incl. FF-T143-5 with self-tests)"
+    }
+  },
+  "files_changed": [
+    "ci/checks/keyed-digest-core-purity.sh",
+    "docs/design/T-0143-keyed-digest-request-path.adr.md",
+    "docs/design/T-0143.adr.contract.json",
+    "docs/design/T-0143.review.contract.json",
+    "docs/design/T-0143.test-report.contract.json",
+    "docs/reviews/T-0143.review.md",
+    "docs/specs/T-0143-keyed-digest-request-path.spec.md",
+    "docs/specs/T-0143.spec.contract.json",
+    "docs/pr/T-0143.pr-handoff.json",
+    "docs/test-reports/T-0143-keyed-digest-request-path.test-report.md",
+    "package.json",
+    "src/__tests__/keyed-digest-e2e.test.ts",
+    "src/main.ts",
+    "src/server.ts"
+  ],
+  "deviations_from_adr": [
+    "ADR §4.3 corrected post-review (R-3): resolverDepsObj typed as { keyedDigest: KeyedDigest }, not ResolverDeps (honest — per-request sources assembled at route). createServer/buildRouter accept Partial<ResolverDeps>. ADR §9 documents the amendment. No semantic deviation from spec requirements."
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "rebase_note": "dev has moved 8 commits ahead (T-0145 tenant-table counter, T-0119 docs-only, T-0039 merge). Low-conflict risk — no overlap in file set. Orchestrator rebases before merge per D-056.",
+    "founder_gate_GT-3": "dev→main promotion is founder-gated (GT-3). What to verify: (1) src/main.ts:134 allocates a single resolverDepsObj passed to createServer() and returned on MainHandle.resolverDeps (same allocation — R-2 fix); (2) src/server.ts createServer/buildRouter accept Partial<ResolverDeps>; (3) ci/checks/keyed-digest-core-purity.sh ships positive+negative self-tests; (4) keyed-digest-e2e.test.ts: 64-char hex with key, absent ssn without key; (5) npm run ci exits 0.",
+    "infra_changes": "No new migrations, no docker-compose changes, no new DB tables. Additive wiring in src/main.ts and src/server.ts only."
+  },
+  "backlog_candidates": [
+    {
+      "source": "ADR §9 R-1 / keyed-digest-core-purity.sh SCOPE NOTE",
+      "title": "Full no-env-in-core sweep: push flowable-client.ts env reads to composition root",
+      "description": "src/core/flowable-client.ts:264/269/274 reads process.env[FLOWABLE_BASE_URL/USER/PASSWORD] directly. T-0143 could not scope its purity check to all of src/core/ because of these pre-existing reads. A separate task should refactor flowable-client.ts to accept its config via injected constructor parameters (or an options object), with env reads pushed up to src/main.ts. This completes the no-env-in-core invariant for all modules under src/core/.",
+      "files": ["src/core/flowable-client.ts", "src/main.ts", "ci/checks/keyed-digest-core-purity.sh"],
+      "priority": "medium"
+    }
+  ],
+  "friction_events": []
+}

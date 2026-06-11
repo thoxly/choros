@@ -1,0 +1,73 @@
+{
+  "task_id": "T-0143",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 908,
+    "passed": 908,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/keyed-digest-e2e.test.ts > FF-T143-2 > keyedDigest.digest() returns 64-char hex when CHOROS_MASK_DIGEST_KEY is set",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/keyed-digest-e2e.test.ts > FF-T143-3 > resolveFor with CHOROS_MASK_DIGEST_KEY set: restricted ssn field is a 64-char lowercase hex string",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/keyed-digest-e2e.test.ts > FF-T143-4 > resolveFor without CHOROS_MASK_DIGEST_KEY: restricted ssn field is ABSENT (honest degrade)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/__tests__/hash-oracle.test.ts (14 tests, all pass)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "src/__tests__/data-classification.test.ts (34 tests) + src/__tests__/grant-resolver.test.ts (48 tests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/data-classification-isolation.sh > FF-DC9: no forbidden imports (no process.env in core)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "src/__tests__/keyed-digest-e2e.test.ts > FF-T143-2 (both sub-tests: 64-char hex with key, undefined without key)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "ci/checks/keyed-digest-core-purity.sh > FF-T143-5 (static grep + positive/negative self-tests)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "src/__tests__/main-wired-entry.test.ts (1 test, passes unchanged)",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "dev_gap": {
+    "merge_base": "353ec791d997d0e5325ea660055188a0cf3a845d",
+    "dev_head": "465d6aeaa9c4b957f58f763bd5485f61b6ea88df",
+    "gap_commits": 8,
+    "gap_tasks": ["T-0145 (tenant-table counter)", "T-0119 (docs-only)", "T-0039 (merge)"],
+    "conflict_risk": "low — gap commits do not touch any T-0143 modified files (src/main.ts, src/server.ts, src/__tests__/keyed-digest-e2e.test.ts, ci/checks/keyed-digest-core-purity.sh)",
+    "rebase_required_before_merge": true,
+    "rebase_decision": "orchestrator"
+  },
+  "ci_run": {
+    "tsc": "exit 0, 0 errors",
+    "eslint": "exit 0, 2 pre-existing warnings (no-console), 0 errors",
+    "fitness": "43/43 checks PASS incl. FF-T143-5 with self-tests",
+    "vitest": "908 passed / 5 skipped / 0 failed (46 test files)"
+  }
+}
