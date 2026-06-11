@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0131",
+  "status": "ready",
+  "decision": "Simulated time in Flowable OSS 7.1.0 draft-runs: use per-timer REST action=move (POST /management/timer-jobs/{id} with {\"action\":\"move\"}, HTTP 204) to forcibly fire individual timer jobs. This is the only viable REST mechanism — no global Clock API is exposed via REST (GET/POST/PUT /management/clock all return 404), and action=reschedule is broken for duration-type timers in 7.1.0. Mechanism is per-instance (job ID scoped), does not affect parallel draft runs, and preserves BPMN execution semantics. Pattern for simulation_run mode-2: GET /management/timer-jobs?processInstanceId={id} to find job by elementId, POST action=move, poll for expected next state (async executor lag ~5-10s). Global clock manipulation (Flowable ClockUtil/TestClockUtil) is Java-internal only and unavailable across the REST boundary (T-0057 TS-only constraint) — deferred to Stage-2 with custom job runner. Direct SQL duedate_ update works as a fallback but requires Postgres access outside the REST boundary and is not recommended for day-1.",
+  "rejected_alternatives": [
+    {
+      "option": "Global Clock API via REST (GET/POST /management/clock)",
+      "why_not": "Does not exist in Flowable 7.1.0 OSS REST image. Confirmed experimentally: all methods return 'No endpoint'. Java-only API (ProcessEngineConfiguration#setClock / ClockUtil) is not exposed via REST boundary."
+    },
+    {
+      "option": "action=reschedule to change dueDate",
+      "why_not": "Returns HTTP 400 'Invalid reschedule timer action. Reschedule timer actions must have a valid due date.' for all tested date formats (ISO 8601 with Z, +0000, without Z, epoch ms, timerDuration, timerCycle). Not functional for duration-type timers in Flowable 7.1.0 OSS REST."
+    },
+    {
+      "option": "Direct SQL UPDATE act_ru_timer_job.duedate_ to past",
+      "why_not": "Works (verified experimentally: UPDATE 1, async executor fires ~10s later) but requires direct Postgres access outside REST boundary, bypasses Flowable's optimistic locking (rev_ column), and is not a sanctioned public API. Acceptable as emergency fallback; not recommended for day-1 simulation_run."
+    },
+    {
+      "option": "Stage-2 custom job runner with controllable ClockUtil",
+      "why_not": "Full global clock manipulation requires embedding Flowable as a library with custom ProcessEngineConfiguration (not the REST image), or a Flowable Spring Boot test profile. Correct for real '3 days per second' simulation at scale, but out-of-scope for day-1 per T-0130 §11 #9."
+    }
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-SPIKE-1",
+      "rule": "action=move on a timer-job for a specific process instance returns HTTP 204 and causes the timer boundary event to fire (escalation task appears), without affecting timer jobs of other concurrently running instances",
+      "ci_check": "spikes/flowable-oss/: disposable spike harness — not a registered fitness function. Verification: deploy timerBoundaryTest2 BPMN, start instances A and B, POST action=move on A's timer job only, assert A has escalation task, B does not. Documented experimentally in docs/spikes/T-0131-simulated-time.md Experiment Q2/Q3."
+    }
+  ],
+  "adr_artifact_path": "docs/spikes/T-0131-simulated-time.md",
+  "escalation": ""
+}
