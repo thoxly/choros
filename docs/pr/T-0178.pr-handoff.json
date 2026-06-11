@@ -1,0 +1,101 @@
+{
+  "task_id": "T-0178",
+  "status": "pr_open",
+  "branch": "task/T-0178-report-page-crud",
+  "merge_target": "dev",
+  "base_commit": "4a2397a",
+  "head_commit": "a1f2696",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "report_page CRUD + promote API + dep registration (PDP-gated, T-0121d). POST /api/report-pages creates tier='draft' with atomic dep registration (Floor-1 auto-derived from page_def; Floor-2 from deps[]). checkReportPageDepFields gate — 422 on bad field_key. POST /api/report-pages/:id/promote — human-only (agent → 403 FORBIDDEN_AGENT_SELF_PROMOTE) + PDP mgmt_object:report_page/promote + stale-dep gate (409 STALE_DEPENDENCIES). GET/PATCH/DELETE CRUD. Audit events via single appendAuditEvent (report_page.authored, report_page.promoted, report_page.deleted). Tenant isolation via withTenantTx + T-0144 BEGIN-before-SET-LOCAL discipline. Fitness check report-page-crud-isolation.sh (FF-NO-2ND-AUTHZ, FF-DEPS, FF-FLOOR-GUARD, HUMAN-ONLY-PROMOTE, T-0087, T-0144, NF-7). 22 no-DB unit tests + 10 live-DB CRUD probes + 3 live-DB agent-gate probes. Pre-test lint fix: removed unused imports vi + PageDepInput from src/__tests__/report-pages.test.ts. Eslint .bin symlink restored in worktree (non-symlink copy). All CI gates green: tsc 0 errors, eslint 0 errors, fitness all PASS, vitest 1354/1354 passed, fitness:db 572/572 passed. RE-REVIEW approved (R-1/R-2/R-3 all closed). ADR T-0121 covered through T-0121d; residual §9 (T-0121e+) in next slices.",
+  "commits": [
+    {
+      "sha": "74dd87e",
+      "phase": "SPEC",
+      "message": "spec(T-0178): report_page CRUD + author/promote API + dep registration (PDP-gated)"
+    },
+    {
+      "sha": "3ea741f",
+      "phase": "BUILD",
+      "message": "feat(T-0178): report_page CRUD + promote API + dep registration (PDP-gated, T-0121d)"
+    },
+    {
+      "sha": "4752352",
+      "phase": "REVIEW",
+      "message": "T-0178 REVIEW: changes_requested — AC-12 (FORBIDDEN_AGENT_SELF_PROMOTE) unit test is a no-op, live-DB probe absent"
+    },
+    {
+      "sha": "a21d165",
+      "phase": "FIX",
+      "message": "T-0178 fix: real agent-gate 403 live test (R-1) + Floor-2/FLOOR_MISMATCH probes (R-2/R-3)"
+    },
+    {
+      "sha": "a1f2696",
+      "phase": "RE-REVIEW",
+      "message": "T-0178 RE-REVIEW: approved — all findings resolved (R-1 blocking AC-12 live, R-2/R-3 nits)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "a1f2696",
+      "findings_resolved": [
+        "R-1 (blocking) — AC-12: FORBIDDEN_AGENT_SELF_PROMOTE unit test was a no-op (accept-any-5-status); live-DB probe absent. Fixed: report_page_agent_gate.test.ts added with a-recon (kind=agent) → toBe(403) + code check + tier='draft' post-gate assertion.",
+        "R-2 (nit) — AC-3: Floor-2 + deps[] body no live-DB probe. Fixed: live-DB Floor-2 + deps[] → 201 + 2 dep rows verified in report_page_agent_gate.test.ts.",
+        "R-3 (nit) — AC-17: FLOOR_MISMATCH no live-DB probe. Fixed: live-DB floor=2 + Floor-1 page_def → 400 FLOOR_MISMATCH strict toBe in report_page_agent_gate.test.ts."
+      ],
+      "findings_nit": [],
+      "artifact": "docs/design/T-0178.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1926,
+      "passed": 1926,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "24/24",
+      "fitness_static": "PASS — all checks green including report-page-crud-isolation.sh (FF-NO-2ND-AUTHZ, FF-DEPS, FF-FLOOR-GUARD, HUMAN-ONLY-PROMOTE, T-0087, T-0144, NF-7)",
+      "fitness_db": "572/572 passed — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros, 39 files; report_page 37/37, report_page_crud 10/10, report_page_agent_gate 3/3",
+      "tested_commit": "a1f2696",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — pre-existing cosmetic no-console warnings, 0 errors (after removing unused vi+PageDepInput imports)",
+        "fitness_static_checks": "PASS — all checks green, report-page-crud-isolation.sh fully green",
+        "vitest_unit": "1354/1354 passed, 6 skipped (flowable integration offline) — 66 test files",
+        "fitness_db_tests": "572/572 passed — report_page.test.ts 37/37, report_page_crud.test.ts 10/10, report_page_agent_gate.test.ts 3/3, cross_tenant.test.ts 115/115, all other db suites green"
+      },
+      "artifact": "docs/test-reports/T-0178.test-report.md",
+      "contract_artifact": "docs/design/T-0178.test-report.contract.json"
+    }
+  },
+  "adr_coverage_note": {
+    "adr": "T-0121",
+    "covered_through": "T-0121d",
+    "this_task_slice": "§6–§9.4 — report_page CRUD + author/promote API + dep registration + PDP gates",
+    "residual": "§9 T-0121e+: bundle-coherence report-page-deps check, MCP-tool seed author_report_page, Floor-1 server-side aggregate renderer, Floor-2 RLS-gated data API, Floor-2 static analysis — next slices"
+  },
+  "deferred_nits": [],
+  "files_changed": [
+    "src/http/report-pages.ts",
+    "src/__tests__/report-pages.test.ts",
+    "src/server.ts",
+    "ci/checks/report-page-crud-isolation.sh",
+    "ci/checks/db/report_page_crud.test.ts",
+    "ci/checks/db/report_page_agent_gate.test.ts",
+    "package.json",
+    "docs/specs/T-0178-report-page-crud.spec.md",
+    "docs/specs/T-0178.spec.contract.json",
+    "docs/design/T-0178.review.contract.json",
+    "docs/reviews/T-0178.review.md",
+    "docs/test-reports/T-0178.test-report.md",
+    "docs/design/T-0178.test-report.contract.json",
+    "docs/pr/T-0178.pr-handoff.json"
+  ]
+}
