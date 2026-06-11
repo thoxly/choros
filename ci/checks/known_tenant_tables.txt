@@ -26,3 +26,4 @@ instance_budget
 agent_budget
 reservation
 spend_ledger
+substitution_rule

@@ -449,6 +449,35 @@ async function seedSpendLedger(
   );
 }
 
+async function seedSubstitutionRule(
+  c: pg.Client,
+  tenantId: string,
+  absentEmployeeId: string,
+  roleId: string,
+): Promise<void> {
+  // Substitute must differ from absent (CHECK constraint). Create a dedicated
+  // substitute employee inline (no position FK needed for kind='agent').
+  const subId = uuid();
+  const slug = `ct-sub-${subId.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.employee (tenant_id,id,position_id,kind,slug,display_name,created_at,updated_at)
+     VALUES ($1,$2,NULL,'agent',$3,$3,0,0) ON CONFLICT DO NOTHING`,
+    [tenantId, subId, slug],
+  );
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.substitution_rule
+       (tenant_id, id, absent_employee_id, substitute_employee_id, role_id,
+        org_scope, ttl_grant_id, non_inheritable_excluded, proposed_by, confirmed_by,
+        valid_from, valid_until, source, created_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5,
+             '{"kind":"global"}'::jsonb, NULL, TRUE, NULL, 'ct-seed',
+             NULL, NULL, 'ct-test', 'ct-seed', 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, absentEmployeeId, subId, roleId],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Seed dispatcher: routes to the correct seed function per table name.
 // Returns the seeded row id.
@@ -643,6 +672,15 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
       const ibId  = tenantId === TENANT_A ? seedState.instanceBudgetIdA : seedState.instanceBudgetIdB;
       await seedSpendLedger(c, tenantId, resId, empId, ibId);
+      break;
+    }
+    case 'substitution_rule': {
+      // T-0035 — requires seeded employee (absent_employee_id FK) + role (role_id FK).
+      // KNOWN_TENANT_TABLES order (…, employee, role, …, substitution_rule) guarantees
+      // both are seeded before this case runs.
+      const empId = tenantId === TENANT_A ? seedState.empIdA : seedState.empIdB;
+      const roleId = tenantId === TENANT_A ? seedState.roleIdA : seedState.roleIdB;
+      await seedSubstitutionRule(c, tenantId, empId, roleId);
       break;
     }
     default:
