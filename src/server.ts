@@ -28,6 +28,7 @@ import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
 import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
+import { registerReportPageRoutes } from "./http/report-pages.js";
 
 const { Pool } = pg;
 
@@ -269,6 +270,9 @@ function buildRouter(
   if (grantsPool) {
     registerNotificationRoutes(router, grantsPool);
   }
+
+  // Register report_page CRUD + promote routes (T-0178 T-0121d).
+  registerReportPageRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
