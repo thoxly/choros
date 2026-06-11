@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0176",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/report-page-compat.ts:57",
+      "issue": "DepViolation.message is present in implementation but not listed in ADR §3 minimal type definition (which specifies only type, registryDefId, fieldKey). The field is additive and mirrors BindingViolation per NF-1, but the spec FR-3 also omits it, leaving a documentation gap.",
+      "suggestion": "When ADR/spec is updated for T-0177, explicitly add 'message: string' to ADR §3 DepViolation interface to close documentation gap. No code change needed."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/__tests__/report-page-compat.test.ts",
+      "issue": "classifyReportPageFloor filter sub-paths for missing filter.field_key and missing filter.value are not explicitly tested. Implementation handles both correctly (lines 199-207) but test coverage is incomplete for these internal branches.",
+      "suggestion": "Add two test cases: (1) filter:{op:'=', value:42} with no field_key → Floor-2; (2) filter:{field_key:'f', op:'='} with no value → Floor-2. Nit — does not block T-0177."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
