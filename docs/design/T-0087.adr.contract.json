@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0087",
+  "status": "ready",
+  "decision": "Tier — единственная joinless колонка `tier text NOT NULL DEFAULT 'draft' CHECK (tier IN ('draft','published'))` на каждой зарегистрированной (через `ci/checks/tier_bearing_tables.txt`) конфиг- и data-таблице в одном silo. Запись в published запрещена двумя одновременно держащимися механизмами (как append-only T-0016): (a) app-write-path отклоняет не-promote мутацию published-строки `409 PUBLISHED_LOCKED`; (b) `BEFORE UPDATE/DELETE` триггер на конфиг-таблицах отклоняет мутацию published-строки, кроме как внутри санкционированной promote-транзакции (txn-local GUC `choros.promoting='1'`, который ставит только `promoteTier`). Promote — единственный переход draft→published, исполняемый только `promoteTier()` через `POST /api/artifacts/:id/promote`: config-only (флипает только `tier` артефакт-строки, НЕ копирует record/instance/audit через тир-границу — FR-3), атомарен со своим audit-событием (NF-2/NF-3), human-gated через ПЕРЕИСПОЛЬЗОВАНИЕ существующего аутентифицированного claim `actor_type` ('human'|'agent') — agent → `403 FORBIDDEN_AGENT_SELF_PROMOTE` (AC-7, без новой authority-модели). Published-контекст читает по умолчанию `tier='published'` (draft-данные не всплывают в prod — FR-5/AC-6). Право promote — обычный `grant` (`mgmt_object:tier_promote`, `operation='transition'`); audit — обычная строка `audit_event` `type='artifact.promoted'` через канонический `appendAuditEventInput`. Ни новой таблицы тиров, ни новой authority/audit-подсистемы, ни второго физического контура (NF-4/FR-7/AC-8). Спецификационные AC-таблицы (process_definition/form_definition/dmn_table/nav_config) ещё не существуют — tier фиксируется как РЕЕСТРОВАЯ конвенция + forward fitness-гейт (FF-1), материализованная day-1 на application/registry_def/grant/record; object_schema ≡ registry_def.record_schema.",
+  "rejected_alternatives": [
+    {"option": "Создать недостающие конфиг-таблицы (process_definition/form_definition/dmn_table/nav_config) в T-0087, чтобы навесить tier", "why_not": "Это построение дельты T-0082/T-0071/E12 и изобретение схемы вне мандата T-0087. Спека §8 ограничивает T-0087 моделью тиров и контрактом чтения/записи, не инвентарём артефактов. Решение: tier = зарегистрированная конвенция + forward fitness-гейт (FF-1); таблицы, добавляемые E12 позже, обязаны нести колонку под CI."},
+    {"option": "Отдельная таблица artifact_tier/environment, ключённая по artifact id", "why_not": "Нарушает NF-1 (join на каждой проверке тира); второй источник истины, дрейфующий от существования артефакта; дублирует tenant-isolation-поверхность. Tier — колонка на самом артефакте, как is_system."},
+    {"option": "Отдельная физическая БД / второй silo на тир как дефолт", "why_not": "Это §8 ось-C — on-demand эскалация, явно НЕ дефолт (FR-7). NF-4 запрещает новый Postgres-контейнер для тиров. Дефолт — 2 логических тира в одном silo; физический контур остаётся редким human-gated флипом (AC-8 grep доказывает отсутствие auto-provision)."},
+    {"option": "Enforce published-immutability только на уровне приложения", "why_not": "Единственный забытый/новый UPDATE-путь тихо открывает мутацию prod — тот самый discipline-not-structure анти-паттерн T-0016 §2. DB-триггер — ортогональная fail-closed половина."},
+    {"option": "Enforce published-immutability только DB-триггером (без app-guard)", "why_not": "HTTP-слой обязан вернуть ТИПИЗИРОВАННЫЙ 409 PUBLISHED_LOCKED (AC-2) с понятной ошибкой, а не сырое DB-исключение; app-guard — место, где различие promote-vs-direct-write наиболее читаемо для ревью. Держим оба."},
+    {"option": "Копировать draft-данные в published при promote (env-clone)", "why_not": "Прямо нарушает FR-3 / §8 «данные НИКОГДА не копируются». Promote — config-only: флип tier артефакт-строки; record/instance/audit никогда не пересекают тир-границу. AC-3 проверяет, что count данных в published остаётся 0."},
+    {"option": "Изобрести новый privilege/store для promote", "why_not": "Нарушает T-0018 NF-1 (единая authority-подсистема). Право promote — обычный grant (mgmt_object:tier_promote reserved resource-type, operation='transition'), резолвится существующим PDP (T-0021). Без параллельного store."},
+    {"option": "Новая audit-таблица/writer для promote-событий", "why_not": "Нарушает T-0016 (один append-only floor; новые ТИПЫ событий, не новые таблицы). artifact.promoted — обычная строка audit_event через канонический appendAuditEventInput, атомарно с флипом тира (NF-3)."},
+    {"option": "Human-gate через body-поле confirmed_by/is_human", "why_not": "Тот самый body-asserted-authority дыра, которую T-0044 §9 закрыл. Гейт читает АУТЕНТИФИЦИРОВАННЫЙ claim actor_type (human/agent) из extractActor/getAuthContext, никогда из body. agent ⇒ 403 FORBIDDEN_AGENT_SELF_PROMOTE."},
+    {"option": "Маппить draft→Choros-dev и published→Choros-prod", "why_not": "Нарушает FR-6/§10 ортогональность: тиры клиента — атрибут ВНУТРИ продукта, развязанный с dev/prod SDLC самого Choros. dev-экземпляр Choros обслуживает оба тира (AC-9). FF-9 грепает отсутствие маппинга tier→SDLC."},
+    {"option": "Nullable tier (без NOT NULL DEFAULT)", "why_not": "NULL-тир — неуправляемое третье состояние, невидимое обоим read-scope и lock. AC-1 требует NOT NULL DEFAULT 'draft' + CHECK; каждый артефакт рождается в draft."}
+  ],
+  "object_model": [
+    {
+      "entity": "tier-column (на каждой зарегистрированной tier-bearing таблице: application, registry_def, grant, record day-1)",
+      "fields": [
+        {"name": "tier", "type": "text NOT NULL DEFAULT 'draft' CHECK (tier IN ('draft','published')) — joinless (NF-1); не ключевой; scoped в тенанте (нет глобального тира)"}
+      ]
+    },
+    {
+      "entity": "tier_bearing_tables registry (ci/checks/tier_bearing_tables.txt — anti-drift, паттерн known_tenant_tables.txt)",
+      "fields": [
+        {"name": "config-class", "type": "list<table>: application, registry_def, grant (day-1); + process_definition/form_definition/dmn_table/nav_config когда E12 их построит"},
+        {"name": "data-class", "type": "list<table>: record (day-1); + process-instance когда построят"}
+      ]
+    },
+    {
+      "entity": "PromoteInput (src/core/env-tier.ts — чистый, без IO)",
+      "fields": [
+        {"name": "currentTier", "type": "'draft' | 'published'"},
+        {"name": "actorType", "type": "'human' | 'agent' — из АУТЕНТИФИЦИРОВАННОГО claim (T-0044 §9 R-AUTH), не body"}
+      ]
+    },
+    {
+      "entity": "PromoteDecision (выход decidePromote)",
+      "fields": [
+        {"name": "ok+from+to", "type": "{ ok:true; from:'draft'; to:'published' }"},
+        {"name": "agent-reject", "type": "{ ok:false; code:'FORBIDDEN_AGENT_SELF_PROMOTE' } — actorType==='agent' → 403 (AC-7)"},
+        {"name": "not-draft-reject", "type": "{ ok:false; code:'NOT_IN_DRAFT' } — currentTier!=='draft'"}
+      ]
+    },
+    {
+      "entity": "artifact.promoted audit_event (обычная строка T-0016, через appendAuditEventInput)",
+      "fields": [
+        {"name": "type", "type": "'artifact.promoted'"},
+        {"name": "actor", "type": "text — аутентифицированный promoter id"},
+        {"name": "subject", "type": "text — artifact id"},
+        {"name": "via", "type": "'tier-promote'"},
+        {"name": "confirmed_by", "type": "text — аутентифицированный human-promoter (AC-5)"},
+        {"name": "payload", "type": "{ artifact_table, tier_from:'draft', tier_to:'published' }"},
+        {"name": "occurred_at", "type": "bigint epoch-ms (caller nowMs)"}
+      ]
+    },
+    {
+      "entity": "promote-grant (право promote — обычный grant T-0018, не новый store)",
+      "fields": [
+        {"name": "resource_type", "type": "'mgmt_object:tier_promote' (reserved namespace T-0018 §4.1)"},
+        {"name": "operation", "type": "'transition'"},
+        {"name": "scope", "type": "артефакт/application subtree (closed lattice)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/env-tier.ts: export type Tier = 'draft' | 'published';",
+    "src/core/env-tier.ts: export function assertWritable(currentTier: Tier): { ok: true } | { ok: false; code: 'PUBLISHED_LOCKED' }; — FR-4/AC-2, чистый; published ⇒ HTTP 409, строка не мутирована",
+    "src/core/env-tier.ts: export function decidePromote(input: { currentTier: Tier; actorType: 'human'|'agent' }): { ok:true; from:'draft'; to:'published' } | { ok:false; code:'FORBIDDEN_AGENT_SELF_PROMOTE' } | { ok:false; code:'NOT_IN_DRAFT' }; — AC-7",
+    "src/core/env-tier.ts: export function readTierScope(ctx: { draftRequested?: boolean }): Tier; — default 'published', 'draft' только при draftRequested===true (FR-5/AC-6)",
+    "Сервис promoteTier (транзакционная оболочка, импл — coder): POST /api/artifacts/:id/promote; actor=extractActor(req), actorType=getAuthContext(req).actorType (НЕ body); withTenantTx: SELECT tier FOR UPDATE → decidePromote → assertGranted(actor,'mgmt_object:tier_promote','transition',ref) [PDP T-0021] → SET LOCAL choros.promoting='1' → UPDATE SET tier='published' (config-only) → appendAuditEventInput(artifact.promoted, tier_from/tier_to) → COMMIT (атомарно, NF-2/NF-3)",
+    "Миграция (additive, идемпотентная, прецедент 030): ALTER TABLE choros.<tbl> ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT 'draft' CHECK (tier IN ('draft','published')); — PK/RLS/GRANT неизменны; known_tenant_tables.txt byte-unchanged",
+    "Триггер: CREATE FUNCTION choros.tier_published_locked() — BEFORE UPDATE OR DELETE на каждой конфиг-таблице; RAISE если OLD.tier='published' AND current_setting('choros.promoting',true) IS DISTINCT FROM '1'",
+    "Read-path: GET /api/records, GET /api/instances добавляют AND tier=$readTier из readTierScope(ctx) — default-deny к published"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Каждая таблица из ci/checks/tier_bearing_tables.txt имеет tier text NOT NULL DEFAULT 'draft' + CHECK; реестр перечисляет application,registry_def,grant,record day-1; ни одна перечисленная не лишена колонки (anti-drift forward-гейт)", "ci_check": "ci/checks/tier-isolation.sh: для каждой таблицы реестра grep миграции на tier-колонку+CHECK, FAIL если лишена. Live: information_schema.columns показывает tier; CHECK отклоняет tier='x'. (static-now lint + live-dev, AC-1)"},
+    {"id": "FF-2", "rule": "Published-locked двойной механизм: (a) write-path зовёт assertWritable до конфиг-мутации; (b) BEFORE UPDATE/DELETE триггер на каждой конфиг-таблице отклоняет мутацию published-строки кроме choros.promoting='1'", "ci_check": "ci/checks/tier-isolation.sh: assert триггер-функция + BEFORE UPDATE OR DELETE существуют per config-table; grep что ни один конфиг-handler не UPDATEит без assertWritable/promote-guard. Live: прямой UPDATE/DELETE seeded published-строки падает (app 409 / DB exception), строка byte-unchanged, для registry_def И application (≥2 типа, AC-2). (static-now lint + live-dev)"},
+    {"id": "FF-3", "rule": "Promote config-only: promoteTier делает ровно один UPDATE SET tier='published' на артефакт-таблице и НИ одной записи в record/instance/audit_event-данные сверх одного artifact.promoted-append", "ci_check": "ci/checks/tier-isolation.sh: grep тело promoteTier — нет INSERT INTO choros.record, нет копии instance, нет cross-tier data motion. Live: после promote A count(record WHERE tier='published') неизменён; A.tier='published'. (static-now lint + live-dev, AC-3)"},
+    {"id": "FF-4", "rule": "Promote атомарен: флип тира и artifact.promoted-append в одной транзакции; сбой после флипа до audit оставляет draft и не пишет audit", "ci_check": "ci/checks/db/tier_promote_atomic.test.ts: инъекция сбоя между UPDATE и append → assert A.tier='draft', нет artifact.promoted, нет строки с tier∉{draft,published} (CHECK структурно гарантирует третий пункт). (live-dev, AC-4)"},
+    {"id": "FF-5", "rule": "Promote эмитит artifact.promoted с actor, subject=A.id, tier_from='draft', tier_to='published', атомарно (нет promote без audit)", "ci_check": "ci/checks/db/tier_promote_atomic.test.ts: после успешного promote — ровно одна совпадающая строка в audit-floor; форсированный сбой audit-append откатывает флип тира. (live-dev, AC-5)"},
+    {"id": "FF-6", "rule": "Published-контекст читает по умолчанию tier='published'; draft-строки возвращают 0 в дефолтном контексте", "ci_check": "ci/checks/db/tier_read_scope.test.ts: seed ≥1 draft record + (когда построят) instance; GET /api/records|/instances без draft-флага → 0 draft; с draftRequested → появляются. Static-now: readTierScope unit возвращает published без draftRequested. (static-now unit + live-dev, AC-6)"},
+    {"id": "FF-7", "rule": "Agent не может self-promote: decidePromote → FORBIDDEN_AGENT_SELF_PROMOTE для actorType==='agent', handler → 403; human с authority → 200; гейт читает аутентифицированный actor_type, не body", "ci_check": "src/__tests__/env-tier.test.ts: decidePromote({currentTier:'draft',actorType:'agent'}) ⇒ forbidden; 'human' ⇒ ok. ci/checks/tier-isolation.sh: grep что handler ставит actorType из getAuthContext(req)/extractActor, банит body.actor_type/b['is_human']/b['confirmed_by'] в гейт. Live: agent-token → 403; human-token с grant → 200. (static-now unit+lint + live-dev, AC-7)"},
+    {"id": "FF-8", "rule": "Нет авто-провижна физического контура: путь tenant-onboarding/genesis не содержит createDatabase/provisionContour/new-Postgres-container, триггеримого двумя тирами", "ci_check": "ci/checks/tier-isolation.sh: grep tenant-init/genesis-seed + promote-путь на createDatabase/provisionContour/new Pool(new-db)/compose-up per-tier DB → FAIL если есть. (static-now lint, AC-8)"},
+    {"id": "FF-9", "rule": "Tier ⟂ SDLC: нет конфига маппящего tier→Choros dev/prod; dev-экземпляр Choros может создать published-артефакт", "ci_check": "ci/checks/tier-isolation.sh: grep docker-compose*.yml/env-config/source на маппинг tier.*(NODE_ENV|CHOROS_ENV|dev|prod) → FAIL если есть. Live: в dev-silo INSERT … tier='published' (и promote) без ошибки. (static-now lint + live-dev, AC-9)"},
+    {"id": "FF-10", "rule": "tier='published' присваивается ТОЛЬКО через promoteTier: никакого UPDATE SET tier='published' вне promote-модуля", "ci_check": "ci/checks/tier-isolation.sh: grep всего src/ на tier = 'published' / SET tier='published'; каждое попадание обязано быть внутри src/core/env-tier.ts / promote-сервиса; иначе FAIL. (static-now lint, AC-10)"},
+    {"id": "FF-11", "rule": "Tier-модель не добавляет новой таблицы и параллельного authority/audit-store: known_tenant_tables.txt byte-unchanged; нет *_tier-таблицы, нет нового authority/audit-writer; право promote — grant-строка, audit — audit_event-строка", "ci_check": "ci/checks/tier-isolation.sh: assert миграция additive-ALTER-TABLE-only (нет CREATE TABLE), known_tenant_tables.txt неизменён в diff; grep банит новую tier/environment authority/audit-таблицу; assert promote-authority через mgmt_object:tier_promote grant + appendAuditEventInput. (static-now lint, NF-4/T-0016/T-0018)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§4.1 tier-колонка + tier_bearing_tables.txt реестр · FF-1"},
+    {"ac": "AC-2", "covered_by": "§4.2 assertWritable + tier_published_locked триггер (двойной) · FF-2"},
+    {"ac": "AC-3", "covered_by": "§4.3 single-UPDATE config-only инвариант · FF-3"},
+    {"ac": "AC-4", "covered_by": "§4.3 withTenantTx одна транзакция + CHECK структурный бар третьего состояния · FF-4"},
+    {"ac": "AC-5", "covered_by": "§4.3 same-txn append + §4.6 форма события · FF-5"},
+    {"ac": "AC-6", "covered_by": "§4.4 readTierScope default published + AND tier=$readTier · FF-6"},
+    {"ac": "AC-7", "covered_by": "§4.3 decidePromote agent-check + §4.5 аутентифицированный actor_type гейт · FF-7"},
+    {"ac": "AC-8", "covered_by": "§2 single-silo + §3 (физический контур = on-demand) · FF-8"},
+    {"ac": "AC-9", "covered_by": "§4.4 ортогональность + FR-6 · FF-9"},
+    {"ac": "AC-10", "covered_by": "§4.3 единственный переход + §2.2 triggered promote-only путь · FF-10"}
+  ],
+  "runtime_target": "локально + dev-silo (внешний ресурс не нужен). Чистый src/core/env-tier.ts — в npm run ci (static-now). tier-колонка/триггер/promoteTier/POST /api/artifacts/:id/promote активируются в УЖЕ ЖИВОМ Postgres-silo (/srv/choros, T-0065 DONE) additive-идемпотентной миграцией через migrations/run.mjs (прецедент 030/031). Нового Postgres-контейнера/схемы/сервиса нет (NF-4); known_tenant_tables.txt byte-unchanged. Server-provision (GT-4) не нужен — dev-silo уже есть; промоушн в prod (GT-2) остаётся founder-gated, неизменно.",
+  "adr_artifact_path": "docs/design/T-0087-client-env-tiers.adr.md",
+  "escalation": ""
+}
