@@ -1,0 +1,129 @@
+{
+  "task_id": "T-0141",
+  "status": "ready",
+  "summary": "Apply showcase seed-pack to the dev DB, wire all five clickable-slice screens to serve showcase-tenant data, and document persona switching and seed reset so the founder can view the demo vitrine on dev.",
+  "functional": [
+    "FR-1: seed apply --tenant showcase --pack showcase succeeds against live dev DB; choros.tenant row with slug='showcase' and all associated entities exist after apply.",
+    "FR-2: GET /api/org with X-Dev-User: <showcase-slug> returns org tree from showcase tenant (3 depts, 7 positions, 12 employees) — not DEV_TENANT_ID in-memory fallback.",
+    "FR-3: GET /api/users returns the 7 human employees from the showcase pack as selectable dev-login personas.",
+    "FR-4: Login picker surfaces at minimum four demo personas: owner (e-owner), manager, executor, agent (agent shown as separate consideration per FR-7 Option A).",
+    "FR-5: All five screens (inbox, org, processes, audit, rights) render without JS error for any showcase human persona.",
+    "FR-6: Persona switching via existing dev-login flow (logout → login picker → select new user) works for all showcase human personas.",
+    "FR-7: Agent personas not in login picker (Option A — gate-sufficient); documented as optional escalation note in AC-12.",
+    "FR-8: seed reset --tenant showcase restores showcase tenant to pack reference state; extra entities removed; genesis-owner and system roles never deleted.",
+    "FR-9: GET /api/rights returns 8 rights_cards from pack display plane after apply.",
+    "FR-10: GET /api/processes returns 8 process instances from pack display plane after apply."
+  ],
+  "non_functional": [
+    "NF-1: All five screens render without JS errors in Chromium against dev stack.",
+    "NF-2: seed apply completes in under 30 seconds on dev hardware.",
+    "NF-3: seed reset completes in under 60 seconds on dev hardware.",
+    "NF-4: No cross-tenant data leakage — showcase data not visible under DEV_TENANT_ID (T-0013 invariant).",
+    "NF-5: GET /api/users returns at minimum 6 human showcase employees.",
+    "NF-6: Persona-switch round-trip completes in under 3 seconds on dev hardware."
+  ],
+  "out_of_scope": [
+    "Public demo stand deployment (T-0142, stage 2 — requires T-0060 + founder creds + DNS).",
+    "Scheduled seed reset cron (T-0142).",
+    "In-session switch-persona dropdown widget — existing logout flow suffices.",
+    "Agent personas in login picker (Option A selected in FR-7).",
+    "Removal of ORG_SEED/PROCESSES_SEED/RIGHTS_SEED in-memory fallbacks.",
+    "Keycloak integration (CHOROS_AUTH_MODE=dev only).",
+    "New migration DDL — showcase data lives in seed pack only.",
+    "Flowable BPMN live process instances — process display is static display-plane data."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "seed apply --tenant showcase --pack showcase on dev DB exits 0 and GET /api/tenants/showcase returns { id: <uuid>, slug: 'showcase' }",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "After apply, GET /api/org with X-Dev-User: e-kravtsova returns exactly 3 departments from the showcase pack",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "After apply, GET /api/org response contains exactly 7 positions and 12 employees total matching seed/showcase/pack.json counts",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "After apply, GET /api/users returns at least 6 human employees each with id, name, position, department fields; all IDs are valid showcase employee slugs",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Dev login screen at http://localhost:8080/ shows a list of users from GET /api/users; clicking a user logs in and the shell renders with the user's name in the nav footer",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "After logging in as any human showcase persona, navigating to /org renders 3 department cards without JS error",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-7",
+      "text": "After logging in as any human showcase persona, navigating to /processes renders 8 process-instance rows without JS error",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-8",
+      "text": "After logging in as any human showcase persona, navigating to /rights renders 8 role cards without JS error",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-9",
+      "text": "After logging in as any human showcase persona, navigating to /audit renders the audit log without JS error (empty is acceptable)",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-10",
+      "text": "After logging in as any human showcase persona, navigating to /inbox renders the inbox without JS error (empty is acceptable)",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-11",
+      "text": "GET /api/rights after apply returns a JSON array of exactly 8 role-card objects; each object has at minimum role_slug, name, grants fields",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "Agent personas are NOT in the /api/users response (Option A). If founder requires agent-persona login before gate sign-off, record as blocking note — no code change required for the gate itself",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-13",
+      "text": "GET /api/org with X-Dev-User: e-kravtsova does NOT return data from DEV_TENANT_ID tenant (a0000000-0000-0000-0000-000000000001) — response must reflect showcase-tenant data",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "seed reset --tenant showcase after manually adding an extra department exits 0 and GET /api/org returns exactly 3 departments",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "seed reset --tenant showcase never deletes the e-owner employee row (SELECT FROM choros.employee WHERE slug='e-owner' returns a row after reset)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "Persona switch: logout (click Выйти) → login picker shows user list → select different persona → nav footer shows new user's name",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-17",
+      "text": "The dev stack starts with a documented single-command sequence and the seed apply command is documented in the repo README or a runbook",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-18",
+      "text": "GET /api/processes after apply returns 8 process-instance objects each with at minimum id, name, status, progress fields",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0141-demo-tenant.spec.md"
+}
