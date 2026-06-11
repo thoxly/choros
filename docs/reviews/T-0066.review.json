@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0066",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 2,
+      "location": "docs/worker-api.md:49-50, docs/worker-api.md:232-233",
+      "issue": "Документ описывает lockOwner и lockExpiry как 'string | null' и 'integer | null' и показывает их как null в JSON-примерах (§2 ответ HTTP 201, §4.1 таблица типов). В действительности оба поля имеют тип string|undefined / number|undefined в types.ts (строки 26-28), а JSON.stringify() ОПУСКАЕТ поля с undefined — они отсутствуют в HTTP-ответе, а не передаются как null. Это подтверждено: tests/jobStore.test.ts строки 50-51 (expect(job.lockOwner).toBeUndefined()), inMemoryJobStore.ts строки 59-60 (lockOwner: undefined, lockExpiry: undefined). Потребитель, который проверяет response.lockOwner === null, получит false для незалоченной задачи; корректная проверка — !(«lockOwner» in job) или job.lockOwner === undefined.",
+      "suggestion": "В §4.1 изменить тип lockOwner на 'string (absent when not locked)' и lockExpiry на 'integer (absent when not locked)'. В JSON-примерах §2 (HTTP 201 enqueue response) убрать строки '\"lockOwner\": null' и '\"lockExpiry\": null' — поля просто не присутствуют в ответе для незалоченной задачи."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "docs/worker-api.md:373-374",
+      "issue": "В §5.3 (complete) перечислен '409 RECORD_IN_PAYLOAD' как возможная ошибка. Это требуется спекой FR-4, но фактически недостижимо через HTTP: обработчик в externalWorker.ts (строки 168-191) вызывает store.complete(workerId, jobId) без payload-аргумента, поэтому ветка RECORD_IN_PAYLOAD в store.complete() (inMemoryJobStore.ts строка 185) никогда не активируется. Документ технически корректен с точки зрения spec (FR-4 требует документировать весь ErrorCode union), но создаёт ложное ожидание у потребителя.",
+      "suggestion": "Добавить примечание рядом с RECORD_IN_PAYLOAD в §4.2 (таблица ошибок) и/или §5.3: 'В текущей версии API payload complete передаётся только через внутренний интерфейс JobStore; через HTTP этот код не возвращается.' Это устранит недопонимание без нарушения AC-5."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": true },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
