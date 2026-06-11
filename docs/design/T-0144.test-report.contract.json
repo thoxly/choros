@@ -1,0 +1,87 @@
+{
+  "task_id": "T-0144",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1113,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: Idempotency — no row accumulation on double run",
+      "test": "grant-editor.test.ts 16/16 × 2 runs; marker count = 0 after each run",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: genesis-owner-seed.test.ts stable on clean silo",
+      "test": "genesis-owner-seed.test.ts AC-12",
+      "result": "fail"
+    },
+    {
+      "ac": "AC-3: Existing assertions not weakened",
+      "test": "git diff dev..HEAD — all expect() calls preserved",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4: FF-10 grantId captured before first assertion",
+      "test": "grant-editor.test.ts > FF-10 live: freeform POST grant + afterAll cleanup",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5: One-shot sanitation script idempotent, 2 FR-6 markers only",
+      "test": "scripts/cleanup-test-grants.ts — TEST_ACTORS = ['test', 'd0000000-0000-0000-0000-0000000000ff']",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6: No migration files touched",
+      "test": "git diff dev -- migrations/ = empty",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "grant-editor.test.ts 16/16 run 1",
+      "result": "pass",
+      "note": "fitness:db run 1 — all 5 afterAll vectors stable"
+    },
+    {
+      "check": "grant-editor.test.ts 16/16 run 2 (idempotency)",
+      "result": "pass",
+      "note": "fitness:db run 2 — no row accumulation, marker count = 0"
+    },
+    {
+      "check": "npm run ci without DATABASE_URL — 1107/0 fail",
+      "result": "pass",
+      "note": "tsc PASS, eslint PASS, fitness 309/0, vitest 1107/1107"
+    },
+    {
+      "check": "ADV-3 not modified (FR-4)",
+      "result": "pass",
+      "note": "git diff dev..HEAD -- ci/checks/db/grant-editor.adversarial.test.ts confirms ADV-3 block unchanged"
+    }
+  ],
+  "failures": [
+    {
+      "test": "genesis-owner-seed.test.ts > AC-12: exactly 17 grants for DEV_ROLE_OWNER",
+      "is_product_defect": false,
+      "root_class": "tooling-gap",
+      "note": "ENV-BLOCKED: 15 accumulated e-owner rows in dev-DB from pre-T-0185 era (ADV-3 beforeAll residue, when tier trigger suppressed DELETEs). Sanitation SQL: DELETE FROM choros.grant WHERE tenant_id='a0000000-...-0001' AND role_id='e0000000-...-0001' AND resource_type LIKE 'mgmt_object:%' AND granted_by='e-owner' — expected rowCount 15. After orchestrator sanitation, genesis-owner-seed AC-12 will be green. Not a T-0144 regression."
+    }
+  ],
+  "known_red": {
+    "fitness_db": {
+      "adv2": "ADV-2 (grant-editor.adversarial.test.ts) — pre-existing self-elevation gap; T-0144 touches 0 lines in adversarial file",
+      "genesis_seed": "genesis-owner-seed.test.ts AC-12 — ENV-BLOCKED by 15 accumulated e-owner rows; orchestrator sanitation SQL in review contract and this report"
+    }
+  },
+  "tested_commit": "5b055ad",
+  "branch": "task/T-0144",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors (2 console warnings, not errors, pre-existing)",
+    "fitness_static": "PASS — 309/0",
+    "vitest_unit": "1107/1107 passed, 6 skipped (run WITHOUT DATABASE_URL — externalWorker.e2e and health tests green in this mode)",
+    "fitness_db_grant_editor_run1": "grant-editor.test.ts 16/16 PASS; ADV-2 pre-existing fail",
+    "fitness_db_grant_editor_run2": "grant-editor.test.ts 16/16 PASS; ADV-2 pre-existing fail (idempotency confirmed)"
+  }
+}

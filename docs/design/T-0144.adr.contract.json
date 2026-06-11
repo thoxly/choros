@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0144",
+  "status": "ready",
+  "decision": "Move the cleanup DELETE for each of the five contaminating describe blocks in grant-editor.test.ts (AC-01, AC-07, AC-14, AC-20, FF-10) from the tail of the it() body into a guaranteed afterAll() hook. Each describe block declares a module-level `let id: string | undefined`, assigns it before the first expect() or withClient() call, and DELETEs the row in afterAll via migratorUrl() (RLS-bypassing). For FF-10, the HTTP-created grantId is extracted from the JSON response before any expect() assertion to guarantee the afterAll can reach it even if assertions throw. ADD a one-shot idempotent script scripts/cleanup-test-grants.ts that DELETEs all rows from choros.\"grant\" matching granted_by IN ('test', 'd0000000-0000-0000-0000-0000000000ff') with the dev-silo role/resource_type filter, accepts DATABASE_URL + optional --dry-run flag, prints deleted count, exits 0. ADV-3 (already uses afterAll correctly) is NOT touched.",
+  "rejected_alternatives": [
+    {
+      "option": "try/finally wrapper inside each it()",
+      "why_not": "Correct but clutters test logic. afterAll is the idiomatic Vitest pattern already demonstrated by ADV-3; it keeps the it() body clean and separates teardown concern."
+    },
+    {
+      "option": "Transaction wrapping each test with rollback in afterAll",
+      "why_not": "AC-20 requires two independent DB connections (one per tenant GUC) to verify RLS cross-tenant isolation; a shared transaction would break that test. Deep restructuring of test client management is out of scope (spec §5)."
+    },
+    {
+      "option": "Double-run CI job to verify idempotency (FF-1)",
+      "why_not": "Doubles db-tier CI time. genesis-owner-seed.test.ts already contains the exact-17 assertion that fails if rows accumulate — it is a sufficient and cheap FF-1 proxy once afterAll cleanup is in place. A separate double-run step is deferred until genesis-owner-seed starts flapping without it."
+    },
+    {
+      "option": "Sanitation script implemented as a migration",
+      "why_not": "Contradicts FR-7 (no migration files touched). No schema change is needed; a standalone TypeScript script with pg is sufficient and leaves db/migrations/ clean."
+    }
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "Two consecutive runs of `npm run fitness:db` against a freshly seeded dev silo both leave COUNT(choros.\"grant\" WHERE role_id=DEV_ROLE_OWNER AND resource_type LIKE 'mgmt_object:%') = 17. No test row accumulates across runs.",
+      "ci_check": "Proxy: genesis-owner-seed.test.ts AC-12 assertion (exact-17) is green on both runs. The db fitness suite already runs in CI; FF-1 is satisfied when genesis-owner-seed is green. A dedicated double-run step is not added to CI (cost vs benefit: the afterAll pattern eliminates accumulation structurally; the exact-17 assertion catches any regression)."
+    },
+    {
+      "id": "FF-2",
+      "rule": "No inline DELETE FROM choros.\"grant\" remains inside an it() body in grant-editor.test.ts after T-0144 (all cleanup lives in afterAll).",
+      "ci_check": "ci/checks/no-inline-grant-delete.sh: grep -c 'DELETE FROM choros.\"grant\"' ci/checks/db/grant-editor.test.ts must return 0. Recommendation: remove all inline DELETEs from the five vectors (afterAll makes them redundant), making the grep check trivially simple. If inline DELETEs are retained for readability, this check is replaced by code review plus the pattern documented in CONTRIBUTING."
+    },
+    {
+      "id": "FF-3",
+      "rule": "FF-10 grantId is captured from the HTTP response before the first expect() assertion in the it() body.",
+      "ci_check": "Code review (manual AC-4): in the FF-10 it() body, the line `freeformGrantId = json.id` must appear before the first `expect(res.status …)` call. No automated grep is necessary; the pattern is unambiguous and audited once at PR time."
+    },
+    {
+      "id": "FF-4",
+      "rule": "ADV-3 in grant-editor.adversarial.test.ts is not modified by T-0144.",
+      "ci_check": "git diff dev -- ci/checks/db/grant-editor.adversarial.test.ts must show no changes to the ADV-3 describe block (lines ~410-463). Enforced by code review."
+    },
+    {
+      "id": "FF-5",
+      "rule": "No expect() call is removed or wrapped in try/catch in grant-editor.test.ts or grant-editor.adversarial.test.ts.",
+      "ci_check": "grep -c 'expect(' on both files before/after T-0144: count must be >= count before. Code review confirms no assertion is guarded with try/catch."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1 (genesis-owner-seed exact-17 assertion green after two consecutive runs)"},
+    {"ac": "AC-2", "covered_by": "FF-1 (same — genesis-owner-seed stable on clean silo after N runs)"},
+    {"ac": "AC-3", "covered_by": "FF-5 (expect count >= before; no try/catch guard)"},
+    {"ac": "AC-4", "covered_by": "FF-3 (code review: freeformGrantId assigned before first expect in FF-10 it())"},
+    {"ac": "AC-5", "covered_by": "Manual: npx tsx scripts/cleanup-test-grants.ts twice; second run reports 0 deleted rows; exit 0 both times"},
+    {"ac": "AC-6", "covered_by": "git diff dev -- db/migrations/ = empty (FR-7 structurally enforced by not touching that directory)"}
+  ],
+  "adr_artifact_path": "docs/design/T-0144-db-test-cleanup.adr.md",
+  "escalation": ""
+}
