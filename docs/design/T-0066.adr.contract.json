@@ -1,0 +1,149 @@
+{
+  "task_id": "T-0066",
+  "status": "ready",
+  "decision": "Написать docs/worker-api.md (8 разделов по структуре ADR §2); Python-пример инлайн в §8 (```python блок, grep-верифицируем, не гниёт отдельно); fitness-чек ci/checks/worker-api-docs.sh добавить аддитивно в конец static-now блока npm run fitness, перед npm run build && worker-auth-config-failfast.sh.",
+  "rejected_alternatives": [
+    {
+      "option": "examples/worker.py + py_compile в чеке",
+      "why_not": "Проверяет только синтаксис Python, не синхронность полей/URL со схемой. Инлайн в доке верифицируется теми же grep-инвариантами, что остальной контент, и не требует отдельного файла."
+    },
+    {
+      "option": "Отдельный CI-джоб для worker-api-docs.sh",
+      "why_not": "Чек pure static-now (grep по Markdown), 0 bootstrap. 50+ существующих static-now чеков в том же npm run fitness. Отдельный джоб оправдан только для runtime-завязанных проверок (fitness:kc, fitness:db)."
+    },
+    {
+      "option": "docs/api/worker.md (поддиректория)",
+      "why_not": "Нет поддиректории docs/api/ — не создаём. docs/worker-api.md рядом с environments.md — согласуется с существующей плоской структурой docs/."
+    },
+    {
+      "option": "OpenAPI/Swagger-генерация",
+      "why_not": "Out of scope T-0066; нет генератора в репо; отдельная задача E2+."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "docs/worker-api.md",
+      "fields": [
+        {"name": "section_intro", "type": "markdown — §1 Что такое external worker"},
+        {"name": "section_quickstart", "type": "markdown — §2 Быстрый старт (curl walkthrough: enqueue→fetch→complete)"},
+        {"name": "section_auth", "type": "markdown — §3 Аутентификация (dev/keycloak/env vars)"},
+        {"name": "section_types", "type": "markdown — §4 Типы данных (Job-объект, таблица ошибок)"},
+        {"name": "section_endpoints", "type": "markdown — §5 Эндпоинты (4 subsections)"},
+        {"name": "section_retry", "type": "markdown — §6 Retry и lock-timeout"},
+        {"name": "section_idempotency", "type": "markdown — §7 Идемпотентность"},
+        {"name": "section_python", "type": "markdown — §8 Пример воркера на Python (```python блок)"}
+      ]
+    },
+    {
+      "entity": "ci/checks/worker-api-docs.sh",
+      "fields": [
+        {"name": "check_file_exists", "type": "bash — test -f docs/worker-api.md"},
+        {"name": "check_ac1_routes", "type": "bash — grep -cE route literals ≥ 4"},
+        {"name": "check_ac2_jobs_fields", "type": "bash — grep -cE field names ≥ 4"},
+        {"name": "check_ac3_fetchlock_fields", "type": "bash — grep -cE field names ≥ 4"},
+        {"name": "check_ac4_job_object", "type": "bash — grep -cE Job fields ≥ 9"},
+        {"name": "check_ac5_error_codes", "type": "bash — grep -cE ErrorCode literals ≥ 7"},
+        {"name": "check_ac6_walkthrough", "type": "bash — grep -cE enqueue|fetch|complete ≥ 3"},
+        {"name": "check_ac7_curl", "type": "bash — grep -c curl ≥ 4"},
+        {"name": "check_ac8_python", "type": "bash — grep -cE ```python|```py ≥ 1"},
+        {"name": "check_ac9_auth_modes", "type": "bash — grep -cE x-dev-user|Bearer|CHOROS_AUTH_MODE ≥ 3"},
+        {"name": "check_ac10_env_vars", "type": "bash — per-var grep for 5 env variables"},
+        {"name": "check_ac11_retry", "type": "bash — grep -cE retry tokens ≥ 4"},
+        {"name": "check_ac12_idempotency", "type": "bash — grep -cE idempotencyKey|idempotent ≥ 2"}
+      ]
+    }
+  ],
+  "contracts": [
+    "docs/worker-api.md содержит разделы §1..§8 в указанном порядке",
+    "Каждый route literal из externalWorker.ts (POST /jobs, POST /external-task/fetch-and-lock, POST /external-task/:id/complete, POST /external-task/:id/fail) присутствует в docs/worker-api.md",
+    "Все ErrorCode значения (NOT_FOUND, NOT_LOCKED, LOCK_EXPIRED, NOT_OWNER, RECORD_IN_PAYLOAD) и auth codes (UNAUTHENTICATED, AUTH_UNAVAILABLE) задокументированы в таблице §4.2",
+    "Job-объект в §4.1 содержит все поля из src/core/types.ts: id, topic, variables, state, retries, lockOwner, lockExpiry, createdAt, available_at, result",
+    "§3.4 перечисляет env-переменные идентично docs/environments.md §6-7: CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_AUDIENCE, JWKS_CACHE_TTL_MS, KC_ISSUER",
+    "§8 содержит ```python блок с fetch-and-lock loop, complete и fail вызовами",
+    "ci/checks/worker-api-docs.sh добавлен в npm run fitness аддитивно (перед npm run build), статус FF-9"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-9-AC1",
+      "rule": "Все 4 route literal из externalWorker.ts присутствуют в docs/worker-api.md (≥4 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC2",
+      "rule": "Поля POST /jobs (topic, variables, retries, idempotencyKey) задокументированы (≥4 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC3",
+      "rule": "Поля fetch-and-lock (workerId, topics, maxJobs, lockDurationMs) задокументированы (≥4 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC4",
+      "rule": "Job-объект содержит все 9 полей из types.ts (id/topic/variables/state/retries/lockOwner/lockExpiry/createdAt/available_at) — ≥9 matches",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC5",
+      "rule": "Таблица ошибок содержит все 7 уникальных error-codes: NOT_FOUND, NOT_LOCKED, LOCK_EXPIRED, NOT_OWNER, RECORD_IN_PAYLOAD, UNAUTHENTICATED, AUTH_UNAVAILABLE",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC6",
+      "rule": "Happy-path walkthrough enqueue→fetch-and-lock→complete присутствует (≥3 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC7",
+      "rule": "curl-примеры для всех 4 эндпоинтов (≥4 упоминания curl)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC8",
+      "rule": "Python-пример присутствует как ```python или ```py блок",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC9",
+      "rule": "Оба auth-режима задокументированы: x-dev-user, Bearer, CHOROS_AUTH_MODE (≥3 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC10",
+      "rule": "5 auth env vars присутствуют поштучно: CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_AUDIENCE, JWKS_CACHE_TTL_MS",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC11",
+      "rule": "Retry-семантика задокументирована: retryTimeoutMs, CREATED, FAILED, lock-reclaim/sweepInterval/30 (≥4 matches)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC12",
+      "rule": "idempotencyKey задокументирован с семантикой (≥2 matches: idempotencyKey + idempotent)",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    },
+    {
+      "id": "FF-9-AC14",
+      "rule": "Файл docs/worker-api.md существует",
+      "ci_check": "ci/checks/worker-api-docs.sh"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-9-AC1 (grep route literals)"},
+    {"ac": "AC-2", "covered_by": "FF-9-AC2 (grep POST /jobs field names)"},
+    {"ac": "AC-3", "covered_by": "FF-9-AC3 (grep fetch-and-lock field names)"},
+    {"ac": "AC-4", "covered_by": "FF-9-AC4 (grep Job object fields ≥9)"},
+    {"ac": "AC-5", "covered_by": "FF-9-AC5 (grep error codes ≥7)"},
+    {"ac": "AC-6", "covered_by": "FF-9-AC6 (grep walkthrough tokens)"},
+    {"ac": "AC-7", "covered_by": "FF-9-AC7 (grep curl ≥4)"},
+    {"ac": "AC-8", "covered_by": "FF-9-AC8 (grep ```python)"},
+    {"ac": "AC-9", "covered_by": "FF-9-AC9 (grep auth mode tokens)"},
+    {"ac": "AC-10", "covered_by": "FF-9-AC10 (per-var grep 5 env vars)"},
+    {"ac": "AC-11", "covered_by": "FF-9-AC11 (grep retry semantics)"},
+    {"ac": "AC-12", "covered_by": "FF-9-AC12 (grep idempotency)"},
+    {"ac": "AC-13", "covered_by": "manual — reviewer DoD: grep каждого request-поля в externalWorker.ts"},
+    {"ac": "AC-14", "covered_by": "FF-9-AC14 (test -f docs/worker-api.md)"}
+  ],
+  "adr_artifact_path": "docs/design/T-0066-worker-api-docs.adr.md"
+}
