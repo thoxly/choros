@@ -18,10 +18,10 @@ import pg from 'pg';
 const DEV_TENANT = 'a0000000-0000-0000-0000-000000000001';
 const DEV_ROLE_OWNER = 'e0000000-0000-0000-0000-000000000001';
 
-// Known test-actor markers: 'test' = direct-SQL tests, UUID = DEV_EMP_OWNER used in
-// HTTP-based FF-10 tests, 'e-owner' = employee slug used in prior HTTP-based test runs.
+// Known test-actor markers per FR-6: 'test' = direct-SQL tests,
+// UUID = DEV_EMP_OWNER used in HTTP-based FF-10 tests.
 // None of these values can appear in production (prod uses real UUIDs for granted_by).
-const TEST_ACTORS = ['test', 'd0000000-0000-0000-0000-0000000000ff', 'e-owner'];
+const TEST_ACTORS = ['test', 'd0000000-0000-0000-0000-0000000000ff'];
 
 const dryRun = process.argv.includes('--dry-run');
 
