@@ -1,0 +1,19 @@
+# ci/checks/role-criticality-migration-excludes.txt
+# Data file for role-criticality-isolation.sh (T-0040 / FF-RC5/FF-RC6).
+#
+# Each non-blank, non-comment line names a migration file (relative to
+# migrations/, without the .sql suffix) that is owned by another task and
+# therefore excluded from the T-0040 frozen-diff check.
+#
+# Format (one entry per line):
+#   <migration_stem>  # T-XXXX — <reason>
+#
+# Rules:
+#   - Only name migrations NOT owned by T-0040.
+#   - Any T-0040 migration would still be caught (it must not appear here).
+#   - Absence of this file is treated as an empty list (fail-closed).
+#   - Lines starting with '#' and blank lines are ignored.
+#
+030_grant_proposed_confirmed  # T-0030 — grant editor; sibling task, predates T-0040
+031_grant_confirmed2_by       # T-0044 — dual-control gate ADD COLUMN confirmed2_by
+043_invoke_proposal           # T-0024 — invoke-grant migration; owned by invoke-grant-isolation.sh
