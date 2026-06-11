@@ -113,7 +113,7 @@ JWT-сессию ядра. (Для QR-кейса даже запись-конт�
 а НЕ выводимая ad-hoc resolve-time. Обоснование — §3 (rejected: ad-hoc-грант-resolve-time).
 
 - **Принципал.** Каждая `external_surface` владеет ровно одной **синтетической ролью**
-  `role` (T-0022, миграция `019_role.sql:23`) с `is_external = true` (аддитивная колонка как
+  `role` (T-0022, новая миграция: `ALTER TABLE choros.role ADD COLUMN is_external ...` (additive, по дисциплине T-0020 §1.5)) с `is_external = true` (аддитивная колонка как
   `registry_def.is_system`, `migrations/004_registry_def.sql:16`): эта роль — никому не
   назначаемый principal, существующий только как держатель грантов поверхности.
   `ResolveSubject.subjectId` для внешнего = id этой роли; никакого `role_assignment` на человека
