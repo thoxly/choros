@@ -20,7 +20,7 @@
  * AC-14 resolve-for-sig: resolveFor signature unchanged (checked by FF-IG-3 sh)
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   coversInvoke,
   SEED_ORACLE,
@@ -45,7 +45,6 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 
 const TENANT_A = "a0000000-0000-0000-0000-000000000001";
-const TENANT_B = "b1000000-0000-0000-0000-000000000001";
 
 const ROLE_RECON = "r0000000-0000-0000-0000-000000000001";
 const AGENT_RECON_ID = "d0000000-0000-0000-0000-000000000002";

@@ -31,7 +31,6 @@ beforeAll(() => {
 
 let mockServer: http.Server;
 let mockPort = 0;
-let discoveryFetchCount = 0;
 let jwksFetchCount = 0;
 
 beforeAll(async () => {
@@ -39,7 +38,6 @@ beforeAll(async () => {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     if (_req.url?.includes("openid-configuration")) {
-      discoveryFetchCount++;
       res.end(JSON.stringify({
         issuer: `http://127.0.0.1:${mockPort}/realms/choros`,
         jwks_uri: `http://127.0.0.1:${mockPort}/certs`,
@@ -67,7 +65,6 @@ afterAll(async () => {
 
 beforeEach(() => {
   _resetJwksCache();
-  discoveryFetchCount = 0;
   jwksFetchCount = 0;
 });
 
