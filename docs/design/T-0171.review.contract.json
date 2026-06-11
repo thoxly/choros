@@ -1,6 +1,6 @@
 {
   "task_id": "T-0171",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {"green": true},
   "findings": [
     {
@@ -8,24 +8,32 @@
       "severity": "blocking",
       "axis": 1,
       "location": "src/http/notification-prefs.ts:157,186",
-      "issue": "AC-6/AC-7 не выполнены: admin-эндпоинты (GET/PUT /api/notification-preferences) не вызывают PDP resolveFor для mgmt_object:notification_config; gate = только наличие x-dev-user заголовка. Любой аутентифицированный пользователь получает полный доступ к tenant-wide preferences без проверки grant. Нет теста для 403-случая. AC-10 («вызов resolveFor присутствует») также не выполнен — fitness-check FF-NP1 проверяет только отсутствие запрещённых паттернов, но не присутствие resolveFor.",
-      "suggestion": "Реализовать вызов resolveFor(deps, handle, actorId, 'read'/'update') в admin-маршрутах (аналогично grant-propose.ts). Добавить тест: GET без grant → 403, GET с grant → 200. Альтернатива: явно переформулировать AC-6/AC-7 в спеке как dev-mode-only (actor-presence gate) и получить founder-approve на понижение критерия, убрав требование 403 из спеки."
+      "issue": "[CLOSED] AC-6/AC-7 не выполнены: admin-эндпоинты (GET/PUT /api/notification-preferences) не вызывали PDP resolveFor для mgmt_object:notification_config; gate = только наличие x-dev-user заголовка. ИСПРАВЛЕНО: checkAdminGrant через loadAdminContext + exact match mgmt_object:notification_config + genesis-owner short-circuit. 403-тесты зелёные (denyAllDeps).",
+      "suggestion": "RESOLVED"
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 1,
-      "location": "src/http/notification-prefs.ts:111-118",
-      "issue": "assertSelfScopeValid отклоняет только role: prefix (400), но не actor:foreign-id. Комментарий на строках 116–117 утверждает 'Reject explicitly to return a clear error' — но actor:foreign в body не бросает ошибку, сервер молча перезаписывает scope. Комментарий вводит в заблуждение.",
-      "suggestion": "Если интент — молча переопределить actor: (что корректно по спеке FR-7), удалить вводящий в заблуждение комментарий 'Reject explicitly to return a clear error'. Или добавить явный reject для actor:other с 400 + тест."
+      "location": "src/http/notification-prefs.ts:assertSelfScopeValid",
+      "issue": "[CLOSED] assertSelfScopeValid не отклонял actor:foreign-id, комментарий вводил в заблуждение. ИСПРАВЛЕНО: actor: prefix теперь также бросает 400; комментарий обновлён. 2 новых теста зелёные.",
+      "suggestion": "RESOLVED"
     },
     {
       "id": "R-3",
       "severity": "nit",
       "axis": 3,
-      "location": "src/core/postgres/pgPrefStore.ts:103",
-      "issue": "SET LOCAL с прямой интерполяцией tenantId без UUID-валидации на пути getPreferences (pool-based метод). Codebase-wide паттерн (14 мест), риск минимален — tenantId приходит из trusted routing-layer, не из user input. Но единственный вариант с UUID-валидацией — только withTenantTx в HTTP-слое.",
-      "suggestion": "Добавить assertUuidShape(tenantId) в начало getPreferences для defense-in-depth. Или трекнуть как codebase-wide cleanup отдельно."
+      "location": "src/core/postgres/pgPrefStore.ts:getPreferences",
+      "issue": "[CLOSED] SET LOCAL с интерполяцией tenantId без UUID-валидации в getPreferences. ИСПРАВЛЕНО: UUID_RE guard добавлен в начало getPreferences.",
+      "suggestion": "RESOLVED"
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/notification-prefs.test.ts:342-345",
+      "issue": "Allow-path (grant present → 200) не покрыт unit-тестом для admin-маршрутов GET/PUT /api/notification-preferences. Комментарий явно отмечает скип store-level тестов (fake pool = null). Механизм deny доказан тестом; allow-путь покрыт косвенно live-DB тестами notification-preferences.test.ts. Полный HTTP allow-path unit-тест потребует mock-store.",
+      "suggestion": "Добавить allowAllDeps: PrefAuthzDeps = { checkAdminGrant: async () => ({ ok: true }) } + mock-store (fake listByTenant), проверить что GET → 200. Follow-up задача, не блокирует merge."
     }
   ],
   "acceptance_coverage": [
@@ -34,11 +42,11 @@
     {"ac": "AC-3",  "covered": true},
     {"ac": "AC-4",  "covered": true},
     {"ac": "AC-5",  "covered": true},
-    {"ac": "AC-6",  "covered": false},
-    {"ac": "AC-7",  "covered": false},
+    {"ac": "AC-6",  "covered": true},
+    {"ac": "AC-7",  "covered": true},
     {"ac": "AC-8",  "covered": true},
     {"ac": "AC-9",  "covered": true},
-    {"ac": "AC-10", "covered": false},
+    {"ac": "AC-10", "covered": true},
     {"ac": "AC-11", "covered": true},
     {"ac": "AC-12", "covered": true},
     {"ac": "AC-13", "covered": true},
