@@ -1,0 +1,62 @@
+{
+  "task_id": "T-0120",
+  "status": "ready",
+  "summary": "Дизайн-требования к подсистеме уведомлений: in-app notification center (tenant-таблица, REST-эндпоинты, badge-счётчик) + опциональный email-канал через SMTP/API клиента с custody SMTP-credentials по RL-3 паттерну T-0025 (handle, не raw secret) + per-событие настройка подписок + расширяемая ChannelDriver-архитектура; доставка через outbox T-0062 (at-least-once, ретраи); tenant-изоляция = T-0013-контракт на всех таблицах.",
+  "functional": [
+    "FR-1: pipeline событие→подписка→канал→доставка — NotificationEvent (event_kind, tenant_id, subject_actor_id, object_ref, payload, occurred_at), routing-слой → NotificationPreference → outbox-ряды per (событие × подписчик × канал).",
+    "FR-2: in-app notification center — tenant-таблица choros.notification (T-0013-контракт), REST GET/PATCH/count, badge-счётчик is_read=false, политика ретенции in-app уведомлений.",
+    "FR-3: email-канал — tenant-таблица choros.email_channel_config (T-0013), smtp_handle по RL-3 паттерну T-0025 (handle shape-guard, нет raw secret), SmtpSecretResolverPort инжектируемый, отправка от имени клиента (его from_address, его SMTP), day-1/Stage-2 resolver разрыв зафиксирован.",
+    "FR-4: per-событие настройка — NotificationPreference-таблица (T-0013), unit = event_kind × recipient_scope × channels[], tenant-admin gate через grant mgmt_object:notification_config/update, self-preference эндпоинт, defaults зафиксированы.",
+    "FR-5: ретраи и bounce — через T-0062 outbox (attempts, back-off, dead), нет второго механизма; bounce day-1 = SMTP-ошибка → retry/dead; egress-граница по T-0041.",
+    "FR-6: расширяемость каналов — ChannelDriver-контракт (key, deliver(job, ctx): Promise<DeliveryResult>), routing через Map<ChannelKey, ChannelDriver> без switch/enum в ядре.",
+    "FR-7: tenant-изоляция — все notification-таблицы под полным T-0013-контрактом (FORCE RLS, default-DENY, known_tenant_tables), worker fail-closed по tenant-контексту в async.",
+    "FR-8: аудит (T-0016) — set/rotate/revoke email_channel_config, изменение notification_preference; is_read не аудитируется; факт доставки = outbox dispatched_at; единственный canonical appendAuditEvent.",
+    "FR-9: шаблонизация — шаблоны per-event_kind, server-side без LLM, переменные из payload (≤ internal data-class), HTML-экранирование в email-теле.",
+    "FR-10: миграционные слоты — бронируются ≥ 041 (барьер T-0119); дизайн без DDL/кода."
+  ],
+  "non_functional": [
+    "NF-1: tenant-изоляция структурна (FORCE RLS + tenant_id-leading PK), не на дисциплине кода.",
+    "NF-2: SMTP-credentials — raw secret никогда в логах/audit_event/API-ответах/exceptions (RL-3 абсолют).",
+    "NF-3: один outbox T-0062, один ретрай-механизм — нотификатор не изобретает второй.",
+    "NF-4: аудит переживает ошибки доставки; сбой delivery фиксируется в outbox, не стирает аудит-след.",
+    "NF-5: egress-согласование (T-0041) — тело уведомления ≤ internal data-class, SMTP-отправка = egress-событие.",
+    "NF-6: ChannelDriver-реестр без switch/enum в ядре — добавление канала = регистрация Driver.",
+    "NF-7: notification center UI не блокирует дизайн — REST API первичная поверхность, UI = Stage-2/отдельная задача."
+  ],
+  "out_of_scope": [
+    "Реализация (DDL/код/SMTP-клиент) — следующие фазы; миграции бронируются, не создаются.",
+    "Telegram/Webhook/SMS-каналы — ChannelDriver-контракт обязателен, реализация = Stage-2.",
+    "Notification center UI (полный экран) — задачи зоны 7; badge additive.",
+    "Bounce-webhook-обработка (DSN от провайдеров) — Stage-2.",
+    "Push-уведомления (мобильные) — not MVP (gap-map зона 6).",
+    "LLM-генерация тела уведомлений — Stage-2.",
+    "Платформенный SMTP-relay — запрещён; только SMTP/API клиента.",
+    "Read-receipts email (pixel tracking) — не MVP.",
+    "Второй permission-механизм — нет нового ACL; grant-алгебра T-0018.",
+    "Pooled-режим — silo дефолт; tenant-изоляция закладывается без достройки pooled."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "ADR определяет pipeline событие→подписка→канал→доставка: NotificationEvent с полями event_kind, tenant_id, subject_actor_id, object_ref, payload, occurred_at; routing-слой сопоставляет событие с активными NotificationPreference и создаёт outbox-ряды.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "ADR определяет tenant-таблицу choros.notification с полным T-0013-контрактом (tenant_id-leading PK, FORCE RLS, default-DENY, choros_app, known_tenant_tables.txt); поля: id, recipient_id, event_kind, title, body, object_ref, is_read, created_at, expires_at.", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "ADR определяет REST-эндпоинты: GET /api/notifications (свои уведомления, fail-closed), POST /api/notifications/:id/read (только owner-actor), GET /api/notifications/unread-count (indexed query); tenant-scoped, нет cross-user чтения.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "ADR определяет tenant-таблицу choros.email_channel_config (T-0013-контракт): smtp_host, smtp_port, smtp_tls, from_address, from_name, smtp_handle (непрозрачный handle по RL-3 паттерну T-0025); raw SMTP-пароль/API-ключ в таблице структурно невозможен (handle shape-guard аналог T-0025 validator).", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "ADR явно запрещает raw SMTP-credential в логах, audit_event payload, API-ответах, exception messages; ссылается на T-0025 NF-1 как прецедент; fitness-grep аналог FF-25-4 (no raw smtp credential in log/error/audit).", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "ADR определяет ChannelDriver-интерфейс: key: string, deliver(job, ctx): Promise<DeliveryResult> где DeliveryResult = {ok:true} | {ok:false; retryable:boolean; reason:string}; routing-слой использует Map<ChannelKey, ChannelDriver> (нет switch/enum в ядре).", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "ADR определяет NotificationPreference-таблицу (T-0013-контракт): (tenant_id, event_kind, recipient_scope, channels[]); управление: tenant-admin через grant mgmt_object:notification_config/update, self-preference через отдельный эндпоинт; defaults зафиксированы.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "ADR явно фиксирует: доставка через T-0062 outbox (один outbox-ряд per событие × подписчик × канал); нет второго outbox / второго ретрай-механизма; ретраи с back-off; dead = DLQ в outbox.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "ADR определяет SmtpSecretResolverPort (инжектируемый port по паттерну T-0025 §8); day-1 = прямая строка / заглушка; Stage-2 = реальный resolver; ADR фиксирует этот разрыв и то, что платформа не является SMTP-relay.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "ADR определяет egress-границу (T-0041): тело email/in-app уведомления несёт данные классификации не выше internal; SMTP-отправка через клиентский SMTP = egress-событие; граница зафиксирована.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "ADR определяет аудит-события (T-0016): set/rotate/revoke email_channel_config, изменение notification_preference; явно исключает audit_event per is_read; факт доставки = outbox dispatched_at; единственный canonical appendAuditEvent.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "ADR определяет шаблонизацию: шаблоны per-event_kind, server-side рендер без LLM, переменные из NotificationEvent.payload (≤ internal data-class), экранирование в HTML-теле email; кто может изменять шаблоны — зафиксировано.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "ADR фиксирует политику ретенции in-app уведомлений: срок хранения прочитанных, механику удаления (sweeper / expires_at), данность непрочитанные не удаляются автоматически; индексная стратегия для badge-счётчика.", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "ADR фиксирует worker fail-closed по tenant-контексту в async-путях (tenancy §9 п.7): SMTP-отправка в async только с явным tenant-контекстом; нет tenant-контекста → отказ.", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "Post-impl: пользователь получает in-app уведомление только о своих событиях (recipient_id = actor); GET /api/notifications из контекста tenant B не возвращает уведомления tenant A.", "verifiable_as": "test"},
+    {"id": "AC-16", "text": "Post-impl: при отключённом email-канале (email_channel_config не настроен или email не в channels) — email не отправляется; in-app уведомление создаётся независимо.", "verifiable_as": "test"},
+    {"id": "AC-17", "text": "Post-impl: попытка прочитать/отметить уведомление другого пользователя (recipient_id != actor) возвращает 403/404; нет cross-user чтения.", "verifiable_as": "test"},
+    {"id": "AC-18", "text": "Post-impl: SMTP-failure на delivery (таймаут/auth-error) переводит outbox-ряд в retry/dead; не создаёт дублирующего уведомления в in-app таблице; SMTP-handle не появляется в логах при ошибке.", "verifiable_as": "test"},
+    {"id": "AC-19", "text": "ADR трассируется к gap-map §2/§3а: каждое FR-1..FR-10 покрыто ≥1 решением ADR; ни одно решение не вводит второго permission-механизма / второго outbox / raw SMTP-секрета в хранилище; ревью-гейт архитектора.", "verifiable_as": "manual"},
+    {"id": "AC-20", "text": "ADR фиксирует связь с T-0095/E7-эскалациями: стандартный контракт NotificationEvent позволяет SLA-watchdog и эскалационному движку публиковать события без изменения ядра нотификатора.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0120-notifications-design.spec.md"
+}
