@@ -1,8 +1,8 @@
 # ADR T-0057 — Язык исполняемого кода Choros в MVP: TS-only ядро vs TS+Python с дня 1
 
-Статус: **DRAFT — pending founder ratification** (гейт GT-1)
+Статус: **ratified** (фаундер, 2026-06-11) — принят В-C
 Фаза: DESIGN задачи T-0057 (S-3). Вход: `docs/specs/T-0057-ts-vs-python.spec.md`.
-Рекомендация архитектора: **В-C — TS-only MVP-контур + зарезервированная external-task-граница для Python в Stage 2.**
+Решение: **В-C — TS-only MVP-контур + зарезервированная external-task-граница для Python в Stage 2.**
 Refs (ратифицированное, НЕ пересматривается): `docs/design/stack-and-fleet-ops.md` §1/§2, `docs/design/tenancy-and-delivery.md`, `CONCEPT.md` §5/§6/§12/§13.
 
 > Этот ADR НЕ решает вопрос — он готовит решение к подписи фаундера. Выбор языка/языков
