@@ -3,10 +3,13 @@
  *
  * Read-API for RBAC roles (GET /api/rights and optionally GET /api/rights/:roleId).
  * In-memory seed data matching screen-rights.jsx ROLES structure.
- * Zero external dependencies — only node:http types and router.ts.
+ * T-0141: when DATABASE_URL is set, serves rights_cards from showcase pack file
+ * (pack-serve.ts). RIGHTS_SEED remains as no-DB fallback (I-2 / spec §4.5).
+ * Zero pg / src/db/* imports (FF-DISPLAY-4).
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { loadShowcasePack } from "./pack-serve.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -143,15 +146,37 @@ const RIGHTS_SEED: Role[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Data accessors
+// DB availability flag — same pattern as org.ts
+// ---------------------------------------------------------------------------
+
+function hasDb(): boolean {
+  return Boolean(process.env["DATABASE_URL"]);
+}
+
+// ---------------------------------------------------------------------------
+// Data accessors — pack-file-serve path when DATABASE_URL set, else RIGHTS_SEED
 // ---------------------------------------------------------------------------
 
 function findRightsData(): Role[] {
+  if (hasDb()) {
+    // T-0141: serve from single source (pack file) when DB-backed mode active.
+    // Map rights_cards[].role_slug → Role.id for backwards-compat with frozen e2e.
+    const pack = loadShowcasePack();
+    return pack.rights_cards.map((card) => ({
+      id: card.role_slug,
+      name: card.name,
+      dept: card.dept,
+      scope: card.scope,
+      holders: card.holders,
+      grants: card.grants,
+      fields: card.fields,
+    }));
+  }
   return RIGHTS_SEED;
 }
 
 function findRole(roleId: string): Role | null {
-  return RIGHTS_SEED.find((r) => r.id === roleId) || null;
+  return findRightsData().find((r) => r.id === roleId) || null;
 }
 
 // ---------------------------------------------------------------------------

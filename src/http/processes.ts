@@ -3,10 +3,13 @@
  *
  * Read-API for process instances (GET /api/processes).
  * In-memory seed data with process instance list matching screen-processes.jsx shape.
- * Zero external dependencies — only node:http types and router.ts.
+ * T-0141: when DATABASE_URL is set, serves process_instances from showcase pack file
+ * (pack-serve.ts). PROCESSES_SEED remains as no-DB fallback (I-2 / spec §4.5).
+ * Zero pg / src/db/* imports (FF-DISPLAY-4).
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { loadShowcasePack } from "./pack-serve.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,11 +123,29 @@ const PROCESSES_SEED: ProcessInstance[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Data accessors
+// DB availability flag — same pattern as org.ts
 // ---------------------------------------------------------------------------
 
+function hasDb(): boolean {
+  return Boolean(process.env["DATABASE_URL"]);
+}
+
+// ---------------------------------------------------------------------------
+// Data accessors — pack-file-serve path when DATABASE_URL set, else PROCESSES_SEED
+// ---------------------------------------------------------------------------
+
+function findProcessInstances(): ProcessInstance[] {
+  if (hasDb()) {
+    // T-0141: serve from single source (pack file) when DB-backed mode active.
+    // process_instances pack shape = ProcessInstance type (T-0140 ADR §3.10).
+    const pack = loadShowcasePack();
+    return pack.process_instances as ProcessInstance[];
+  }
+  return PROCESSES_SEED;
+}
+
 function findProcessInstance(instanceId: string): ProcessInstance | null {
-  return PROCESSES_SEED.find((p) => p.id === instanceId) || null;
+  return findProcessInstances().find((p) => p.id === instanceId) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +160,7 @@ export function registerProcessesRoutes(
   router.register("GET", "/api/processes", async (_req, res) => {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ instances: PROCESSES_SEED }));
+    res.end(JSON.stringify({ instances: findProcessInstances() }));
   });
 
   // GET /api/processes/:id — return specific instance or 404

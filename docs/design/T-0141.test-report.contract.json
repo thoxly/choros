@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0141",
+  "verdict": "pass",
+  "head_sha": "e17afa0",
+  "deterministic": {
+    "total": 1095,
+    "passed": 1095,
+    "failed": 0,
+    "notes": "vitest run: 1095 passed, 6 skipped (58 files). 0 failures. fitness (full chain incl. FF-PACK-2 + FF-FALLBACK-6 newly wired): all PASS."
+  },
+  "fitness_db": {
+    "ff_apply_1": "PASS — GET /api/tenants/showcase slug=showcase; 3 depts, 7 positions, 12 employees, 8 role cards, 8 process instances",
+    "ff_scope_3": "PASS — showcase depts (fin/cs/plat) present; exactly 3; no cross-tenant leakage; self-test PASS",
+    "ff_pack_2": "PASS (3/3 stability runs; wired into default fitness per R-3)",
+    "ff_fallback_6": "PASS (3/3 stability runs; wired into default fitness per R-3)"
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/demo-tenant.test.ts + live: FF-APPLY-1 → GET /api/tenants/showcase returns {id:<uuid>,slug:'showcase'}",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/demo-tenant.test.ts (org scoping tests) + live: FF-APPLY-1 → GET /api/org X-Dev-User:e-kravtsova → 3 departments",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/demo-tenant.test.ts + live: FF-APPLY-1 summary → departments:3, positions:7, employees:12",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/__tests__/demo-tenant.test.ts (user-list tests) + live: GET /api/users → 7 human showcase slugs each with id/name/position/department; 0 agent personas",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "manual — dev login screen http://localhost:8080/ login picker; clicking persona → shell with user name in nav footer",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-6",
+      "test": "manual — /org renders 3 department cards without JS error for any showcase human persona",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-7",
+      "test": "manual — /processes renders 8 process-instance rows without JS error",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-8",
+      "test": "manual — /rights renders 8 role cards without JS error",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-9",
+      "test": "manual — /audit renders without JS error (empty acceptable)",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-10",
+      "test": "manual — /inbox renders without JS error (empty acceptable)",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-11",
+      "test": "src/__tests__/rights.e2e.test.ts + live: FF-APPLY-1 → GET /api/rights → 8 role-card objects with role_slug/name/grants",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "src/__tests__/demo-tenant.test.ts (user-list) — agent slugs absent from /api/users response; review confirmed 7 human employees only",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "src/__tests__/demo-tenant.test.ts + live: FF-SCOPE-3 → showcase org does NOT contain DEV_TENANT_ID data; WHERE tenant_id verified via code + live probe",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "src/__tests__/demo-tenant.test.ts (seed reset test) → extra dept inserted, reset → 3 depts remain",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-15",
+      "test": "src/__tests__/demo-tenant.test.ts (e-owner preservation test) → e-owner row present after reset (EXCLUDE_EMPLOYEE_SLUGS=['e-owner'])",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-16",
+      "test": "manual — logout → login picker → select different persona → nav footer shows new user name",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-17",
+      "test": "manual — single-command start documented; seed apply command documented in spec §6 and runbook",
+      "result": "deferred-to-founder-gate"
+    },
+    {
+      "ac": "AC-18",
+      "test": "src/__tests__/processes.e2e.test.ts + live: FF-APPLY-1 → GET /api/processes → 8 process-instance objects with id/name/status/progress",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "known_limitations": [
+    {
+      "id": "R-1-grant-trail",
+      "source": "reviewer nit R-1",
+      "description": "queryGrantTrail (src/db/audit-grant-trail.ts) reads via getOrgPool (choros_migrator, BYPASSRLS) with no explicit WHERE tenant_id predicate. Not cross-tenant exploitable through showcase persona path (tenantId hardcoded). Follow-up task created.",
+      "ac_impact": "none"
+    },
+    {
+      "id": "R-2-e-owner-spec",
+      "source": "reviewer nit R-2",
+      "description": "Spec FR-4 lists e-owner as demo owner persona but e-owner is not in showcase seed pack and not surfaced in login picker. Actual showcase high-privilege persona = e-larina. Impl correct; spec inconsistency surfaced to founder at gate.",
+      "ac_impact": "none — AC-4 satisfied (>=6 showcase human slugs returned)"
+    }
+  ]
+}

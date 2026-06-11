@@ -12,12 +12,15 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { DEV_USER_HEADER } from "./auth.js";
 import {
   listOrgTree,
   findEmployeeById,
   listHumanEmployees,
   getOrgPool,
   DEV_TENANT_ID,
+  resolveActorTenant,
+  resolveTenantBySlug,
   type OrgPerson,
   type OrgDepartment,
 } from "../db/org.js";
@@ -131,7 +134,9 @@ export async function findEmployee(
   employeeId: string,
 ): Promise<(OrgPerson & { position: string; department: string }) | null> {
   if (hasDb()) {
-    return findEmployeeById(getOrgPool(), DEV_TENANT_ID, employeeId);
+    // T-0141: resolve actor's tenant from DB (resolveActorTenant fallback=DEV_TENANT_ID)
+    const tenantId = await resolveActorTenant(getOrgPool(), employeeId);
+    return findEmployeeById(getOrgPool(), tenantId, employeeId);
   }
   // In-memory fallback (no DATABASE_URL).
   for (const department of ORG_SEED) {
@@ -164,7 +169,10 @@ export async function listSelectableUsers(): Promise<Array<{
   department: string;
 }>> {
   if (hasDb()) {
-    return listHumanEmployees(getOrgPool(), DEV_TENANT_ID);
+    // T-0141: use DEMO_TENANT_SLUG (default: "showcase") for pre-login picker
+    const demoSlug = process.env["DEMO_TENANT_SLUG"] ?? "showcase";
+    const tenantId = await resolveTenantBySlug(getOrgPool(), demoSlug);
+    return listHumanEmployees(getOrgPool(), tenantId);
   }
   // In-memory fallback (no DATABASE_URL).
   const users = [];
@@ -191,10 +199,17 @@ export async function listSelectableUsers(): Promise<Array<{
 
 export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   // GET /api/org — return full org tree
-  router.register("GET", "/api/org", async (_req, res) => {
+  // T-0141: resolve actor's tenant from X-Dev-User header (fallback: DEV_TENANT_ID)
+  router.register("GET", "/api/org", async (req, res) => {
     let departments: OrgDepartment[];
     if (hasDb()) {
-      departments = await listOrgTree(getOrgPool(), DEV_TENANT_ID);
+      let actorSlug = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(actorSlug)) actorSlug = actorSlug[0];
+      const tenantId =
+        actorSlug && typeof actorSlug === "string"
+          ? await resolveActorTenant(getOrgPool(), actorSlug)
+          : DEV_TENANT_ID;
+      departments = await listOrgTree(getOrgPool(), tenantId);
     } else {
       departments = findOrgDataSync();
     }

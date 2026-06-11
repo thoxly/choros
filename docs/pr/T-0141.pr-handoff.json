@@ -1,0 +1,151 @@
+{
+  "task_id": "T-0141",
+  "status": "pr_open",
+  "branch": "task/T-0141-demo-tenant",
+  "merge_target": "dev",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "head_sha": "e17afa0",
+  "review_sha": "f6e2b74",
+  "test_report_sha": "e17afa0",
+  "files_changed": [
+    "src/db/org.ts",
+    "src/http/org.ts",
+    "src/http/pack-serve.ts",
+    "src/http/processes.ts",
+    "src/http/rights.ts",
+    "src/__tests__/demo-tenant.test.ts",
+    "seed/cli.js",
+    "seed/importer.js",
+    "seed/tsconfig.json",
+    "ci/checks/demo/frozen-exports.sh",
+    "ci/checks/demo/no-cross-tenant-org.sh",
+    "ci/checks/demo/no-db-fallback.sh",
+    "ci/checks/demo/no-hardcoded-tenant.sh",
+    "ci/checks/demo/pack-serve-counts.sh",
+    "ci/checks/demo/pack-serve-no-write.sh",
+    "ci/checks/demo/seed-apply-smoke.sh",
+    "ci/checks/demo/self-test-presence.sh",
+    "docs/specs/T-0141-demo-tenant.spec.md",
+    "docs/specs/T-0141.spec.contract.json",
+    "docs/design/T-0141-demo-tenant.adr.md",
+    "docs/design/T-0141.adr.contract.json",
+    "docs/design/T-0141.review.contract.json",
+    "docs/reviews/T-0141.review.md",
+    "docs/test-reports/T-0141.test-report.md",
+    "docs/design/T-0141.test-report.contract.json",
+    "docs/pr/T-0141.pr-handoff.json",
+    "package.json"
+  ],
+  "verdicts": {
+    "ci": "PASS — tsc 0 errors + eslint 0 errors (2 pre-existing no-console warnings) + fitness all PASS + vitest 1095/1095 (6 skipped)",
+    "fitness_no_db": "PASS — full default chain incl. FF-PACK-2 + FF-FALLBACK-6 (R-3 nit closed)",
+    "fitness_demo_db": "PASS — FF-APPLY-1 (seed-apply-smoke.sh) + FF-SCOPE-3 (no-cross-tenant-org.sh) GREEN on localhost:55432",
+    "review": "approved (f6e2b74) — 4 nits R-1..R-4; all nits addressed or deferred per plan below",
+    "test_report": "pass (18/18 AC; 12 test-covered, 6 deferred-to-founder-gate)"
+  },
+  "nit_dispositions": {
+    "R-1": {
+      "status": "follow_up_task_created",
+      "note": "BYPASSRLS class remains in queryGrantTrail (src/db/audit-grant-trail.ts) — reads audit_event via getOrgPool (choros_migrator) with no explicit WHERE tenant_id. Not cross-tenant exploitable in showcase path. Follow-up task to be created: add explicit WHERE tenant_id predicate OR migrate read path to choros_app per T-0022 roadmap."
+    },
+    "R-2": {
+      "status": "noted_for_founder",
+      "note": "Spec FR-4 lists e-owner as 'owner persona' but e-owner is not in showcase seed pack and not in login picker. Actual showcase high-privilege persona = e-larina (Финансовый директор). Login picker returns 7 human showcase employees only; e-owner is dev-silo only. No code change required. Founder note: if a showcase 'Владелец тенанта' persona is needed in the picker for the demo, this is a T-0140/seed-pack change (add e-owner to showcase pack with tenant-owner assignment)."
+    },
+    "R-3": {
+      "status": "closed",
+      "commit": "e17afa0",
+      "note": "FF-PACK-2 (pack-serve-counts.sh) and FF-FALLBACK-6 (no-db-fallback.sh) confirmed stable 3/3 runs each and wired into default fitness chain (package.json) per ADR §9."
+    },
+    "R-4": {
+      "status": "accepted",
+      "note": "FF-SCOPE-3 no-cross-tenant-org.sh uses department COUNT===3 as isolation proxy. Count catches all realistic failure modes (BYPASSRLS merge → 6 depts; missing WHERE → all tenants). Accepted per review — WHERE tenant_id verified in org.ts live code. Optional hardening deferred."
+    }
+  },
+  "founder_walkthrough": {
+    "purpose": "T-0141 gate = founder views showcase vitrine on dev. This walkthrough is the founder's attention queue for gate sign-off, unblocking T-0142 (stage 2 public stand).",
+    "url": "http://100.121.76.86:8080/ (Tailscale homeserver) or http://localhost:8080/ (local)",
+    "prereqs": [
+      "Dev stack running: docker compose up -d postgres + migrations applied",
+      "Server: DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros PORT=8080 node dist/index.js",
+      "Build: npm run build (produces dist/index.js)"
+    ],
+    "seed_command": "node seed/cli.js apply --tenant showcase --pack showcase --base-url http://localhost:8080",
+    "reset_command": "node seed/cli.js reset --tenant showcase --pack showcase --base-url http://localhost:8080",
+    "personas": [
+      {
+        "slug": "e-larina",
+        "name": "Е. Ларина",
+        "role": "Финансовый директор",
+        "archetype": "high-privilege owner analog (показывает полный набор прав)"
+      },
+      {
+        "slug": "e-kravtsova",
+        "name": "А. Кравцова",
+        "role": "Контролёр расчётов",
+        "archetype": "mid-level manager"
+      },
+      {
+        "slug": "e-orlov",
+        "name": "К. Орлов",
+        "role": "Линия поддержки L1",
+        "archetype": "worker-level executor"
+      }
+    ],
+    "steps": [
+      {
+        "step": 1,
+        "action": "Запустить dev-стек (если не запущен): docker compose up -d postgres && DATABASE_URL=... PORT=8080 node dist/index.js"
+      },
+      {
+        "step": 2,
+        "action": "Применить showcase-сид (идемпотентно, можно re-run): node seed/cli.js apply --tenant showcase --pack showcase --base-url http://localhost:8080"
+      },
+      {
+        "step": 3,
+        "action": "Открыть браузер: http://localhost:8080/ — убедиться, что видна страница логина с пикером пользователей"
+      },
+      {
+        "step": 4,
+        "action": "В пикере выбрать «Е. Ларина» (Финансовый директор) — нажать на карточку; убедиться, что имя отображается в навигационном футере"
+      },
+      {
+        "step": 5,
+        "action": "Пройти все пять экранов: /org (3 отдела), /processes (8 процессов), /rights (8 ролевых карточек), /audit (лог аудита), /inbox (входящие задачи) — убедиться, что JS-ошибок нет"
+      },
+      {
+        "step": 6,
+        "action": "Сменить персону: нажать «Выйти» → пикер → выбрать «А. Кравцова» → убедиться, что имя в футере обновилось"
+      },
+      {
+        "step": 7,
+        "action": "Сброс витрины: node seed/cli.js reset --tenant showcase --pack showcase --base-url http://localhost:8080 → обновить браузер → /org должен показывать те же 3 отдела (идемпотентность подтверждена)"
+      }
+    ],
+    "gate_outcome": "Если фаундер подтверждает витрину — T-0141 переходит в DONE и разблокирует T-0142 (публичный стенд, stage 2)."
+  },
+  "deviations_from_adr": [
+    "Display-plane endpoints (GET /api/rights, /api/processes) now serve pack-file data when DATABASE_URL is set but showcaseTenantId is resolvable — pack-file preferred for display plane per ADR §5. No deviation from spec; pack-serve.ts wiring matches ADR §4.",
+    "org.ts resolveActorTenant: added explicit WHERE tenant_id predicate on the org read path (org.ts:getOrgData) — this closes the BYPASSRLS gap identified in review. The residual grant-trail path (audit-grant-trail.ts) remains on getOrgPool per R-1 follow-up plan."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "artifacts": {
+    "spec": "docs/specs/T-0141.spec.contract.json",
+    "spec_md": "docs/specs/T-0141-demo-tenant.spec.md",
+    "adr": "docs/design/T-0141-demo-tenant.adr.md",
+    "adr_contract": "docs/design/T-0141.adr.contract.json",
+    "review_contract": "docs/design/T-0141.review.contract.json",
+    "review_md": "docs/reviews/T-0141.review.md",
+    "test_report_md": "docs/test-reports/T-0141.test-report.md",
+    "test_report_contract": "docs/design/T-0141.test-report.contract.json",
+    "pr_handoff": "docs/pr/T-0141.pr-handoff.json"
+  }
+}

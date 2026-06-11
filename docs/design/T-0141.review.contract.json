@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0141",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "tsc": "exit 0 (npx tsc --noEmit)",
+    "tests": "1095 passed / 6 skipped (56 files) — incl. demo-tenant.test.ts (15) + frozen org/rights/processes/static e2e still green",
+    "fitness": "npm run fitness exit 0 (no-DB chain incl. 4 demo static FF)",
+    "fitness_demo_db": "FF-APPLY-1 + FF-SCOPE-3 GREEN against live dev DB (choros_migrator@localhost:55432/choros)",
+    "fitness_demo_server": "FF-PACK-2 + FF-FALLBACK-6 GREEN (self-starting servers, self-tests fire)"
+  },
+  "build_sha": "e0d3656",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/db/audit-grant-trail.ts:10-11 (+ src/http/grant-trail.ts via getOrgPool)",
+      "issue": "Same latent BYPASSRLS class the BUILD fixed in org.ts remains in the grant-trail read path: queryGrantTrail reads choros.audit_event relying ONLY on the SET LOCAL choros.tenant_id GUC + RLS, executed on getOrgPool() = choros_migrator (BYPASSRLS) which ignores RLS entirely. Not exploitable cross-tenant via the showcase persona path because grant-trail hardcodes tenantId=DEV_TENANT_ID regardless of X-Dev-User (grant-trail.ts:222-228), and it is OUT OF T-0141 SCOPE (untouched file). Logged as role_gap_evidence, not blocking for T-0141.",
+      "suggestion": "Separate task: add explicit WHERE tenant_id = $1 predicate to queryGrantTrail (same additive fix as org.ts), OR migrate the read HTTP pool to choros_app (NOBYPASSRLS) per the T-0022 roadmap so the GUC/RLS path is actually enforced at runtime."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/specs/T-0141-demo-tenant.spec.md FR-4 table vs §6 walkthrough; src/db/org.ts:298-301 (resolveActorTenant fallback)",
+      "issue": "Spec FR-4 lists 'Владелец тенанта = e-owner' as a demo persona, but e-owner exists ONLY in the dev-silo tenant (migration 026), is NOT in seed/showcase/pack.json, and holds no tenant-owner assignment in showcase (verified live: e-owner rows total=1, tenant=DEV_TENANT_ID). resolveActorTenant('e-owner') correctly resolves to DEV_TENANT_ID (fallback), so a manually-sent X-Dev-User: e-owner would silently show dev-silo data. Mitigated: e-owner is NOT surfaced in the login picker (/api/users returns 7 showcase humans only), and the spec's own §6 walkthrough uses e-larina/e-kravtsova/e-orlov as the actual demo personas. AC-4 (>=6 showcase humans, all valid showcase slugs) is satisfied. Internal spec inconsistency, not an impl defect.",
+      "suggestion": "Surface to founder at gate: the showcase 'owner-archetype' persona is e-larina (Финансовый директор / high-privilege), not e-owner. No code change required. Optionally: a guard that rejects X-Dev-User slugs absent from the resolved demo tenant rather than silently falling back to DEV_TENANT_ID."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "package.json scripts.fitness vs scripts.fitness:demo:db / FF-PACK-2 / FF-FALLBACK-6",
+      "issue": "FF-PACK-2 (pack-serve-counts.sh) and FF-FALLBACK-6 (no-db-fallback.sh) are self-contained (self-start a server; FF-PACK-2 uses a non-connectable sentinel DATABASE_URL) and run GREEN with no live DB — yet neither is wired into the default `npm run fitness` chain (only the 4 pure-static demo checks are). They will only run if someone invokes them ad hoc. The ADR §9 table claims they run 'always'; in practice the always-gate omits them.",
+      "suggestion": "Either add pack-serve-counts.sh and no-db-fallback.sh to the default `fitness` chain (they need no DB), or update ADR §9 to mark them 'fitness:demo (server-starting, not in default fitness gate)'. Low priority — they pass; this is about gate-coverage honesty."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 2,
+      "location": "ci/checks/demo/no-cross-tenant-org.sh:38-50",
+      "issue": "FF-SCOPE-3 proves no cross-tenant leakage via department COUNT===3, not via slug identity — because dev-silo and showcase share dept slugs (fin/cs/plat). The count proxy catches the realistic failure modes (BYPASSRLS merge → 6 depts; missing WHERE → all tenants), but a hypothetical bug returning exactly 3 wrong-tenant depts would slip. Acceptable for the gate; the real guarantee is the explicit WHERE tenant_id=$1 (now present) verified directly via live code probe in this review.",
+      "suggestion": "Optional hardening: assert on a showcase-unique marker (e.g. a specific employee display_name or count of 12 employees under the tree) in addition to dept count."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "TEST-APPARATUS ROLE-MISMATCH (answers BUILD point 1c — why no existing fitness caught the org.ts BYPASSRLS bug): ci/checks/db/cross_tenant.test.ts (the 152-FZ isolation gate) proves RLS isolation through appUrl() = choros_app (NOBYPASSRLS), while the runtime HTTP read path (getOrgPool → GET /api/org, /api/users) connects via DATABASE_URL = choros_migrator (BYPASSRLS). The fitness apparatus exercises RLS via the app role but NEVER exercises the actual runtime pool role for the read endpoints. RLS policies were correct; the runtime simply bypassed them. The cross-tenant fitness therefore structurally cannot catch a missing explicit WHERE tenant_id on a migrator-pool read — exactly the gap T-0141 patched in org.ts. Candidate remediation: a fitness that runs the read endpoints under the migrator pool and asserts isolation, OR migrate read endpoints to choros_app per T-0022.",
+    "RESIDUAL BYPASSRLS-CLASS READ (answers BUILD point 1a): after T-0141, the ONLY remaining tenant-scoped read on the migrator (BYPASSRLS) pool that relies solely on the GUC (no explicit WHERE tenant_id) is queryGrantTrail in src/db/audit-grant-trail.ts (audit_event), reached via /api/audit/grant-trail (src/http/grant-trail.ts, getOrgPool). It is not cross-tenant-exploitable through the showcase persona path (tenantId hardcoded to DEV_TENANT_ID there), and is out of T-0141 scope. Should be closed in a follow-up alongside R-1 (either explicit predicate or choros_app pool migration).",
+    "CROSS-TENANT BOOTSTRAP AUTHORITY (T-0140 design, observed not introduced by T-0141): seed-write POST/DELETE handlers gate on loadAdminContext(pool, DEV_TENANT_ID, actorId) — i.e. genesis-ownership of the DEV silo authorizes writes into ANY tenant's body.tenant_id on the BYPASSRLS migrator pool. This is what lets `seed apply/reset --tenant showcase` succeed as devUser=e-owner even though e-owner is not a member/owner of the showcase tenant. Pre-existing T-0140 decision; flagged for awareness because it is a real cross-tenant write authority that will need re-gating when the pool splits to choros_app / Keycloak lands (T-0054/T-0022)."
+  ]
+}
