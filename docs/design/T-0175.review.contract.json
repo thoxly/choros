@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0175",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 5,
+      "location": "git log c70065e",
+      "issue": "BUILD commit message states '42 test cases' but vitest reports 37 tests at runtime. Minor inaccuracy in the commit description; the live test run is the source of truth and all 37 tests pass.",
+      "suggestion": "No action required — nit only."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true},
+    {"ac": "AC-2",  "covered": true},
+    {"ac": "AC-3",  "covered": true},
+    {"ac": "AC-4",  "covered": true},
+    {"ac": "AC-5",  "covered": true},
+    {"ac": "AC-6",  "covered": true},
+    {"ac": "AC-7",  "covered": true},
+    {"ac": "AC-8",  "covered": true},
+    {"ac": "AC-9",  "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true},
+    {"ac": "AC-21", "covered": true},
+    {"ac": "AC-22", "covered": true},
+    {"ac": "AC-23", "covered": true},
+    {"ac": "AC-24", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
