@@ -264,4 +264,74 @@ describe('T-0044 dual-control gate write-path e2e', () => {
     const third = await postGrant('e-third', { phase: 'confirm2', change_ref: grantId });
     expect(third.status).toBe(409);
   });
+
+  // --- T-0044 review-friction: concurrent grant-writes of ONE tenant must NOT
+  //     500 on the audit chain. The removed T-0030 placeholder writer computed
+  //     seq/prev_hash without per-tenant serialization, so two appends racing on
+  //     the unique (tenant_id, seq) key threw a duplicate-key 23505 → bubbled to
+  //     500. The canonical appendAuditEvent (T-0068) serializes per tenant via
+  //     `audit_head ... FOR UPDATE` (seed-head anchor), so concurrent writes block
+  //     rather than collide. This probe fires N parallel routine grants on the
+  //     same tenant+role and asserts: zero 500s, every request 201, and the audit
+  //     chain that resulted is gapless & seq-unique (proof of real serialization,
+  //     not just retry-luck). On the old base this test failed (≥1 request 500).
+  it('concurrency: parallel grant-writes of one tenant do not 500 (canonical FOR UPDATE serialization)', async () => {
+    const N = 8;
+
+    // Snapshot the tenant's audit head seq before the burst, so we can assert the
+    // burst produced a contiguous run regardless of unrelated history.
+    const seqBefore = await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT COALESCE(MAX(seq), 0) AS seq FROM choros.audit_event WHERE tenant_id=$1`,
+        [DEV_TENANT],
+      );
+      return Number(rows[0].seq);
+    });
+
+    // Fire N routine (read) grants concurrently — same tenant, same role. Each
+    // write appends ≥2 audit rows (dualcontrol.gate + grant.create) in its own tx;
+    // all contend for the SAME per-tenant audit_head lock.
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        postGrant(ACTOR1, {
+          role_id: TEST_ROLE,
+          resource_type: 'record',
+          operation: 'read',
+          scope: FIN_NODE_SCOPE,
+          granted_by: ACTOR1,
+        }),
+      ),
+    );
+
+    // No request 500'd; every request succeeded (201).
+    const fiveHundreds = results.filter((r) => r.status >= 500);
+    expect(
+      fiveHundreds.length,
+      `expected zero 500s under concurrent grant-writes, got ${fiveHundreds.length}: ` +
+        JSON.stringify(fiveHundreds.map((r) => r.json)),
+    ).toBe(0);
+    for (const r of results) {
+      expect(r.status, JSON.stringify(r.json)).toBe(201);
+    }
+
+    // The audit chain advanced gaplessly & uniquely: seqs after the snapshot form
+    // a contiguous, strictly-increasing run with no duplicates. A racing writer
+    // (old behavior) would either dup a seq (→ failed insert/500) or leave a gap.
+    await withClient(migratorUrl(), async (c) => {
+      const { rows } = await c.query(
+        `SELECT seq FROM choros.audit_event
+          WHERE tenant_id=$1 AND seq > $2 ORDER BY seq ASC`,
+        [DEV_TENANT, seqBefore],
+      );
+      const seqs = rows.map((r) => Number(r.seq));
+      // At least 2 rows per successful write.
+      expect(seqs.length).toBeGreaterThanOrEqual(N * 2);
+      // Strictly increasing, contiguous (gapless), no duplicates.
+      const uniq = new Set(seqs);
+      expect(uniq.size, 'duplicate audit seq under concurrency').toBe(seqs.length);
+      for (let i = 1; i < seqs.length; i++) {
+        expect(seqs[i], `gap/disorder in audit chain at index ${i}`).toBe(seqs[i - 1] + 1);
+      }
+    });
+  });
 });
