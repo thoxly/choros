@@ -1,3 +1,4 @@
+agent_card
 job
 application
 registry_def

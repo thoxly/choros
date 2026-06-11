@@ -1,0 +1,90 @@
+{
+  "task_id": "T-0020",
+  "status": "ready",
+  "decision": "agent_card as a separate tenant-isolated FORCE-RLS table (migration 032), one row per employee(kind='agent'), schema-only and runtime-dormant day-1. FR-2 (card only for agents) enforced declaratively via a composite-FK-into-redundant-discriminator-key idiom: migration 032 adds UNIQUE (tenant_id, id, kind) on employee, agent_card carries employee_kind text NOT NULL DEFAULT 'agent' pinned by CHECK (employee_kind='agent'), and FK (tenant_id, employee_id, employee_kind) -> employee(tenant_id, id, kind) — no trigger. budget_policy_id and escalation_rule_id are uuid NULL with NO FK (T-0023 instance_budget unlanded; no escalation_rule table at all — deferred per the 017 'impossible FK = BUILD bounce' lesson). 5 dev agents seeded ON CONFLICT DO NOTHING. No prompt/instruction column (T-0123 competence layer adds it additively). No new TS module, no HTTP endpoint. Live-verified against the running silo Postgres (migrations 001-031 already applied); DB left pristine.",
+  "rejected_alternatives": [
+    {"option": "Agent columns directly on employee (no separate table)", "why_not": "9 agent-only nullable columns on every human row; muddier intent; T-0123/Stage-2 additions pollute the org-core table. Backlog signature names a table (agent_card(employee_id, ...))."},
+    {"option": "Trigger enforcing employee.kind='agent' on INSERT/UPDATE", "why_not": "Procedural second enforcement surface; the composite-FK-into-redundant-key idiom enforces FR-2 declaratively with zero code."},
+    {"option": "Plain composite FK (tenant_id, employee_id) -> employee(tenant_id, id) only", "why_not": "Cannot restrict on kind; would admit cards for kind='human' employees, violating FR-2."},
+    {"option": "Declare budget_policy_id FK to instance_budget in migration 032", "why_not": "instance_budget (T-0023) is not applied in the live DB; the FK target does not exist -> migration fails to apply = BUILD bounce (017 lesson). FK deferred to T-0023."},
+    {"option": "Declare escalation_rule_id FK in migration 032", "why_not": "No escalation_rule table exists anywhere yet. Impossible FK. Column is uuid NULL with no FK; the future escalation task adds it."},
+    {"option": "Add a prompt/instruction/system_prompt column", "why_not": "Competence layer is T-0123's scope (product-audit 2026-06-11 seam). Table kept narrow + additively extensible."},
+    {"option": "Separate seed script outside the migration", "why_not": "Violates the T-0053 one-bring-up-path principle (NF-4). Seed stays inside migration 032 behind ON CONFLICT DO NOTHING."},
+    {"option": "Reuse the shared human empIdA/empIdB in the cross_tenant seedRowForTable agent_card case", "why_not": "seedEmployeeRow seeds kind='human' (line 177); the kind-FK rejects it. The agent_card case must seed its own kind='agent' employee inline (order-independent, like the role case)."}
+  ],
+  "object_model": [
+    {"entity": "agent_card", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL; leading PK component; part of FK to employee (T-0013)"},
+      {"name": "employee_id", "type": "uuid NOT NULL; PK (tenant_id, employee_id); FK component to employee"},
+      {"name": "employee_kind", "type": "text NOT NULL DEFAULT 'agent'; CHECK (employee_kind='agent'); FK discriminator for FR-2"},
+      {"name": "kc_client_id", "type": "text NOT NULL; Keycloak service-account clientId (e.g. agent-recon); UNIQUE (tenant_id, kc_client_id); frozen linkage seam FR-7"},
+      {"name": "llm_endpoint", "type": "text NULL; BYO-LLM base URL; NULL = dormant"},
+      {"name": "llm_model", "type": "text NULL; model id; NULL = dormant"},
+      {"name": "llm_secret_handle", "type": "text NULL; RL-3 opaque handle (never a raw key, NF-3); no length cap below 512 (AC-15); T-0025 owns lifecycle"},
+      {"name": "autonomy_threshold", "type": "numeric(5,4) NULL; CHECK (IS NULL OR (>=0 AND <=1)) (NF-4); NULL = dormant"},
+      {"name": "budget_policy_id", "type": "uuid NULL; NO FK in 032 (FK to instance_budget deferred to T-0023, FR-9)"},
+      {"name": "escalation_rule_id", "type": "uuid NULL; NO FK (target table absent, FR-8)"},
+      {"name": "created_at", "type": "bigint NOT NULL; epoch-ms"},
+      {"name": "updated_at", "type": "bigint NOT NULL; epoch-ms"}
+    ]},
+    {"entity": "employee (additive change in migration 032)", "fields": [
+      {"name": "employee_tenant_id_id_kind_key", "type": "ADD CONSTRAINT UNIQUE (tenant_id, id, kind) — makes (tenant_id, id, kind) FK-targetable for FR-2; superset of existing PK; no row mutation; idempotent; DDL-only, no importer/public-symbol surface affected"}
+    ]},
+    {"entity": "DevSeedAgentCards (migration 032, ON CONFLICT DO NOTHING)", "fields": [
+      {"name": "a-recon (d0000000-...-0002)", "type": "kc_client_id=agent-recon; LLM/autonomy NULL"},
+      {"name": "a-invoice (d0000000-...-0003)", "type": "kc_client_id=agent-invoice; LLM/autonomy NULL"},
+      {"name": "a-triage (d0000000-...-0006)", "type": "kc_client_id=agent-triage; LLM/autonomy NULL"},
+      {"name": "s-ledger (d0000000-...-0011)", "type": "kc_client_id=s-ledger (slug placeholder; T-0042 provisions real KC client); LLM/autonomy NULL"},
+      {"name": "s-ocr (d0000000-...-0012)", "type": "kc_client_id=s-ocr (slug placeholder; T-0042 provisions real KC client); LLM/autonomy NULL"}
+    ]}
+  ],
+  "contracts": [
+    "Migration 032: ALTER TABLE choros.employee ADD CONSTRAINT employee_tenant_id_id_kind_key UNIQUE (tenant_id, id, kind).",
+    "Migration 032: CREATE TABLE choros.agent_card (tenant_id uuid NOT NULL, employee_id uuid NOT NULL, employee_kind text NOT NULL DEFAULT 'agent', kc_client_id text NOT NULL, llm_endpoint text NULL, llm_model text NULL, llm_secret_handle text NULL, autonomy_threshold numeric(5,4) NULL, budget_policy_id uuid NULL, escalation_rule_id uuid NULL, created_at bigint NOT NULL, updated_at bigint NOT NULL, PRIMARY KEY (tenant_id, employee_id), UNIQUE (tenant_id, kc_client_id), CONSTRAINT agent_card_employee_kind_chk CHECK (employee_kind='agent'), CONSTRAINT agent_card_autonomy_threshold_chk CHECK (autonomy_threshold IS NULL OR (autonomy_threshold >= 0 AND autonomy_threshold <= 1)), CONSTRAINT agent_card_employee_fk FOREIGN KEY (tenant_id, employee_id, employee_kind) REFERENCES choros.employee(tenant_id, id, kind)).",
+    "Migration 032: ENABLE + FORCE ROW LEVEL SECURITY; POLICY agent_card_tenant_isolation USING/WITH CHECK (tenant_id = current_setting('choros.tenant_id', true)::uuid); GRANT SELECT, INSERT, UPDATE, DELETE ON choros.agent_card TO choros_app (no DDL).",
+    "Migration 032: dev seed of 5 agent cards for DEV_TENANT a0000000-0000-0000-0000-000000000001, ON CONFLICT DO NOTHING.",
+    "ci/checks/known_tenant_tables.txt += 'agent_card' (1 line; schema.test.ts reads it as an unordered Set, so position is cosmetic).",
+    "T-0042 (write seam): on hire INSERT an agent_card row for the employee(kind='agent') with kc_client_id = the new KC clientId; LLM fields/autonomy_threshold MAY be NULL; T-0042 provisions the real KC clients for s-ledger/s-ocr.",
+    "T-0024 (read seam): agent identity = agent_card.employee_id (tenant-scoped) or employee WHERE kind='agent'; kc_client_id is the KC anchor.",
+    "T-0025 (column seam): agent_card.llm_secret_handle text NULL holds the opaque handle; T-0025 owns create/rotate/revoke and the never-a-raw-key rule (not DB-enforced here).",
+    "T-0043 (read seam): agent_card.employee_id is the toolset-from-grants agent identity key.",
+    "T-0023 (FK seam): adds budget_policy_id -> instance_budget(tenant_id, id) additively once instance_budget lands.",
+    "T-0123 (extension seam): adds competence/prompt columns by additive ALTER TABLE ADD COLUMN; this ADR adds no instruction/prompt column.",
+    "Coder BUILD-phase test-seam fix 1: ci/checks/db/grant-editor.test.ts expect(lines.length).toBe(21) -> toBe(22) (the 'no new tenant table from T-0030' comment is now stale).",
+    "Coder BUILD-phase test-seam fix 2: ci/checks/db/cross_tenant.test.ts seedRowForTable add a SELF-SUFFICIENT case 'agent_card' that seeds its own kind='agent' employee inline then its card (the file iterates in known_tenant_tables.txt order where agent_card precedes employee, and the shared empIdA/B is kind='human' = FK-incompatible). Template in ADR §4.4.",
+    "two_tenant.test.ts needs NO change: its migration-count assertion is dynamic (>= filesOnDisk), auto-adapting to 32 files."
+  ],
+  "fitness_functions": [
+    {"id": "FF-AC-1", "rule": "agent_card has ENABLE + FORCE ROW LEVEL SECURITY and the default-DENY tenant-isolation policy; tenant_id is the leading PK column", "ci_check": "ci/checks/db/schema.test.ts FF-RLS describe-block iterates KNOWN_TENANT_TABLES dynamically — automatic once agent_card is in known_tenant_tables.txt. Covers AC-1 (RLS), AC-2. Live-verified: relrowsecurity=true, relforcerowsecurity=true, policy present."},
+    {"id": "FF-AC-2", "rule": "Every composite FK on agent_card leads with tenant_id (agent_card_employee_fk = (tenant_id, employee_id, employee_kind))", "ci_check": "ci/checks/db/schema.test.ts FF-LEAD iterates KNOWN_TENANT_TABLES — automatic once agent_card is in the txt file."},
+    {"id": "FF-AC-3", "rule": "FR-2 kind-FK: INSERT agent_card referencing a kind='human' employee is rejected (PG 23503); referencing a kind='agent' employee succeeds", "ci_check": "New behavioral test in ci/checks/db/agent-card.test.ts (db CI job): INSERT card for e-kravtsova (human) -> 23503; INSERT card for a fresh kind='agent' employee -> success. Covers AC-5, AC-6. Live-verified in DESIGN (23503 reject; fresh-agent insert 5->6)."},
+    {"id": "FF-AC-4", "rule": "autonomy_threshold CHECK: 1.5 rejected (23514), 0.0/0.5/1.0 accepted, NULL accepted", "ci_check": "ci/checks/db/agent-card.test.ts: INSERT autonomy_threshold=1.5 -> 23514; 0.5 -> success; NULL -> success. Covers AC-7. Live-verified (23514 reject; 0.5 accepted)."},
+    {"id": "FF-AC-5", "rule": "budget_policy_id and escalation_rule_id are uuid NULL with NO FK constraint in migration 032 (deferred-FK discipline)", "ci_check": "Static grep + schema introspection in ci/checks/db/agent-card.test.ts: assert no pg_constraint of contype='f' on agent_card references budget_policy_id or escalation_rule_id columns; migration applies cleanly with instance_budget absent. Covers AC-16, AC-17. Live-verified: only agent_card_employee_fk exists."},
+    {"id": "FF-AC-6", "rule": "Dormancy: no day-1 runtime code path reads agent_card", "ci_check": "grep -rn 'agent_card' src/ returns 0 matches in any .ts file outside __tests__/migrations/. Add to npm run fitness (static check, e.g. ci/checks/agent-card-dormant.sh). Covers AC-12. Live-verified: 0 matches in src/."},
+    {"id": "FF-AC-7", "rule": "Migration 032 is idempotent (re-run = no error, no row delta); 512-char llm_secret_handle accepted; UNIQUE (tenant_id, kc_client_id) rejects duplicates (23505)", "ci_check": "ci/checks/db/two_tenant.test.ts FF-2 idempotency re-run (seeds use ON CONFLICT DO NOTHING; ALTER ADD CONSTRAINT runs once via schema_migrations); agent-card.test.ts: 512-char handle accepted, duplicate kc_client_id -> 23505. Covers AC-11, AC-15, AC-10. Live-verified (idempotent re-run; 512 accepted; 23505 reject)."},
+    {"id": "FF-AC-8", "rule": "No prompt/instruction/system_prompt column on agent_card (competence layer is T-0123)", "ci_check": "Static check in ci/checks/agent-card-dormant.sh (or schema introspection): assert agent_card column set is exactly the 12 designed columns; no column name matching prompt|instruction|system_prompt. Prevents scope creep into T-0123."},
+    {"id": "FF-AC-9", "rule": "known_tenant_tables.txt contains 'agent_card' and the grant-editor static count assertion is updated to 22", "ci_check": "ci/checks/db/grant-editor.test.ts count assertion toBe(22); schema.test.ts anti-decorative guard (no DB tenant table missing from fixture, exact-set under CI) passes for agent_card; cross_tenant.test.ts seedRowForTable gains case 'agent_card'. Covers AC-8 (cross-tenant probe passes for agent_card without test-source change beyond the seed case). Coder owns these three BUILD-phase fixes."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-AC-1; known_tenant_tables.txt + schema.test.ts FF-RLS; migration 032 DDL (11+1 columns, PK, UNIQUE). Live-verified structure."},
+    {"ac": "AC-2", "covered_by": "FF-AC-1; ENABLE+FORCE RLS + tenant-isolation policy in 032. Live-verified."},
+    {"ac": "AC-3", "covered_by": "FF-AC-1 RLS; FF-AC-9 cross_tenant.test.ts agent_card seed case (cross-tenant read = 0 rows). Live-verified (tenant B sees 0, tenant A sees 5)."},
+    {"ac": "AC-4", "covered_by": "FF-AC-1 default-DENY WITH CHECK; cross_tenant.test.ts cross-tenant write rejected (42501). Live-verified."},
+    {"ac": "AC-5", "covered_by": "FF-AC-3 kind-FK rejects kind='human' (23503). Live-verified."},
+    {"ac": "AC-6", "covered_by": "FF-AC-3 kind-FK accepts kind='agent'. Live-verified (5->6)."},
+    {"ac": "AC-7", "covered_by": "FF-AC-4 autonomy_threshold CHECK (1.5 -> 23514; 0.0/0.5/1.0/NULL accepted). Live-verified."},
+    {"ac": "AC-8", "covered_by": "FF-AC-9; known_tenant_tables.txt + cross_tenant.test.ts agent_card seed case; cross-tenant CI probe passes without test-source change beyond the additive seed case."},
+    {"ac": "AC-9", "covered_by": "Migration 032 dev seed (5 agent cards, kc_client_id matching). Live-verified (count=5)."},
+    {"ac": "AC-10", "covered_by": "FF-AC-7; UNIQUE (tenant_id, kc_client_id) -> 23505 on duplicate. Live-verified."},
+    {"ac": "AC-11", "covered_by": "FF-AC-7; ON CONFLICT DO NOTHING seed + once-recorded ALTER; two_tenant.test.ts idempotency. Live-verified (run.mjs x2: applied then nothing-to-apply)."},
+    {"ac": "AC-12", "covered_by": "FF-AC-6; grep -r agent_card src/ = 0. Live-verified."},
+    {"ac": "AC-13", "covered_by": "FF-AC-1 GRANT; choros_app has SELECT/INSERT/UPDATE/DELETE, no DDL. Live-verified."},
+    {"ac": "AC-14", "covered_by": "No new TS module (NF-6) so tsc/eslint unaffected by source; npm run fitness gains agent-card-dormant.sh; npm run fitness:db gains agent-card.test.ts. Coder runs the full ci script in BUILD."},
+    {"ac": "AC-15", "covered_by": "FF-AC-7; llm_secret_handle text (no length cap); 512-char accepted. Live-verified (length=512)."},
+    {"ac": "AC-16", "covered_by": "FF-AC-5; budget_policy_id uuid NULL, no FK in 032 (instance_budget absent); migration applies. Live-verified (only agent_card_employee_fk present)."},
+    {"ac": "AC-17", "covered_by": "FF-AC-5; escalation_rule_id uuid NULL, no FK in 032. Live-verified."}
+  ],
+  "runtime_target": "Postgres in the silo docker-compose stack (T-0053, already running; verified live on host port 55432, migrations 001-031 applied before this task). agent_card DML executes under choros_app (NOBYPASSRLS, non-owner) via SET LOCAL choros.tenant_id inside transactions; migration 032 applied by choros_migrator (owner) through migrations/run.mjs. No new infrastructure, no new TypeScript runtime module, no HTTP endpoint — schema + seed + known_tenant_tables.txt line only.",
+  "adr_artifact_path": "docs/design/T-0020-agent-card.adr.md",
+  "escalation": ""
+}
