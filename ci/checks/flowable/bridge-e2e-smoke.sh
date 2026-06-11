@@ -17,14 +17,16 @@
 #   - Flowable + Postgres already running (wait-ready.sh called first)
 #   - dist/ compiled (npm run build)
 #   - DATABASE_URL pointing to isolated Postgres
-#   - FLOWABLE_PORT / FLOWABLE_BASE_URL set (default: 18085 for isolation)
+#   - FLOWABLE_PORT / FLOWABLE_BASE_URL set (default: 8082 = compose default, как у
+#     остальных flowable-чеков; изолированный локальный гейт задаёт порт явно env-ом —
+#     дефолт 18085 был выбросом и валил CI-job без env: curl exit 7, FE-2026-W24-0055)
 #   - BRIDGE_TENANT_ID: UUID of tenant (genesis owner or test tenant)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-FLOWABLE_PORT="${FLOWABLE_PORT:-18085}"
+FLOWABLE_PORT="${FLOWABLE_PORT:-8082}"
 ADMIN_USER="${FLOWABLE_REST_APP_ADMIN_USER_ID:-admin}"
 ADMIN_PASS="${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}"
 PROCESS_KEY="chorosSmoke"
