@@ -46,8 +46,6 @@ curl -s -X POST http://localhost:3000/jobs \
   "variables": { "invoiceId": "INV-001" },
   "state": "CREATED",
   "retries": 3,
-  "lockOwner": null,
-  "lockExpiry": null,
   "createdAt": 1718100000000,
   "available_at": 1718100000000
 }
@@ -229,8 +227,8 @@ curl -s -X POST http://localhost:8180/realms/choros/protocol/openid-connect/toke
 | `variables` | `object` | Входные данные задачи; произвольный JSON-объект |
 | `state` | `string` enum | Состояние задачи: `CREATED`, `LOCKED`, `COMPLETED`, `FAILED` |
 | `retries` | `integer ≥ 0` | Число оставшихся попыток |
-| `lockOwner` | `string \| null` | `workerId` воркера, удерживающего лок; `null` когда не залочена |
-| `lockExpiry` | `integer \| null` | Unix epoch ms истечения лока; `null` когда не залочена |
+| `lockOwner` | `string` (absent when not locked) | `workerId` воркера, удерживающего лок; **отсутствует** когда не залочена |
+| `lockExpiry` | `integer` ms epoch (absent when not locked) | Unix epoch ms истечения лока; **отсутствует** когда не залочена |
 | `createdAt` | `integer` | Unix epoch ms момента создания задачи |
 | `available_at` | `integer` | Unix epoch ms не раньше которого задача доступна для fetch-and-lock |
 | `result` | `object \| undefined` | Payload результата complete (если передан); отсутствует если не передавался |
@@ -262,9 +260,14 @@ CREATED → (fetch-and-lock) → LOCKED → (complete) → COMPLETED
 | 404 | `NOT_FOUND` | Задача с указанным `id` не существует |
 | 409 | `LOCK_EXPIRED` | Лок задачи истёк до вызова complete/fail |
 | 409 | `NOT_LOCKED` | Задача не находится в состоянии `LOCKED` (complete/fail на незалоченную задачу) |
-| 409 | `RECORD_IN_PAYLOAD` | Payload complete содержит сырой Job-объект (защита от случайной передачи `job` вместо результата) |
+| 409 | `RECORD_IN_PAYLOAD` | Payload complete содержит сырой Job-объект (защита от случайной передачи `job` вместо результата) ¹ |
 | 413 | `PAYLOAD_TOO_LARGE` | Тело запроса превышает 1 MiB |
 | 503 | `AUTH_UNAVAILABLE` | Keycloak недоступен (JWKS-запрос упал по таймауту 5 с) |
+
+> ¹ `RECORD_IN_PAYLOAD` недостижим через HTTP в текущей версии: обработчик `complete`
+> вызывает `store.complete(workerId, jobId)` без payload-аргумента, поэтому ветка
+> проверки в `JobStore` никогда не активируется по HTTP-пути. Код задокументирован
+> как часть `ErrorCode`-union (FR-4); через внутренний интерфейс `JobStore` он возможен.
 
 ---
 
