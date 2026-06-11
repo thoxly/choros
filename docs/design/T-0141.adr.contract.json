@@ -1,0 +1,159 @@
+{
+  "task_id": "T-0141",
+  "status": "ready",
+  "decision": "Wire four minimal shims onto the T-0140 infrastructure: (A) resolveActorTenant helper (src/db/org.ts) resolves actor slug → tenant UUID via BYPASSRLS SELECT on choros.employee, injected into listOrgTree/findEmployeeById/listHumanEmployees with DEV_TENANT_ID fallback when DB absent or actor unknown — zero public-signature changes to frozen exports; (B) pack-file-serve path in rights.ts and processes.ts reads seed/showcase/pack.json rights_cards and process_instances when DATABASE_URL is set, falling back to RIGHTS_SEED/PROCESSES_SEED when DB is absent; (C) seed apply is run as a documented one-time operational step (idempotent, AC-17/FR-1); (D) DEMO_TENANT_SLUG env var (default: showcase) resolves the pre-login /api/users tenant scope. Agent personas excluded (Option A, FR-7). AC-12 founder note preserved.",
+  "rejected_alternatives": [
+    {
+      "option": "New /api/org?tenant=<slug> query param",
+      "why_not": "Changes API surface consumed by frozen e2e tests and React frontend; caller-controlled tenant enables cross-tenant leakage (AC-13 violation)"
+    },
+    {
+      "option": "Global TENANT_ID env override",
+      "why_not": "Single-tenant assumption breaks multi-tenant-first data model (T-0013); showcase tenant must be actor-scoped, not process-level"
+    },
+    {
+      "option": "New DB table demo_personas for picker config",
+      "why_not": "Over-engineered; DEMO_TENANT_SLUG env + listHumanEmployees query achieves the same result in three lines (rubric axis 5 proportionality)"
+    },
+    {
+      "option": "Remove RIGHTS_SEED / PROCESSES_SEED constants",
+      "why_not": "Spec §4 out-of-scope item 5 explicitly preserves in-memory fallbacks; T-0140 I-2 designates them as the single permitted second locus; FF-FALLBACK-6 enforces retention"
+    },
+    {
+      "option": "Runtime JSON Schema re-validation of pack on every request",
+      "why_not": "Expensive per-request overhead; pack is immutable in a running process; validation is CI-time (T-0140 FF-1); runtime load is lazy-cached"
+    },
+    {
+      "option": "Add agent employees to /api/users (Option B, FR-7)",
+      "why_not": "Spec explicitly selects Option A (minimal); any change requires founder product-direction call; AC-12 note preserved in acceptance walkthrough"
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "resolveActorTenant",
+      "fields": [
+        {"name": "pool", "type": "pg.Pool"},
+        {"name": "actorSlug", "type": "string"},
+        {"name": "return", "type": "Promise<string> — tenant UUID or DEV_TENANT_ID fallback"}
+      ]
+    },
+    {
+      "entity": "resolveTenantBySlug",
+      "fields": [
+        {"name": "pool", "type": "pg.Pool"},
+        {"name": "tenantSlug", "type": "string"},
+        {"name": "return", "type": "Promise<string> — tenant UUID or DEV_TENANT_ID fallback"}
+      ]
+    },
+    {
+      "entity": "loadShowcasePack",
+      "fields": [
+        {"name": "packDir", "type": "string — base dir, default 'seed'"},
+        {"name": "return", "type": "Pack — parsed seed/showcase/pack.json, no runtime schema validation"}
+      ]
+    },
+    {
+      "entity": "EnvVar:DEMO_TENANT_SLUG",
+      "fields": [
+        {"name": "default", "type": "\"showcase\""},
+        {"name": "purpose", "type": "Tenant slug for /api/users pre-login picker and display-plane serve"}
+      ]
+    },
+    {
+      "entity": "EnvVar:PACK_DIR",
+      "fields": [
+        {"name": "default", "type": "\"seed\""},
+        {"name": "purpose", "type": "Base directory for pack files — optional CI override"}
+      ]
+    },
+    {
+      "entity": "PackServeRightsMapping",
+      "fields": [
+        {"name": "role_slug", "type": "string → mapped to id in response"},
+        {"name": "name", "type": "string"},
+        {"name": "dept", "type": "string"},
+        {"name": "scope", "type": "string"},
+        {"name": "holders", "type": "Array<{type: 'human'|'agent'|'service', name: string}>"},
+        {"name": "grants", "type": "Array<{res: string, uri: string, ops: string[], scope: string}>"},
+        {"name": "fields", "type": "Array<{name: string, a: 'read'|'write'|'hidden'}>"}
+      ]
+    }
+  ],
+  "contracts": [
+    "GET /api/org — unchanged signature; behavior: when DATABASE_URL set, actor tenant resolved via resolveActorTenant(actorSlug); fallback to DEV_TENANT_ID when DB absent. Response: { departments: OrgDepartment[] }",
+    "GET /api/users — unchanged signature; behavior: when DATABASE_URL set, tenant resolved from DEMO_TENANT_SLUG env (default: showcase) via resolveTenantBySlug; returns human employees only (kind='human'). Response: { users: Array<{id, name, position, department}> }",
+    "GET /api/rights — when DATABASE_URL set: loads seed/showcase/pack.json, returns { roles: pack.rights_cards[] } with role_slug mapped to id; when DB absent: returns RIGHTS_SEED. Response shape: { roles: Role[] } — identical envelope to current",
+    "GET /api/processes — when DATABASE_URL set: loads seed/showcase/pack.json, returns { instances: pack.process_instances[] }; when DB absent: returns PROCESSES_SEED. Response shape: { instances: ProcessInstance[] } — identical envelope to current",
+    "findEmployee(employeeId: string): Promise<(OrgPerson & { position: string; department: string }) | null> — FROZEN SIGNATURE (src/http/org.ts:130). Internal change: calls resolveActorTenant(pool, employeeId) before findEmployeeById. No external signature change.",
+    "listSelectableUsers(): Promise<Array<{id, name, position, department}>> — FROZEN SIGNATURE (src/http/org.ts:160). Internal change: uses resolveTenantBySlug(pool, DEMO_TENANT_SLUG) instead of DEV_TENANT_ID. No external signature change.",
+    "registerOrgRoutes(router: Router, _store?: JobStore): void — FROZEN SIGNATURE (src/http/org.ts:192). Unchanged.",
+    "resolveActorTenant(pool: Pool, actorSlug: string): Promise<string> — new internal helper in src/db/org.ts. Query: SELECT e.tenant_id FROM choros.employee WHERE slug=$1 LIMIT 1 (no GUC, pool is BYPASSRLS). Returns DEV_TENANT_ID if not found or DATABASE_URL absent.",
+    "resolveTenantBySlug(pool: Pool, tenantSlug: string): Promise<string> — new internal helper in src/db/org.ts. Query: SELECT id FROM choros.tenant WHERE slug=$1 LIMIT 1 (no GUC, BYPASSRLS). Returns DEV_TENANT_ID if not found.",
+    "loadShowcasePack(packDir?: string): Pack — new thin module src/http/pack-serve.ts. Reads and parses seed/showcase/pack.json synchronously. No runtime schema validation (CI-time only). Cached after first load."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-APPLY-1",
+      "rule": "seed apply on clean migrated DB exits 0; GET /api/org returns 3 depts/7 positions/12 employees; GET /api/rights returns 8 role cards; GET /api/processes returns 8 instances. Self-test: a deliberate wrong-count assertion must exit non-zero.",
+      "ci_check": "ci/checks/demo/seed-apply-smoke.sh — runs node seed/cli.js apply, then curl-asserts counts; includes SELF-TEST block with wrong expected value. Wired in npm run seed:smoke under fitness:db CI gate (requires DATABASE_URL). Covers AC-1/AC-2/AC-3/AC-11/AC-18."
+    },
+    {
+      "id": "FF-PACK-2",
+      "rule": "Pack-file-serve path returns correct counts when DATABASE_URL set: GET /api/rights → 8 role cards, GET /api/processes → 8 instances. Self-test: wrong-pack path must return non-zero exit.",
+      "ci_check": "ci/checks/demo/pack-serve-counts.sh — starts server with DATABASE_URL and PACK_DIR pointing at test fixture; asserts counts; includes SELF-TEST block. Always-on CI (no live DB needed with test fixture). Covers FR-9/FR-10/AC-11/AC-18."
+    },
+    {
+      "id": "FF-SCOPE-3",
+      "rule": "Cross-tenant isolation: GET /api/org with X-Dev-User of a showcase employee must not return departments from DEV_TENANT_ID. Self-test: DEV_TENANT_ID dept slug must not appear in response.",
+      "ci_check": "ci/checks/demo/no-cross-tenant-org.sh — live-DB gate (fitness:db); asserts showcase dept slugs present and known DEV_TENANT_ID dept slugs absent. Covers AC-13/NF-4."
+    },
+    {
+      "id": "FF-DISPLAY-4",
+      "rule": "Display-plane serve modules (src/http/pack-serve.ts, rights.ts, processes.ts) must not import pg or any src/db/* module. No DB writes from the display-plane path.",
+      "ci_check": "ci/checks/demo/pack-serve-no-write.sh — grep -E \"from ['\\\"](pg|.*src/db)\" src/http/pack-serve.ts src/http/rights.ts src/http/processes.ts; any match = non-zero exit. Always-on CI. Covers I-1 exception fence / T-0140 FF-7."
+    },
+    {
+      "id": "FF-FROZEN-5",
+      "rule": "Frozen exports findEmployee, listSelectableUsers, registerOrgRoutes in src/http/org.ts retain their pre-T-0141 parameter signatures.",
+      "ci_check": "ci/checks/demo/frozen-exports.sh — grep -n 'export.*findEmployee\\|export.*listSelectableUsers\\|export.*registerOrgRoutes' src/http/org.ts must match exactly 3 lines with the baseline signatures. Always-on CI. Covers FE-W23-0008."
+    },
+    {
+      "id": "FF-FALLBACK-6",
+      "rule": "When DATABASE_URL is absent, GET /api/org, GET /api/users, GET /api/rights, GET /api/processes all return 200 with non-empty data from in-memory seeds.",
+      "ci_check": "ci/checks/demo/no-db-fallback.sh — starts server without DATABASE_URL; curls all four endpoints; asserts 200 + non-empty array in each response. Always-on CI. Covers NF-1 / spec §4.5 fallback retention."
+    },
+    {
+      "id": "FF-ACTOR-7",
+      "rule": "resolveActorTenant and resolveTenantBySlug function bodies in src/db/org.ts must not contain the literal DEV_TENANT_ID UUID (a0000000-0000-0000-0000-000000000001) inline — fallback allowed only via DEV_TENANT_ID constant reference.",
+      "ci_check": "ci/checks/demo/no-hardcoded-tenant.sh — extracts the two function bodies from src/db/org.ts and greps for the literal UUID; any match = non-zero exit. Always-on CI. Covers AC-13 / T-0013 isolation invariant."
+    },
+    {
+      "id": "FF-SELFTEST-8",
+      "rule": "Every ci/checks/demo/*.sh script must contain a SELF-TEST marker comment followed by an assertion that verifies the check can detect regressions (i.e., at least one deliberately-failing probe that must produce non-zero exit).",
+      "ci_check": "ci/checks/demo/self-test-presence.sh — greps each ci/checks/demo/*.sh for the literal string '# SELF-TEST:'; any script missing the marker = non-zero exit. Always-on CI. Covers all FF checks."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.3 seed-apply operational step; FF-APPLY-1"},
+    {"ac": "AC-2", "covered_by": "§2.1 resolveActorTenant → listOrgTree; FF-APPLY-1; FF-SCOPE-3"},
+    {"ac": "AC-3", "covered_by": "§2.1 resolveActorTenant → listOrgTree counts; FF-APPLY-1"},
+    {"ac": "AC-4", "covered_by": "§2.4 DEMO_TENANT_SLUG → listHumanEmployees; probe:db:3"},
+    {"ac": "AC-5", "covered_by": "§2.4 login screen populated from /api/users existing flow; no new UI"},
+    {"ac": "AC-6", "covered_by": "§3.4 GET /api/org post-login; probe:db:2"},
+    {"ac": "AC-7", "covered_by": "§2.2 GET /api/processes pack-file-serve; FF-PACK-2; probe:db:5"},
+    {"ac": "AC-8", "covered_by": "§2.2 GET /api/rights pack-file-serve; FF-PACK-2; probe:db:4"},
+    {"ac": "AC-9", "covered_by": "§3.4 GET /api/audit existing route; tenant-scoped; empty acceptable"},
+    {"ac": "AC-10", "covered_by": "§3.4 GET /api/inbox existing route; tenant-scoped; empty acceptable"},
+    {"ac": "AC-11", "covered_by": "§2.2 pack-file-serve rights_cards; §3.5 shape mapping; FF-PACK-2; probe:db:4"},
+    {"ac": "AC-12", "covered_by": "§1 Option A selected; §4.3 founder gate note preserved; no code required"},
+    {"ac": "AC-13", "covered_by": "§2.1 resolveActorTenant actor-derived tenant; FF-SCOPE-3; probe:db:6"},
+    {"ac": "AC-14", "covered_by": "§2.3 seed reset operational step; probe:db:7"},
+    {"ac": "AC-15", "covered_by": "§2.3 e-owner exclude-list (T-0140 reset impl); probe:db:8"},
+    {"ac": "AC-16", "covered_by": "Existing dev-login flow logout → picker re-appears; no new code"},
+    {"ac": "AC-17", "covered_by": "§2.3 runbook documentation; §3.2 env vars documented"},
+    {"ac": "AC-18", "covered_by": "§2.2 GET /api/processes pack-file-serve; FF-PACK-2; probe:db:5"}
+  ],
+  "runtime_target": "local/dev-container (CHOROS_AUTH_MODE=dev, X-Dev-User header; DATABASE_URL pointing to dev Postgres). No external resource requested. Public stand = T-0142 (founder-gated, GT-4) — out of scope.",
+  "adr_artifact_path": "docs/design/T-0141-demo-tenant.adr.md",
+  "escalation": "AC-12 / FR-7 founder note preserved: agent personas are excluded from login picker (Option A selected). If founder requires agent-persona login for the demo, this requires a product-direction decision before T-0142 gate sign-off — no code change needed for the current gate. No other blocking escalation."
+}
