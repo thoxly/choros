@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0186",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1338,
+    "passed": 1332,
+    "failed": 0,
+    "skipped": 6
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "externalWorker.e2e.test.ts — 18/18 pass, no DATABASE_URL",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "externalWorker.e2e.test.ts — 18/18 pass, with DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "health.test.ts — 4/4 pass, no DATABASE_URL",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "health.test.ts — 4/4 pass, with DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "fitness static grep — createServer() default storeMode=undefined (treated as 'auto'); env-based store selection preserved",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "tsc --noEmit — exit 0, 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "vitest run — 1332/1338 passed, 0 failed, 6 skipped (flowable integration offline pre-existing)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "npm run fitness — 409 PASS, 0 FAIL",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "Scenario A (no env) — 65/67 files, 1332/1338 tests",
+      "result": "pass"
+    },
+    {
+      "check": "Scenario B (with DATABASE_URL) — 65/67 files, 1332/1338 tests",
+      "result": "pass"
+    },
+    {
+      "check": "R-1 nit closed — stale count 22→18 in spec AC-1/AC-2",
+      "result": "pass"
+    },
+    {
+      "check": "R-2 nit documented — explicit store + storeMode='memory' asymmetry, no call sites affected",
+      "result": "pass",
+      "note": "No current call site passes both explicit store and storeMode='memory'. Documented in PR residual_risks."
+    }
+  ],
+  "failures": []
+}
