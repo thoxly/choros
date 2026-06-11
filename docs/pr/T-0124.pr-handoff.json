@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0124",
+  "status": "pr_open",
+  "branch": "task/T-0124-document-on-demand-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/specs/T-0124-document-on-demand.spec.md",
+    "docs/specs/T-0124.spec.contract.json",
+    "docs/design/T-0124-document-on-demand.adr.md",
+    "docs/design/T-0124.adr.contract.json",
+    "docs/design/T-0124.review.contract.json",
+    "docs/reviews/T-0124.review.md",
+    "docs/test-reports/T-0124.test-report.md",
+    "docs/design/T-0124.test-report.contract.json",
+    "docs/pr/T-0124.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review iter-1 + test-report + pr-handoff). Нет src/ изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI env-gap pre-existing = node_modules absent, идентично dev; docs-only ветка). D-056: integration-honest gate пройден.",
+    "AC-11/AC-12/AC-13/AC-14 (verifiable_as: test) отложены в impl-задачу — легально для design-фазы; покрыты fitness-функциями FF-LIVE-NO-CACHE / FF-NO-RENDER-ACL / FF-SNAPSHOT-IMMUTABLE / FF-REPRODUCIBLE / FF-AUDIT-EVERY-RENDER (gating=live-impl) в ADR §6.",
+    "R-1 (blocking): grant-resolver.ts line offset :122→:489 исправлен коммитом aa20113.",
+    "R-2 (nit): bundle-coherence.sh legend-статус исправлен коммитом aa20113.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**)",
+    "npm_ci_result": "env-gap pre-existing (node_modules absent; identical on dev); product code unaffected; D-056",
+    "review_verdict": "approved (T-0124.review.contract.json); 15/15 AC covered; R-1 blocking + R-2 nit закрыты",
+    "test_report": "docs/design/T-0124.test-report.contract.json (verdict=pass, schema OK)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0124.spec.contract.json",
+    "adr": "docs/design/T-0124-document-on-demand.adr.md",
+    "adr_contract": "docs/design/T-0124.adr.contract.json",
+    "review_iter1_contract": "docs/design/T-0124.review.contract.json (verdict=approved; R-1 blocking + R-2 nit resolved; sha aa20113)",
+    "review_md": "docs/reviews/T-0124.review.md",
+    "test_report_md": "docs/test-reports/T-0124.test-report.md",
+    "test_report_contract": "docs/design/T-0124.test-report.contract.json"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-impl-T-0124-1",
+      "title": "impl: миграция template_def + template_dep (tenant-таблицы, FORCE RLS, format CHECK {csv,html})",
+      "scope": "ADR §10 п.1: DDL template_def (tenant_id/id/registry_id/format CHECK/body/version/tier/created_by/at/updated_at; FORCE RLS; policy; known_tenant_tables.txt) + template_dep (зеркало report_page_dep: templateId/fieldKey/dep_kind/stale; FORCE RLS). Занести обе таблицы в known_tenant_tables.txt + bundle_members.txt. Номер слота — coder (run-seam, следующий свободный).",
+      "gates": "FF-FORMAT-CLOSED (CHECK template_def_format_chk ∈ {csv,html}); FF-NO-DUP-SUBSYSTEM (нет CREATE TABLE file*/external_*/render_log); tenant_isolation policy; bundle_members.txt updated.",
+      "depends_on": ["T-0119 (is_snapshot приёмная поверхность)", "T-0013 (RLS policy pattern)", "T-0014 (registry_def FK)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-2",
+      "title": "impl: src/core/template-compat.ts — checkTemplateDepFields (зеркало binding-compat.ts)",
+      "scope": "ADR §10 п.2: чистая функция checkTemplateDepFields(template_deps, record_schema) → {ok}|{ok:false,violations:[{templateId,fieldKey,type}]}, no-I/O, type='missing_in_schema'. Типы TemplateDep/TemplateDepViolation. Зеркало binding-compat.ts (T-0072).",
+      "gates": "unit-тесты (зеркало binding-compat.test.ts); чистая функция (no side effects); FF-TEMPLATE-COHERENCE.",
+      "depends_on": ["T-impl-T-0124-1 (template_dep типы)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-3",
+      "title": "impl: src/core/document-render.ts — render() + RENDERERS{csv,html} + RenderMeta+sourceDigest",
+      "scope": "ADR §10 п.3: render(templateRef, params, subject) → RenderResult={bytes,format,meta}. Resolve template_def → batch resolveFor+projectFields per-record (T-0021) → renderer. RENDERERS closed map. RenderMeta включает templateId/templateVersion/format/renderedAt/sourceDigest/recordCount. Детерминированный sourceDigest (хэш projected-rows ORDER BY tenant_id,id).",
+      "gates": "FF-RENDER-VIA-PDP (нет прямого SELECT от record мимо PDP); FF-NO-RENDER-ACL (нет render_acl); FF-NO-MASK-ROW (невидимые строки absent); FF-FORMAT-CLOSED (RENDERERS.size = CHECK-set.size).",
+      "depends_on": ["T-impl-T-0124-1", "T-impl-T-0124-2", "T-0021 resolveFor/projectFields"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-4",
+      "title": "impl: renderAndFix — композиция render → addVersion(isSnapshot=true) → doc.snapshot_fixed",
+      "scope": "ADR §10 п.4: renderAndFix(templateRef, params, subject) → versionId. Тонкая композиция: (1) r=render(); (2) versionId=addVersion(store, fileOwner, r.bytes, {mime, isSnapshot:true, dataClass}) T-0119-порт; (3) doc.snapshot_fixed audit-event связывает (templateId,templateVersion,sourceDigest,renderedAt)↔versionId.",
+      "gates": "FF-SNAPSHOT-IMMUTABLE (нет прямого INSERT/UPDATE/DELETE file_version); FF-REPRODUCIBLE (integration AC-13).",
+      "depends_on": ["T-impl-T-0124-3", "T-0119 addVersion порт"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-5",
+      "title": "impl: аудит-эмиссия doc.render / doc.render_denied / doc.snapshot_fixed",
+      "scope": "ADR §10 п.5: эмиссия audit_event (T-0016 порт) для каждого рендера (успех И отказ). doc.render: actor/subject/via/format/record_count/source_digest. doc.render_denied: + reason (no_grant/cross_tenant/not_found). doc.snapshot_fixed: + version_id/is_snapshot=true. Секрет токена исключён.",
+      "gates": "FF-AUDIT-EVERY-RENDER (integration AC-14: render+denied+fix → 1 event каждый, tenant-scoped; секрет absent); grep payload на отсутствие token/secret; нет CREATE TABLE render_log.",
+      "depends_on": ["T-impl-T-0124-3", "T-0016 audit_event порт"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-6",
+      "title": "impl: питание T-0122 — download(live→render)/verify(facet-срез) хуки",
+      "scope": "ADR §10 п.6: реализация download(live→render) и verify(facet-срез из проекции) хуков для T-0122-поверхности. download при doc_mode='live' вызывает render(); download при doc_mode='snapshot' — presignGet(file_version.key) T-0119. verify отдаёт projectFields-срез под внешним субъектом (тот же resolveFor путь).",
+      "gates": "FF-TENANT-SCOPED-RENDER; verify не раскрывает скрытые поля (FF-NO-MASK-ROW); QR-кейс end-to-end.",
+      "depends_on": ["T-impl-T-0124-3", "T-impl-T-0124-4", "T-0122 external surface"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-7",
+      "title": "impl: расширение bundle-coherence.sh + деструктив-гард template_dep",
+      "scope": "ADR §10 п.7: check-template-deps (template_dep.field_key ∈ record_schema.properties) в bundle-coherence.sh. Деструктив-гард (зеркало T-0121 §5): drop/rename field при активном non-stale template_dep → 409 destructive_schema_change; force → stale=true + депромоут tier='draft' + один audit-event. bundle_members.txt строка для template_dep.",
+      "gates": "FF-TEMPLATE-COHERENCE (unit checkTemplateDepFields; bundle-coherence.sh fail при stale dep; integration: drop без force → 409).",
+      "depends_on": ["T-impl-T-0124-1", "T-impl-T-0124-2", "T-0082 bundle-coherence.sh"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-8",
+      "title": "impl: config-агент авторинг шаблона — author_template DRAFT + human-gated promote",
+      "scope": "ADR §10 п.8: config-агент (T-0077) получает author_template операцию → template_def{tier='draft'}. Human-gated promote в 'published'. Рантайм-агентная генерация шаблона — Stage-2 (E5.6+).",
+      "gates": "T-0087-дисциплина (DRAFT before PUBLISH); нет рантайм-агентного promote без human-gate.",
+      "depends_on": ["T-impl-T-0124-1", "T-0077 config-agent"]
+    },
+    {
+      "suggested_id": "T-impl-T-0124-9",
+      "title": "impl: тесты FF-* + AC-11..AC-14 (fitness + integration)",
+      "scope": "ADR §10 п.9: unit FF-NO-RENDER-ACL / FF-RENDER-VIA-PDP / FF-NO-MASK-ROW / FF-FORMAT-CLOSED / FF-SNAPSHOT-IMMUTABLE / FF-TEMPLATE-COHERENCE / FF-TENANT-SCOPED-RENDER / FF-LIVE-NO-CACHE / FF-AUDIT-EVERY-RENDER / FF-NO-DUP-SUBSYSTEM / FF-REPRODUCIBLE. Integration AC-11 (live-no-cache) / AC-12 (denied=absent) / AC-13 (snapshot воспроизводим) / AC-14 (аудит каждого рендера).",
+      "gates": "Все FF-* зелёные; AC-11..AC-14 live-probe pass (с Postgres + живыми данными).",
+      "depends_on": ["T-impl-T-0124-1..T-impl-T-0124-8 (все)"]
+    }
+  ],
+  "rationale": "T-0124 — design-задача (SPEC+ADR+review). ADR зафиксировал: операцию render(template,params,subject)→RenderResult, закрытый набор форматов day-1 {csv,html} с движком RENDERERS closed map, режимы live/snapshot + renderAndFix→addVersion(isSnapshot=true) T-0119, питание QR-кейса через T-0122 без своего канала, право как производность resolveFor+projectFields (FF-NO-RENDER-ACL), генерацию реестра как частный случай, аудит open-vocab doc.render* (T-0016), шаблон-модель template_def+template_dep (зеркало T-0072/T-0121), 11 fitness-функций, трассировку 15 AC, прогон QR+реестр через единый примитив. Review approved iter-1 (15/15 AC, R-1 blocking + R-2 nit закрыты коммитом aa20113). Product CI env-gap pre-existing (docs-only branch unaffected). AC-11..AC-14 deferred-to-impl (4 post-impl live probes). Готово к merge в dev и старту impl-декомпозиции (9 пунктов §10)."
+}
