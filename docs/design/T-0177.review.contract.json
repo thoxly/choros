@@ -1,8 +1,8 @@
 {
   "task_id": "T-0177",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {
-    "green": false
+    "green": true
   },
   "findings": [
     {
@@ -10,16 +10,16 @@
       "severity": "blocking",
       "axis": 6,
       "location": "ci/checks/db/schema_change_api.test.ts:431-457",
-      "issue": "_pool module-level singleton leak: after live-DB tests set _pool, the 'Route registration (no-DB)' test deletes DATABASE_URL and creates a new server, but getPool() returns the already-set _pool instead of throwing HttpError(503). Result: test gets 404 (static handler PUT-reject) instead of 503. Fails only in full suite run, passes in isolation.",
-      "suggestion": "Move 'Route registration (no-DB)' test to the TOP of the file (before any live-DB tests that trigger getPool()), or export resetPoolForTesting() from registry-defs.ts and call it in the test's setup."
+      "issue": "_pool module-level singleton leak: after live-DB tests set _pool, the 'Route registration (no-DB)' test deletes DATABASE_URL and creates a new server, but getPool() returned the already-set _pool instead of throwing HttpError(503). Result: test got 404 instead of 503. Fails only in full suite run, passes in isolation.",
+      "suggestion": "Export resetPoolForTesting() from registry-defs.ts and call it before createServer() in the no-DB test. FIXED in c47837d."
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 1,
       "location": "src/http/registry-defs.ts:186-404",
-      "issue": "kind:'noop' is defined in UpdateSchemaResult union and handled in response logic (lines 399-404) but updateSchemaInTx never returns it. The 'unchanged schema' path documented in the comment ('If record_schema is absent or unchanged → 200 { updated: false }') is not implemented — an identical schema still triggers a DB UPDATE and returns {updated:true}.",
-      "suggestion": "Either remove 'noop' from the union and delete the dead branch, or add JSON.stringify equality check before applying UPDATE."
+      "issue": "kind:'noop' was defined in UpdateSchemaResult union and handled in response logic but updateSchemaInTx never returned it. Dead branch. Unchanged schema still triggered a DB UPDATE and returned {updated:true}.",
+      "suggestion": "Remove 'noop' from union and delete the dead branch, or add deep-equal guard. FIXED in c47837d — noop removed, ADR-honesty comment added."
     },
     {
       "id": "R-3",
@@ -27,15 +27,15 @@
       "axis": 4,
       "location": "ci/checks/db/schema_change_api.test.ts:12",
       "issue": "AC-13 (partial failure → ROLLBACK) is listed in the file header as covered but no live test exists. Rollback correctness of the force path on appendAuditEvent failure is not verified by a live-DB probe.",
-      "suggestion": "Add a live-DB test that simulates appendAuditEvent throwing; verify record_schema, stale, and tier remain unchanged."
+      "suggestion": "Add a live-DB test that simulates appendAuditEvent throwing; verify record_schema, stale, and tier remain unchanged. DEFERRED — acceptable nit for MVP phase."
     },
     {
       "id": "R-4",
       "severity": "nit",
       "axis": 2,
       "location": "src/http/registry-defs.ts:244",
-      "issue": "SET LOCAL choros.promoting='1' is issued before the soft-path early return (if destructiveDeps.length === 0). The GUC is harmless but unnecessary in the soft path — misleads readers about why it is set.",
-      "suggestion": "Move the SET LOCAL choros.promoting='1' into the force path block (7b), after the soft-path early return."
+      "issue": "SET LOCAL choros.promoting='1' was issued before the soft-path early return. The GUC was harmless but unnecessary in the soft path and misled readers.",
+      "suggestion": "Move SET LOCAL into the force path block, after the soft-path early return. FIXED in c47837d — GUC now only on force path."
     },
     {
       "id": "R-5",
@@ -43,7 +43,7 @@
       "axis": 3,
       "location": "src/http/registry-defs.ts:277-301",
       "issue": "Per-dep and per-page UPDATE loops issue one SQL statement per affected dep/page (N+1 roundtrips). Not harmful at MVP scale but inefficient at large dep counts.",
-      "suggestion": "Replace loops with unnest-based batch UPDATEs for production readiness."
+      "suggestion": "Replace loops with unnest-based batch UPDATEs. DEFERRED — acceptable nit for MVP phase."
     }
   ],
   "acceptance_coverage": [
@@ -64,7 +64,7 @@
     {"ac": "AC-15", "covered": true},
     {"ac": "AC-16", "covered": true},
     {"ac": "AC-17", "covered": true},
-    {"ac": "AC-18", "covered": false}
+    {"ac": "AC-18", "covered": true}
   ],
   "role_gap_evidence": []
 }
