@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0119",
+  "status": "ready",
+  "decision": "Файл-вложение = две tenant-таблицы ядра (file: PK (tenant_id,id), FK (tenant_id,record_id)→record, current_version, retention_state; file_version: иммутабельная версия с object_key, content_hash, version_no, data_class, is_snapshot, cycle_ref) + объект в S3-совместимом сторе. Бинарь в Postgres запрещён. S3-ключ структурно tenant-префиксован (<tenant_id>/<file_id>/<version_id>), собирается единственной buildObjectKey из tenant-контекста сессии — cross-tenant ключ неконструируем. Авторизация полностью делегирована PDP T-0021: файл-операция транслируется в операцию над записью-владельцем (read/update/delete), тот же резолвер, никаких file_acl/attachment_rights/visibility (T-0018 §2). Выдача контента — краткоживущий presigned-URL, выпускаемый ТОЛЬКО после allow-решения PDP (не стриминг через ядро); bucket deny-by-default, постоянных публичных URL нет. Версии при циклах доработки — addVersion создаёт новую иммутабельную строку+ключ, переводит current_version, старая версия читаема (NF-3); cycle_ref трассирует к возврату на доработку. Ретенция: retention_state{active,archived,pending_deletion} day-1, декларативная политика, deny-by-default к стиранию, контент-erase разведён с метаданными/аудит-следом (tombstone content_erased_at; T-0016 переживает стирание); фоновый sweeper = Stage-2. data_class:DataClass фиксирует egress-границу (T-0041), runtime-гейт = Stage-2. Приёмная поверхность снапшота document-on-demand (is_snapshot) для T-0124. Один bucket + tenant-префикс (не bucket-на-тенант) — pooled-готовность без ретрофита, нулевой провижн на нового tenant.",
+  "rejected_alternatives": [
+    {"option": "Bucket-на-тенант", "why_not": "В pooled-режиме = неограниченное число bucket-ов под лимиты провайдера + провижн bucket-а в genesis (новая операция/сбой-режим). Один bucket + tenant-префикс ключа даёт ту же структурную изоляцию (cross-tenant ключ неконструируем) при нулевом провижн-шаге и pooled-готовности без ретрофита."},
+    {"option": "Стриминг бинаря через ядро", "why_not": "CPU/память/полоса ядра масштабируются с трафиком файлов → ядро = узкое место и точка отказа, дублирует нативную функцию S3. Presigned-URL короткого TTL после allow даёт тот же инвариант (ни байта без allow PDP) при O(1)-нагрузке на ядро; TOCTOU закрыт коротким TTL + presign-строго-после-allow."},
+    {"option": "Перезапись объекта S3 + S3-native versioning (один ключ)", "why_not": "Прячет историю и понятие актуальной версии в инфра-конфиг (дисциплина, не структура); воспроизводимость зависит от включённого versioning на bucket; cycle_ref-трассировка невыразима в S3-метаданных. Immutable-версии = отдельные строки file_version + отдельные ключи + явный current_version делают актуальную версию однозначным фактом ядра, иммутабельность — инвариантом приложения, независимым от S3-фич."},
+    {"option": "current = max(version_no) (вычислять актуальную версию)", "why_not": "Актуальная ≠ всегда последняя по номеру: откат/снапшот-ветвление ломают тождество. Явный file.current_version = решение, записанное в строке, однозначное и аудируемое."},
+    {"option": "file_acl / attachment_rights / file.visibility-поле", "why_not": "Второй источник истины 'кто видит файл' дрейфует от 'кто видит запись' → тихий leak/отказ. Запрещено T-0018 §2 / T-0021 FF-R6 / NF-1. Право файла выводится из права записи-владельца тем же PDP."},
+    {"option": "Файл как вложение к инстансу процесса", "why_not": "Референс ТЭЛ: файлы на карточке записи, не на инстансе; процесс несёт handle (T-0015). Привязка к инстансу разорвала бы файл от записи после завершения процесса и создала бы вторую точку истины. Точка истины — запись (FR-1)."},
+    {"option": "Бинарь в Postgres (bytea/large object)", "why_not": "Раздувает БД/бэкапы/WAL; не S3-совместимо (решение фаундера = S3); ломает FR-2."}
+  ],
+  "object_model": [
+    {"entity": "file", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (leading PK, RLS key)"},
+      {"name": "id", "type": "uuid NOT NULL"},
+      {"name": "record_id", "type": "uuid NOT NULL (FK (tenant_id,record_id)→record(tenant_id,id), T-0014; cross-tenant структурно невозможен)"},
+      {"name": "original_name", "type": "text NOT NULL"},
+      {"name": "current_version", "type": "uuid NULL (указатель на актуальную file_version.id; nullable до первой версии)"},
+      {"name": "retention_state", "type": "text NOT NULL DEFAULT 'active' CHECK in {active,archived,pending_deletion}"},
+      {"name": "retention_policy_ref", "type": "text NULL (декларативная политика срок/класс)"},
+      {"name": "created_by", "type": "text NOT NULL"},
+      {"name": "created_at", "type": "bigint NOT NULL (epoch ms)"},
+      {"name": "updated_at", "type": "bigint NOT NULL"}
+    ]},
+    {"entity": "file_version", "fields": [
+      {"name": "tenant_id", "type": "uuid NOT NULL (leading PK, RLS key)"},
+      {"name": "id", "type": "uuid NOT NULL"},
+      {"name": "file_id", "type": "uuid NOT NULL (FK (tenant_id,file_id)→file(tenant_id,id))"},
+      {"name": "version_no", "type": "integer NOT NULL (монотонный per-file; UNIQUE (tenant_id,file_id,version_no))"},
+      {"name": "object_key", "type": "text NOT NULL (S3-ключ <tenant_id>/<file_id>/<version_id>; UNIQUE (tenant_id,object_key))"},
+      {"name": "mime_type", "type": "text NOT NULL (из declared allowlist)"},
+      {"name": "size_bytes", "type": "bigint NOT NULL (≤ declared limit)"},
+      {"name": "content_hash", "type": "text NOT NULL (хэш при загрузке, T-0118-совместимый)"},
+      {"name": "data_class", "type": "text NOT NULL DEFAULT 'internal' (DataClass T-0033; egress-граница T-0041)"},
+      {"name": "is_snapshot", "type": "boolean NOT NULL DEFAULT false (document-on-demand снапшот, FR-9/T-0124)"},
+      {"name": "cycle_ref", "type": "text NULL (трассировка к событию цикла доработки процесса)"},
+      {"name": "content_erased_at", "type": "bigint NULL (tombstone: контент стёрт по ретенции, метаданные/хэш живут, NF-5)"},
+      {"name": "uploaded_by", "type": "text NOT NULL"},
+      {"name": "uploaded_at", "type": "bigint NOT NULL"}
+    ]},
+    {"entity": "ObjectStore (TS port, инъектируемый; дев = MinIO)", "fields": [
+      {"name": "put", "type": "(key: string, body: Uint8Array, meta:{mime,size}) => Promise<void> (новый ключ per version, без overwrite)"},
+      {"name": "presignGet", "type": "(key: string, ttlSeconds: number) => Promise<string> (вызывается ТОЛЬКО после allow PDP)"},
+      {"name": "erase", "type": "(key: string) => Promise<void> (ретенция; метаданные/аудит не затрагиваются)"}
+    ]}
+  ],
+  "contracts": [
+    "buildObjectKey(tenantId, fileId, versionId): string — ЕДИНСТВЕННЫЙ конструктор ключа; tenantId из tenant-контекста сессии, не из запроса; cross-tenant неконструируем (FF-KEY).",
+    "authorizeFileOp(resolver: HandleResolver, fileHandle: ObjectHandle, subject: ResolveSubject, op: Operation): Promise<ResolvedView> — транслирует файл-op в op над записью-владельцем + PDP T-0021; нет собственного permission-вычисления; reason-union наследуется от T-0021.",
+    "getFileContentUrl(deps{resolver,store,meta,ttl}, fileVersionId, subject): Promise<{denied:true,reason}|{denied:false,url,expiresAt}> — allow→presign; ни байта без allow (NF-4).",
+    "addVersion(deps{resolver,store,meta}, fileId, subject, body, attrs{mime,cycleRef?,isSnapshot?,dataClass?}): Promise<{denied:true,reason}|{denied:false,versionId,versionNo}> — новая иммутабельная версия + перевод current_version; старая версия читаема.",
+    "Импорт (НЕ редекларация): HandleResolver/ResolveSubject/ObjectHandle/Operation (T-0015/T-0018), DataClass (T-0033). Новых reason-значений и второй permission-функции не вводится."
+  ],
+  "fitness_functions": [
+    {"id": "FF-NOACL", "rule": "Нет второго механизма авторизации файлов: нет file_acl/attachment_rights/file_visibility/visibility-токенов; file-attachment.ts зовёт resolveHandle/resolveFor (T-0021), не вычисляет права сам.", "ci_check": "bash ci/checks/file-attachment-isolation.sh: grep forbidden tokens в migrations/0NN_*.sql + src/core/file-attachment.ts; assert наличие resolveHandle|resolveFor и отсутствие собственного grant-фильтра. gating=static-now."},
+    {"id": "FF-NB", "rule": "Бинарь не в Postgres: миграция не содержит bytea/large-object/base64-контент-колонки, только object_key.", "ci_check": "grep -iE '\\b(bytea|largeobject|lo_)\\b' migrations/0NN_files_attachments.sql => 0 matches; assert object_key text. gating=static-now."},
+    {"id": "FF-KEY", "rule": "Tenant-префикс ключа структурен: buildObjectKey — единственный конструктор, ключ начинается с tenant_id-сегмента, tenantId не из недоверенного аргумента запроса.", "ci_check": "bash ci/checks/file-attachment-isolation.sh: assert ровно один export function buildObjectKey; нет inline-конкатенации S3-ключа в обход put(/presignGet(. gating=static-now."},
+    {"id": "FF-V", "rule": "Иммутабельность контента per-версия: write-path не UPDATE/DELETE object_key/контент существующей file_version; замена = INSERT новой строки + UPDATE file.current_version.", "ci_check": "vitest run src/__tests__/file-attachment.test.ts -t 'immutable-version': addVersion дважды => две строки, разные object_key/version_no/content_hash, старая не мутирована, put не overwrite того же ключа. gating=static-now."},
+    {"id": "FF-PRESIGN-AFTER-ALLOW", "rule": "Presign только после allow: getFileContentUrl при {denied:true} НЕ вызывает store.presignGet; при allow — вызывает с ttl ≤ maxTtl (TOCTOU-граница NF-4).", "ci_check": "vitest run … -t 'presign-after-allow': deny => presignGet не вызван; allow => presignGet(key,ttl) вызван, ttl ≤ 300. gating=static-now."},
+    {"id": "FF-FAILCLOSED", "rule": "Fail-closed по tenant-контексту в async/фоне: без tenant-контекста presign/put/erase отказывают, не выполняются глобально (tenancy §9 п.7).", "ci_check": "vitest run … -t 'fail-closed': вызов без tenant-контекста => отказ (cross_tenant/no_grant), ноль обращений к ObjectStore. gating=static-now."},
+    {"id": "FF-DERIVED-AUTHZ", "rule": "Право файла = производная права записи (AC-9): субъект без grant read на запись => {denied} на download; с grant read => {denied:false,url}; решение принимает PDP T-0021 (тот же резолвер).", "ci_check": "live-impl probe: seed запись+файл, grant/no-grant субъекту, assert allow/deny через makeGrantResolver. gating=live-impl."},
+    {"id": "FF-CROSS-TENANT", "rule": "Cross-tenant контент недостижим (AC-10): файл tenant B из контекста tenant A => cross_tenant, ни байта; S3-ключ tenant B не presign-уется из tenant A.", "ci_check": "live-impl probe в стиле ci/checks/db/cross_tenant.test.ts (appUrl/migratorUrl) + assert presign отказан. gating=live-impl."},
+    {"id": "FF-VERSION-READABLE", "rule": "Старая версия читаема после замены (AC-11): addVersion оставляет предыдущую file_version читаемой по её ключу; current_version => новая; content_hash версий различны и совпадают с фактическим контентом.", "ci_check": "live-impl probe: upload v1, replace->v2, assert v1 GET ок по object_key, current=v2, hash(v1)≠hash(v2), hash совпадает с байтами. gating=live-impl."},
+    {"id": "FF-RETENTION-DENY", "rule": "Deny-by-default к удалению (AC-6/NF-5): контент стирается только из pending_deletion после истечения политики; стирание ставит content_erased_at, строки file/file_version и аудит-след сохраняются (T-0016 append-only).", "ci_check": "vitest run … -t 'retention-deny' (unit: erase в active/archived => отказ) + live-impl (после pending_deletion+истечения => erase + content_erased_at set, метаданные/аудит живы). gating=static-now + live-impl."},
+    {"id": "FF-AUDIT-EVENTS", "rule": "Аудит на upload/replace/download/delete (AC-13): каждое = строка audit_event (open vocab file.*, новых таблиц нет) с actor, subject=record_ref, payload={file_id,version_id,content_hash,…}, tenant-scoped.", "ci_check": "vitest run … -t 'audit-events': каждая операция эмитит ожидаемое audit_event; assert known_tenant_tables не получает audit-таблицу-дубль. gating=static-now."},
+    {"id": "FF-T13", "rule": "T-0013-контракт метаданных: file/file_version — tenant_id-leading PK/FK, ENABLE+FORCE RLS, default-DENY на choros.tenant_id GUC, choros_app DML-only, занесены в known_tenant_tables.txt.", "ci_check": "существующие T-0013/T-0115 пробы (tenant_id_leading.sql, cross-tenant-fitness.sh) применяются к новым таблицам после внесения в фикстуру. gating=live-impl (T-0013 apparatus)."},
+    {"id": "FF-EGRESS-CLASS", "rule": "Egress-граница зафиксирована (AC-14/NF-6): file_version.data_class:DataClass импортирован из src/core/data-classification.ts (не редекларация); тип-контракт под tsc.", "ci_check": "tsc --noEmit на тип-фикстуре file_version.data_class ↔ DataClass; grep что DataClass импортирован, не переопределён. gating=static-now."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §2.1 (file, FK (tenant_id,record_id)→record, 1↔0..N) + §4.1 + §3 rejected(вложение к инстансу)"},
+    {"ac": "AC-2", "covered_by": "ADR §2.1 + §4.1/§4.2 + FF-NB + §3 rejected(бинарь в Postgres)"},
+    {"ac": "AC-3", "covered_by": "ADR §2.4 + §4.3 authorizeFileOp + §4.4 + FF-NOACL + §3 rejected(file_acl)"},
+    {"ac": "AC-4", "covered_by": "ADR §2.3/§2.5 + §4.3 getFileContentUrl + FF-PRESIGN-AFTER-ALLOW + §3 rejected(стриминг)"},
+    {"ac": "AC-5", "covered_by": "ADR §2.6 + §4.2 + FF-V/FF-VERSION-READABLE + §3 rejected(S3-versioning, max(version_no))"},
+    {"ac": "AC-6", "covered_by": "ADR §2.7 (retention_state, декларативная политика, deny-by-default, tombstone, sweeper=Stage-2) + FF-RETENTION-DENY"},
+    {"ac": "AC-7", "covered_by": "ADR §2.2/§2.3 + §4.1/§4.2 (T-0013-контракт, known_tenant_tables) + FF-KEY/FF-T13 + §3 rejected(bucket-per-tenant)"},
+    {"ac": "AC-8", "covered_by": "ADR §2.5 step1 + §4.4 step1 (tenant-gate fail-closed) + FF-FAILCLOSED"},
+    {"ac": "AC-9", "covered_by": "ADR §2.4 + §4.4 (PDP T-0021 тот же резолвер) + FF-DERIVED-AUTHZ"},
+    {"ac": "AC-10", "covered_by": "ADR §2.2 + §4.4 step1 (cross_tenant до S3) + FF-CROSS-TENANT"},
+    {"ac": "AC-11", "covered_by": "ADR §2.6 (immutable, новый ключ/хэш) + FF-VERSION-READABLE"},
+    {"ac": "AC-12", "covered_by": "ADR §2.1 (is_snapshot) + §2 (приёмная поверхность) + §4.2; не дублирует права/версии"},
+    {"ac": "AC-13", "covered_by": "ADR §2.8 (content_hash, declared-лимиты, аудит) + §4.2 + FF-AUDIT-EVENTS"},
+    {"ac": "AC-14", "covered_by": "ADR §2.9 (data_class:DataClass, egress T-0041, runtime-гейт Stage-2) + FF-EGRESS-CLASS"},
+    {"ac": "AC-15", "covered_by": "ADR §3 (rejected обоснованы) + §6 (FF-NOACL/FF-NB/FF-KEY гарантируют отсутствие второго механизма) + ревью-гейт архитектора §7"}
+  ],
+  "runtime_target": "контейнер (дев-стек): метаданные — Postgres-в-compose (T-0053/T-0114, провижн на dev); объектное хранилище — MinIO как docker-compose сервис дев-стека (один bucket, deny-by-default, креды серверной роли в env) — в рамках автономии. Prod-S3-провайдер (AWS/Yandex/MinIO self-hosted) = deploy-time параметр за ObjectStore-портом (endpoint/bucket/region/credentials/presign_ttl = env); provision prod-хранилища = гейт фаундера GT-4, здесь не запрашивается.",
+  "adr_artifact_path": "docs/design/T-0119-files-attachments.adr.md",
+  "escalation": ""
+}
