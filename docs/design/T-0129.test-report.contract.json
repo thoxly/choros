@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0129",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1042,
+    "passed": 1042,
+    "failed": 0,
+    "note": "Product CI npm run ci: tsc --noEmit (0 errors) + eslint src + fitness (291 PASS / 0 FAIL) + vitest run (1042 passed, 6 skipped, 0 failed; 53 test files). Ветка docs-only — продуктовый код не затронут; результат эквивалентен dev-baseline (D-056 integration-honest)."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review: ADR §2 модель фаз (таблица вход/выход/состояние + рёбра revise/evolve); review.contract.json verdict=approved", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review: ADR §3 сотрудник-аппарат T-0077, явное «нет нового authority-store/privilege-path»; review approved", "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review: ADR §4 MAY-create vs MUST-propose, структурная DRAFT-граница (FF-2, ноль грантов authoring_published); review approved", "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review: ADR §7 протокол интервью (claim→discrepancy→question, read-only оргструктура, старт из шаблонов); review approved", "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review: ADR §5 контракт бандла (когерентная единица, draft-тир, bundle-coherence §9п.4, тиры §8, не новая модель сред); review approved", "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review: ADR §6 валидация = расширение T-0027 + грант-консистентность + bundle-coherence; FF-3 заземлён grep-конкретикой в токенах ADR; review approved", "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review: ADR §8.1 три режима прогона + явное «draft-тир той же системы, не параллельная»; review approved", "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review: ADR §8.2 статисты ≠ сотрудники, не попадают в оргструктуру, оргструктура read-only; review approved", "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review: ADR §8.3 A/B-LLM = параметр прогона, N сценариев X/Y, решение фаундера 2026-06-11; review approved", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review: ADR §10.1 пилот = scoped rollout поверх T-0018 (set([node,interval])+TTL); FF-4 заземлён; review approved", "result": "pass"},
+    {"ac": "AC-11", "test": "covered-by-review: ADR §10.2 промоут = human-gate, подтверждение сценариев (не diff), config-only, атомарность бандла (R-2 применён); review approved", "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review: ADR §10.3 эволюция = тот же цикл инкрементально + drain-by-default (extensibility §7); review approved", "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review: ADR §8.4 red-lines прогона (fail-closed T-0034 в draft, config-only, тест-аудит помечен исключён из комплаенса); review approved", "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review: ADR §9 карточка внедрения, явное отвержение dev/prod-переключателя; draft/published = машинный слой; review approved", "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review: ADR §10.4 единый аудит через appendAuditEvent (T-0031), тест-маркер test:true; review approved", "result": "pass"},
+    {"ac": "AC-16", "test": "covered-by-review: ADR §12 классифицирует все 7 НОМЕРОВ примитивов §5 (MVP/Stage-2) + Flowable-спайк; FF-5 переформулирован (R-1 применён); review approved", "result": "pass"},
+    {"ac": "AC-17", "test": "covered-by-review: ADR §5.3 two-floor на весь ЖЦ, клиент не обязан смотреть на BPMN/DMN/гранты; review approved", "result": "pass"},
+    {"ac": "AC-18", "test": "covered-by-review: ADR §17 трассировка 20 AC-строк; FF-6 заземлён в §17; review approved", "result": "pass"},
+    {"ac": "AC-19", "test": "covered-by-review: ADR §13.2 решения рамки не переоткрыты, 6 токенов + founder-confirmation 2026-06-11; FF-8; review approved", "result": "pass"},
+    {"ac": "AC-20", "test": "covered-by-review: ADR §14 граница design-only + перечень build-задач B-1..B-7; review approved", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "Нет UI-поверхности — design-only артефакт; браузерная/LLM-проверка не применима",
+      "result": "n/a",
+      "note": "D-025: детерминированный CI — единственный сигнал для design-задачи; no UX surface"
+    }
+  ],
+  "failures": [],
+  "diff_gate": {
+    "docs_only": true,
+    "files_changed": [
+      "docs/design/T-0129-implementation-loop.adr.md",
+      "docs/design/T-0129.adr.contract.json",
+      "docs/design/T-0129.review.contract.json",
+      "docs/reviews/T-0129.review.md",
+      "docs/specs/T-0129-implementation-loop.spec.md",
+      "docs/specs/T-0129.spec.contract.json"
+    ],
+    "files_outside_docs": []
+  },
+  "product_ci": {
+    "command": "npm run ci",
+    "tsc": "pass (0 errors)",
+    "eslint": "pass",
+    "fitness_checks": {"total": 291, "passed": 291, "failed": 0},
+    "tests": {"total": 1042, "passed": 1042, "skipped": 6, "failed": 0},
+    "note": "Docs-only branch; product CI unaffected by this change — baseline identical to dev."
+  },
+  "review_gate": {
+    "verdict": "approved",
+    "findings": [
+      {"id": "R-1", "severity": "nit", "disposition": "applied: FF-5 переформулирован — считать 7 НОМЕРОВ примитивов, не 7 строк"},
+      {"id": "R-2", "severity": "nit", "disposition": "applied: §10.1 добавлен абзац о promote atomicity (неделимая единица бандла)"},
+      {"id": "R-3", "severity": "nit", "disposition": "applied: §16 добавлено примечание — скрипты создаёт impl-задача; на момент ADR = спецификация, не файлы"}
+    ]
+  },
+  "deferred_to_impl": {
+    "ac_ids": [],
+    "reason": "Все 20 AC покрыты на design-фазе через approved-ревью; post-impl live probes отсутствуют (design-only ADR без live-probe fitness-функций)."
+  }
+}
