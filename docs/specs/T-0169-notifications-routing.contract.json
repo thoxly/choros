@@ -1,0 +1,123 @@
+{
+  "task_id": "T-0169",
+  "status": "ready",
+  "summary": "Notifications E-N.2: routing событие→подписка + ChannelDriver-реестр (Map, deliver в runOutboxOnce T-0062, aggregate_kind=notification). Реализует publishNotificationEvent (fanout), ChannelDriver/DeliveryJob/DeliveryResult-типы, makeNotificationDeliver (Map-реестр без switch), in_app no-op-драйвер. Второго диспетчера нет; доставка через существующий runOutboxOnce T-0062.",
+  "functional": [
+    "FR-1: ChannelDriver interface (key, deliver)",
+    "FR-2: DeliveryJob type",
+    "FR-3: DeliveryResult type",
+    "FR-4: ChannelRegistry = ReadonlyMap",
+    "FR-5: NotificationEvent interface (ровно один export)",
+    "FR-6: publishNotificationEvent — единственная публикующая функция",
+    "FR-7: fanout pipeline по ADR §4.5 (tenant-gate, preferences, scope-expand, render, insert+outbox)",
+    "FR-8: makeNotificationDeliver(registry) — Map-реестр, не switch",
+    "FR-9: retryable:false → immediate-dead (maxAttempts=0 semantics)",
+    "FR-10: inAppNoOpDriver key='in_app', deliver()={ok:true}",
+    "FR-11: outbox-ряд aggregate_kind='notification', idempotency_key='notif:'+id+':'+channel",
+    "FR-12: all deps (prefStore, notifStore, outboxStore, templates, roleResolver, clock) injectable",
+    "FR-13: SmtpSecretResolverPort — структурно совместим с T-0025 SecretResolverPort"
+  ],
+  "non_functional": [
+    "NF-1: нет switch/enum по каналу в notification-router.ts (FF-NO-SWITCH-CHANNEL)",
+    "NF-2: нет нового диспетчера/ретрай-петли (FF-ONE-OUTBOX)",
+    "NF-3: pure-core — нет прямых IO-импортов в notification-router.ts",
+    "NF-4: fail-closed без tenantId (FF-FANOUT-FAILCLOSED)",
+    "NF-5: SmtpSecretResolverPort совместим с T-0025 SecretResolverPort под tsc (FF-RESOLVER-PORT)",
+    "NF-6: NotificationEvent один раз, publishNotificationEvent одна (FF-EVENT-CONTRACT)",
+    "NF-7: нет appendAuditEvent в delivery-пути (FF-NO-DELIVERY-AUDIT)",
+    "NF-8: DataClass импортируется из data-classification.ts"
+  ],
+  "out_of_scope": [
+    "Email-драйвер, email_channel_config-CRUD, SMTP-адаптер — E-N.3",
+    "notification_preference-CRUD, defaults-seed — E-N.4",
+    "renderTemplate, notification-templates.ts — E-N.5",
+    "REST API notification center — E-N.6",
+    "audit-события notif.email_config.* / notif.preference.changed — E-N.7",
+    "SLA-watchdog / эскалации как продюсеры NotificationEvent — T-0095/E7",
+    "Full notification center UI — Stage-2",
+    "Реальный SmtpSecretResolver — Stage-2"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "NotificationEvent определён ровно один раз, publishNotificationEvent — ровно одна публикующая функция; tsc проходит",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "notification-router.ts не содержит switch(channel)/if(channel==='email') — только driverMap.get(key)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "makeNotificationDeliver роутит по Map: email-mock вызван для channel='email', in_app-mock для 'in_app', unknown → {ok:false}",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "inAppNoOpDriver.key==='in_app'; deliver() всегда возвращает {ok:true}",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "publishNotificationEvent с пустым tenantId → отказ, 0 INSERT/outbox (fanout-fail-closed)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Fanout с preference channels=['in_app'] → inAppCreated=1, outboxEnqueued=1 (aggregateKind='notification', payload.channel='in_app')",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Fanout с preference channels=['email'] и is_enabled=true → inAppCreated=0, outboxEnqueued=1 (payload.channel='email')",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Fanout с email preference и is_enabled=false → outboxEnqueued=0 (email пропущен)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "notification-router.ts не содержит setInterval/startNotificationDispatcher — нет нового ретрай-механизма",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "makeNotificationDeliver: retryable:false → DispatchResult с маркером immediate-dead (maxAttempts=0 semantics)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "SmtpSecretResolverPort структурно совместим с T-0025 SecretResolverPort под tsc --noEmit",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "notification-router.ts не содержит прямых импортов pg/node:http/node:net/node:https/fetch",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "appendAuditEvent не вызывается в makeNotificationDeliver и в inAppNoOpDriver",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "idempotencyKey outbox-ряда = 'notif:' + notification.id + ':' + channel",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "tsc --noEmit и npm test (vitest) проходят без новых ошибок",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "npm run fitness и новый ci/checks/notification-isolation.sh (owner T-0169) зелёные",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0169-notifications-routing.spec.md"
+}

@@ -1,0 +1,113 @@
+{
+  "task_id": "T-0169",
+  "status": "pr_open",
+  "branch": "task/T-0169-notifications-routing",
+  "merge_target": "dev",
+  "base_commit": "54ad067ca860aca15ff06d1b1b84e7b28ac96174",
+  "head_commit": "d0582e6",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E-N.2: pure-core notification routing module (src/core/notification-router.ts, 597 lines). Implements ADR T-0120 §2.1/§2.5/§2.6/§4.4/§4.5: publishNotificationEvent (event→subscription→notification rows+outbox rows), ChannelDriver/ChannelRegistry Map-реестр (no switch/enum), inAppNoOpDriver, makeNotificationDeliver (Deliver для runOutboxOnce T-0062), SmtpSecretResolverPort, ObjectRef, NotificationPreference store ports. 26 unit tests. 6 FF fitness checks (FF-N1..FF-N6). REVIEW approved (0 blocking, 4 nit). R-1/R-3/R-4 закрыты, R-2 carried (E-N.3). CI: tsc+eslint+fitness+vitest все зелёные (1133/1133 passed).",
+  "commits": [
+    {
+      "sha": "0052209",
+      "phase": "SPEC",
+      "message": "spec(T-0169): E-N.2 notifications routing + ChannelDriver-реестр"
+    },
+    {
+      "sha": "02ed284",
+      "phase": "BUILD",
+      "message": "feat(T-0169): E-N.2 notifications routing + ChannelDriver-реестр"
+    },
+    {
+      "sha": "d697ede",
+      "phase": "REVIEW",
+      "message": "T-0169 REVIEW: approved — notification routing pure-core PASS (4 nit, 0 blocking)"
+    },
+    {
+      "sha": "d0582e6",
+      "phase": "NITS",
+      "message": "T-0169 nits: fix FF-N2 dead sub-pattern (R-4) + honest retry semantics doc (R-3) + ChannelDriver delta doc (R-1)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "d697ede",
+      "findings_resolved": [
+        "R-4 (axis 4) — FF-N2 dead sub-pattern: POSIX [(] form + exit-code guard ≥2→FAIL; all 5 sub-patterns proved red on planted violations",
+        "R-3 (axis 3) — IMMEDIATE_DEAD_ERROR_PREFIX jsdoc rewritten: actual=back-off to opts.maxAttempts; target=E-N.3 wiring with maxAttempts=1 or markRetry(id,0); TODO left",
+        "R-1 (axis 1) — ChannelDriver jsdoc: ADR §2.5 base contract + E-N.2 delta for requiresInAppRow/requiresEmailConfig; REQUIRED note for E-N.3 EmailChannelDriver"
+      ],
+      "findings_nit_carried": [
+        "R-2 (axis 2) — lifecycle-bridge.ts:236 makeNotificationDeliver not wired to production dispatch path; out of E-N.2 scope per ADR §5; see residual_risks"
+      ],
+      "artifact": "docs/design/T-0169.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1133,
+      "passed": 1133,
+      "failed": 0,
+      "ac_coverage": "16/16",
+      "fitness_static": "PASS — notification-isolation.sh: FF-N1a/b/c+FF-N2+FF-N3+FF-N4+FF-N5+FF-N6+FF-NB-OUTBOX all green; no sibling false-positives (no new tenant tables, no migration-excludes changes)",
+      "tested_commit": "d0582e6",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing bridge-runner.ts + externalTaskBridge.ts), 0 errors",
+        "fitness_static_checks": "PASS — all checks green including notification-isolation.sh (R-4 fix confirmed live)",
+        "vitest_unit": "1133/1133 passed, 6 skipped (flowable integration offline); notification-router.test.ts 26/26"
+      },
+      "artifact": "docs/test-reports/T-0169.test-report.md",
+      "contract_artifact": "docs/design/T-0169.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/notification-isolation.sh",
+    "docs/design/T-0169.review.contract.json",
+    "docs/reviews/T-0169.review.md",
+    "docs/specs/T-0169-notifications-routing.contract.json",
+    "docs/specs/T-0169-notifications-routing.spec.md",
+    "package.json",
+    "src/__tests__/notification-router.test.ts",
+    "src/core/notification-router.ts",
+    "docs/test-reports/T-0169.test-report.md",
+    "docs/design/T-0169.test-report.contract.json",
+    "docs/pr/T-0169.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "description": "makeNotificationDeliver not registered in production dispatch path (lifecycle-bridge.ts:236 uses only makeExternalTaskDeliver). E-N.2 scope per ADR §5 does not require wiring; risk is that the next developer misses it without a TODO.",
+      "follow_up_candidate": "E-N.3 wiring task: 'E-N.3 wiring makeNotificationDeliver в runOutboxOnce + EmailChannelDriver'. Materialize as separate backlog item. Lifecycle-bridge should gain: // TODO E-N.3: compose with makeNotificationDeliver(registry) once ChannelRegistry is assembled."
+    },
+    {
+      "id": "R-3-pending",
+      "severity": "nit",
+      "description": "IMMEDIATE_DEAD_ERROR_PREFIX semantics gap: retryable:false rows enter back-off cycle until opts.maxAttempts exhausted, not immediate-dead. Documented in jsdoc with TODO E-N.3.",
+      "follow_up_candidate": "E-N.3 wiring: use maxAttempts=1 dispatcher-instance for notification rows, or extend runOutboxOnce with per-row prefix override calling markRetry(id,0)."
+    }
+  ],
+  "notes": [
+    "retry-семантика честная: retryable:false идёт в back-off до maxAttempts (T-0062 не читает prefix); immediate-dead — следующая E-N.3 wiring задача",
+    "R-2 wiring в lifecycle-bridge — кандидат материализации: «E-N.3 wiring makeNotificationDeliver в runOutboxOnce + EmailChannelDriver»",
+    "Nit-фикс lint: `ctx` → `_ctx` в test stub SmtpSecretResolverPort (eslint no-unused-vars)",
+    "Nit-фикс eslint-disable: spurious // eslint-disable-next-line @typescript-eslint/no-unused-vars removed (params already prefixed _job/_ctx)"
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_changes": "T-0169 adds no SQL migrations, no known_tenant_tables.txt changes, no compose changes. No FF-RC6 sibling-gotcha applies.",
+    "downstream_effect": "Unblocks E-N.3+ tasks: makeNotificationDeliver wiring in lifecycle-bridge, EmailChannelDriver, notification_preference CRUD, REST notification-center API (E9). publishNotificationEvent is fully testable in isolation without DB (pure-core). ChannelDriver registry extensible without core changes."
+  },
+  "friction_events": []
+}

@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0169",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1133,
+    "passed": 1133,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "notification-isolation.sh > FF-N1a/b: exactly 1 NotificationEvent + 1 publishNotificationEvent (fitness)",        "result": "pass"},
+    {"ac": "AC-2",  "test": "notification-isolation.sh > FF-N1c+FF-N2: Map-based routing present, no switch/enum on channel (fitness)",         "result": "pass"},
+    {"ac": "AC-3",  "test": "notification-router.test.ts > makeNotificationDeliver > routes to in_app/email driver, unknown→{ok:false}",        "result": "pass"},
+    {"ac": "AC-4",  "test": "notification-router.test.ts > inAppNoOpDriver > key='in_app', deliver→{ok:true}, requiresInAppRow=true",           "result": "pass"},
+    {"ac": "AC-5",  "test": "notification-router.test.ts > fail-closed > throws on empty tenantId / cross-tenant / ctx.tenantId empty",        "result": "pass"},
+    {"ac": "AC-6",  "test": "notification-router.test.ts > in_app channel > inAppCreated=1, outboxEnqueued=1; outbox row shape correct",        "result": "pass"},
+    {"ac": "AC-7",  "test": "notification-router.test.ts > email channel > is_enabled=true → inAppCreated=0, outboxEnqueued=1",                "result": "pass"},
+    {"ac": "AC-8",  "test": "notification-router.test.ts > email channel > is_enabled=false/null → outboxEnqueued=0",                         "result": "pass"},
+    {"ac": "AC-9",  "test": "notification-isolation.sh > FF-N3: no setInterval / startNotificationDispatcher in notification-router.ts",        "result": "pass"},
+    {"ac": "AC-10", "test": "notification-router.test.ts > makeNotificationDeliver > retryable:false → IMMEDIATE_DEAD_ERROR_PREFIX in error",   "result": "pass"},
+    {"ac": "AC-11", "test": "notification-router.test.ts > SmtpSecretResolverPort > structurally assignable to T-0025 SecretResolverPort",     "result": "pass"},
+    {"ac": "AC-12", "test": "notification-isolation.sh > FF-N5: no IO imports (pg/node:http/node:https/node:net/fetch) in notification-router.ts", "result": "pass"},
+    {"ac": "AC-13", "test": "notification-isolation.sh > FF-N4: no appendAuditEvent in notification-router.ts delivery path",                  "result": "pass"},
+    {"ac": "AC-14", "test": "notification-router.test.ts > in_app channel > idempotencyKey = 'notif:' + notifId + ':in_app'",                 "result": "pass"},
+    {"ac": "AC-15", "test": "tsc --noEmit exit 0 + vitest run 1133/1133 passed",                                                               "result": "pass"},
+    {"ac": "AC-16", "test": "npm run fitness all green: notification-isolation.sh (FF-N1..FF-N6+FF-NB-OUTBOX) + all pre-existing checks",      "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "R-4: FF-N2 all 5 sub-patterns catch planted violations",
+      "result": "pass",
+      "note": "Each of 5 FORBIDDEN_PATTERNS planted individually → FAIL(FF-N2); clean run → PASS(FF-N2)"
+    },
+    {
+      "check": "R-3: IMMEDIATE_DEAD_ERROR_PREFIX jsdoc honest about actual vs intended semantics",
+      "result": "pass",
+      "note": "Actual: back-off until opts.maxAttempts. Intended: immediate-dead via E-N.3 wiring. TODO noted."
+    },
+    {
+      "check": "R-1: ChannelDriver ADR §2.5 delta documented",
+      "result": "pass",
+      "note": "requiresInAppRow/requiresEmailConfig rationale in jsdoc; E-N.3 MUST set requiresEmailConfig=true"
+    },
+    {
+      "check": "R-2: lifecycle-bridge makeNotificationDeliver wiring TODO",
+      "result": "n/a",
+      "note": "Out of E-N.2 scope; carried as residual risk in pr-handoff; candidate for next E-N task"
+    }
+  ],
+  "failures": []
+}

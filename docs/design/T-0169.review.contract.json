@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0169",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "src/core/notification-router.ts:116-132",
+      "issue": "ChannelDriver interface расширен двумя опциональными флагами (requiresInAppRow?, requiresEmailConfig?) сверх ADR §2.5 контракта {key, deliver}. Флаги решают реальную задачу (FF-NO-SWITCH-CHANNEL + email-гейт без сравнения строк), но расширение не задокументировано как delta от ADR. При реализации EmailChannelDriver (E-N.3) потребуется явно задать requiresEmailConfig=true.",
+      "suggestion": "Добавить комментарий к ChannelDriver: «ADR §2.5 базовый контракт; requiresInAppRow/requiresEmailConfig — E-N.2 extension для FF-NO-SWITCH-CHANNEL». Или отдельный ADR-amendment для §2.5."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/server/lifecycle-bridge.ts:236",
+      "issue": "makeNotificationDeliver не зарегистрирован в production dispatch path. lifecycle-bridge использует только makeExternalTaskDeliver. E-N.2 не обязан регистрировать (ADR §5 scope), но отсутствие TODO-комментария о «notification deliver pending E-N.3/wiring» увеличивает риск пропуска следующим разработчиком.",
+      "suggestion": "В lifecycle-bridge.ts у строки с deliver = makeExternalTaskDeliver добавить: // TODO E-N.3: compose with makeNotificationDeliver(registry) once ChannelRegistry is assembled."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/core/notification-router.ts:460-480",
+      "issue": "IMMEDIATE_DEAD_ERROR_PREFIX документирует семантику «caller вызовет markRetry(…, 0)», но runOutboxOnce (T-0062) не читает error-строку и не переопределяет maxAttempts per-row. Retryable:false отправится в back-off цикл до исчерпания opts.maxAttempts, а не сразу. Расхождение между комментарием модуля и реальным поведением T-0062.",
+      "suggestion": "При wiring в lifecycle-bridge: либо доработать T-0062 для per-row maxAttempts override по error-prefix, либо использовать отдельный dispatcher-instance с maxAttempts=1 для notification rows. Задокументировать gap в TODO у IMMEDIATE_DEAD_ERROR_PREFIX."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/notification-isolation.sh:72",
+      "issue": "Паттерн 'switch[[:space:]]*([[:space:]]*channel' содержит несбалансированные скобки для macOS ugrep — grep выбрасывает предупреждение и может вернуть exit 2 без фактической проверки паттерна. Тест помечает PASS через || true, маскируя потенциальный uncheck. На Linux GNU grep работает корректно.",
+      "suggestion": "Заменить на POSIX-совместимый паттерн: 'switch[(][[:space:]]*channel' или использовать grep -F для литерального поиска 'switch (channel'."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
