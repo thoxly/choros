@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0145",
+  "status": "ready",
+  "decision": "Убрать хардкод toBe(29) из блока FF-5/AC-19 в ci/checks/db/grant-editor.test.ts; заменить на expect(lines.length).toBeGreaterThan(0) — длина выводится из самого файла (readFileSync уже используется, файл является единственным авторитетом). Добавить toContain('invoke_proposal') в набор точечных guard-ов (таблица уже в реестре с T-0120, пробел точечного теста устраняется). Инвариант «реестр = схема» остаётся исключительно в schema.test.ts (live Postgres, FF-RLS). Тест живёт в ci/checks/db/ и запускается только в db CI-job (npm run fitness:db), не виден ambient vitest run — это сознательная каталожная принадлежность per D-056.",
+  "rejected_alternatives": [
+    {
+      "option": "toBeGreaterThan(0) без toContain-расширения (только снять хардкод)",
+      "why_not": "Без toContain('invoke_proposal') пробел T-0120 не закрывается: новая таблица в реестре не покрыта точечным guard-ом. Решение объединяет оба шага: динамический счётчик + расширение точечного набора."
+    },
+    {
+      "option": "Читать lines.length из файла и сравнивать с константой из отдельного config-файла",
+      "why_not": "Избыточная сложность: добавляет артефакт (config), который снова нужно синхронизировать при каждом добавлении таблицы. Проблема ровно та же, что с toBe(29)."
+    },
+    {
+      "option": "Оставить toBe(N) и обновлять N при каждом добавлении таблицы (статус-кво)",
+      "why_not": "Именно это создаёт регулярный конфликт: задача добавляет таблицу в реестр, а синхронная правка теста выбивает параллельные ветки. Хардкод счётчика противоречит принципу 'файл — единственный авторитет'."
+    }
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T145-1",
+      "rule": "В grant-editor.test.ts отсутствует toBe(29) (и любой toBe(<число>) в контексте длины known_tenant_tables); блок FF-5 использует toBeGreaterThan(0).",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-T145-2",
+      "rule": "invoke_proposal включён в toContain-набор FF-5 в grant-editor.test.ts.",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-T145-3",
+      "rule": "Добавление новой строки в known_tenant_tables.txt не требует правки теста FF-5 (счётчик динамический, из файла).",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-T145-4",
+      "rule": "Блок FF-5 не содержит withClient, migratorUrl, information_schema — остаётся чисто статическим.",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-T145-5",
+      "rule": "Все остальные describe-блоки grant-editor.test.ts (FF-1, FF-2, FF-7, FF-8, FF-10, AC-01..AC-20) не изменены.",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-T145-6",
+      "rule": "tsc --noEmit, eslint src, npm run fitness, vitest run зелёные после коммита задачи.",
+      "ci_check": "npm run ci"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-T145-1 + FF-T145-3: toBeGreaterThan(0) не привязан к конкретному числу"},
+    {"ac": "AC-2", "covered_by": "FF-T145-2 + toContain-набор: удаление любой точечной таблицы из txt — красный"},
+    {"ac": "AC-3", "covered_by": "FF-T145-4: отсутствие withClient/information_schema в блоке FF-5"},
+    {"ac": "AC-4", "covered_by": "FF-T145-1: отсутствие toBe(29) в grant-editor.test.ts"},
+    {"ac": "AC-5", "covered_by": "FF-T145-2: toContain('invoke_proposal') добавлен"},
+    {"ac": "AC-6", "covered_by": "FF-T145-5: все остальные блоки untouched, подтверждается полным fitness:db прогоном"}
+  ],
+  "adr_artifact_path": "docs/design/T-0145-table-count-registry.adr.md"
+}
