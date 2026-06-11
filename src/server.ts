@@ -21,6 +21,7 @@ import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
+import { type ResolverDeps } from "./core/grant-resolver.js";
 
 const { Pool } = pg;
 
@@ -32,8 +33,12 @@ const { Pool } = pg;
  * Creates a PostgresJobStore if DATABASE_URL is set, otherwise InMemoryJobStore.
  * Used by createServer() in production (index.ts) and by tests via optional store
  * injection. Clock injection seam is preserved for deterministic tests.
+ *
+ * Exported so startMain (src/main.ts) can call it explicitly before passing both
+ * the store AND a resolverDepsObj to createServer() — required when T-0143 threads
+ * ResolverDeps through the composition stack (ADR §4.3: single allocation).
  */
-function createJobStore(clock?: Clock): PostgresJobStore | InMemoryJobStore {
+export function createJobStore(clock?: Clock): PostgresJobStore | InMemoryJobStore {
   const url = process.env["DATABASE_URL"];
   if (url) {
     const pool = new Pool({ connectionString: url });
@@ -76,8 +81,15 @@ function createOutboxStore(clock?: Clock): PostgresOutboxStore | undefined {
 function buildRouter(
   store: JobStore | PostgresJobStore | InMemoryJobStore,
   timerStore?: PostgresTimerStore,
-  outboxStore?: PostgresOutboxStore
+  outboxStore?: PostgresOutboxStore,
+  // T-0143: captured in closure; passed to makeGrantResolver when a route calls it.
+  // Absent ⇒ hash fields drop honestly (FR-2 / NF-3).
+  resolverDeps?: ResolverDeps
 ): Router {
+  // resolverDeps is captured here in the closure so every future route that calls
+  // makeGrantResolver(resolverDeps) automatically inherits the composition-root
+  // binding — no second wiring step required when a new route is added (FR-3).
+  void resolverDeps; // referenced via closure; used by future route registrations
   const router = new Router();
   // Postgres pool for the grant write-path (DATABASE_URL optional — routes
   // that hit DB will 500 naturally when no DB is configured; non-DB routes
@@ -210,10 +222,19 @@ function buildRouter(
  * for deterministic lock-expiry testing. Zero-arg usage (index.ts, health.test.ts)
  * is preserved via the default parameter.
  *
+ * T-0143: additive optional second parameter `resolverDeps?: ResolverDeps`.
+ * When present it is threaded to `buildRouter` where it is captured in a closure
+ * for use by any route that calls `makeGrantResolver` (FR-3, NF-2 / FE-W23-0008).
+ * Zero-arg and one-arg callers are unaffected (additive optional parameter).
+ * When absent, `hash` fields drop honestly (FR-2 / NF-3).
+ *
  * Does NOT call .listen() — that is the caller's responsibility.
  */
-export function createServer(store: JobStore | PostgresJobStore | InMemoryJobStore = createJobStore()): http.Server {
-  const router = buildRouter(store, createTimerStore(), createOutboxStore());
+export function createServer(
+  store: JobStore | PostgresJobStore | InMemoryJobStore = createJobStore(),
+  resolverDeps?: ResolverDeps   // T-0143: threaded to buildRouter; absent => hash fields drop (FR-2)
+): http.Server {
+  const router = buildRouter(store, createTimerStore(), createOutboxStore(), resolverDeps);
   return http.createServer(router.dispatch.bind(router));
 }
 

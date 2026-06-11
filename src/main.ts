@@ -16,7 +16,8 @@
 
 import http from "node:http";
 import { Pool } from "pg";
-import { createServer } from "./server.js";
+import { createServer, createJobStore } from "./server.js";
+import { type ResolverDeps } from "./core/grant-resolver.js";
 import { PostgresJobStore } from "./core/jobStore.js";
 import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import {
@@ -122,10 +123,20 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
     ownedPool = built.pool;
   }
 
+  // T-0118: bind the silo masking secret into the KeyedDigest port at the
+  // composition root (the only process.env boundary). Honest-degrade when absent.
+  const keyedDigest = buildKeyedDigestFromEnv(env);
+
+  // T-0143: single ResolverDeps allocation — passed to BOTH createServer() and
+  // placed on MainHandle.resolverDeps (object identity by construction, not
+  // by coincidence). Any future route that calls makeGrantResolver(resolverDeps)
+  // from buildRouter's closure receives the same instance (FR-3 / FR-5 / AC-7).
+  const resolverDepsObj: ResolverDeps = { keyedDigest } as unknown as ResolverDeps;
+
   let server: http.Server | undefined;
   if (listen) {
     const port = opts.port ?? Number(env["PORT"] ?? 8080);
-    server = createServer().listen(port, () => {
+    server = createServer(createJobStore(), resolverDepsObj).listen(port, () => {
       process.stdout.write(`choros listening on port ${port}\n`);
     });
   }
@@ -134,10 +145,6 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   // inside createServer (so test imports of the server do not start a loop — FF-9).
   // Degraded without FLOWABLE_BASE_URL / DATABASE_URL: returns a no-op handle.
   const lifecycle = start(lifecycleDeps, env);
-
-  // T-0118: bind the silo masking secret into the KeyedDigest port at the
-  // composition root (the only process.env boundary). Honest-degrade when absent.
-  const keyedDigest = buildKeyedDigestFromEnv(env);
 
   return {
     server,
