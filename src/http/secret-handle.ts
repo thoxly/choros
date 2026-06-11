@@ -178,10 +178,14 @@ async function loadAgentOrgScope(
   agentId: string,
   tenantId: string,
 ): Promise<ScopeElement> {
+  // Resolve the agent's department via the employee → position → department chain.
+  // employee.position_id → position.department_id → department.id
   const { rows } = await client.query<{ department_id: string | null }>(
-    `SELECT department_id
-       FROM choros.employee
-      WHERE tenant_id = $1 AND id = $2
+    `SELECT p.department_id
+       FROM choros.employee e
+       LEFT JOIN choros.position p
+         ON p.tenant_id = e.tenant_id AND p.id = e.position_id
+      WHERE e.tenant_id = $1 AND e.id = $2
       LIMIT 1`,
     [tenantId, agentId],
   );
