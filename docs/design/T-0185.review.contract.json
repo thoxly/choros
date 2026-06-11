@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0185",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": false},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/role-criticality-migration-excludes.txt:missing entry",
+      "issue": "050_tier_delete_fix migration is not listed in the sibling-migration excludes file. role-criticality-isolation.sh (FF-RC5/FF-RC6) treats any new migration as a T-0040 violation unless explicitly excluded. npm run fitness exits non-zero with 3 FAIL lines.",
+      "suggestion": "Add line: `050_tier_delete_fix  # T-0185 — tier DELETE suppression bugfix` to ci/checks/role-criticality-migration-excludes.txt"
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/tier_delete_fix.test.ts:DEL-2 and DEL-4 describe blocks",
+      "issue": "Tests leave published del-app-* rows in choros.application after each run (no afterEach cleanup). Table accumulates on repeated CI runs. Correctness unaffected (unique UUIDs per run).",
+      "suggestion": "Add afterEach that deletes rows WHERE slug LIKE 'del-app-%' to keep the test DB clean across runs."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "BEFORE DELETE returns OLD for draft row", "covered": true},
+    {"ac": "BEFORE DELETE raises for published row (no GUC)", "covered": true},
+    {"ac": "BEFORE DELETE with promoting GUC succeeds", "covered": true},
+    {"ac": "UPDATE semantics regression: published still raises", "covered": true},
+    {"ac": "Migration is idempotent (CREATE OR REPLACE + DROP/CREATE trigger)", "covered": true},
+    {"ac": "049_tier.sql untouched", "covered": true},
+    {"ac": "No .sh files touched", "covered": true},
+    {"ac": "npm run fitness green", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "externalWorker.e2e.test.ts and health.test.ts are brittle to ambient DATABASE_URL: createJobStore() silently selects PostgresJobStore when DATABASE_URL is set, breaking tests designed for InMemoryJobStore. Pre-existing gap, not introduced by T-0185. Candidate for a future test-isolation hardening task."
+  ]
+}
