@@ -14,8 +14,13 @@
 
 import type { Pool } from "pg";
 import { makeFlowableClient } from "../core/flowable-client.js";
-import { startBridgePollLoop } from "../core/externalTaskBridge.js";
+import {
+  startBridgePollLoop,
+  makeExternalTaskDeliver,
+} from "../core/externalTaskBridge.js";
+import { startOutboxDispatcherLoop, defaultBackoff } from "../core/outboxDispatcher.js";
 import { PostgresJobStore } from "../core/jobStore.js";
+import { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
 import {
   makePgAuditWriter,
   type AuditWriter,
@@ -38,20 +43,44 @@ export interface LifecycleBridgeHandle {
 export interface LifecycleBridgeDeps {
   /** App pool (choros_app) for the audit writer's per-tenant transactions. */
   pool?: Pool;
-  /** Job store for the bridge poll loop. */
+  /** Job store for the bridge poll loop + external-task deliver reverse-map. */
   jobStore?: PostgresJobStore;
+  /** Outbox store the dispatcher loop drains (where onDispatched fires). */
+  outboxStore?: PostgresOutboxStore;
   /**
    * Resolve actor identity + actorType for an outbox row. Default projects the
    * external-worker channel as a 'service' actor (kind='agent' over the bridge).
    */
   resolveActor?: (row: OutboxRow) => Promise<{ actor: string; actorType: ActorType }>;
+  /**
+   * TEST SEAMS (production leaves them undefined → real pg/Flowable path). They
+   * let a wired-entry integration test exercise the REAL composition (both loops,
+   * onDispatched, encoder, writer.appendAuditEvent) against in-memory leaves —
+   * the wiring is real, only the boundary IO is faked.
+   */
+  /** Override the audit writer (e.g. InMemoryAuditWriter). Default makePgAuditWriter(). */
+  auditWriter?: AuditWriter;
+  /** Override the per-tenant tx runner. Default opens a pg tx + sets the GUC. */
+  withTenantTx?: <T>(tenantId: string, fn: (tx: PgClientLike) => Promise<T>) => Promise<T>;
+  /** Poll interval for both loops (ms). */
+  intervalMs?: number;
+  /** Injectable setInterval for deterministic tests. */
+  setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
 }
 
 /**
  * Audit a successful startInstance: encode an `instance.started` row and append it
- * via the writer inside the supplied per-tenant transaction (FR-3 / AC-7). Exactly
- * one append. The call-site (where the server invokes flowableClient.startInstance)
- * calls this on `ok:true`; the in-memory writer + a direct call cover AC-7 in unit.
+ * via the canonical writer inside the supplied per-tenant transaction (FR-3). Exactly
+ * one append.
+ *
+ * FORWARD-OBLIGATION (honest seam, not yet live): there is NO production HTTP route
+ * that calls flowableClient.startInstance today — the only call-sites are the
+ * flowable-client tests and the bridge smoke runner. This wrapper is therefore the
+ * sanctioned call-site FOR the start-instance route when it lands (the route task
+ * MUST invoke auditInstanceStarted on ok:true inside its own withTenant tx). The
+ * RUNTIME lifecycle audit path that IS live end-to-end in this build is
+ * task.completed / task.failed via the outbox dispatcher's onDispatched (see
+ * startLifecycleBridge). The in-memory writer + a direct call cover AC-7 in unit.
  */
 export async function auditInstanceStarted(
   writer: AuditWriter,
@@ -98,8 +127,10 @@ function noopHandle(): LifecycleBridgeHandle {
 export function buildAuditOnDispatched(
   pool: Pool,
   resolveActor?: (row: OutboxRow) => Promise<{ actor: string; actorType: ActorType }>,
+  writerOverride?: AuditWriter,
+  withTenantTxOverride?: <T>(tenantId: string, fn: (tx: PgClientLike) => Promise<T>) => Promise<T>,
 ) {
-  const writer = makePgAuditWriter();
+  const writer = writerOverride ?? makePgAuditWriter();
 
   // Default actor resolution: the bridge is an external-worker channel, so an
   // agent-kind employee acting over it projects to 'service' (ADR §4.5).
@@ -111,7 +142,9 @@ export function buildAuditOnDispatched(
       return { actor, actorType: projectActorType("agent", "external-worker") };
     });
 
-  const withTenantTx = async <T>(
+  const withTenantTx =
+    withTenantTxOverride ??
+    (async <T>(
     tenantId: string,
     fn: (tx: PgClientLike) => Promise<T>,
   ): Promise<T> => {
@@ -129,7 +162,7 @@ export function buildAuditOnDispatched(
     } finally {
       client.release();
     }
-  };
+  });
 
   return makeAuditOnDispatched({ writer, withTenantTx, resolveActor: resolve });
 }
@@ -137,7 +170,18 @@ export function buildAuditOnDispatched(
 /**
  * Start the lifecycle bridge. Reads env (FLOWABLE_BASE_URL and credentials). When
  * the Flowable config or the required deps are absent, returns a degraded no-op
- * handle (server starts, no throw). When configured, starts the bridge poll loop.
+ * handle (server starts, no throw — NF-5). When configured, starts BOTH halves of
+ * the lifecycle path:
+ *
+ *   (1) the bridge poll loop — fetch-and-lock external tasks from Flowable, enqueue
+ *       outbox rows (task_completed / task_failed);
+ *   (2) the OUTBOX DISPATCHER loop — drains those rows back into Flowable via
+ *       makeExternalTaskDeliver, and fires onDispatched=makeAuditOnDispatched(...)
+ *       after each durable markDispatched (exactly-once). This is the live
+ *       end-to-end audit firing point (FR-4/FR-8): a completed/failed task lands a
+ *       lifecycle audit_event row through the SAME canonical sink as grants.
+ *
+ * Both loops are stopped by the returned handle (graceful shutdown).
  */
 export function startLifecycleBridge(
   deps: LifecycleBridgeDeps = {},
@@ -148,15 +192,14 @@ export function startLifecycleBridge(
     // Degraded: no engine configured. Server runs; lifecycle audit path dormant.
     return noopHandle();
   }
-  if (deps.pool === undefined || deps.jobStore === undefined) {
+  if (
+    deps.pool === undefined ||
+    deps.jobStore === undefined ||
+    deps.outboxStore === undefined
+  ) {
     // Misconfigured deps — stay degraded rather than crash the server (NF-5).
     return noopHandle();
   }
-
-  // Touch the audit onDispatched wiring so the composition is exercised even
-  // though the bridge poll loop drives fetchAndLock; the outbox dispatcher (the
-  // actual onDispatched firing point) consumes the same callback.
-  void buildAuditOnDispatched(deps.pool, deps.resolveActor);
 
   const flowableClient = makeFlowableClient({
     baseUrl,
@@ -173,10 +216,37 @@ export function startLifecycleBridge(
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
 
-  const loop = startBridgePollLoop(flowableClient, deps.jobStore, {
+  // (1) Poll loop: Flowable external tasks → outbox rows.
+  const pollLoop = startBridgePollLoop(flowableClient, deps.jobStore, {
     topics,
     workerId: env["FLOWABLE_WORKER_ID"] ?? "choros-bridge",
+    ...(deps.intervalMs !== undefined ? { pollIntervalMs: deps.intervalMs } : {}),
+    ...(deps.setIntervalFn !== undefined ? { setIntervalFn: deps.setIntervalFn } : {}),
   });
 
-  return { stop: loop.stop };
+  // (2) Dispatcher loop: outbox rows → Flowable + lifecycle audit on dispatch.
+  //     onDispatched is the REAL firing point — it appends exactly one lifecycle
+  //     audit row per dispatched task_completed/task_failed (no-op for others).
+  const auditOnDispatched = buildAuditOnDispatched(
+    deps.pool,
+    deps.resolveActor,
+    deps.auditWriter,
+    deps.withTenantTx,
+  );
+  const deliver = makeExternalTaskDeliver(flowableClient, deps.jobStore);
+  const dispatchLoop = startOutboxDispatcherLoop(deps.outboxStore, deliver, {
+    batchLimit: 10,
+    maxAttempts: 5,
+    backoff: defaultBackoff,
+    onDispatched: auditOnDispatched,
+    ...(deps.intervalMs !== undefined ? { intervalMs: deps.intervalMs } : {}),
+    ...(deps.setIntervalFn !== undefined ? { setIntervalFn: deps.setIntervalFn } : {}),
+  });
+
+  return {
+    stop: () => {
+      pollLoop.stop();
+      dispatchLoop.stop();
+    },
+  };
 }

@@ -17,12 +17,15 @@
  * isGenesisOwner is NEVER hardcoded; it is resolved from the DB via
  * loadAdminContext → isGenesisOwnerForTenant (NF-3 / AC-15).
  *
- * encoding seam: T-0031 will replace writeGrantAuditEvent with its own
- * encoder. For now this is a thin local function writing the minimal honest
- * audit_event row using the existing T-0016 append path.
+ * encoding seam: writeGrantAuditEvent / writeAssignmentAuditEvent encode via the
+ * T-0031 encoders (encodeGrantAuditEvent / encodeAssignmentAuditEvent), then append
+ * through the SINGLE canonical audit sink — appendAuditEvent (src/db/audit-writer.ts,
+ * T-0068). The earlier T-0030 placeholder local writer (partial/non-JCS preimage on
+ * the same vocab=1 tables) is REMOVED: one preimage rule governs the whole chain so
+ * grant + lifecycle rows interleave verifiably (ADR §9 forward-obligation landed).
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import {
   type GrantAuditEvent,
@@ -41,6 +44,7 @@ import {
   type AuditEventInput,
 } from "../core/audit-grant-encoder.js";
 import { loadAdminContext } from "../db/org.js";
+import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 
@@ -197,96 +201,29 @@ export function parseScopeElement(raw: unknown): ScopeElement | null {
 }
 
 // ---------------------------------------------------------------------------
-// appendAuditEventInput — T-0031 encoder seam integration (T-0030 obligation).
+// appendAuditEventInput — routes a pre-encoded AuditEventInput through the SINGLE
+// canonical audit sink (src/db/audit-writer.ts, T-0068). It does NOT compute a
+// chain itself: T-0030 originally carried a LOCAL placeholder writer with a
+// partial, non-length-prefixed, non-JCS preimage that stamped vocab_version=1 on
+// the same audit_event/audit_head tables. Two incompatible preimage rules under
+// the same vocab pin would make a verifier (T-0053) false-positive tamper on grant
+// rows and break density verification on a mixed grant+lifecycle chain. Per the
+// ADR §9 forward-obligation, grant-trail audit now appends through the canonical
+// appendAuditEvent (length-prefixed/JCS over all 14 fields, FOR-UPDATE seed-head
+// serialization), the same sink lifecycle audit uses — one preimage, one chain.
 //
-// Accepts a pre-encoded AuditEventInput (from encodeGrantAuditEvent or
-// encodeAssignmentAuditEvent) and appends it to audit_event within the caller's
-// transaction, maintaining the SHA-256 chained append path (T-0016).
-//
-// Called INSIDE a withTenantTx callback (no own transaction).
-// Chain columns (seq, prev_hash, row_hash, vocab_version) are computed here;
-// all other fields come verbatim from the encoder output (ADR §4.1 / NF-2).
+// Runs INSIDE a withTenantTx callback (no own transaction); the writer sources
+// tenant_id from the choros.tenant_id GUC the caller set.
 // ---------------------------------------------------------------------------
+
+const grantAuditWriter = makePgAuditWriter();
 
 async function appendAuditEventInput(
   client: pg.PoolClient,
-  tenantId: string,
+  _tenantId: string,
   input: AuditEventInput,
 ): Promise<void> {
-  // Fetch current audit head for this tenant to maintain hash chain.
-  const headRes = await client.query<{
-    seq: string;
-    row_hash: Buffer;
-  }>(
-    `SELECT seq, row_hash FROM choros.audit_head WHERE tenant_id = $1`,
-    [tenantId],
-  );
-
-  let prevSeq: bigint;
-  let prevHash: Buffer;
-
-  if (headRes.rows.length === 0) {
-    prevSeq = 0n;
-    prevHash = Buffer.alloc(32); // all-zeros sentinel
-  } else {
-    prevSeq = BigInt(headRes.rows[0].seq);
-    prevHash = headRes.rows[0].row_hash;
-  }
-
-  const newSeq = prevSeq + 1n;
-
-  // row_hash = SHA-256(prevHash || type || actor || subject || occurred_at)
-  const rowHash = createHash("sha256")
-    .update(prevHash)
-    .update(input.type)
-    .update(input.actor)
-    .update(input.subject ?? "")
-    .update(String(input.occurred_at))
-    .digest();
-
-  // Insert audit_event row — fields driven entirely by encoder output (AC-12 / FF-1).
-  await client.query(
-    `INSERT INTO choros.audit_event
-       (tenant_id, seq, id, type, actor, subject, scope, via,
-        proposed_by, confirmed_by, payload, occurred_at,
-        prev_hash, row_hash, vocab_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8,
-             $9, $10, $11::jsonb, $12,
-             $13, $14, $15)`,
-    [
-      tenantId,
-      newSeq.toString(),
-      input.id,
-      input.type,
-      input.actor,
-      input.subject,
-      input.scope !== null ? JSON.stringify(input.scope) : null,
-      input.via ?? "grant-editor",
-      input.proposed_by,
-      input.confirmed_by,
-      JSON.stringify(input.payload),
-      input.occurred_at.toString(),
-      prevHash,
-      rowHash,
-      1,
-    ],
-  );
-
-  // Upsert audit_head advancing seq by exactly +1 (trigger enforces this).
-  if (headRes.rows.length === 0) {
-    await client.query(
-      `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [tenantId, newSeq.toString(), rowHash, input.occurred_at.toString(), 1],
-    );
-  } else {
-    await client.query(
-      `UPDATE choros.audit_head
-          SET seq = $2, row_hash = $3, updated_at = $4, vocab_version = $5
-        WHERE tenant_id = $1`,
-      [tenantId, newSeq.toString(), rowHash, input.occurred_at.toString(), 1],
-    );
-  }
+  await grantAuditWriter.appendAuditEvent(client as unknown as PgClientLike, input);
 }
 
 // ---------------------------------------------------------------------------

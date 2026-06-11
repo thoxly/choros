@@ -72,6 +72,26 @@ describe("audit-preimage (FF-3 / AC-3)", () => {
     expect(canonicalPreimage(FIXTURE).equals(canonicalPreimage(permuted))).toBe(true);
   });
 
+  it("JCS — non-ASCII / supra-BMP jsonb keys sort deterministically (R-4 pin)", () => {
+    // RFC 8785 §3.2.3 sorts on UTF-16 code units. Pin the ordering under vocab=1
+    // so any future change to the comparator (e.g. localeCompare / code-point sort)
+    // flips this fixture. Keys: a non-ASCII key, an emoji key (surrogate pair above
+    // U+FFFF), and an ASCII key — supplied in two different insertion orders.
+    const orderA: CanonicalAuditRow = {
+      ...FIXTURE,
+      payload: { "тип": "h", "😀": 1, actorType: "human" },
+    };
+    const orderB: CanonicalAuditRow = {
+      ...FIXTURE,
+      payload: { actorType: "human", "😀": 1, "тип": "h" },
+    };
+    // Insertion-order independence (the sort is the only thing that can order them).
+    expect(canonicalPreimage(orderA).equals(canonicalPreimage(orderB))).toBe(true);
+    // And it is a real, stable digest distinct from the ASCII-only golden.
+    expect(rowHash(orderA).equals(rowHash(orderB))).toBe(true);
+    expect(rowHash(orderA).toString("hex")).not.toBe(GOLDEN_DIGEST);
+  });
+
   it("NULL ≠ empty string (length-unambiguous)", () => {
     const withNull: CanonicalAuditRow = { ...FIXTURE, subject: null };
     const withEmpty: CanonicalAuditRow = { ...FIXTURE, subject: "" };

@@ -241,26 +241,52 @@ actor/actorType (через `employeeKindLookup` + канал external-worker).
 
 `resolveFor(deps, handle, subject, op, invokeCtx?, guardCtx?)` (grant-resolver.ts:451) **уже**
 принимает опциональные `guardCtx` и `deps.sod` — T-0068 **НЕ меняет сигнатуру**. T-0068 добавляет
-чистую `buildLifecycleGuardCtx(ctx): GuardContext` (actor, onBehalfOf, roleAtEvent, verb='transition'|'approve',
-approveLevel?) для approve/transition-шва. Без `deps.sod` поведение = pre-T-0032 (fail-open-by-absence;
-grant-only решение). Живой Postgres SoD-DAO — НЕ скоуп (§2.3, T-0053).
+чистую `buildLifecycleGuardCtx(ctx): GuardContext` (actor, onBehalfOf, roleAtEvent,
+`verb ∈ ActorEventVerb`, approveLevel?) для approve/release-шва. Без `deps.sod` поведение = pre-T-0032
+(fail-open-by-absence; grant-only решение). Живой Postgres SoD-DAO — НЕ скоуп (§2.3, T-0053).
+
+> **Поправка R-3 (точность словаря):** ранняя редакция писала `verb='transition'|'approve'`, но
+> `'transition'` НЕ член закрытого `ActorEventVerb` (миграция 018 / `actor-event.ts` =
+> `{request,prepare,submit,approve,release}`). `'transition'` — это `Grant.operation` (gated OP-CLASS),
+> ДРУГОЙ словарь, не тот, что пишется в `actor_event`. Код корректно типизирует `verb: ActorEventVerb`;
+> процессный transition отображается на один из закрытых verb-ов (напр. `submit`/`release`). Изменений
+> кода это не требует — только эта прозаическая правка.
 
 ### 4.8 Server-wiring (FR-8, `src/server/lifecycle-bridge.ts` + hook в `index.ts`)
 
 ```ts
 export interface LifecycleBridgeHandle { stop: () => void; }
-// Читает env (FLOWABLE_BASE_URL и пр.). Если конфига нет — возвращает no-op handle (degraded,
-// no-throw). Если есть — makeFlowableClient + startBridgePollLoop({..., onDispatched: makeAuditOnDispatched(...)}).
+// Читает env (FLOWABLE_BASE_URL и пр.). Если конфига/deps нет — возвращает no-op handle (degraded,
+// no-throw). Если есть — makeFlowableClient + ДВА цикла:
+//   (1) startBridgePollLoop(client, jobStore, {...})         — внешние задачи → outbox-строки;
+//   (2) startOutboxDispatcherLoop(outboxStore, deliver, {    — outbox-строки → Flowable + аудит:
+//         onDispatched: makeAuditOnDispatched(...) })          ← onDispatched ЖИВЁТ ЗДЕСЬ.
 export function startLifecycleBridge(deps: {...}, env?: NodeJS.ProcessEnv): LifecycleBridgeHandle;
 ```
 
-Вызывается из `index.ts` main-блока (`thisFile === mainFile`), РЯДОМ с `createServer().listen()`,
-НЕ внутри `createServer` (чтобы тесты, импортирующие server, не стартовали loop — паттерн lockReclaimer).
-Без `FLOWABLE_BASE_URL` сервер стартует, bridge деградирован (loop не крутится / poll-ошибки глотаются —
-T-0067 AC-13/14). `startInstance`-аудит: тонкая обёртка на call-site старта инстанса (где сервер зовёт
-`flowableClient.startInstance`) — при `ok:true` энкодит `instance.started` (instanceId=`result.instanceId`)
-и аппендит в tenant-tx. (NB: REST-эндпоинт старта инстанса — отдельный шов; T-0068 проводит аудит-обёртку,
-сам HTTP-route — там, где он есть/появится; для AC-7 достаточно unit с in-memory writer + прямой вызов обёртки.)
+Вызывается из композиционного корня `startMain` (`src/main.ts`), к которому делегирует `index.ts`
+main-блок (`thisFile === mainFile`), РЯДОМ с `createServer().listen()`, НЕ внутри `createServer`
+(чтобы тесты, импортирующие server, не стартовали loop — паттерн lockReclaimer). Без `FLOWABLE_BASE_URL`
+или `DATABASE_URL` сервер стартует, bridge деградирован (циклы не крутятся / ошибки прохода глотаются —
+T-0067 AC-13/14).
+
+> **Поправка R-3 (точка срабатывания onDispatched):** ранняя редакция писала
+> `startBridgePollLoop({..., onDispatched: makeAuditOnDispatched(...)})`, но у `startBridgePollLoop`
+> НЕТ параметра `onDispatched` — poll-loop только фетчит/локает внешние задачи и кладёт outbox-строки.
+> `onDispatched` срабатывает в **outbox-диспетчере** (`runOutboxOnce`/`startOutboxDispatcherLoop`) ПОСЛЕ
+> durable `markDispatched` (`if (advanced)`), что и даёт exactly-once. Поэтому wired-путь живёт через
+> ОБА цикла, и `onDispatched=makeAuditOnDispatched(...)` подаётся в диспетчерный цикл, а не в poll-loop.
+> `deliver` для диспетчера = `makeExternalTaskDeliver(client, jobStore)`. Runtime-путь, живой end-to-end
+> в этой сборке — `task.completed`/`task.failed` (диспетчер). Тест wired-entry (`main-wired-entry.test.ts`)
+> зовёт `startMain` (не `createServer`) и проверяет, что событие ДОЕЗЖАЕТ до `audit_event` через реальную
+> проводку (in-memory writer на конце).
+
+`startInstance`-аудит (`auditInstanceStarted`): тонкая обёртка на call-site старта инстанса — при `ok:true`
+энкодит `instance.started` и аппендит в tenant-tx. **Forward-obligation (честный шов):** прод-HTTP-route
+старта инстанса сегодня НЕ существует (`flowableClient.startInstance` зовут лишь тесты + smoke-runner);
+обёртка — санкционированный call-site ДЛЯ этого route, когда он появится (route обязан звать
+`auditInstanceStarted` при `ok:true` в своей withTenant-tx). Для AC-7 достаточно unit с in-memory writer +
+прямой вызов обёртки.
 
 ### 4.9 Миграции / таблицы
 
@@ -277,7 +303,8 @@ T-0067 AC-13/14). `startInstance`-аудит: тонкая обёртка на c
 - `src/core/audit-preimage.ts`, `src/core/lifecycle-audit.ts` — **чистые** (no pg/http/https/net/fetch/child_process import); IO-free; по образцу `audit-grant-encoder.ts`.
 - `src/db/audit-writer.ts` — **единственный** модуль, делающий SQL на `audit_event`/`audit_head` (кроме миграций). Writer = единственный санкционированный путь записи (T-0016 §4.4).
 - `AuditEventInput` импортируется из `src/core/audit-grant-encoder.ts` (T-0031) — не дублируется.
-- Background-loop wiring — только в `index.ts` main-блоке / `src/server/lifecycle-bridge.ts`, НЕ в `createServer` (тесты не должны стартовать loop).
+- Background-loop wiring — только в композиционном корне `src/main.ts` (к нему делегирует `index.ts` main-блок) / `src/server/lifecycle-bridge.ts`, НЕ в `createServer` (тесты не должны стартовать loop).
+- Единый сток аудита: и grant-trail (`src/http/grants.ts`), и lifecycle аппендят ТОЛЬКО через канонический `appendAuditEvent` (`src/db/audit-writer.ts`) — один preimage (length-prefixed/JCS, 14 полей), одна цепочка. Локальный partial-preimage writer T-0030 устранён (dual-writer фикс).
 
 ---
 

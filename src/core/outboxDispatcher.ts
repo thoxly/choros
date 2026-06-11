@@ -124,3 +124,51 @@ export function defaultBackoff(attempts: number): number {
   const ms = base * Math.pow(2, Math.max(0, attempts));
   return Math.min(ms, cap);
 }
+
+// ---------------------------------------------------------------------------
+// startOutboxDispatcherLoop — background poll scheduler (образец startLockReclaimerLoop)
+// ---------------------------------------------------------------------------
+
+export interface OutboxDispatcherLoopOptions extends RunOutboxOptions {
+  /** Poll interval (ms). Default 1000. */
+  intervalMs?: number;
+  /** Injectable setInterval for deterministic tests. */
+  setIntervalFn?: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
+  /** Observability hook called after each pass. Default no-op. */
+  onPass?: (result: RunOutboxResult) => void;
+}
+
+/**
+ * Start a recurring outbox dispatch loop. First pass runs after `intervalMs`
+ * (not immediately — does not block server startup), identical to
+ * startLockReclaimerLoop (T-0063). `opts.onDispatched` is the firing point the
+ * lifecycle-audit callback (T-0068) attaches to: it runs for each row AFTER a
+ * durable markDispatched (exactly-once). Returns { stop } for graceful shutdown
+ * (clearInterval; in-flight pass errors are swallowed so a degraded engine does
+ * not crash the loop).
+ */
+export function startOutboxDispatcherLoop(
+  store: PostgresOutboxStore,
+  deliver: Deliver,
+  opts: OutboxDispatcherLoopOptions,
+): { stop: () => void } {
+  const intervalMs = opts.intervalMs ?? 1000;
+  const setIntervalFn = opts.setIntervalFn ?? setInterval;
+  const onPass = opts.onPass ?? ((_r: RunOutboxResult) => {/* no-op */});
+  const runOpts: RunOutboxOptions = {
+    batchLimit: opts.batchLimit,
+    maxAttempts: opts.maxAttempts,
+    backoff: opts.backoff,
+    ...(opts.onDispatched !== undefined ? { onDispatched: opts.onDispatched } : {}),
+  };
+
+  const handle = setIntervalFn(() => {
+    runOutboxOnce(store, deliver, runOpts)
+      .then(onPass)
+      .catch(() => {/* swallow — degraded signal; loop continues next interval */});
+  }, intervalMs);
+
+  return {
+    stop: () => clearInterval(handle),
+  };
+}
