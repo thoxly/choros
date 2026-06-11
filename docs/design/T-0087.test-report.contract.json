@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0087",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1090,
+    "passed": 1084,
+    "failed": 0,
+    "skipped": 6,
+    "note": "vitest run (src/__tests__): 1084 passed / 6 skipped / 0 failed (55 test files). fitness:db tier: tier_promote_atomic 7/7 + tier_read_scope 3/3 = 10/10 live-pass."
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "static FF-1 (tier-isolation.sh) + live FF-1 (tier_promote_atomic: tier CHECK rejects invalid tier)", "result": "pass"},
+    {"ac": "AC-2", "test": "live FF-2 (tier_promote_atomic: UPDATE on published application/registry_def fails with trigger)", "result": "pass"},
+    {"ac": "AC-3", "test": "live FF-3 (tier_promote_atomic: after promoting registry_def, draft record count in published context = 0)", "result": "pass"},
+    {"ac": "AC-4", "test": "live promote path exercised via FF-2/FF-9 sanctioned promoting='1' flow (withTenantTx)", "result": "pass"},
+    {"ac": "AC-5", "test": "live R-2: POST /api/artifacts/:id/promote on published artifact -> 409 NOT_IN_DRAFT (tier_promote_atomic.test.ts)", "result": "pass"},
+    {"ac": "AC-6", "test": "live FF-6 (tier_read_scope: default published, draft rows 0 in published context, id-matched)", "result": "pass"},
+    {"ac": "AC-7", "test": "unit: env-tier.test.ts (12/12) — actorType from auth context, decidePromote 403 for agent", "result": "pass"},
+    {"ac": "AC-8", "test": "static FF-8 (tier-isolation.sh: no createDatabase/provisionContour in artifacts.ts or 046_tier.sql)", "result": "pass"},
+    {"ac": "AC-9", "test": "live FF-9 (tier_promote_atomic: published-tier application INSERT/promote succeeds in dev Choros)", "result": "pass"},
+    {"ac": "AC-10", "test": "static FF-10 (tier-isolation.sh: tier='published' assigned only in env-tier.ts / artifacts.ts)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "No web frontend changes", "result": "n/a"}
+  ],
+  "failures": [
+    {
+      "test": "FF-DC7 (dual-control-isolation.sh): unexpected migration 046_tier.sql",
+      "is_product_defect": false,
+      "root_class": "tooling-gap",
+      "note": "Sibling-frozen-check gotcha: T-0044 dual-control-isolation.sh has no data-file exclusion mechanism (unlike role-criticality-isolation.sh). Same gap affected T-0072/T-0077. Cannot fix without modifying T-0044 frozen .sh. Non-blocking; documented in review-contract role_gap_evidence."
+    }
+  ],
+  "ci_gate": {
+    "tsc": true,
+    "eslint": true,
+    "fitness_ff_dc7_only_red": true,
+    "vitest_src": {"passed": 1084, "failed": 0, "skipped": 6},
+    "fitness_db_tier": {"passed": 10, "failed": 0, "files": ["tier_promote_atomic.test.ts 7/7", "tier_read_scope.test.ts 3/3"]},
+    "tier_isolation_ff1_ff11": "all 26 checks green"
+  },
+  "review_contract": {
+    "verdict": "approved",
+    "iter": 3,
+    "sha": "13d9850",
+    "open_findings": ["R-7 (non-blocking, rename 046->049 at merge window, 5 sync-points, orchestrator step)"]
+  },
+  "migration_renumber_note": "046_tier.sql -> 049_tier.sql at merge (5 sync-points: migrations/046_tier.sql + header line 1; role-criticality-migration-excludes.txt line 20; tier-isolation.sh:158 GENESIS_PATHS; tier-isolation.sh:235-245 FF-11a x5; docs/pr/T-0087.pr-handoff.json:16)"
+}

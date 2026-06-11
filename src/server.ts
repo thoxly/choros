@@ -20,6 +20,7 @@ import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerBindingRoutes } from "./http/binding.js";
+import { registerArtifactRoutes } from "./http/artifacts.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
@@ -221,6 +222,9 @@ function buildRouter(
   if (grantsPool) {
     registerBindingRoutes(router, grantsPool);
   }
+
+  // Register artifact tier-promote endpoint (T-0087 E12.6).
+  registerArtifactRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));

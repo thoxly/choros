@@ -1,0 +1,50 @@
+{
+  "task_id": "T-0087",
+  "status": "pr_open",
+  "branch": "task/T-0087",
+  "head_sha": "e57804f",
+  "rebased_onto": "9bf226d95be494bd4d7c1e0ec1089e8a634a276d",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": false
+  },
+  "review_verdict": "approved",
+  "review_iter": 3,
+  "review_sha": "13d9850",
+  "test_verdict": "pass",
+  "test_sha": "e57804f",
+  "test_summary": "tsc clean, eslint 0 errors, fitness FF-1..FF-11 all green, vitest 1084/0/6, tier live-DB 10/10 (tier_promote_atomic 7/7 + tier_read_scope 3/3), all 10 AC live-covered. Sole red = FF-DC7 (sibling-gotcha, non-blocking).",
+  "files_changed": [
+    "migrations/049_tier.sql",
+    "ci/checks/tier_bearing_tables.txt",
+    "ci/checks/tier-isolation.sh",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "src/core/env-tier.ts",
+    "src/http/artifacts.ts",
+    "src/__tests__/env-tier.test.ts",
+    "ci/checks/db/tier_promote_atomic.test.ts",
+    "ci/checks/db/tier_read_scope.test.ts",
+    "src/server.ts",
+    "package.json"
+  ],
+  "review_fixes": {
+    "R-1": "FIXED — migration renamed 044→045→046 (dev had 044_config_agent_seed + 045_form_binding); 049_tier entry added to ci/checks/role-criticality-migration-excludes.txt per T-0164/B2 data-file pattern; role-criticality-isolation.sh now GREEN",
+    "R-2": "FIXED — decidePromote now called inside promoteTier with real currentTier from FOR UPDATE SELECT (not hardcoded 'draft'); actorType threaded through; NOT_IN_DRAFT path live; 409 endpoint test added to ci/checks/db/tier_promote_atomic.test.ts",
+    "R-3": "FIXED — FF-1 grep in tier-isolation.sh anchored to table name (ALTER TABLE choros.<table>) — prevents false-pass if column added to only one table",
+    "R-4": "FIXED — startup-time UUID validation for DEV_TENANT_ID with clear error message at module load",
+    "R-5": "FIXED (iter-3) — BEGIN-before-SET-LOCAL in all withClient blocks of both tier db-test files; tier live-DB 10/10 green",
+    "R-6": "FIXED (iter-3) — foreign 045_form_binding line dropped from role-criticality-migration-excludes.txt; only T-0087-owned 049_tier remains"
+  },
+  "deviations_from_adr": [
+    "CI fitness=false REASON — SIBLING-CHECK GOTCHA ONLY: dual-control-isolation.sh (T-0044 FF-DC7) flags migrations/049_tier.sql as 'unexpected migration' — this check has no data-file exclusion mechanism (unlike role-criticality-isolation.sh which T-0164 extended). Cannot fix without modifying T-0044's frozen .sh file. Same gap affected T-0072 (045_form_binding) and T-0077 (044_config_agent_seed) — both merged without resolving this structural gap. All other fitness checks GREEN: role-criticality-isolation.sh GREEN (049_tier in excludes.txt), own tier-isolation.sh (FF-1..FF-11) GREEN, frozen-checks-immutable.sh GREEN. CI: build=true, lint=true, types=true, tests=1084 passed / 6 skipped.",
+    "MIGRATION RENUMBER NOTE: migrations/049_tier.sql is currently numbered 046 on this branch. T-0168 occupies 046-048 on dev; target number is 049. Orchestrator will renumber in the merge window — do NOT renumber on the branch. 5 atomic sync-points: (1) migrations/049_tier.sql rename + header comment line 1 ('-- 046 ·' -> '-- 049 ·'); (2) ci/checks/role-criticality-migration-excludes.txt line 20: '049_tier' -> '049_tier'; (3) ci/checks/tier-isolation.sh line 158 GENESIS_PATHS: '049_tier.sql' -> '049_tier.sql'; (4) ci/checks/tier-isolation.sh lines 235-245 FF-11a (5 occurrences of '049_tier.sql' -> '049_tier.sql'); (5) docs/pr/T-0087.pr-handoff.json files_changed[0]: 'migrations/049_tier.sql' -> 'migrations/049_tier.sql'. No '046' hardcode in src/.",
+    "Authority check (assertGranted / mgmt_object:tier_promote) is a TODO stub in artifacts.ts pending T-0021 PDP wiring — documented in the code with a clear TODO(T-0021) comment. The ADR §4.5 explicitly notes 'resolved by the EXISTING PDP (T-0021)' as the integration seam; FF-11d emits a WARN (not FAIL) for this seam. Day-1 dev mode: the authority gate is honest-degraded (same pattern as other routes without PDP wiring).",
+    "No remote GitHub PR opened — local-branch only handoff per project convention (GT-2 / no agent push rights to remote)."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}
