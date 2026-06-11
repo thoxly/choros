@@ -28,3 +28,4 @@ reservation
 spend_ledger
 substitution_rule
 invoke_proposal
+form_binding
