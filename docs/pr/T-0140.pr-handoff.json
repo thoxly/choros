@@ -1,0 +1,40 @@
+{
+  "task_id": "T-0140",
+  "status": "pr_open",
+  "branch": "task/T-0140",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "seed/pack.schema.json",
+    "seed/showcase/pack.json",
+    "seed/blank/pack.json",
+    "seed/importer.ts",
+    "seed/cli.ts",
+    "src/http/seed-write.ts",
+    "src/server.ts",
+    "src/__tests__/seed-write.e2e.test.ts",
+    "ci/checks/seed/pack-schema-valid.sh",
+    "ci/checks/seed/no-direct-pg-in-importer.sh",
+    "ci/checks/seed/no-seed-secret.sh",
+    "ci/checks/seed/single-source.sh",
+    "ci/checks/seed/pack-refs-resolve.sh",
+    "ci/checks/seed/write-api-auth-gate.sh",
+    "ci/checks/seed/display-plane-no-write.sh",
+    "ci/checks/seed/no-hardcoded-fixture-ids.sh",
+    "package.json",
+    "docs/pr/T-0140.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "FF-9 smoke-apply (npm run seed:smoke) not wired as a CI step in package.json — the smoke test requires a live Postgres DB and is gated under fitness:db. The 3/7/12 entity counts are verified by the in-memory fallback shape tests (org.e2e.test.ts, processes.e2e.test.ts, rights.e2e.test.ts) which confirm ORG_SEED/PROCESSES_SEED/RIGHTS_SEED shapes. Full FF-9 DB-path smoke is a fitness:db concern requiring the live server; the script infra is in place (applyPack, CLI, endpoints) but the npm run seed:smoke hook is not added since it would require the DB service in ambient-free CI. The ADR says 'wired after npm run migrate' — this is a DB-gated step.",
+    "GET /api/tenants/:slug and GET /api/org/tenant-state helper endpoints added (not in ADR §4) — these are importer-internal helpers required to resolve tenant UUID and current state for idempotent apply/reset. They are gated behind grantsPool (DATABASE_URL required), not accessible in no-DB path.",
+    "DELETE /api/departments|positions|employees|roles added (ADR §6 flagged these as coder-surfaced dependency for AC-9 reset delete-extra) — implemented behind isGenesisOwner gate as recommended."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}

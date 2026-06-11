@@ -21,6 +21,7 @@ import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerBindingRoutes } from "./http/binding.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
+import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
 
@@ -199,6 +200,9 @@ function buildRouter(
     // existing '/api/grants/:id/revoke' pattern.
     registerGrantProposeRoute(router, grantsPool);
     registerSecretHandleRoutes(router, grantsPool);
+    // Register seed write-API (T-0140): POST /api/tenants|departments|positions|employees|roles
+    // and DELETE variants for reset. Same pool as grants.
+    registerSeedWriteRoutes(router, grantsPool);
   }
 
   // Register processes endpoints
