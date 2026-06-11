@@ -49,7 +49,7 @@ import type { AuditWriter, PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "./audit-grant-encoder.js";
 
 // SMTP adapter (injected port — this module stays pure-core)
-import type { SmtpSenderPort, SmtpSendError } from "../adapters/smtp-sender.js";
+import type { SmtpSenderPort } from "../adapters/smtp-sender.js";
 
 // Re-export DataClass so callers importing from notification-email.ts have it.
 export type { DataClass };
@@ -370,7 +370,7 @@ export class EmailChannelDriver implements ChannelDriver {
         config.smtpHandle,
         { tenantId: ctx.tenantId },
       );
-    } catch (err) {
+    } catch {
       // Secret resolution error → retryable (transient resolver issue)
       // DO NOT include resolved secret or smtpHandle in error reason (FF-NO-RAW-SMTP)
       return { ok: false, retryable: true, reason: "secret_resolution_error" };
@@ -449,6 +449,7 @@ export const makeDirectStringSmtpResolver = (): SmtpSecretResolverPort => ({
 // Verify structural compatibility with T-0025 SecretResolverPort at compile time.
 // This assignment is never called; it is a compile-time assertion only.
 // (FF-RESOLVER-PORT: SmtpSecretResolverPort ↔ SecretResolverPort compatible under tsc)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 declare function _assertResolverCompat(p: SmtpSecretResolverPort): SecretResolverPort;
 // The above declaration is INTENTIONALLY unused — it is a compile-time type check only.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

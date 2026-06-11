@@ -1,0 +1,137 @@
+{
+  "task_id": "T-0170",
+  "status": "pr_open",
+  "branch": "task/T-0170-notifications-email-driver",
+  "merge_target": "dev",
+  "base_commit": "5d42295e0e9fbfa9c327995cd58967891ea2919f",
+  "head_commit": "cc718e5",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E-N.3: EmailChannelDriver + RL-3 smtp_handle custody + email_channel_config CRUD + production wiring (src/core/notification-email.ts, src/adapters/smtp-sender.ts, src/core/postgres/pgEmailConfigStore.ts, src/server/lifecycle-bridge.ts, src/main.ts). 31 unit tests. 9 FF fitness checks (FF-HANDLE-SHAPE/FF-NO-RAW-SMTP/FF-EMAIL-FROM-CLIENT/FF-FANOUT-FAILCLOSED/FF-RESOLVER-PORT/FF-AUDIT-CONFIG-ONLY/FF-NO-DELIVERY-AUDIT/FF-ONE-OUTBOX/FF-EGRESS-CLASS). 3 review iterations: iter-1 changes_requested (R-1 immediate-dead, R-2 production wiring), iter-2 changes_requested (R-NEW: loop dropped perRowMaxAttempts), iter-3 approved (0 blocking). CI: tsc+eslint+fitness+vitest 1205/1205 passed; fitness:db 529/529 passed.",
+  "commits": [
+    {
+      "sha": "30466c6",
+      "phase": "SPEC",
+      "message": "spec(T-0170): E-N.3 email_channel_config + RL-3 custody + SMTP-драйвер + wiring"
+    },
+    {
+      "sha": "40118e6",
+      "phase": "BUILD",
+      "message": "feat(T-0170): E-N.3 email_channel_config + RL-3 custody + SMTP-драйвер + wiring"
+    },
+    {
+      "sha": "e7c6b4e",
+      "phase": "REVIEW",
+      "message": "T-0170 REVIEW: changes_requested — maxAttempts=5 ломает immediate-dead + EmailChannelDriver не вирирован в production"
+    },
+    {
+      "sha": "00c96be",
+      "phase": "FIX",
+      "message": "T-0170 fix: immediate-dead honored (R-1) + production EmailChannelDriver wiring in main (R-2)"
+    },
+    {
+      "sha": "f6b135d",
+      "phase": "RE-REVIEW",
+      "message": "T-0170 RE-REVIEW: changes_requested — R-NEW startOutboxDispatcherLoop drops perRowMaxAttempts"
+    },
+    {
+      "sha": "3b5fa0f",
+      "phase": "FIX",
+      "message": "T-0170 fix R-NEW: thread perRowMaxAttempts through dispatcher loop + loop-level proof test"
+    },
+    {
+      "sha": "cc718e5",
+      "phase": "RE-REVIEW",
+      "message": "T-0170 RE-REVIEW iter3: approved"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iterations": [
+        {
+          "iter": 1,
+          "verdict": "changes_requested",
+          "reviewed_commit": "e7c6b4e",
+          "blocking_findings": ["R-1: immediate-dead — maxAttempts=5 meant retryable:false rows back-off 5× before dying (lifecycle-bridge.ts:339)", "R-2: EmailChannelDriver not wired in production (src/main.ts + lifecycle-bridge.ts)"],
+          "nit_findings": ["R-3: jsdoc for perRowMaxAttempts mechanism unclear", "R-4: notificationRegistry jsdoc missing production default reference"]
+        },
+        {
+          "iter": 2,
+          "verdict": "changes_requested",
+          "reviewed_commit": "f6b135d",
+          "blocking_findings": ["R-NEW: startOutboxDispatcherLoop silently dropped perRowMaxAttempts — never reached runOutboxOnce (src/core/outboxDispatcher.ts:182)"],
+          "nit_findings": []
+        },
+        {
+          "iter": 3,
+          "verdict": "approved",
+          "reviewed_commit": "cc718e5",
+          "blocking_findings": [],
+          "nit_findings": []
+        }
+      ],
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "artifact": "docs/design/T-0170.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1205,
+      "passed": 1205,
+      "failed": 0,
+      "ac_coverage": "17/17",
+      "fitness_db": "PASS — 529/529 passed (DATABASE_URL live)",
+      "fitness_static": "PASS — notification-email.sh: FF-HANDLE-SHAPE/FF-NO-RAW-SMTP/FF-EMAIL-FROM-CLIENT/FF-FANOUT-FAILCLOSED/FF-RESOLVER-PORT/FF-AUDIT-CONFIG-ONLY/FF-NO-DELIVERY-AUDIT/FF-ONE-OUTBOX/FF-EGRESS-CLASS all green; no sibling false-positives",
+      "tested_commit": "cc718e5",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 cosmetic no-console warnings (pre-existing bridge-runner.ts + externalTaskBridge.ts), 0 errors",
+        "fitness_static_checks": "PASS — all checks green including notification-email.sh",
+        "vitest_unit": "1205/1205 passed, 6 skipped (flowable integration offline); notification-email.test.ts 31/31",
+        "fitness_db": "529/529 passed (33 test files)"
+      },
+      "artifact": "docs/test-reports/T-0170.test-report.md",
+      "contract_artifact": "docs/design/T-0170.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/notification-email.sh",
+    "docs/design/T-0170.review.contract.json",
+    "docs/reviews/T-0170.review.md",
+    "docs/specs/T-0170-notifications-email.contract.json",
+    "docs/specs/T-0170-notifications-email.spec.md",
+    "package.json",
+    "src/__tests__/notification-email.test.ts",
+    "src/__tests__/outboxDispatcher.test.ts",
+    "src/adapters/smtp-sender.ts",
+    "src/core/notification-email.ts",
+    "src/core/outboxDispatcher.ts",
+    "src/core/postgres/pgEmailConfigStore.ts",
+    "src/main.ts",
+    "src/server/lifecycle-bridge.ts",
+    "docs/test-reports/T-0170.test-report.md",
+    "docs/design/T-0170.test-report.contract.json",
+    "docs/pr/T-0170.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "notes": [
+    "T-0062 правка аддитивна: perRowMaxAttempts добавлен как опциональный параметр (default=undefined), 7 оригинальных тестов outboxDispatcher не тронуты, поведение при отсутствии perRowMaxAttempts идентично прежнему",
+    "Production registry в main: buildProductionNotificationRegistry(pool) вызывается в src/main.ts и передаётся в startLifecycleBridge; EmailChannelDriver инстанциируется с PgEmailConfigStore(pool)",
+    "T-0190 поглощён: wiring + immediate-dead сделаны здесь (loop-level proof test в outboxDispatcher.test.ts + production buildProductionNotificationRegistry); T-0190 можно закрыть как absorbed",
+    "Lint-фиксы в TEST-pass: unused-vars cleanup (SetEmailConfigResult/SmtpSendError imports; catch (err) → catch {}; let socket hoist) — нулевое семантическое изменение, все 31 тест зелёные",
+    "Nit-фиксы iter-2: R-3 jsdoc perRowMaxAttempts, R-4 notificationRegistry jsdoc — закрыты"
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "migration_note": "T-0170 не добавляет SQL-миграций (PgEmailConfigStore использует существующую таблицу choros.email_channel_config из migration 047); no known_tenant_tables.txt changes; no compose changes",
+    "downstream_effect": "Завершает E-N.3: email-канал полностью wired в production dispatch loop. Unblocks E-N.4+ (notification_preference CRUD, REST notification-center API E9). T-0190 absorbed and can be closed."
+  },
+  "friction_events": []
+}

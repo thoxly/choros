@@ -19,12 +19,10 @@ import {
   type EmailChannelConfig,
   type EmailChannelConfigInput,
   type EmailConfigWritePort,
-  type SetEmailConfigResult,
 } from "../core/notification-email.js";
 import {
   FakeSmtpSender,
   FailingSmtpSender,
-  SmtpSendError,
 } from "../adapters/smtp-sender.js";
 import {
   InMemoryAuditWriter,
@@ -367,8 +365,6 @@ describe("setEmailChannelConfig — audit config (AC-6) audit-config", () => {
 
   it("audit-config: revokeEmailChannelConfig emits notif.email_config.revoke", async () => {
     const configStore = new FakeEmailConfigStore();
-    const auditWriter = new InMemoryAuditWriter();
-    const tx = inMemoryTx(TENANT_ID);
 
     // Setup: create a config first
     await setEmailChannelConfig(
@@ -727,10 +723,6 @@ describe("makeNotificationDeliver — immediate-dead semantics (AC-13)", () => {
 
 describe("lifecycle-bridge wired-entry test (AC-12, FE-W24-0045)", () => {
   it("AC-12: notification outbox row → email stub deliver called via startLifecycleBridge", async () => {
-    // Import the composition root
-    const { startLifecycleBridge } = await import("../server/lifecycle-bridge.js");
-    const { runOutboxOnce, defaultBackoff } = await import("../core/outboxDispatcher.js");
-
     // Stub email driver that records calls
     const emailDeliverCalls: Array<{ job: DeliveryJob; ctx: TenantCtx }> = [];
     const stubEmailDriver = {
@@ -1032,11 +1024,11 @@ describe("R-1 fix: permanent-fail notification row dies on first attempt (AC-13/
 describe("R-2 fix: buildProductionNotificationRegistry wires EmailChannelDriver (FR-9)", () => {
   it("buildProductionNotificationRegistry returns registry with email + in_app keys", async () => {
     const { buildProductionNotificationRegistry } = await import("../server/lifecycle-bridge.js");
-    const { Pool } = await import("pg");
 
     // Use a stub pool — we are only checking that the registry keys are correct,
     // not making any DB calls. EmailChannelDriver is constructed with PgEmailConfigStore(pool).
-    const stubPool = {} as InstanceType<typeof Pool>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stubPool = {} as any;
 
     const registry = buildProductionNotificationRegistry(stubPool);
 

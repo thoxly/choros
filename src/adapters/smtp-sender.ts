@@ -143,7 +143,11 @@ export class NodemailerSmtpSender implements SmtpSenderPort {
  */
 async function sendSmtpEmail(opts: SmtpSendOpts, timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    let socket: net.Socket | tls.TLSSocket;
+    // Use implicit TLS (SMTPS, port 465) when opts.tls=true; plain TCP otherwise.
+    const socket: net.Socket | tls.TLSSocket = opts.tls
+      ? tls.connect({ host: opts.host, port: opts.port, rejectUnauthorized: true })
+      : net.connect({ host: opts.host, port: opts.port });
+
     let settled = false;
     const done = (result: string | Error) => {
       if (settled) return;
@@ -156,11 +160,6 @@ async function sendSmtpEmail(opts: SmtpSendOpts, timeoutMs: number): Promise<str
     const timeout = setTimeout(() => {
       done(new SmtpSendError("SMTP connect/send timeout", true));
     }, timeoutMs);
-
-    // Use implicit TLS (SMTPS, port 465) when opts.tls=true; plain TCP otherwise.
-    socket = opts.tls
-      ? tls.connect({ host: opts.host, port: opts.port, rejectUnauthorized: true })
-      : net.connect({ host: opts.host, port: opts.port });
 
     socket.setTimeout(timeoutMs);
     socket.on("timeout", () => done(new SmtpSendError("SMTP socket timeout", true)));
