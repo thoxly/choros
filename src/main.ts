@@ -21,6 +21,7 @@ import { PostgresJobStore } from "./core/jobStore.js";
 import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import {
   startLifecycleBridge,
+  buildProductionNotificationRegistry,
   type LifecycleBridgeDeps,
   type LifecycleBridgeHandle,
 } from "./server/lifecycle-bridge.js";
@@ -67,6 +68,11 @@ export interface StartMainOptions {
  * Build lifecycle bridge deps from env. Returns {} (degraded) when DATABASE_URL is
  * absent — startLifecycleBridge then returns a no-op handle even if FLOWABLE_BASE_URL
  * is set, since the audit writer + dispatcher have no pool to run against.
+ *
+ * T-0170 E-N.3 (R-2): when DATABASE_URL is present, also builds the production
+ * notification registry (inAppNoOpDriver + EmailChannelDriver) via
+ * buildProductionNotificationRegistry(pool). This ensures the email channel is
+ * reachable in production (FR-9: registry includes emailChannelDriver).
  */
 function buildLifecycleDepsFromEnv(env: NodeJS.ProcessEnv): {
   deps: LifecycleBridgeDeps;
@@ -79,6 +85,8 @@ function buildLifecycleDepsFromEnv(env: NodeJS.ProcessEnv): {
     pool,
     jobStore: new PostgresJobStore(pool),
     outboxStore: new PostgresOutboxStore(pool),
+    // T-0170 E-N.3 (R-2): production notification registry — email channel reachable.
+    notificationRegistry: buildProductionNotificationRegistry(pool),
   };
   return { deps, pool };
 }

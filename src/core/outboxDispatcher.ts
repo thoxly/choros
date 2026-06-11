@@ -46,6 +46,19 @@ export interface RunOutboxOptions {
   backoff: (attempts: number) => number;
   /** T-0068 seam; default no-op. */
   onDispatched?: OnDispatched;
+  /**
+   * ADDITIVE OPTION (T-0170 E-N.3): per-row maxAttempts override.
+   *
+   * When provided, called after each failed delivery (before markRetry).
+   * Return a number to override opts.maxAttempts for THIS row only; return
+   * undefined to fall through to opts.maxAttempts (the default).
+   *
+   * Default: undefined (old behaviour preserved — opts.maxAttempts for all rows).
+   *
+   * Use-case: notification rows with IMMEDIATE_DEAD_ERROR_PREFIX must die on the
+   * first attempt (maxAttempts=1), while external-task rows use the shared ceiling.
+   */
+  perRowMaxAttempts?: (row: OutboxRow, error: string | undefined) => number | undefined;
 }
 
 export interface RunOutboxResult {
@@ -97,12 +110,18 @@ export async function runOutboxOnce(
         // backoff is computed from the row's CURRENT attempts (markRetry increments).
         const backoffMs = opts.backoff(row.attempts);
         const errText = res.error ?? "delivery failed";
+        // T-0170: perRowMaxAttempts may override the shared ceiling (e.g. maxAttempts=1
+        // for IMMEDIATE_DEAD rows). Falls back to opts.maxAttempts when undefined.
+        const rowMaxAttempts =
+          opts.perRowMaxAttempts !== undefined
+            ? (opts.perRowMaxAttempts(row, res.error) ?? opts.maxAttempts)
+            : opts.maxAttempts;
         const outcome = await store.markRetry(
           row.tenantId,
           row.id,
           backoffMs,
           errText,
-          opts.maxAttempts
+          rowMaxAttempts
         );
         if (outcome === "dead") result.dead += 1;
         else if (outcome === "pending") result.failed += 1;
@@ -160,6 +179,7 @@ export function startOutboxDispatcherLoop(
     maxAttempts: opts.maxAttempts,
     backoff: opts.backoff,
     ...(opts.onDispatched !== undefined ? { onDispatched: opts.onDispatched } : {}),
+    ...(opts.perRowMaxAttempts !== undefined ? { perRowMaxAttempts: opts.perRowMaxAttempts } : {}),
   };
 
   const handle = setIntervalFn(() => {

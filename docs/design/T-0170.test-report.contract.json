@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0170",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1205,
+    "passed": 1205,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "notification-email.test.ts > EmailChannelDriver — driver metadata > key==='email' + requiresEmailConfig===true",                                             "result": "pass"},
+    {"ac": "AC-2",  "test": "notification-email.test.ts > EmailChannelDriver.deliver — secret resolution > deliver calls resolveSecret(handle, {tenantId})",                            "result": "pass"},
+    {"ac": "AC-3",  "test": "notification-email.test.ts > secret not exposed in error reason (unit) + notification-email.sh > FF-NO-RAW-SMTP (fitness)",                               "result": "pass"},
+    {"ac": "AC-4",  "test": "notification-email.test.ts > setEmailChannelConfig — RL-3 shape-guard > smtp-handle-shape (4 sub-cases: vendor_key_prefix/bare_hex_token/jwt_shape/valid)", "result": "pass"},
+    {"ac": "AC-5",  "test": "notification-email.test.ts > getEmailChannelConfigStatus — redacted handle > returns handleRedacted=redactHandle(handle), not raw",                        "result": "pass"},
+    {"ac": "AC-6",  "test": "notification-email.test.ts > setEmailChannelConfig — audit config > emits notif.email_config.set with from_address/smtp_host, no smtp_handle",             "result": "pass"},
+    {"ac": "AC-7",  "test": "notification-email.test.ts > EmailChannelDriver.deliver — From header > SMTP sender receives 'from_name <from_address>' from config",                      "result": "pass"},
+    {"ac": "AC-8",  "test": "notification-email.test.ts > EmailChannelDriver.deliver — fail-closed > empty tenantId + no config + is_enabled=false → {ok:false, retryable:false}",     "result": "pass"},
+    {"ac": "AC-9",  "test": "notification-email.test.ts > SmtpSecretResolverPort — structural compat > assignable to T-0025 SecretResolverPort + tsc exit 0",                          "result": "pass"},
+    {"ac": "AC-10", "test": "notification-email.sh > FF-NO-DELIVERY-AUDIT: no appendAuditEvent in deliver path of notification-email.ts",                                              "result": "pass"},
+    {"ac": "AC-11", "test": "notification-email.sh > FF-ONE-OUTBOX: no setInterval/startEmailDispatcher/startOutboxDispatcherLoop in notification-email.ts",                           "result": "pass"},
+    {"ac": "AC-12", "test": "notification-email.test.ts > lifecycle-bridge wired-entry > outbox row → email stub deliver called + startLifecycleBridge accepts notificationRegistry",   "result": "pass"},
+    {"ac": "AC-13", "test": "notification-email.test.ts > immediate-dead > retryable:false → IMMEDIATE_DEAD prefix; outboxDispatcher.test.ts > loop-level proof > perRowMaxAttempts reaches runOutboxOnce", "result": "pass"},
+    {"ac": "AC-14", "test": "notification-email.sh > FF-EGRESS-CLASS: DataClass imported from data-classification.ts, not redeclared in notification-email.ts",                        "result": "pass"},
+    {"ac": "AC-15", "test": "tsc --noEmit exit 0 + vitest run 1205/1205 passed",                                                                                                       "result": "pass"},
+    {"ac": "AC-16", "test": "npm run fitness all green: notification-email.sh (FF-HANDLE-SHAPE/FF-NO-RAW-SMTP/FF-EMAIL-FROM-CLIENT/FF-FANOUT-FAILCLOSED/FF-RESOLVER-PORT/FF-AUDIT-CONFIG-ONLY/FF-NO-DELIVERY-AUDIT/FF-ONE-OUTBOX/FF-EGRESS-CLASS) + all pre-existing checks", "result": "pass"},
+    {"ac": "AC-17", "test": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros npm run fitness:db → 529/529 passed",                                         "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "T-0062 additive: perRowMaxAttempts optional (default=undefined) — 7 original outboxDispatcher tests unchanged",
+      "result": "pass",
+      "note": "perRowMaxAttempts added as optional param; old behaviour (undefined) is identical; 7 original tests unmodified and green"
+    },
+    {
+      "check": "T-0190 absorbed: production wiring + immediate-dead proof done in T-0170",
+      "result": "pass",
+      "note": "buildProductionNotificationRegistry wired in lifecycle-bridge + main.ts; loop-level proof test confirms perRowMaxAttempts reaches runOutboxOnce"
+    },
+    {
+      "check": "Lint fixes (tester pass): unused-vars in test/core/adapter — zero semantic change",
+      "result": "pass",
+      "note": "SetEmailConfigResult/SmtpSendError unused imports removed; catch (err) → catch {}; let socket → const socket hoist; eslint-disable for compile-time declare"
+    },
+    {
+      "check": "RL-3 custody: smtp_handle never in audit/log/exception/API response",
+      "result": "pass",
+      "note": "FF-NO-RAW-SMTP fitness + unit test both confirm; catch block never exposes handle"
+    },
+    {
+      "check": "Review iter-1..3 all blocking findings closed",
+      "result": "pass",
+      "note": "R-1 (immediate-dead), R-2 (production wiring), R-NEW (loop dropped perRowMaxAttempts) all CLOSED; 0 blocking residuals"
+    }
+  ],
+  "failures": []
+}
