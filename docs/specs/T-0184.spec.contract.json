@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0184",
+  "status": "ready",
+  "summary": "Add explicit WHERE tenant_id=$1 to queryGrantTrail in audit-grant-trail.ts (the single remaining GUC-only BYPASSRLS read), and add a pool-role fitness test that exercises the DAO under the actual runtime migrator pool role to prove cross-tenant reads are impossible.",
+  "functional": [
+    "FR-1: queryGrantTrail SELECT on choros.audit_event must carry explicit WHERE tenant_id = $1 binding the tenantId argument",
+    "FR-2: fix is additive — no behaviour change for NOBYPASSRLS connections (WHERE is redundant-but-correct)",
+    "FR-3: new DB-gated fitness test calls queryGrantTrail via migratorUrl() (BYPASSRLS) and asserts zero cross-tenant rows (planted-tenant scenario)",
+    "FR-4: self-test block in the fitness check proves the check can detect failure",
+    "FR-5: all existing passing tests remain green after the change"
+  ],
+  "non_functional": [
+    "NF-1: fix mirrors the T-0141 org.ts pattern — no new parameters or interface changes",
+    "NF-2: fitness test uses migratorUrl() (not appUrl()) to exercise the actual runtime pool role",
+    "NF-3: fitness test plants two tenants with independent audit_event rows and asserts isolation",
+    "NF-4: fitness test lives in ci/checks/db/ and skips gracefully when DATABASE_URL is absent",
+    "NF-5: no DDL, no migrations, no changes to known_tenant_tables.txt"
+  ],
+  "out_of_scope": [
+    "Stage-2 candidate: migrating the read pool from choros_migrator (BYPASSRLS) to choros_app (NOBYPASSRLS) — requires APP_DATABASE_URL pool split, deferred to a follow-up task",
+    "Changes to grant-trail HTTP routing, pagination, or error codes",
+    "Changes to audit-writer.ts (write path; GUC usage is correct there)",
+    "Changes to resolveActorTenant / resolveTenantBySlug (intentionally global by design)",
+    "Closing role_gap in existing cross_tenant.test.ts (uses appUrl — orthogonal)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "src/db/audit-grant-trail.ts: queryGrantTrail SQL contains a WHERE tenant_id = $N predicate binding the tenantId argument (not only SET LOCAL GUC)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "New DB-gated fitness test in ci/checks/db/ using migratorUrl() (BYPASSRLS): plant audit_event rows under TENANT_A and TENANT_B, call queryGrantTrail(pool, TENANT_A, {}), assert ALL returned rows have tenant_id = TENANT_A (zero TENANT_B rows leak). Test skips gracefully when DATABASE_URL is absent.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Self-test block in the AC-2 fitness test: raw SQL SELECT without WHERE tenant_id via migratorUrl() CAN see the TENANT_B audit_event row — confirming the planted data is visible to the BYPASSRLS pool and the explicit WHERE is the only guard. Assertion present and non-vacuous.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "npm test (vitest) exits 0 with no regressions after the fix. grant-trail.adversarial.test.ts, grant-trail.e2e.test.ts, and all frozen e2e suites remain green.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "New static shell fitness check in ci/checks/ greps for WHERE.*tenant_id in queryGrantTrail body and exits non-zero if absent. Includes # SELF-TEST section that verifies the grep fails on a synthetic string lacking the predicate.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "npx tsc --noEmit exits 0 after the change. No new TypeScript type errors.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0184-bypassrls-residual.spec.md"
+}
