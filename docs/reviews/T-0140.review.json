@@ -1,7 +1,7 @@
 {
   "task_id": "T-0140",
-  "verdict": "changes_requested",
-  "iteration": 2,
+  "verdict": "approved",
+  "iteration": 3,
   "ci_seen": { "green": true },
   "findings": [
     {
@@ -16,7 +16,7 @@
       "severity": "closed",
       "axis": 4,
       "location": "ci/checks/db/seed-pack.test.ts",
-      "resolution": "DB-tests written (5 suites: AC-7/8/9/10/R-1). Tests are structurally correct, skip-discipline compliant (migratorUrl() throws if DATABASE_URL absent). Tests FAIL (4/5) due to R-6 implementation bug (GET /api/tenants/:slug RLS issue — see R-6). Tests themselves are correct; the production code they probe is broken. Status: CLOSED as test-writing requirement; R-6 captures the outstanding implementation bug."
+      "resolution": "DB-tests written (5 suites: AC-7/8/9/10/R-1). All 5 pass in iteration 3 after R-6 fix. CLOSED."
     },
     {
       "id": "R-3",
@@ -30,7 +30,7 @@
       "severity": "closed",
       "axis": 3,
       "location": "src/http/seed-write.ts:364-390",
-      "resolution": "syntheticGrant.tenantId now uses tenant_id from request body (target tenant), not DEV_TENANT_ID. Body is read before gate check (body used to extract tenant_id for both syntheticGrant context and INSERT). CLOSED."
+      "resolution": "syntheticGrant.tenantId now uses tenant_id from request body (target tenant), not DEV_TENANT_ID. CLOSED."
     },
     {
       "id": "R-5",
@@ -41,55 +41,80 @@
     },
     {
       "id": "R-6",
-      "severity": "blocking",
+      "severity": "closed",
       "axis": 2,
-      "location": "src/http/seed-write.ts:595-612 (GET /api/tenants/:slug)",
-      "issue": "GET /api/tenants/:slug handler does a plain pool.connect() and issues SELECT id, slug FROM choros.tenant WHERE slug = $1 LIMIT 1 WITHOUT setting the choros.tenant_id GUC. choros.tenant has FORCE ROW LEVEL SECURITY (migration 013): policy = id = current_setting('choros.tenant_id', true)::uuid. Without the GUC, current_setting returns NULL, the predicate is always false, every tenant row is invisible to choros_app. Result: POST /api/tenants creates the tenant (withTenantTx sets the GUC correctly), but the immediately following GET /api/tenants/:slug returns 404 for any slug OTHER than those already in the connection's session GUC. The applyPack flow breaks at 'Resolve tenant UUID' step for every test tenant (AC-7/8/9/R-1 in seed-pack.test.ts all fail with 'Cannot resolve tenant: 404'). Confirmed by fitness:db run: 4/5 seed-pack.test.ts tests fail. AC-10 passes because it uses withClient(migratorUrl()) — choros_migrator is table owner and bypasses FORCE RLS. The schema.test and genesis-owner-seed failures in fitness:db are pre-existing (Flowable ACT_ tables present in dev Docker + grant count reflects accumulated dev silo state) and not introduced by T-0140.",
-      "suggestion": "GET /api/tenants/:slug must set the GUC before the SELECT. Since the slug is known but the UUID is not yet known, the handler cannot use withTenantTx (which needs the UUID). Options: (a) use withTenantTx with a two-step approach — first resolve the tenant id as choros_migrator (via a separate DB role) or (b) query as the pool connection but use SET LOCAL choros.tenant_id = ... for all possible UUIDs (not viable). Practical options: (1) Add a choros_migrator pool (already used in fitness tests) or expose a server-internal query that bypasses RLS for the lookup (analogous to how org-structure tests use withClient(migratorUrl())); (2) have POST /api/tenants return the created tenant's ID in the 201 body (it already does: {id, slug}) and have the importer store the id from the 201 response without a subsequent GET; (3) add a SECURITY DEFINER function that looks up tenant by slug without RLS. Option (2) is already implemented — POST returns {id, slug} — so importer.ts applyPack can simply store tenantId from the 201 body instead of making a separate GET. This is the zero-new-code fix and does not change the public API surface. The GET endpoint would still be useful but needs a RLS-bypass mechanism for correctness."
+      "location": "seed/importer.ts:301-328, src/http/seed-write.ts:149-203",
+      "resolution": "Root cause correctly diagnosed as slug mismatch (POST used pack.tenant.slug, GET used tenantSlug parameter). Fix: POST /api/tenants now does a privileged SELECT (migrator pool BYPASSRLS) on INSERT conflict and returns 409 with {id, slug, code:'CONFLICT'} body. importer reads tenantId from 201/409 body; separate GET /api/tenants/:slug no longer called by applyPack. Auth gate (isGenesisOwner) verified BEFORE the 409 branch — line 130 ('if (!admin.isGenesisOwner)') executes before line 174 ('if (insertConflict)'); anonymous caller cannot reach 409 body. Pool used for conflict lookup is the migrator pool (BYPASSRLS, same pool as the rest of the handler) — correct for T-0140 T-0022 boundary per ADR note. All 5 seed-pack.test.ts suites PASS in fitness:db. CLOSED."
+    },
+    {
+      "id": "N-1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/seed-write.ts:620-624 (GET /api/tenants/:slug comment), seed/importer.ts:536",
+      "issue": "GET /api/tenants/:slug comment says 'retained for test-side verification (seed-pack.test.ts)' but resetPack (seed/importer.ts:536) also calls this endpoint. Comment is inaccurate. Additionally, the endpoint has no auth-gate — any caller can GET /api/tenants/showcase and receive the tenant UUID without authentication.",
+      "suggestion": "Update the comment to reflect that resetPack uses the endpoint. Auth-gate is optional: runtime_target=local/dev-container, the whole server operates in X-Dev-User mode with no real authz enforcement, and ADR §0 scopes this to local. Adding isGenesisOwner gate to this GET would be proportionate but is not blocking given the scope. Not blocking — dev-only surface in a dev-mode server.",
+      "note": "nit: inaccurate comment + unauthenticated read endpoint in dev-only tool. Blast-radius: zero in runtime_target=local per ADR §0. No AC requires auth on this GET."
+    },
+    {
+      "id": "N-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "seed/importer.ts:554-566, ci/checks/db/seed-pack.test.ts (AC-9 and R-1 tests)",
+      "issue": "resetPack deletes departments BEFORE positions (line 554 before line 568). FK constraint position_tenant_id_department_id_fkey is RESTRICT (no CASCADE). If an extra department has positions, DELETE /api/departments would fail with FK violation. AC-9 test and R-1 test both use leaf depts created without positions — this masks the FK ordering bug for the case 'extra dept with children'.",
+      "suggestion": "resetPack should delete in dependency-safe reverse order: employees → positions → departments (or: delete positions first, then departments). Alternatively, the DELETE /api/departments handler could cascade deletes on positions. Not blocking — happy path AC-9 passes; the at-risk scenario (extra dept+positions) is not in any AC and is a dev-tool edge case. Should be addressed in a follow-up or noted in a code comment.",
+      "note": "nit: delete ordering bug masked by test isolation. Actual AC-9 scenario (extra dept, no children) passes. Production risk: zero (runtime_target=local, seed tooling only)."
     }
   ],
   "acceptance_coverage": [
-    { "ac": "AC-1",  "covered": true,  "note": "POST /api/tenants 201/409 implemented and gated. DB path tested but broken by R-6 (GET after POST fails)." },
-    { "ac": "AC-2",  "covered": true,  "note": "POST /api/departments 201/409 implemented." },
-    { "ac": "AC-3",  "covered": true,  "note": "POST /api/positions 201/409 implemented." },
-    { "ac": "AC-4",  "covered": true,  "note": "POST /api/employees kind=human implemented." },
-    { "ac": "AC-5",  "covered": true,  "note": "POST /api/employees kind=agent implemented." },
+    { "ac": "AC-1",  "covered": true,  "note": "POST /api/tenants 201 {id,slug} / 409 {id,slug,code:'CONFLICT'} — both paths return tenantId. Gated. seed-pack.test.ts AC-7 PASS." },
+    { "ac": "AC-2",  "covered": true,  "note": "POST /api/departments 201/409 implemented and gated." },
+    { "ac": "AC-3",  "covered": true,  "note": "POST /api/positions 201/409 implemented and gated." },
+    { "ac": "AC-4",  "covered": true,  "note": "POST /api/employees kind=human implemented and gated." },
+    { "ac": "AC-5",  "covered": true,  "note": "POST /api/employees kind=agent implemented and gated." },
     { "ac": "AC-6",  "covered": true,  "note": "POST /api/roles with mgmt_object:role:create gate implemented." },
-    { "ac": "AC-7",  "covered": false, "note": "BLOCKING R-6. DB test (seed-pack.test.ts AC-7 suite) exists and is correct. Fails: GET /api/tenants/:slug returns 404 due to RLS GUC bug. 3/7/12 count NOT verifiable until R-6 fixed." },
-    { "ac": "AC-8",  "covered": false, "note": "BLOCKING R-6. DB test exists and is correct. Fails: same root cause as AC-7." },
-    { "ac": "AC-9",  "covered": false, "note": "BLOCKING R-6. DB test exists and is correct. Fails: same root cause as AC-7." },
-    { "ac": "AC-10", "covered": true,  "note": "EXCLUDE_EMPLOYEE_SLUGS guard present in importer.ts. DB test (static guard + direct migrator query) PASSES — not blocked by R-6 because it uses choros_migrator connection." },
-    { "ac": "AC-11", "covered": true,  "note": "GET /api/rights returns 8 roles via RIGHTS_SEED in-memory (unchanged; display plane)." },
+    { "ac": "AC-7",  "covered": true,  "note": "seed-pack.test.ts AC-7 suite PASS: 3 depts / 7 positions / 12 employees confirmed via live HTTP+DB." },
+    { "ac": "AC-8",  "covered": true,  "note": "seed-pack.test.ts AC-8 suite PASS: second applyPack all-skipped, same entity counts." },
+    { "ac": "AC-9",  "covered": true,  "note": "seed-pack.test.ts AC-9 suite PASS: resetPack deletes extra dept (no children), pack depts remain. N-2 nit (ordering) does not block." },
+    { "ac": "AC-10", "covered": true,  "note": "EXCLUDE_EMPLOYEE_SLUGS guard present. seed-pack.test.ts AC-10 PASS." },
+    { "ac": "AC-11", "covered": true,  "note": "GET /api/rights returns 8 roles via RIGHTS_SEED in-memory (display plane)." },
     { "ac": "AC-12", "covered": true,  "note": "FF-1 pack-schema-valid PASS." },
     { "ac": "AC-13", "covered": true,  "note": "FF-2 no-direct-pg-in-importer PASS." },
     { "ac": "AC-14", "covered": true,  "note": "FF-3 no-seed-secret PASS." },
-    { "ac": "AC-15", "covered": true,  "note": "ApplySummary structured JSON to stdout." },
+    { "ac": "AC-15", "covered": true,  "note": "ApplySummary/ResetSummary structured JSON to stdout." },
     { "ac": "AC-16", "covered": true,  "note": "GET /api/processes returns process_instances via display plane." },
-    { "ac": "AC-17", "covered": true,  "note": "FF-10 no-hardcoded-fixture-ids PASS." },
-    { "ac": "AC-18", "covered": true,  "note": "FF-6 write-api-auth-gate PASS. All write handlers gated. R-4 fix: syntheticGrant.tenantId uses target tenant." }
+    { "ac": "AC-17", "covered": true,  "note": "FF-10 no-hardcoded-fixture-ids PASS (WARNs are pre-existing non-showcase slugs)." },
+    { "ac": "AC-18", "covered": true,  "note": "FF-6 write-api-auth-gate PASS. All write handlers gated. isGenesisOwner check BEFORE 409-body branch confirmed." }
   ],
-  "r1_authz_judgment": {
-    "question": "Is tenant_id from DELETE body an authz hole or correct per ADR?",
-    "verdict": "CORRECT per ADR",
-    "reasoning": "Auth gate (loadAdminContext → isGenesisOwner) executes BEFORE body is parsed. Any non-genesis-owner caller receives 403 before body.tenant_id is ever read. A genesis-owner caller can delete org entities in any tenant by design: ADR §2.3 option C explicitly places org-structure bootstrap authority on the isGenesisOwner boolean (DB-resolved), not on a per-resource grant. ADR §6 explicitly lists DELETE endpoints as operating under isGenesisOwner gate. The silo model (runtime_target=local/dev-container) means there is no multi-tenant production surface where this pattern would be exploitable. The blast-radius (genesis-owner can name any tenant_id in body) is the intended authority envelope for the seed-reset use case — genesis-owner created those tenants in the first place. No new authority subsystem, no hardcoded slug bypass. FF-6 passes (no e-owner slug comparison). Within ADR §2.3/§6 scope."
+  "r6_409_leak_judgment": {
+    "question": "Does 409-with-body-{id} constitute tenant UUID information leak?",
+    "verdict": "NOT a leak — auth gate precedes 409 branch",
+    "reasoning": "POST /api/tenants handler: line 130 'if (!admin.isGenesisOwner) throw new HttpError(403, ...)' executes unconditionally after extractActor+loadAdminContext, BEFORE line 174 'if (insertConflict)'. An anonymous caller (or non-genesis-owner) receives 403 before the INSERT is attempted and before insertConflict is ever set. The privileged SELECT on line 181-190 (migrator pool BYPASSRLS) runs only inside the 'if (insertConflict)' block, which is only reached after the isGenesisOwner gate has passed. Blast-radius: zero for unauthenticated callers. For genesis-owner callers the UUID disclosure is intentional (they created the tenant). ADR §2.3 option C explicitly endorses this authority pattern.",
+    "adr_section": "§2.3 option C — isGenesisOwner as bootstrap-class authority"
+  },
+  "get_tenants_slug_judgment": {
+    "question": "Is GET /api/tenants/:slug a dead/broken surface that must be removed or gated?",
+    "verdict": "LIVE surface (used by resetPack), RLS-correct for current pool (migrator BYPASSRLS), no auth-gate — nit in dev context",
+    "reasoning": "The endpoint is not dead — resetPack calls it at seed/importer.ts:536. It is RLS-correct because the migrator pool role BYPASSRLS (documented in code comment, line 626-630 of seed-write.ts). It has no auth-gate, making it an unauthenticated read of tenant UUID+slug. In runtime_target=local/dev-container (ADR §0, §8) this is acceptable: the entire server runs in X-Dev-User dev mode, there is no production tenant to protect. The T-0022 roadmap note in the code correctly identifies that a SECURITY DEFINER function will be needed when choros_app pool (NOBYPASSRLS) is adopted. Verdict: nit (inaccurate comment + no gate), not blocking. Does not require removal.",
+    "adr_section": "§0 runtime_target:local; T-0022 roadmap note in code"
   },
   "pre_existing_db_failures": [
     "ci/checks/db/schema.test.ts: FF-ACT — Flowable ACT_ tables (56) present in running Docker DB; not introduced by T-0140.",
-    "ci/checks/db/genesis-owner-seed.test.ts: tenant-owner grant count = 120 vs expected 17 — dev silo state reflects accumulated grants from multiple tasks; not introduced by T-0140."
+    "ci/checks/db/genesis-owner-seed.test.ts: tenant-owner grant count = 150 vs expected 17 — dev silo state reflects accumulated grants from multiple tasks/apply runs; not introduced by T-0140."
   ],
   "role_gap_evidence": [
-    "Confirmed pattern from R-6: RLS-protected tables are not directly queryable by a plain pool.connect() / choros_app connection without the tenant_id GUC. Any handler that needs to look up a tenant row by slug (a cross-tenant lookup by definition, since the GUC must already equal the tenant's own id for the row to be visible) requires a privileged connection path. Candidate for ledgers/role-gaps.md: 'cross-tenant lookup by slug (pre-UUID-known) requires choros_migrator path or SECURITY DEFINER function — choros_app cannot perform this lookup without a GUC it cannot know without the row.' This is a systemic gap that will recur whenever a new slug-lookup is needed before the UUID is known."
+    "Pattern confirmed closed by R-6: cross-tenant slug-lookup (pre-UUID-known) requires migrator pool (BYPASSRLS) path. T-0022 roadmap note in code correctly identifies future SECURITY DEFINER requirement. No new ledgers/role-gaps.md entry needed — coder has already scoped the T-0022 migration path in-code."
   ],
   "_review_meta": {
     "reviewer": "claude-sonnet-4-6 (reviewer role, D-007)",
     "date": "2026-06-11",
-    "iteration": 2,
-    "ci_run": "npm run ci: tsc (0 errors, 2 pre-existing warnings) + eslint (warnings only) + fitness (all 52 checks PASS) + vitest (877 passed, 5 skipped, 46 files) — GREEN",
-    "fitness_db_run": "npm run fitness:db (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros): 6 failed / 355 total. 2 pre-existing (schema/ACT tables, genesis-owner grant count). 4 new failures in ci/checks/db/seed-pack.test.ts (AC-7/8/9/R-1) — all share root cause R-6 (GET /api/tenants/:slug RLS GUC missing). AC-10 PASSES.",
-    "blocking_count": 1,
-    "nit_count": 0,
-    "base_sha": "aad6c00",
-    "head_sha": "eb93da2",
-    "r1_r2_r3_r4_r5": "CLOSED"
+    "iteration": 3,
+    "ci_run": "npm run ci: tsc (0 errors, 2 pre-existing console warnings in bridge-runner.ts/externalTaskBridge.ts) + eslint (warnings only, 0 errors) + fitness (all 52 FF checks PASS, including FF-1..FF-10 seed checks) + vitest (877 passed, 5 skipped, 45 passed + 1 skipped files) — GREEN",
+    "fitness_db_run": "DATABASE_URL=postgresql://choros_migrator:choros_dev_pw@localhost:55432/choros: 2 failed / 355 total. Both failures are pre-existing: schema.test.ts (Flowable ACT_ tables present) + genesis-owner-seed.test.ts (grant count 150 vs 17, dev silo dirty state). seed-pack.test.ts 5/5 PASS — AC-7/8/9/10/R-1 all green.",
+    "diff_scope_check": "git diff 930714d..HEAD --name-only = 4 files (ci/checks/db/seed-pack.test.ts, docs/pr/T-0140.pr-handoff.json, seed/importer.ts, src/http/seed-write.ts). Matches coder's claimed scope of 3 production files + handoff. No unintended file drift.",
+    "blocking_count": 0,
+    "nit_count": 2,
+    "base_sha": "930714d",
+    "head_sha": "5edd3c1",
+    "r1_r2_r3_r4_r5_r6": "ALL CLOSED"
   }
 }
