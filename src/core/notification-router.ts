@@ -108,9 +108,20 @@ export type DeliveryResult =
  * New channel = implement ONE interface + register in Map. Core does NOT change.
  * (FF-NO-SWITCH-CHANNEL: no switch/case on key anywhere in core.)
  *
- * `requiresInAppRow` (optional, default false): set to true for channels whose
- * "delivery" is an INSERT into choros.notification (in-app center). The fanout
- * reads this flag from the driver — no channel-name comparison in core.
+ * ADR §2.5 base contract: `{ key: string; deliver(job, ctx): Promise<DeliveryResult> }`.
+ *
+ * E-N.2 delta (two optional flags added above the ADR §2.5 base — not in ADR text):
+ *
+ *   `requiresInAppRow` — replaces a channel-name string comparison that would
+ *   violate FF-NO-SWITCH-CHANNEL.  The fanout reads this flag to decide whether
+ *   to INSERT a choros.notification row; no driver key is ever compared in core.
+ *   (in-app "delivery" = the INSERT itself, per ADR §2.1а.)
+ *
+ *   `requiresEmailConfig` — gates email delivery on email_channel_config.is_enabled
+ *   (ADR §2.4: "email-if-configured").  Without this flag the core would need to
+ *   compare channel keys to decide which channels to gate — another FF-NO-SWITCH-CHANNEL
+ *   violation.  REQUIRED: any EmailChannelDriver implementation (E-N.3) MUST set
+ *   `requiresEmailConfig: true`; omitting it skips the is_enabled gate entirely.
  */
 export interface ChannelDriver {
   /** Stable channel key: 'in_app' | 'email' | 'telegram' | … */
@@ -462,18 +473,24 @@ async function expandScope(
 // ---------------------------------------------------------------------------
 
 /**
- * The IMMEDIATE_DEAD_PREFIX is a special error prefix that signals to the caller
- * (the outbox dispatcher) that this delivery failure should be treated as
- * immediately dead (maxAttempts=0 semantics from ADR §2.6 / T-0062):
- *   retryable:false → immediate-dead: markRetry with maxAttempts=0.
- * The dispatcher MUST check for this prefix and call markRetry(…, 0) accordingly.
+ * Prefix appended to `DispatchResult.error` when a delivery fails with
+ * `retryable: false` (unknown channel, malformed payload, or driver returning
+ * a permanent-failure result).
  *
- * Note: T-0062's runOutboxOnce uses opts.maxAttempts as a shared ceiling.
- * For immediate-dead, the caller should pass maxAttempts=1 and we return
- * attempts-already-at-max by using a dedicated error prefix. The dispatcher
- * recognizes the prefix and can wire accordingly. This is the ADR §2.6 seam:
- * "maxAttempts=0 достаточен" means the dispatcher's markRetry(…, 0) advances
- * immediately to dead state.
+ * ACTUAL SEMANTICS (as wired today — E-N.2 scope, pending E-N.3 wiring):
+ *   T-0062's `runOutboxOnce` does NOT parse this prefix.  A row whose deliver()
+ *   returns `{ok:false, error: "IMMEDIATE_DEAD:…"}` enters the normal back-off
+ *   cycle and is retried until `opts.maxAttempts` is exhausted, at which point
+ *   the row transitions to `state='dead'`.
+ *
+ * INTENDED SEMANTICS (target, to be realised in E-N.3 wiring):
+ *   The lifecycle-bridge must either (a) compose `makeNotificationDeliver` with a
+ *   dispatcher-instance whose `maxAttempts=1`, so the row dies on first attempt,
+ *   OR (b) extend `runOutboxOnce` with a per-row maxAttempts override that reads
+ *   this prefix and calls `markRetry(id, 0)` directly.
+ *
+ * TODO E-N.3: implement immediate-dead shortcut; until then `retryable:false`
+ * rows use the shared `opts.maxAttempts` ceiling.
  */
 export const IMMEDIATE_DEAD_ERROR_PREFIX = "IMMEDIATE_DEAD:";
 

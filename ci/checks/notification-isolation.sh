@@ -61,7 +61,11 @@ echo ""
 echo "Check FF-N2 (FF-NO-SWITCH-CHANNEL): no switch(channel) / channel === 'email' in routing"
 
 FORBIDDEN_PATTERNS=(
-  "switch[[:space:]]*([[:space:]]*channel"
+  # POSIX-safe: literal '(' via character class [(] avoids the unbalanced-paren
+  # trap in ERE on macOS ugrep (was: "switch[[:space:]]*([[:space:]]*channel"
+  # which returned exit 2 / pattern-error, silently skipping this sub-check).
+  # T-0143 lesson: distinguish grep exit 1 (no match) from exit ≥2 (error).
+  "switch[[:space:]]*[(][[:space:]]*channel"
   "channel[[:space:]]*===[[:space:]]*['\"]email['\"]"
   "channel[[:space:]]*===[[:space:]]*['\"]in_app['\"]"
   "case[[:space:]]*['\"]email['\"]"
@@ -69,12 +73,20 @@ FORBIDDEN_PATTERNS=(
 )
 FF_N2_ERRORS=0
 for pat in "${FORBIDDEN_PATTERNS[@]}"; do
-  if grep -qE "${pat}" "${ROUTER}"; then
+  grep_rc=0
+  grep -qE "${pat}" "${ROUTER}" || grep_rc=$?
+  if [[ ${grep_rc} -ge 2 ]]; then
+    # grep error (bad pattern, I/O error, etc.) — fail loudly rather than skip
+    echo "FAIL (FF-N2): grep exited ${grep_rc} (pattern/IO error) for pattern: ${pat}"
+    FF_N2_ERRORS=$((FF_N2_ERRORS + 1))
+    ERRORS=$((ERRORS + 1))
+  elif [[ ${grep_rc} -eq 0 ]]; then
     echo "FAIL (FF-N2): forbidden channel-switch pattern found: ${pat}"
     grep -nE "${pat}" "${ROUTER}" || true
     FF_N2_ERRORS=$((FF_N2_ERRORS + 1))
     ERRORS=$((ERRORS + 1))
   fi
+  # grep_rc == 1 → no match → pass (continue loop)
 done
 if [[ ${FF_N2_ERRORS} -eq 0 ]]; then
   echo "PASS (FF-N2): no switch/enum patterns on channel key in routing core"
