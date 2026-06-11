@@ -66,16 +66,24 @@ if [[ ${ERRORS} -eq ${before} ]]; then
   echo "PASS [DC8]: no parallel-authority store tokens (grant-rows + data_classification only)"
 fi
 
-# ---- DC9: no forbidden pg/fs/net/http import ----------------------------
+# ---- DC9: no forbidden pg/fs/net/http/crypto import + no process.env -----
+# T-0118 (FF-T118-1 / AC-7): the keyed `hash` digest is HMAC-SHA256, but the
+# crypto lives in the IMPURE port src/core/keyed-digest.ts — never in this pure
+# core. The bound digest *function* is threaded in via MaskContext. So the
+# import ban is EXTENDED with node:crypto/crypto, and a process.env read ban is
+# added: the secret is read ONLY at the composition root (src/main.ts), never
+# here. Green ⇒ core purity preserved (C-4).
 FORBIDDEN_IMPORTS=(
   "from.*['\"].*node:http['\"]"
   "from.*['\"]pg['\"]"
   "from.*['\"].*node:fs['\"]"
   "from.*['\"].*node:net['\"]"
+  "from.*['\"].*node:crypto['\"]"
   "from.*['\"]http['\"]"
   "from.*['\"]fs['\"]"
   "from.*['\"]net['\"]"
-  "require.*['\"](pg|fs|net|http)['\"]"
+  "from.*['\"]crypto['\"]"
+  "require.*['\"](pg|fs|net|http|crypto|node:crypto)['\"]"
 )
 
 before=${ERRORS}
@@ -85,8 +93,16 @@ for pattern in "${FORBIDDEN_IMPORTS[@]}"; do
     ERRORS=$((ERRORS + 1))
   fi
 done
+# process.env must never be read in the pure core (the secret boundary is main.ts).
+# Ignore comment lines (// ...) so prose naming process.env in the ban passes.
+ENV_MATCHES=$(grep -nE "process\.env" "${MODULE}" | grep -vE "^\s*[0-9]*:?\s*(//|\*)" || true)
+if [[ -n "${ENV_MATCHES}" ]]; then
+  echo "FAIL [DC9]: data-classification.ts reads process.env (secret boundary is src/main.ts, not the pure core):"
+  echo "${ENV_MATCHES}"
+  ERRORS=$((ERRORS + 1))
+fi
 if [[ ${ERRORS} -eq ${before} ]]; then
-  echo "PASS [DC9]: no forbidden imports (classification via injected port; DB DAO → T-0053)"
+  echo "PASS [DC9]: no forbidden imports (no pg/fs/net/http/crypto; no process.env; keyed digest via injected port)"
 fi
 
 # ---- DC10: no direct-write accessor to data_classification.class --------

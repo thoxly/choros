@@ -87,9 +87,16 @@ const REDACTED_SENTINEL = "[redacted]";
 
 /**
  * Pure, deterministic, non-reversible digest (djb2-style, same family as
- * object-handle's `deriveHandleId`). NO key custody — crypto is out of scope
- * (spec §6-A #12); this is a stable token, not an encryption. Determinism is a
- * contract (AC-13): equal input ⇒ equal digest.
+ * object-handle's `deriveHandleId`). NO key custody — this is a stable token,
+ * not an encryption. Determinism is a contract (AC-13): equal input ⇒ equal
+ * digest.
+ *
+ * T-0118 (D-4): this keyless digest is NO LONGER the `hash` *masking* output —
+ * that path now routes through the per-tenant KEYED digest on `MaskContext`
+ * (`maskFields`), because the keyless form is a cross-tenant equality-oracle /
+ * rainbow leak. This helper survives ONLY for non-masking internal callers
+ * (e.g. the `deriveHandleId` family) and for the closed-vocabulary
+ * `applyTransform` contract surface; it is unreachable as masked output.
  */
 function digest(input: string): string {
   let h1 = 5381;
@@ -335,6 +342,22 @@ export interface MaskContext {
   rows: ClassificationRow[]; // for (resourceType, facetSchemaVersion)
   clearance: Clearance;
   facetSchemaVersion: number;
+  // T-0118 (E4.3-fu) — ADDITIVE optional members for the keyed `hash` path that
+  // closes the cross-tenant equality-oracle. The core stays PURE: it imports no
+  // `node:crypto`/`process.env`; the secret-keyed digest *function* is threaded
+  // in (the impure HMAC lives in src/core/keyed-digest.ts, C-4 / FF-DC9). When a
+  // field resolves to `hash`, `maskFields` calls `keyedDigest(...)` instead of the
+  // local keyless `digest()`; if `keyedDigest` is absent (no port — D-4) OR the
+  // call returns `undefined` (no key for the tenant — D-3), the field FAILS CLOSED
+  // to `drop` (key omitted) — never the keyless djb2, never raw.
+  resourceType?: string; // field-identity part of KeyedDigestInput (C-1)
+  tenantId?: string; // per-tenant separation (D-1); already validated upstream
+  keyedDigest?: (input: {
+    value: unknown;
+    tenantId: string;
+    resourceType: string;
+    facetField: string;
+  }) => string | undefined;
 }
 
 /**
@@ -411,6 +434,28 @@ export function maskFields(
       // Key omitted — capability-not-text, the maximal mask.
       continue;
     }
+
+    // T-0118: the `hash` masking output is the per-tenant KEYED digest, never the
+    // keyless djb2 (which is an equality-oracle / rainbow leak). It rides the
+    // injected `keyedDigest` port threaded onto MaskContext. Fail closed (D-3/D-4):
+    //  - no port (keyedDigest absent), OR
+    //  - port returns undefined (no key for the tenant)
+    //  ⇒ the field is DROPPED (key omitted), never the keyless digest, never raw.
+    // `applyTransform(_, "hash")` is NO LONGER the reachable masking output — its
+    // local `digest()` survives only for direct non-masking callers (D-4).
+    if (transform === "hash") {
+      if (ctx.keyedDigest === undefined) continue; // D-4 / AC-6 — no port ⇒ drop
+      const d = ctx.keyedDigest({
+        value: raw,
+        tenantId: ctx.tenantId ?? "",
+        resourceType: ctx.resourceType ?? "",
+        facetField: key,
+      });
+      if (d === undefined) continue; // D-3 / AC-5 — no key ⇒ drop
+      out[key] = d;
+      continue;
+    }
+
     out[key] = applyTransform(raw, transform);
   }
 
