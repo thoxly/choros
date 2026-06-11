@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0131",
+  "status": "pr_open",
+  "branch": "task/T-0131-simulated-time-spike",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/spikes/T-0131-simulated-time.md",
+    "docs/design/T-0131.adr.contract.json",
+    "docs/reviews/T-0131.review.md",
+    "docs/design/T-0131.review.contract.json",
+    "docs/test-reports/T-0131.test-report.md",
+    "docs/design/T-0131.test-report.contract.json",
+    "docs/pr/T-0131.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "follow_ups": [
+    {
+      "task": "T-0130 B-5 impl",
+      "note": "Incorporate timer-advancement mechanism into simulation_run mode-2 (автопрогон). Pattern: GET /management/timer-jobs?processInstanceId={id} to find job by elementId → POST {action:move} → poll tasks until expected state. Account for async executor lag ~5-10s (observed up to ~12s under Docker/Compose)."
+    },
+    {
+      "task": "T-0130 B-5 impl",
+      "note": "Latency note: async executor lag is ~5-10s (configurable via flowable.async-executor-activate and polling interval). In simulation_run mode-2 sequential timer chains, factor this as per-step wait. Not blocking for day-1 non-real-time autorun."
+    }
+  ],
+  "friction_events": []
+}

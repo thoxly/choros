@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0131",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1113,
+    "passed": 1107,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-SPIKE-1: no global clock REST", "test": "live probe GET/POST/PUT /management/clock → HTTP 500", "result": "pass"},
+    {"ac": "AC-SPIKE-2a: action=move HTTP 204", "test": "live POST action=move on timer A job", "result": "pass"},
+    {"ac": "AC-SPIKE-2b: escalation task fires after move", "test": "poll tasks on instance A after 12s async lag", "result": "pass"},
+    {"ac": "AC-SPIKE-2c: per-instance isolation (B unaffected)", "test": "poll tasks on instance B — only 'Wait for approval'", "result": "pass"},
+    {"ac": "AC-SPIKE-3: action=reschedule returns 400 (negative probe)", "test": "POST reschedule with 3 date formats → HTTP 400 each", "result": "pass"},
+    {"ac": "docs-only diff", "test": "git diff --stat merge-base..HEAD — only docs/**", "result": "pass"},
+    {"ac": "CI green", "test": "npm run ci — 57 test files / 1107 tests / 0 failures", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {
+      "check": "async executor lag measured",
+      "result": "pass",
+      "note": "Observed ~12s from action=move to escalation task appearing; consistent with ADR note of ~5-10s polling interval (Docker/Compose overhead can extend it)"
+    },
+    {
+      "check": "Timer B dueDate unchanged after failed reschedule",
+      "result": "pass",
+      "note": "dueDate remained 2026-06-11T19:09:26.912Z after three 400 reschedule attempts"
+    }
+  ],
+  "failures": [],
+  "ci_stats": {
+    "test_files_passed": 57,
+    "test_files_skipped": 2,
+    "tests_passed": 1107,
+    "tests_skipped": 6,
+    "tests_failed": 0,
+    "tsc_errors": 0,
+    "eslint_warnings": 2,
+    "eslint_errors": 0
+  }
+}

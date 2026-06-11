@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0131",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-01",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/spikes/T-0131-simulated-time.md §Ограничения #4",
+      "issue": "action=move described as 'идемпотентен только один раз' — idempotency implies safe re-application; move is single-use (repeat call returns 404). Misleading terminology for implementors of B-5.",
+      "suggestion": "Clarify to: 'одноразов, не идемпотентен: повторный вызов вернёт 404. Статус-машина draft-прогона должна трекать промотнутые таймеры.'"
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "spike Q1 (no global clock REST)", "covered": true},
+    {"ac": "spike Q2a (action=move HTTP 204, escalation fires)", "covered": true},
+    {"ac": "spike Q2b (action=reschedule HTTP 400, negative probe)", "covered": true},
+    {"ac": "spike Q3 (per-instance isolation — B timer untouched)", "covered": true},
+    {"ac": "T-0130 ADR §11 p.9 consistency", "covered": true},
+    {"ac": "docs-only diff (no production code)", "covered": true}
+  ],
+  "role_gap_evidence": [],
+  "reproduction_summary": {
+    "positive_probe_reproduced": true,
+    "positive_probe_http": 204,
+    "positive_probe_result": "Instance A: ['Wait for approval', 'Escalation task']; Instance B: ['Wait for approval'] — per-instance isolation confirmed",
+    "negative_probe_reproduced": true,
+    "negative_probe_http": 400,
+    "negative_probe_result": "HTTP 400 'Invalid reschedule timer action. Reschedule timer actions must have a valid due date.' for all 3 date formats tested",
+    "global_clock_probed": true,
+    "global_clock_result": "GET/POST/PUT /management/clock all return HTTP 500 'No endpoint'",
+    "async_executor_lag_observed_seconds": 12
+  }
+}
