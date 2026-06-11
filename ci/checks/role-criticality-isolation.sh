@@ -176,18 +176,6 @@ FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|s
 # migration would still be caught (031 is owned + asserted by dual-control-isolation.sh).
 MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by)\.sql$'
 
-# T-0118 integration note: src/core/data-classification.ts and
-# src/core/grant-resolver.ts carry the ADDITIVE keyed-digest masking change owned
-# by T-0118 (E4.3-fu — closes the `hash` equality-oracle, ADR §4.2/§4.3): MaskContext
-# gains optional resourceType?/tenantId?/keyedDigest? and ResolverDeps gains the
-# optional keyedDigest? port. This is a sibling task that postdates T-0040; its
-# additive edit to these foundation files is legitimate and is asserted by T-0118's
-# OWN isolation gates (data-classification-isolation.sh FF-DC9/DC17 stay green: core
-# purity + import-surface preserved; single-resolver.sh green). Excluded from T-0040's
-# byte-freeze for the same integration reason as the 030/031 migrations above; any
-# NEW (non-additive, non-T-0118) edit to role-criticality's own surface is still caught.
-FROZEN_EXCLUDE_RE='^(src/core/data-classification\.ts|src/core/grant-resolver\.ts)$'
-
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then
   # Committed changes since base + any uncommitted working-tree changes.
@@ -211,10 +199,7 @@ fi
 # Remove known-other-task migrations from the diff before checking T-0040's constraints.
 CHANGED_FILTERED="$(echo "${CHANGED}" | grep -vE "${MIGRATION_EXCLUDE_RE}" || true)"
 
-# Remove the T-0118 sibling additive masking edit (see integration note above) before
-# the byte-freeze check; the new-migration check (FF-RC6) below intentionally does NOT
-# apply this exclusion (T-0118 adds no migration — ADR §5 M-2, custody = env_secret).
-FROZEN_HITS="$(echo "${CHANGED_FILTERED}" | grep -vE "${FROZEN_EXCLUDE_RE}" | grep -E "${FROZEN_PATHS_RE}" || true)"
+FROZEN_HITS="$(echo "${CHANGED_FILTERED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
   echo "FAIL [FF-RC5/FF-RC6]: T-0040 touches a frozen foundation file or a migration (must be byte-untouched):"
   echo "${FROZEN_HITS}"

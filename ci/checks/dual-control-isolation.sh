@@ -222,17 +222,8 @@ fi
 
 # ---- FF-DC8: frozen foundation untouched ------------------------------------
 FROZEN_PATHS_RE='^(src/core/role-criticality\.ts|src/core/grant-lattice\.ts|src/core/data-classification\.ts|src/core/effect-resource\.ts|src/core/grant-resolver\.ts|src/core/object-handle\.ts)$'
-# T-0118 integration note: src/core/data-classification.ts and src/core/grant-resolver.ts
-# carry the ADDITIVE keyed-digest masking change owned by sibling task T-0118 (E4.3-fu,
-# closes the `hash` equality-oracle, ADR §4.2/§4.3) — MaskContext gains optional
-# resourceType?/tenantId?/keyedDigest?, ResolverDeps gains the optional keyedDigest? port.
-# T-0118 postdates T-0044; its additive edit is legitimate and asserted by T-0118's own
-# isolation gates (data-classification-isolation.sh FF-DC9/DC17 + single-resolver.sh).
-# Excluded from T-0044's byte-freeze for the same integration reason as migration 031;
-# any non-additive edit to dual-control's own surface is still caught.
-FROZEN_EXCLUDE_RE='^(src/core/data-classification\.ts|src/core/grant-resolver\.ts)$'
 before=${ERRORS}
-FROZEN_HITS="$(echo "${CHANGED}" | grep -vE "${FROZEN_EXCLUDE_RE}" | grep -E "${FROZEN_PATHS_RE}" || true)"
+FROZEN_HITS="$(echo "${CHANGED}" | grep -E "${FROZEN_PATHS_RE}" || true)"
 if [[ -n "${FROZEN_HITS}" ]]; then
   echo "FAIL [FF-DC8]: T-0044 touches a frozen foundation file (must be byte-untouched):"
   echo "${FROZEN_HITS}"
