@@ -16,6 +16,10 @@ import * as http from 'node:http';
 import { migratorUrl, appUrl, withClient, uuid, TENANT_A } from './_helpers.js';
 import { createServer } from '../../../src/server.js';
 
+// DEV_TENANT_ID must match the value used by the HTTP layer (artifacts.ts).
+// artifacts.ts reads process.env.DEV_TENANT_ID, defaulting to the value below.
+const DEV_TENANT_ID = process.env['DEV_TENANT_ID'] ?? 'a0000000-0000-0000-0000-000000000001';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -27,6 +31,7 @@ async function seedDraftRegistryDef(url: string, tenantId: string): Promise<stri
   const appId = await seedDraftApplication(url, tenantId);
   const id = uuid();
   await withClient(url, async (c) => {
+    await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
       `INSERT INTO choros.registry_def
@@ -34,6 +39,7 @@ async function seedDraftRegistryDef(url: string, tenantId: string): Promise<stri
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'draft', 0, 0)`,
       [tenantId, id, appId, `test-reg-${id.slice(0, 8)}`, 'Test Registry', '{}'],
     );
+    await c.query('COMMIT');
   });
   return id;
 }
@@ -42,6 +48,7 @@ async function seedDraftRegistryDef(url: string, tenantId: string): Promise<stri
 async function seedDraftApplication(url: string, tenantId: string): Promise<string> {
   const id = uuid();
   await withClient(url, async (c) => {
+    await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
       `INSERT INTO choros.application
@@ -49,6 +56,7 @@ async function seedDraftApplication(url: string, tenantId: string): Promise<stri
        VALUES ($1, $2, $3, $4, 'draft', 0, 0)`,
       [tenantId, id, `app-${id.slice(0, 8)}`, 'Test App'],
     );
+    await c.query('COMMIT');
   });
   return id;
 }
@@ -57,6 +65,7 @@ async function seedDraftApplication(url: string, tenantId: string): Promise<stri
 async function seedDraftRecord(url: string, tenantId: string, registryId: string): Promise<string> {
   const id = uuid();
   await withClient(url, async (c) => {
+    await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
       `INSERT INTO choros.record
@@ -64,6 +73,7 @@ async function seedDraftRecord(url: string, tenantId: string, registryId: string
        VALUES ($1, $2, $3, $4::jsonb, 'draft', 0, 0, 'test')`,
       [tenantId, id, registryId, '{}'],
     );
+    await c.query('COMMIT');
   });
   return id;
 }
@@ -102,6 +112,7 @@ describe('FF-1 (live): tier column + CHECK on tier-bearing tables', () => {
 
   it('tier CHECK rejects invalid tier value on application', async () => {
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await expect(
         c.query(
@@ -111,6 +122,7 @@ describe('FF-1 (live): tier column + CHECK on tier-bearing tables', () => {
           [TENANT, uuid()],
         ),
       ).rejects.toMatchObject({ code: '23514' }); // check_violation
+      await c.query('ROLLBACK');
     });
   });
 });
@@ -125,8 +137,8 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
 
     // Promote to published via the sanctioned path (SET LOCAL choros.promoting='1')
     await withClient(appUrl(), async (c) => {
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       await c.query(
         `UPDATE choros.application SET tier = 'published' WHERE tenant_id = $1 AND id = $2`,
@@ -137,6 +149,7 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
 
     // Direct UPDATE without promoting GUC must be rejected
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await expect(
         c.query(
@@ -144,6 +157,7 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
           [TENANT, appId],
         ),
       ).rejects.toThrow(/published rows are managed\/locked/);
+      await c.query('ROLLBACK');
     });
   });
 
@@ -152,8 +166,8 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
 
     // Promote
     await withClient(appUrl(), async (c) => {
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       await c.query(
         `UPDATE choros.registry_def SET tier = 'published' WHERE tenant_id = $1 AND id = $2`,
@@ -164,6 +178,7 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
 
     // Direct UPDATE without GUC → trigger fires
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await expect(
         c.query(
@@ -171,6 +186,7 @@ describe('FF-2 (live): direct UPDATE on published row raises (trigger)', () => {
           [TENANT, defId],
         ),
       ).rejects.toThrow(/published rows are managed\/locked/);
+      await c.query('ROLLBACK');
     });
   });
 });
@@ -188,8 +204,8 @@ describe('FF-3 (live): promote does not copy draft record rows to published', ()
 
     // Promote the registry_def config artifact
     await withClient(appUrl(), async (c) => {
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       await c.query(
         `UPDATE choros.registry_def SET tier = 'published' WHERE tenant_id = $1 AND id = $2`,
@@ -200,12 +216,14 @@ describe('FF-3 (live): promote does not copy draft record rows to published', ()
 
     // Published-context query: no draft records should appear
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       const res = await c.query(
         `SELECT count(*) AS cnt FROM choros.record
           WHERE tenant_id = $1 AND registry_id = $2 AND tier = 'published'`,
         [TENANT, defId],
       );
+      await c.query('COMMIT');
       expect(Number(res.rows[0].cnt), 'draft record rows must not appear in published context').toBe(0);
     });
   });
@@ -219,10 +237,10 @@ describe('FF-9 (live): published artifact in dev Choros succeeds (tier ⊥ SDLC)
   it('can INSERT a published-tier application directly without error', async () => {
     const id = uuid();
     await withClient(appUrl(), async (c) => {
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       // Insert with tier='published' via the sanctioned path (migratorUrl level)
       // In tests we use the app user — promote via SET LOCAL choros.promoting='1'
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       // First insert as draft, then promote (honest test of the flow)
       await c.query(
@@ -240,11 +258,13 @@ describe('FF-9 (live): published artifact in dev Choros succeeds (tier ⊥ SDLC)
 
     // Verify: artifact is published
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       const res = await c.query(
         `SELECT tier FROM choros.application WHERE tenant_id = $1 AND id = $2`,
         [TENANT, id],
       );
+      await c.query('COMMIT');
       expect(res.rows[0].tier).toBe('published');
     });
   });
@@ -295,23 +315,28 @@ describe('R-2: POST /api/artifacts/:id/promote on published artifact → 409 NOT
   }
 
   it('returns 409 NOT_IN_DRAFT when artifact is already published (R-2 live path)', async () => {
-    // Seed a draft application, then promote it directly via SQL (bypassing the endpoint),
+    // Seed a draft application under DEV_TENANT_ID (the tenant the HTTP endpoint uses),
+    // then promote it directly via SQL (bypassing the endpoint),
     // then attempt to promote again via the endpoint → must get 409.
     const id = uuid();
     await withClient(appUrl(), async (c) => {
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+      // Insert draft application under DEV_TENANT_ID
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${DEV_TENANT_ID}'`);
       await c.query(
         `INSERT INTO choros.application
            (tenant_id, id, slug, display_name, tier, created_at, updated_at)
          VALUES ($1, $2, $3, 'R-2 Test App', 'draft', 0, 0)`,
-        [TENANT, id, `r2-app-${id.slice(0, 8)}`],
+        [DEV_TENANT_ID, id, `r2-app-${id.slice(0, 8)}`],
       );
+      await c.query('COMMIT');
       // Promote via sanctioned SQL path (set promoting GUC)
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${DEV_TENANT_ID}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       await c.query(
         `UPDATE choros.application SET tier = 'published' WHERE tenant_id = $1 AND id = $2`,
-        [TENANT, id],
+        [DEV_TENANT_ID, id],
       );
       await c.query('COMMIT');
     });
@@ -323,6 +348,7 @@ describe('R-2: POST /api/artifacts/:id/promote on published artifact → 409 NOT
     // NOT_IN_DRAFT → endpoint returns 409.
     expect(result.statusCode, 'expected 409 NOT_IN_DRAFT for already-published artifact').toBe(409);
     const parsed: unknown = JSON.parse(result.body);
-    expect(parsed).toMatchObject({ error: 'NOT_IN_DRAFT' });
+    // Error envelope: { error: { code, message } } — see router.ts:sendErrorEnvelope.
+    expect(parsed).toMatchObject({ error: { code: 'NOT_IN_DRAFT' } });
   });
 });

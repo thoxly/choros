@@ -20,6 +20,7 @@ const TENANT = TENANT_A;
 async function seedApp(url: string, tenantId: string): Promise<string> {
   const id = uuid();
   await withClient(url, async (c) => {
+    await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
       `INSERT INTO choros.application
@@ -27,6 +28,7 @@ async function seedApp(url: string, tenantId: string): Promise<string> {
        VALUES ($1, $2, $3, 'Scope Test', 'draft', 0, 0)`,
       [tenantId, id, `scope-app-${id.slice(0, 8)}`],
     );
+    await c.query('COMMIT');
   });
   return id;
 }
@@ -34,6 +36,7 @@ async function seedApp(url: string, tenantId: string): Promise<string> {
 async function seedRegistryDef(url: string, tenantId: string, appId: string): Promise<string> {
   const id = uuid();
   await withClient(url, async (c) => {
+    await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     await c.query(
       `INSERT INTO choros.registry_def
@@ -41,6 +44,7 @@ async function seedRegistryDef(url: string, tenantId: string, appId: string): Pr
        VALUES ($1, $2, $3, $4, 'Scope Reg', '{}', 'draft', 0, 0)`,
       [tenantId, id, appId, `scope-reg-${id.slice(0, 8)}`],
     );
+    await c.query('COMMIT');
   });
   return id;
 }
@@ -48,9 +52,9 @@ async function seedRegistryDef(url: string, tenantId: string, appId: string): Pr
 async function seedRecord(url: string, tenantId: string, registryId: string, tier: 'draft' | 'published'): Promise<string> {
   const id = uuid();
   await withClient(url, async (c) => {
-    await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
     if (tier === 'published') {
       await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       await c.query("SET LOCAL choros.promoting = '1'");
       await c.query(
         `INSERT INTO choros.record
@@ -66,12 +70,15 @@ async function seedRecord(url: string, tenantId: string, registryId: string, tie
       );
       await c.query('COMMIT');
     } else {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       await c.query(
         `INSERT INTO choros.record
            (tenant_id, id, registry_id, data, tier, created_at, updated_at, created_by)
          VALUES ($1, $2, $3, '{}', 'draft', 0, 0, 'test')`,
         [tenantId, id, registryId],
       );
+      await c.query('COMMIT');
     }
   });
   return id;
@@ -101,6 +108,7 @@ describe('FF-6 (live): readTierScope default=published; draft rows 0 in publishe
     const draftTier = readTierScope({ draftRequested: true }); // "draft"
 
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
 
       // Published context: only the 1 published record visible for this registry
@@ -119,6 +127,7 @@ describe('FF-6 (live): readTierScope default=published; draft rows 0 in publishe
         [TENANT, regId, draftTier],
       );
       expect(draftRes.rows.length).toBe(2);
+      await c.query('COMMIT');
     });
   });
 
@@ -128,12 +137,14 @@ describe('FF-6 (live): readTierScope default=published; draft rows 0 in publishe
     const publishedTier = readTierScope({});
 
     await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
       const res = await c.query(
         `SELECT id FROM choros.application
           WHERE tenant_id = $1 AND id = $2 AND tier = $3`,
         [TENANT, appId, publishedTier],
       );
+      await c.query('COMMIT');
       // The app is draft — it must not appear in published context
       expect(res.rows.length).toBe(0);
     });
