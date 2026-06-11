@@ -1,41 +1,50 @@
 {
   "task_id": "T-0125",
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "iteration": 2,
   "ci_seen": {
     "green": true,
-    "note": "DESIGN-фаза: продуктового CI нет; ADR-FF (FF-CA-1..9) design-declared, scripts — deliverable §9 B-tasks. Опорные ci/checks (mutation-gateway-isolation, actor_event_vocab_pinned, audit_append_only, audit_writer_isolation, cross-tenant-fitness) присутствуют и цитируются корректно."
+    "note": "DESIGN-фаза iter-2: продуктового CI нет; ADR-FF (FF-CA-1..10) design-declared, scripts — deliverable §8/§9 B-tasks. Опорные ci/checks цитируются корректно. Сверка против ЖИВОГО кода: grant-lattice.ts:33-38 (ResourceType закрыт, process_instance отсутствует), grant-resolver.ts:489/497/508-516/611-615 (covering=op∧scope-containment, НЕ resourceType-match), object-handle.ts:40 (ResourceRef закрыт 3 kinds), actor-event.ts:36-44 (ActorEventVerb без terminate), T-0019:147/197 (object_kind CHECK)."
   },
   "findings": [
     {
       "id": "R-1",
-      "severity": "blocking",
+      "severity": "nit",
       "axis": 4,
-      "location": "docs/design/T-0125-card-actions.adr.md:72,:84,:187",
-      "issue": "Адресация инстанса процесса подана как существующий ResourceRef PDP ('resourceRef: ResourceRef (= существующий тип PDP)', ADR:72; 'terminate/message резолвятся на существующую op transition над ResourceRef инстанса', ADR:84), но в закрытой решётке такого типа НЕТ: grant-lattice.ts:33-39 ResourceType = application|registry|record|mgmt_object:*|effect_resource (нет process_instance); T-0019 ADR:147 живой object_kind CHECK IN ('application','registry','record'). Следствие — разъезд семантики прав: без инстансного ResourceRef terminate резолвится только над record-ref с op=transition, поэтому держатель обычного transition-статус-гранта (op=transition,record,scope) удовлетворяет тот же PDP-чек, что 'терминировать инстанс'. 'Право сменить статус' ≠ 'право убить инстанс', но дизайн их структурно не разделяет живыми примитивами и подаёт инстанс-адресацию как готовое переиспользование, а не dormant. Путь dormant (FF-CA-5 → denied без isReady), поэтому не живая дыра сегодня, но это несущая посылка AC-8/§7-B-8: при разморозке без явного решения материализуется как эскалация привилегии. ADR не выбирает ни ветвь (а) новый ResourceType process_instance (коллизия с NF-1 закрытая решётка — нужен довод 'новый ресурс-тип ≠ новый тип права'), ни ветвь (б) различитель transition-статус vs terminate-instance (guard-facet) над op=transition.",
-      "suggestion": "Не coder — дизайн-решение architect. В §2.2/§2.3 и критерии разморозки §7/B-8 явно зафиксировать: инстансного ResourceRef в закрытой решётке day-1 НЕТ → пометить как dormant наравне с REST T-0058. Выбрать и обосновать ветвь: (а) ввести process_instance ResourceType с доводом 'новый ресурс-тип под тем же закрытым Operation enum ≠ новая authority-подсистема' + FF на не-эскалацию; либо (б) guard-facet/предикат, различающий transition-статус-записи от terminate-lifecycle-инстанса над op=transition, + FF, доказывающий, что обычный transition-грант НЕ терминирует инстанс."
+      "location": "docs/design/T-0125-card-actions.adr.md:23,:76-125,:133-146,:245,:260-262,:281-285,:308,:323 (CLOSED — был blocking iter-1)",
+      "issue": "CLOSED. R-1 iter-1 (blocking): инстанс-адресация через несуществующий ResourceType → terminate коллапсирует в record-transition-грант (право сменить статус == право убить инстанс, эскалация при разморозке). DESIGN-fix 2100226 закрыл по существу: (1) §2.2.1 явно объявляет process_instance ОТСУТСТВУЮЩИМ в закрытой решётке (grant-lattice.ts:33-38) и object_kind CHECK (T-0019:147,197) → dormant, не ложное переиспользование; (2) выбрана ветвь (а) новый ResourceType process_instance, ветвь (б) (статус-дискриминированный грант) корректно отвергнута как НЕвыразимая живым covering без нового авторизационного механизма (сверено: covering grant-resolver.ts:508-516 не параметризуется target-статусом; GuardContext.verb из ActorEventVerb={request,prepare,submit,approve,release} пишется на акт, не в допуск — actor-event.ts:36-44, grant-resolver.ts:411-417); (3) B-8 разведён на ДВА условия разморозки (REST ∧ адресуемость решётки) + FF-CA-10 поведенчески тестирует deny грантa (transition,record) над instance-handle. Путь dormant (нет живой дыры), FF-CA-10 на гейте разморозки. Остаточная неточность механизма обоснования вынесена в R-3 (nit).",
+      "suggestion": "Закрыто. Остаток — R-3."
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 5,
-      "location": "docs/design/T-0125-card-actions.adr.md:166",
-      "issue": "§5 batch-PDP видимости: 'цикл по op над тем же subject/handle'. Edge корректен (тот же resolveFor, fail-closed), для DESIGN достаточно. Но resolveFor (grant-resolver.ts:489) делает grant-резолв + (шаг 5) fetch записи; ADR не фиксирует, амортизируется ли record-fetch один раз на target или повторяется per-op (потенциальный N+1 на рендере списка карточек).",
-      "suggestion": "Добавить в §5 строку: batch = K grant-резолвов над одним уже-загруженным target (record-fetch один раз на target), а не K независимых resolveFor-с-fetch."
+      "location": "docs/design/T-0125-card-actions.adr.md:230-238 (CLOSED)",
+      "issue": "CLOSED. R-2 iter-1 (nit): амортизация record-fetch в batch-PDP не зафиксирована (потенциальный N+1). DESIGN-fix добавил §5 ноту: batch = K grant-резолвов (шаги 1-4) над ОДНИМ уже-загруженным target; record-fetch (grant-resolver.ts:611-615) ОДИН раз на target, не per-op; coder обязан не растиражировать N+1. Точная цитата шага fetch + явный запрет тиражирования — достаточно для DESIGN.",
+      "suggestion": "Закрыто."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0125-card-actions.adr.md:91-95,:102,:104,:142-143,:260; §7-B-8:283; §9-B-8:323; T-0125.adr.contract.json rejected_alternatives[1]",
+      "issue": "Дизъюнктность (transition,record) vs (transition,process_instance) описана через «covering-фильтр различает по resourceType-match (grant-resolver.ts:508-516)». Это неточно по ЖИВОМУ коду: covering-фильтр (grant-resolver.ts:508-516) ключится на g.operation===op И scope-containment (isNarrowerOrEqual(refToScope(handle.ref), g.scope)) и НЕ сравнивает g.resourceType с типом handle нигде в admission-пути. Единственное использование refToResourceType(handle.ref) (grant-resolver.ts:242) — для mask-классификации T-0033, НЕ для допуска. Реальный дискриминатор дизъюнктности — scope-containment через resource-иерархию (refToScope to {nodeLevel,nodeId}; isDescendantOrSelf), не resourceType-равенство. Следствие 1 (точность): решение верно (новый ResourceType — правильный рычаг, op-keying недостаточен), но механизм мис-атрибутирован; дизъюнктность не «структурно гарантирована resourceType-match», а зависит от размещения instance-узла в иерархии при B-8 (broad-scope record-грант мог бы содержать instance-узел при неудачном вайринге). Следствие 2 (полнота B-8): адресуемость инстанса требует расширить НЕ ТОЛЬКО grant-lattice.ts ResourceType + object_kind CHECK (как в §7/§9), НО И ResourceRef (object-handle.ts:40, закрыт 3 kinds, exhaustive switch) + refToScope/NodeLevel (grant-resolver.ts:178, grant-lattice.ts:19) — B-8 surface этот слой не называет. NIT (не blocking): путь dormant (нет живой дыры); FF-CA-10 утверждает поведенческий denied(no_grant) → неудачный containment-вайринг завалит FF до разморозки; решение по направлению верно.",
+      "suggestion": "(а) Переформулировать §2.2.1/§2.3/§6: дизъюнктность даёт scope-containment над resource-иерархией (covering: op-match И isNarrowerOrEqual), а ResourceType process_instance порождает её, размещая instance в отдельной ветви иерархии, не содержащейся record-грантами — а не «resourceType-match в covering» (которого нет). (б) Дописать в B-8 (§7 п.2 / §9): аддитив включает ResourceRef-kind (object-handle.ts:40) + refToScope/NodeLevel-узел (grant-resolver.ts:178); FF-CA-10 обязан проверить, что BROAD-scope record-грант (registry/предок) тоже не покрывает instance."
     }
   ],
   "acceptance_coverage": [
     {"ac": "AC-1", "covered": true},
     {"ac": "AC-2", "covered": true},
-    {"ac": "AC-3", "covered": true, "note": "секция §2.3 присутствует; качественно подорвано R-1 (посылка инстанс-ResourceRef)"},
+    {"ac": "AC-3", "covered": true, "note": "§2.3+§2.2.1 terminate над dormant ResourceType process_instance; FF-CA-10. R-1 essence закрыт."},
     {"ac": "AC-4", "covered": true},
     {"ac": "AC-5", "covered": true},
     {"ac": "AC-6", "covered": true},
     {"ac": "AC-7", "covered": true},
-    {"ac": "AC-8", "covered": true, "note": "кейс прогнан §6, но несущая посылка terminate-над-инстансом подорвана R-1"},
+    {"ac": "AC-8", "covered": true, "note": "§6 шаг 2/4: два дизъюнктных гранта над разными ResourceType; обычный статус-грант не убивает инстанс. R-1 закрыт (механизм-неточность = R-3 nit)."},
     {"ac": "AC-9", "covered": true},
     {"ac": "AC-10", "covered": true},
     {"ac": "AC-11", "covered": true},
-    {"ac": "AC-12", "covered": true, "note": "terminate-семантика — см. R-1"},
+    {"ac": "AC-12", "covered": true, "note": "§2.2.1+FF-CA-10 terminate=отдельный грант, не transition-статуса."},
     {"ac": "AC-13", "covered": true},
     {"ac": "AC-14", "covered": true},
     {"ac": "AC-15", "covered": true}
