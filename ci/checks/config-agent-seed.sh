@@ -53,12 +53,13 @@ if [[ -f "${MIG}" ]]; then
   done
 fi
 
-# ---- Check-3: ON CONFLICT DO NOTHING on every INSERT -----------------------
+# ---- Check-3: ON CONFLICT DO NOTHING on every INSERT (non-comment lines) ---
 echo ""
 echo "Check-3: migration 044 is idempotent (ON CONFLICT DO NOTHING)"
 if [[ -f "${MIG}" ]]; then
-  INSERT_COUNT=$(grep -c '\bINSERT\b' "${MIG}" || true)
-  OC_COUNT=$(grep -c '\bON CONFLICT DO NOTHING\b' "${MIG}" || true)
+  # Exclude comment lines from counts
+  INSERT_COUNT=$(grep -v '^[[:space:]]*--' "${MIG}" | grep -c '\bINSERT\b' || true)
+  OC_COUNT=$(grep -v '^[[:space:]]*--' "${MIG}" | grep -c '\bON CONFLICT DO NOTHING\b' || true)
   if [[ "${INSERT_COUNT}" -gt 0 && "${OC_COUNT}" -ge "${INSERT_COUNT}" ]]; then
     echo "PASS: ${INSERT_COUNT} INSERT(s), ${OC_COUNT} ON CONFLICT DO NOTHING (idempotent)"
   else
@@ -67,15 +68,16 @@ if [[ -f "${MIG}" ]]; then
   fi
 fi
 
-# ---- Check-4: no authoring_published in migration 044 ----------------------
+# ---- Check-4: no authoring_published in migration 044 (non-comment lines) --
 echo ""
-echo "Check-4: DRAFT-boundary — no 'authoring_published' in migration 044"
+echo "Check-4: DRAFT-boundary — no 'authoring_published' in migration 044 non-comment lines"
 if [[ -f "${MIG}" ]]; then
-  if grep -q 'authoring_published' "${MIG}" 2>/dev/null; then
-    echo "FAIL: 'authoring_published' found in migration 044 — DRAFT-boundary violated" >&2
+  # Exclude SQL comment lines (starting with --)
+  if grep -v '^[[:space:]]*--' "${MIG}" | grep -q 'authoring_published' 2>/dev/null; then
+    echo "FAIL: 'authoring_published' found in non-comment code of migration 044 — DRAFT-boundary violated" >&2
     ERRORS=$((ERRORS + 1))
   else
-    echo "PASS: no 'authoring_published' in migration 044"
+    echo "PASS: no 'authoring_published' in migration 044 non-comment code"
   fi
 fi
 
@@ -122,15 +124,16 @@ else
   done
 fi
 
-# ---- Check-7: no CREATE TABLE in migration 044 -----------------------------
+# ---- Check-7: no CREATE TABLE in migration 044 (non-comment lines) ---------
 echo ""
-echo "Check-7: no CREATE TABLE in migration 044 (data-seed only)"
+echo "Check-7: no CREATE TABLE in migration 044 non-comment lines (data-seed only)"
 if [[ -f "${MIG}" ]]; then
-  if grep -iqE '\bCREATE TABLE\b' "${MIG}" 2>/dev/null; then
-    echo "FAIL: CREATE TABLE found in migration 044 — must be data-seed only" >&2
+  # Exclude SQL comment lines (starting with --)
+  if grep -v '^[[:space:]]*--' "${MIG}" | grep -iqE '\bCREATE TABLE\b' 2>/dev/null; then
+    echo "FAIL: CREATE TABLE found in non-comment code of migration 044 — must be data-seed only" >&2
     ERRORS=$((ERRORS + 1))
   else
-    echo "PASS: no CREATE TABLE in migration 044"
+    echo "PASS: no CREATE TABLE in migration 044 non-comment code"
   fi
 fi
 
