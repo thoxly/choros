@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0120",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "spec_contract_delta": {
+    "spec_contract_path": "docs/specs/T-0120.spec.contract.json",
+    "adr_contract_path": "docs/design/T-0120.adr.contract.json",
+    "note": "Архитектор указал в ADR, что читал спеку docs/specs/T-0120-notifications-design.spec.md, но .spec.contract.json искал под неверным именем (по условию задачи). Сверка проведена ревьюером вручную.",
+    "divergences": []
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0120-notifications.adr.md:§FR-10 / §5 E-N.1",
+      "issue": "Спека FR-10 требует, чтобы ADR 'зафиксировал номера миграций SQL-файлов' с барьером ≥ 041. ADR пишет «следующие свободные слоты ≥ 044 (наивысший занятый — 043_invoke_proposal.sql; барьер T-0119 был ≥ 041, с тех пор слот сдвинулся)» и явно оговаривает, что точный номер выбирает coder. Это соответствует смыслу спеки (бронирование vs DDL) и реальному состоянию миграций (043 действительно последний занятый). Нарушения нет, но формулировка «барьер T-0119 был ≥ 041» может вводить в заблуждение следующего читателя: T-0119 установил барьер ≥ 041, а не ≥ 044 — новый барьер для T-0120 следует из занятости 043, а не из T-0119. Рекомендуется уточнить фразу для однозначности.",
+      "suggestion": "В §5 E-N.1 заменить «барьер T-0119 был ≥ 041, с тех пор слот сдвинулся — точный номер ≥ 044» на явное «наивысший занятый на момент ADR = 043_invoke_proposal.sql, поэтому свободные ≥ 044» — это устраняет ложный сигнал на барьер T-0119."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0120-notifications.adr.md:§2.6 / FF-ONE-OUTBOX",
+      "issue": "ADR описывает, что non-retryable DeliveryResult должен «помечаться так, чтобы markRetry(maxAttempts) сразу дал dead (или прямой markDead-путь — impl-деталь)». T-0062 outboxDispatcher.ts содержит только markRetry, который сам переводит в dead при исчерпании attempts. Прямого markDead-вызова в T-0062 контрактном интерфейсе нет (PostgresOutboxStore его не экспортирует в §4.2). ADR оставляет это как «impl-деталь» — что корректно для DESIGN-фазы — но полезно зафиксировать консенсус с T-0062: coder должен либо передавать maxAttempts=0 для мгновенного перевода в dead, либо добавить markDead в аутбокс-стор (что потребует мини-правки T-0062 seam). Не blocking для дизайна, но coder должен учесть.",
+      "suggestion": "В §2.6 явно указать ожидаемый механизм: «retryable:false → вызвать markRetry с backoff=0 и maxAttempts=0 (impl-эффект: attempts≥maxAttempts → dead без следующего poll)». Это одностороннее уточнение impl-контракта, не меняет дизайн-решение."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0120-notifications.adr.md:§6 FF-BADGE-INDEX",
+      "issue": "FF-BADGE-INDEX упоминается в Build Plan (E-N.1) как несомая fitness, но в §6 (таблица fitness-функций) нет строки с id=FF-BADGE-INDEX — вместо него покрытие badge-индекса несёт FF-UNREAD-INDEXED. Это несогласованность имён между §5 и §6: E-N.1 ссылается на FF-BADGE-INDEX, а реальная фитнес-функция называется FF-UNREAD-INDEXED. Не blocking (смысл ясен), но coder и tester увидят расхождение при реализации.",
+      "suggestion": "В E-N.1 заменить «FF-BADGE-INDEX» на «FF-UNREAD-INDEXED», чтобы имена соответствовали §6."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1",  "covered": true,  "note": "§2.1 pipeline + §4.4 NotificationEvent/publishNotificationEvent + FF-EVENT-CONTRACT. Все 6 полей NotificationEvent перечислены. Покрыто содержательно."},
+    {"ac": "AC-2",  "covered": true,  "note": "§2.2 + §4.1 полная схема choros.notification с T-0013-контрактом; все поля включая expires_at; known_tenant_tables упоминается явно."},
+    {"ac": "AC-3",  "covered": true,  "note": "§2.2 REST: GET/notifications (own-only, fail-closed), POST/:id/read, PATCH, GET/unread-count (indexed); кросс-юзер недостижим структурно."},
+    {"ac": "AC-4",  "covered": true,  "note": "§2.3 + §4.2 email_channel_config с всеми полями; smtp_handle = RL-3 shape-guard verbatim T-0025; validateSecretHandleShape вызывается при set/rotate."},
+    {"ac": "AC-5",  "covered": true,  "note": "§2.3 явный запрет сырого секрета в лог/audit/API/exception; ссылка T-0025 NF-1; FF-NO-RAW-SMTP охватывает grep + redactHandle на status-пути. Содержательно проверено."},
+    {"ac": "AC-6",  "covered": true,  "note": "§2.5 ChannelDriver-интерфейс дан verbatim с key/deliver/DeliveryResult; Map-реестр, нет switch/enum; FF-NO-SWITCH-CHANNEL с grep на forbidden-паттерны."},
+    {"ac": "AC-7",  "covered": true,  "note": "§2.4 + §4.3 NotificationPreference с (tenant_id,event_kind,recipient_scope,channels[]); PDP-gate mgmt_object:notification_config; self-эндпоинт; defaults seed с конкретными event_kind."},
+    {"ac": "AC-8",  "covered": true,  "note": "§2.6 явная фиксация: один outbox-ряд per событие×получатель×канал; ретраи через T-0062 back-off; dead=DLQ в outbox; нет второго диспетчера."},
+    {"ac": "AC-9",  "covered": true,  "note": "§2.3 + §4.4 + §8 SmtpSecretResolverPort; day-1 stub / прямая-строка; Stage-2 разрыв зафиксирован; no-LLM и no-relay явно."},
+    {"ac": "AC-10", "covered": true,  "note": "§2.9 + §2.10 тело ≤ internal; фильтр на fanout; egress-граница под T-0041 зафиксирована; runtime-гейт = Stage-2."},
+    {"ac": "AC-11", "covered": true,  "note": "§2.8 аудит только config-события (4 типа: set/rotate/revoke email_config + preference.changed); явно исключены per-delivery и is_read; dispatched_at как факт доставки."},
+    {"ac": "AC-12", "covered": true,  "note": "§2.9 + §4.4 renderTemplate: code-bundled шаблоны, string-подстановка {{var}}, HTML-escape при html:true, ≤ internal фильтр; FF-TEMPLATE-NO-LLM/FF-HTML-ESCAPE/FF-TEMPLATE-CLASS."},
+    {"ac": "AC-13", "covered": true,  "note": "§2.7 частичный индекс (tenant_id,recipient_id) WHERE is_read=false; гибрид expires_at + sweeper (90д прочитанные); непрочитанные immutable; sweeper=Stage-2."},
+    {"ac": "AC-14", "covered": true,  "note": "§2.10 + §4.5 worker fail-closed: без tenant-контекста → отказ; GUC per-tenant в фазе-2 T-0062; FF-FANOUT-FAILCLOSED."},
+    {"ac": "AC-15", "covered": true,  "note": "Post-impl test; гарантируется own-only WHERE + RLS + cross-tenant probe в FF-OWN-ONLY-READ live-impl."},
+    {"ac": "AC-16", "covered": true,  "note": "§2.4 email-if-configured: routing пропускает email при is_enabled=false; §2.6 in_app-доставка независима. Live-impl probe E-N.3/E-N.6."},
+    {"ac": "AC-17", "covered": true,  "note": "§2.2 UPDATE WHERE recipient_id=$actor: чужая строка не матчится → 404; FF-NO-CROSS-USER live-impl."},
+    {"ac": "AC-18", "covered": true,  "note": "§2.6 SMTP-failure → retry/dead; §2.3 handle не в логах при ошибке; in-app дублирования нет (INSERT делается при fanout, не при delivery). Live-impl probe."},
+    {"ac": "AC-19", "covered": true,  "note": "§3 rejected-alternatives с явными обоснованиями; §6 FF-ONE-OUTBOX/FF-PREF-AUTHZ/FF-NO-RAW-SMTP структурно закрывают три инварианта; §7 ревью-гейт архитектора."},
+    {"ac": "AC-20", "covered": true,  "note": "§2.1 тот же NotificationEvent shape для SLA-watchdog/эскалаций T-0095/E7; §4.4 контракт publishNotificationEvent; FF-EVENT-CONTRACT grep одного экспорта."}
+  ],
+  "contract_vs_spec_contract": {
+    "verdict": "MATCH",
+    "detail": [
+      "spec_contract.functional (FR-1..FR-10) → adr_contract.decision и adr_contract.contracts полностью соответствуют: pipeline NotificationEvent/routing/outbox (FR-1), in-app notification (FR-2), email RL-3 custody (FR-3), per-событие preference (FR-4), ретраи/bounce/egress (FR-5), ChannelDriver-Map (FR-6), T-0013-контракт 3 таблиц (FR-7), аудит без дублирования (FR-8), шаблонизация code-bundled (FR-9), слоты ≥ 044 (FR-10).",
+      "spec_contract.non_functional (NF-1..NF-7) → все покрыты в adr: NF-1 FORCE RLS (§2.10/§4); NF-2 ни-сырого-секрета-нигде (§2.3/§2.5/FF-NO-RAW-SMTP); NF-3 один outbox (§2.6/FF-ONE-OUTBOX); NF-4 аудит переживает ошибки доставки (§2.8/§9); NF-5 egress ≤ internal (§2.9/§2.10); NF-6 Map-реестр без switch (§2.5/§3/FF-NO-SWITCH-CHANNEL); NF-7 REST API первичен, UI Stage-2 (§2.2).",
+      "spec_contract.acceptance_criteria (AC-1..AC-20) → adr_contract.traceability покрывает все 20 AC; совпадение текстов с docs/specs/T-0120.spec.contract.json проверено построчно — текстовые расхождения отсутствуют.",
+      "spec_contract.out_of_scope (10 пунктов) → adr §5 Defers и §7 (спеки Out-of-Scope) зеркально воспроизводят все 10 исключений: Telegram/webhook/SMS, full UI, bounce-webhooks, push mobile, LLM-генерация, platform SMTP-relay, read-receipts, второй ACL, pooled-mode, DDL/код.",
+      "ВАЖНО: adr_contract.json назван 'T-0120.adr.contract.json' (без суффикса '-notifications'), т.е. стандартная схема именования demiurge. spec_contract.json — 'T-0120.spec.contract.json'. ADR ссылается на spec под именем docs/specs/T-0120-notifications-design.spec.md — это верно. Расхождения имён контракт-файлов не влияют на содержание, оба документа согласованы."
+    ]
+  },
+  "security_red_lines": {
+    "smtp_raw_secret": {
+      "verdict": "PROTECTED",
+      "analysis": "Три уровня защиты: (1) структурный барьер: validateSecretHandleShape (T-0025 §2.1) отвергает sk-/xai-/AIza-префиксы, bare-hex-32+, JWT-shape — сырой вендор-ключ физически не запишется в столбец. (2) runtime-барьер: smtp_handle не появляется в console.*/appendAuditEvent/res.json — FF-NO-RAW-SMTP grep охватывает все эти пути. (3) resolved-секрет (возвращённый SmtpSecretResolverPort.resolveSecret): по контракту §4.5 «сырой секрет не покидает драйвер (не в лог/audit/exception)»; status-эндпоинт отдаёт redactHandle(smtp_handle), не значение. Все три гарантии зафиксированы как FF с конкретными grep-check.",
+      "rl3_pattern_match": "MATCH — SmtpSecretResolverPort структурно совместим с T-0025 SecretResolverPort (оба: resolveSecret(handle,ctx{tenantId}):Promise<string>); shape-guard импортируется, а не редекларируется; redactHandle используется на status-пути; audit payload содержит только from_address/smtp_host, никогда smtp_handle."
+    },
+    "t0025_pattern_comparison": {
+      "verdict": "CONSISTENT",
+      "detail": "T-0025 §8 и §2.1–§2.4 задают паттерн: (а) pure IO-free validator validateSecretHandleShape + redactHandle; (б) порт SecretResolverPort как seam; (в) handle AS-IS в столбце (не шифруется); (г) resolved-значение только в worker-контексте, не покидает обработчик; (д) audit = {agentEmployeeId}, никогда handle. T-0120 §2.3/§2.6/§4.4/§8 воспроизводит каждый из 5 пунктов verbatim, заменяя llm_secret_handle на smtp_handle и agent_card на email_channel_config. Единственное отличие: T-0025 описывает custody llm-ключа для grant-resolved операций; T-0120 описывает custody smtp-пароля для email-отправки в worker. Семантика разная, механизм идентичный. Паттерн не нарушен."
+    }
+  },
+  "outbox_integration": {
+    "verdict": "CONSISTENT",
+    "analysis": "T-0062 §4.2 PostgresOutboxStore.enqueueInTx принимает OutboxInsert{aggregateKind,aggregateId,eventType,payload,idempotencyKey}. ADR T-0120 §2.6 явно задаёт: aggregate_kind='notification', aggregate_id=notification.id (или синтетический для email), event_type=event_kind, payload={channel,recipientId,title,body,objectRef,occurredAt}, idempotency_key='notif:'+notification_id+':'+channel. Поле 'channel' в payload — корректное расширение полиморфного jsonb (не ломает T-0062 schema). Поле aggregate_kind='notification' — новый token в открытом vocab (T-0062 §3.2: 'job/record/external_task/…' — знак '/' не закрывает список). Seam Deliver (T-0062 §4.3 runOutboxOnce) принимает row:OutboxRow → Promise<DispatchResult>; makeNotificationDeliver(registry) возвращает именно такой тип. Интеграция корректна без изменения T-0062 кода.",
+    "deliver_seam": "runOutboxOnce(store, deliver, opts) — deliver инжектируется (T-0062 §4.3); makeNotificationDeliver(registry) производит совместимую функцию. Маппинг DeliveryResult→DispatchResult: {ok:true}→{ok:true}; {ok:false,retryable:true}→{ok:false,error} (→markRetry); {ok:false,retryable:false}→dead-path (impl-деталь, см. R-2). Единственная неопределённость — механизм immediate-dead для retryable:false — вынесена как nit R-2.",
+    "in_app_no_op_driver": "day-1 in_app-драйвер = no-op success (INSERT notification выполнен при fanout); outbox-ряд для in_app существует ради единообразия pipeline и будущего push. Архитектурно обоснованно (§3 rejected второй диспетчер)."
+  },
+  "tenant_isolation": {
+    "verdict": "CONSISTENT",
+    "tables": ["notification", "email_channel_config", "notification_preference"],
+    "t0013_contract": "все три таблицы: tenant_id-leading PK/FK, ENABLE+FORCE RLS, default-DENY на choros.tenant_id GUC, choros_app DML-only, known_tenant_tables.txt. Соответствует T-0013 verbatim.",
+    "worker_fail_closed": "§2.10/§4.5: фаза-2 T-0062 ставит GUC per-tenant; без контекста → отказ. Соответствует tenancy §9 п.7.",
+    "cross_tenant_smtp": "email_channel_config RLS + tenant-scoped claimBatch: каждый tenant использует только свой конфиг. Cross-tenant SMTP-секрет/тело структурно недостижимы."
+  },
+  "grant_authority": {
+    "verdict": "CONSISTENT",
+    "analysis": "ADR не вводит нового permission-механизма. Управление email_channel_config — grant mgmt_object:email_config/update через PDP T-0021 (аналог T-0025 §4). Управление notification_preference (admin) — grant mgmt_object:notification_config/update. Self-preference — структурно ограничен actor:$self. role:/object_owner-разворот recipient_scope — через существующие резолверы T-0018. Нет notification_acl, pref_rights, второй grant-алгебры. FF-PREF-AUTHZ с grep подтверждает. NF-9 закрыт."
+  },
+  "decomposition_check": {
+    "verdict": "SOUND",
+    "dependency_graph": "E-N.1 (миграции) → E-N.2 (routing+driver-реестр, зависит от T-0062/T-0018/21) → E-N.3 (email-custody+SMTP, зависит от E-N.2/T-0025/T-0041/T-0053) || E-N.4 (preferences+defaults, зависит от E-N.2/T-0018/21/T-0026) || E-N.5 (шаблоны, зависит от E-N.2/T-0033) → E-N.6 (REST API, зависит от E-N.1..4) → E-N.7 (аудит-wiring, зависит от E-N.2..6/T-0016). Нет циклов. E-N.3/E-N.4/E-N.5 параллельны после E-N.2.",
+    "migration_slots": "ADR указывает ≥ 044. Реальное состояние: наивысший занятый = 043_invoke_proposal.sql; 033, 035, 037, 039, 041, 042 свободны. ADR корректно говорит '≥ 044' как нижнюю гарантию (не создавать коллизии с 043). Coder может взять любой свободный ≥ 044. Подход 'coder выбирает точный номер' соответствует дисциплине T-0119 (не фиксировать номер в DESIGN, ибо к моменту impl слот мог занять другой merge).",
+    "fitness_per_task": "E-N.1: FF-T13+FF-NB-OUTBOX+FF-BADGE-INDEX(=FF-UNREAD-INDEXED, nit R-3). E-N.2: FF-NO-SWITCH-CHANNEL+FF-ONE-OUTBOX+FF-FANOUT-FAILCLOSED+FF-EVENT-CONTRACT. E-N.3: FF-NO-RAW-SMTP+FF-HANDLE-SHAPE+FF-RESOLVER-PORT+FF-EMAIL-FROM-CLIENT+FF-EGRESS-CLASS. E-N.4: FF-PREF-AUTHZ+FF-SELF-PREF-SCOPED+FF-DEFAULTS-SEED. E-N.5: FF-TEMPLATE-NO-LLM+FF-HTML-ESCAPE+FF-TEMPLATE-CLASS. E-N.6: FF-OWN-ONLY-READ+FF-NO-CROSS-USER+FF-UNREAD-INDEXED. E-N.7: FF-AUDIT-CONFIG-ONLY+FF-NO-DELIVERY-AUDIT+FF-NO-ISREAD-AUDIT. Каждая задача несёт fitness — требование выполнено."
+  },
+  "architecture_sanity": {
+    "verdict": "SOUND",
+    "checks": [
+      "badge_partial_index: CREATE INDEX idx_notification_unread ON choros.notification (tenant_id, recipient_id) WHERE is_read = false — корректный частичный индекс; hot-path COUNT(*) использует только непрочитанные; не MV. Консистентен со спекой §6 (резолюция).",
+      "map_registry_no_switch: Map<ChannelKey, ChannelDriver> в notification-router.ts; makeNotificationDeliver использует driverMap.get(channel); grep на switch/case/if===channel в ядре = forbidden FF-NO-SWITCH-CHANNEL. Нет внутреннего противоречия.",
+      "templates_code_bundled: src/core/notification-templates.ts — константная Map event_kind→{title,body}; renderTemplate — string-подстановка {{var}} + HTML-escape; нет eval/template-engine. Безопасно: нет tenant-инъекции day-1.",
+      "expires_at_sweeper_hybrid: expires_at-колонка (nullable) для временных + sweeper-политика 90д прочитанных + непрочитанные immutable (sweeper не трогает is_read=false). Три правила непротиворечивы. Sweeper-процесс=Stage-2 — правильно, схема day-1.",
+      "no_second_mechanism: ни нового at-least-once/dispatch-механизма (uses runOutboxOnce), ни нового permission-механизма (uses PDP T-0018/21), ни нового custody (uses T-0025 validateSecretHandleShape/SecretResolverPort). Три 'нет второго' держатся структурно через FF и rejected-alternatives.",
+      "audit_no_duplication: нотификатор не пишет свой audit_event per-delivery; actor_event остаётся единственным ledger-следом действия; nотификатор добавляет строки audit_event только для config-mutations (4 типа); dispatched_at = durable факт доставки. T-0016 appendAuditEvent — единственный canonical sink."
+    ]
+  },
+  "role_gap_evidence": []
+}

@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0120",
+  "status": "pr_open",
+  "branch": "task/T-0120",
+  "merge_target": "dev",
+  "pr_url": "https://github.com/thoxly/choros/pull/12",
+
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+
+  "files_changed": [
+    "docs/specs/T-0120-notifications-design.spec.md",
+    "docs/specs/T-0120.spec.contract.json",
+    "docs/design/T-0120-notifications.adr.md",
+    "docs/design/T-0120.adr.contract.json",
+    "docs/reviews/T-0120.review.json",
+    "docs/test-reports/T-0120.test-report.json",
+    "docs/pr/T-0120.pr-handoff.json"
+  ],
+
+  "deliverable": "ADR T-0120-notifications.adr.md",
+
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "commit_reviewed": "a4536d5",
+      "nit_fixes_applied": "4ecc81d (R-1: migration slots, R-2: markRetry-dead, R-3: FF-UNREAD-INDEXED)"
+    },
+    "docs_gate_pass": {
+      "verdict": "pass",
+      "test_report": "docs/test-reports/T-0120.test-report.json",
+      "traceability": "20/20 AC",
+      "red_line": "PASS",
+      "docs_only_diff": "PASS (0 files outside docs/**)",
+      "product_ci": "PASS (1032 passed, 0 failed)"
+    }
+  },
+
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff). Нет src/** изменений. ci_local build/lint/types/tests/fitness=true означает UNAFFECTED (product CI зелёный, docs-only ветка). Integration-honest gate (D-056): продуктовый код не тронут.",
+    "AC-15/AC-16/AC-17/AC-18 (verifiable_as: test) deferred в impl-задачи — легально для design-фазы; покрыты fitness-функциями с gating=live-impl в ADR §6.",
+    "Reviewer nits R-1/R-2/R-3 (non-blocking): все три применены в коммите 4ecc81d до создания PR."
+  ],
+
+  "blocked_reason": "",
+  "friction_events": [],
+
+  "test_evidence": {
+    "diff_gate": "docs-only PASS (0 файлов вне docs/**; git diff --name-only 92a53e1..HEAD = 6 файлов, все docs/**)",
+    "npm_ci_result": "PASS — tsc (0 errors) + eslint + fitness (все static checks green) + vitest (1032 passed / 0 failed / 6 skipped; 53 test files)",
+    "review_verdict": "approved (docs/reviews/T-0120.review.json); 20/20 AC covered; 3 nit findings все applied",
+    "test_report": "docs/test-reports/T-0120.test-report.json (verdict=pass, schema valid)"
+  },
+
+  "follow_up_build_tasks": {
+    "status": "ЖДЁТ МАТЕРИАЛИЗАЦИИ — решение фаундера/оркестратора",
+    "note": "7 build-задач E-N.1..E-N.7 определены в ADR §5; точные T-номера и порядок claim присвоит материализация бэклога. Задачи несут fitness-функции (FF-T13, FF-NB-OUTBOX, FF-UNREAD-INDEXED, FF-NO-SWITCH-CHANNEL, FF-ONE-OUTBOX, FF-FANOUT-FAILCLOSED, FF-EVENT-CONTRACT, FF-NO-RAW-SMTP, FF-HANDLE-SHAPE, FF-RESOLVER-PORT, FF-EMAIL-FROM-CLIENT, FF-EGRESS-CLASS, FF-PREF-AUTHZ, FF-SELF-PREF-SCOPED, FF-DEFAULTS-SEED, FF-TEMPLATE-NO-LLM, FF-HTML-ESCAPE, FF-TEMPLATE-CLASS, FF-AUDIT-CONFIG-ONLY, FF-NO-DELIVERY-AUDIT, FF-NO-ISREAD-AUDIT, FF-OWN-ONLY-READ, FF-NO-CROSS-USER).",
+    "tasks": [
+      {
+        "proposed_id": "E-N.1",
+        "title": "[impl] notification: 3 миграции + tenant-изоляция",
+        "depends_on": ["T-0013", "T-0014 (employee)", "T-0119 (слот-дисциплина)"],
+        "fitness": ["FF-T13", "FF-NB-OUTBOX", "FF-UNREAD-INDEXED"]
+      },
+      {
+        "proposed_id": "E-N.2",
+        "title": "[impl] notification routing + ChannelDriver-реестр",
+        "depends_on": ["E-N.1", "T-0062", "T-0018/T-0021"],
+        "fitness": ["FF-NO-SWITCH-CHANNEL", "FF-ONE-OUTBOX", "FF-FANOUT-FAILCLOSED", "FF-EVENT-CONTRACT"]
+      },
+      {
+        "proposed_id": "E-N.3",
+        "title": "[impl] email-channel config + RL-3 custody + SMTP-драйвер",
+        "depends_on": ["E-N.2", "T-0025", "T-0041", "T-0053"],
+        "fitness": ["FF-NO-RAW-SMTP", "FF-HANDLE-SHAPE", "FF-RESOLVER-PORT", "FF-EMAIL-FROM-CLIENT", "FF-EGRESS-CLASS"]
+      },
+      {
+        "proposed_id": "E-N.4",
+        "title": "[impl] notification preferences + defaults seed",
+        "depends_on": ["E-N.2", "T-0018/T-0021", "T-0026"],
+        "fitness": ["FF-PREF-AUTHZ", "FF-SELF-PREF-SCOPED", "FF-DEFAULTS-SEED"]
+      },
+      {
+        "proposed_id": "E-N.5",
+        "title": "[impl] notification templates (code-bundled) + render",
+        "depends_on": ["E-N.2", "T-0033"],
+        "fitness": ["FF-TEMPLATE-NO-LLM", "FF-HTML-ESCAPE", "FF-TEMPLATE-CLASS"]
+      },
+      {
+        "proposed_id": "E-N.6",
+        "title": "[impl] REST API notification center + badge",
+        "depends_on": ["E-N.1", "E-N.2", "E-N.3", "E-N.4"],
+        "fitness": ["FF-OWN-ONLY-READ", "FF-NO-CROSS-USER", "FF-UNREAD-INDEXED"]
+      },
+      {
+        "proposed_id": "E-N.7",
+        "title": "[impl] audit-события config + delivery-через-outbox",
+        "depends_on": ["E-N.2", "E-N.3", "E-N.4", "E-N.5", "E-N.6", "T-0016"],
+        "fitness": ["FF-AUDIT-CONFIG-ONLY", "FF-NO-DELIVERY-AUDIT", "FF-NO-ISREAD-AUDIT"]
+      }
+    ]
+  },
+
+  "rationale": "T-0120 — design-задача (SPEC+ADR+review+test-report). ADR закрыл все 5 внутри-DESIGN развилок (recipient_scope vocab; smtp_handle day-1 shape-guard vs Stage-2 resolver; шаблоны code-bundled vs tenant-configurable; ретенция/badge-индексы; расположение ChannelDriver-реестра), зафиксировал объектную модель (3 tenant-таблицы), контракты (publishNotificationEvent/ChannelDriver/makeNotificationDeliver/SmtpSecretResolverPort/renderTemplate), 23 fitness-функции, traceability AC-1..AC-20. Review approved (20/20 AC covered, 3 nit all applied). Единственная развилка уровня фаундера (выбор реального SMTP-secret-resolver-бэкенда для prod) вынесена как Stage-2 за SmtpSecretResolverPort — не блокирует impl. Product CI green (1032/0/6). Готово к merge в dev и старту impl-декомпозиции."
+}
