@@ -14,6 +14,13 @@
 #   RD-6 — report_page_dep present in known_tenant_tables.txt (T-0013 contract).
 #
 # Companion to bundle-coherence.sh (T-0082 · frozen). Does NOT modify that file.
+# Division of responsibility:
+#   bundle-coherence.sh  — generic: every bundle_members.txt entry has a known_tenant_tables
+#                          row + migration DDL key-invariant (one guard per entry, all kinds).
+#   check-report-page-deps.sh (this file) — report_page_dep-specific: DDL detail checks
+#                          (RD-3 dep_kind CHECK, RD-4 UNIQUE, RD-5 stale column) that are
+#                          too narrow to be encoded in the generic bundle-coherence loop.
+# N-1 cross-ref: N-1 review nit on T-0179 requested this companion cross-reference.
 # Live DB check (field_key ∈ registry_def.record_schema.properties) is in
 # ci/checks/db/report_page_bundle_deps.test.ts (FF-BUNDLE-DEPS, fitness:db).
 #

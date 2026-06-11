@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0179",
+  "status": "pr_open",
+  "branch": "task/T-0179-report-bundle-coherence",
+  "merge_target": "dev",
+  "base_commit": "7e541aa",
+  "head_commit": "e4e23c6",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "bundle-coherence companion check-report-page-deps.sh + bundle_members.txt entry for report_page_dep (T-0121e). Adds: (1) report_page_dep line to bundle_members.txt (kind=choros_table, migration 052); (2) new static check ci/checks/check-report-page-deps.sh (RD-1..RD-6 + self-test RD-7) in fitness chain after bundle-coherence.sh; (3) live-DB vitest probe ci/checks/db/report_page_bundle_deps.test.ts (DB-1 field_key coherence, DB-2 stale logging, DB-3 no-orphan). bundle-coherence.sh (T-0082 frozen) NOT modified. N-1 nit closed: explicit division-of-responsibility comment block added to check-report-page-deps.sh header documenting companion vs generic guard boundary. Post-rebase onto dev (T-0180 merged): config-agent-seed.test.ts 8/8 PASS (template now carries migration 053). All CI gates green: tsc 0 errors, eslint 0 errors, fitness all PASS (including check-report-page-deps.sh, bundle-coherence.sh, author-report-page-seed.sh), vitest 1363/1363 passed, fitness:db 586/586 passed.",
+  "commits": [
+    {
+      "sha": "4f92860",
+      "phase": "SPEC",
+      "message": "spec(T-0179): bundle-coherence check-report-page-deps + bundle_members.txt (T-0121e)"
+    },
+    {
+      "sha": "124e6d7",
+      "phase": "BUILD",
+      "message": "feat(T-0179): bundle-coherence расширение check-report-page-deps + bundle_members.txt (T-0121e)"
+    },
+    {
+      "sha": "e4e23c6",
+      "phase": "REVIEW",
+      "message": "T-0179 REVIEW: approved — bundle_members.txt + check-report-page-deps.sh + live-DB probes"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "13a1d97",
+      "findings_resolved": [
+        "N-1 (nit) — check-report-page-deps.sh lacked cross-reference to companion bundle-coherence.sh. Closed: explicit division-of-responsibility comment block added to header (lines 16-23) describing generic guard (bundle-coherence.sh) vs task-specific DDL checks (this file). bundle-coherence.sh frozen T-0082 — NOT touched."
+      ],
+      "findings_nit": [],
+      "artifact": "docs/design/T-0179.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1363,
+      "passed": 1363,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "17/17",
+      "fitness_static": "PASS — all checks green including check-report-page-deps.sh (RD-1..RD-6+self-test), bundle-coherence.sh, frozen-checks-immutable.sh",
+      "fitness_db": "586/586 passed — DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros, 41 files; report_page_bundle_deps.test.ts 3/3, config-agent-seed.test.ts 8/8 GREEN post-rebase",
+      "tested_commit": "e4e23c6",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — pre-existing no-console warnings only (bridge-runner.ts / externalTaskBridge.ts), 0 errors",
+        "fitness_static_checks": "PASS — check-report-page-deps.sh PASS, bundle-coherence.sh PASS, author-report-page-seed.sh PASS, frozen-checks-immutable PASS",
+        "vitest_unit": "1363/1363 passed, 6 skipped (flowable integration offline) — 67 test files",
+        "fitness_db_tests": "586/586 passed — report_page_bundle_deps.test.ts 3/3, config-agent-seed.test.ts 8/8, author_report_page_seed.test.ts 11/11, all other db suites green"
+      },
+      "artifact": "docs/test-reports/T-0179.test-report.md",
+      "contract_artifact": "docs/design/T-0179.test-report.contract.json"
+    }
+  },
+  "adr_coverage_note": {
+    "adr": "T-0121",
+    "covered_through": "T-0121e",
+    "this_task_slice": "§9.5 — bundle-coherence companion (check-report-page-deps.sh, bundle_members.txt, live-DB probe)",
+    "residual": "T-0192 (template-gap: report_page_dep not in seed template isolation check — see role_gap_evidence in review contract); T-0121f done (T-0180 merged dev); T-0121g+ Floor-1/Floor-2 deferred"
+  },
+  "deferred_nits": [],
+  "notes": {
+    "N-1_fate": "CLOSED in this TEST+PR phase — division-of-responsibility comment block added to check-report-page-deps.sh header. No modification to frozen bundle-coherence.sh required.",
+    "config_agent_seed_status": "GREEN post-rebase. Pre-rebase state (reviewed on 13a1d97): template was contaminated by T-0180 migration 053 causing config-agent-seed.test.ts AC-02/AC-04 to fail with 8-tool count vs 7 expected. Post-rebase onto dev (7e541aa, T-0180 merged): template now canonical with migration 053, count=8 correct, all 8 tests PASS.",
+    "T-0192_template_gap": "Template isolation gap (report_page_dep not validated in seed template checks) identified in review phase, materialized as T-0192. Not blocking T-0179 merge."
+  },
+  "files_changed": [
+    "ci/checks/bundle_members.txt",
+    "ci/checks/check-report-page-deps.sh",
+    "ci/checks/db/report_page_bundle_deps.test.ts",
+    "package.json",
+    "docs/specs/T-0179-bundle-coherence-deps.spec.md",
+    "docs/specs/T-0179.spec.contract.json",
+    "docs/design/T-0179.review.contract.json",
+    "docs/reviews/T-0179.review.md",
+    "docs/test-reports/T-0179.test-report.md",
+    "docs/design/T-0179.test-report.contract.json",
+    "docs/pr/T-0179.pr-handoff.json"
+  ]
+}
