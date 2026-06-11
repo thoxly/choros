@@ -14,6 +14,7 @@
     "src/core/secret-handle-validator.ts",
     "src/http/secret-handle.ts",
     "src/__tests__/secret-handle.test.ts",
+    "ci/checks/db/secret-handle.test.ts",
     "ci/checks/secret-handle-isolation.sh",
     "src/server.ts",
     "package.json"
