@@ -1,0 +1,53 @@
+{
+  "task_id": "T-0130",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": false},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "ci/checks/sim-adr-foundations.sh, ci/checks/sim-adr-structure.sh (отсутствуют)",
+      "issue": "Fitness §13 (FF-1..FF-9) описан в ADR, но сами ci-чеки не созданы (ls ci/checks/sim-*.sh → нет файлов). Нижняя планка роли (§2: красный/отсутствующий CI → changes_requested) не пройдена. ADR-контракт T-0130.adr.contract.json валиден против adr.schema.json, 17 AC в traceability присутствуют.",
+      "suggestion": "Поставить оба bash-чека с режимом --self-test (по образцу T-0129 impl-loop-adr-*.sh): зеленеют на этом ADR, краснеют на фикстурах-нарушителях; FF-9 мета-гарантия выходит 0."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "docs/design/T-0130-simulation.adr.md:30-31, :171, §7.1:318-328, §12.1:487 vs src/core/effect-resource.ts:194-243 + src/core/grant-lattice.ts:497-501",
+      "issue": "Несущая red-line-механика 'draft-аффинность' (для эффект-грантов §7.1 И грантов статиста §4.2) представлена как 'структурное производное T-0034 / то же draft-аффинное правило / deny by construction в draft'. Фактический код tier-неосведомлён: verifyEffectGrants(declarations, coveringGrants, nowMs, source, tenantId) НЕ имеет tier-параметра и единственный deny-путь = 'нет покрывающего гранта'; isEffective(grant, nowMs) проверяет ТОЛЬКО временное окно; Grant не несёт поля tier. 'Грант эффективен только над bundle.tier=draft' НЕ выразимо существующей решёткой/PDP. Тот же класс, что поймало T-0122 (опора на риторику вместо кода). Не blocking: §11 build-таблица (стр.457) и B-4 (стр.471) честно карвят аффинность в новую работу, 'готов' корректно относится к T-0034 как ratified-ADR — обмана нет, есть под-специфицированность КАК вводится tier-аффинность в tierless-аппарат.",
+      "suggestion": "В §7.1 (и §4.2) добавить 'реализационную развилку аффинности': явно сказать, что Grant/isEffective/verifyEffectGrants tierless, и зафиксировать выбранный механизм. Рекомендация: оборачивающий draft-gateway/DraftStatistGrantSource НЕ передаёт published-эффект-гранты в coveringGrants при tier=draft → deny остаётся 'нет покрывающего гранта' (совпадает с фактическим единственным deny-путём, T-0034 не трогается, NF-5 удержан). Если выбран tier-параметр в verifyEffectGrants — пометить как правку frozen-поверхности T-0034 с миграцией/чеком. Закрывает AC-11/AC-14 полностью."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0130-simulation.adr.md:217, §5.3:250-256 vs migrations/018_actor_event.sql",
+      "issue": "is_test/test:true маркер: схема не имеет колонки is_test (и ADR её не требует — флаг в detail jsonb актор-события). Корректно, но ADR подразумевает место хранения, явно не называя его — читатель build-задачи может предположить новую колонку.",
+      "suggestion": "Одной строкой указать: маркер test:true живёт в detail-джейсоне actor_event (migration 018, event-metadata), не новая колонка — согласовано с T-0129 §10.4 'не второй лог'."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": false},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": false},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Повторяющийся класс (также в T-0122-ревью): design-ADR формулирует red-line как 'структурное производное / по построению / свойство существующего кода' там, где фактический код tier-неосведомлён (T-0034 verifyEffectGrants, T-0018 isEffective, Grant не несут tier). Reviewer каждый раз вынужден сверять claim с shipped-кодом. Кандидат-чек для ledgers/role-gaps.md: ADR-утверждение о СУЩЕСТВУЮЩЕМ механизме обязано указывать файл:символ либо явно помечаться как новое (build-задача)."
+  ]
+}
