@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0145",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "T-0145-F-001",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/cross_tenant.test.ts:687",
+      "issue": "cross_tenant.test.ts не имеет seedRowForTable-ветки для invoke_proposal (добавленной T-0024/T-0043), и падает при file-level инициализации. Это pre-existing красный: invoke_proposal появилась в known_tenant_tables.txt в 9824d17 (merge T-0024), тогда же cross_tenant не получила seeder. T-0145 не трогает cross_tenant.test.ts.",
+      "suggestion": "Отдельная задача: добавить case 'invoke_proposal' в seedRowForTable в cross_tenant.test.ts."
+    },
+    {
+      "id": "T-0145-F-002",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/genesis-owner-seed.test.ts:48",
+      "issue": "genesis-owner-seed: ожидается ровно 17 delegable mgmt_object grants, в silo-БД их 150. Pre-existing: silo загрязнён повторными прогонами seed-seed-миграций от параллельных веток/сессий; T-0145 не трогает genesis-seed или grant-таблицы.",
+      "suggestion": "Периодический reset silo-БД или guard 'ON CONFLICT DO NOTHING + cleanup' в seed."
+    },
+    {
+      "id": "T-0145-F-003",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/db/schema.test.ts:323–325 (FF-ACT)",
+      "issue": "FF-ACT ожидает 0 таблиц вида act_*, в silo-БД их 56 (Flowable установлен). Pre-existing: Flowable-схема присутствует в silo-БД до T-0145; T-0145 не трогает schema.test.ts.",
+      "suggestion": "Flowable должен быть изолирован в отдельной БД или тест должен допускать silo-tolerant режим аналогично FF-RLS anti-decorative."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-1: добавление строки в known_tenant_tables.txt не требует правки теста FF-5",
+      "covered": true
+    },
+    {
+      "ac": "AC-2: тест FF-5 падает при отсутствии точечной таблицы из toContain-набора",
+      "covered": true
+    },
+    {
+      "ac": "AC-3: FF-5 не обращается к information_schema / DATABASE_URL / withClient",
+      "covered": true
+    },
+    {
+      "ac": "AC-4: шапка файла обновлена, toBe(29) / toBe(N) отсутствует в FF-5",
+      "covered": true
+    },
+    {
+      "ac": "AC-5: invoke_proposal добавлен в toContain-набор FF-5",
+      "covered": true
+    },
+    {
+      "ac": "AC-6: остальные блоки grant-editor.test.ts (FF-1/2/7/8/10, AC-01..20) без изменений; 16 pass",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": [
+    "Коммит 0758e9a трогает ровно один файл: ci/checks/db/grant-editor.test.ts (+9/-5 строк), только блок FF-5 и шапочный комментарий. Нет изменений в schema.test.ts, _helpers.ts, known_tenant_tables.txt — out-of-scope соблюдён.",
+    "grant-editor.test.ts: 16/16 pass (все ✓ при DATABASE_URL=postgresql://choros_migrator:choros_dev_pw@localhost:55432/choros)",
+    "grant-editor.adversarial.test.ts: 18/18 pass (все ✓)",
+    "Ambient vitest run: 927 pass, 5 skipped — полностью зелёный",
+    "Pre-existing красные (3, все присутствовали до T-0145 уже на base 9824d17): cross_tenant.test.ts (нет seeder для invoke_proposal, добавленной T-0024); genesis-owner-seed.test.ts (silo-загрязнение, 150 grant вместо 17); schema.test.ts FF-ACT (Flowable в silo-БД, 56 act_ таблиц). Ни один не вызван изменениями коммита 0758e9a.",
+    "Инвариант реестр=схема держит schema.test.ts (FF-RLS anti-decorative, строки 74–117): двунаправленная проверка known ⊆ inDb и inDb ⊆ known (в CI=strict). Этот тест не затронут.",
+    "toContain-гарды после правки: grant, role_assignment, instance_budget, agent_budget, reservation, spend_ledger, substitution_rule, invoke_proposal — 8 критических таблиц из ADR, все подтверждены."
+  ]
+}
