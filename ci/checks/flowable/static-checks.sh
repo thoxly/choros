@@ -216,11 +216,14 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== FF-FL-11: Existing postgres/keycloak blocks unmodified ==="
-# Compare against baseline commit 2f749a9 (T-0054 merge — last known good state).
+# Compare against baseline commit f693923 (T-0061 BUILD fix — KC healthcheck changed from
+# curl to bash /dev/tcp with hardcoded container-internal port 9000; Flowable healthcheck
+# changed from --password= to URL-embedded basic-auth; both are authorized fixes for
+# pre-existing T-0054/T-0058 bugs, ported in-scope per orchestrator mandate).
 # Strategy: extract service blocks by AWK (no pyyaml needed) and diff.
 # A service block starts at "  <name>:" (2-space indent) and ends before the next
 # 2-space-indent service key or end of file.
-BASELINE_SHA="2f749a9"
+BASELINE_SHA="f693923"
 
 extract_service_block() {
   local file_content="$1"

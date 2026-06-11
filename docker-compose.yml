@@ -68,7 +68,12 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:${KEYCLOAK_MGMT_PORT:-9000}/health/ready || exit 1"]
+      # KC 25 image (quay.io/keycloak/keycloak:25.0.6) ships without curl.
+      # Use bash /dev/tcp to hit the KC management port /health/ready endpoint.
+      # KC management port is always 9000 INSIDE the container (KC_MANAGEMENT_PORT default);
+      # KEYCLOAK_MGMT_PORT is the HOST-side mapping only — do NOT use it here.
+      # /health/ready returns HTTP 200 + JSON; we check the status line contains "200".
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '200' <(timeout 4 cat <&3) && exec 3>&-"]
       interval: 5s
       timeout: 5s
       retries: 24
@@ -115,7 +120,48 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null --user=admin --password=${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw} http://localhost:8080/flowable-rest/service/management/engine || exit 1"]
+      # Flowable 7.1.0 ships BusyBox 1.36.1 wget which does NOT support --password=.
+      # Use URL-embedded basic-auth (user:pass@host) — supported by all wget variants.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://admin:${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}@localhost:8080/flowable-rest/service/management/engine || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # choros-app — Node.js silo runtime (T-0061, E0.6)
+  #
+  # Built from the multi-stage Dockerfile in the repo root (web-builder →
+  # app-builder → runtime). All env params have DEV-ONLY defaults; prod values
+  # are injected by founder via .env.prod at deploy (E0.7, RL-1/RL-3).
+  #
+  # Internal KC issuer uses compose service name 'keycloak' (not localhost).
+  # DATABASE_URL internal host = 'postgres' (compose service name).
+  # EXPOSE 3000; host port default APP_PORT=3000 (no collision: 55432/8180/9000/8082).
+  # depends_on: all three substrates must be healthy before choros-app starts.
+  choros:
+    build: .
+    environment:
+      DATABASE_URL:     ${DATABASE_URL:-postgres://choros_migrator:choros_dev_pw@postgres:5432/choros}
+      CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:-dev}
+      KEYCLOAK_PORT:    ${KEYCLOAK_PORT:-8180}
+      KEYCLOAK_REALM:   ${KEYCLOAK_REALM:-choros}
+      KC_ISSUER:        ${KC_ISSUER:-http://keycloak:8180/realms/choros}
+      NODE_ENV:         ${NODE_ENV:-development}
+      PORT:             ${PORT:-3000}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      flowable:
+        condition: service_healthy
+    healthcheck:
+      # node:20-slim has no wget; use the built-in Node.js fetch API (Node 18+).
+      # fetch() is available globally in Node 20. Exit 0 on HTTP 200, 1 otherwise.
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:' + (process.env.PORT||'3000') + '/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))\""]
       interval: 5s
       timeout: 5s
       retries: 24

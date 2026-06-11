@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0061",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "ci_detail": {
+    "tsc": "exit 0 (--noEmit)",
+    "eslint": "exit 0 (2 pre-existing no-console warnings, 0 errors — not introduced by T-0061)",
+    "fitness_static": "exit 0 — all FF-T61-1..11 checks green (compose-prod-config.sh); all pre-existing fitness scripts unaffected",
+    "vitest": "768 tests pass (5 skipped integration), 0 regressions",
+    "negative_rl3_tests": "FF-T61-5 catches injected secret in .env.prod.example (FAIL as expected); no-committed-secret.sh catches non-allowlisted password literal in docker-compose.yml (FAIL as expected); both restored clean"
+  },
+  "rl3_check": "clean",
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docker-compose.prod.yml (volumes section) + ADR §3.3",
+      "issue": "ADR §3.3 notes '# keycloak and flowable volumes use _prod suffix analogously' but neither KC nor Flowable have named volumes in the base compose (they use bind-mount for realm import and rely on Postgres for state). The prod overlay therefore only declares choros_pgdata_prod, which is correct. The ADR comment is slightly misleading — it implies analogous named volumes will exist but they don't (and don't need to). No data isolation gap in practice since KC/Flowable state is in Postgres (which IS isolated by choros_pgdata_prod). Documentation ambiguity only.",
+      "suggestion": "Update the comment in docker-compose.prod.yml to drop '# keycloak and flowable volumes use _prod suffix analogously' or clarify 'KC/Flowable use no named volumes — their state lives in Postgres, which is covered by choros_pgdata_prod'."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "ci/checks/compose-prod-config.sh:95-99 (FF-T61-4)",
+      "issue": "The check for bare 'choros_pgdata:' without _prod suffix uses `grep 'choros_pgdata:' | grep -v _prod`. This would match a line like '  - choros_pgdata:/var/lib/...' in the prod overlay and correctly flag it, but a volume mount string '- \"choros_pgdata:/var/lib/...\"' (with quotes) would also match. Conversely, a line 'choros_pgdata_something_else:' (a different prod suffix) would pass. The grep is sufficient for the current file content and the only real volume name at play, but is a slightly coarse pattern.",
+      "suggestion": "Minor: tighten the pattern to require a non-_prod char after choros_pgdata: (e.g. grep -E with a negative lookahead), or add a YAML-aware check. Not blocking given the file content is correct and the check catches the real case."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true}
+  ],
+  "role_gap_evidence": [],
+  "deep_analysis": {
+    "rl3_env_prod_example": "CLEAN. Every PASSWORD/SECRET/KEY/TOKEN= line in .env.prod.example uses REPLACE_WITH_SECURE_PASSWORD. No dev credential (choros_dev_pw, choros_kc_dev_pw, choros_flowable_dev_pw) appears as a value. FF-T61-5 was verified destructively — injecting 'POSTGRES_PASSWORD=supersecretpw123' caused FAIL correctly.",
+    "rl3_no_committed_secret": "CLEAN. no-committed-secret.sh exits 0. Dev defaults in docker-compose.yml (choros_dev_pw, choros_kc_dev_pw, choros_flowable_dev_pw) are on the ALLOWED_DEV_DEFAULTS allowlist. Destructive test (substituting 'super_secret_prod_pw') correctly triggered 3 FAIL lines. The new DATABASE_URL default in the choros service embeds choros_dev_pw which is already on the allowlist.",
+    "required_form_completeness": "docker-compose.prod.yml uses ${VAR} (no :-) for: POSTGRES_PASSWORD, POSTGRES_USER, POSTGRES_DB, KEYCLOAK_ADMIN, KEYCLOAK_ADMIN_PASSWORD, KC_DB_PASSWORD, KC_DB_USERNAME, SPRING_DATASOURCE_PASSWORD, SPRING_DATASOURCE_USERNAME, FLOWABLE_REST_APP_ADMIN_PASSWORD, DATABASE_URL, CHOROS_AUTH_MODE, PORT. NODE_ENV is hardcoded 'production' (correct — not a secret, always production in prod overlay). KC_HOSTNAME_STRICT and KC_HTTP_ENABLED are hardcoded safe non-secret values.",
+    "dockerfile_multi_stage": "3-stage build (web-builder → app-builder → runtime) matches ADR §3.5 exactly. runtime stage copies dist/, package*.json, web/dist/, migrations/ — all required for silo-upgrade semantics (migrations/run.mjs called at startup). .dockerignore covers .env* (no secret bake-in). dev-deps excluded via npm ci --omit=dev in runtime stage.",
+    "migration_container_semantics": "ADR §1.3: if DATABASE_URL is not set (or DB unreachable), server.ts skip-path is the existing behavior. If migration fails at startup the node process exits non-zero → Docker marks container unhealthy/exited. This is by-design silo-upgrade semantics (tenancy ADR §5): compose will not proceed past depends_on health gates if choros exits. No silent failure path.",
+    "dev_stack_non_interference": "Existing postgres/keycloak/flowable blocks in docker-compose.yml are untouched (git diff f0c4b26..79c1524 -- 'src/*' is empty). KC env names (KEYCLOAK_ADMIN_PASSWORD, KC_DB_*) are identical in dev and prod overlay — overlay wins at merge time. choros service addition is strictly additive.",
+    "ci_stack_job": "New 'stack' job in ci.yml: npm ci + web build, then docker compose up -d --wait (timeout 10min). --wait flag tells compose to wait for all services with healthchecks to be healthy before returning. AC-13 is integration-honestly gated. Docker layer cache not seeded in CI (first run ~5min) — acceptable per ADR FF-T61-12 gate note.",
+    "port_isolation": "Dev ports (55432/8180/9000/8082/3000) are all unique. Prod overlay does not override host ports — operator controls them via .env.prod. Spec §FR-3 explicitly states 'ports in prod overlay MAY remain the same (env-configured)'. No collision on single-host simultaneous use is not a design target (NF stated dev+prod are not run simultaneously on same host).",
+    "gitignore_coverage": ".gitignore line 4: '.env.prod' — exact match for AC-6. Line 6: '.env.*.local' — covers future .env.prod.local if created. .env (line 3) covers a bare .env. FF-T61-6 grep pattern matches line 4 correctly."
+  }
+}
