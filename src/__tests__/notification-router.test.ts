@@ -462,7 +462,7 @@ describe("SmtpSecretResolverPort — structural compatibility with T-0025 Secret
     // This is a compile-time check — if tsc passes, structural compatibility is confirmed.
     // At runtime we verify the shape matches.
     const stub: SmtpSecretResolverPort = {
-      async resolveSecret(handle: string, ctx: { tenantId: string }): Promise<string> {
+      async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
         return handle; // day-1 passthrough
       },
     };

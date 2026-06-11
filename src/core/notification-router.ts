@@ -182,7 +182,6 @@ export interface SmtpSecretResolverPort {
 export const inAppNoOpDriver: ChannelDriver = {
   key: "in_app",
   requiresInAppRow: true,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   deliver(_job: DeliveryJob, _ctx: TenantCtx): Promise<DeliveryResult> {
     return Promise.resolve({ ok: true });
   },
