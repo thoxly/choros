@@ -683,6 +683,22 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       await seedSubstitutionRule(c, tenantId, empId, roleId);
       break;
     }
+    case 'form_binding': {
+      // T-0072 — self-contained (no FK deps beyond tenant_id).
+      // process_key + form_key uniqueness per tenant: use uuid slices to avoid
+      // collision between TENANT_A / TENANT_B seeds.
+      const id = uuid();
+      const procKey = `ct-proc-${id.slice(0, 8)}`;
+      const formKey = `ct-form-${id.slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.form_binding
+           (tenant_id, id, process_key, form_key, fields, version, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, '[{"key":"ctField","type":"string","required":false}]'::jsonb, 1, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, procKey, formKey],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
