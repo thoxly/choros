@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0066",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 987,
+    "passed": 981,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "FF-9 fitness: grep POST /jobs|fetch-and-lock|complete|fail >= 4 (found: 14)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "FF-9 fitness: grep topic|variables|retries|idempotencyKey >= 4 (found: 52)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "FF-9 fitness: grep workerId|topics|maxJobs|lockDurationMs >= 4 (found: 30)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "FF-9 fitness: grep id|topic|variables|state|retries|lockOwner|lockExpiry|createdAt|available_at >= 9 (found: 81)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "FF-9 fitness: grep NOT_FOUND|NOT_LOCKED|LOCK_EXPIRED|NOT_OWNER|RECORD_IN_PAYLOAD|UNAUTHENTICATED|AUTH_UNAVAILABLE >= 7 (found: 16)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "FF-9 fitness: grep enqueue|fetch.and.lock|complete >= 3 (found: 35)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "FF-9 fitness: grep curl >= 4 (found: 12); live walkthrough: all 4 curl commands executed against server, all returned expected responses",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "FF-9 fitness: grep ```python|```py >= 1 (found: 3); live Python worker ran fetch-and-lock + complete successfully",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "FF-9 fitness: grep x-dev-user|Bearer|CHOROS_AUTH_MODE >= 3 (found: 25); live auth check passed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "FF-9 fitness: all 5 env vars present (CHOROS_AUTH_MODE, KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_AUDIENCE, JWKS_CACHE_TTL_MS); cross-checked with environments.md §6-7",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "FF-9 fitness: grep retryTimeoutMs|CREATED|FAILED|lock.reclaim|sweepInterval|30 >= 4 (found: 46); live fail-path with retryTimeoutMs=1000 verified: job re-available after 1s",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "FF-9 fitness: grep idempotencyKey|idempotent >= 2 (found: 8); live idempotencyKey test: two enqueues with same key returned same job id",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "Manual: all 4 endpoint request fields verified in externalWorker.ts (topic/variables/retries/idempotencyKey; workerId/topics/maxJobs/lockDurationMs; workerId for complete; workerId/retries/retryTimeoutMs for fail); all Job fields verified in types.ts. No phantom fields found.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "test -f docs/worker-api.md && echo OK → OK",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "Live walkthrough §2: enqueue → fetch-and-lock → complete (curl copy-paste from doc, port 13066)",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; все три шага дали ожидаемые HTTP-коды (201/200/200) и тела ответов"
+    },
+    {
+      "check": "R-1 fix: lockOwner/lockExpiry ОТСУТСТВУЮТ в ответе enqueue (POST /jobs)",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; поля отсутствуют в ответе, документ корректно описывает это в §4.1"
+    },
+    {
+      "check": "Fail-path: fail с retryTimeoutMs=1000 → job доступен через 1s; retries=2 сохранён",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; документ §6 верно описывает механику"
+    },
+    {
+      "check": "Python-воркер из §8: fetch-and-lock + complete одного job — рабочий цикл прошёл без ошибок",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; python3 stdlib, без SDK. Сильнейшая проверка доки — прошла."
+    },
+    {
+      "check": "Error codes: 400 VALIDATION, 400 INVALID_JSON, 403 NOT_OWNER, 404 NOT_FOUND, 409 NOT_LOCKED, 413 PAYLOAD_TOO_LARGE — все проверены живыми запросами",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; все коды совпали с документацией"
+    },
+    {
+      "check": "Auth dev-режим: x-dev-user работает; без заголовка сервер также пропускает запрос (withAuth — no-op в dev-режиме согласно FR-5)",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; FINDING: doc §3.1 описывает x-dev-user как обязательный в dev-режиме, но сервер принимает запросы без него (dev pass-through FR-5). Это не противоречие — документ предписывает best practice, а не enforcement. Severity: low (external dev-friendly: только помогает)."
+    },
+    {
+      "check": "Запуск сервера по доке: worker-api.md не содержит инструкций по запуску сервера — gap зафиксирован",
+      "result": "pass",
+      "note": "вторично, LLM-тестер; gap: worker-api.md не говорит как поднять сервер, допустимо по спеке (out of scope: environments.md). Сервер поднят по environments.md dev-режим. Severity: low (spec явно выводит деплой из скоупа T-0066)"
+    }
+  ],
+  "failures": [],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "low",
+      "description": "worker-api.md не содержит инструкций по запуску Choros-сервера. Внешний разработчик должен обратиться к docs/environments.md. Спека T-0066 §4 явно выводит деплой сервера из скоупа, поэтому это не баг документа, но gap-опыта.",
+      "doc_vs_reality": "doc молчит; реальность: нужен environments.md",
+      "recommendation": "Добавить в §1 или §2 однострочную ссылку: 'Запуск сервера: docs/environments.md (dev-режим)'."
+    },
+    {
+      "id": "F-2",
+      "severity": "low",
+      "description": "В dev-режиме заголовок x-dev-user не является обязательным: withAuth — полный no-op (FR-5 в auth.ts). Документ описывает x-dev-user как то, что нужно 'передать', не утверждая что без него будет 401. Технически расхождения нет, но может вводить в заблуждение разработчика, не читающего код.",
+      "doc_vs_reality": "doc: 'Передайте заголовок x-dev-user'; реальность: без него тоже работает в dev-режиме",
+      "recommendation": "Уточнить в §3.1: 'JWT не требуется; x-dev-user опционален в dev-режиме (сервер не проверяет идентичность)'"
+    }
+  ]
+}
