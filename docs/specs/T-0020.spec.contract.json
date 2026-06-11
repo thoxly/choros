@@ -1,0 +1,126 @@
+{
+  "task_id": "T-0020",
+  "status": "ready",
+  "summary": "Add `agent_card(tenant_id, employee_id, kc_client_id, llm_endpoint, llm_model, llm_secret_handle, autonomy_threshold, budget_policy_id, escalation_rule_id, created_at, updated_at)` as a separate tenant-isolated table keyed to `employee(kind=agent)`, migration 032, dev-seeded for 5 agent employees, runtime-dormant day-1; downstream contracts for T-0042/T-0024/T-0025/T-0043 frozen.",
+  "functional": [
+    "FR-1 agent_card table with 11 columns, PK(tenant_id, employee_id), UNIQUE(tenant_id, kc_client_id)",
+    "FR-2 constraint: agent_card.employee_id must reference an employee row with kind='agent'",
+    "FR-3 T-0013 isolation invariants: tenant_id leading, FORCE RLS, default-DENY, choros_app SELECT/INSERT/UPDATE/DELETE only",
+    "FR-4 ci/checks/known_tenant_tables.txt updated with 'agent_card' (alphabetical)",
+    "FR-5 dev seed (migration 032, ON CONFLICT DO NOTHING) for 5 agent employees with kc_client_id",
+    "FR-6 no runtime code reads agent_card on day-1 (schema-dormant)",
+    "FR-7 kc_client_id column is the frozen linkage seam: employee.slug maps to KC clientId, consumed by T-0042/T-0024/T-0060",
+    "FR-8 escalation_rule_id is uuid NULL without FK (target table does not exist yet)",
+    "FR-9 budget_policy_id is uuid NULL; FK to instance_budget deferred if T-0023 not yet applied"
+  ],
+  "non_functional": [
+    "NF-1 migration 032 idempotent (re-run = no error)",
+    "NF-2 known_tenant_tables.txt updated, cross-tenant test needs no source change",
+    "NF-3 llm_secret_handle is an opaque handle reference, not a raw secret at rest",
+    "NF-4 autonomy_threshold CHECK BETWEEN 0 AND 1, numeric(5,4), NULL allowed",
+    "NF-5 migration seam: 031 occupied by T-0044, T-0020 uses 032",
+    "NF-6 no new TypeScript runtime module delivered by T-0020"
+  ],
+  "out_of_scope": [
+    "agent provisioning API (T-0042)",
+    "invoke-grant logic (T-0024)",
+    "BYO-LLM secret-handle custody (T-0025)",
+    "mcp_tool registry (T-0043)",
+    "agent runtime: autonomy downgrade, budget enforcement, A2A breakers (Stage-2 E5.7-E5.10)",
+    "instance_budget / agent_budget / spend_ledger schema (T-0023)",
+    "escalation_rule table definition",
+    "KC service-account provisioning for s-ledger / s-ocr (T-0042)",
+    "JWT -> employee resolution via kc_client_id (T-0060)",
+    "HTTP endpoints reading or writing agent_card (T-0042)",
+    "Flowable/BPMN agent-task integration"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Migration file migrations/032_agent_card.sql exists; has CREATE TABLE choros.agent_card with PK (tenant_id, employee_id), UNIQUE (tenant_id, kc_client_id), and all 11 columns from FR-1.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "agent_card has FORCE ROW LEVEL SECURITY and a USING (tenant_id = current_setting('choros.tenant_id', true)::uuid) policy.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "A cross-tenant read on agent_card (tenant B context, tenant A data) returns 0 rows.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "A cross-tenant write on agent_card (tenant B context, tenant A tenant_id) is rejected (0 rows inserted / RLS violation).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "INSERT into agent_card referencing an employee.id with kind='human' is rejected at the DB layer.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "INSERT into agent_card referencing an employee.id with kind='agent' succeeds.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "autonomy_threshold CHECK constraint: value 1.5 is rejected; 0.0, 0.5, 1.0 are accepted; NULL is accepted.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "ci/checks/known_tenant_tables.txt contains 'agent_card'; the cross-tenant CI tests pass for agent_card without modification to the test source.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "After applying migration 032, all 5 agent employees (a-recon, a-invoice, a-triage, s-ledger, s-ocr) have an agent_card row with matching kc_client_id.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "kc_client_id UNIQUE constraint per tenant: inserting two agent_card rows with the same (tenant_id, kc_client_id) is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Migration 032 is idempotent: running the migration runner twice produces no error.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "No Choros runtime code path imports or reads agent_card on day-1: grep -r 'agent_card' src/ returns 0 matches in any .ts file outside __tests__/migrations/.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "choros_app role has SELECT, INSERT, UPDATE, DELETE on agent_card and no DDL.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "tsc --noEmit, eslint, and npm run fitness (existing) are all green after migration 032 is added.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "llm_secret_handle column is text NULL: a 512-character string is accepted; column has no length constraint below 512.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "budget_policy_id is uuid NULL; if instance_budget table does not exist at migration time, the column has no FK constraint and migration still succeeds.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "escalation_rule_id is uuid NULL with NO FK constraint in migration 032 (target table does not exist yet).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0020-agent-card.spec.md"
+}
