@@ -96,15 +96,19 @@ describe('FF-2 (static): isGenesisOwner not hardcoded outside src/db/org.ts', ()
 // FF-5 / AC-19 (static): known_tenant_tables.txt length unchanged
 // ---------------------------------------------------------------------------
 describe('FF-5 / AC-19 (static): known_tenant_tables.txt unchanged', () => {
-  it('has exactly 23 entries (no new tenant table beyond T-0043 mcp_tool)', () => {
+  it('has exactly 27 entries (23 pre-T-0023 + 4 budget tables: instance_budget, agent_budget, reservation, spend_ledger)', () => {
     const content = readFileSync(
       join(REPO_ROOT, 'ci', 'checks', 'known_tenant_tables.txt'),
       'utf8',
     );
     const lines = content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-    expect(lines.length, 'known_tenant_tables.txt must have exactly 23 entries').toBe(23);
+    expect(lines.length, 'known_tenant_tables.txt must have exactly 27 entries').toBe(27);
     expect(lines).toContain('grant');
     expect(lines).toContain('role_assignment');
+    expect(lines).toContain('instance_budget');
+    expect(lines).toContain('agent_budget');
+    expect(lines).toContain('reservation');
+    expect(lines).toContain('spend_ledger');
   });
 });
 
