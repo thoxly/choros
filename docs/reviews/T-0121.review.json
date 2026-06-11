@@ -1,0 +1,72 @@
+{
+  "task_id": "T-0121",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "T-0121-F-001",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0121-reports-pages.adr.md:§2 таблицы «(migration 046)» / «(migration 047)»",
+      "issue": "В заголовках таблиц §2.1 и §2.2 написаны конкретные номера «migration 046» и «migration 047» без оговорки, тогда как §0 уже содержит правильный fallback «если 046/047 заняты — coder берёт следующие свободные ≥046». Читатель §2 без §0 может воспринять 046/047 как жёстко зафиксированные и не применить fallback. Spec AC-14 требует только «≥046» — расхождение формальное, но создаёт риск ошибки кодера при реальном конфликте слотов.",
+      "suggestion": "Добавить в §2.1 и §2.2 короткую сноску «(migration 046 — или следующий свободный ≥046 при материализации, см. §0)» либо дать ссылку на §0. Альтернатива: переименовать заголовки таблиц в «(migration ≥046)» / «(migration ≥047)»."
+    },
+    {
+      "id": "T-0121-F-002",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0121-reports-pages.adr.md:§6.1 MCP-tool seed",
+      "issue": "ADR §6.1 фиксирует seed `author_report_page` в `choros.mcp_tool` — паттерн T-0077 — но не указывает явно tenant-контекст сида. T-0077 §2.3 установил критический инвариант: все seed-строки tool/grant/employee для config-агента обязаны быть в тенанте `a0000000-…-000000000001` (dev-silo), потому что `resolveAgentToolset(tenantId)` ищет tools и grants в ОДНОМ tenantId под RLS. Если coder кладёт строку в другой тенант (как demo-tool 040 в `00000000-…-001`), tool не будет виден агенту. ADR не воспроизводит это предупреждение, хотя ссылается на T-0077 как прецедент.",
+      "suggestion": "В §6.1 или в примечании к seed-описанию добавить: «Seed обязан идти в dev-tenant `a0000000-…-000000000001` (тот же что T-0077 migration 044) — иначе tool невидим resolveAgentToolset (T-0077 §2.3 урок).»"
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true},
+    {"ac": "AC-21", "covered": true},
+    {"ac": "AC-22", "covered": true}
+  ],
+  "seam_check": {
+    "verdict": "ok",
+    "notes": [
+      "14 fitness functions в adr.contract.json совпадают 1:1 с ADR §8 по ID, тексту правила и CI-check — нет ни одного выдуманного при добивке.",
+      "13 contract-строк в adr.contract.json покрывают: checkReportPageDepFields, classifyReportPageFloor, soft-warn, destructive-deny, force-escape-hatch, promote-gate, dep-registration-422, MCP DRAFT-only, audit-vocab, Floor-2-RLS, bundle-coherence, T-0084-changelog, migration-slots — все выведены из ADR §1/§3/§5/§6/§7, без добавлений.",
+      "Object model (2 таблицы + compat-модуль + MCP seed) в контракте повторяет ADR §2/§3/§6.1 по именам полей, типам и ограничениям точно.",
+      "Traceability таблица 22 AC в контракте совпадает с ADR §11 1:1 — каждое covered_by скопировано без искажений.",
+      "Migration-slots в контракте используют «≥046» / «≥047» (с сохранением порядка FK) — совпадает с формулировкой §0 ADR."
+    ]
+  },
+  "migration_slots_verdict": {
+    "verdict": "nit",
+    "detail": "ADR §0 содержит корректный fallback-язык «если 046/047 заняты, coder берёт следующие свободные ≥046» — спека AC-14 формально удовлетворена (требует только ≥046). Проблема в §2: заголовки таблиц говорят «migration 046» / «migration 047» без ссылки на fallback. Это NIT (F-001), не blocking — смысловой контракт спеки соблюдён."
+  },
+  "role_gap_evidence": [
+    "Все 22 AC покрыты решениями ADR с конкретными якорями (§, FF-ID). Трассировка в §11 полная, 1:1.",
+    "Контракт добивочного агента (77509b1) прошёл seam-check: 14 FF, 13 contracts, object model, traceability — все выведены из ADR, нет выдуманных элементов. Добивочный агент не привнёс фантомных решений.",
+    "T-0072-сверка: ADR §3 явно называет checkReportPageDepFields расширением checkBindingCompat; DepViolation зеркалит BindingViolation; §12 честно предупреждает кодера о необходимости синхронизации сигнатур после мержа T-0072 — не замалчивает риск.",
+    "Граница фаундера: founder-решения (two-floor, реестр зависимостей, предупреждение, red-line на деструктив, config-агент авторит в DRAFT, human-promote) не пересматриваются. Все зоны дизайна (способ наполнения, момент предупреждения, критерий деструктива, гранулярность прав, слоты) решены автономно с обоснованием.",
+    "T-0077 alignment: authoring_draft vocab, DRAFT-only структурная граница, promote human-only — воспроизведены корректно. Единственный gap — отсутствие явного упоминания dev-tenant для seed (F-002, nit).",
+    "14 FF не вырождены: каждая проверяет фальсифицируемое свойство (RLS-контракт, I/O-clean функция, синтаксическая граница этажей, 409 на деструктив, stale-гейт promote, bundle-coherence exit 1, audit-события). Все различны.",
+    "Декомпозиция T-0121a..h ациклична: a(DDL)→b(core)→c(schema-change,a+b)→d(CRUD,a+b)→e(bundle,a)→f(seed,d)→g(render,a+d)→h(static-analysis,b+d,Stage-2). T-0121h явно помечен Stage-2."
+  ]
+}
