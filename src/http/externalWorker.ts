@@ -7,6 +7,7 @@
  */
 import { HttpError, mapDomainError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { withAuth, assertKeycloakConfig } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -34,8 +35,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 export function registerExternalWorkerRoutes(router: Router, store: JobStore): void {
+  // fail-fast config check for keycloak mode (ADR §1.7, AC-20)
+  assertKeycloakConfig();
+
   // POST /jobs — enqueue a new job
-  router.register("POST", "/jobs", async (req, res) => {
+  router.register("POST", "/jobs", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -105,10 +109,10 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(job));
-  });
+  }));
 
   // POST /external-task/fetch-and-lock — acquire up to maxJobs locked jobs
-  router.register("POST", "/external-task/fetch-and-lock", async (req, res) => {
+  router.register("POST", "/external-task/fetch-and-lock", withAuth(async (req, res) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -158,10 +162,10 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ jobs }));
-  });
+  }));
 
   // POST /external-task/:id/complete — mark a job as completed
-  router.register("POST", "/external-task/:id/complete", async (req, res, params) => {
+  router.register("POST", "/external-task/:id/complete", withAuth(async (req, res, params) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -184,10 +188,10 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 
   // POST /external-task/:id/fail — report a job failure and optionally schedule retry
-  router.register("POST", "/external-task/:id/fail", async (req, res, params) => {
+  router.register("POST", "/external-task/:id/fail", withAuth(async (req, res, params) => {
     const body = await readJsonBody(req);
 
     if (!isPlainObject(body)) {
@@ -231,5 +235,5 @@ export function registerExternalWorkerRoutes(router: Router, store: JobStore): v
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 }
