@@ -377,3 +377,153 @@ string and makes no outbound call. **No GT-4 provision.** Verifiable locally aga
 client hosts" (kickoff §4.5, GT-1), the not-a-raw-key invariant (T-0020 NF-3/C-3, ratified), the
 audit floor (E2.8, day-1), and tenant-RLS (T-0013). The custody port for T-0039 (§8) is a contract,
 not a product-direction or cross-vendor choice. No founder escalation required.
+
+---
+
+## 13. Seam resolution vs T-0042 (hire write-path) — ADR AMENDMENT (2026-06-11)
+
+**Status of the conflict.** T-0042 (E5.2 agent provisioning) is **already merged to dev**. Its
+`POST /api/agents/hire` route optionally accepts `llm_secret_handle` in the request body
+(`src/http/agents.ts:215`), threads it through the pure plan builder
+(`src/core/agent-hire.ts::buildAgentHirePlan`, field `llmSecretHandle`), and persists it via a raw
+INSERT (`src/db/agent-provision.ts` — `agent_card … llm_secret_handle …`, `$7`). That INSERT runs
+**without** `validateSecretHandleShape`: a raw `sk-…` key in the hire body reaches the column,
+bypassing the RL-3 not-a-raw-key guard this task owns. T-0025 §6/AC-16 and **FF-25-3 as originally
+written** (allow-pattern = files matching `secret-handle`) declare the column's *write* lifecycle the
+exclusive province of the custody routes — so two facts collide: (a) a real RL-3 bypass exists in
+merged code, and (b) the dormancy fitness would flag the hire-path reference as a leak. This section
+resolves both. **No founder escalation:** the resolution stays strictly inside the signed E5.5 model
+(RL-3 "platform governs the *handle*, client hosts the secret; no platform LLM dependency") — it
+changes no product direction and crosses no red line. RL-3 is *strengthened* (a bypass is closed),
+not re-scoped.
+
+### 13.1 Decision — **Variant B (validated initial write at hire) + FF re-scope**
+
+The custody **governance** (the not-a-raw-key shape guard and the audit vocabulary) is centralized in
+**one** place — the pure `validateSecretHandleShape` validator and the
+`set_llm_secret_handle` audit type — but it is permitted to have **two audited call-sites**: the
+custody routes (set/rotate/revoke) and the **hire INSERT**. The hire route MAY write an initial
+`llm_secret_handle` **iff** it (1) passes the value through the *same* pure
+`validateSecretHandleShape` before the plan/INSERT, rejecting `400 INVALID_HANDLE(reason)` on
+failure, and (2) emits the *same* canonical `set_llm_secret_handle` audit event (no handle value in
+any field) in the hire transaction, alongside the existing `agent.hire` audit. Every **subsequent**
+mutation of the column (UPDATE/SET to a non-NULL value, revoke-to-NULL) remains the **exclusive**
+province of the T-0025 custody routes — the hire INSERT is the *only* sanctioned write outside them,
+and only because it is validator-gated.
+
+The invariant that RL-3 actually demands is **"no raw API key ever lands in
+`agent_card.llm_secret_handle` un-validated, and every binding event is audited"** — *not* "exactly
+one HTTP route may touch the column." Variant B satisfies the real invariant by moving the guard to
+the value (the pure validator is the single point of governance), rather than to the route (a single
+point of *plumbing*). The bypass is closed at the seam where the value enters, which is the correct
+locus.
+
+### 13.2 Why not Variant A (hire strips/rejects `llm_secret_handle`; handle is post-hire only)
+
+Rejected. Variant A would force the hire route to **drop or 400** any `llm_secret_handle` in the
+body, making agent-LLM setup a mandatory two-step flow (hire, then a separate custody call) and
+requiring an **edit to merged T-0042 code that *removes* a field it deliberately declared**
+(`spec §3 "Accepting them is autonomous; if omitted, persisted as NULL"`, ADR §3.1). Axes:
+**custody integrity** — A gives "one route" but at the cost of an un-auditable *gap* (the field is
+silently discarded), whereas B gives "one validator + two audited points," which is the stronger
+custody property; **proportionality** — A's UX regression and merged-feature removal are
+disproportionate to the threat, which B neutralizes additively; **blast-radius** — A deletes T-0042
+behavior (regression risk against `FF-HIRE-5` integration expectations), B only *adds* a guard at the
+existing write; **identity⊥rights (T-0042 §1.3)** — untouched by either (the validator/audit live on
+the agent_card custody axis, never the rights layer); **UX** — A is strictly worse (two steps). The
+only thing A buys is a literally-singular write route, which is a plumbing aesthetic, not a security
+property. Variant B is chosen.
+
+### 13.3 Fitness-function consequences (the part that must change to stay green)
+
+**FF-25-3 (dormancy boundary) is amended, not weakened.** Its allow-set changes from "files matching
+`secret-handle`" to an **explicit named allow-list** of the custody module **plus the three
+T-0042 hire-path files** that legitimately reference the column. The check
+(`ci/checks/secret-handle-isolation.sh`, the FF-25-3 block at lines 53–72) must treat as allowed:
+`src/http/secret-handle.ts`, `src/core/secret-handle-validator.ts` (if/when it names the column),
+`src/db/agent-provision.ts`, `src/core/agent-hire.ts`, `src/http/agents.ts` (+ their test files). Any
+*other* file referencing `llm_secret_handle` is still a leak → fail. The dormancy guarantee for
+`autonomy_threshold` / `budget_policy_id` / `escalation_rule_id` (the second half of the FF-25-3
+block) is **unchanged** — those columns remain untouched by T-0025.
+
+**NEW: FF-25-8 (write-path validator-gate).** Pins Variant B structurally: *every* code path that
+writes a non-NULL `llm_secret_handle` (custody routes **and** the hire INSERT) must be reachable only
+after a `validateSecretHandleShape` call; and **no** UPDATE/SET of `llm_secret_handle` to a non-NULL
+value may exist **outside** `src/http/secret-handle.ts` (the hire path uses INSERT, not UPDATE — so
+the "single SET/UPDATE route" property is preserved for mutation). Concretely the check asserts:
+(a) `src/http/agents.ts` imports `validateSecretHandleShape` from
+`../core/secret-handle-validator.js` AND calls it on the `llm_secret_handle` value before
+`buildAgentHirePlan`; (b) `grep -rnE 'UPDATE[[:space:]]+choros\.agent_card[^;]*llm_secret_handle'
+src/` (i.e. an UPDATE that sets the column) appears **only** in `src/http/secret-handle.ts` — an
+INSERT in `agent-provision.ts` is allowed, a SET/UPDATE there is a fail; (c) `src/http/agents.ts`
+emits the canonical `set_llm_secret_handle` audit type when (and only when) it writes a non-NULL
+handle. This is the executable form of "one validator governs the value; UPDATE stays single-route;
+the hire INSERT is the one validated exception."
+
+**Unchanged:** FF-25-1/2/4/5/6/7 stand as written. The pure validator stays IO-free and is the
+single shape authority; the hire path imports it (additive new importer — no validator change). The
+`set_llm_secret_handle` audit type is now emitted from two sites but is still one canonical type
+through the one `appendAuditEvent` sink (NF-7 holds).
+
+### 13.4 Coder instruction (precise — files / lines / contracts; coder writes the code)
+
+> Target branch: `task/T-0025`. T-0042 files are merged to dev; editing them here is **legal** — the
+> edit flows through this branch and the dev→main gate. Treated as **compatibility contracts** below.
+
+**(C-1) `src/http/agents.ts` — gate the hire-time handle through the custody validator.**
+- Add import: `import { validateSecretHandleShape } from "../core/secret-handle-validator.js";`
+- At **line 215** (`const llmSecretHandle = …`): after deriving `llmSecretHandle`, if it is
+  non-NULL, run `const verdict = validateSecretHandleShape(llmSecretHandle); if (!verdict.ok) throw
+  new HttpError(400, "INVALID_HANDLE", verdict.reason);` — **before** `buildAgentHirePlan` (line 239)
+  and before the Keycloak call (line 256). Place it next to the other body-field validations
+  (after line 216) so rejection precedes *all* side-effects (mirrors FF-HIRE-1 ordering).
+  **NF-1: never put `llmSecretHandle` into the `HttpError` message — pass `verdict.reason` (a code).**
+- In the hire transaction (Step 5, around line 268–273), **when `llmSecretHandle` is non-NULL**, emit
+  an additional canonical custody audit event of type `"set_llm_secret_handle"` via the same
+  `appendAuditEvent(tx, …)` sink, in the **same `withTenantTx`** as `insertAgentRows` and the existing
+  `agent.hire` audit. Shape (no value in any field): `{ type: "set_llm_secret_handle", actor:
+  actorId, subject: <new agent employee_id from the plan>, scope: null, via: "secret-handle",
+  proposed_by: null, confirmed_by: null, payload: { agentEmployeeId: <new employee_id> },
+  occurred_at: nowMs }`. (You may reuse the existing AuditEventInput builder idiom from the
+  custody module §2.3, or inline an equivalent literal — it must be the **canonical** `appendAuditEvent`
+  sink, not a parallel path.) When `llmSecretHandle` is NULL, emit **only** the existing `agent.hire`
+  audit (no custody event for a NULL bind).
+
+**(C-2) `src/core/agent-hire.ts` — no change required.** `buildAgentHirePlan` stays pure and may
+keep `llmSecretHandle` in `AgentHireInput`/`AgentHirePlan` as-is; it now receives an
+already-validated value. **Do not** add the validator import here (keep the core IO/policy-free; the
+gate lives at the HTTP boundary, consistent with T-0042 §1 "thin route over pure core").
+
+**(C-3) `src/db/agent-provision.ts` — no change required.** The INSERT keeps writing
+`plan.agentCard.llmSecretHandle` at `$7`. **Do not** convert this INSERT into an UPDATE/SET path and
+**do not** add any UPDATE of `llm_secret_handle` here (FF-25-8 (b) forbids a SET/UPDATE outside the
+custody route). The value it inserts is now guaranteed validator-passed by C-1.
+
+**(C-4) `src/core/secret-handle-validator.ts` — unchanged (new importer only).** It already exports
+`validateSecretHandleShape`. C-1 is an additive new import site; the validator file itself is not
+edited (FF-25-1 IO-purity preserved).
+
+**(C-5) `ci/checks/secret-handle-isolation.sh` — amend FF-25-3 allow-list + add FF-25-8.**
+- FF-25-3 block (lines 53–72): replace the single `ALLOWED_PATTERN="src/http/secret-handle"` /
+  `*secret-handle*` test with an **explicit allow-set** of basenames/paths:
+  `src/http/secret-handle.ts`, `src/core/secret-handle-validator.ts`, `src/db/agent-provision.ts`,
+  `src/core/agent-hire.ts`, `src/http/agents.ts` (and their `*.test.ts` / `__tests__` siblings). A
+  `llm_secret_handle` hit in any file **not** in that set → FAIL (unchanged failure semantics, wider
+  allow-set). Keep the `autonomy_threshold|budget_policy_id|escalation_rule_id` sub-check untouched.
+- Append a **FF-25-8** block: (a) assert `src/http/agents.ts` both imports
+  `validateSecretHandleShape` and calls it (grep both tokens present); (b) assert
+  `grep -rnE 'UPDATE[[:space:]]+choros\.agent_card[^;]*llm_secret_handle' src/ --include=*.ts`
+  returns matches **only** in `src/http/secret-handle.ts` (any other file → FAIL); (c) assert
+  `src/http/agents.ts` contains the literal `"set_llm_secret_handle"` (the custody audit emit). Wire
+  it into the same `ERRORS` accumulator so it gates in `npm run fitness`.
+
+**(C-6) Tests.** Extend the hire integration test (`src/__tests__/agent-hire.test.ts`, FF-HIRE-5):
+add cases — hire with a raw `sk-…` `llm_secret_handle` → `400 INVALID_HANDLE` (`vendor_key_prefix`),
+**zero** side-effects (no Keycloak client, no rows, no audit); hire with a valid opaque handle → 201,
+column set to that value, **two** audit rows present (`agent.hire` + `set_llm_secret_handle`), neither
+carrying the handle value; hire with NULL handle → 201, **one** audit row (`agent.hire` only). Keep
+the existing custody-route tests unchanged.
+
+**Out of scope / do-not-touch:** `scoped-admin.ts`, `grant-lattice.ts`, `grant-resolver.ts`,
+`mcp-tool-registry.ts`, `object-handle.ts` stay byte-frozen (FF-25-6 / FF-HIRE-2/4). No migration.
+T-0042's `identity⊥rights` (§1.3) is untouched — this amendment lives entirely on the custody axis.
