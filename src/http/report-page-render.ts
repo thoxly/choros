@@ -53,6 +53,11 @@ import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
 import { loadAdminContext } from "../db/org.js";
+import {
+  isNarrowerOrEqual,
+  type ScopeElement,
+  type AncestryOracle,
+} from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,6 +86,27 @@ if (!UUID_RE.test(_rawDevTenantId)) {
   );
 }
 const DEV_TENANT_ID = _rawDevTenantId;
+
+// ---------------------------------------------------------------------------
+// Resource-hierarchy oracle (T-0193: scope-containment for application nodes)
+//
+// Day-1: resource hierarchy is flat (application → registry → record).
+// No DB-backed tree traversal yet (T-0053). For containment checks against
+// application nodes the oracle is equality-only: a grant scope covers the
+// target application iff the grant's nodeId equals the target appId, OR the
+// grant scope is a wider node (registry/record levels don't apply here since
+// we check application-level containment only).
+//
+// This mirrors the same day-1 equality oracle used for resource UUIDs in
+// grants.ts / secret-handle.ts SEED_ORACLE: UUIDs not in ORG_SEED_CHILDREN
+// resolve to equality-only (isDescendantOrSelf returns a===b).
+// ---------------------------------------------------------------------------
+
+const RESOURCE_ORACLE: AncestryOracle = {
+  isDescendantOrSelf(_hierarchy, descendantId, ancestorId): boolean {
+    return descendantId === ancestorId;
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Pool (lazy singleton — same pattern as report-pages.ts)
@@ -112,10 +138,18 @@ export function resetRenderPoolForTesting(): void {
 // ---------------------------------------------------------------------------
 
 export interface ReportPageRenderAuthzDeps {
+  /**
+   * Gate: actor must hold a confirmed, in-window `application/read` grant whose
+   * scope CONTAINS the target application (appId).
+   *
+   * T-0193 (R-6 fix): appId added so the check is scope-scoped to the specific
+   * application whose page is being rendered/read — not any application grant.
+   */
   checkReadGrant: (
     pool: pg.Pool,
     tenantId: string,
     actorId: string,
+    appId: string,
     nowMs: number,
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
@@ -124,6 +158,7 @@ async function defaultCheckReadGrant(
   pool: pg.Pool,
   tenantId: string,
   actorId: string,
+  appId: string,
   nowMs: number,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   // Step 1: genesis-owner short-circuit (tenant-owner role check via loadAdminContext).
@@ -132,15 +167,24 @@ async function defaultCheckReadGrant(
     return { ok: true };
   }
 
-  // Step 2: Non-genesis path — query `application read` grants directly.
+  // Step 2: Non-genesis path — query `application read` grants and apply scope-containment.
   //
   // ADR §6: page visibility = grant `read` on resource_type `application`.
-  // loadAdminContext only loads `mgmt_object:*` grants (write-path delegation);
-  // it does NOT load `application` grants. We must query them separately.
+  // T-0193 (R-6): the grant's scope must CONTAIN the target application (appId).
+  // A grant scoped to App-A must NOT grant access to pages of App-B.
   //
-  // Pattern mirrors invoke.ts loadInvokeGrants (src/http/invoke.ts:220-262):
-  // join grant → role_assignment on (tenant_id, role_id) filtered by employee
-  // slug + grant operation/resource_type + validity window.
+  // Implementation: fetch candidate grants (resource_type=application, operation=read,
+  // in-window, confirmed role_assignment), load their scope column, then filter in
+  // application code using isNarrowerOrEqual(targetAppScope, grantScope, RESOURCE_ORACLE).
+  //
+  // This is the JOIN+containment path per the T-0193 spec (minimal honest variant):
+  // resolveFor full PDP requires GrantSource/RecordSource ports not available here;
+  // instead we import isNarrowerOrEqual (pure function from grant-lattice.ts, no duplication)
+  // and apply it to the fetched grant rows.
+  //
+  // Pattern mirrors invoke.ts loadInvokeGrants (src/http/invoke.ts:220-262) for the JOIN,
+  // and secret-handle.ts holdsAgentMgmtUpdate (src/http/secret-handle.ts:154-166) for the
+  // isNarrowerOrEqual post-fetch filter.
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -158,9 +202,10 @@ async function defaultCheckReadGrant(
     }
     const employeeId = empRows[0]!.id;
 
-    // Check for any confirmed, in-window role_assignment + application/read grant.
-    const { rows: grantRows } = await client.query<{ id: string }>(
-      `SELECT g.id
+    // Load candidate grants: confirmed role_assignment + application/read + in-window.
+    // Fetch scope column for containment check (T-0193 R-6).
+    const { rows: grantRows } = await client.query<{ id: string; scope: unknown }>(
+      `SELECT g.id, g.scope
          FROM choros."grant" g
          JOIN choros.role_assignment ra
            ON ra.tenant_id = g.tenant_id AND ra.role_id = g.role_id
@@ -172,13 +217,43 @@ async function defaultCheckReadGrant(
           AND g.resource_type = 'application'
           AND g.operation = 'read'
           AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
-          AND (g.valid_until IS NULL OR g.valid_until  > $3)
-        LIMIT 1`,
+          AND (g.valid_until IS NULL OR g.valid_until  > $3)`,
       [tenantId, employeeId, nowMs],
     );
     await client.query("COMMIT");
 
     if (grantRows.length === 0) {
+      return { ok: false, reason: "no_read_grant_on_application" };
+    }
+
+    // T-0193 (R-6): scope-containment check.
+    // Target scope: the specific application node for this page's app_id.
+    // A grant covers the page iff its scope contains (is ⊒ than) the target app node.
+    // isNarrowerOrEqual(target, grantScope): target ⊑ grantScope ↔ grant covers target.
+    const targetAppScope: ScopeElement = {
+      kind: "node",
+      hierarchy: "resource",
+      nodeId: appId,
+      nodeLevel: "application",
+    };
+
+    const hasCovering = grantRows.some((row) => {
+      const rawScope = row.scope;
+      // Freeform scopes are owner-only, non-delegable, outside the lattice — skip.
+      if (
+        rawScope === null ||
+        typeof rawScope !== "object" ||
+        (rawScope as Record<string, unknown>)["kind"] === "freeform"
+      ) {
+        return false;
+      }
+      const grantScope = rawScope as ScopeElement;
+      // isNarrowerOrEqual(target, parent): true iff target's reach ⊆ parent's reach.
+      // RESOURCE_ORACLE: day-1 equality-only for resource hierarchy UUIDs.
+      return isNarrowerOrEqual(targetAppScope, grantScope, RESOURCE_ORACLE);
+    });
+
+    if (!hasCovering) {
       return { ok: false, reason: "no_read_grant_on_application" };
     }
     return { ok: true };
@@ -535,15 +610,8 @@ async function renderFloor1(args: {
 }): Promise<RenderResult> {
   const { pool, tenantId, pageId, actor, nowMs, authzDeps } = args;
 
-  // PDP gate: application read grant (ADR §6 — page visibility = app read).
-  // Called BEFORE withTenantTx, mirroring dataFloor2 (lines 634-637).
-  const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, nowMs);
-  if (!gateResult.ok) {
-    throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
-  }
-
   return withTenantTx(pool, tenantId, async (client) => {
-    // 1. Load page (RLS-gated)
+    // 1. Load page (RLS-gated) — must happen first to obtain app_id for PDP gate.
     const { rows: pageRows } = await client.query<ReportPageRow>(
       `SELECT id, app_id, floor, page_def, page_code
          FROM choros.report_page
@@ -563,14 +631,22 @@ async function renderFloor1(args: {
       );
     }
 
-    // 2. Parse metrics from page_def
+    // 2. PDP gate: application read grant scoped to this page's app_id (ADR §6 + T-0193 R-6).
+    // Called after page load so we can pass app_id for scope-containment check.
+    // The pool is passed separately (defaultCheckReadGrant opens its own connection).
+    const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, page.app_id, nowMs);
+    if (!gateResult.ok) {
+      throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
+    }
+
+    // 3. Parse metrics from page_def
     const metrics = parseMetrics(page.page_def);
 
     if (metrics.length === 0) {
       return { page_id: pageId, floor: "1", metrics: [] };
     }
 
-    // 3. Group metrics by source_registry_def_id for batched schema lookup
+    // 4. Group metrics by source_registry_def_id for batched schema lookup
     const byRegistryDef = new Map<string, Floor1Metric[]>();
     for (const m of metrics) {
       const group = byRegistryDef.get(m.source_registry_def_id) ?? [];
@@ -578,7 +654,7 @@ async function renderFloor1(args: {
       byRegistryDef.set(m.source_registry_def_id, group);
     }
 
-    // 4. For each registry_def: load schema, validate field_keys, run aggregates
+    // 5. For each registry_def: load schema, validate field_keys, run aggregates
     const results: MetricResult[] = [];
 
     for (const [registryDefId, metricGroup] of byRegistryDef) {
@@ -689,14 +765,9 @@ async function dataFloor2(args: {
 }): Promise<DataResult> {
   const { pool, tenantId, pageId, registryDefId, limit, offset, actor, nowMs, authzDeps } = args;
 
-  // PDP gate: application read grant (ADR §6 — page visibility = app read)
-  const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, nowMs);
-  if (!gateResult.ok) {
-    throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
-  }
-
   return withTenantTx(pool, tenantId, async (client) => {
-    // 1. Load page to verify it exists and is floor=2 (and belongs to this tenant)
+    // 1. Load page to verify it exists and is floor=2 (and belongs to this tenant).
+    // Page loaded first to obtain app_id for PDP gate (T-0193 R-6 scope-containment).
     const { rows: pageRows } = await client.query<ReportPageRow>(
       `SELECT id, app_id, floor, page_def, page_code
          FROM choros.report_page
@@ -716,7 +787,14 @@ async function dataFloor2(args: {
       );
     }
 
-    // 2. Verify registry_def belongs to this tenant (RLS covers it, but explicit FK check)
+    // 2. PDP gate: application read grant scoped to this page's app_id (ADR §6 + T-0193 R-6).
+    // Checked after page existence/floor validated, before any data is returned.
+    const gateResult = await authzDeps.checkReadGrant(pool, tenantId, actor, page.app_id, nowMs);
+    if (!gateResult.ok) {
+      throw new HttpError(403, "NO_READ_GRANT", `read on application denied: ${gateResult.reason}`);
+    }
+
+    // 3. Verify registry_def belongs to this tenant (RLS covers it, but explicit FK check)
     const { rows: regRows } = await client.query(
       `SELECT id FROM choros.registry_def WHERE tenant_id = $1 AND id = $2`,
       [tenantId, registryDefId],
@@ -729,7 +807,7 @@ async function dataFloor2(args: {
       );
     }
 
-    // 3. Count total records (for pagination metadata)
+    // 4. Count total records (for pagination metadata)
     const { rows: countRows } = await client.query<{ total: string }>(
       `SELECT COUNT(*) AS total
          FROM choros.record
@@ -738,7 +816,7 @@ async function dataFloor2(args: {
     );
     const totalCount = parseInt(countRows[0]?.total ?? "0", 10);
 
-    // 4. Fetch records with limit+offset (all parameterized — no interpolation)
+    // 5. Fetch records with limit+offset (all parameterized — no interpolation)
     const { rows: recordRows } = await client.query<{
       id: string;
       data: unknown;
