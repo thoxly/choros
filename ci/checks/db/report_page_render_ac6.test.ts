@@ -109,17 +109,24 @@ async function seedRoleAssignment(
   return id;
 }
 
+/**
+ * T-0193 (R-6 fix): appId parameter added so the grant scope contains the
+ * specific application being granted access to. Previously used a fixed test
+ * nodeId which worked before scope-containment was enforced.
+ */
 async function seedApplicationReadGrant(
   c: pg.Client,
   tenantId: string,
   roleId: string,
+  appId: string,
 ): Promise<string> {
   const id = uuid();
-  // scope: single-node scope (application level is fine for the lattice)
+  // T-0193: scope must contain the specific appId — not a fixed test node.
+  // isNarrowerOrEqual(targetAppScope, grantScope) → grantScope nodeId must match appId.
   const scope = JSON.stringify({
     kind: 'node',
     hierarchy: 'resource',
-    nodeId: 'b0000000-0000-0000-0000-000000000001',
+    nodeId: appId,
     nodeLevel: 'application',
   });
   await c.query('BEGIN');
@@ -424,7 +431,8 @@ describe('AC-6 allow probe: non-genesis actor WITH application/read grant → 20
       allowEmployeeId = await seedEmployee(c, tenantId, allowActorSlug);
       roleId = await seedRole(c, tenantId);
       raId = await seedRoleAssignment(c, tenantId, allowEmployeeId, roleId);
-      grantId = await seedApplicationReadGrant(c, tenantId, roleId);
+      // T-0193 R-6: grant scope must match the specific appId of the page.
+      grantId = await seedApplicationReadGrant(c, tenantId, roleId, appId!);
     });
 
     const r = await makeRequest(
@@ -478,7 +486,8 @@ describe('AC-6 allow probe: non-genesis actor WITH application/read grant → 20
       allowEmployeeId = await seedEmployee(c, tenantId, allowActorSlug);
       roleId = await seedRole(c, tenantId);
       raId = await seedRoleAssignment(c, tenantId, allowEmployeeId, roleId);
-      grantId = await seedApplicationReadGrant(c, tenantId, roleId);
+      // T-0193 R-6: grant scope must match the specific appId of the page.
+      grantId = await seedApplicationReadGrant(c, tenantId, roleId, appId!);
     });
 
     const r = await makeRequest(
