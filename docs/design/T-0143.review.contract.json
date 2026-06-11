@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0143",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "ci/checks/keyed-digest-core-purity.sh:18",
+      "issue": "The grep pattern's third alternative `process\\x27\\(env\\x27)` is an unbalanced group; the pattern errors under ugrep and BSD/GNU grep. The `2>/dev/null || true` swallows the error so MATCHES is always empty and the check passes unconditionally. Verified: a planted `process.env` in src/core/ is NOT detected. Had the regex compiled, `grep -rn ... src/core/` would red-line on the pre-existing src/core/flowable-client.ts:264/269/274 env reads, so it could never have been honestly green. FF-T143-5/AC-6-sibling proves nothing (reviewer rule 2).",
+      "suggestion": "Use a well-formed alternation scoped to the masking modules (or excluding the known pre-existing flowable-client.ts reads), REMOVE the `|| true` so a regex error fails loud, and add a positive/negative self-test so the check cannot silently degrade. Alternatively drop the new check and rely on the genuinely-green FF-DC9, since AC-8's recursive-grep intent is unachievable while flowable-client.ts legitimately reads env in core."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "src/main.ts:134,152",
+      "issue": "ADR §4.3, the main.ts comment (lines 130-133), and the e2e proof-of-equivalence comment all claim a single ResolverDeps allocation with object identity between MainHandle.resolverDeps and the object passed to createServer. This is false: line 134 allocates resolverDepsObj (passed to createServer line 139); line 152 returns a SEPARATE `{ keyedDigest }` literal. Two allocations. The pattern-(b) e2e validity (spec §8 / FF-T143-2) rests entirely on this identity claim, which is materially inaccurate. The test only passes because both literals share the same keyedDigest reference (identity of the port, not of the ResolverDeps).",
+      "suggestion": "Place the SAME resolverDepsObj on the handle (`resolverDeps: resolverDepsObj`), or if MainHandle must stay the narrow shape, drop the 'same allocation / object identity' wording everywhere it appears. Make the comment match the code."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "src/main.ts:134",
+      "issue": "`{ keyedDigest } as unknown as ResolverDeps` double-casts a partial (missing the three REQUIRED members grants/records/ancestry per grant-resolver.ts:104-162) into the full interface. The cast masks that the object threaded to createServer/buildRouter is not a usable request-path ResolverDeps, making the ADR FR-3 promise ('any future route auto-inherits a usable ResolverDeps from buildRouter's closure') hollow — a future route consuming it would get undefined grants/records/ancestry and break at runtime. It also papers over an ADR §4.3 contradiction: the architect's literal `const resolverDepsObj: ResolverDeps = { keyedDigest };` does not compile.",
+      "suggestion": "Thread a deliberately-typed partial: change createServer/buildRouter to accept `resolverDeps?: Partial<ResolverDeps>` or a `Pick<ResolverDeps,'keyedDigest'>` alias, drop the `as unknown as`, and correct the 'full ResolverDeps' framing in the ADR. Per-request sources are assembled at the route, not the composition root. Escalate the ADR §4.3 mismatch as a spec/ADR correction."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/server.ts:84",
+      "issue": "`void resolverDeps; // referenced via closure; used by future route registrations` is a seam placeholder (acceptable under FR-3) but the comment claims a closure capture for future routes that — given R-3 — captures a non-usable partial.",
+      "suggestion": "Re-read after R-3 is resolved; once the threaded type is a deliberate partial the comment is fine as-is."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 6,
+      "location": "src/__tests__/keyed-digest-e2e.test.ts:50",
+      "issue": "Security lens (informational): no secret committed (dummy key), env boundary stays in main.ts, honest fail-closed degrade is genuinely tested, no injection/unsafe-default in the diff. Clean.",
+      "suggestion": "No action."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": false },
+    { "ac": "AC-2", "covered": false },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": false },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": true },
+    { "ac": "AC-9", "covered": true }
+  ],
+  "role_gap_evidence": [
+    "SQ11/role-gaps: a broken fitness function (regex error + `2>/dev/null || true`) passed BUILD self-verification as 'green' because the harness only checks exit code, not that the check can FAIL on a planted violation. Recurring class: fitness functions are not themselves tested. Evidence for a 'fitness-function must ship with a positive/negative self-test' invariant, or a meta-check that flags `|| true` / `2>/dev/null` wrapped around the assertion grep in ci/checks/*.sh."
+  ]
+}
