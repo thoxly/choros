@@ -1,0 +1,125 @@
+{
+  "task_id": "T-0042",
+  "status": "ready",
+  "summary": "Agent provisioning (hire): requires management grant {mgmt_object:agent, create, scope}; creates employee(kind=agent) + agent_card + Keycloak service account atomically; freshly hired agent has zero tool access by construction (no role → no grants → no tools, structural not config); identity (kc_client_id) is invisible to the rights layer.",
+  "functional": [
+    "FR-1: Hire endpoint requires a confirmed in-window grant {mgmt_object:agent, create, org-scope} on the caller; rejected before any side effect otherwise.",
+    "FR-2: Successful hire atomically creates one employee(kind=agent) row and one agent_card row in a single transaction.",
+    "FR-3: Successful hire calls Keycloak Admin REST API to create a confidential OIDC client (serviceAccountsEnabled=true, grant_type=client_credentials, actor_type=agent attribute); kc_client_id stored in agent_card.",
+    "FR-4: Rights layer (grant-resolver, mcp-tool-registry) operates on (tenant_id, employee_id) only; kc_client_id is not a parameter in any grant lookup (identity decoupled from rights).",
+    "FR-5: Freshly hired agent with no role assignment resolves to empty toolset via resolveAgentToolset — structural consequence of 0 grants, not a default-deny config.",
+    "FR-6: Every successful hire emits an audit record: actor=caller.employee_id, subject=new agent employee_id, capability={mgmt_object:agent, create}, scope=admitting org-scope; written atomically with DB rows.",
+    "FR-7: Duplicate kc_client_id (unique constraint on tenant_id + kc_client_id) returns a typed conflict error without creating a second DB row or Keycloak client.",
+    "FR-8: No Keycloak realm role is assigned to the new service account; Choros rights live in the TS core only."
+  ],
+  "non_functional": [
+    "NF-1: No second authority subsystem — hire authorization uses only mgmt_object:agent grant rows + existing scoped-admin.ts checker.",
+    "NF-2: Additive-only changes to shared files (grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts, router.ts, auth.ts) — no refactoring; parallel sister tasks merge sequentially.",
+    "NF-3: Dev-auth compatibility — hire works under CHOROS_AUTH_MODE=dev; all pre-existing x-dev-user tests stay green.",
+    "NF-4: Atomic DB + Keycloak — Keycloak failure rolls back DB; DB commit failure triggers best-effort Keycloak client deletion (orphan cleanup).",
+    "NF-5: Migration seam — slot 042 reserved; any migration is additive, keeps T-0013 invariants (FORCE RLS / default-DENY / tenant_id leading), seeds idempotent; current assessment is no new table needed.",
+    "NF-6: No production credentials committed — Keycloak Admin REST credentials are env-var-injected; dev defaults may be committed.",
+    "NF-7: Keycloak Admin REST calls behind an injected port — hire service unit-testable with in-memory fake; live HTTP adapter is a separate file."
+  ],
+  "out_of_scope": [
+    "JWT validation of agent tokens — T-0060 (E1.4).",
+    "Invoke-grants (who can call the agent) and request/command split — T-0024 (E5.4).",
+    "Role assignment to the newly hired agent — separate admin action (E3.2 write-path).",
+    "Agent runtime enforcement (LLM, autonomy, A2A breakers) — Stage-2 (E5.6–E5.10); columns dormant.",
+    "BYO-LLM secret custody lifecycle — T-0025/E5.5.",
+    "Budget policy attachment — T-0023/E4.9; column NULL deferred.",
+    "Agent de-provisioning / offboarding.",
+    "Keycloak Organizations / pooled tenancy — deferred per tenancy ADR §6.",
+    "Production Keycloak deploy — E0.7, founder-gated.",
+    "Dual-control gating on the hire action itself — T-0044/E4.6."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Hire blocked without management grant: POST hire as caller with no {mgmt_object:agent, create, <scope>} grant → HTTP 403; zero employee rows; zero agent_card rows; zero Keycloak Admin API calls.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Hire succeeds with management grant: POST hire as caller holding confirmed in-window {mgmt_object:agent, create, admitting-scope} → HTTP 201; exactly one employee(kind=agent) row and one agent_card row created.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Scope narrowing enforced: admin holds {mgmt_object:agent, create, scope=D1 subtree}; hire targets position in disjoint D2 → HTTP 403; zero DB rows; zero Keycloak calls.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Keycloak service account created: after successful hire, the Keycloak Admin API (or injected port capture) confirms a client with kc_client_id exists, serviceAccountsEnabled=true, grant_type=client_credentials, service-account user attribute actor_type=agent.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "kc_client_id stored in agent_card: SELECT kc_client_id FROM choros.agent_card WHERE employee_id=<new_agent_id> returns a non-empty string matching the created Keycloak client.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Atomicity — Keycloak failure rolls back DB: inject Keycloak port that fails; call hire → HTTP error; no employee row and no agent_card row committed.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Atomicity — DB failure triggers orphan cleanup attempt: inject DB that fails on commit after Keycloak succeeds; assert Keycloak Admin port's delete method was called for the orphan client (best-effort).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Zero tool access by construction: after hire (no role assigned), resolveAgentToolset(tenantId, newAgent.employee_id, now) returns []; verify via injected GrantSource returning empty array for this subject.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "Identity decoupled from rights: grep grant-resolver.ts, grant-lattice.ts, mcp-tool-registry.ts for 'kc_client_id', 'agent_card', 'kc_' — assert no matches (Keycloak identity invisible to rights layer).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "No Keycloak realm role assigned: after hire, Keycloak Admin API (or test double) reports empty realm-role mapping for the new service-account user.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Hire is audited: after successful hire, audit log (or capture) contains exactly one record with actor=caller.employee_id, subject=new agent employee_id, capability={resourceType:'mgmt_object:agent', operation:'create'}, non-null scope.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "Duplicate kc_client_id rejected: attempt hire whose derived kc_client_id already exists in agent_card → typed error (e.g. 409 Conflict); no second DB row; no second Keycloak client.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "No second authority subsystem: static lint asserts hire authorization path uses only grant rows (mgmt_object:agent × create × org-scope) + scoped-admin.ts; no admin-specific table, flag, or ACL store introduced.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "Additive-only changes to shared files: git diff of grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts against dev base shows no deleted or modified lines in existing function bodies; only additions.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "Dev-auth compatibility: with CHOROS_AUTH_MODE=dev, hire succeeds using x-dev-user header as genesis-owner employee (AC-2 conditions); all pre-existing x-dev-user tests pass.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-16",
+      "text": "Keycloak Admin port is injectable: hire service factory accepts an interface with create_client/delete_client methods; unit tests run with in-memory implementation (no live Keycloak).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "Migration seam: IF a migration file is added, its name prefix is '042_'; it is additive (no edits to prior migrations); keeps FORCE RLS/default-DENY/tenant_id-leading; seeds use ON CONFLICT DO NOTHING. IF no migration added, this AC is vacuously satisfied.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0042-agent-provisioning.spec.md"
+}
