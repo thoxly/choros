@@ -1,0 +1,103 @@
+{
+  "task_id": "T-0118",
+  "status": "ready",
+  "decision": "Replace the keyless djb2 reachable from applyTransform(_, 'hash') with a per-tenant keyed digest threaded through a new optional KeyedDigest port on ResolverDeps (the established GrantSource/ClassificationSource/EffectSource/SodSource injected-port pattern). The port (src/core/keyed-digest.ts) computes HMAC-SHA256 over a canonical length-prefixed preimage of (tenantId, resourceType, facetField, valueStr) keyed by a secret silo key, returning a hex digest or undefined when no key is available for the tenant; node:crypto/process.env live ONLY in this port, never in the pure data-classification core (FF-DC9). MaskContext gains additive optional resourceType/tenantId/keyedDigest members; maskFields' hash branch calls ctx.keyedDigest(...) and OMITS the key (drop) when the port is absent (D-4/AC-6) or returns undefined (no key, D-3/AC-5), never emitting the keyless digest and never revealing raw. tenant_id is threaded from the already-validated handle.tenantId (grant-resolver.ts:460), not re-fetched. Q-arch custody = env_secret: the per-silo secret CHOROS_MASK_DIGEST_KEY is read once at the composition root (src/main.ts, the only process.env boundary, honest-degrade like buildLifecycleDepsFromEnv) and bound into the port; NO DB key table, NO migration 032 — because a DB-custodied key lives in the same Postgres the masking defends (circular custody) and the silo model needs only one secret per silo (T-0061 .env.prod.example REPLACE_WITH_* required-form). AC-13 (DB-custody isolation) is therefore not applicable / skipped.",
+  "rejected_alternatives": [
+    {"option": "DB-custodied per-tenant key table (migration 032, RLS-scoped)", "why_not": "Circular custody — the key would live in the same Postgres instance the masking defends; a DB read that exposes masked output can also expose the key, collapsing the keyed property back to keyless. Adds a migration + RLS table + per-tenant key lifecycle for no security gain over a silo env secret under silo-only delivery. AC-13 is conditional on this and is skipped."},
+    {"option": "Keep digest() keyless but salt it with tenant_id only", "why_not": "D-2: tenant_id is non-secret (appears in handles, logs, RLS GUCs). Offline rainbow/dictionary attack survives — anyone who knows the tenant_id (everyone) brute-forces low-entropy values. A secret must participate (C-2)."},
+    {"option": "Random per-call nonce (remove equality entirely)", "why_not": "Breaks the deterministic-token property (T-0033 AC-13) and the legitimate within-tenant mask-join/dedup use (D-1). The transform exists to be a deterministic token, not a nonce."},
+    {"option": "Perform HMAC inside data-classification.ts core", "why_not": "Violates C-4 / FF-DC9 — the pure core must import no node:crypto/process.env. The keyed digest is a capability behind an injected port; the bound digest function is passed in via MaskContext."},
+    {"option": "Add a second handle->fields export carrying the digest", "why_not": "Violates C-5 / FF-DC7 / FF-DC17 single-resolver invariant. The keyed digest rides the existing ONE maskFields/projectFields call via MaskContext; no second resolution edge."},
+    {"option": "Reuse audit-preimage.ts createHash('sha256') directly for masking", "why_not": "That is an UNKEYED SHA-256 audit-chain preimage (no secret) — using it for masking re-introduces the rainbow attack (C-2). The masking port needs a KEYED HMAC; only the node:crypto precedent is borrowed, not the unkeyed construction."},
+    {"option": "Reversible encryption / tokenization with reversible key custody", "why_not": "Out of scope (T-0033 §6-A #12 gold-plating); hash stays non-reversible (spec §7)."}
+  ],
+  "object_model": [
+    {
+      "entity": "KeyedDigestInput",
+      "fields": [
+        {"name": "value", "type": "unknown (raw field value; canonically stringified inside the port)"},
+        {"name": "tenantId", "type": "string (per-tenant domain separation D-1; already validated === subject.tenantId)"},
+        {"name": "resourceType", "type": "string (field-identity part 1; matches classification-row key)"},
+        {"name": "facetField", "type": "string (field-identity part 2; matches classification-row key)"}
+      ]
+    },
+    {
+      "entity": "KeyedDigest (injected port — src/core/keyed-digest.ts, impure boundary)",
+      "fields": [
+        {"name": "digest", "type": "(input: KeyedDigestInput) => string | undefined  // hex HMAC-SHA256 digest, or undefined when no key for tenant (fail-closed); NEVER throws for no-key"}
+      ]
+    },
+    {
+      "entity": "makeKeyedDigest (factory)",
+      "fields": [
+        {"name": "signature", "type": "(key: Buffer | undefined) => KeyedDigest  // empty/undefined key => a KeyedDigest whose digest() always returns undefined (present-but-keyless == fail-closed)"},
+        {"name": "construction", "type": "createHmac('sha256', key).update(canonicalLengthPrefixedPreimage(tenantId, resourceType, facetField, valueStr)).digest('hex')"},
+        {"name": "valueStr", "type": "typeof value === 'string' ? value : JSON.stringify(value)  // same stringification the old core used (determinism C-3 across types)"}
+      ]
+    },
+    {
+      "entity": "MaskContext (ADDITIVE optional members in src/core/data-classification.ts)",
+      "fields": [
+        {"name": "governed", "type": "boolean (existing)"},
+        {"name": "rows", "type": "ClassificationRow[] (existing)"},
+        {"name": "clearance", "type": "Clearance (existing)"},
+        {"name": "facetSchemaVersion", "type": "number (existing)"},
+        {"name": "resourceType", "type": "string | undefined (NEW additive; for KeyedDigestInput C-1)"},
+        {"name": "tenantId", "type": "string | undefined (NEW additive; for KeyedDigestInput D-1)"},
+        {"name": "keyedDigest", "type": "((input: {value: unknown; tenantId: string; resourceType: string; facetField: string}) => string | undefined) | undefined (NEW additive; bound port fn — absence OR undefined-return => hash field drops)"}
+      ]
+    },
+    {
+      "entity": "ResolverDeps (ADDITIVE optional port in src/core/grant-resolver.ts)",
+      "fields": [
+        {"name": "classifications", "type": "ClassificationSource | undefined (existing)"},
+        {"name": "keyedDigest", "type": "KeyedDigest | undefined (NEW additive optional port; mirrors classifications?)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/keyed-digest.ts (NEW): export interface KeyedDigestInput { value: unknown; tenantId: string; resourceType: string; facetField: string }",
+    "src/core/keyed-digest.ts (NEW): export interface KeyedDigest { digest(input: KeyedDigestInput): string | undefined }",
+    "src/core/keyed-digest.ts (NEW): export function makeKeyedDigest(key: Buffer | undefined): KeyedDigest  // HMAC-SHA256 over length-prefixed preimage; node:crypto import lives HERE not in core",
+    "src/core/data-classification.ts: MaskContext gains additive optional resourceType?/tenantId?/keyedDigest? — NO new node:crypto/process.env import (FF-DC9 stays green)",
+    "src/core/data-classification.ts: maskFields hash branch => if ctx.keyedDigest undefined OR ctx.keyedDigest(...) returns undefined => omit key (drop); else out[key] = digest. applyTransform(value,'hash') is no longer the reachable masking output; local djb2 digest() retained private for non-masking internal use only (deriveHandleId family)",
+    "src/core/data-classification.ts: applyTransform stays a pure 2-arg function (no signature widening) — keyed path confined to maskFields which owns MaskContext (preferred option (i))",
+    "src/core/grant-resolver.ts: ResolverDeps gains keyedDigest?: KeyedDigest (additive optional); resolveFor/makeGrantResolver/projectFields/visibleFields/grantFacetFields signatures and exports UNCHANGED (FE-W23-0008)",
+    "src/core/grant-resolver.ts: buildMaskContext threads resourceType=refToResourceType(handle.ref), tenantId=handle.tenantId (already validated, no re-fetch), keyedDigest=deps.keyedDigest ? (i)=>deps.keyedDigest.digest(i) : undefined into MaskContext",
+    "src/main.ts: read CHOROS_MASK_DIGEST_KEY from env at the composition root (only process.env boundary), decode to Buffer, makeKeyedDigest(key), inject into ResolverDeps; honest-degrade when absent (no key => hash fields drop, server still starts, never keyless, never raw); NEVER log the key; NEVER read process.env under src/core/",
+    ".env.prod.example: add CHOROS_MASK_DIGEST_KEY=REPLACE_WITH_SECURE_HEX_KEY under a '# --- Masking digest key ---' block (T-0061 required-form; .env.prod stays git-ignored RL-3)"
+  ],
+  "fitness_functions": [
+    {"id": "FF-T118-1", "rule": "Core purity preserved (C-4/AC-7): data-classification.ts imports no node:crypto/crypto/process.env in addition to the existing pg/fs/net/http ban — the keyed digest is a passed-in function, not core code.", "ci_check": "Extend ci/checks/data-classification-isolation.sh DC9 FORBIDDEN_IMPORTS with patterns for node:crypto, crypto, and a process\\.env grep over src/core/data-classification.ts; run the script, expect exit 0 / PASS [DC9]."},
+    {"id": "FF-T118-2", "rule": "Cross-tenant oracle killed (AC-1, adversarial): same value V + same field under tenant A vs B (A!=B) via the hash path => DIFFERENT digests.", "ci_check": "vitest in src/__tests__/data-classification.test.ts (or a new hash-oracle suite): build two MaskContexts identical except tenantId, mask the same value; assert out_A[field] !== out_B[field]."},
+    {"id": "FF-T118-3", "rule": "Within-(tenant,field) determinism preserved (AC-2, adversarial; T-0033 AC-13): same tenant+field+value, two mask calls => SAME digest.", "ci_check": "vitest: invoke maskFields twice with deeply-equal ctx/value; assert out1[field] === out2[field] and both defined."},
+    {"id": "FF-T118-4", "rule": "Cross-field separation (AC-3): within one tenant, same value V into two different facetFields => DIFFERENT digests.", "ci_check": "vitest: mask value V on two records whose visible/classified field names differ (facetField A vs B), same tenant+key; assert digest_A !== digest_B."},
+    {"id": "FF-T118-5", "rule": "Keyed not keyless (AC-4, anti-rainbow): two different injected keys => different digests; and the new digest != the old keyless djb2 of V.", "ci_check": "vitest: makeKeyedDigest(key1) vs makeKeyedDigest(key2) on identical input => differ; reproduce the old djb2(V) inline and assert it !== the keyed digest of V."},
+    {"id": "FF-T118-6", "rule": "Fail-closed on absent key (AC-5/D-3): keyedDigest port present but digest() returns undefined (no key / missing) => the hash field is DROPPED (absent from output), raw never present.", "ci_check": "vitest: inject a KeyedDigest whose digest() returns undefined; mask a field that selectTransform routes to hash; assert field NOT in output keys and raw value not present anywhere."},
+    {"id": "FF-T118-7", "rule": "No-port degrade is fail-closed (AC-6/D-4, negative 'port absent => drop'): with NO keyedDigest injected, a field whose selectTransform => hash is DROPPED; the keyless djb2 string is NOT emitted; raw never present.", "ci_check": "vitest: MaskContext with keyedDigest undefined; mask a hash-routed field; assert field absent from output AND the computed old djb2(V) string does not appear in any output value."},
+    {"id": "FF-T118-8", "rule": "Tenant binding real not cosmetic (AC-11): digest changes when ONLY tenantId changes (resourceType, facetField, value, key fixed).", "ci_check": "vitest: two calls to the bound KeyedDigest.digest with inputs differing only in tenantId; assert outputs differ."},
+    {"id": "FF-T118-9", "rule": "Single projection preserved (C-5/AC-8): one maskFields/projectFields path; human-path == agent-path projection byte-identical on a record with a hash-masked field; no new handle->fields export.", "ci_check": "Run ci/checks/single-resolver.sh (expect exit 0); vitest asserting the human-form and agent-payload projections of a hash-masked record are deeply/byte equal."},
+    {"id": "FF-T118-10", "rule": "Import surface preserved (FE-W23-0008/AC-9): resolveFor/makeGrantResolver/projectFields/visibleFields exported + grantFacetFields present; only additive optional members/ports added; grant-resolver.test.ts compiles & passes unchanged.", "ci_check": "Run ci/checks/data-classification-isolation.sh DC17 (expect PASS [DC17]); run vitest src/__tests__/grant-resolver.test.ts unchanged (expect green); tsc typecheck clean."},
+    {"id": "FF-T118-11", "rule": "Determinism overall (AC-10): deeply-equal full inputs (record, grants, rows, tenant, key, now) => deeply-equal masked output; double-invoke maskFields deep-equal.", "ci_check": "vitest: construct two deeply-equal full input bundles, run resolveFor/maskFields, assert deepEqual on output; also double-invoke maskFields and deepEqual."},
+    {"id": "FF-T118-12", "rule": "No regression in the rest of T-0033 (AC-12): full T-0033 deterministic suite + shell fitness checks stay green; only hash output semantics change.", "ci_check": "Run vitest src/__tests__/data-classification.test.ts + src/__tests__/grant-resolver.test.ts and the four shell checks (data-classification-isolation.sh, single-resolver.sh, and the other T-0033 fitness scripts); expect all green."},
+    {"id": "FF-T118-13", "rule": "Secret hygiene (AC-7 env-variant): the new CHOROS_MASK_DIGEST_KEY appears only as a REPLACE_WITH_* placeholder in .env.prod.example; no real key committed; secret-shape fitness stays green.", "ci_check": "Run ci/checks/no-committed-secret.sh and ci/checks/compose-prod-config.sh (FF-T61-5 placeholders-only); expect exit 0 with the new env line present as a REPLACE_WITH_* placeholder; grep confirms .env.prod is git-ignored."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "Decision §2 keyed digest mixes tenantId into the HMAC preimage; FF-T118-2"},
+    {"ac": "AC-2", "covered_by": "§4.1 deterministic HMAC over canonical preimage; FF-T118-3"},
+    {"ac": "AC-3", "covered_by": "§4.1 preimage includes facetField (field-identity); FF-T118-4"},
+    {"ac": "AC-4", "covered_by": "§2 secret-keyed HMAC differs from keyless djb2 and across keys; FF-T118-5"},
+    {"ac": "AC-5", "covered_by": "§4.2 maskFields hash branch: keyedDigest(...)===undefined => drop; FF-T118-6"},
+    {"ac": "AC-6", "covered_by": "§4.2 keyedDigest member absent => drop (D-4); FF-T118-7"},
+    {"ac": "AC-7", "covered_by": "§4.2 no node:crypto/process.env added to core; §5 FF-T118-1 (DC9 extended) + FF-T118-13"},
+    {"ac": "AC-8", "covered_by": "§4.2/§4.3 single maskFields/projectFields path, no second export; FF-T118-9"},
+    {"ac": "AC-9", "covered_by": "§4.2/§4.3 additive optional members/port only, signatures unchanged; FF-T118-10"},
+    {"ac": "AC-10", "covered_by": "§4.1 deterministic digest + §4 pure fold; FF-T118-11"},
+    {"ac": "AC-11", "covered_by": "§2 tenantId is an actual HMAC input; FF-T118-8"},
+    {"ac": "AC-12", "covered_by": "§4 surgical hash-only change, rest of T-0033 untouched; FF-T118-12"},
+    {"ac": "AC-13", "covered_by": "§2.1 NOT APPLICABLE under env_secret custody — conditional on custody=DB; skipped (no key table, no migration 032, no known_tenant_tables.txt change)"}
+  ],
+  "runtime_target": "Silo container (founder home-server /srv/choros docker-compose via Tailscale). New per-silo secret CHOROS_MASK_DIGEST_KEY provisioned into .env.prod by ops at the existing T-0061 secret surface — NOT a new external resource, NOT a GT-4 founder-provision gate (no new server/DB host/service). No migration, no new table, no infra change.",
+  "adr_artifact_path": "docs/design/T-0118-hash-oracle.adr.md",
+  "escalation": ""
+}
