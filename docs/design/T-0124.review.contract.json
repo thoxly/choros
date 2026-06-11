@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0124",
+  "verdict": "changes_requested",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/design/T-0124-document-on-demand.adr.md:25,:125",
+      "issue": "Load-bearing [ЖИВОЙ src/core/grant-resolver.ts:122,:156] cites docstring prose inside the effects?/substitution? port comments, not resolveFor. Actual: resolveFor at :489; reason-returns at :499 (cross_tenant), :520 (no_grant), :614 (not_found). Claim content (reason-union, single PDP chokepoint) is true and live — only the line offset is wrong. Cited at foundation (:25) AND §2.3 step-1 (:125, the core permission-derivation). A wrong file:line on the highest-traffic live marker defeats the claim-legend's contract (precision is its whole purpose).",
+      "suggestion": "Change both cites to src/core/grant-resolver.ts:489 (function); optionally add :499/:520/:614 for the reason-returns."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0124-document-on-demand.adr.md:43",
+      "issue": "bundle-coherence.sh labeled 'НЕ на этой ветке (цитируется как контракт)' but the script IS on-branch and git-tracked (ci/checks/bundle-coherence.sh, T-0082 base via merge-base). Genuinely-absent part is the T-0121 check-report-page-deps extension. Mislabel is safe-direction (understates what is live) so non-blocking, but legend status accuracy must be corrected.",
+      "suggestion": "Re-mark base script as [ЖИВОЙ ci/checks/bundle-coherence.sh]; mark the check-template-deps extension as [НОВАЯ работа]."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
