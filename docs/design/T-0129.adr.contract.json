@@ -1,0 +1,175 @@
+{
+  "task_id": "T-0129",
+  "status": "ready",
+  "decision": "Внедренческая петля — не новая подсистема, а продуктовое прочтение принятого governance-аппарата. Агент-внедренец = тот же класс сотрудника, что config-агент T-0077 (роль→MCP-tools→гранты→бюджет→единый аудит), у которого toolset расширен с 'настраивает формы' до 'ведёт внедрение'. Ноль нового authority-store/модели сред/scope-механизма/второго аудит-лога (NF-1). Внедрение моделируется как сущность implementation с явной машиной фаз (org_ready→interview→draft_bundle→simulation→pilot→promote_pending→production) + обратные рёбра revise и evolve; промоут — единственный человеко-инициируемый переход. Выход интервью — bundle: когерентная единица E12.1 (процесс+формы+статусы+роли+гранты), версионируемая атомарно в draft-тире (extensibility §8), проверяемая 3 детерминированными гардами ДО прогона/промоута: BPMN/DMN-линт (расширение T-0027 lintBpmn), грант-консистентность (решётка T-0018 isNarrowerOrEqual/validateNarrowing), bundle-coherence (extensibility §9 п.4). Клиент бандл не читает (two-floor на весь ЖЦ, NF-2). Граница автономии СТРУКТУРНА: гранты внедренца указывают на authoring_draft (как T-0077), промоут draft→published физически недостижим инструментами агента (ноль грантов authoring_published) — он только ПРЕДЛАГАЕТ через request_promote, промоут всегда human-gate, смысл гейта = подтверждение проверенных сценариев, не diff. Прогон — draft-тир той же системы (не параллельная), 3 режима над одной живой read-only оргструктурой; внешние эффекты в draft fail-closed (T-0034 не действует в draft); статисты НЕ сотрудники; A/B-LLM = параметр прогона. T-0129 проектирует контракт бандла-как-предмета-прогона и оставляет именованный шов для T-0130 (механика симуляции). Пилот = scoped rollout поверх T-0018 (set([node,interval])+TTL). Эволюция = тот же автомат с фазы interview, drain-by-default для in-flight. design-only: механизм/миграции/код — зона build-задач B-1..B-7 + DESIGN T-0130.",
+  "rejected_alternatives": [
+    {
+      "option": "Новый authority-store / отдельная подсистема прав внедренца",
+      "why_not": "NF-1: один control plane. Внедренец — третий случай паттерна 'агент предлагает — человек подтверждает' (config-агент T-0077, 'Предложить гранты' E3.5). Новый store дрейфует от grant-таблицы: право в одном, но не в другом = тихая утечка/отказ. Внедренец переиспользует choros.role/choros.grant/resolveAgentToolset/appendAuditEvent/agent_card.budget_policy_id без единого нового privilege-path."
+    },
+    {
+      "option": "Расширить toolset существующего config-агента T-0077 (один агент для форм И внедрения)",
+      "why_not": "config-агент T-0077 уже засижен и заморожен (migration 044, frozen seed). Расширение его toolset = трогать frozen 044 + risk регрессии FF-T0077-*. Внедренец = отдельная роль implementation-agent аддитивной seed-миграцией (паттерн 044), ноль правок T-0077. Config-агентский toolset (authoring_draft) наследуется, петле-специфичное (interview/simulate/pilot) добавляется."
+    },
+    {
+      "option": "Глобальный переключатель сред dev/prod как пользовательская поверхность",
+      "why_not": "ИТ-концепт, путает нетехничного админа (рамка §4). Поверхность = карточка внедрения ('черновик'/'в проде'/'пилот') с вкладкой 'Прогон'; пара draft/published остаётся машинным слоем (extensibility §8). Состояние = implementation.phase."
+    },
+    {
+      "option": "Новый/параллельный BPMN-линтер для валидации черновика-бандла",
+      "why_not": "AC-6/NF-1: режим 1 прогона и валидация бандла — КОНСУМЕНТЫ lintBpmn(xml):LintResult (T-0027), не новый линтер. Второй парсер = parser-differential с Flowable (T-0027 §2.2) и второй источник истины handle-дисциплины."
+    },
+    {
+      "option": "Новый scope-механизм для пилота (scoped rollout)",
+      "why_not": "AC-10/NF-1: пилот = продуктовое ПОНЯТИЕ поверх решётки T-0018, буквально set([node(оргузел), interval(axis=amount,lo,hi)]) + valid_until, проверенное validateNarrowing. Новая решётка скоупов дублирует доказанную монотонную решётку T-0018 и ломает single-authority."
+    },
+    {
+      "option": "Конфигурационная DRAFT-граница (флаг 'draft-only' в гранте/инструменте)",
+      "why_not": "Подделываема правкой флага. ADR требует СТРУКТУРНОЙ границы (как T-0077 §1): ноль грантов на authoring_published ⇒ resolveAgentToolset не вернёт промоутящий инструмент ⇒ промоут физически недостижим. Подделать = выдать published-грант, что само red-line под dual-control T-0044."
+    },
+    {
+      "option": "Молча создавать недостающие оргузлы/угадывать адресата в интервью",
+      "why_not": "AC-4: расхождение 'правило ссылается на роль/узел, которого в оргдереве нет' обязано подниматься как явный ВОПРОС человеку (ask_interview_question), а не угадываться. Оргструктура при интервью read-only — интервью её читает, не создаёт узлов. Иначе агент придумывает юротдел, которого у клиента нет (reference-process: ≥5 млн → юротдел)."
+    },
+    {
+      "option": "Детализировать механику симуляции (статисты/симулированное время/A/B-движок) в этом ADR",
+      "why_not": "Задача-сестра T-0130 (рамка §3) проектируется ОТДЕЛЬНО. T-0129 владеет контрактом бандла-как-предмета-прогона; T-0130 владеет механикой. Совмещение = два ADR противоречат по швам. Оставлен именованный шов §11 + frozen-контракт стыка (что бандл предоставляет симулятору)."
+    },
+    {
+      "option": "Эволюция ('добавьте этап') как отдельный механизм миграции/диффа",
+      "why_not": "AC-12: эволюция = ребро evolve того же конечного автомата с фазы interview, инкрементально, на живом тенанте. Отдельный механизм = второй путь авторинга, дрейфующий от петли. In-flight инстансы — drain-by-default (extensibility §7), бандл версионируется когерентно."
+    },
+    {
+      "option": "Дообогащение синтетических кейсов из реальных справочников клиента по умолчанию",
+      "why_not": "Риск утечки чувствительных данных контрагента в draft-прогон (рамка §6.3). Консервативный дефолт — генерация кейсов только из интервью; дообогащение → Stage-2 за явным гейтом."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "implementation (проекция фаз петли — НЕ новый authority-store)",
+      "fields": [
+        {"name": "implementation_id", "type": "uuid"},
+        {"name": "tenant_id", "type": "uuid (T-0013 RLS-ключ)"},
+        {"name": "title", "type": "text ('Согласование договоров')"},
+        {"name": "phase", "type": "text ∈ {org_ready, interview, draft_bundle, simulation, pilot, promote_pending, production}"},
+        {"name": "current_bundle_id", "type": "uuid → bundle"},
+        {"name": "agent_employee_id", "type": "uuid → employee (внедренец)"}
+      ]
+    },
+    {
+      "entity": "bundle (когерентная единица E12.1 — связка, версионируемая атомарно)",
+      "fields": [
+        {"name": "bundle_id", "type": "uuid"},
+        {"name": "implementation_id", "type": "uuid → implementation"},
+        {"name": "tier", "type": "text ∈ {draft, published} (логический тир extensibility §8, НЕ новая сущность сред)"},
+        {"name": "version", "type": "int (монотонная; published = промоутнутый draft)"},
+        {"name": "components", "type": "object {process: BPMN-XML, forms: FormSpec[], statuses: StatusModel, roles: RoleRef[], grants: GrantSpec[]}"},
+        {"name": "coherence_hash", "type": "string (версия-связка-хэш; десинк компонентов = ошибка bundle-coherence)"},
+        {"name": "changelog", "type": "SemanticChangelog (наружу: 'добавлено поле X' — НЕ raw diff)"}
+      ]
+    },
+    {
+      "entity": "interview_claim (утверждение интервью + расхождение)",
+      "fields": [
+        {"name": "claim_id", "type": "uuid"},
+        {"name": "text", "type": "text (утверждение о процессе)"},
+        {"name": "org_refs", "type": "RoleRef[] (роли/должности, на которые ссылается)"},
+        {"name": "resolution", "type": "text ∈ {resolved, discrepancy}"},
+        {"name": "discrepancy", "type": "object NULL {kind ∈ {missing_role, ambiguous_assignee, scope_unrepresentable}, question: text}"}
+      ]
+    },
+    {
+      "entity": "implementation-agent (сотрудник — переиспользует аппарат T-0077, НЕ новый класс)",
+      "fields": [
+        {"name": "role", "type": "role 'implementation-agent' (namespace e0, как config-agent e0...003) через choros.role"},
+        {"name": "employee", "type": "employee kind=agent, position_id=NULL (системный агент)"},
+        {"name": "agent_card.budget_policy_id", "type": "uuid → instance_budget (бюджет токены/деньги/действия)"},
+        {"name": "grants", "type": "choros.grant resource_type ∈ {authoring_draft, implementation_op}; ноль authoring_published"},
+        {"name": "toolset", "type": "resolveAgentToolset(tenantId) — проекция грантов, тот же резолвер"}
+      ]
+    }
+  ],
+  "contracts": [
+    "Контракт стыка с T-0130 (frozen seam, §11): bundle предоставляет симулятору — (1) tier='draft' детерминированно отличим от published; (2) components.process прошёл lintBpmn (T-0027); (3) components.roles = RoleRef'ы резолвимые в живой read-only оргструктуре (статист ИГРАЕТ RoleRef, не создаёт employee); (4) components.grants проверены грант-консистентностью; (5) агентные шаги несут параметризуемое model-поле (A/B-LLM); (6) эффект-гранты T-0034 в draft не эффективны (fail-closed). T-0130 НЕ переоткрывает: статисты≠сотрудники, прогон=draft-тир, промоут=только конфиг, эффекты fail-closed.",
+    "Структурная DRAFT-граница: ∄ grant с resource_type='authoring_published' для роли implementation-agent ⇒ промоут физически недостижим инструментами внедренца; promote всегда human-gate (extensibility §8).",
+    "MAY-create (внедренец сам, draft): ask_interview_question, emit_form_code/edit_jsonschema/author_dmn/scaffold_external_worker/write_object_migration/open_draft_branch (унаследованы T-0077, authoring_draft), assemble_bundle, propose_scenarios, run_simulation (режим 1/2), propose_pilot_scope.",
+    "MUST-propose (человек, human-gate): request_promote (draft→published; пишет запрос, не применяет), активация пилота, необратимые red-lines (drop/rename поля, lossy миграция, delete core-справочника — default-DENY на необратимость), затрагивание core-owned справочников (extend-not-replace), приглашение настоящих сотрудников на репетицию.",
+    "3 гарда валидации бандла ДО прогона/промоута: (1) BPMN/DMN-линт = lintBpmn (T-0027, не новый); (2) грант-консистентность = каждый GrantSpec шага имеет разрешимый адресат в оргструктуре + дренируемый старый инстанс не получает грант своей версии (T-0018 isNarrowerOrEqual + extensibility §7 security-десинк); (3) bundle-coherence = форма-схема↔object-schema↔MCP-grants согласованы по версиям (extensibility §9 п.4).",
+    "Пилот = scoped rollout поверх T-0018: published-бандл, чьи гранты = set([node(оргузел), interval(axis='amount',lo=0,hi=100000)]) + valid_until (месяц), проверенные validateNarrowing. Снятие ограничения = расширение скоупа = новый промоут (human-gate).",
+    "Промоут = подтверждение сценариев: request_promote несёт verified_scenarios (id сценариев прогона, помеченных человеком как проверенные); human-gate показывает их, не diff/changelog; переносит только конфиг, не данные (config-only promotion extensibility §7/§8).",
+    "Аудит-вокабуляр (расширяет T-0077 authoring.*, frozen seam): impl.interview.question_asked, impl.interview.claim_resolved, impl.bundle.assembled, impl.scenario.proposed, impl.simulation.run, impl.pilot.proposed, impl.phase.transitioned; promote через authoring.promote.requested (T-0077). Тест-аудит прогона помечен test:true и исключён из комплаенс-выгрузок (не второй лог, только маркер).",
+    "Машина фаз: единственный человеко-инициируемый переход — promote (promote_pending→production); все прочие переходы инициирует внедренец, ни один не пересекает draft→published без human-gate. Фазы НЕ дублируют жизненный цикл инстанса процесса (T-0068) — мета-уровень 'как процесс попал в прод'."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "ADR ссылается на ВСЕ несущие основы поимённо (T-0077, T-0027, T-0018, T-0034) и НЕ вводит запрещённых конструкций ('новый authority-store', 'второй аудит-лог') в утвердительном контексте. Самотест: чек обязан уметь падать.",
+      "ci_check": "ci/checks/impl-loop-adr-foundations.sh (Check-FOUNDATIONS): grep ADR на 4 токена основ + отсутствие banned; SELF-TEST `--self-test`: прогоняет против fixture без 'T-0027' и требует exit!=0 (если фикстура-нарушитель проходит → чек сам падает)."
+    },
+    {
+      "id": "FF-2",
+      "rule": "Структурная DRAFT-граница: ADR утверждает гранты внедренца → authoring_draft (НЕ authoring_published) и физическую недостижимость промоута инструментами агента.",
+      "ci_check": "ci/checks/impl-loop-adr-foundations.sh (Check-DRAFT): ADR содержит 'authoring_draft' + утверждение недостижимости; банит 'внедренец промоутит сам'; SELF-TEST: fixture с 'agent promotes' ⇒ красный (AC-3)."
+    },
+    {
+      "id": "FF-3",
+      "rule": "Линт-делегация: ADR ссылается на lintBpmn/T-0027 как ЕДИНСТВЕННЫЙ линтер и НЕ определяет новый/параллельный (banned: 'новый линтер', второй BPMN-парсер).",
+      "ci_check": "ci/checks/impl-loop-adr-foundations.sh (Check-LINT): присутствие T-0027+lintBpmn, отсутствие banned; SELF-TEST: fixture 'вводим собственный BPMN-парсер' ⇒ красный (AC-6)."
+    },
+    {
+      "id": "FF-4",
+      "rule": "Скоуп-делегация: ADR ссылается на решётку T-0018 (isNarrowerOrEqual/validateNarrowing) для пилота и НЕ вводит новый scope-механизм (banned: 'новый scope-механизм', 'собственная решётка скоупов').",
+      "ci_check": "ci/checks/impl-loop-adr-foundations.sh (Check-SCOPE): T-0018 + lattice-токены присутствуют, banned отсутствует; SELF-TEST: fixture с собственной решёткой ⇒ красный (AC-10)."
+    },
+    {
+      "id": "FF-5",
+      "rule": "MVP/Stage-2 классификация полна: ADR §12 классифицирует ВСЕ 7 примитивов рамки §5; симулированное время помечено 'Flowable-спайк заранее'.",
+      "ci_check": "ci/checks/impl-loop-adr-structure.sh (Check-MVP): §12 содержит 7 строк примитивов + токен 'спайк' у симулированного времени; SELF-TEST: fixture с 6 примитивами ⇒ красный (AC-16)."
+    },
+    {
+      "id": "FF-6",
+      "rule": "Трассировка полна: каждый AC спека (AC-1..AC-20) имеет строку в §17 traceability с указанием секции ADR.",
+      "ci_check": "ci/checks/impl-loop-adr-structure.sh (Check-TRACE): 20 AC-строк в таблице traceability; SELF-TEST: fixture с 19 строками ⇒ красный (AC-18)."
+    },
+    {
+      "id": "FF-7",
+      "rule": "Шов T-0130 присутствует и контрактен: §11 содержит именованный шов + таблицу 'что бандл предоставляет симулятору' (≥5 гарантий) + список НЕ-переоткрываемого.",
+      "ci_check": "ci/checks/impl-loop-adr-structure.sh (Check-SEAM): §11 содержит 'T-0130' + ≥5 строк контракта-стыка; SELF-TEST: fixture без таблицы стыка ⇒ красный."
+    },
+    {
+      "id": "FF-8",
+      "rule": "Решения рамки НЕ переоткрыты: ADR §13.2 утверждает 6 принятых решений как данность со ссылкой на founder-confirmation 2026-06-11; не содержит 'пересматриваем/переоткрываем' к ним.",
+      "ci_check": "ci/checks/impl-loop-adr-structure.sh (Check-FRAME): §13.2 содержит 6 токенов решений + '2026-06-11'; банит 'пересматриваем симуляцию/статистов'; SELF-TEST: fixture с переоткрытием ⇒ красный (AC-19)."
+    },
+    {
+      "id": "FF-9",
+      "rule": "Self-test-гарантия (мета): оба ci-чека при `--self-test` ДОЛЖНЫ выйти 0 (успешно показали покраснение на сломанной фикстуре); если self-test не реализован/фикстура-нарушитель проходит — чек падает. Прямая реализация 'чек обязан уметь падать'.",
+      "ci_check": "bash ci/checks/impl-loop-adr-foundations.sh --self-test && bash ci/checks/impl-loop-adr-structure.sh --self-test"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §2 модель фаз (вход/выход/состояние + рёбра revise/evolve)"},
+    {"ac": "AC-2", "covered_by": "ADR §3 сотрудник-аппарат T-0077 + явное 'нет нового authority-store/privilege-path'"},
+    {"ac": "AC-3", "covered_by": "ADR §4 MAY-create vs MUST-propose + структурная DRAFT-граница; FF-2"},
+    {"ac": "AC-4", "covered_by": "ADR §7 протокол интервью (claim→discrepancy→question, read-only оргструктура, старт из шаблона)"},
+    {"ac": "AC-5", "covered_by": "ADR §5 контракт бандла (когерентная единица, draft-тир, bundle-coherence §9 п.4, тиры §8)"},
+    {"ac": "AC-6", "covered_by": "ADR §6 валидация = расширение T-0027 + грант-консистентность + bundle-coherence; FF-3"},
+    {"ac": "AC-7", "covered_by": "ADR §8.1 три режима + явное 'draft-тир, не параллельная система'"},
+    {"ac": "AC-8", "covered_by": "ADR §8.2 статисты ≠ сотрудники, оргструктура read-only"},
+    {"ac": "AC-9", "covered_by": "ADR §8.3 A/B-LLM как параметр прогона"},
+    {"ac": "AC-10", "covered_by": "ADR §10.1 пилот = scoped rollout поверх T-0018 (set([node,interval])+TTL); FF-4"},
+    {"ac": "AC-11", "covered_by": "ADR §10.2 промоут = подтверждение сценариев, config-only"},
+    {"ac": "AC-12", "covered_by": "ADR §10.3 эволюция = тот же цикл + drain-by-default"},
+    {"ac": "AC-13", "covered_by": "ADR §8.4 red-lines прогона (fail-closed эффекты, config-only, тест-аудит помечен)"},
+    {"ac": "AC-14", "covered_by": "ADR §9 карточка внедрения, явное отвержение переключателя dev/prod"},
+    {"ac": "AC-15", "covered_by": "ADR §10.4 единый аудит через appendAuditEvent + тест-маркер"},
+    {"ac": "AC-16", "covered_by": "ADR §12 MVP/Stage-2 классификация 7 примитивов + Flowable-спайк; FF-5"},
+    {"ac": "AC-17", "covered_by": "ADR §5.3 two-floor на весь ЖЦ (клиент не смотрит на BPMN/DMN/гранты)"},
+    {"ac": "AC-18", "covered_by": "ADR §17 трассировка 20 AC; FF-6"},
+    {"ac": "AC-19", "covered_by": "ADR §13.2 решения рамки не переоткрыты, founder-confirmation 2026-06-11; FF-8"},
+    {"ac": "AC-20", "covered_by": "ADR §14 граница design-only + перечень вытекающих build-задач B-1..B-7 + DESIGN T-0130"}
+  ],
+  "adr_artifact_path": "docs/design/T-0129-implementation-loop.adr.md",
+  "runtime_target": "локально (design-only артефакт — документ + doc-линтеры в npm run fitness). Build-задачи §14 наследуют runtime своих основ: статик-now ядро (B-2/B-3/B-5) локально; режим-2/3 прогона (MVP-late) — draft-тир на живом Flowable (T-0058, сервер /srv/choros, founder-gated GT-4); прод-Keycloak-клиент внедренца — founder-gated. T-0129 сам ничего не провижнит.",
+  "escalation": ""
+}
