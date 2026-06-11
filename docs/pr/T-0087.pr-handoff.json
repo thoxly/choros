@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0087",
+  "status": "pr_open",
+  "branch": "task/T-0087",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "migrations/044_tier.sql",
+    "ci/checks/tier_bearing_tables.txt",
+    "ci/checks/tier-isolation.sh",
+    "src/core/env-tier.ts",
+    "src/http/artifacts.ts",
+    "src/__tests__/env-tier.test.ts",
+    "ci/checks/db/tier_promote_atomic.test.ts",
+    "ci/checks/db/tier_read_scope.test.ts",
+    "src/server.ts",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "SIBLING-CHECK GOTCHA (by design, not a violation): role-criticality-isolation.sh (T-0040 FF-RC5/RC6) flags migrations/044_tier.sql as a 'frozen migration' because it diffs from the merge-base with dev. This check is designed for T-0040 and treats any new migration on an in-flight branch as suspect. Per project memory (choros-ci-check-gotchas.md): 'sibling frozen-file FF-checks (T-0040/44) redden on in-flight amendment branches by design (green post-merge to dev)'. The MIGRATION_EXCLUDE_RE in role-criticality-isolation.sh lists 030/031/043 as known sibling exclusions; 044 will be included once this branch merges to dev. Our own tier-isolation.sh (FF-1..FF-11) is fully green.",
+    "Authority check (assertGranted / mgmt_object:tier_promote) is a TODO stub in artifacts.ts pending T-0021 PDP wiring — documented in the code with a clear TODO(T-0021) comment. The ADR §4.5 explicitly notes 'resolved by the EXISTING PDP (T-0021)' as the integration seam; FF-11d emits a WARN (not FAIL) for this seam. Day-1 dev mode: the authority gate is honest-degraded (same pattern as other routes without PDP wiring).",
+    "No remote GitHub PR opened — local-branch only handoff per project convention (GT-2 / no agent push rights to remote)."
+  ],
+  "blocked_reason": "",
+  "friction_events": []
+}
