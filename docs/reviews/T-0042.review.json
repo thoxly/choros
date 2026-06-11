@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0042",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true,
+    "build": "tsc: 0 errors",
+    "tests": "893 passed / 5 skipped (46 test files)",
+    "fitness": "FF-HIRE-1..7 all PASS"
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/__tests__/agent-hire.test.ts:501-526",
+      "issue": "AC-1 HTTP test is mislabelled and does NOT cover the actual AC-1 requirement. The spec AC-1 says: caller holds NO {mgmt_object:agent, create, scope} grant → 403, zero employee rows, zero Keycloak calls. The test at line 501 labelled 'AC-1' only verifies the MISSING HEADER path (401/UNAUTHENTICATED), not the NO-GRANT path (403/no_mgmt_grant). There is no HTTP integration test that exercises a caller who is authenticated (has an x-dev-user header and a valid employee) but lacks the mgmt_object:agent grant. makeFakePool only has isGenesisOwner: true in all HTTP describe blocks — the 403 path is untested.",
+      "suggestion": "Add a test with isGenesisOwner: false in makeFakePool (and adminGrants=[] via the fake pool returning empty rows for the mgmt_object:% query). Send a valid x-dev-user header; assert response is 403 and fakeKc.created.length === 0."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/__tests__/agent-hire.test.ts (missing test)",
+      "issue": "AC-3 (scope narrowing: hire rejected when target position is outside admin's org-scope) has zero HTTP integration coverage. The ADR §1 step 2 and spec AC-3 both require this case to be tested. No test in agent-hire.test.ts exercises a non-genesis admin whose grant covers department D1 but the target position_id is in department D2.",
+      "suggestion": "Add an HTTP integration test with a non-genesis admin pool (isGenesisOwner: false, adminGrants covering one dept, position returning a disjoint dept). Assert 403 and zero KC calls. The makeFakePool's department_id return in the position lookup can be made configurable."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/agents.ts:99",
+      "issue": "SET LOCAL choros.tenant_id = '${tenantId}' uses string interpolation inside the SQL text. The tenantId is already UUID-validated by assertUuidShape() immediately before withTenantTx is called, so injection is not possible in practice; however, the grants.ts precedent (which this file is supposed to mirror) uses the same pattern and is accepted project-wide. This is a nit for style consistency — the SET LOCAL pattern cannot use parameterized queries in PostgreSQL anyway.",
+      "suggestion": "No change required (matches existing grants.ts pattern). Document the assertUuidShape pre-check as the invariant that makes this safe."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/keycloak/admin-port.ts:105",
+      "issue": "getAdminToken error propagates the raw KC response body in the error message: 'KC admin token failed: ${resp.status} ${resp.body}'. This error is caught in agents.ts and surfaced as a 503 response to the caller. The KC response body is Keycloak's error payload (e.g. {error: 'invalid_client', error_description: '...'}), which does not contain the admin credential itself, but could reveal internal error details. This is acceptable for dev; for production, it should be scrubbed to a generic message before surfacing to callers.",
+      "suggestion": "Nit only (dev scope). Consider wrapping the KC error to strip the response body before surfacing in HTTP 503: 'Keycloak service account creation failed' (generic). The full error can remain in a server-side log."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": false, "note": "Only 401 (missing header) is tested; 403 (no grant) is not tested in HTTP layer. R-1."},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": false, "note": "Scope narrowing not tested in HTTP layer. R-2."},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true, "note": "FF-HIRE-2 static check + runtime test."},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true, "note": "FF-HIRE-3 static check."},
+    {"ac": "AC-14", "covered": true, "note": "FF-HIRE-4 confirms frozen files byte-identical to dcd5a78."},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true, "note": "FF-HIRE-6 static check."},
+    {"ac": "AC-17", "covered": true, "note": "Vacuously — no migration added. FF-HIRE-7 confirms."}
+  ],
+  "role_gap_evidence": []
+}
