@@ -1,0 +1,93 @@
+{
+  "task_id": "T-0146",
+  "status": "ready",
+  "summary": "Новый fitness-чек ci/checks/frozen-checks-immutable.sh, который на task-ветке запрещает изменение или удаление чужих ci/checks/*.sh, разрешая только правки собственного чека задачи (определяемого по заголовку # T-XXXX · во второй строке файла).",
+  "functional": [
+    "FR-1: вычислять diff vs merge-base с dev; при отсутствии merge-base — exit 0",
+    "FR-2: детектировать T-ID задачи из имени ветки task/T-XXXX-*; при несоответствии паттерну — exit 0",
+    "FR-3: определять собственный чек задачи по заголовку # T-XXXX · на второй строке *.sh",
+    "FR-4: запрещать изменение чужих ci/checks/*.sh — FAIL + exit 1",
+    "FR-5: запрещать удаление чужих ci/checks/*.sh — FAIL + exit 1",
+    "FR-6: разрешённые классы правок — новые файлы, known_tenant_tables.txt, src/, migrations/, собственный *.sh, поддиректории ci/checks/db|kc|flowable",
+    "FR-7: зарегистрировать в npm run fitness (package.json)",
+    "FR-8: hostile-probe тест/harness, воспроизводящий AC-1 и AC-3"
+  ],
+  "non_functional": [
+    "NF-1: zero новых runtime-зависимостей, pure bash",
+    "NF-2: алгоритм merge-base совпадает с dual-control-isolation.sh",
+    "NF-3: на dev (diff пуст или нет task-контекста) — exit 0",
+    "NF-4: заголовок # T-0146 · на строке 2 собственного чека",
+    "NF-5: graceful exit 0 при недоступном dev (offline/fresh clone)"
+  ],
+  "out_of_scope": [
+    "Семантический контроль содержимого правок в собственном чеке",
+    "Изменения через non-task ветки (вне task/T-XXXX-*)",
+    "Семантическая валидация bash-кода внутри *.sh",
+    "Проверка src/, migrations/, *.ts файлов",
+    "Отдельный GitHub Actions job для мета-гейта"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Воспроизвести diff 72a02fd: на ветке с TASK_ID≠T-0044 добавить exclusion-строку в ci/checks/dual-control-isolation.sh; frozen-checks-immutable.sh возвращает exit 1 и FAIL с именем файла",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Воспроизвести diff e7dc2ad (до revert): на ветке с TASK_ID≠T-0044 добавить FROZEN_EXCLUDE_RE в ci/checks/dual-control-isolation.sh; чек возвращает exit 1",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "На ветке task/T-0146-*: правка ci/checks/frozen-checks-immutable.sh (заголовок # T-0146 ·) в diff; чек возвращает exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "При вызове чека на ветке dev или когда merge-base = HEAD (diff пуст) — exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "На task-ветке в diff только добавление нового ci/checks/something-isolation.sh (diff-filter=A); чек возвращает exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "На task-ветке удалён ci/checks/role-criticality-isolation.sh (TASK_ID ≠ T-0040); чек возвращает exit 1",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "package.json содержит bash ci/checks/frozen-checks-immutable.sh в строке скрипта fitness; npm run fitness включает его в цепочку",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "В ci/checks/frozen-checks-immutable.sh вторая строка соответствует паттерну ^# T-0146[[:space:]]·; проверяется grep-ом",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "В diff только ci/checks/known_tenant_tables.txt (не *.sh); чек возвращает exit 0",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "Существует исполняемый тест или bash-harness, воспроизводящий AC-1 (должен быть exit 1) и AC-3 (должен быть exit 0) через прямой вызов скрипта в изолированном git-состоянии",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "Файл без T-ID заголовка (actor_event_append_only.sh) изменён на любой task-ветке → FAIL exit 1",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Изменения в ci/checks/db/*.ts, ci/checks/kc/*.sh, ci/checks/flowable/*.sh не нарушают мета-гейт (glob ci/checks/*.sh не захватывает поддиректории)",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0146-frozen-checks-immutable.spec.md"
+}
