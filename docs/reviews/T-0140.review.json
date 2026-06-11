@@ -115,6 +115,18 @@
     "nit_count": 2,
     "base_sha": "930714d",
     "head_sha": "5edd3c1",
-    "r1_r2_r3_r4_r5_r6": "ALL CLOSED"
+    "r1_r2_r3_r4_r5_r6": "ALL CLOSED",
+    "post_rebase_delta": {
+      "rebase_onto": "dev@175bc04",
+      "pre_rebase_approved_sha": "5edd3c1",
+      "test_pass_sha": "f2514c8",
+      "rebase_merge_resolution_sha": "4f51407",
+      "coder_commit_sha": "a532a1c",
+      "head_sha_post_rebase": "a532a1c649c96e079222b2455e3653e368a401c9",
+      "delta_class_a_merge_resolution": "package.json: orchestrator deduped the fitness chain (was 8 seed checks duplicated from pre-rebase merge conflict), restored fitness:seed script. Verified: no duplicates in final fitness chain, fitness:seed present, seed checks appear exactly once each (8 scripts). server.ts: all pre-rebase registrations preserved; T-0140 registerSeedWriteRoutes additive on top of dev registrations — confirmed identical to dev baseline plus T-0140 line.",
+      "delta_class_b_allow_list": "ci/checks/seed/single-source.sh: 3 new entries in allowed_seed_files — src/http/invoke.ts (T-0024), src/http/agents.ts (T-0042), src/http/secret-handle.ts (T-0025). These files contain ORG_SEED_CHILDREN consts that arrived on dev before T-0140 was rebased. Attribution comments reference task IDs and call out dedup as T-0165 follow-up. Check logic unchanged.",
+      "no_extraneous_changes": "git diff f310cc9..HEAD touches exactly 2 files: package.json (4f51407) and ci/checks/seed/single-source.sh (a532a1c). No production code changes, no src/ changes, no new test files.",
+      "post_rebase_ci_run": "npm run ci (post-rebase HEAD a532a1c): tsc 0 errors, eslint 0 errors (2 pre-existing console warnings), fitness ALL PASS (all seed checks including FF-4 single-source), vitest 54 files passed / 2 skipped, 1050 tests passed / 6 skipped — GREEN"
+    }
   }
 }
