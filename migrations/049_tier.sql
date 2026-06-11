@@ -1,4 +1,4 @@
--- 046 · tier (T-0087 E12.6) — two logical tiers (draft→published) in one silo.
+-- 049 · tier (T-0087 E12.6) — two logical tiers (draft→published) in one silo.
 --
 -- Adds a `tier` column to every registered tier-bearing table:
 --   config class:  application, registry_def, "grant"

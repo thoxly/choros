@@ -155,7 +155,7 @@ fi
 echo ""
 echo "FF-8: no createDatabase/provisionContour/compose-per-tier in promote/genesis paths"
 # grep both artifacts.ts and any genesis path
-GENESIS_PATHS=("${SRC}/http/artifacts.ts" "${MIG}/046_tier.sql")
+GENESIS_PATHS=("${SRC}/http/artifacts.ts" "${MIG}/049_tier.sql")
 for f in "${GENESIS_PATHS[@]}"; do
   [[ -f "${f}" ]] || continue
   if grep -qiE 'createDatabase|provisionContour|new Pool.*new.db|compose.*up.*tier' "${f}"; then
@@ -232,17 +232,17 @@ fi
 
 # ---- FF-11a: T-0087 migration is additive ALTER TABLE only (no CREATE TABLE) ----
 echo ""
-echo "FF-11a: T-0087 migration (046_tier.sql) is ALTER TABLE only — no CREATE TABLE"
-TIER_MIG="${MIG}/046_tier.sql"
+echo "FF-11a: T-0087 migration (049_tier.sql) is ALTER TABLE only — no CREATE TABLE"
+TIER_MIG="${MIG}/049_tier.sql"
 if [[ -f "${TIER_MIG}" ]]; then
   if grep -iqE '^\s*CREATE TABLE' "${TIER_MIG}"; then
-    echo "FAIL FF-11a: 046_tier.sql contains CREATE TABLE (must be additive ALTER TABLE only)"
+    echo "FAIL FF-11a: 049_tier.sql contains CREATE TABLE (must be additive ALTER TABLE only)"
     ERRORS=$((ERRORS + 1))
   else
-    echo "PASS FF-11a: 046_tier.sql contains no CREATE TABLE"
+    echo "PASS FF-11a: 049_tier.sql contains no CREATE TABLE"
   fi
 else
-  echo "FAIL FF-11a: 046_tier.sql not found"
+  echo "FAIL FF-11a: 049_tier.sql not found"
   ERRORS=$((ERRORS + 1))
 fi
 
