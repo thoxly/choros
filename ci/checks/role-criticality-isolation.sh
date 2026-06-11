@@ -174,7 +174,7 @@ FROZEN_PATHS_RE='^(src/core/grant-lattice\.ts|src/core/data-classification\.ts|s
 # is the additive ADD COLUMN confirmed2_by owned by T-0044 (dual-control gate),
 # a sibling task. Excluded here for the same reason as 030; any NEW T-0040
 # migration would still be caught (031 is owned + asserted by dual-control-isolation.sh).
-MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by)\.sql$'
+MIGRATION_EXCLUDE_RE='^migrations/(030_grant_proposed_confirmed|031_grant_confirmed2_by|043_invoke_proposal)\.sql$'
 
 before=${ERRORS}
 if [[ -n "${BASE_REF}" ]]; then

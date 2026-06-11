@@ -1,0 +1,116 @@
+{
+  "task_id": "T-0024",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 897,
+    "passed": 892,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "invoke-grant.test.ts > coversInvoke > returns true for matching grant",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "invoke-grant.test.ts > coversInvoke > returns false for operation !== invoke / role mismatch / scope mismatch / freeform scope",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "invoke-grant.test.ts > coversInvoke > returns true for matching grant (command path)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "invoke-grant.test.ts > coversInvoke > returns false for operation !== invoke / no grant",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "invoke-grant.test.ts > encodeInvokeAuditEvent > invoke.request maps fields correctly + seam test",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "invoke-grant.test.ts > encodeInvokeAuditEvent > invoke.command maps mode=command",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "MANUAL PROBE: ac7-400-probe.test.ts (temporary, deleted post-run) — both /request and /command with pool returning empty agent_card rows throw HttpError 400 VALIDATION. RESULT: pass",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "invoke-grant.test.ts > AC-8: invoke grant data shape > Grant with operation:invoke resource_type:agent is accepted",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "invoke-grant.test.ts > coversInvoke > returns false when grant is expired / not yet valid",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "invoke-grant.test.ts > AC-10: tenant isolation > grant from tenant A does not cover tenant B",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "invoke-grant.test.ts > coversInvoke > narrowed scope grant covers its subtree only",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "invoke-grant.test.ts > AC-12: known_tenant_tables.txt > invoke_proposal is listed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13",
+      "test": "invoke-grant.test.ts > AC-13: grant-lattice.ts exports preserved + all 122 grant-lattice tests pass in full vitest run",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14",
+      "test": "invoke-grant-isolation.sh > IG-3: resolveFor signature unchanged + IG-4: grant-lattice.ts byte-unmodified",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [],
+  "failures": [],
+  "edge_case_notes": {
+    "malformed_uuid_agent_role_id": "PASS — coversInvoke does string equality; malformed UUID does not match well-formed role id, returns false safely. No crash.",
+    "empty_body": "PASS — validateInvokeBody (production code, probe-verified) throws HttpError 400 for null, empty {}, missing goal, non-UUID target_agent_id.",
+    "double_command_idempotency": "PASS — coversInvoke is deterministic pure function; writeInvokeAuditEvent can be called twice (append-only audit, no unique constraint). Handler itself does not deduplicate; each invocation creates a new audit row. Acceptable for day-1 (spec allows this).",
+    "expired_grant_scope_mismatch": "PASS — expired grant (valid_until < nowMs) correctly rejected by isEffective. Grant scoped to cs does not cover fin — correctly rejected by isNarrowerOrEqual.",
+    "command_does_not_query_invoke_proposal": "PASS — static check confirms exactly 1 INSERT INTO choros.invoke_proposal in invoke.ts, only in /request handler, not in /command handler."
+  },
+  "fitness_run": {
+    "total_checks": 41,
+    "passed_checks": 39,
+    "failed_checks": 2,
+    "expected_reds": [
+      {
+        "check": "grant-trail-no-new-table.sh Check-1",
+        "reason": "known pre-merge gotcha: known_tenant_tables.txt modified vs dev merge-base (T-0024 adds invoke_proposal). Green post-merge per choros-ci-check-gotchas."
+      },
+      {
+        "check": "role-criticality-isolation.sh FF-RC5/FF-RC6 (3 violations)",
+        "reason": "known pre-merge gotcha: migration 043 and known_tenant_tables.txt appear in diff from dev merge-base, triggering T-0040 frozen-file checks. Documented in review R-4. Fix: add 043 to MIGRATION_EXCLUDE_RE in role-criticality-isolation.sh at merge time."
+      }
+    ],
+    "unexpected_reds": []
+  },
+  "migration_live_test": {
+    "status": "run-live",
+    "container": "choros-postgres-1 (postgres:16, port 55432)",
+    "result": "PASS — migration 043 applied cleanly: CREATE TABLE, ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY, tenant isolation policy (choros.invoke_proposal_tenant_isolation ALL), GRANT to choros_app. pg_class.relforcerowsecurity = true confirmed. Table dropped after test."
+  },
+  "review_finding_ac7": {
+    "reviewer_finding": "R-1 (nit): AC-7 HTTP 400 path for non-agent target had no dedicated test in invoke-grant.test.ts",
+    "tester_action": "Wrote temporary probe test ac7-400-probe.test.ts with mocked pool returning empty agent_card rows. Both /request and /command routes correctly throw HttpError(400, 'VALIDATION', 'target_agent_id is not a provisioned agent'). Tests passed. Probe file deleted.",
+    "verdict": "Product correct — AC-7 400-path is implemented and verified. No product defect."
+  }
+}

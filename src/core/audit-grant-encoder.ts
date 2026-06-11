@@ -129,3 +129,55 @@ export function encodeAssignmentAuditEvent(
     occurred_at: nowMs,
   };
 }
+
+// ---------------------------------------------------------------------------
+// InvokeAuditEvent — shape for invoke request/command audit events (T-0024).
+// Exported so src/http/invoke.ts can pass the correct shape to
+// encodeInvokeAuditEvent.
+// ---------------------------------------------------------------------------
+
+export type InvokeAuditEvent = {
+  kind: "invoke.request" | "invoke.command";
+  actor: string;         // caller employee id
+  targetAgentId: string; // subject = target agent employee id
+  agentRoleId: string;
+  orgScope: unknown;     // the grant's matched org ScopeElement
+  goal: string;
+};
+
+// ---------------------------------------------------------------------------
+// encodeInvokeAuditEvent — pure encoder for invoke request/command events.
+//
+// Parameters:
+//   e          — the InvokeAuditEvent shape
+//   nowMs      — epoch-ms timestamp supplied by caller (Date.now() at call site)
+//   idOverride — optional deterministic UUID for tests; omit in production
+//
+// Returns an AuditEventInput ready to pass verbatim to appendAuditEvent(tx, input).
+// ---------------------------------------------------------------------------
+
+export function encodeInvokeAuditEvent(
+  e: InvokeAuditEvent,
+  nowMs: number,
+  idOverride?: string,
+): AuditEventInput {
+  const mode = e.kind === "invoke.request" ? "request" : "command";
+  return {
+    id: idOverride ?? randomUUID(),
+    type: e.kind,
+    actor: e.actor,
+    subject: e.targetAgentId,
+    scope: e.orgScope,
+    via: null,
+    proposed_by: null,
+    confirmed_by: null,
+    payload: {
+      mode,
+      target_agent_id: e.targetAgentId,
+      agent_role_id: e.agentRoleId,
+      org_scope: e.orgScope,
+      goal: e.goal,
+    },
+    occurred_at: nowMs,
+  };
+}
