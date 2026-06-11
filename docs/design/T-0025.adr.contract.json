@@ -1,0 +1,97 @@
+{
+  "task_id": "T-0025",
+  "status": "ready",
+  "decision": "Add the llm_secret_handle lifecycle as two new isolated files plus one pure validator, editing no frozen file and not grants.ts. (1) src/core/secret-handle-validator.ts: a logic-only (IO-free) module exporting validateSecretHandleShape(value):SecretHandleVerdict (RL-3 not-a-raw-key heuristics — too_short<8, vendor_key_prefix sk-/sk-proj-/xai-/AIza, bare_hex_token ^[0-9a-fA-F]{32,}$, jwt_shape eyJ…three-segment), redactHandle(value) for status, and the SecretResolverPort interface that T-0039's resolveSecret port is structurally compatible with. (2) src/http/secret-handle.ts: registerSecretHandleRoutes(router,pool) with POST/PUT/DELETE/GET on /api/agents/:agentId/secret-handle(/status); each op authenticated via extractActor, authorized by reusing loadAdminContext + a holdsAgentMgmtUpdate predicate requiring a covering confirmed/in-window/delegable mgmt_object:agent/update grant (no new authority logic, scoped-admin.ts untouched), executed under the grants.ts withTenantTx SET-LOCAL+FORCE-RLS pattern (helper duplicated by the codebase's own write-path precedent), and audited through the canonical appendAuditEventInput sink with an AuditEventInput whose payload and every field never carries the handle value. Handle stored as-is after the shape guard; platform never decodes/resolves/calls an LLM (the resolveSecret resolution is the injected port consumed by T-0039 and implemented at Stage-2/T-0045). No new table, no migration (column from 032; no index), migration 033 stays unallocated.",
+  "rejected_alternatives": [
+    {"option": "Append the lifecycle into grants.ts and reuse its withTenantTx/appendAuditEventInput directly.", "why_not": "grants.ts structure is asserted by grant-editor-isolation.sh; adding routes/helpers churns a frozen surface for no gain and couples agent-card custody to the grant editor. A separate module mirrors the T-0039 grant-propose.ts precedent."},
+    {"option": "Export withTenantTx from grants.ts and import it.", "why_not": "Promotes a private helper to a public-surface export = new compatibility contract + frozen-file edit. The ~20-line helper is duplicated instead, per the codebase's own 'write-path needs own transaction' precedent."},
+    {"option": "Programmatic-only API (no HTTP), called only by T-0042.", "why_not": "The status read (FR-4) and the management-UI seam need an HTTP surface; T-0042's hire flow is HTTP. One thin HTTP surface (logic in the pure validator) avoids a later second adapter."},
+    {"option": "Encrypt or hash the handle at rest.", "why_not": "The handle is an opaque reference, not a secret (the secret lives client-side). Encrypting a non-secret adds key-management + a crypto dep for zero threat reduction; the RL-3 posture is enforced by the shape guard, not encryption."},
+    {"option": "Enforce not-a-raw-key via a DB CHECK constraint or trigger.", "why_not": "The heuristic is evolving policy; DDL makes it un-versioned and hard to test, and 032's DDL is deliberately narrow. Validation belongs in the pure TS validator. Preserves NF-5 (no migration)."},
+    {"option": "Add an index on llm_secret_handle (migration 033).", "why_not": "No query filters/joins on the handle value (lookups are by PK (tenant_id, employee_id)); an index buys nothing and would index a sensitive-shaped column. 033 stays unallocated."},
+    {"option": "Return the full handle (or full prefix) in the status response.", "why_not": "Violates NF-1 categorically. redactHandle (scheme prefix / first-8 + ellipsis) gives operator confidence without leaking the value (FR-4)."}
+  ],
+  "object_model": [
+    {
+      "entity": "agent_card (existing, migration 032 — NO change)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid (PK, RLS key)"},
+        {"name": "employee_id", "type": "uuid (PK, = agent_employee_id)"},
+        {"name": "llm_secret_handle", "type": "text NULL — the only column T-0025 reads/writes; opaque reference token, never a raw key"},
+        {"name": "updated_at", "type": "bigint — bumped on set/rotate/revoke"}
+      ]
+    },
+    {
+      "entity": "SecretHandleVerdict (new, secret-handle-validator.ts)",
+      "fields": [
+        {"name": "ok", "type": "boolean (discriminant)"},
+        {"name": "reason", "type": "'too_short' | 'vendor_key_prefix' | 'bare_hex_token' | 'jwt_shape' (only when ok=false)"}
+      ]
+    },
+    {
+      "entity": "SecretResolverPort (new TYPE seam, secret-handle-validator.ts — custody boundary for T-0039)",
+      "fields": [
+        {"name": "resolveSecret", "type": "(handle: string, ctx: { tenantId: string }) => Promise<string> — declared, NOT invoked by T-0025; impl is Stage-2/T-0045; structurally compatible with T-0039 GrantProposeDeps.resolveSecret"}
+      ]
+    },
+    {
+      "entity": "AuditEventInput (existing audit-grant-encoder.ts — built directly, no encoder change)",
+      "fields": [
+        {"name": "type", "type": "'set_llm_secret_handle' | 'rotate_llm_secret_handle' | 'revoke_llm_secret_handle' (NF-4 exact strings)"},
+        {"name": "actor", "type": "string — authenticated actor (extractActor)"},
+        {"name": "subject", "type": "string — agent_employee_id"},
+        {"name": "via", "type": "'secret-handle'"},
+        {"name": "payload", "type": "{ agentEmployeeId: string } — NO handle value, NO redaction, NO endpoint (NF-1/NF-4)"},
+        {"name": "occurred_at", "type": "number (epoch-ms)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "src/core/secret-handle-validator.ts (NEW, pure/IO-free): export function validateSecretHandleShape(value: string): SecretHandleVerdict — reject order: too_short(<8) -> vendor_key_prefix(sk-|sk-proj-|xai-|AIza) -> bare_hex_token(^[0-9a-fA-F]{32,}$) -> jwt_shape(/^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*$/); a passing value is stored AS-IS (safeguard, not a full parser).",
+    "src/core/secret-handle-validator.ts: export function redactHandle(value: string): string — scheme prefix or first-8 + ellipsis; NEVER returns the full value; used only by the status endpoint.",
+    "src/core/secret-handle-validator.ts: export type SecretHandleVerdict = { ok: true } | { ok: false; reason: SecretHandleRejectReason }; export type SecretHandleRejectReason = 'too_short'|'vendor_key_prefix'|'bare_hex_token'|'jwt_shape'.",
+    "src/core/secret-handle-validator.ts: export interface SecretResolverPort { resolveSecret(handle: string, ctx: { tenantId: string }): Promise<string> } — custody port type T-0025 owns; T-0039 resolveSecret is structurally compatible; impl is Stage-2/T-0045 (T-0025 declares, never invokes).",
+    "src/http/secret-handle.ts (NEW): export function registerSecretHandleRoutes(router: Router, pool: pg.Pool): void.",
+    "POST   /api/agents/:agentId/secret-handle        body { handle_value: string } -> 200 { ok: true } | 400 INVALID_HANDLE(reason code) | 401 | 403 ADMIN_GATE_REJECTED | 404 AGENT_NOT_FOUND. Response NEVER echoes handle_value (NF-1).",
+    "PUT    /api/agents/:agentId/secret-handle        body { handle_value: string } -> rotate; same checks; atomic UPDATE under withTenantTx (AC-7); no value echoed.",
+    "DELETE /api/agents/:agentId/secret-handle        -> revoke; sets llm_secret_handle = NULL; same auth gate; 200 { ok: true }.",
+    "GET    /api/agents/:agentId/secret-handle/status -> 200 { bound: boolean, summary?: string } where summary = redactHandle(value); full value NEVER in response (FR-4/AC-9).",
+    "Per-op gate predicate holdsAgentMgmtUpdate(admin: AdminContext, agentOrgScope: ScopeElement): boolean = admin.isGenesisOwner || admin.adminGrants.some(g => g.resourceType==='mgmt_object:agent' && g.operation==='update' && g.delegable && isNarrowerOrEqual(agentOrgScope, g.scope, SEED_ORACLE)). Composes existing exports; scoped-admin.ts byte-unchanged (NF-6).",
+    "Persistence: UPDATE choros.agent_card SET llm_secret_handle = $2, updated_at = $3 WHERE tenant_id = current_setting('choros.tenant_id')::uuid AND employee_id = $1 RETURNING employee_id; rowCount=0 -> 404 (cross-tenant = 0 rows via FORCE RLS, AC-10). UPDATE + appendAuditEventInput in ONE withTenantTx (atomic).",
+    "Reused existing exports (compatibility contracts, T-0025 is a new importer of each, none renamed/removed): loadAdminContext (src/db/org.ts), isNarrowerOrEqual (src/core/scoped-admin.ts), AuditEventInput (src/core/audit-grant-encoder.ts), makePgAuditWriter/appendAuditEvent (src/db/audit-writer.ts), HttpError/readJsonBody/Router/extractActor-pattern (src/http).",
+    "server.ts: one additive import + one call registerSecretHandleRoutes(router, grantsPool) alongside registerGrantsRoutes (additive, no signature/path/location change)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-25-1", "rule": "secret-handle-validator.ts is pure: no IO imports (pg, fetch, node:http/https, net, child_process). The not-a-raw-key heuristic is provably free of network/DB/LLM reach.", "ci_check": "ci/checks/secret-handle-isolation.sh: grep -E for forbidden IO imports in src/core/secret-handle-validator.ts returns empty; non-zero exit on any match (mirrors grant-trail-encoder-isolation.sh Check-1)."},
+    {"id": "FF-25-2", "rule": "No LLM SDK / API client in package.json (dependencies + devDependencies). Zero platform LLM dependency (NF-2 / AC-15).", "ci_check": "grep -E 'openai|anthropic|generative-ai|mistralai|cohere|groq' package.json returns empty (exit non-zero -> pass; any match -> fail)."},
+    {"id": "FF-25-3", "rule": "Dormancy boundary: grep -rn 'llm_secret_handle' src/ matches ONLY src/http/secret-handle.ts (+ its test). No dormancy leak into unrelated modules; autonomy_threshold/budget_policy_id/escalation_rule_id never referenced by T-0025 (AC-16 / FR-8).", "ci_check": "ci/checks/secret-handle-isolation.sh: the set of files containing 'llm_secret_handle' under src/ equals {src/http/secret-handle.ts} (test dir allowed); any other file -> fail. Also assert grep -rn 'autonomy_threshold|budget_policy_id|escalation_rule_id' in the two new T-0025 files is empty."},
+    {"id": "FF-25-4", "rule": "Handle value never appears in logs, error messages, or audit payload (NF-1 / AC-11). The handle_value binding flows only to validateSecretHandleShape, the parameterized SQL $2 bind, and redactHandle (status path).", "ci_check": "ci/checks/secret-handle-isolation.sh: static grep over the two new files asserts (a) no console.*/logger.* line and no template literal includes the handle_value/value/newHandle binding, (b) no HttpError(/new Error( argument list contains that binding, (c) the audit payload object literal contains no value-bearing key. Complemented by AC-11 stdout/stderr capture test."},
+    {"id": "FF-25-5", "rule": "Seed unchanged: all 5 dev-seeded agents retain llm_secret_handle = NULL after merge (AC-19). T-0025 ships no seed mutation.", "ci_check": "ci/checks/secret-handle-isolation.sh: grep over migrations/*.sql for any seed INSERT into agent_card with a non-NULL llm_secret_handle literal returns empty; existing 032 seed assertion stays green."},
+    {"id": "FF-25-6", "rule": "Frozen files byte-unchanged vs merge-base with dev: scoped-admin.ts, grant-lattice.ts, object-handle.ts (NF-6). No second authority surface, no edit to the authority/handle frozen core.", "ci_check": "ci/checks/secret-handle-isolation.sh: git diff --quiet <merge-base HEAD dev> -- src/core/scoped-admin.ts src/core/grant-lattice.ts src/core/object-handle.ts; non-empty diff -> fail (mirrors scoped-admin-isolation.sh FF-11 / grant-trail-encoder Check-2 dynamic merge-base idiom)."},
+    {"id": "FF-25-7", "rule": "tsc --noEmit and eslint are green after T-0025 changes (NF-3 / AC-17).", "ci_check": "npx tsc --noEmit && npx eslint src/core/secret-handle-validator.ts src/http/secret-handle.ts (existing CI typecheck/lint gate)."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.2 set handler: UPDATE agent_card SET llm_secret_handle=$2 under withTenantTx; DB read confirms non-NULL (behavioral test)."},
+    {"ac": "AC-2", "covered_by": "§2.1 validator rule 2 vendor_key_prefix (sk-); set rejected 400 INVALID_HANDLE, column unchanged (no write reached)."},
+    {"ac": "AC-3", "covered_by": "§2.1 validator rule 2 vendor_key_prefix (sk-proj-, a prefix of sk-)."},
+    {"ac": "AC-4", "covered_by": "§2.1 validator rule 3 bare_hex_token (^[0-9a-fA-F]{32,}$)."},
+    {"ac": "AC-5", "covered_by": "§2.1 validator rule 4 jwt_shape (eyJ three-segment regex)."},
+    {"ac": "AC-6", "covered_by": "§2.1 validator rule 1 too_short (<8)."},
+    {"ac": "AC-7", "covered_by": "§2.2 rotate handler: atomic UPDATE inside a single withTenantTx (BEGIN..COMMIT); previous value overwritten, unreadable after."},
+    {"ac": "AC-8", "covered_by": "§2.2 revoke handler sets llm_secret_handle=NULL; §2.2 status read returns bound=false."},
+    {"ac": "AC-9", "covered_by": "§2.2 status read: bound=true + redactHandle(value) summary; full value never in response object (NF-1)."},
+    {"ac": "AC-10", "covered_by": "§5 FORCE RLS + SET LOCAL choros.tenant_id: cross-tenant UPDATE matches 0 rows -> 404; target agent_card unmodified."},
+    {"ac": "AC-11", "covered_by": "§2.4 no-value-in-logs discipline + FF-25-4 static grep; complemented by stdout/stderr capture test."},
+    {"ac": "AC-12", "covered_by": "§2.3 AuditEventInput type='set_llm_secret_handle', subject=agentId, payload has no value; appended via canonical sink in same tx."},
+    {"ac": "AC-13", "covered_by": "§2.3 AuditEventInput type='rotate_llm_secret_handle'; no value in any field."},
+    {"ac": "AC-14", "covered_by": "§2.3 AuditEventInput type='revoke_llm_secret_handle'."},
+    {"ac": "AC-15", "covered_by": "FF-25-2 (no LLM SDK in package.json)."},
+    {"ac": "AC-16", "covered_by": "§6 dormancy boundary + FF-25-3 (llm_secret_handle only in T-0025 files)."},
+    {"ac": "AC-17", "covered_by": "FF-25-7 (tsc --noEmit + eslint green)."},
+    {"ac": "AC-18", "covered_by": "§4 holdsAgentMgmtUpdate gate via loadAdminContext; no covering mgmt_object:agent/update grant -> 403, agent_card unchanged."},
+    {"ac": "AC-19", "covered_by": "§6 no seed mutation + FF-25-5 (no non-NULL llm_secret_handle seed literal)."}
+  ],
+  "runtime_target": "контейнер — Choros dev stack on /srv/choros (homeserver-vm, T-0065). No external resource, no platform LLM credential (FR-6: platform stores an opaque string, makes no outbound call). No GT-4 provision. Verifiable locally against dev Postgres (032 already applied). No founder gate.",
+  "adr_artifact_path": "docs/design/T-0025-byo-llm-secret-custody.adr.md",
+  "escalation": ""
+}
