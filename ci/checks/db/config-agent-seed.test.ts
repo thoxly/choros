@@ -4,9 +4,11 @@
 // Assumes migrations have been applied (the db job runs the runner ×2 before this suite).
 //
 // AC-01: role 'config-agent' exists with correct UUID and slug.
-// AC-02: 7 mcp_tool rows with resource_ops @> '[{"resourceType":"authoring_draft"}]'.
-// AC-03: all 7 tools have pure_compute=true.
-// AC-04: 7 grant rows with resource_type='authoring_draft' for role config-agent.
+// AC-02: 8 mcp_tool rows with resource_ops @> '[{"resourceType":"authoring_draft"}]'
+//         (7 from migration 044 + author_report_page from migration 053 / T-0180).
+// AC-03: all 8 tools have pure_compute=true.
+// AC-04: 9 grant rows with resource_type='authoring_draft' for role config-agent
+//         (7 from migration 044 + 2 from migration 053 / T-0180).
 // AC-05: ZERO grants with resource_type='authoring_published' for role config-agent.
 // AC-09: idempotency — migration already applied; second pass is a no-op (row counts stable).
 // AC-12 (RLS): cross-tenant SELECT for authoring_draft mcp_tool returns 0 rows.
@@ -47,8 +49,8 @@ describe('AC-01: role config-agent exists in dev-silo', () => {
 // AC-02 — 7 mcp_tool rows with authoring_draft resource_ops
 // ---------------------------------------------------------------------------
 
-describe('AC-02: 7 mcp_tool rows with authoring_draft resource_ops', () => {
-  it('exactly 7 mcp_tool rows for dev-tenant with authoring_draft', async () => {
+describe('AC-02: 8 mcp_tool rows with authoring_draft resource_ops', () => {
+  it('exactly 8 mcp_tool rows for dev-tenant with authoring_draft (7 from 044 + author_report_page from 053)', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT name FROM choros.mcp_tool
@@ -57,7 +59,7 @@ describe('AC-02: 7 mcp_tool rows with authoring_draft resource_ops', () => {
           ORDER BY name`,
         [DEV_TENANT],
       );
-      expect(rows.length, 'expected 7 authoring_draft mcp_tool rows').toBe(7);
+      expect(rows.length, 'expected 8 authoring_draft mcp_tool rows').toBe(8);
       const names = rows.map((r: { name: string }) => r.name).sort();
       expect(names).toContain('emit_form_code');
       expect(names).toContain('edit_jsonschema');
@@ -66,6 +68,8 @@ describe('AC-02: 7 mcp_tool rows with authoring_draft resource_ops', () => {
       expect(names).toContain('write_object_migration');
       expect(names).toContain('open_draft_branch');
       expect(names).toContain('request_promote');
+      // T-0180 / T-0121f addition (migration 053)
+      expect(names).toContain('author_report_page');
     });
   });
 });
@@ -74,7 +78,7 @@ describe('AC-02: 7 mcp_tool rows with authoring_draft resource_ops', () => {
 // AC-03 — pure_compute=true for all 7 tools
 // ---------------------------------------------------------------------------
 
-describe('AC-03: pure_compute=true for all authoring_draft tools', () => {
+describe('AC-03: pure_compute=true for all authoring_draft tools (8 total)', () => {
   it('zero rows with pure_compute=false among authoring_draft tools', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
@@ -93,8 +97,8 @@ describe('AC-03: pure_compute=true for all authoring_draft tools', () => {
 // AC-04 — 7 grant rows for role config-agent with authoring_draft
 // ---------------------------------------------------------------------------
 
-describe('AC-04: 7 grants for role config-agent with authoring_draft', () => {
-  it('exactly 7 grant rows with resource_type=authoring_draft for config-agent role', async () => {
+describe('AC-04: 9 grants for role config-agent with authoring_draft', () => {
+  it('exactly 9 grant rows with resource_type=authoring_draft for config-agent role (7 from 044 + 2 from 053)', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT count(*)::int AS n FROM choros."grant"
@@ -103,7 +107,7 @@ describe('AC-04: 7 grants for role config-agent with authoring_draft', () => {
             AND role_id = $2`,
         [DEV_TENANT, ROLE_CONFIG_AGENT],
       );
-      expect(rows[0].n, 'expected 7 authoring_draft grants for config-agent').toBe(7);
+      expect(rows[0].n, 'expected 9 authoring_draft grants for config-agent (7 from mig-044 + 2 from mig-053)').toBe(9);
     });
   });
 });

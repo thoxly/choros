@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0180",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1946,
+    "passed": 1946,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "T-0121f/reachable-via-resolveAgentToolset", "test": "T180-5: tool discoverable via resolveAgentToolset pattern", "result": "pass"},
+    {"ac": "T-0121f/authoring_draft-grants-only", "test": "T180-4: grant e2...008 (create) + e2...009 (update) for config-agent", "result": "pass"},
+    {"ac": "T-0121f/DRAFT-only-no-promote", "test": "ARP-4 + T180-6: no authoring_published in migration or grants", "result": "pass"},
+    {"ac": "T-0121f/audit-vocab-seam", "test": "ARP-7: camelCase resourceType key in resource_ops", "result": "pass"},
+    {"ac": "AC-12/seed-part", "test": "T180-1..T180-3: tool row shape, declares=[], pure_compute=true", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "FF-DC7 known-red (sibling dual-control check; green post-merge)", "result": "n/a", "note": "Expected non-blocking red; all other fitness checks green"},
+    {"check": "ARP nit N-1 closed: grep pure_compute=false exact literal", "result": "pass", "note": "Fixed in 819683a before test run"},
+    {"check": "config-agent-seed.test.ts AC-02/AC-04 counter=fact (7→8 tools, 7→9 grants)", "result": "pass", "note": "Updated in d6f177d; verified live-DB 583/583"},
+    {"check": "Migration 053 applied to dev-DB (no re-apply needed on merge)", "result": "n/a", "note": "See T-0192 cross-branch template-gap note in PR"}
+  ],
+  "failures": [],
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors (pre-existing no-console warnings only)",
+    "fitness_static_checks": "PASS — all checks green except FF-DC7 (known sibling-task gotcha)",
+    "ff_dc7_status": "KNOWN_RED — dual-control-isolation.sh flags migration 053 (not a dual-control migration); green post-merge to dev by design",
+    "vitest_unit": "1363/1363 passed, 6 skipped (flowable integration offline) — 67 test files",
+    "fitness_db_tests": "583/583 passed — author_report_page_seed.test.ts 8/8, config-agent-seed.test.ts AC-02/AC-04 pass, 40 test files"
+  }
+}
