@@ -13,6 +13,7 @@ import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
 import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
+import { registerInvokeRoutes } from "./http/invoke.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
@@ -171,6 +172,8 @@ function buildRouter(
   // Write routes require grantsPool; pool is non-null when DATABASE_URL is set.
   if (grantsPool) {
     registerGrantsRoutes(router, grantsPool);
+    // Register invoke routes (T-0024 E5.4).
+    registerInvokeRoutes(router, grantsPool);
   }
 
   // Register processes endpoints
