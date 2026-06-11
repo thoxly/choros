@@ -88,9 +88,18 @@ CHECK (`T-0019 ADR:147,197`) = `IN ('application','registry','record')`. Инс�
 **Сверка с живым PDP (как грант параметризуется).** `Grant` (`grant-lattice.ts:62-76`)
 ключится на **`resourceType` (закрытый ResourceType) ∧ `operation` (закрытый Operation)
 ∧ `scope` (containment)** + опц. `resourceFacet` (несёт ТОЛЬКО имена полей для masking —
-`grant-resolver.ts:305,321`). Covering-фильтр (`grant-resolver.ts:508-516`) различает грант
-ровно по `g.operation === op` **и** scope-containment записи. **Целевой статус в covering-
-предикат НЕ входит**: `GuardContext.verb` (`grant-resolver.ts:411-417`) — это `ActorEventVerb`
+`grant-resolver.ts:305,321`). Covering-фильтр (`grant-resolver.ts:508-516`) проверяет грант
+ровно по `g.operation === op` **∧ scope-containment** (`isNarrowerOrEqual(refToScope(handle.ref), g.scope)`).
+**`g.resourceType` в admission-предикате НЕ участвует нигде в covering-пути:**
+единственный вызов `refToResourceType(handle.ref)` (`grant-resolver.ts:242`) — для mask-классификации
+поля (T-0033 field-masking), **не** для admission/допуска. Реальный дискриминатор, разделяющий
+грант на record-переход от гранта на instance-terminate, — **scope-containment через
+resource-иерархию**: `refToScope(handle.ref)` → `{nodeLevel, nodeId}`; предикат `isNarrowerOrEqual`
+проверяет `isDescendantOrSelf` (или равенство) в иерархии ресурсных узлов. Именно поэтому
+инстанс `process_instance` дизъюнктен с `record`-грантами: B-8 размещает instance-узел в
+**отдельной ветви** иерархии (node-подпространстве `process_instance`), недостижимой из
+scope record-гранта при правильном вайринге. **[iter-3, R-3]**
+**Целевой статус в covering-предикат НЕ входит**: `GuardContext.verb` (`grant-resolver.ts:411-417`) — это `ActorEventVerb`
 ∈ `{request,prepare,submit,approve,release}` (`actor-event.ts:36-44`, закрытый GT-1-set, БЕЗ
 «terminate»), он **записывается на акт**, но в covering-чек гранта НЕ участвует.
 
@@ -101,7 +110,7 @@ CHECK (`T-0019 ADR:147,197`) = `IN ('application','registry','record')`. Инс�
 |---|---|---|
 | Выразимо ЖИВЫМ covering-алгоритмом? | **ДА** — грант уже ключится на `resourceType`; добавление члена в union + миграция object_kind CHECK не меняют covering-алгоритм (`g.operation===op ∧ containment`). | **НЕТ** — covering-фильтр НЕ параметризуется статусом; грант на «конкретный target-статус» НЕвыразим без **нового grant-предиката** (изменение covering-алгоритма). |
 | NF-1 («не новый тип права/механизм») | **НЕ нарушает** — это новый *ResourceType* под ТЕМ ЖЕ закрытым Operation enum и ТЕМ ЖЕ covering-алгоритмом; не новый тип ПРАВА и не вторая authority-подсистема (см. ниже точную формулировку NF). | **Нарушает** — статус-дискриминированный covering-предикат = новый *механизм* авторизации (NF-1 запрещает). |
-| Не-эскалация (обычный transition-грант ≠ убийство) | **ДА, структурно** — `(op=transition, resourceType=process_instance)` ДИЗЪЮНКТЕН с `(op=transition, resourceType=record)`: covering требует containment, а record-handle никогда не содержит instance-ref. Обычный статус-грант над record **не покрывает** terminate инстанса. Машинно-проверяемо (FF-CA-10). | Зависит от корректности нового предиката; по умолчанию (без него) — эскалация. |
+| Не-эскалация (обычный transition-грант ≠ убийство) | **ДА, через scope-containment** — `(op=transition, resourceType=process_instance)` ДИЗЪЮНКТЕН с `(op=transition, resourceType=record)` благодаря **размещению instance-узла в отдельной ветви resource-иерархии** (B-8): covering (`isNarrowerOrEqual(refToScope(handle.ref), g.scope)`) не находит instance-ref в scope record-гранта, когда B-8 корректно разводит ветви иерархии. Обычный статус-грант над record **не покрывает** terminate инстанса. Машинно-проверяемо (FF-CA-10, включая broad-scope-пробу). **[iter-3, R-3]** | Зависит от корректности нового предиката; по умолчанию (без него) — эскалация. |
 | Объём аддитивного расширения | 1 член ResourceType + 1 миграция object_kind CHECK (+ VOCAB bump) | изменение covering-алгоритма resolveFor + новая колонка/предикат гранта |
 
 **Почему (а) НЕ нарушает NF-1 — сверка с точной формулировкой спеки.** Spec §1 (стр. 70)
@@ -135,15 +144,19 @@ terminate/message (T-0058): пока ResourceType-член и object_kind CHECK 
 
 > `terminate`/`message` НЕ получают новый тип права — они резолвятся на существующую op
 > `transition` (NF-1/AC-2: «Прервать» = `transition`, gap-map §4б, не новая операция).
-> **[iter-2, R-1] Ключевое различение прав:** terminate/message адресуют **новый ResourceType
+> **[iter-2, R-1] [iter-3, R-3] Ключевое различение прав:** terminate/message адресуют **новый ResourceType
 > `process_instance`** (§2.2.1, dormant-аддитив), а НЕ record-ref. Поэтому грант
 > `(op=transition, resourceType=process_instance)` **структурно дизъюнктен** с грантом
 > `(op=transition, resourceType=record)`: обычный transition-грант на смену статуса карточки
-> **НЕ покрывает** terminate привязанного инстанса (covering-фильтр требует resourceType-match,
-> `grant-resolver.ts:508-516`; record-handle не содержит instance-ref). «Право сменить статус»
-> ≠ «право убить инстанс» — теперь это разделено живым примитивом решётки, не имитацией
-> (FF-CA-10). Ветвь «terminate над record-ref op=transition» **отвергнута** как
-> grant-эскалация (детали и rejected_alternatives — §2.2.1).
+> **НЕ покрывает** terminate привязанного инстанса. Дискриминатор — **scope-containment**:
+> covering-фильтр (`grant-resolver.ts:508-516`) проверяет `g.operation===op ∧ isNarrowerOrEqual(refToScope(handle.ref), g.scope)`;
+> `g.resourceType` в admission НЕ участвует (`refToResourceType` вызывается только для mask
+> `grant-resolver.ts:242`). Дизъюнктность обеспечивается **размещением instance-узла в
+> отдельной ветви иерархии** (B-8 — ResourceRef-kind + refToScope/NodeLevel): instance-ref
+> не попадает в containment record-гранта при правильном вайринге. «Право сменить статус»
+> ≠ «право убить инстанс» — разделено живым примитивом решётки (FF-CA-10, включая broad-scope-пробу).
+> Ветвь «terminate над record-ref op=transition» **отвергнута** как grant-эскалация
+> (детали и rejected_alternatives — §2.2.1).
 
 ### 2.4 `CardActionAuditRecord` — контракт аудита (не новая таблица)
 
@@ -227,6 +240,7 @@ defaultCardActions(handle, subject, deps) → CardActionDecl[]
 
 **Видимость на рендере карточки = batch-PDP.** Карточка вызывает `resolveFor` для каждого кандидат-действия. Чтобы не делать N синхронных round-trip, ADR фиксирует **batch-резолв**: одна проекция набора `(op, target)` через `resolveFor` за рендер карточки (PDP уже принимает handle+subject; batch = цикл по op над тем же subject/handle, без второго edge авторизации — то же тело `resolveFor`). Результат — список **исполнимых** действий; неисполнимые не рендерятся (fail-closed, AC-1).
 
+
 > **[iter-2, R-2] Амортизация record-fetch в batch-PDP.** `resolveFor` (`grant-resolver.ts:489`)
 > на шаге 5 (`grant-resolver.ts:611-615`) делает `getRecord(handle.ref)`. В batch над одной
 > карточкой все кандидат-действия делят **один и тот же target** (record/instance), поэтому
@@ -242,7 +256,7 @@ defaultCardActions(handle, subject, deps) → CardActionDecl[]
 ```
 isReady(semantics) :=
   transition | invoke           → true (ЖИВЫЕ пути)
-  terminate  | message          → engineBridgeSupports(semantics)        // [iter-2,R-1] false, пока (а) flowable-client не экспортирует deleteProcessInstance/correlateMessage И (б) ResourceType `process_instance` не добавлен в решётку + object_kind CHECK (§2.2.1). ОБА условия снимаются вместе в B-8.
+  terminate  | message          → engineBridgeSupports(semantics)        // [iter-2,R-1][iter-3,R-3] false, пока (а) flowable-client не экспортирует deleteProcessInstance/correlateMessage И (б) решётка не расширена: ResourceType `process_instance` в grant-lattice.ts + object_kind CHECK (§2.2.1) + ResourceRef-kind (object-handle.ts:40) + refToScope/NodeLevel (grant-resolver.ts:178, grant-lattice.ts:19). ВСЕ аддитивы снимаются вместе в B-8.
 customReady() := formDefTableExists()                                    // false, пока нет form_def
 ```
 
@@ -257,7 +271,7 @@ customReady() := formDefTableExists()                                    // fals
 Карточка договора, привязанный инстанс согласования активен. Кнопка «Прервать согласование»:
 
 1. **Декларация** = `CardActionDecl { id:"abort_approval", semantics:"terminate", operation:"transition", target:{kind:"process_instance", resourceRef:<инстанс, resourceType=process_instance>}, paramsSchema:<reason>, readiness:"dormant" }` + сопутствующее `CardActionDecl { semantics:"transition", target:{kind:"record", resourceRef:<запись>}, цель="Отказано" }`.
-2. **Право [iter-2, R-1]** = **два РАЗНЫХ гранта над РАЗНЫМИ ResourceType**: terminate инстанса требует `resolveFor(subject, op=transition, handle=<инстанс, resourceType=process_instance>)`; transition карточки в «Отказано» — `resolveFor(subject, op=transition, handle=<запись, resourceType=record>)`. Они **структурно дизъюнктны** (covering-фильтр `grant-resolver.ts:508-516` различает по resourceType-match): держатель гранта только на смену статуса карточки **НЕ может прервать инстанс** — для этого нужен отдельный грант на `process_instance`. Нет соответствующего гранта → действие невидимо/отклонено fail-closed (`grant-resolver.ts:489`, tenant-gate :497). Это существующий PDP над аддитивным ResourceType (§2.2.1), не новая модель прав.
+2. **Право [iter-2, R-1] [iter-3, R-3]** = **два РАЗНЫХ гранта над РАЗНЫМИ ResourceType**: terminate инстанса требует `resolveFor(subject, op=transition, handle=<инстанс, resourceType=process_instance>)`; transition карточки в «Отказано» — `resolveFor(subject, op=transition, handle=<запись, resourceType=record>)`. Они **структурно дизъюнктны через scope-containment**: covering-фильтр (`grant-resolver.ts:508-516`) проверяет `g.operation===op ∧ isNarrowerOrEqual(refToScope(handle.ref), g.scope)`; `g.resourceType` в admission НЕ участвует (используется только для mask `grant-resolver.ts:242`). Дизъюнктность гарантируется **размещением instance-узла в отдельной ветви иерархии** (B-8 — расширение ResourceRef-kind + refToScope/NodeLevel): instance-ref не входит в containment record-гранта. Держатель гранта только на смену статуса карточки **НЕ может прервать инстанс** — для этого нужен отдельный грант на `process_instance`. Нет соответствующего гранта → действие невидимо/отклонено fail-closed (`grant-resolver.ts:489`, tenant-gate :497). Это существующий PDP над аддитивным ResourceType (§2.2.1), не новая модель прав.
 3. **«Фиксирует причину»** = `params.reason` → пишется в `audit_event.subject.params` + (для transition-части) `actor_event` payload. Не новый механизм.
 4. **Исполнение:** terminate инстанса = engine-bridge `deleteProcessInstance` (T-0058) — **за гейтом §5** (dormant: REST-путь `flowable-client.ts` экспортирует только start/complete/fail, И ResourceType `process_instance` ещё не в решётке — оба снимаются в B-8); + transition карточки в «Отказано» = mutation-gateway (T-0028) + actor_event (T-0019) над `resourceType=record` — **ЖИВОЙ путь day-1**.
 5. **«Уведомления участникам»** = НЕ card action; card action эмитит переход/событие, доставку реализует T-0120 (граница, не дублируется).
@@ -278,9 +292,9 @@ customReady() := formDefTableExists()                                    // fals
 - аудит каждого срабатывания (executed/denied) — T-0016 + actor_event для transition;
 - прогон «Прервать согласование» (transition-часть исполнима, terminate-часть за гейтом).
 
-**Критерий разморозки terminate/message [iter-2, R-1] — ДВА аддитивных условия, снимаются вместе в B-8:**
+**Критерий разморозки terminate/message [iter-2, R-1] [iter-3, R-3] — ДВА аддитивных условия, снимаются вместе в B-8:**
 1. **REST-путь:** `flowable-client.ts` экспортирует `deleteProcessInstance`/`correlateMessage` (REST `DELETE/POST /runtime/process-instances/{id}` и message-correlation) под mutation-guard контрактом T-0028 FF-G3;
-2. **Адресуемость инстанса в решётке (§2.2.1):** ResourceType `process_instance` добавлен в `grant-lattice.ts` union + миграция `object_kind` CHECK (`IN ('application','registry','record','process_instance')`) + VOCAB bump, под FF-CA-10 (доказывает дизъюнктность с record-transition-грантом — обычный статус-грант НЕ терминирует инстанс).
+2. **Адресуемость инстанса в решётке (§2.2.1) — полный surface расширения:** ResourceType `process_instance` добавлен в `grant-lattice.ts` union + миграция `object_kind` CHECK (`IN ('application','registry','record','process_instance')`) + VOCAB bump **∧** `ResourceRef`-kind (`object-handle.ts:40`, закрытый exhaustive switch — добавляется ветвь `process_instance`) **∧** `refToScope`/`NodeLevel` (`grant-resolver.ts:178`, `grant-lattice.ts:19` — handle→scope-адаптер: instance-узел размещается в отдельной ветви resource-иерархии), под FF-CA-10 (доказывает дизъюнктность через scope-containment: узкий record-грант И broad-scope record-грант (registry/предок) НЕ покрывают instance-handle при правильном вайринге иерархии). **[iter-3, R-3]** Без расширения ResourceRef (compile-error в exhaustive switch) и refToScope/NodeLevel (instance-ref неизвестен иерархии) инстанс остаётся неадресуемым даже после добавления ResourceType-члена.
 
 Когда ОБА условия выполнены — `isReady(terminate|message)` → true, декларация card action НЕ меняется (FF-CA-5). (Отдельная build-задача — потребляет T-0058/T-0064 + аддитивную миграцию решётки.)
 
@@ -305,7 +319,7 @@ customReady() := formDefTableExists()                                    // fals
 | **FF-CA-7** | Каждое срабатывание (executed И denied) пишет `audit_event` (T-0016 open-vocab), не новую таблицу; transition дополнительно `actor_event`. | `card-action-audit.test.ts` (unit) — executed ⇒ 1 `audit_event` (+actor_event для transition); denied-by-PDP ⇒ 1 `audit_event(denied,reason)`; запрет новой audit-таблицы (`audit_writer_isolation.sh`). (AC-7, AC-14) |
 | **FF-CA-8** | Tenant fail-closed: card action над инстансом/записью другого tenant ⇒ `resolveFor` cross_tenant deny до любой мутации/вызова. | `cross-tenant-fitness.sh` (расширяется кейсом card-action) + unit: `handle.tenantId != subject.tenantId` ⇒ denied, нет эффекта. (AC-14, NF-5) |
 | **FF-CA-9** | Дефолтный набор генерится из T-0014 + T-0019 без ручного авторинга: `defaultCardActions` не читает кастом-схему для базового набора; базовая карточка отдаёт доступные transitions из текущего статуса. | `card-action-default-gen.test.ts` (unit) — карточка без кастом-схемы ⇒ дефолт = guarded transitions из статуса (+terminate при инстансе), все под PDP. (AC-4, AC-13) |
-| **FF-CA-10** **[iter-2, R-1]** | **Различение прав terminate-инстанса vs transition-статуса:** грант `(op=transition, resourceType=record)` НЕ покрывает terminate привязанного инстанса; terminate требует отдельного гранта `(op=transition, resourceType=process_instance)`. Обычный transition-грант на смену статуса карточки структурно НЕ даёт права убийства инстанса. | `card-action-terminate-authority.test.ts` (unit, **за гейтом B-8 / activates при разморозке решётки**) — субъект с грантом только на `(transition, record, scope⊇карточка)`, БЕЗ гранта на `(transition, process_instance, …)`: `resolveFor` над instance-handle ⇒ `denied(no_grant)`, нет вызова engine-bridge; обратно — грант на инстанс НЕ покрывает запись. До разморозки решётки покрыто FF-CA-5 (dormant denied=path_not_ready). (AC-3, AC-8, AC-12, NF-1, security-линза) |
+| **FF-CA-10** **[iter-2, R-1] [iter-3, R-3]** | **Различение прав terminate-инстанса vs transition-статуса через scope-containment:** грант `(op=transition, resourceType=record)` — ни узкий (scope=карточка), ни широкий (scope=registry/предок-узел) — НЕ покрывает terminate привязанного инстанса; terminate требует отдельного гранта `(op=transition, resourceType=process_instance)`. Обычный transition-грант на смену статуса карточки структурно НЕ даёт права убийства инстанса: дискриминатор = scope-containment (`isNarrowerOrEqual(refToScope(handle.ref), g.scope)`), instance-узел размещён в отдельной ветви иерархии B-8. **[iter-3, R-3]** Проба широкого скоупа критически необходима: без неё containment-вайринг иерархии не проверен (broad-scope record-грант мог бы содержать instance-узел при неудачном вайринге). | `card-action-terminate-authority.test.ts` (unit, **за гейтом B-8 / activates при разморозке решётки**) — три кейса: (1) субъект с грантом только на `(transition, record, scope=карточка)`, БЕЗ гранта на instance: `resolveFor` над instance-handle ⇒ `denied(no_grant)`, нет вызова engine-bridge; (2) субъект с грантом `(transition, record, scope=registry/предок-узел)` (**broad-scope**), БЕЗ гранта на instance: `resolveFor` над instance-handle ⇒ `denied(no_grant)` — broad-scope record-грант НЕ покрывает instance; (3) грант на инстанс НЕ покрывает запись (обратная проверка). До разморозки решётки покрыто FF-CA-5 (dormant denied=path_not_ready). (AC-3, AC-8, AC-12, NF-1, security-линза) |
 
 ---
 
@@ -320,7 +334,7 @@ customReady() := formDefTableExists()                                    // fals
 | **B-5** | Генератор дефолта `defaultCardActions` из T-0014 + статуса T-0019 + FF-CA-9 | T-0014 (ADR), T-0019 (ЖИВ) | day-1 |
 | **B-6** | Dormant-гейт `isReady`/`engineBridgeSupports`/`customReady` + FF-CA-5 | — | day-1 |
 | **B-7** | Аудит-контракт card_action.* (open-vocab type) + FF-CA-7 | T-0016 (ЖИВ) | day-1 |
-| **B-8** | **Разморозка terminate/message [iter-2, R-1]:** (1) `deleteProcessInstance`+`correlateMessage` в flowable-client (REST) под T-0028 FF-G3 + FF-CA-3; (2) аддитивная миграция решётки — ResourceType `process_instance` в `grant-lattice.ts` + object_kind CHECK + VOCAB bump + FF-CA-10 (дизъюнктность terminate-инстанса от record-transition) | **T-0058 (НЕ DONE)** + аддитив решётки (§2.2.1) | за гейтом §7 |
+| **B-8** | **Разморозка terminate/message [iter-2, R-1] [iter-3, R-3]:** (1) `deleteProcessInstance`+`correlateMessage` в flowable-client (REST) под T-0028 FF-G3 + FF-CA-3; (2) аддитивная миграция решётки — полный surface: ResourceType `process_instance` в `grant-lattice.ts` + object_kind CHECK + VOCAB bump **∧** `ResourceRef`-kind (`object-handle.ts:40`, exhaustive switch — ветвь `process_instance`) **∧** `refToScope`/`NodeLevel` (`grant-resolver.ts:178`, `grant-lattice.ts:19` — instance-handle→scope-адаптер, размещение в отдельной ветви иерархии) + FF-CA-10 (дизъюнктность terminate-инстанса от record-transition, включая broad-scope-пробу). Без ResourceRef-kind — compile-error exhaustive switch; без refToScope/NodeLevel — instance-ref неизвестен иерархии containment. | **T-0058 (НЕ DONE)** + аддитив решётки (§2.2.1) | за гейтом §7 |
 | **B-9** | **Разморозка кастом-слоя:** таблица `form_def`, promotion члена bundle (T-0082-deferral), card-action-конфиг в bundle + FF-CA-4, FF-CA-6 | **T-0073/T-0079/T-0082 form_def (НЕ DONE)** | за гейтом §7 |
 | **B-10** | Прогон кейса «Прервать согласование» как интеграционный (transition-часть day-1; terminate-часть после B-8) | B-1..B-7 | day-1 (terminate после B-8) |
 
