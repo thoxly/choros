@@ -9,7 +9,7 @@
 //   DEL-3  — DELETE published row with promoting GUC succeeds (rowCount = 1)
 //   DEL-4  — UPDATE on published row still raises (regression guard for 049 semantics)
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { appUrl, withClient, uuid, TENANT_A } from './_helpers.js';
 
 const TENANT = TENANT_A;
@@ -64,6 +64,24 @@ async function countApp(url: string, id: string): Promise<number> {
   });
   return cnt;
 }
+
+// ---------------------------------------------------------------------------
+// Cleanup — remove any del-app-* rows left by DEL-2/DEL-4 (published rows
+// require the promoting GUC to be deleted, per 049/050 trigger semantics).
+// ---------------------------------------------------------------------------
+
+afterEach(async () => {
+  await withClient(appUrl(), async (c) => {
+    await c.query('BEGIN');
+    await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+    await c.query("SET LOCAL choros.promoting = '1'");
+    await c.query(
+      `DELETE FROM choros.application WHERE tenant_id = $1 AND slug LIKE 'del-app-%'`,
+      [TENANT],
+    );
+    await c.query('COMMIT');
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Tests
