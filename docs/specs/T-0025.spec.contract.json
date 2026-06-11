@@ -1,0 +1,136 @@
+{
+  "task_id": "T-0025",
+  "status": "ready",
+  "summary": "Implement lifecycle operations (set/rotate/revoke/status) for agent_card.llm_secret_handle — an RL-3 opaque reference token that points to a client-hosted LLM API credential; platform governs the handle, client hosts the secret; no raw credential is ever stored, logged, or transmitted by the platform; zero platform LLM dependency.",
+  "functional": [
+    "FR-1 setSecretHandle(tenant_id, agent_employee_id, handle_value): grant-checked write of handle to agent_card.llm_secret_handle; emits audit_event; handle value never echoed in response",
+    "FR-2 rotateSecretHandle(tenant_id, agent_employee_id, new_handle_value): grant-checked atomic overwrite; emits audit_event; no value in response",
+    "FR-3 revokeSecretHandle(tenant_id, agent_employee_id): grant-checked NULL-set of llm_secret_handle; emits audit_event",
+    "FR-4 getSecretHandleStatus(tenant_id, agent_employee_id): returns bound:bool and redacted prefix summary; full handle value NEVER returned via any API",
+    "FR-5 RL-3 handle shape validation (not-a-raw-key guard): reject values starting with sk-/sk-proj-/xai-/AIza, bare 32+ hex strings, JWTs (eyJ prefix), or values shorter than 8 characters",
+    "FR-6 zero platform LLM call: no code path introduced by T-0025 initiates an LLM API call; platform operable with all handles NULL",
+    "FR-7 tenant isolation: all handle operations execute under SET LOCAL choros.tenant_id + FORCE RLS on agent_card; cross-tenant access impossible by construction",
+    "FR-8 dormancy boundary: T-0025 breaks agent_card dormancy only for llm_secret_handle column; autonomy_threshold/budget_policy_id remain dormant (no enforcement path added)"
+  ],
+  "non_functional": [
+    "NF-1 handle_value never appears in HTTP responses, application logs, audit event payload, or error messages",
+    "NF-2 no LLM SDK or LLM API client added to package.json (openai, @anthropic-ai/sdk, @google/generative-ai, mistralai, etc.)",
+    "NF-3 tsc --noEmit green, no new ESLint violations",
+    "NF-4 audit_event row emitted for every set/rotate/revoke call with type in {set_llm_secret_handle, rotate_llm_secret_handle, revoke_llm_secret_handle}; handle value absent from all audit fields",
+    "NF-5 no new migration required (llm_secret_handle column exists from migration 032); migration 033 available if architect needs an index",
+    "NF-6 frozen files (object-handle.ts, grant-lattice.ts, mutation-gateway-isolation.sh FROZEN_EXPORTS) not modified"
+  ],
+  "out_of_scope": [
+    "resolving the handle to an actual LLM credential at call-time (Stage-2, T-0045)",
+    "any LLM API call from the platform",
+    "agent provisioning hire flow (T-0042 owns; T-0025 provides primitives T-0042 may call)",
+    "autonomy threshold / budget enforcement (Stage-2 E5.7/E5.9)",
+    "A2A call-graph breakers (Stage-2 E5.8)",
+    "data-egress policy enforcement (Stage-2 T-0045 / E5.10)",
+    "egress_policy table (T-0041)",
+    "JWT to employee resolution (T-0060)",
+    "storage of actual LLM API credential anywhere in the platform",
+    "client-side secret management (Vault, env, secrets manager — client owns)",
+    "validating that a stored handle actually resolves to a real credential",
+    "management UI (frontend concern; spec covers API contract only)"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "setSecretHandle(tenant, agentId, validValue) writes llm_secret_handle in agent_card and returns success; DB read confirms non-NULL.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "setSecretHandle with a value starting with 'sk-' is rejected; agent_card.llm_secret_handle unchanged.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "setSecretHandle with a value starting with 'sk-proj-' is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "setSecretHandle with a 32-character hex-only string is rejected (bare token heuristic).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "setSecretHandle with a well-formed JWT (eyJ prefix, three dot-separated Base64url segments) is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "setSecretHandle with a value shorter than 8 characters is rejected.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "rotateSecretHandle(tenant, agentId, newValue) atomically overwrites the previous handle; previous value unreadable after rotation.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "revokeSecretHandle(tenant, agentId) sets llm_secret_handle = NULL; subsequent status call returns {bound: false}.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "getSecretHandleStatus(tenant, agentId) returns {bound: true} when handle is set; full handle value is NOT present in the response.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Cross-tenant setSecretHandle (caller tenant_id != agent tenant_id) is rejected; target agent_card unmodified.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-11",
+      "text": "No log line (stdout/stderr captured in test) contains the submitted handle value for any setSecretHandle call (success or rejection).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-12",
+      "text": "Successful setSecretHandle produces an audit_event row with type='set_llm_secret_handle', subject=agent_employee_id; the audit row contains no field with the handle value.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-13",
+      "text": "Successful rotateSecretHandle produces an audit_event row with type='rotate_llm_secret_handle'; no handle value in any audit field.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-14",
+      "text": "Successful revokeSecretHandle produces an audit_event row with type='revoke_llm_secret_handle'.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "package.json (dependencies + devDependencies) contains no LLM SDK: grep -E 'openai|anthropic|generative-ai|mistralai|cohere|groq' package.json returns empty.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "grep -r 'llm_secret_handle' src/ returns matches ONLY in files introduced or modified by T-0025 (no dormancy leak into unrelated modules).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-17",
+      "text": "tsc --noEmit and eslint are green after T-0025 changes.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-18",
+      "text": "setSecretHandle called without the management grant (mgmt_object:agent, update) is rejected with an authorization error; agent_card unchanged.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-19",
+      "text": "All 5 dev-seeded agents retain llm_secret_handle = NULL after T-0025 code is merged (no accidental seed mutation).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0025-byo-llm-secret-custody.spec.md"
+}

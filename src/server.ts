@@ -15,6 +15,7 @@ import { registerRightsRoutes } from "./http/rights.js";
 import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
 import { registerInvokeRoutes } from "./http/invoke.js";
 import { registerGrantProposeRoute } from "./http/grant-propose.js";
+import { registerSecretHandleRoutes } from "./http/secret-handle.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
@@ -182,6 +183,7 @@ function buildRouter(
     // The path is a distinct fixed segment — it is never captured by the
     // existing '/api/grants/:id/revoke' pattern.
     registerGrantProposeRoute(router, grantsPool);
+    registerSecretHandleRoutes(router, grantsPool);
   }
 
   // Register processes endpoints
