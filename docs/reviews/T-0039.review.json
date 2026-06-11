@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0039",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": false },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/http/grant-propose.ts:43",
+      "issue": "CI RED (ESLint error): function `isValidUuid` is defined but never used (`@typescript-eslint/no-unused-vars`). The function was likely scaffolded early in development and superseded by the `assertUuidShape` helper that uses `UUID_RE` directly. Dead code blocks lint and must be removed.",
+      "suggestion": "Delete the `isValidUuid` function (lines 43-45) in `src/http/grant-propose.ts`. Validate via `UUID_RE.test()` directly (as `assertUuidShape` already does) or re-use `assertUuidShape` if needed elsewhere."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/__tests__/grant-propose.test.ts:109",
+      "issue": "CI RED (ESLint error): `baseUrl` is declared with `let` but never reassigned (`prefer-const`). The variable is set to the empty string `\"\"` on line 109 and is only ever read via the getter on the returned object; the `let` declaration is never written outside initialization.",
+      "suggestion": "Change `let baseUrl = \"\";` to `const baseUrl = \"\";` on line 109 of the test file. Note: the `get baseUrl()` accessor references the const closure, which is valid in JS/TS."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-01", "covered": true },
+    { "ac": "AC-02", "covered": true },
+    { "ac": "AC-03", "covered": true },
+    { "ac": "AC-04", "covered": true },
+    { "ac": "AC-05", "covered": true },
+    { "ac": "AC-06", "covered": true },
+    { "ac": "AC-07", "covered": true },
+    { "ac": "AC-08", "covered": true },
+    { "ac": "AC-09", "covered": true },
+    { "ac": "AC-10", "covered": true },
+    { "ac": "AC-11", "covered": true },
+    { "ac": "AC-12", "covered": true },
+    { "ac": "AC-13", "covered": true },
+    { "ac": "AC-14", "covered": true },
+    { "ac": "AC-15", "covered": true }
+  ],
+  "role_gap_evidence": []
+}
