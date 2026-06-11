@@ -1,0 +1,67 @@
+{
+  "task_id": "T-0164",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/config-agent-seed.sh:161-168",
+      "issue": "The new self-scope anchor uses `find ... -name 'config-agent*.ts'`. This glob matches filenames starting with 'config-agent' and ending with '.ts'. If a future file were named e.g. 'config-agent-utils.ts' by an unrelated task that happened to use that prefix it would be blocked. That said, the prefix is domain-specific and T-0077 owns it; the risk is low and consistent with intent.",
+      "suggestion": "No code change required. Accept as designed. If naming conventions expand, coder can tighten the glob later."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "AC-GATE-1",
+      "covered": true,
+      "note": "bash ci/checks/config-agent-seed.sh → all 9 checks PASS including Check-9 (new self-scope). Exit 0."
+    },
+    {
+      "ac": "AC-GATE-2",
+      "covered": true,
+      "note": "bash ci/checks/frozen-checks-immutable.sh → PASS [FF-FCI1]: ci/checks/config-agent-seed.sh is own check for T-0077 (BASE_REF header = '# T-0077 · config-agent-seed fitness check (E11.6).'; TASK_ID from branch 'task/T-0077-check9-selfscope-T0164' = T-0077). No header tampering detected."
+    },
+    {
+      "ac": "AC-GATE-3",
+      "covered": true,
+      "note": "npm run ci → tsc + eslint (2 pre-existing console.log warnings, 0 errors) + all fitness checks + vitest: 53 files passed, 1042 tests passed, 0 failures."
+    },
+    {
+      "ac": "AC-OWNERSHIP-1",
+      "covered": true,
+      "note": "T-0146 residual-path §10: reviewer sees header diff (line 2 unchanged in diff — identical to BASE_REF '# T-0077 ·') and branch name 'task/T-0077-check9-selfscope-T0164' together. Ownership is transparent and unforged. BASE_REF anchor (3d9aa75) is authoritative; working-copy header not relied upon by frozen-checks-immutable.sh."
+    },
+    {
+      "ac": "AC-OWNERSHIP-2",
+      "covered": true,
+      "note": "T-0164 in control.db: id=T-0164, status=in_progress, task_type=mechanical, approved_by_founder=1. Fix is registered, not rogue. Task title explicitly states 'ветка несёт префикс T-0077 (ownership-модель T-0146, residual-path под ревью)' — the ownership intent was declared upfront."
+    },
+    {
+      "ac": "AC-INTENT-1",
+      "covered": true,
+      "note": "Old Check-9 invariant (merge-base diff --diff-filter=A on ALL src/**/*.ts) was OVERLY BROAD — it blocked every feature branch adding any new src file, which was never the T-0077 invariant. T-0077 invariant is: config-agent is delivered as data-seed only (migration 044), no runtime src/ module. New check enforces exactly this: scan for config-agent*.ts in src/ outside __tests__. This is PRECISION GAIN, not invariant weakening."
+    },
+    {
+      "ac": "AC-INTENT-2",
+      "covered": true,
+      "note": "New check is merge-base-independent: it scans the working tree directly. This is correct because the invariant is an absolute property (no config-agent runtime file should ever exist in src/), not a relative-to-branch property. The old check was not only over-broad but also structurally wrong for an absolute invariant."
+    }
+  ],
+  "ownership_rationale": {
+    "residual_path_used": true,
+    "t0146_adr_section": "§10 mitigation: reviewer sees header diff and branch name together",
+    "branch": "task/T-0077-check9-selfscope-T0164",
+    "task_id_from_branch": "T-0077",
+    "file_header_line2_base_ref": "# T-0077 · config-agent-seed fitness check (E11.6).",
+    "file_header_line2_working_copy": "# T-0077 · config-agent-seed fitness check (E11.6).",
+    "header_unchanged": true,
+    "base_ref_sha": "3d9aa75",
+    "fix_sha": "50c31d8",
+    "t0164_in_control_db": true,
+    "t0164_approved_by_founder": true,
+    "verdict_on_ownership": "LEGITIMATE — ownership header unaltered in BASE_REF, branch name matches, T-0164 registered and approved in control.db, T-0146 residual-path followed transparently"
+  },
+  "role_gap_evidence": []
+}
