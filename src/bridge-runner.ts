@@ -39,9 +39,18 @@ async function main(): Promise<void> {
   const maxTasksPerTopic = Number(process.env["BRIDGE_MAX_TASKS"] ?? "10");
   const retries = Number(process.env["BRIDGE_RETRIES"] ?? "3");
 
+  const flowableBaseUrl =
+    process.env["FLOWABLE_BASE_URL"] ?? "http://flowable:8082/flowable-rest/service";
+  const flowableAdminUser = process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin";
+  const flowableAdminPassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+
   const pool = new Pool({ connectionString: dbUrl });
   const jobStore = new PostgresJobStore(pool);
-  const flowableClient = makeFlowableClient();
+  const flowableClient = makeFlowableClient({
+    baseUrl: flowableBaseUrl,
+    adminUser: flowableAdminUser,
+    adminPassword: flowableAdminPassword,
+  });
 
   // Set the tenant GUC for all operations in this runner.
   // We use a dedicated connection to set the session-level GUC.
