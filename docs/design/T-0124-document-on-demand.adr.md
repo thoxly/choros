@@ -22,7 +22,7 @@
   - presign-after-allow: ни байта без предшествующего allow PDP по записи-владельцу — T-0119 §3 step5 (`:89`–`:96`). «Здесь только приёмная поверхность снапшота, не рендер — T-0124» — T-0119 `:19`.
 
 - `docs/design/T-0021-grant-resolver-pdp.adr.md` + **живой код** `src/core/grant-resolver.ts` (статус: DONE, код на ветке T-0124):
-  - `resolveFor(handle, subject, op)` — единый PDP-чокпойнт, action-time, fail-closed; reason-union `"no_grant" | "cross_tenant" | "not_found"` — `src/core/grant-resolver.ts:122`,`:156`.
+  - `resolveFor(handle, subject, op)` — единый PDP-чокпойнт, action-time, fail-closed; reason-union `"no_grant" | "cross_tenant" | "not_found"` — `src/core/grant-resolver.ts:489` (function); reason-returns `:499/:520/:614`.
   - `projectFields(rawFields, visibleFieldSet, maskCtx?)` → НОВЫЙ объект только из видимых полей; делегирует `maskFields` — `src/core/grant-resolver.ts:290`–`:298`.
   - `grantFacetFields` / facet-механика: strictly-absent facet ⇒ whole-resource; well-formed `{fields:[...]}` ⇒ narrow; malformed ⇒ `[]` (zero) — `src/core/grant-resolver.ts:321`–`:336`.
   - `maskFields` транс­форм `drop` = **омиссия ключа** (capability-not-text), не маскированная строка; null clearance / unknown class / fieldRank<0 ⇒ `drop` (fail-closed) — `src/core/data-classification.ts:127`,`:318`–`:322`,`:432`–`:433`.
@@ -40,7 +40,7 @@
 
 **Подсистема согласованности «производный артефакт ↔ поля схемы» (FR-8) — НЕ четвёртый механизм:**
 - T-0072 (named-binding): **живой код** `src/core/binding-compat.ts` — `checkBindingCompat` (чистая функция, `BindingViolation`, типы `missing_in_schema`/`missing_in_bpmn`) — `src/core/binding-compat.ts:37`–`:47`,`:66`+.
-- T-0082 (bundle-coherence): **живой реестр** `ci/checks/bundle_members.txt` (TSV, FROZEN CONTRACT: «добавить член = одна строка + pass `bundle-coherence.sh`»); `bundle-coherence.sh` = единая исполняемая точка fail-closed — T-0082 ADR §2 (`docs/design/T-0082-bundle-coherence.adr.md:42`–`:51`). (Статус: реестр-файл и deferral-контракт DONE; `bundle-coherence.sh`-скрипт DONE на dev, на ветке T-0124 присутствует `bundle_members.txt`/`known_tenant_tables.txt`, сам скрипт — НЕ на этой ветке, цитируется как контракт.)
+- T-0082 (bundle-coherence): **живой реестр** `ci/checks/bundle_members.txt` (TSV, FROZEN CONTRACT: «добавить член = одна строка + pass `bundle-coherence.sh`»); `bundle-coherence.sh` = единая исполняемая точка fail-closed — T-0082 ADR §2 (`docs/design/T-0082-bundle-coherence.adr.md:42`–`:51`). (Статус: реестр-файл и `bundle-coherence.sh`-скрипт **[ЖИВОЙ ci/checks/bundle-coherence.sh]** — расширение check-report-page-deps от T-0121 — КОНТРАКТ-DONE; `check-template-deps`-расширение для T-0124 = `[НОВАЯ работа]`.)
 - T-0121 (отчёты-как-UI): `report_page_dep` (реестр зависимостей страница↔`field_key` схемы, `dep_kind ∈ {read,aggregate}`, `stale boolean`) + **`checkReportPageDepFields`** из `src/core/report-page-compat.ts` (расширение T-0072, «один control plane согласованности», NF-1); деструктив-дисциплина: drop/rename `field_key` при активном non-stale dep → `409 destructive_schema_change`, не применяется; force → `stale=true` + депромоут + один audit-event — T-0121 ADR §2.1/§5 (`docs/design/T-0121-reports-pages.adr.md:25`,`:33`,`:135`–`:143`). (Статус: T-0121 DONE на dev; `report_page_dep`-миграция и `report-page-compat.ts` НЕ на ветке T-0124, цитируются как контракт-прецедент.)
 
 > **Легенда статусов claim'ов в этом ADR:** `[ЖИВОЙ]` = file:line кода/миграции на ветке T-0124; `[КОНТРАКТ-DONE]` = file:line чужого ADR/реестра, механизм DONE на dev (этой ветке предшествует merge-base, миграция/код придёт с rebase на dev перед impl); `[НОВАЯ работа]` = строит coder T-0124. Прошлые blocking случались именно из claim'ов про «существующий» механизм без кода — здесь каждый помечен.
@@ -122,7 +122,7 @@ Document-on-demand вводится как **одна чистая render-опе
 ### 2.3 Право рендера = производная прав чтения (FR-5, NF-1, NF-3) — потребление T-0021
 
 Рендер НЕ вводит permission-механизма. Для каждой записи-источника:
-1. `resolveFor(deps.resolver, handleOf(recordRef), subject, "read")` `[ЖИВОЙ src/core/grant-resolver.ts:122]`.
+1. `resolveFor(deps.resolver, handleOf(recordRef), subject, "read")` `[ЖИВОЙ src/core/grant-resolver.ts:489]`.
 2. `{denied:true}` ⇒ запись **не попадает** в документ (для реестра — отсутствует строка; не «строка-прочерк», раскрывающая существование). Для одиночной справки нулевой доступ ⇒ render-операция возвращает `{ denied:true, reason }` (отказ, не пустой частичный документ с утечкой — NF-3).
 3. `{denied:false, fields}` ⇒ в документ идёт **только `projectFields`-результат** `[ЖИВОЙ :290]`: невидимое поле физически отсутствует (транс­форм `drop` = омиссия ключа `[ЖИВОЙ data-classification.ts:127]`), не маскированная строка.
 
