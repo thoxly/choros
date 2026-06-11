@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0187",
+  "status": "pr_open",
+  "branch": "task/T-0187-fitness-key-dedup",
+  "merge_target": "dev",
+  "base_commit": "1e73100f27f182157bc7e659cf180b1f6b220eaa",
+  "head_commit": "3c2af25",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0187 fixes the silent duplicate-fitness-key gate hole in package.json: merges two top-level 'fitness' keys into exactly one (96 entries = 95 bash checks + guard), re-inserting the two lost checks (named-binding-isolation.sh, npm run build) at their correct position between config-agent-seed.sh and worker-auth-config-failfast.sh. Adds ci/checks/package-json-no-dup-keys.sh — a Node.js-based duplicate-key guard with --self-test — registered as the 96th entry. npm run ci: 1107/1107 vitest passed, all 96 fitness entries green, 0 TypeScript errors. REVIEW approved (0 findings).",
+  "commits": [
+    {
+      "sha": "6adca03",
+      "phase": "SPEC",
+      "message": "spec(T-0187): fitness key-dedup — spec + contract"
+    },
+    {
+      "sha": "d617d3a",
+      "phase": "BUILD",
+      "message": "build(T-0187): merge duplicate fitness keys + add dup-key guard"
+    },
+    {
+      "sha": "3c2af25",
+      "phase": "REVIEW",
+      "message": "T-0187 REVIEW: approved — union complete (0 lost), guard honest, 6 AC covered"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "3c2af25",
+      "findings_resolved": [],
+      "findings_nit": [],
+      "artifact": "docs/design/T-0187.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1107,
+      "passed": 1107,
+      "failed": 0,
+      "ac_coverage": "6/6",
+      "fitness_entries": 96,
+      "fitness_static": "PASS — all 96 entries green; named-binding-isolation.sh (L-1, index 56) + npm run build (L-2, index 57) re-enabled; package-json-no-dup-keys.sh (index 95) passes + self-test passes",
+      "tested_commit": "3c2af25",
+      "ci_wall_time_s": 25,
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors (2 pre-existing no-console warnings unchanged)",
+        "fitness_all_96": "PASS — no failures; raw 'fitness' key count = 1 in package.json",
+        "vitest_unit": "1107/1107 passed, 6 skipped (flowable integration offline, pre-existing)"
+      },
+      "artifact": "docs/test-reports/T-0187.test-report.md",
+      "contract_artifact": "docs/design/T-0187.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/package-json-no-dup-keys.sh",
+    "package.json",
+    "docs/specs/T-0187-fitness-key-dedup.spec.md",
+    "docs/specs/T-0187.spec.contract.json",
+    "docs/design/T-0187.review.contract.json",
+    "docs/reviews/T-0187.review.md",
+    "docs/test-reports/T-0187.test-report.md",
+    "docs/design/T-0187.test-report.contract.json",
+    "docs/pr/T-0187.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migrations": "T-0187 adds no SQL migrations, no DDL changes, no known_tenant_tables.txt changes. Pure package.json + new ci/checks shell script.",
+    "IMPORTANT_rebase_conflict_rule": "package.json WILL conflict when rebasing against any sibling branch that added fitness entries using the old duplicate-key pattern. The only correct resolution is: produce EXACTLY ONE 'fitness' key containing the UNION of all commands from both sides. After resolution, bash ci/checks/package-json-no-dup-keys.sh MUST exit 0. The old pattern of 'append to the tail of the last key' is no longer valid — there is now only one key.",
+    "guard_canary": "ci/checks/package-json-no-dup-keys.sh is the post-merge canary. Any surviving duplicate key causes npm run fitness to fail immediately on the first entry.",
+    "downstream_effect": "After this merge, all 96 fitness checks run on every CI invocation. named-binding-isolation.sh (T-0072 invariants) and npm run build (tsc compile check) are now structurally enforced again. Sibling tasks that previously escaped named-binding or build regressions will now be caught in fitness."
+  },
+  "friction_events": []
+}
