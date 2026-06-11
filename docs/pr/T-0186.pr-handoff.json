@@ -1,0 +1,114 @@
+{
+  "task_id": "T-0186",
+  "status": "pr_open",
+  "branch": "task/T-0186-store-mode-pin",
+  "merge_target": "dev",
+  "base_commit": "4a2397a",
+  "head_commit": "3da4607",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0186 StoreMode pin: additive storeMode?='auto'|'memory' parameter threaded through createJobStore/createTimerStore/createOutboxStore/createServer/handleRequest. Fixes externalWorker.e2e.test.ts (18 tests) and health.test.ts (4 tests) failing under ambient DATABASE_URL (pre-existing gap from T-0185 review §3). Production path ('auto'/undefined) is byte-for-byte preserved — no call site in src/index.ts or src/main.ts is modified. Router cache keyed by mode (_routerCache: Partial<Record<StoreMode, Router>>) prevents cross-mode contamination. Both scenarios green: Scenario A (no env) 1332/1338, Scenario B (DATABASE_URL=postgres://...) 1332/1338. tsc 0 errors, eslint 0 errors (2 pre-existing console warnings), fitness 409 PASS 0 FAIL. Nit R-1 closed (stale count 22→18 in spec). Nit R-2 documented (explicit store + storeMode='memory' asymmetry — no call sites hit this case).",
+  "commits": [
+    {
+      "sha": "62e493c",
+      "phase": "SPEC",
+      "message": "spec(T-0186): store-mode-pin — explicit memory parameter для тестов без ambient DATABASE_URL"
+    },
+    {
+      "sha": "feb243a",
+      "phase": "BUILD",
+      "message": "fix(T-0186): store-mode-pin — additive storeMode param, тесты пинят memory явно"
+    },
+    {
+      "sha": "5a4fc2b",
+      "phase": "REVIEW",
+      "message": "T-0186 REVIEW: approved — StoreMode additive param, both scenarios green"
+    },
+    {
+      "sha": "3da4607",
+      "phase": "TEST+PR",
+      "message": "nit(T-0186): R-1 close — stale count 22→18 in spec AC-1/AC-2 + review table"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "5a4fc2b",
+      "findings_resolved": [
+        "R-1 (nit, axis 2): stale count 22→18 in spec AC-1/AC-2 — CLOSED in commit 3da4607"
+      ],
+      "findings_nit_open": [
+        "R-2 (nit, axis 1, src/server.ts:310): when both explicit non-null store and storeMode='memory' are passed to createServer, the explicit store is used as-is while timerStore/outboxStore are forced to undefined. Asymmetry documented; no current call site hits this case. Candidate JSDoc warning in future cleanup."
+      ],
+      "artifact": "docs/design/T-0186.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "scenario_a": {
+        "env": "no DATABASE_URL",
+        "total_tests": 1338,
+        "passed": 1332,
+        "failed": 0,
+        "skipped": 6,
+        "externalWorker_e2e": "18/18 PASS",
+        "health": "4/4 PASS"
+      },
+      "scenario_b": {
+        "env": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros",
+        "total_tests": 1338,
+        "passed": 1332,
+        "failed": 0,
+        "skipped": 6,
+        "externalWorker_e2e": "18/18 PASS",
+        "health": "4/4 PASS"
+      },
+      "ac_coverage": "8/8",
+      "fitness_static": "PASS — 409 PASS, 0 FAIL",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — 409 PASS, 0 FAIL (all checks green)",
+        "vitest_scenario_a": "1332/1338 passed, 6 skipped",
+        "vitest_scenario_b": "1332/1338 passed, 6 skipped"
+      },
+      "artifact": "docs/test-reports/T-0186.test-report.md",
+      "contract_artifact": "docs/design/T-0186.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/server.ts",
+    "src/__tests__/externalWorker.e2e.test.ts",
+    "src/__tests__/health.test.ts",
+    "docs/specs/T-0186-store-mode-pin.spec.md",
+    "docs/specs/T-0186.spec.contract.json",
+    "docs/design/T-0186.review.contract.json",
+    "docs/reviews/T-0186.review.md",
+    "docs/test-reports/T-0186.test-report.md",
+    "docs/design/T-0186.test-report.contract.json",
+    "docs/pr/T-0186.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 1,
+      "description": "When both an explicit non-null store and storeMode='memory' are passed to createServer, the explicit store is used as-is (may be a PostgresJobStore) while timerStore and outboxStore are forced to undefined (memory mode). Asymmetry is documented in JSDoc. No current call site hits this combination.",
+      "follow_up_candidate": "Add JSDoc warning or if (store && storeMode === 'memory') assertion comment in a future cleanup. Low priority — no call site affected."
+    }
+  ],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "No DDL changes. src/server.ts only — additive parameter with backward-compatible default.",
+    "downstream_effect": "Fixes pre-existing test fragility under ambient DATABASE_URL. externalWorker.e2e.test.ts and health.test.ts are now robust in both dev environments (with or without Postgres). StoreMode type exported from server.ts for downstream use."
+  },
+  "friction_events": []
+}
