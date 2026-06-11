@@ -1,0 +1,179 @@
+{
+  "task_id": "T-0035",
+  "status": "ready",
+  "decision": "Substitutions/absences as a thin declaration+routing layer over already-ratified primitives, no new authority subsystem. (1) New tenant-isolated table substitution_rule (migration 036) declaring who substitutes for whom over which role_id and org_scope across [valid_from,valid_until), with the role_assignment proposal/confirmation contract (confirmed_by NULL=proposal/zero-capability, NOT NULL=effective), T-0013 invariants (tenant_id leading PK, FORCE RLS, default-DENY policy, choros_app DML-only), composite tenant-scoped FKs to employee (both sides), role, and grant (ttl_grant_id), two CHECKs (no-self-substitution, window sanity), and an idempotent dev seed (a-recon substitutes e-mironov under budget-approver in fin dept, Tier-1, confirmed_by='seed'). (2) Two tiers: Tier-1 default = routing-layer stand-in, ttl_grant_id NULL, NO grant minted, stand-in uses own role authority; Tier-2 fallback = TTL'd grant minted by the future write-API with valid_until=TTL, valid_from=now, delegable=false, granted_by='substitution:<rule_id>', id recorded in substitution_rule.ttl_grant_id. (3) grant table gets NO new column: TTL rides existing grant.valid_until + isEffective (expiry needs zero gateway code, resolveFor already denies 'no_grant' past valid_until); provenance rides existing granted_by; both NF-4 escape hatches (TTL column, source column) are REJECTED to keep grant frozen. (4) Non-inheritable exclusion is a grant.constraint jsonb convention {non_inheritable:true}, exported as pure isNonInheritable(grant) + eligibleForTier2 filter for the mint site. (5) New pure module src/core/substitution.ts holds SubstitutionRule type, SubstitutionSource port (getActiveSubstitutions, getSubstitutionForSubstitute), resolveSubstitution pure selector reusing isNarrowerOrEqual over hierarchy 'org', isEffectiveWindow/isRuleEffective, and an in-memory test source; Postgres-backed port deferred to T-0053. (6) grant-resolver.ts touched additively ONLY by one optional ResolverDeps property substitution?: SubstitutionSource (wired for the future routing layer, NOT consulted inside resolveFor, so the PDP keeps deciding on T-0018 grant rows only); resolveFor byte-stable when absent. (7) on_behalf_of threading reuses existing GuardContext.onBehalfOf (T-0032) -> actor_event.on_behalf_of (T-0019), actor=substituteEmployeeId / onBehalfOf=absentEmployeeId, SoD attributes COALESCE(on_behalf_of,actor); NO new GuardContext/actor_event field. (8) substitution_rule added to known_tenant_tables.txt so the table-agnostic cross_tenant.test.ts/schema.test.ts sweep it with no test-source edit; new ci/checks/substitution-isolation.sh appended to npm run fitness. Runtime target: pure static-now TS core (no DB/IO/LLM), migration 036 under choros_migrator, read path under choros_app within withTenant; no new process or dependency.",
+  "rejected_alternatives": [
+    {
+      "option": "New valid_until_ttl / is_substitution column on grant for the TTL",
+      "why_not": "NF-4 forbids a TTL column; grant.valid_until + isEffective ARE the TTL already. Touching the frozen, parallel-edited 008_grant.sql widens collision risk for zero gain."
+    },
+    {
+      "option": "New source text column on grant (the NF-4 escape hatch) to mark substitution provenance",
+      "why_not": "Permitted by spec but unnecessary: granted_by='substitution:<rule_id>' identifies provenance without a schema change. Keeping grant frozen is the smaller, safer kernel (proportionality)."
+    },
+    {
+      "option": "Consult SubstitutionSource inside resolveFor to auto-resolve a stand-in at decision time",
+      "why_not": "Routing-engine reassignment is orchestrator-layer and explicitly out of scope; it would re-introduce a decision-time fork into the PDP, breaking the T-0021 grant-rows-only / single-projection invariant. The port is wired but unconsulted; a Tier-2 grant is just a grant to the PDP."
+    },
+    {
+      "option": "New substitution scope hierarchy or new lattice element kind",
+      "why_not": "No new algebra needed: org-scope containment is the existing isNarrowerOrEqual over hierarchy 'org' with the injected AncestryOracle."
+    },
+    {
+      "option": "Enforce confirmed_by / validity window via DB CHECK",
+      "why_not": "Mirrors role_assignment (T-0022): proposal/confirmation + window semantics are enforced at the resolution boundary (port query / pure function), not a CHECK. DB enforces NOT NULL + valid jsonb + the two structural CHECKs only."
+    },
+    {
+      "option": "New actor_event column to mark a substituted action",
+      "why_not": "The existing actor != on_behalf_of pair already encodes it; detail can carry the rule id if needed. actor-event.ts stays a frozen file."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "substitution_rule (migration 036; choros schema; PK (tenant_id,id))",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL (leading PK; T-0013)"},
+        {"name": "id", "type": "uuid NOT NULL (PK)"},
+        {"name": "absent_employee_id", "type": "uuid NOT NULL; FK (tenant_id,absent_employee_id)->employee(tenant_id,id)"},
+        {"name": "substitute_employee_id", "type": "uuid NOT NULL; FK (tenant_id,substitute_employee_id)->employee(tenant_id,id)"},
+        {"name": "role_id", "type": "uuid NOT NULL; FK (tenant_id,role_id)->role(tenant_id,id)"},
+        {"name": "org_scope", "type": "jsonb NOT NULL (ScopeElement hierarchy 'org'; structural validation app-layer)"},
+        {"name": "ttl_grant_id", "type": "uuid NULL; FK (tenant_id,ttl_grant_id)->grant(tenant_id,id); NULL=Tier-1, set=Tier-2"},
+        {"name": "non_inheritable_excluded", "type": "boolean NOT NULL DEFAULT TRUE"},
+        {"name": "proposed_by", "type": "text NULL"},
+        {"name": "confirmed_by", "type": "text NULL (NULL=proposal/zero-capability, NOT NULL=effective)"},
+        {"name": "valid_from", "type": "bigint NULL (epoch-ms; NULL=open start)"},
+        {"name": "valid_until", "type": "bigint NULL (epoch-ms; NULL=open end)"},
+        {"name": "source", "type": "text NOT NULL"},
+        {"name": "created_by", "type": "text NOT NULL"},
+        {"name": "created_at", "type": "bigint NOT NULL"},
+        {"name": "updated_at", "type": "bigint NOT NULL"},
+        {"name": "CHECK substitution_rule_no_self_sub", "type": "CHECK (absent_employee_id <> substitute_employee_id)"},
+        {"name": "CHECK substitution_rule_window_sane", "type": "CHECK (valid_from IS NULL OR valid_until IS NULL OR valid_from < valid_until)"},
+        {"name": "RLS", "type": "ENABLE+FORCE ROW LEVEL SECURITY; policy USING/WITH CHECK (tenant_id=current_setting('choros.tenant_id',true)::uuid); GRANT SELECT,INSERT,UPDATE,DELETE TO choros_app"}
+      ]
+    },
+    {
+      "entity": "SubstitutionRule (src/core/substitution.ts; camelCase TS mirror)",
+      "fields": [
+        {"name": "tenantId", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "absentEmployeeId", "type": "string"},
+        {"name": "substituteEmployeeId", "type": "string"},
+        {"name": "roleId", "type": "string"},
+        {"name": "orgScope", "type": "ScopeElement (imported from grant-lattice.ts)"},
+        {"name": "ttlGrantId", "type": "string | null"},
+        {"name": "nonInheritableExcluded", "type": "boolean"},
+        {"name": "proposedBy", "type": "string | null"},
+        {"name": "confirmedBy", "type": "string | null"},
+        {"name": "validFrom", "type": "number | null"},
+        {"name": "validUntil", "type": "number | null"},
+        {"name": "source", "type": "string"},
+        {"name": "createdBy", "type": "string"},
+        {"name": "createdAt", "type": "number"},
+        {"name": "updatedAt", "type": "number"}
+      ]
+    },
+    {
+      "entity": "SubstitutionSource (port; src/core/substitution.ts; Postgres impl=T-0053)",
+      "fields": [
+        {"name": "getActiveSubstitutions", "type": "(tenantId: string, absentEmployeeId: string, nowMs: number) => Promise<SubstitutionRule[]>"},
+        {"name": "getSubstitutionForSubstitute", "type": "(tenantId: string, substituteEmployeeId: string, absentEmployeeId: string, roleId: string, nowMs: number) => Promise<SubstitutionRule | null>"}
+      ]
+    },
+    {
+      "entity": "substitution.ts pure functions",
+      "fields": [
+        {"name": "isEffectiveWindow", "type": "(validFrom: number|null, validUntil: number|null, nowMs: number) => boolean"},
+        {"name": "isRuleEffective", "type": "(rule: SubstitutionRule, nowMs: number) => boolean (confirmedBy!==null && in-window)"},
+        {"name": "resolveSubstitution", "type": "(rules: SubstitutionRule[], employeeId: string, roleId: string, orgScope: ScopeElement, ancestry: AncestryOracle, nowMs: number) => SubstitutionRule | null"},
+        {"name": "isNonInheritable", "type": "(grant: Grant) => boolean (constraint jsonb {non_inheritable:true})"},
+        {"name": "eligibleForTier2", "type": "(rule: SubstitutionRule, roleGrants: Grant[]) => Grant[] (drops non-inheritable when rule.nonInheritableExcluded)"},
+        {"name": "makeInMemorySubstitutionSource", "type": "(rules: SubstitutionRule[]) => SubstitutionSource"}
+      ]
+    },
+    {
+      "entity": "ResolverDeps additive touch (src/core/grant-resolver.ts) — the ONLY shared-file edit",
+      "fields": [
+        {"name": "substitution", "type": "SubstitutionSource | undefined (OPTIONAL; wired for future routing layer; NOT consulted inside resolveFor; resolveFor byte-stable when absent)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "C-1 T-0053: Postgres-backed SubstitutionSource; JOIN filters tenant_id (RLS) + confirmed_by IS NOT NULL + half-open window [valid_from,valid_until); ORDER BY valid_from DESC NULLS LAST. Same DAO pattern as GrantSource/RecordSource/SodSource.",
+    "C-2 T-0044: a Tier-2 TTL'd grant expanding a criticality-(a/b/c) capability fires the T-0044 dual-control gate at grant-mint; T-0035 documents the invariant, does not implement the gate.",
+    "C-3 T-0019/T-0021: substitute action => GuardContext{actor:substituteEmployeeId, onBehalfOf:absentEmployeeId}; actor_event row carries both distinct; SoD attributes COALESCE(on_behalf_of,actor); existing fields only.",
+    "C-4 routing layer (future): consults getActiveSubstitutions; ttl_grant_id NULL => Tier-1 (stand-in uses own role, no mint); ttl_grant_id NOT NULL => Tier-2 grant already live.",
+    "C-5 Tier-2 mint site (future write-API): uses eligibleForTier2(rule,roleGrants)+isNonInheritable; mints grant with delegable=false, valid_until=TTL, granted_by='substitution:<rule_id>'; writes new grant id to substitution_rule.ttl_grant_id; no new grant column."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-SUB1",
+      "rule": "substitution.ts introduces no parallel-authority/visibility store (_acl, substitution_visibility, substitutionRights, substitutionAcl absent in non-comment code); rights derive from rules + T-0018 grant rows only.",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB2",
+      "rule": "substitution.ts imports no pg/fs/net/http; all substitution state arrives via the injected SubstitutionSource port (Postgres DAO deferred to T-0053).",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB3",
+      "rule": "grant-resolver.ts import surface preserved: resolveFor/makeGrantResolver/projectFields/visibleFields/refToScope exported, grantFacetFields present, and the substitution port is OPTIONAL (substitution?:).",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB4",
+      "rule": "Frozen files carry no diff in T-0035's commit: grant-lattice.ts, object-handle.ts, actor-event.ts, types.ts, migrations/008_grant.sql, migrations/020_role_assignment.sql.",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB5",
+      "rule": "Migration seam: a migrations/036_*.sql file exists and no migration numbered 032..035 or 038+ is introduced by this task (only 036, optionally 037 for a split).",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB6",
+      "rule": "ci/checks/known_tenant_tables.txt lists substitution_rule so the table-agnostic cross_tenant.test.ts/schema.test.ts sweep it without a test-source edit.",
+      "ci_check": "bash ci/checks/substitution-isolation.sh"
+    },
+    {
+      "id": "FF-SUB7",
+      "rule": "Live-DB: substitution_rule exists with PK (tenant_id,id), FORCE RLS + default-DENY policy, both CHECKs and all FKs; cross-tenant read returns 0 rows; cross-tenant write and self-substitution INSERT are rejected; the dev seed row is present.",
+      "ci_check": "npm run fitness:db"
+    },
+    {
+      "id": "FF-SUB8",
+      "rule": "resolveSubstitution/isRuleEffective purity + selection semantics (confirmed-only, in-window, scope-containment via isNarrowerOrEqual, null on no match); eligibleForTier2 drops {non_inheritable:true} grants when rule.nonInheritableExcluded; Tier-2 grant delegable=false and denies 'no_grant' past valid_until via existing isEffective/resolveFor.",
+      "ci_check": "vitest run (unit tests over src/core/substitution.ts, impl phase)"
+    },
+    {
+      "id": "FF-SUB9",
+      "rule": "tsc --noEmit, eslint src, and npm run fitness are all green after T-0035's commit.",
+      "ci_check": "npm run ci"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-SUB5 + ADR §4.1 DDL + FF-SUB7 (schema.test.ts table-exists)"},
+    {"ac": "AC-2", "covered_by": "FF-SUB7 (schema.test.ts FORCE-RLS sweep) + §4.1 policy"},
+    {"ac": "AC-3", "covered_by": "FF-SUB7 (cross_tenant.test.ts cross-tenant read = 0 rows)"},
+    {"ac": "AC-4", "covered_by": "FF-SUB7 (cross_tenant.test.ts cross-tenant write rejected)"},
+    {"ac": "AC-5", "covered_by": "FF-SUB7 (CHECK substitution_rule_no_self_sub)"},
+    {"ac": "AC-6", "covered_by": "FF-SUB8 (isRuleEffective/getActiveSubstitutions drop confirmedBy===null)"},
+    {"ac": "AC-7", "covered_by": "FF-SUB8 (isEffectiveWindow drops nowMs>=validUntil)"},
+    {"ac": "AC-8", "covered_by": "FF-SUB8 (resolveSubstitution -> null on no match)"},
+    {"ac": "AC-9", "covered_by": "FF-SUB8 (resolveSubstitution -> rule when isNarrowerOrEqual(orgScope,rule.orgScope))"},
+    {"ac": "AC-10", "covered_by": "reuse of isEffective/resolveFor (no new code) + FF-SUB8 unit: Tier-2 grant delegable=false, post-valid_until => resolveFor 'no_grant'"},
+    {"ac": "AC-11", "covered_by": "FF-SUB8 (isNonInheritable + eligibleForTier2 exclusion)"},
+    {"ac": "AC-12", "covered_by": "C-3 + ADR §2.7: existing GuardContext.onBehalfOf -> actor_event.on_behalf_of; actor != on_behalf_of"},
+    {"ac": "AC-13", "covered_by": "FF-SUB3 (resolver surface) + FF-SUB4 (frozen grant-lattice.ts/actor-event.ts/types.ts) + new-file substitution.ts"},
+    {"ac": "AC-14", "covered_by": "FF-SUB6 (table in known list) + FF-SUB7 (cross-tenant sweep, no test-source edit)"},
+    {"ac": "AC-15", "covered_by": "ADR §4.1 seed + FF-SUB7 (seed-row presence probe)"},
+    {"ac": "AC-16", "covered_by": "NF-1: CREATE TABLE IF NOT EXISTS + ON CONFLICT DO NOTHING (idempotent re-run)"},
+    {"ac": "AC-17", "covered_by": "FF-SUB5 (no 032-035/038+ introduced)"},
+    {"ac": "AC-18", "covered_by": "FF-SUB9 (npm run ci: tsc + eslint + fitness green)"},
+    {"ac": "AC-19", "covered_by": "FF-SUB3 (additive optional substitution?; resolver body unchanged => existing tests pass)"},
+    {"ac": "AC-20", "covered_by": "FF-SUB7 (Tier-1 NULL ttl_grant_id stored; Tier-2 valid grant.id FK stored; MATCH-SIMPLE NULL composite-FK note §4.1)"}
+  ],
+  "adr_artifact_path": "docs/design/T-0035-substitutions.adr.md"
+}
