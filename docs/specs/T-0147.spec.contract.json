@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0147",
+  "status": "ready",
+  "summary": "Изолировать каждый прогон npm run fitness:db от параллельных прогонов (разные worktree/PID) через Postgres template database: клонировать choros_test_template → choros_test_<run_id> перед прогоном, дропнуть после; genesis гарантированно = 17 без гонок данных.",
+  "functional": [
+    "FR-1: Каждый запуск fitness:db работает с базой, не разделяемой с параллельными прогонами из других worktree.",
+    "FR-2: Существует шаблонная база choros_test_template с полностью применёнными миграциями; рабочая база клонируется из неё.",
+    "FR-3: Имя рабочей базы уникально для каждого прогона (паттерн choros_test_<run_id>), не конфликтует с параллельными прогонами.",
+    "FR-4: Команда npm run fitness:db:setup-template создаёт choros_test_template и применяет миграции; идемпотентна.",
+    "FR-5: Lifecycle создания и дропа рабочей базы выполняется автоматически в рамках прогона; DATABASE_URL/APP_DATABASE_URL переопределяются для тестов.",
+    "FR-6: Ни один из существующих файлов ci/checks/db/*.test.ts не изменяется; механизм реализуется через globalSetup/globalTeardown или npm-обёртку снаружи тестов.",
+    "FR-7: Флаг --no-file-parallelism сохраняется; тестовые файлы внутри одного прогона выполняются последовательно.",
+    "FR-8: Команда дропа рабочей базы корректно завершает активные соединения (pg_terminate_backend или WITH (FORCE)).",
+    "FR-9: Cleanup-паттерны T-0144 (afterAll DELETE by ID) сохраняются как второй слой защиты.",
+    "FR-10: fitness:db без шаблонной базы завершается с понятной ошибкой и инструкцией запустить setup-template."
+  ],
+  "non_functional": [
+    "NF-1: Только devDependencies; механика — стандартный Postgres SQL (postgres:16).",
+    "NF-2: Время CREATE DATABASE ... TEMPLATE choros_test_template ≤ 5 секунд на dev-машине.",
+    "NF-3: Два параллельных прогона из разных worktree оба завершаются с genesis count = 17.",
+    "NF-4: При аварийном завершении (SIGKILL) осиротевшие choros_test_* базы идентифицируемы и удаляются npm run fitness:db:cleanup-orphans.",
+    "NF-5: Имя рабочей базы не содержит секретов, паролей или worktree-путей."
+  ],
+  "out_of_scope": [
+    "Вариант A (BEGIN/ROLLBACK per test) как универсальный механизм — несовместим с multi-connection тестами.",
+    "Изоляция других CI-тиров (fitness:kc, fitness:flowable, fitness:demo:db).",
+    "Изменение структуры migrations/run.mjs.",
+    "Изменение docker-compose.yml или silo 55432.",
+    "Изоляция на уровне Postgres-схем (не баз).",
+    "Параллелизм внутри одного прогона (убрать --no-file-parallelism)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Два одновременных прогона npm run fitness:db из разных worktree оба завершаются зелёными; genesis-owner-seed.test.ts AC-12 = 17 в каждой базе; нет ERROR: database is being accessed by other users.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-2",
+      "text": "Два последовательных прогона: после каждого рабочая база задропана, шаблонная база не изменена, genesis count = 17 в обоих.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "genesis-owner-seed.test.ts AC-12 зелёный (count = 17) на N-ом запуске подряд без сброса БД.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "git diff HEAD -- ci/checks/db/*.test.ts пустой: ни один тестовый файл не изменён.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "При kill -9 vitest-процесса рабочая база choros_test_<run_id> удаляется npm run fitness:db:cleanup-orphans без ошибок.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-6",
+      "text": "npm run fitness:db без предварительного setup-template завершается exit code ≠ 0 с сообщением 'run npm run fitness:db:setup-template first' (или эквивалентным).",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-7",
+      "text": "npm run fitness:db:setup-template при повторном запуске не дублирует миграции и не падает; выводит 'nothing to apply'.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-8",
+      "text": "withClient(appUrl()) и withClient(migratorUrl()) успешно подключаются к рабочей базе; cross_tenant.test.ts зелёный.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-9",
+      "text": "CREATE DATABASE choros_test_perf_check TEMPLATE choros_test_template выполняется < 5 секунд на dev-машине (homeserver-vm или local docker).",
+      "verifiable_as": "manual"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0147-db-test-isolation.spec.md"
+}
