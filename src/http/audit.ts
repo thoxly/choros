@@ -10,9 +10,11 @@
  *   GET /api/audit/export?instance=<id>  — download named instance as JSON.
  *   GET /api/audit/export                — download default instance (INS-7731).
  *   Authz: x-dev-user header required in dev mode (401 if absent).
- *   PDP gate: same principal as GET /api/audit (observer role assumed for day-1
- *   seed; production gates via PDP grant check — forward obligation annotated
- *   inline as FORWARD-OBLIGATION comment).
+ *   PDP gate: NONE in dev slice — all three audit routes (GET /api/audit,
+ *   GET /api/audit/:instanceId, GET /api/audit/export) run without a PDP
+ *   grant check. Hardening MUST close all three before production: add
+ *   PDP operation=read on resource=audit_trace for each route (see
+ *   FORWARD-OBLIGATION comments inline).
  *   Response: 200 application/json + Content-Disposition: attachment filename.
  */
 import { HttpError, type Router } from "./router.js";
@@ -270,6 +272,9 @@ export function getDefaultAuditInstance(): AuditData {
 
 export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   // GET /api/audit — return default instance (INS-7731)
+  //
+  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  // PDP check: operation=read, resource=audit_trace before returning data.
   router.register("GET", "/api/audit", async (_req, res) => {
     const data = getDefaultAuditInstance();
     res.statusCode = 200;
@@ -287,8 +292,10 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   //   (absent)        — export the default instance (INS-7731)
   //
   // Authz: x-dev-user header required (dev mode); 401 if absent.
-  //   FORWARD-OBLIGATION: production route MUST check PDP for
-  //   operation=read on resource=audit_trace before returning data.
+  //   FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  //   PDP check: operation=read, resource=audit_trace before returning data.
+  //   (Same obligation applies to GET /api/audit and GET /api/audit/:instanceId
+  //   — all three routes must be closed together in the hardening pass.)
   //
   // Response: 200 application/json + Content-Disposition: attachment.
   router.register("GET", "/api/audit/export", async (req, res) => {
@@ -327,6 +334,9 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   });
 
   // GET /api/audit/:instanceId — return specific instance or 404
+  //
+  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  // PDP check: operation=read, resource=audit_trace before returning data.
   router.register("GET", "/api/audit/:instanceId", async (_req, res, params) => {
     const data = findAuditData(params.instanceId as string);
     if (!data) {
