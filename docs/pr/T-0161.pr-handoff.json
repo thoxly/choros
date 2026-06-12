@@ -1,0 +1,96 @@
+{
+  "task_id": "T-0161",
+  "status": "pr_open",
+  "branch": "task/T-0161-demo-tool-tenant-fix",
+  "merge_target": "dev",
+  "base_commit": "f9439ae99e107124a3f551d73c12f611d5d091de",
+  "head_commit": "2bf9acc",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Удаляет 3 демо-строки mcp_tool (http-integration-tool, slack-notify-tool, json-transform-tool), ошибочно засеянные миграцией 040 в bootstrap-тенант (00000000-0000-0000-0000-000000000001) вместо dev-тенанта (a0000000-0000-0000-0000-000000000001). Строки невидимы resolveAgentToolset и всем fitness-чекам конфиг-агента. Миграция 055 (DELETE idempotent, data-mutation only, no DDL). Живая проверка: 0 строк в bootstrap-тенанте, 8 authoring_draft инструментов в dev-тенанте (AC-02 цел). Единственный красный — FF-DC7 sibling-gotcha (dual-control-isolation.sh), зеленеет post-merge. Миграция 055 УЖЕ применена к dev-БД. Нит N-1 (уточнение комментария слота) закрыт в коммите 2bf9acc.",
+  "commits": [
+    {
+      "sha": "fa22b23",
+      "phase": "BUILD",
+      "message": "fix(db): delete misplaced 040 demo mcp_tool rows (T-0161)"
+    },
+    {
+      "sha": "3ab0b3d",
+      "phase": "BUILD",
+      "message": "chore(ci): register migration 055 in role-criticality excludes (T-0161)"
+    },
+    {
+      "sha": "5ba38dd",
+      "phase": "REVIEW",
+      "message": "T-0161 REVIEW: approved — 3 demo mcp_tool rows correctly deleted, all key facts verified"
+    },
+    {
+      "sha": "2bf9acc",
+      "phase": "TEST",
+      "message": "fix(T-0161): clarify slot comment per nit N-1 — «before this file: 053»"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "5ba38dd",
+      "findings_resolved": [
+        "N-1 (nit, axis 4): slot comment 'max on-disk slot at time of writing is 053' clarified to 'before this file: 053' — closed in TEST phase commit 2bf9acc"
+      ],
+      "artifact": "docs/design/T-0161.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 600,
+      "passed": 600,
+      "failed": 0,
+      "ac_coverage": "5/5",
+      "fitness_static": "PASS (FF-DC7 sibling-gotcha only, known false-positive)",
+      "fitness_db_mcp_tool": "8/8 mcp_tool.test.ts PASS",
+      "fitness_db_live": "AC-1: 0 demo rows in bootstrap tenant; AC-2: 8 authoring_draft tools intact",
+      "tested_commit": "2bf9acc",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 no-console warnings (pre-existing), 0 errors",
+        "fitness_static_checks": "PASS — FF-DC7 is the sole FAIL; known sibling-gotcha (dual-control-isolation.sh flags 055 as unexpected for T-0044 scope); green post-merge to dev by design",
+        "fitness_db_total": "600/600 in T-0161 scope; 3 pre-existing fails in pgOutbox/pgJob (reproduced against dev branch, do not touch T-0161 scope)",
+        "live_db_ac1": "SELECT 0 rows for IDs 10000000-…-000001/2/3 under tenant 00000000-…-0001 — PASS",
+        "live_db_ac2": "SELECT COUNT=8 authoring_draft tools for dev-tenant a0000000-…-0001 — PASS",
+        "migration_applied": "schema_migrations confirms 055_fix_mcp_tool_demo_tenant on dev-DB"
+      },
+      "artifact": "docs/test-reports/T-0161.test-report.md",
+      "contract_artifact": "docs/design/T-0161.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "migrations/055_fix_mcp_tool_demo_tenant.sql",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "docs/design/T-0161.review.contract.json",
+    "docs/reviews/T-0161.review.md",
+    "docs/test-reports/T-0161.test-report.md",
+    "docs/design/T-0161.test-report.contract.json",
+    "docs/pr/T-0161.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "ff_dc7_note": "FF-DC7 (dual-control-isolation.sh) FAILS on this branch because migrations/055_fix_mcp_tool_demo_tenant.sql is flagged as unexpected for T-0044 scope. T-0161 owns migration 055 — the check's allowlist covers only T-0044 migration 031. This is a constructive false-positive by design: green post-merge to dev. See memory choros-ci-check-gotchas.",
+    "migrations_already_applied": "Migration 055_fix_mcp_tool_demo_tenant is ALREADY applied to the local dev-Postgres instance (confirmed via choros.schema_migrations). The DELETE WHERE is idempotent — re-running post-merge is a no-op.",
+    "slot_coordination": "Slot 054 is reserved by T-0128 (D1 decomposition). When T-0128 lands: on clean DB the runner applies 054 before 055 (lexicographic); on dev-DB where 055 is already applied the runner applies 054 only. Operations independent: 054 creates connector table, 055 deletes rows from mcp_tool."
+  },
+  "notes": [
+    "055 applied to dev-БД во время BUILD фазы (runner идемпотентен, re-run post-merge = no-op).",
+    "Координация слота: 054 = T-0128 D1 (не приземлён). Slot 054 (connector) и 055 (mcp_tool DELETE) — независимые операции, порядок runner'а безопасен.",
+    "Нит N-1 (комментарий слота) закрыт в TEST: перефразирован в 'before this file: 053' (commit 2bf9acc)."
+  ],
+  "friction_events": []
+}

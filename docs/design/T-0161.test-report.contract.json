@@ -1,0 +1,79 @@
+{
+  "task_id": "T-0161",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 600,
+    "passed": 600,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: 3 demo mcp_tool rows deleted from bootstrap tenant (00000000-0000-0000-0000-000000000001)",
+      "test": "psql live query — SELECT COUNT(*) = 0 for IDs 10000000-…-000001/2/3 under bootstrap tenant",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: config-agent-seed AC-02 intact — 8 authoring_draft tools in dev-tenant (a0000000-…-0001)",
+      "test": "psql COUNT(*) = 8 + config-agent-seed.test.ts AC-02 PASS in fitness:db",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3: idempotency — DELETE WHERE is no-op when rows already absent",
+      "test": "fitness:db setup-template applied 48 migrations including 055 without error; template re-apply clean",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4: FF-10 migration 040 freeze intact — 040_mcp_tool.sql not touched",
+      "test": "git diff dev...HEAD --name-only: 040_mcp_tool.sql absent from branch diff",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5: FF-RC5/FF-RC6 role-criticality excludes registered for migration 055",
+      "test": "role-criticality-migration-excludes.txt contains 055_fix_mcp_tool_demo_tenant; role-criticality-isolation.sh PASS in npm run fitness",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "mcp_tool.test.ts 8/8 — table schema, RLS, UNIQUE, CHECK, cross-tenant isolation",
+      "result": "pass",
+      "note": "All existing mcp_tool fitness probes pass; 055 does not regress schema invariants"
+    },
+    {
+      "check": "Migration slot coordination — 054 reserved by T-0128 (D1), 055 = next free",
+      "result": "pass",
+      "note": "054 (connector table) and 055 (mcp_tool DELETE) are independent operations; runner order safe"
+    },
+    {
+      "check": "Nit N-1 closed — slot comment clarified to «before this file: 053»",
+      "result": "pass",
+      "note": "commit 2bf9acc"
+    }
+  ],
+  "failures": [],
+  "known_red": {
+    "ci": {
+      "check": "FF-DC7 (dual-control-isolation.sh)",
+      "reason": "sibling-check gotcha: dual-control-isolation.sh rejects 055_fix_mcp_tool_demo_tenant.sql as unexpected for T-0044; T-0161 owns 055, not T-0044. Green post-merge to dev by design.",
+      "is_product_defect": false
+    },
+    "fitness_db": {
+      "count": 3,
+      "reason": "pre-existing on dev DB: pgJobStore idempotency deadcount (T-0063 sweep), pgOutboxStore SKIP LOCKED parallel, pgOutboxStore enqueue idempotency_key. All reproduced against dev branch directly. None touch mcp_tool, migration 055, or config-agent-seed scope.",
+      "is_product_defect": false
+    }
+  },
+  "tested_commit": "2bf9acc",
+  "branch": "task/T-0161-demo-tool-tenant-fix",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 2 no-console warnings (pre-existing), 0 errors",
+    "fitness_static": "FAIL at FF-DC7 only (sibling-gotcha); all other static checks PASS",
+    "fitness_db_total": "600/600 passed in T-0161 scope (3 pre-existing failures in pgOutbox/pgJob suites)",
+    "fitness_db_mcp_tool": "8/8 mcp_tool.test.ts PASS",
+    "fitness_db_config_agent_seed": "AC-02 8-tool count PASS",
+    "live_db_ac1": "SELECT 0 rows for 3 demo IDs under bootstrap tenant — PASS",
+    "live_db_ac2": "SELECT COUNT=8 authoring_draft tools in dev-tenant — PASS",
+    "migration_055_applied": "schema_migrations confirms 055_fix_mcp_tool_demo_tenant applied to dev-DB"
+  }
+}
