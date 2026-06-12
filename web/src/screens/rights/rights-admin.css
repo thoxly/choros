@@ -291,6 +291,7 @@
 .chs-dualbanner__glyph::after { content: "!"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--chs-font-mono); font-size: 10px; font-weight: var(--chs-weight-bold); color: var(--chs-color-danger); }
 .chs-dualbanner__txt { font-size: var(--chs-text-sm); color: var(--chs-color-text); line-height: var(--chs-leading-snug); }
 .chs-dualbanner__txt b { color: var(--chs-color-danger); }
+.chs-dualbanner__hint { opacity: 0.75; font-style: italic; }
 .chs-dualbanner__tag { margin-left: auto; font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-wide); color: var(--chs-color-danger); border: 1px solid color-mix(in oklch, var(--chs-color-danger) 40%, transparent); border-radius: var(--chs-radius-1); padding: 2px var(--chs-space-3); white-space: nowrap; flex: none; }
 
 .chs-crit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--chs-space-9); }
