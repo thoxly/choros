@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0008",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": ".github/workflows/deploy-dev.yml:jobs.deploy-dev",
+      "issue": "No `needs: ci` in deploy-dev job. Both workflows trigger in parallel on push to dev. Deploy can race CI and execute even when CI is red, if branch protection is not yet configured (relies on external founder setup rather than declarative workflow dependency).",
+      "suggestion": "Add `needs: ci` to jobs.deploy-dev. This makes the gate declarative and independent of branch protection timing."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 6,
+      "location": ".github/workflows/deploy-dev.yml:44",
+      "issue": "ssh-keyscan TOFU: accepts any key the host presents without fingerprint validation. Risk mitigated by Tailscale WireGuard PKI for this dev private network, but not explicitly documented.",
+      "suggestion": "Either pin the host fingerprint or add a comment explicitly documenting the TOFU decision and Tailscale mitigation."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 6,
+      "location": ".github/workflows/deploy-dev.yml:41",
+      "issue": "Secret DEPLOY_SSH_KEY is directly interpolated via ${{ secrets.DEPLOY_SSH_KEY }} in run: shell command. GitHub masks it in logs, but the value appears in the expanded shell command before masking. Recommended pattern is env: block.",
+      "suggestion": "Use `env: SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}` at step level and reference `$SSH_KEY` in the run script instead."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": ".github/workflows/deploy-dev.yml (workflow level)",
+      "issue": "No explicit `permissions:` block. Workflow uses only checkout (read). Default permissions on public repo are broader than needed.",
+      "suggestion": "Add `permissions: contents: read` at workflow or job level to follow least-privilege principle."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 2,
+      "location": ".gitignore (root)",
+      "issue": "docker-compose.override.yml is not listed in .gitignore. The server file /srv/choros/docker-compose.override.yml is currently untracked and survives git reset --hard. However, if it is accidentally staged (git add), the next deploy will delete it, breaking restart-policy for the dev stack.",
+      "suggestion": "Add `docker-compose.override.yml` to .gitignore to make survival explicit and prevent accidental tracking."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 3,
+      "location": "scripts/deploy-dev.sh:65",
+      "issue": "Unescaped command substitution $(git log --oneline -1) inside double-quoted SSH argument. Outer shell expands this on the GitHub Actions runner before sending to SSH, so server receives the local runner HEAD hash, not the server HEAD after pull.",
+      "suggestion": "Escape to \\$(git log --oneline -1) so it runs on the remote server as intended."
+    }
+  ],
+  "acceptance_coverage": [
+    {
+      "ac": "deploy-dev.sh --dry-run завершается без ошибок",
+      "covered": true
+    },
+    {
+      "ac": "deploy-dev.yml содержит dormancy gate (if: secrets.DEPLOY_SSH_KEY != '')",
+      "covered": true
+    },
+    {
+      "ac": "Workflow НЕ касается main и prod-кредов",
+      "covered": true
+    },
+    {
+      "ac": "PR dev→main открыт (PR #15)",
+      "covered": true
+    },
+    {
+      "ac": "Healthcheck ждёт статус healthy, timeout 60s (12 × 5s)",
+      "covered": true
+    }
+  ],
+  "role_gap_evidence": [
+    "T-0008 combines infrastructure automation with SSH key handling and public-repo security constraints. Recurring pattern of security-axis findings (R-1..R-3) on deploy/CI tasks suggests candidacy for a dedicated security-reviewer role — log in ledgers/role-gaps.md (SQ11)."
+  ]
+}
