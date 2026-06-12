@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0132",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 16,
+    "passed": 16,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "covered-by-review (ADR §0/§3.3/§5.1/§5.2; review approved iter-2; FF-1/FF-2)", "result": "pass"},
+    {"ac": "AC-2", "test": "covered-by-review (ADR §3.3 grant-предикат write-time ЖИВО; read-path = НОВАЯ B-7; FF-3)", "result": "pass"},
+    {"ac": "AC-3", "test": "covered-by-review (ADR §6 validateNarrowing без обхода; FF-4)", "result": "pass"},
+    {"ac": "AC-4", "test": "covered-by-review (ADR §2 GRAN-1 таблица пилот/симуляция; FF-5)", "result": "pass"},
+    {"ac": "AC-5", "test": "covered-by-review (ADR §5.1 node/срок ЖИВО; §5.2 amount НОВАЯ B-7/B-8)", "result": "pass"},
+    {"ac": "AC-6", "test": "covered-by-review (ADR §4 5 состояний + isEffective авто-истечение; FF-6)", "result": "pass"},
+    {"ac": "AC-7", "test": "covered-by-review (ADR §8 appendAuditEvent/GrantAuditEvent; FF-7)", "result": "pass"},
+    {"ac": "AC-8", "test": "covered-by-review (ADR §6 расширение = ослабление под human-gate)", "result": "pass"},
+    {"ac": "AC-9", "test": "covered-by-review (ADR §7 drain-by-default + R-4 разграничитель; FF-8)", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review (ADR §10 T-0129 FR-10 предусловие SEAM-1; FF-8)", "result": "pass"},
+    {"ac": "AC-11", "test": "covered-by-review (ADR §8 pilot.* в единый аудит НЕ test; FF-7)", "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review (ADR §0/§3 ноль новых scope-примитивов; B-1/B-7/B-8 = НОВЫЕ, помечены; FF-1/FF-2)", "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review (ADR §0/§1 продуктовое понятие, рамка §2 п.5; FF-9)", "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review (ADR §9 two-floor карточка внедрения; FF-9)", "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review (ADR §13 16 строк AC-1..AC-16; FF-10)", "result": "pass"},
+    {"ac": "AC-16", "test": "covered-by-review (ADR §11 B-1..B-8 + design-owned SEAM-2/3; FF-10)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "browser/UI", "result": "n/a", "note": "design-only artifact — no UI surface"}
+  ],
+  "failures": [],
+  "blocked_reason": "",
+  "diff_gate": "PASS — docs/** + ci/checks/pilot-adr-*.sh + package.json only",
+  "npm_ci_result": "PASS — tsc 0 errors, eslint 0 errors, fitness all green (FF-1/FF-1b/FF-2..FF-10 + self-tests), vitest 1389/1395 passed",
+  "review_verdict": "approved iter-2 (21bc00d); 16/16 AC covered; R-1/R-2 blocking closed 1fcd76c; R-3/R-4 nit closed 1fcd76c",
+  "ff_checks_created": ["ci/checks/pilot-adr-foundations.sh", "ci/checks/pilot-adr-structure.sh"],
+  "cn_1_note": "B-7 axisCtx? 7th param collides with T-0136 traceOut? 7th param — merge-coordination at impl phase"
+}
