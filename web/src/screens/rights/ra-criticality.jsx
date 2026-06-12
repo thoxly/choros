@@ -18,7 +18,7 @@ const SCENARIOS = {
     fromAxes: { guarded: false, external: false, sensitive: true },
     toAxes: { guarded: true, external: true, sensitive: true },
     diff: [
-      { kind: "new", label: "Вызов внешней интеграции", detail: "Платёжный шлюз · exec", note: "новый класс доступа — раньше отсутствовал" },
+      { kind: "new", label: "Вызов внешней интеграции", detail: "Платёжный шлюз · invoke", note: "новый класс доступа — раньше отсутствовал" },
       { kind: "raise", label: "Потолок суммы платежа", detail: "₽50 000 → ₽250 000", note: "числовой интервал расширен в пределах потолка роли" },
       { kind: "guard", label: "Утверждение guarded-перехода", detail: "Согласование счёта", note: "роль начинает влиять на защищённый переход" },
       { kind: "same", label: "Чтение чувствительных данных", detail: "Реестр счетов · read", note: "без изменений" },
