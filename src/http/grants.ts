@@ -36,7 +36,7 @@ import {
   validateAdminDelegation,
 } from "../core/scoped-admin.js";
 import type { Grant } from "../core/grant-lattice.js";
-import type { AncestryOracle } from "../core/grant-lattice.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
 import {
   encodeGrantAuditEvent,
   encodeAssignmentAuditEvent,
@@ -62,39 +62,6 @@ import { DEV_USER_HEADER } from "./auth.js";
 
 const DEV_TENANT_ID =
   process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
-
-// Seed-based in-memory oracle for org hierarchy ancestry.
-// Day-1: uses slug-based IDs from ra-data.jsx ORG_TREE and UUID-based IDs
-// from migrations. We do a simple prefix-match descent for the slug tree;
-// for UUID nodes we treat equality-only (no DB traversal — T-0053 improves).
-const ORG_SEED_CHILDREN: Record<string, string[]> = {
-  org: ["fin", "cs", "plat", "sales"],
-  fin: ["fin-calc", "fin-approve", "fin-treasury"],
-  cs: ["cs-l1", "cs-l2"],
-  sales: ["sales-smb", "sales-ent"],
-  // UUID forest root departments (from migration 014/026 seed):
-  "b0000000-0000-0000-0000-000000000001": [], // fin dept
-  "b0000000-0000-0000-0000-000000000002": [], // cs dept
-  "b0000000-0000-0000-0000-000000000003": [], // plat dept
-};
-
-function isDescendantOrSelfSeed(
-  descendantId: string,
-  ancestorId: string,
-): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_SEED_CHILDREN[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelfSeed(descendantId, c)) return true;
-  }
-  return false;
-}
-
-const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
-    return isDescendantOrSelfSeed(descendantId, ancestorId);
-  },
-};
 
 // ---------------------------------------------------------------------------
 // withTenant helper (mirrors src/db/org.ts — write-path needs own transaction)
