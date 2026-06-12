@@ -1,0 +1,103 @@
+{
+  "task_id": "T-0008",
+  "status": "pr_open",
+  "branch": "task/T-0008-xxx",
+  "merge_target": "dev",
+  "base_commit": "f6183fe",
+  "head_commit": "8067626",
+  "pr_url": "https://github.com/thoxly/choros/pull/15",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0008 dev-автодеплой + PR dev→main: scripts/deploy-dev.sh (5-step SSH deploy: git pull + docker compose build/up + healthcheck, --dry-run), .github/workflows/deploy-dev.yml (dormant до DEPLOY_SSH_KEY, workflow_run gate на CI success — R-1 fix), docs/deploy-dev-spec.md, PR #15 (dev→main, OPEN, фаундер-гейт Merge). Re-review approved (8067626): все R-1..R-6 закрыты. deploy-dev.sh --dry-run: 5/5 OK. yml-валидность: ci.yml + deploy-dev.yml OK. npm run ci: 101/101 тестов, 0 ошибок tsc, 0 ошибок eslint.",
+  "commits": [
+    {
+      "sha": "71807b2",
+      "phase": "BUILD",
+      "message": "devops(T-0008): deploy-dev script + dormant GH Actions workflow + SPEC"
+    },
+    {
+      "sha": "00ed094",
+      "phase": "REVIEW",
+      "message": "T-0008 REVIEW: changes_requested — needs: ci missing (blocking R-1) + 5 nits"
+    },
+    {
+      "sha": "3be1262",
+      "phase": "BUILD-fix",
+      "message": "T-0008 fix: deploy gated by CI success via workflow_run (R-1) + hardening nits (R-2..R-6)"
+    },
+    {
+      "sha": "8067626",
+      "phase": "REVIEW-reapprove",
+      "message": "T-0008 re-review: prescription compliance verified — verdict approved"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "8067626",
+      "findings_resolved": [
+        "R-1 (blocking, axis 3): workflow_run trigger с conclusion==success — единственно корректный паттерн cross-workflow gating (needs: работает только внутри одного workflow). CLOSED: 3be1262.",
+        "R-2 (nit, axis 6): TOFU/Tailscale решение задокументировано в комментарии Install SSH key step. CLOSED: 3be1262.",
+        "R-3 (nit, axis 6): секрет передаётся через env: SSH_KEY:, не интерполируется в run: напрямую. CLOSED: 3be1262.",
+        "R-4 (nit, axis 3): добавлен блок permissions: contents: read на уровне workflow. CLOSED: 3be1262.",
+        "R-5 (nit, axis 2): docker-compose.override.yml добавлен в .gitignore с пояснительным комментарием. CLOSED: 3be1262.",
+        "R-6 (nit, axis 3): $(git log --oneline -1) экранирован в \\$(git log --oneline -1) — вычисляется на сервере. CLOSED: 3be1262."
+      ],
+      "findings_nit_open": [],
+      "artifact": "docs/design/T-0008.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 101,
+      "passed": 101,
+      "failed": 0,
+      "ac_coverage": "6/6",
+      "run_details": {
+        "npm_ci_script": "exit 0 — tsc 0 err, eslint 0 err, vitest 101/101",
+        "yaml_ci_yml": "OK (python3.11 yaml.safe_load)",
+        "yaml_deploy_dev_yml": "OK (python3.11 yaml.safe_load)",
+        "dry_run": "5/5 steps OK, exit 0",
+        "pr_15_state": "OPEN (https://github.com/thoxly/choros/pull/15)"
+      },
+      "artifact": "docs/test-reports/T-0008.test-report.md",
+      "contract_artifact": "docs/design/T-0008.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    ".github/workflows/deploy-dev.yml",
+    ".gitignore",
+    "docs/deploy-dev-spec.md",
+    "docs/design/T-0008.review.contract.json",
+    "docs/reviews/T-0008.review.md",
+    "scripts/deploy-dev.sh",
+    "docs/test-reports/T-0008.test-report.md",
+    "docs/design/T-0008.test-report.contract.json",
+    "docs/pr/T-0008.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "operational_notes": {
+    "founder_request_DEPLOY_SSH_KEY": {
+      "status": "флаг уже поднят в control-plane",
+      "action": "thoxly/choros → Settings → Secrets and variables → Actions → New repository secret → Name: DEPLOY_SSH_KEY, Value: содержимое ~/.ssh/homeserver_vm",
+      "effect": "Авто-деплой активируется первым push в dev ПОСЛЕ добавления секрета. Никаких изменений кода не требуется."
+    },
+    "pr_15_lifecycle": "PR #15 dev→main живёт постоянно и обновляется автоматически при каждом push в dev. После N волн разработки фаундер нажимает Merge для промоушна в прод (RL-2/GT-3).",
+    "deploy_activation": "deploy-dev workflow сработает при первом push в dev после добавления DEPLOY_SSH_KEY. Гейт: workflow_run ci conclusion==success — деплой НЕ запустится на красном CI.",
+    "no_prod_touch": "Workflow затрагивает только dev-ветку и dev-стек (100.121.76.86:3000). Продакшн не затронут."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "Только скрипт + yml + документация. Нет DDL-изменений.",
+    "downstream_effect": "После мержа в dev: следующий push в dev (любой задачей) запустит deploy-dev.yml (если DEPLOY_SSH_KEY уже добавлен). PR #15 автоматически обновится."
+  },
+  "friction_events": []
+}

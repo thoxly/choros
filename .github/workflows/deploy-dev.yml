@@ -1,0 +1,68 @@
+name: deploy-dev
+
+# R-1: Triggered by successful completion of the "ci" workflow on dev branch.
+# Using workflow_run ensures deploy never starts until CI has finished and
+# succeeded — the gate is declarative in the workflow definition itself, not
+# dependent on external branch-protection settings.
+#
+# DORMANT until founder provides:
+#   - GitHub secret DEPLOY_SSH_KEY  (contents of ~/.ssh/homeserver_vm private key)
+#
+# Once the secret is set this workflow activates automatically — no other
+# changes required. See docs/environments.md §3 for context.
+#
+# The deploy is non-prod (dev only) and does NOT touch main or prod.
+
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [dev]
+
+# R-4: Minimal permissions — workflow only needs checkout (read).
+permissions:
+  contents: read
+
+jobs:
+  deploy-dev:
+    name: Deploy to dev (homeserver-vm)
+    runs-on: ubuntu-latest
+
+    # R-1: Gate — only run when the upstream CI workflow succeeded.
+    # conclusion == 'success' means all CI jobs passed; any other value
+    # (failure, cancelled, timed_out, etc.) skips this job entirely.
+    if: ${{ github.event.workflow_run.conclusion == 'success' && secrets.DEPLOY_SSH_KEY != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        # R-2 (TOFU note): ssh-keyscan accepts whatever key the host presents.
+        # Risk is intentionally accepted for this dev-only workflow:
+        # the target IP (100.121.76.86) is a Tailscale address authenticated
+        # through WireGuard PKI — MITM via Tailscale-IP hijack is not a
+        # practical threat in this private overlay network.
+        #
+        # R-3: Secret passed via env: block — value stays in the process
+        # environment and is never interpolated into the shell command text.
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Add known host to avoid interactive prompt (TOFU — see note above)
+          ssh-keyscan -H 100.121.76.86 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: "100.121.76.86"
+          DEPLOY_USER: "ubuntu"
+          DEPLOY_DIR: "/srv/choros"
+          SSH_KEY_PATH: "$HOME/.ssh/deploy_key"
+        run: bash scripts/deploy-dev.sh
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
