@@ -24,7 +24,8 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { loadAdminContext } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
+import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
@@ -46,35 +47,6 @@ const DEV_TENANT_ID =
 const AUDIT_TYPE_SET    = "set_llm_secret_handle"    as const;
 const AUDIT_TYPE_ROTATE = "rotate_llm_secret_handle" as const;
 const AUDIT_TYPE_REVOKE = "revoke_llm_secret_handle" as const;
-
-// ---------------------------------------------------------------------------
-// Seed-based org ancestry oracle (mirrors grants.ts SEED_ORACLE)
-// ---------------------------------------------------------------------------
-
-const ORG_SEED_CHILDREN: Record<string, string[]> = {
-  org: ["fin", "cs", "plat", "sales"],
-  fin: ["fin-calc", "fin-approve", "fin-treasury"],
-  cs: ["cs-l1", "cs-l2"],
-  sales: ["sales-smb", "sales-ent"],
-  "b0000000-0000-0000-0000-000000000001": [],
-  "b0000000-0000-0000-0000-000000000002": [],
-  "b0000000-0000-0000-0000-000000000003": [],
-};
-
-function isDescendantOrSelfSeed(descendantId: string, ancestorId: string): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_SEED_CHILDREN[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelfSeed(descendantId, c)) return true;
-  }
-  return false;
-}
-
-const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy: import("../core/grant-lattice.js").Hierarchy, descendantId: string, ancestorId: string): boolean {
-    return isDescendantOrSelfSeed(descendantId, ancestorId);
-  },
-};
 
 // ---------------------------------------------------------------------------
 // UUID / shape helpers (duplicated from grants.ts — write-path own transaction)

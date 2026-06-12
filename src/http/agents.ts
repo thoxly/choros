@@ -54,36 +54,7 @@ function assertUuidShape(value: string, label: string): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Org ancestry oracle (mirrors grants.ts SEED_ORACLE — day-1 seed-based)
-// ---------------------------------------------------------------------------
-
-const ORG_SEED_CHILDREN: Record<string, string[]> = {
-  org: ["fin", "cs", "plat", "sales"],
-  fin: ["fin-calc", "fin-approve", "fin-treasury"],
-  cs: ["cs-l1", "cs-l2"],
-  sales: ["sales-smb", "sales-ent"],
-  "b0000000-0000-0000-0000-000000000001": [],
-  "b0000000-0000-0000-0000-000000000002": [],
-  "b0000000-0000-0000-0000-000000000003": [],
-};
-
-function isDescendantOrSelfSeed(descendantId: string, ancestorId: string): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_SEED_CHILDREN[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelfSeed(descendantId, c)) return true;
-  }
-  return false;
-}
-
-import type { AncestryOracle } from "../core/grant-lattice.js";
-
-const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
-    return isDescendantOrSelfSeed(descendantId, ancestorId);
-  },
-};
+import { SEED_ORACLE } from "./seed-ancestry.js";
 
 // ---------------------------------------------------------------------------
 // withTenantTx helper (write-path, mirrors grants.ts)

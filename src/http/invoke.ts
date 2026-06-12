@@ -39,6 +39,8 @@ import {
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
+export { SEED_ORACLE };
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -49,35 +51,6 @@ const DEV_TENANT_ID =
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// ---------------------------------------------------------------------------
-// Seed oracle (mirrors grants.ts — day-1 org ancestry oracle)
-// ---------------------------------------------------------------------------
-
-const ORG_SEED_CHILDREN: Record<string, string[]> = {
-  org: ["fin", "cs", "plat", "sales"],
-  fin: ["fin-calc", "fin-approve", "fin-treasury"],
-  cs: ["cs-l1", "cs-l2"],
-  sales: ["sales-smb", "sales-ent"],
-  "b0000000-0000-0000-0000-000000000001": [],
-  "b0000000-0000-0000-0000-000000000002": [],
-  "b0000000-0000-0000-0000-000000000003": [],
-};
-
-function isDescendantOrSelfSeed(descendantId: string, ancestorId: string): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_SEED_CHILDREN[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelfSeed(descendantId, c)) return true;
-  }
-  return false;
-}
-
-export const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
-    return isDescendantOrSelfSeed(descendantId, ancestorId);
-  },
-};
 
 // ---------------------------------------------------------------------------
 // withTenantTx helper (mirrors grants.ts pattern)
