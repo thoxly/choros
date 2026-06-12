@@ -1,53 +1,65 @@
 {
   "task_id": "T-0134",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {"green": true},
   "findings": [
     {
       "id": "R-1",
-      "severity": "blocking",
+      "severity": "nit",
       "axis": 4,
-      "location": "docs/design/T-0134-agent-docs.adr.md:105 (§2.1), §5.3:244, FF-DOCS-TENANT:322",
-      "issue": "Механика чтения scope='system'-доков из tenant-сессии под FORCE RLS не специфицирована. system-доки лежат в выделенном system-тенанте (a0...001); RLS-политика tenant-таблиц USING (tenant_id = current_setting('choros.tenant_id')) физически отрежет их для tenant-B-сессии ДО предиката scope, вернув ноль строк. Любая реализация требует ЛИБО tenant-context-switch на внешней (harness) сессии, ЛИБО второго RLS-предиката по scope — оба = второй read/authz-путь, который ADR клянётся не вводить (NF-1) на самой опасной внешней поверхности. Прецедента нет (T-0121 report_page без scope; T-0077 сам сидит в system-тенанте, а не читает его из чужой tenant-сессии). FF-DOCS-TENANT покрывает только 'tenant B не достаёт tenant A', но НЕ способ доставки system-доков. ADR описывает шов лозунгом 'две выборки, структурно' вместо решения.",
-      "suggestion": "Пометить 'реализация system-read-класса под FORCE RLS без второго authz-пути' именованным design-owned SEAM (как SEAM-2), ИЛИ решить в ADR: (а) репликация/проекция system-доков в каждый tenant при сиде → обычный RLS-путь, ноль второго пути; либо (б) выделенная read-only-роль/политика, чьё правило = scope='system' read, с FF, доказывающей, что она не достаёт scope='tenant'-строк system-тенанта и проходит тот же PDP-чокпойнт. Добавить fitness-функцию на system-read-класс."
+      "location": "docs/design/T-0134-agent-docs.adr.md:109 (§2.1-инвариант), §2.4:159, §5.3:303, FF-DOCS-SYSTEM-PROJECTION:390",
+      "issue": "RESOLVED (iter-1 blocking снят). iter-1 R-1 = 'чтение scope=system-доков из чужой tenant-сессии под FORCE RLS = второй read/authz-путь'. Fix fc6e899 решает read-путь per-tenant проекцией (§2.4): system-доки физически живут в каждом тенанте как обычные tenant_id=<его> строки (scope=system, authored_by=system, catalog_version), поэтому lint/MCP/UI читают ОДИН класс ОДНИМ RLS-путём (tenant_id = current_setting('choros.tenant_id')) — без второго USING-предиката, без context-switch; master-копия a0...001 структурно недостижима из чужой сессии (FORCE RLS режет до scope). Проверено против живой базы: migrations/051_report_page.sql:79 = единственный USING tenant_id (прецедент верен); a0000000-...-001 = живой dev-тенант (044_config_agent_seed). Отвергнутые ветви (б) выделенная RLS-политика USING(scope=system) и (в) глобальная таблица без RLS обоснованы честно в §7. FF-DOCS-SYSTEM-PROJECTION доказывает read-инвариант (static: единственный USING tenant_id + нет SET choros.tenant_id в MCP/UI; live: B-сессия читает свою проекцию, SELECT scope=system AND tenant_id=a0...001 ⇒ 0 строк). NF-1 на самой опасной (внешней harness read) поверхности удержан. Blocking снят; остаточная честность write-стороны вынесена в R-6.",
+      "suggestion": "Снято. Read-путь решён по существу. См. R-6 по write-стороне проекции."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0134-agent-docs.adr.md:168-180 (§2.4), §9 T-0134i:410, FF-таблица §8",
+      "issue": "Write-путь проекции честно не назван. Чтобы записать scope=system-строки в tenant_id=B (B != сессия-источник и != system-тенант), агент-поставщик (§2.4 'реплицирует', T-0134i) под FORCE RLS + WITH CHECK(tenant_id=current_setting(...)) обязан ЛИБО выставить choros.tenant_id=B per-target (тот самый context-switch, что отвергнут на read-пути — теперь на write), ЛИБО писать привилегированной ролью мимо RLS. Это provision-time системная операция, PDP/RLS-context-обходная ПО ОПРЕДЕЛЕНИЮ. Защитимо (легитимный provision-write, прецедент = 044_config_agent_seed / mcp_tool-seed T-0077 §2.3 / инстанцирование каталога T-0133; предшествует любому внешнему read-доступу) — потому НЕ blocking. НО ADR довёл честность только до read: write-роль не названа, операция не помечена context-обходной provision-операцией (как read-ветви (а)/(б) прямо названы 'вторым путём'), не ограничена (только scope=system-строки, projection-only, недоступна harness, аудит как граница полномочия), и нет FF на write-сторону — 'нет второго пути' доказано лишь для read; write-bypass вынесен из-под FF-периметра (FF грепают MCP/UI read-слой, provision-writer вне его).",
+      "suggestion": "§2.4/T-0134i явно назвать проекцию provision-time context-обходной системной операцией + границы (только scope=system, projection-only, роль недоступна harness-поверхности, аудит docs.system_projected как граница полномочия) + FF, ограничивающая write-сторону (provision-writer пишет только scope=system, не scope=tenant)."
     },
     {
       "id": "R-2",
       "severity": "nit",
       "axis": 5,
-      "location": "docs/design/T-0134-agent-docs.adr.md:401 (§11)",
-      "issue": "Метка 'сестринские ветки / в base' для прецедентных артефактов T-0121/T-0072/T-0082 stale: src/core/report-page-compat.ts (T-0176) и binding-compat.ts смержены и физически присутствуют в базе worktree. Указание 'coder обязан сверить форму checkReportPageDepFields после мержа' неточно по факту — сверять можно уже сейчас против живого файла.",
-      "suggestion": "Переформулировать на 'сверить против живого src/core/report-page-compat.ts (уже в base, T-0176)'. Требование 1:1-зеркала (NF-6) остаётся верным."
+      "location": "docs/design/T-0134-agent-docs.adr.md:472-479 (§11 Координация)",
+      "issue": "RESOLVED. iter-1 R-2 (метка 'после мержа' stale) закрыт: §11 теперь 'report-page-compat.ts (T-0176) и binding-compat.ts физически присутствуют в базе этого worktree ... сверять можно сейчас'. Подтверждено: src/core/report-page-compat.ts (12 КБ, checkReportPageDepFields:99 / DepViolation:53) и binding-compat.ts (8 КБ) в base."
     },
     {
       "id": "R-3",
       "severity": "nit",
       "axis": 4,
-      "location": "docs/design/T-0134-agent-docs.adr.md:162 (§3.2), LiveSnapshot",
-      "issue": "Граница разрешимости ref_kind недоговорена: code_symbol (`${module}#${symbol}`) требует build/CI-time снимка экспортов — на проде исходников нет (деплой = собранный артефакт), тогда как rest_endpoint/process/config_key/schema_field разрешимы рантайм-реестром. ADR честно выносит сборщик LiveSnapshot в impl (T-0134c), но не проговаривает, какие ref_kind разрешимы рантайм vs только на исходниках.",
-      "suggestion": "В §3.2 явно: code_symbol-сверка = build/CI-time (есть исходники); рантайм-lint покрывает rest_endpoint/process/config_key/schema_field."
+      "location": "docs/design/T-0134-agent-docs.adr.md:235-245 (§3.2)",
+      "issue": "RESOLVED. iter-1 R-3 (граница code_symbol build/CI-time vs runtime недоговорена) закрыт: §3.2 новый блок 'Граница источника LiveSnapshot по ref_kind (R-3, явно)' — code_symbol = build/CI-time (на проде исходников нет), rest_endpoint/process/config_key/schema_field = runtime; зафиксировано для T-0134c."
     },
     {
       "id": "R-4",
       "severity": "nit",
       "axis": 3,
-      "location": "docs/specs/T-0134-agent-docs.spec.md:53 (FR-13), ADR §0/§5.2",
-      "issue": "Cross-ref на 'T-0126 headless-design задачу в очереди' висит: T-0126 не существует (нет docs/design/T-0126*, docs/specs/T-0126*, ноль в git-истории). Механизм-прецедент = живой T-0122 §0 (harness = is_external по тому же механизму производного гранта) — его достаточно, концептуального смешения нет; но опереть консистентность на 'T-0126 в очереди' не на что.",
-      "suggestion": "Отметить, что headless/программная граница держится T-0122 §0 (один механизм внешнего принципала), а T-0126 ещё не материализован."
+      "location": "docs/design/T-0134-agent-docs.adr.md:486-490 (§11)",
+      "issue": "RESOLVED. iter-1 R-4 (висящий cross-ref на T-0126) закрыт: §11 'Headless/программная граница (R-4)' — 'T-0126 пока НЕ материализован (нет docs/design/T-0126*/docs/specs/T-0126*); граница держится T-0122 §0, не отдельным ADR T-0126'. Подтверждено: T-0126-файлы отсутствуют."
     },
     {
       "id": "R-5",
       "severity": "nit",
       "axis": 3,
-      "location": "docs/design/T-0134-agent-docs.adr.md:22 (§0 бронь), §11",
-      "issue": "Слот 054 уже занят дизайном T-0128 (connector, смержен e2f8d79; ADR T-0128 §3.1 D1 и contract пинят migrations/054_connector.sql). T-0134 тоже метит doc_page в 054. Факт.максимум слотов в базе = 053 (T-0121-волна). coder T-0134 обязан взять 055+, сохранив порядок doc_page→doc_ref→doc_log. ADR даёт нейтральную '≥054', но не называет T-0128 как занявшего 054.",
-      "suggestion": "Добавить координационную строку: '054 = T-0128/connector (смержен); doc_page → 055+'."
+      "location": "docs/design/T-0134-agent-docs.adr.md:24 (§0 бронь), §11:480-484",
+      "issue": "RESOLVED. iter-1 R-5 (слот 054 коллизия с T-0128) закрыт: §0/§11 — '054 уже занят дизайном T-0128 (connector, смержен e2f8d79); coder T-0134 берёт 055+'. Подтверждено: e2f8d79 IN base; T-0128.adr.contract.json пинит migration 054; макс. слот в base = 053; FF-SCHEMA-DOCS/T-0134a метят >=055."
+    },
+    {
+      "id": "R-7",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0134-agent-docs.adr.md:19 (легенда), §9 T-0134i deps",
+      "issue": "T-0133 (прецедент vendor-update/managed-solution для проекции) сам ещё НЕ смержен в base этого worktree — живёт в commit db913d6 на ветке task/T-0133-process-templates-design, не в истории HEAD. ADR честно метит '[ЖИВОЙ] git db913d6' и прецедент валиден (§2.5 provenance {catalog_version,origin}, §3.6 VendorUpdateProposal day-1 детект+уведомление / merge=Stage-2 подтверждены в commit). Но T-0134i depends on T-0133 — импл-координация: проекция-vendor-update не материализуема, пока T-0133 не в base. Не дефект дизайна.",
+      "suggestion": "Оркестратору учесть порядок T-0133 → T-0134i при материализации build-задач."
     }
   ],
   "acceptance_coverage": [
     {"ac": "AC-1", "covered": true},
     {"ac": "AC-2", "covered": true},
-    {"ac": "AC-3", "covered": false},
+    {"ac": "AC-3", "covered": true},
     {"ac": "AC-4", "covered": true},
     {"ac": "AC-5", "covered": true},
     {"ac": "AC-6", "covered": true},
@@ -55,10 +67,10 @@
     {"ac": "AC-8", "covered": true},
     {"ac": "AC-9", "covered": true},
     {"ac": "AC-10", "covered": true},
-    {"ac": "AC-11", "covered": false},
+    {"ac": "AC-11", "covered": true},
     {"ac": "AC-12", "covered": true},
     {"ac": "AC-13", "covered": true},
-    {"ac": "AC-14", "covered": false},
+    {"ac": "AC-14", "covered": true},
     {"ac": "AC-15", "covered": true},
     {"ac": "AC-16", "covered": true},
     {"ac": "AC-17", "covered": true},
