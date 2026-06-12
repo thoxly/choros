@@ -31,6 +31,7 @@ import { registerNotificationRoutes } from "./http/notifications.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
+import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 
 const { Pool } = pg;
 
@@ -282,6 +283,9 @@ function buildRouter(
 
   // Register Floor-1 aggregate renderer + Floor-2 RLS-gated data API (T-0181 T-0121g).
   registerReportPageRenderRoutes(router);
+
+  // Register Floor-1 form editor (T-0073 E11.2 — stateless pure transform, no pool needed).
+  registerFloor1EditorRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
