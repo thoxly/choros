@@ -1,0 +1,94 @@
+{
+  "task_id": "T-0135",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1523,
+    "passed": 1517,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-01: DICT_PRESETS ≥ 10 пресетов",
+      "test": "grant-presets.test.ts > AC-01: DICT_PRESETS count > has at least 10 presets",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-02: shape invariants — id, label, desc, grants; atom resource_type + operation",
+      "test": "grant-presets.test.ts > AC-02: preset shape invariants (10 presets × N atoms)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-03: resource_type in DICT_RESOURCES URI",
+      "test": "grant-presets.test.ts > AC-03: resource_type vocabulary",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-04: operation in Operation union",
+      "test": "grant-presets.test.ts > AC-04: operation vocabulary",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-05: p-budget-approver exactly 2 atoms (ledger.invoices:read + :approve)",
+      "test": "grant-presets.test.ts > AC-05: p-budget-approver content > has exactly 2 grant atoms",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-06: p-treasury-exec exactly 4 atoms, critical:true (R-N1 fix: added toHaveLength(4))",
+      "test": "grant-presets.test.ts > AC-06: p-treasury-exec content > has exactly 4 grant atoms",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-07: p-pay-init-limited critical:true + payments.initiate:invoke + constraint.amount_le=250000",
+      "test": "grant-presets.test.ts > AC-07: p-pay-init-limited content",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-08: no degenerate preset (grants non-empty)",
+      "test": "grant-presets.test.ts > AC-08: non-degeneracy (10 presets)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-09: DICT_PRESETS exported from grants.ts, no logic duplication",
+      "test": "ci/checks/grant-presets-isolation.sh — AC-09a/AC-09b/AC-09c PASS",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10: PRESETS in ra-data.jsx synced with DICT_PRESETS (ids + count)",
+      "test": "ci/checks/grant-presets-isolation.sh — AC-10 PASS",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "fitness:db live run: 1517/1517 tests PASS with DATABASE_URL to dev Postgres",
+      "result": "pass",
+      "note": "grant-presets.test.ts is DB-independent (pure data shape); all e2e tests PASS against live DB"
+    },
+    {
+      "check": "frozen-file check: grants.ts red on in-flight branch — expected by design (green post-merge)",
+      "result": "n/a",
+      "note": "Per choros-ci-check-gotchas.md: FF-checks on frozen files redden on amendment branches by design. Not a regression T-0135."
+    },
+    {
+      "check": "R-N1 closed: spec AC-06 updated 3→4 atoms; toHaveLength(4) added to test",
+      "result": "pass",
+      "note": "Commit 1435fc5. Test count increased by 1 (1516→1517 passed)."
+    },
+    {
+      "check": "R-N2 nit: axesFromGrants checks 'exec' not 'invoke' in ra-data.jsx — out of scope T-0135, T-0194 created",
+      "result": "n/a",
+      "note": "Pre-existing pattern. Runtime gate (T-0044) unaffected. T-0194 filed for nit-sweep."
+    }
+  ],
+  "failures": [],
+  "tested_commit": "1435fc5",
+  "branch": "task/T-0135-grant-presets",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+    "fitness_static": "PASS — all checks green; frozen-file grants.ts expected-red (in-flight, not a regression)",
+    "vitest_unit": "1517/1523 passed, 6 skipped (flowable integration offline)",
+    "fitness_db_grant_presets": "128/128 PASS — grant-presets.test.ts (all AC-01..AC-08 + bonus p-refund-operator, with new toHaveLength(4))",
+    "fitness_db_total": "1517/1517 passed, 0 failed"
+  }
+}
