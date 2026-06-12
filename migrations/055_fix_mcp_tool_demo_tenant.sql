@@ -19,8 +19,8 @@
 --   and mislead future operators about the config-agent scope.
 --
 -- Coordination: slot 054 is reserved by T-0128 (D1 decomposition) which has not
---   yet landed; max on-disk slot at time of writing is 053.  This migration takes
---   055, the next free slot.
+--   yet landed; max on-disk slot at time of writing, before this file: 053.  This
+--   migration takes 055, the next free slot.
 --
 -- Design discipline:
 --   - IDEMPOTENT: DELETE … WHERE is safe to re-apply (no row = no-op).
