@@ -274,9 +274,8 @@ function buildRouter(
   }
 
   // Register PDP explain endpoint (T-0136).
-  if (grantsPool) {
-    registerPdpExplainRoutes(router, grantsPool);
-  }
+  // Registered unconditionally — returns 503 NO_DATABASE when pool is absent (R-7).
+  registerPdpExplainRoutes(router, grantsPool ?? null);
 
   // Register report_page CRUD + promote routes (T-0178 T-0121d).
   registerReportPageRoutes(router);

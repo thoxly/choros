@@ -15,6 +15,19 @@
  * Анти-oracle: не-admin запрос о чужом субъекте → 403 (без подробностей).
  * Маскинг: maskedFields раскрывается только admin; при самоопросе — только
  * governed-флаг (не раскрывать существование drop-полей — AC-8).
+ *
+ * Ограничение scope (R-2): explain поддерживает op ∈ {read, create, update, delete}.
+ * Операции invoke/approve/transition требуют EffectSource / SodSource,
+ * которые не имеют production-реализации в контексте explain (T-0053).
+ * Запрос с неподдерживаемым op → 422 EXPLAIN_OP_UNSUPPORTED.
+ * Это задекларировано в ADR §3.5 как честное сужение, а не молчаливое игнорирование.
+ *
+ * Record-источник (R-3): для ref.kind === "record" читается реальная запись из БД
+ * (tenant-isolated, RLS). Для ref.kind ∈ {registry, application} запись не применима;
+ * resolveFor никогда не вызовет getRecord для этих видов, т.к. record_fetch относится
+ * только к записям (шаг 5 резолвера срабатывает лишь после нахождения покрывающего гранта).
+ *
+ * 503 NO_DATABASE (R-7): эндпоинт регистрируется всегда; без пула отдаёт 503.
  */
 
 import pg from "pg";
@@ -37,8 +50,6 @@ import {
   type Operation,
   type Grant,
   type ScopeElement,
-  isNarrowerOrEqual,
-  isEffective,
 } from "../core/grant-lattice.js";
 import {
   validateAdminDelegation,
@@ -54,8 +65,17 @@ import { DEV_USER_HEADER } from "./auth.js";
 const DEV_TENANT_ID =
   process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// ---------------------------------------------------------------------------
+// Supported operations (R-2): explain is honest only for grant→scope→record
+// pipeline. invoke/approve/transition require EffectSource/SodSource that have
+// no production-backed implementation in the explain context yet (T-0053).
+// ---------------------------------------------------------------------------
+
+/** Operations fully supported by explain (honest verdict match guaranteed). */
+const EXPLAIN_SUPPORTED_OPS: readonly Operation[] = ["read", "create", "update", "delete"];
+
+/** All valid operations accepted at the HTTP level. */
+const ALL_VALID_OPS: Operation[] = ["read", "create", "update", "delete", "approve", "transition", "invoke"];
 
 // ---------------------------------------------------------------------------
 // In-memory seed oracle (mirrors grants.ts pattern — T-0053 improves)
@@ -177,6 +197,54 @@ async function loadSubjectGrants(
 }
 
 // ---------------------------------------------------------------------------
+// DB-backed record source for explain (R-3: real record, not stub)
+//
+// For ref.kind === "record": fetch from choros.record (tenant-isolated via RLS).
+// Returns null when the record does not exist — resolveFor will emit
+// record_fetch ok:false with reason:"not_found" (AC-6 through HTTP path).
+//
+// For ref.kind ∈ {registry, application}: return a sentinel (non-null) so
+// resolveFor reaches the masking step. Registry/application objects are not
+// stored in choros.record; the grant-scope check is what matters for these
+// resource types. The sentinel is NOT a lie — for registry/application refs,
+// record existence is not the gating concern (grant→scope is).
+// ---------------------------------------------------------------------------
+
+async function fetchRecordForExplain(
+  pool: pg.Pool,
+  tenantId: string,
+  ref: ResourceRef,
+): Promise<Record<string, unknown> | null> {
+  if (ref.kind !== "record") {
+    // Registry and application resources are not rows in choros.record.
+    // Return a non-null sentinel so resolveFor reaches the masking step.
+    return { __explain_resource_sentinel__: true };
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+
+    const { rows } = await client.query<{ data: Record<string, unknown> }>(
+      `SELECT data FROM choros.record
+        WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [tenantId, ref.recordId],
+    );
+
+    await client.query("COMMIT");
+    if (rows.length === 0) return null;
+    return rows[0]!.data;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Request body parsing
 // ---------------------------------------------------------------------------
 
@@ -252,9 +320,8 @@ function parseExplainBody(body: unknown): ExplainBody {
   }
 
   const operation = b["operation"];
-  const VALID_OPS: Operation[] = ["read", "create", "update", "delete", "approve", "transition", "invoke"];
-  if (!VALID_OPS.includes(operation as Operation)) {
-    throw new HttpError(400, "VALIDATION", `operation must be one of: ${VALID_OPS.join(", ")}`);
+  if (!ALL_VALID_OPS.includes(operation as Operation)) {
+    throw new HttpError(400, "VALIDATION", `operation must be one of: ${ALL_VALID_OPS.join(", ")}`);
   }
 
   return {
@@ -336,11 +403,20 @@ async function checkExplainAuthz(
 /**
  * Register POST /api/pdp/explain
  *
- * Available only when DATABASE_URL is set (explain requires live grant data).
- * Without DB: 503 NO_DATABASE.
+ * Registered unconditionally. Without DB pool: 503 NO_DATABASE (R-7).
+ *
+ * Supported operations (R-2): read, create, update, delete.
+ * Operations invoke/approve/transition require EffectSource/SodSource that have
+ * no production-backed implementation in explain context (T-0053 pending).
+ * Those ops return 422 EXPLAIN_OP_UNSUPPORTED (honest scope declaration).
  */
-export function registerPdpExplainRoutes(router: Router, pool: pg.Pool): void {
+export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): void {
   router.register("POST", "/api/pdp/explain", async (req, res) => {
+    // R-7: 503 when no DB pool is available.
+    if (pool === null) {
+      throw new HttpError(503, "NO_DATABASE", "DATABASE_URL not set; explain requires live grant data");
+    }
+
     const caller = extractCaller(req);
     const nowMs = Date.now();
     const tenantId = DEV_TENANT_ID;
@@ -356,6 +432,20 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool): void {
     }
     if (explainReq.handle.tenantId !== tenantId) {
       throw new HttpError(400, "VALIDATION", "handle.tenantId must match server tenant");
+    }
+
+    // R-2: reject unsupported operations with 422 EXPLAIN_OP_UNSUPPORTED.
+    // invoke/approve/transition require EffectSource/SodSource; without them the
+    // explain verdict would diverge from the real PDP verdict (AC-1 violation).
+    // Honest scooping: declare the limitation rather than silently producing wrong verdicts.
+    if (!(EXPLAIN_SUPPORTED_OPS as readonly string[]).includes(explainReq.operation)) {
+      throw new HttpError(
+        422,
+        "EXPLAIN_OP_UNSUPPORTED",
+        `operation '${explainReq.operation}' is not supported by explain: ` +
+          `effect/SoD sources required for this op are not available in explain context (T-0053 pending). ` +
+          `Supported: ${EXPLAIN_SUPPORTED_OPS.join(", ")}`,
+      );
     }
 
     // Authz: self-query or admin check.
@@ -389,21 +479,23 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool): void {
     };
 
     // Build in-memory GrantSource, RecordSource, AncestryOracle for explain.
-    // We use a stub RecordSource that always returns a sentinel record so
-    // resolveFor can reach the masking step. The actual record content is not
-    // relevant for explain — we only care about the decision pipeline.
-    const stubRecord: Record<string, unknown> = { __explain_sentinel__: true };
+    //
+    // R-3: RecordSource is honest:
+    //   - ref.kind === "record": real DB lookup; null → record_fetch ok:false (AC-6 through HTTP).
+    //   - ref.kind ∈ {registry, application}: sentinel (non-null); resolveFor reaches masking.
+    //     These resource types are not stored as rows in choros.record; existence is not
+    //     the gating concern — grant→scope coverage is (ADR §3.3).
     const explainDeps: ResolverDeps = {
       grants: {
         getGrants: async (_subject, _nowMs) => subjectGrants,
       },
       records: {
-        getRecord: async (_ref) => stubRecord,
+        getRecord: async (ref) => fetchRecordForExplain(pool, tenantId, ref),
       },
       ancestry: SEED_ORACLE,
-      // classifications, effects, sod, keyedDigest are NOT wired for explain.
-      // explain traces the grant→scope→record pipeline; effect/SoD/masking
-      // steps emit trace entries only if the relevant deps are present (NF-1).
+      // classifications, effects, sod, keyedDigest: NOT wired for explain.
+      // effects/sod are absent → invoke/approve/transition are rejected above (R-2).
+      // classifications: omitted → masking step governed=false (no data-class governance).
       now: () => nowMs,
     };
 
@@ -411,7 +503,9 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool): void {
     const traceSteps: TraceStep[] = [];
     const collector: TraceCollector = { push: (s) => { traceSteps.push(s); } };
 
-    // Run resolveFor with trace — verdict guaranteed to match real resolver.
+    // Run resolveFor with trace — verdict guaranteed to match real resolver for
+    // supported ops (grant→scope→record pipeline; no effect/SoD divergence possible
+    // since those deps are absent and the guarded ops are rejected above).
     const result = await resolveFor(
       explainDeps,
       handle,
