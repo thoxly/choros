@@ -239,7 +239,6 @@ describe("AC-7 — result.reason is non-empty string", () => {
 describe("AC-8 — FLOOR1_EDIT_KINDS and FLOOR2_EDIT_KINDS are disjoint", () => {
   it("no kind appears in both sets", () => {
     const floor1 = Array.from(FLOOR1_EDIT_KINDS);
-    const floor2 = Array.from(FLOOR2_EDIT_KINDS);
     const overlap = floor1.filter((k) => (FLOOR2_EDIT_KINDS as ReadonlySet<string>).has(k));
     expect(overlap).toHaveLength(0);
   });
