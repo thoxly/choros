@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0132",
+  "status": "ready",
+  "decision": "Пилот — продуктовое понятие «ограниченный боевой запуск published-процесса» поверх ЖИВОЙ решётки скоупов T-0018, а НЕ вторая подсистема авторизации. Срез декларируется тремя осями, каждая — живой примитив решётки: узел оргдерева (node), интервал суммы (interval, grant-предикат), срок (Grant.validUntil/isEffective). PilotDeclaration компилируется машинно в scope пилотных грантов = set([node, interval]) + validUntil через живой meet; гранты — монотонное сужение (пилотный.scope ⊑ полный.scope), проходящее живой validateNarrowing. Граница пилота обеспечена решёткой: вне-срезовый кейс не покрыт resolveFor (isNarrowerOrEqual/isEffective) — это следствие резолюции грантов, не if-фильтр. Пилот published+боевой (эффект-гранты T-0034 действуют) — точная противоположность симуляции T-0130 (draft+стабы). Жизненный цикл запланирован→активен→{расширен|откачен|истёк} наблюдаем в едином аудите; авто-истечение через isEffective; расширение = ослабление среза под human-gate; откат = drain-by-default. Ноль нового scope-механизма/authority-store/второго аудит-лога.",
+  "rejected_alternatives": [
+    {"option": "Пилот как отдельный if-фильтр в движке поверх неограниченных грантов (if case.amount<=100000)", "why_not": "Разрывает единый источник истины авторизации (T-0018 NF-1): граница пилота необеспечена решёткой, аудит/резолюция её не видят. Срез обязан быть interval-grant-предикатом (FR-2/AC-2)."},
+    {"option": "Новая сущность-scope «пилотный диапазон» (второй scope-механизм)", "why_not": "interval/node уже ЖИВЫ в grant-lattice.ts:44/46 и обслужены meet/isNarrowerOrEqual. Новый примитив = переизобретение, запрещён рамкой §2 п.5 и NF-1/AC-12."},
+    {"option": "Второй аудит-лог для пилотной телеметрии", "why_not": "Пилот — боевая активность; параллельный лог раздваивает истину/комплаенс. Мониторинг = срез единого appendAuditEvent по pilotId (FR-7/FR-11)."},
+    {"option": "Флаг simulate / частично-боевой пилот", "why_not": "Стирает границу GRAN-1 с симуляцией (NF-2): либо боевые эффекты в «тесте», либо «пилот» без нагрузки. Пилот всегда published+боевой; симуляция всегда draft+стаб."},
+    {"option": "Принудительная остановка in-flight инстансов при откате как дефолт", "why_not": "Убивает реальные боевые кейсы на полпути. Дефолт — drain (T-0129 §10.3); kill — отдельный риск Stage-2 (SEAM-3)."},
+    {"option": "Таймер-демон «закрой пилот по сроку» в авторитете", "why_not": "Избыточно: valid_until = TTL встроен в живой isEffective на read-path (grant-lattice.ts:497). Авто-истечение — следствие резолюции, не отдельный процесс."}
+  ],
+  "object_model": [
+    {"entity": "PilotDeclaration", "fields": [
+      {"name": "tenantId", "type": "string"},
+      {"name": "pilotId", "type": "string"},
+      {"name": "implementationId", "type": "string"},
+      {"name": "bundleVersion", "type": "string"},
+      {"name": "nodeAxis", "type": "{ hierarchy:\"org\"; nodeId: string; nodeLevel: NodeLevel }"},
+      {"name": "amountAxis", "type": "{ axis: string; lo: number; hi: number } | null"},
+      {"name": "validUntil", "type": "number | null"},
+      {"name": "state", "type": "PilotState"},
+      {"name": "createdBy", "type": "string"}
+    ]},
+    {"entity": "PilotGrantBinding", "fields": [
+      {"name": "pilotId", "type": "string"},
+      {"name": "grantId", "type": "string"},
+      {"name": "derivedScope", "type": "ScopeElement (set([node,interval]) | node)"}
+    ]},
+    {"entity": "PilotState", "fields": [
+      {"name": "value", "type": "\"запланирован\" | \"активен\" | \"расширен\" | \"откачен\" | \"истёк\""}
+    ]}
+  ],
+  "contracts": [
+    "derivedScope(decl): ScopeElement — amountAxis===null ? node : meet(node, interval, ancestryOracle) ⇒ set([node,interval]) (живой meet, grant-lattice.ts:367)",
+    "grant.scope = derivedScope(decl); grant.validUntil = decl.validUntil ?? undefined (живой isEffective, grant-lattice.ts:497)",
+    "Пилотные гранты проходят живой validateNarrowing(parent, child, oracle) (grant-lattice.ts:408) — пилотный.scope ⊑ полный.scope; расширение = тот же гейт относительно санкционированного владельцем",
+    "Граница среза = выход resolveFor(deps, handle, subject, op) (grant-resolver.ts:489): вне-срезовый кейс ⇒ no_grant как следствие isNarrowerOrEqual/isEffective, не отдельная проверка",
+    "Авто-истечение активен→истёк = isEffective(grant, now)=false когда now>=validUntil (без ручного действия / таймера в авторитете)",
+    "Аудит-вокабуляр (добавки в единый appendAuditEvent / GrantAuditEvent): pilot.started | pilot.expanded | pilot.rolled_back | pilot.expired (наследует impl.pilot.proposed из T-0129); НЕ помечены test, НЕ исключены из комплаенс-экспорта",
+    "Производные build-задачи (НОВЫЕ): B-1 модель+компилятор, B-2 state machine+авто-истечение, B-3 MCP-ops+human-gate, B-4 UX карточки+мониторинг; B-5 in-flight kill (Stage-2), B-6 жёсткая маршрутизация остатка (Stage-2)"
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "Foundations: несущие символы ЖИВЫ — interval-kind/isNarrowerOrEqual/meet/validateNarrowing/isEffective в grant-lattice.ts; resolveFor в grant-resolver.ts; effect-resource.ts существует (защита от дрейфа удалённого символа, FE-W23-0008)", "ci_check": "ci/checks/pilot-adr-foundations.sh: grep -qF каждого символа в реальном src/core/*; --self-test на фикстуре без символа ⇒ красный. Регистрация в package.json fitness-цепочке."},
+    {"id": "FF-2", "rule": "Три оси = существующие примитивы T-0018, ноль нового scope-механизма (AC-1, NF-1)", "ci_check": "ci/checks/pilot-adr-structure.sh Check-AXES: present interval,node,'set([node',T-0018; absent assertion «новый scope-механизм»"},
+    {"id": "FF-3", "rule": "Интервал суммы = grant-предикат (interval-элемент в ⊑-проверке), НЕ внешний if-фильтр (AC-2)", "ci_check": "Check-PREDICATE: present 'grant-предикат',validateNarrowing; absent 'if (case.amount'"},
+    {"id": "FF-4", "rule": "Монотонное сужение через живой validateNarrowing, без обхода гейта (AC-3)", "ci_check": "Check-NARROW: present validateNarrowing,'сужение','пилотный.scope ⊑'; absent assertion «обход validateNarrowing»"},
+    {"id": "FF-5", "rule": "Граница live/draft GRAN-1 явная: пилот=published+боевой, симуляция=draft+стаб; срез=охват≠боевость (AC-4, NF-2)", "ci_check": "Check-GRAN1: present published,'охват, а НЕ',T-0130; absent assertion «simulate=true гасит»"},
+    {"id": "FF-6", "rule": "State machine ≥5 состояний + авто-истечение через isEffective без ручного действия (AC-6)", "ci_check": "Check-STATES: count_ge состояний >=5 (запланирован/активен/расширен/откачен/истёк); present isEffective,'автоматическ','без ручного действия'"},
+    {"id": "FF-7", "rule": "Единый аудит, без второго лога; пилотные события НЕ помечены test, не исключены из комплаенс (AC-7, AC-11)", "ci_check": "Check-AUDIT: present appendAuditEvent,'НЕ помечен',комплаенс; absent assertion «второй лог»"},
+    {"id": "FF-8", "rule": "Seam T-0129/промоут (FR-10, предусловие, set([node,interval])) + drain-by-default отката (AC-9, AC-10)", "ci_check": "Check-SEAM: present T-0129,FR-10,drain-by-default,предусловие"},
+    {"id": "FF-9", "rule": "Природа задачи (продуктовое понятие, «не хватало только понятия») + two-floor (карточка внедрения, не редактор грантов) удержаны (AC-13, AC-14)", "ci_check": "Check-NATURE: present 'продуктовое понятие',two-floor,карточк; absent assertion «клиент редактирует решётку руками»"},
+    {"id": "FF-10", "rule": "Трассировка полна: >=16 строк | AC-N | + раздел производных задач [НОВАЯ B- (AC-15, AC-16)", "ci_check": "Check-TRACE: count_ge '^\\| AC-[0-9]' >=16; present '[НОВАЯ B-'; --self-test на 15-строчной фикстуре ⇒ красный"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §0 (interval ЖИВОЙ grant-lattice.ts:46), §3.3, §1; FF-2"},
+    {"ac": "AC-2", "covered_by": "ADR §3.3 (interval = grant-предикат в isNarrowerOrEqual, НЕ if-фильтр); FF-3"},
+    {"ac": "AC-3", "covered_by": "ADR §6 (расширение через живой validateNarrowing без обхода), §1 (сужение ⊑); FF-4"},
+    {"ac": "AC-4", "covered_by": "ADR §2 (таблица GRAN-1, охват≠боевость); FF-5"},
+    {"ac": "AC-5", "covered_by": "ADR §5 (граница = следствие resolveFor; SEAM-2 design-owned default=полный процесс)"},
+    {"ac": "AC-6", "covered_by": "ADR §4 (state machine 5 состояний + авто-истечение isEffective); FF-6"},
+    {"ac": "AC-7", "covered_by": "ADR §8 (мониторинг = срез единого аудита, без второго лога); FF-7"},
+    {"ac": "AC-8", "covered_by": "ADR §6 (расширение = ослабление среза под human-gate, в границах владельца)"},
+    {"ac": "AC-9", "covered_by": "ADR §7 (откат: гранты дезактивированы, drain-by-default, эффекты не переписаны); FF-8"},
+    {"ac": "AC-10", "covered_by": "ADR §10 (пилот = фаза петли T-0129 FR-10, промоут=предусловие, SEAM-1); FF-8"},
+    {"ac": "AC-11", "covered_by": "ADR §8 (старт/расширение/откат в единый аудит, не исключены из комплаенс); FF-7"},
+    {"ac": "AC-12", "covered_by": "ADR §0/§1/§3 (ноль переизобретения: всё на живом T-0018/T-0021/T-0034/T-0031/T-0129); FF-1, FF-2"},
+    {"ac": "AC-13", "covered_by": "ADR §0/§1 (добавляем продуктовое понятие, «не хватало только понятия»); FF-9"},
+    {"ac": "AC-14", "covered_by": "ADR §9 (two-floor, карточка внедрения, не редактор грантов); FF-9"},
+    {"ac": "AC-15", "covered_by": "ADR §13 + §0 (опоры трассированы поимённо); FF-10"},
+    {"ac": "AC-16", "covered_by": "ADR §11 (границы design-only + производные B-1..B-6 + design-owned/Stage-2 метки); FF-10"}
+  ],
+  "runtime_target": "локально / существующий контейнер choros (dev-стек /srv/choros) — design-only, новый внешний ресурс не требуется (пилот опирается на живую решётку T-0018/резолвер/аудит/published-бандл); GT-4 не нужен",
+  "adr_artifact_path": "docs/design/T-0132-pilot-rollout.adr.md",
+  "escalation": ""
+}
