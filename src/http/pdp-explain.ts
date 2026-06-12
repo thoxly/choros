@@ -56,6 +56,7 @@ import {
   validateAdminDelegation,
 } from "../core/scoped-admin.js";
 import { loadAdminContext } from "../db/org.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 
@@ -79,33 +80,17 @@ const EXPLAIN_SUPPORTED_OPS: readonly Operation[] = ["read", "create", "update",
 const ALL_VALID_OPS: Operation[] = ["read", "create", "update", "delete", "approve", "transition", "invoke"];
 
 // ---------------------------------------------------------------------------
-// In-memory seed oracle (mirrors grants.ts pattern — T-0053 improves)
+// Ancestry oracle — imported from shared module (T-0053 improves to DB-backed)
 // ---------------------------------------------------------------------------
-
-const ORG_SEED_CHILDREN: Record<string, string[]> = {
-  org: ["fin", "cs", "plat", "sales"],
-  fin: ["fin-calc", "fin-approve", "fin-treasury"],
-  cs: ["cs-l1", "cs-l2"],
-  sales: ["sales-smb", "sales-ent"],
-  "b0000000-0000-0000-0000-000000000001": [],
-  "b0000000-0000-0000-0000-000000000002": [],
-  "b0000000-0000-0000-0000-000000000003": [],
-};
-
-function isDescendantOrSelfSeed(descendantId: string, ancestorId: string): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_SEED_CHILDREN[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelfSeed(descendantId, c)) return true;
-  }
-  return false;
-}
-
-const SEED_ORACLE = {
-  isDescendantOrSelf(_hierarchy: string, descendantId: string, ancestorId: string) {
-    return isDescendantOrSelfSeed(descendantId, ancestorId);
-  },
-};
+//
+// SEED_ORACLE is the shared seed-based oracle from seed-ancestry.ts.
+// Known gap: correct only for the dev-seed org topology; wrong for tenants with
+// a different department structure. This affects admin delegation checks that
+// compare org-scoped authority. DB-backed ancestry requires refactoring the
+// synchronous AncestryOracle interface (T-0053).
+//
+// Do NOT redeclare ORG_SEED_CHILDREN here — use the shared export instead.
+// (FF-4 / ci/checks/seed/single-source.sh enforces this)
 
 // ---------------------------------------------------------------------------
 // DB-backed grant source for explain (read the subject's actual grants)
