@@ -1,6 +1,6 @@
 {
   "task_id": "T-0074",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {"green": true},
   "findings": [
     {
@@ -9,7 +9,8 @@
       "axis": 1,
       "location": "src/core/authoring-floor-classifier.ts:Floor1EditKind+FLOOR1_EDIT_KINDS",
       "issue": "ADR §9.1 и T-0073 task title явно включают help-text / help как отдельную Floor-1 операцию (relabel/hide/required/order/help). Текущий Floor1EditKind содержит 5 kinds; set_help_text (или эквивалентный kind) отсутствует. Если T-0073 эмитит change с kind set_help_text, классификатор вернёт requiredFloor:'2' через unknown-fallback — нарушение §9.2 (тривиальная zero-LLM правка escalated to Floor-2).",
-      "suggestion": "Добавить set_help_text в Floor1EditKind union и FLOOR1_EDIT_KINDS set; обновить docstring relabel_field чтобы разграничить scope. Альтернатива: формально задокументировать решение о слиянии help-text в relabel_field + зафиксировать контракт в spec T-0073 (T-0073 обязан эмитировать relabel_field, не set_help_text)."
+      "suggestion": "Добавить set_help_text в Floor1EditKind union и FLOOR1_EDIT_KINDS set; обновить docstring relabel_field чтобы разграничить scope. Альтернатива: формально задокументировать решение о слиянии help-text в relabel_field + зафиксировать контракт в spec T-0073 (T-0073 обязан эмитировать relabel_field, не set_help_text).",
+      "resolution": "FIXED in commit 3d186d5: set_help_text added to Floor1EditKind union and FLOOR1_EDIT_KINDS set as 6th Floor-1 kind; relabel_field docstring narrowed to label/placeholder; 2 individual unit tests added (AC-9). 80 authoring-floor tests pass; AFC-1..AFC-7 green; full suite 1641 pass."
     },
     {
       "id": "R-N1",
@@ -17,11 +18,12 @@
       "axis": 2,
       "location": "feat(T-0074) commit message",
       "issue": "Commit message заявляет «74 unit cases»; vitest run возвращает 76 tests passed. Расхождение в 2 теста.",
-      "suggestion": "Исправить счётчик в commit message или добавить пояснение."
+      "suggestion": "Исправить счётчик в commit message или добавить пояснение.",
+      "resolution": "ADDRESSED in commit 3d186d5: new commit message states accurate test counts (80 authoring-floor, 1641 full suite)."
     }
   ],
   "acceptance_coverage": [
-    {"ac": "AC-1: Floor-1 vocab полный (relabel/hide/required/order/help)", "covered": false},
+    {"ac": "AC-1: Floor-1 vocab полный (relabel/hide/required/order/help)", "covered": true},
     {"ac": "AC-2: Floor-2 vocab полный (8 kinds §4)", "covered": true},
     {"ac": "AC-3: unknown → Floor-2 safe-default", "covered": true},
     {"ac": "AC-4: fieldKey → appears in reason", "covered": true},
