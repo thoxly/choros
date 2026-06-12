@@ -63,33 +63,121 @@ const RES_BY_URI = Object.fromEntries(RESOURCES.map((r) => [r.uri, r]));
 
 /* ---------------------------------------------------------------------------
    ПРЕСЕТЫ простого режима — высокоуровневое намерение → набор грантов
+   (T-0135: 10 day-1 пресетов; синхронизированы с DICT_PRESETS в src/http/grants.ts)
+   Шейп атома: { uri, ops, scopeOwn?, scopeOrg?, constraint? }
+   Каждый пресет разворачивается в grant-атомы на стороне клиента перед POST /api/grants
+   (AC-18 T-0030 — без preset-таблицы).
    --------------------------------------------------------------------------- */
 const PRESETS = [
+  // 1 — Согласующий бюджета в Финансах
   {
-    id: "p-read-ledger", label: "Чтение реестра счетов",
-    desc: "Просмотр счетов и их статусов без права изменения",
-    grants: [{ uri: "mcp://ledger.invoices", ops: ["read"] }],
+    id: "p-budget-approver",
+    label: "Согласующий бюджета в Финансах",
+    desc: "Просмотр и согласование счетов в Финансах без права инициировать платёж",
+    grants: [
+      { uri: "mcp://ledger.invoices", ops: ["read"],    scopeOrg: "fin" },
+      { uri: "mcp://ledger.invoices", ops: ["approve"], scopeOrg: "fin" },
+    ],
   },
+  // 2 — Казначей-исполнитель
   {
-    id: "p-approve-own", label: "Утверждать заявки в своём подразделении",
-    desc: "Решение по заявкам в пределах своего узла оргструктуры",
-    grants: [{ uri: "mcp://ledger.invoices", ops: ["read", "approve"], scopeOwn: true }],
-  },
-  {
-    id: "p-recon", label: "Сверка платежей",
-    desc: "Чтение реестра + ведение сверки за период",
-    grants: [{ uri: "mcp://ledger.invoices", ops: ["read"] }, { uri: "mcp://ledger.recon", ops: ["read", "write"] }],
-  },
-  {
-    id: "p-kb", label: "Поиск по базе знаний",
-    desc: "Только чтение справочной базы",
-    grants: [{ uri: "mcp://kb.search", ops: ["read"] }],
-  },
-  {
-    id: "p-pay-init", label: "Инициировать платёж до лимита",
-    desc: "Вызов платёжного шлюза с числовым потолком суммы",
+    id: "p-treasury-exec",
+    label: "Казначей-исполнитель",
+    desc: "Чтение, сверка и инициация платежей до ₽500 000 в Казначействе",
     critical: true,
-    grants: [{ uri: "mcp://payments.initiate", ops: ["exec"], scopeRange: "≤ ₽250 000" }],
+    grants: [
+      { uri: "mcp://ledger.invoices",  ops: ["read"],   scopeOrg: "fin-treasury" },
+      { uri: "mcp://ledger.recon",      ops: ["read"],   scopeOrg: "fin-treasury" },
+      { uri: "mcp://ledger.recon",      ops: ["update"], scopeOrg: "fin-treasury" },
+      { uri: "mcp://payments.initiate", ops: ["invoke"], scopeOrg: "fin-treasury",
+        constraint: { amount_le: 500000 } },
+    ],
+  },
+  // 3 — Наблюдатель аудита
+  {
+    id: "p-audit-observer",
+    label: "Наблюдатель аудита",
+    desc: "Чтение счетов, сверки и реестра договоров для аудиторских целей",
+    grants: [
+      { uri: "mcp://ledger.invoices",  ops: ["read"], scopeOrg: "fin" },
+      { uri: "mcp://ledger.recon",      ops: ["read"], scopeOrg: "fin" },
+      { uri: "mcp://contracts.lookup",  ops: ["read"], scopeOrg: "fin" },
+    ],
+  },
+  // 4 — Инициатор договорной работы
+  {
+    id: "p-contract-initiator",
+    label: "Инициатор договорной работы",
+    desc: "Создание договоров и чтение справочника контрагентов в своём подразделении",
+    grants: [
+      { uri: "mcp://contracts.lookup",  ops: ["read", "create"], scopeOwn: true },
+      { uri: "mcp://counterparty.kyc",   ops: ["read"],           scopeOwn: true },
+    ],
+  },
+  // 5 — Согласующий договоров
+  {
+    id: "p-contract-approver",
+    label: "Согласующий договоров",
+    desc: "Просмотр и согласование договоров в своём подразделении",
+    grants: [
+      { uri: "mcp://contracts.lookup", ops: ["read", "approve"], scopeOwn: true },
+      { uri: "mcp://counterparty.kyc",  ops: ["read"],            scopeOwn: true },
+    ],
+  },
+  // 6 — Линия поддержки L1
+  {
+    id: "p-support-l1",
+    label: "Линия поддержки L1",
+    desc: "Обработка обращений L1: очередь, CRM и база знаний",
+    grants: [
+      { uri: "mcp://support.queue",  ops: ["read", "update"], scopeOrg: "cs-l1" },
+      { uri: "mcp://crm.customer",   ops: ["read"],           scopeOrg: "cs-l1" },
+      { uri: "mcp://kb.search",      ops: ["read"],           scopeOrg: "cs-l1" },
+    ],
+  },
+  // 7 — Приёмник эскалаций агентов
+  {
+    id: "p-escalation-receiver",
+    label: "Приёмник эскалаций агентов",
+    desc: "Приём и обработка агентских эскалаций в Клиентском сервисе",
+    grants: [
+      { uri: "mcp://escalations.queue", ops: ["read", "update"], scopeOrg: "cs" },
+      { uri: "mcp://crm.customer",      ops: ["read"],           scopeOrg: "cs" },
+    ],
+  },
+  // 8 — Бухгалтер сверки
+  {
+    id: "p-recon-accountant",
+    label: "Бухгалтер сверки",
+    desc: "Чтение реестра счетов и ведение сверки платежей",
+    grants: [
+      { uri: "mcp://ledger.invoices", ops: ["read"],           scopeOrg: "fin" },
+      { uri: "mcp://ledger.recon",    ops: ["read", "update"], scopeOrg: "fin" },
+    ],
+  },
+  // 9 — Инициировать платёж до лимита
+  {
+    id: "p-pay-init-limited",
+    label: "Инициировать платёж до лимита",
+    desc: "Вызов платёжного шлюза до ₽250 000 в своём подразделении",
+    critical: true,
+    grants: [
+      { uri: "mcp://ledger.invoices",  ops: ["read"],   scopeOwn: true },
+      { uri: "mcp://payments.initiate", ops: ["invoke"], scopeOwn: true,
+        constraint: { amount_le: 250000 } },
+    ],
+  },
+  // 10 — Оператор возвратов
+  {
+    id: "p-refund-operator",
+    label: "Оператор возвратов",
+    desc: "Инициация возвратов до ₽30 000 и просмотр счетов в Финансах",
+    critical: true,
+    grants: [
+      { uri: "mcp://ledger.invoices",  ops: ["read"],   scopeOrg: "fin" },
+      { uri: "mcp://payments.refund",  ops: ["invoke"], scopeOrg: "fin",
+        constraint: { amount_le: 30000 } },
+    ],
   },
 ];
 

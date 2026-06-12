@@ -413,6 +413,186 @@ const DICT_SCOPE_TAGS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Grant preset atom shape (T-0135).
+// scope_own: the scope is bounded by the assignee's own org node (UI fills it).
+// scope_org: explicit org slug/nodeId ceiling (the UI maps to a lattice node).
+// constraint: opaque jsonb — e.g. { amount_le: 250000 } for payment ceiling.
+// Resource_type values must be URIs present in DICT_RESOURCES (mcp:// namespaced).
+// Operation values must be members of the Operation union from grant-lattice.ts.
+// ---------------------------------------------------------------------------
+
+export interface GrantPresetAtom {
+  resource_type: string;
+  operation: string;
+  scope_own?: boolean;
+  scope_org?: string;
+  constraint?: Record<string, unknown>;
+  delegable?: boolean;
+}
+
+export interface GrantPreset {
+  id: string;
+  label: string;
+  desc: string;
+  critical?: boolean;
+  grants: GrantPresetAtom[];
+}
+
+/**
+ * DICT_PRESETS — 10 day-1 grant presets (T-0135 / gap-map §4 zone 4).
+ *
+ * Sources: ra-data.jsx SoD rules + TRAIL + TEL reference process roles.
+ * Each preset is a named bundle of grant atoms; the frontend expands them
+ * into structural GrantAtom POST bodies before calling POST /api/grants
+ * (AC-18 T-0030 — no preset table, client-side expansion only).
+ *
+ * Vocabulary invariants (AC-03 / AC-04):
+ *  - resource_type: must be a URI present in DICT_RESOURCES.
+ *  - operation: must be one of read|create|update|delete|approve|transition|invoke.
+ */
+export const DICT_PRESETS: GrantPreset[] = [
+  // 1 — Согласующий бюджета в Финансах
+  // Source: SoD-01 "Согласование ≤ ₽250 000" role, TRAIL confirmed roles.
+  // Reads invoices in Finance department; approves them.
+  {
+    id: "p-budget-approver",
+    label: "Согласующий бюджета в Финансах",
+    desc: "Просмотр и согласование счетов в Финансах без права инициировать платёж",
+    grants: [
+      { resource_type: "mcp://ledger.invoices", operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://ledger.invoices", operation: "approve", scope_org: "fin" },
+    ],
+  },
+
+  // 2 — Казначей-исполнитель
+  // Source: TRAIL role "Эскалации L2 / Казначейство", SoD-03, TEL treasurer.
+  // Full finance ops in treasury sub-department: reads/reconciles + limited payment invoke.
+  {
+    id: "p-treasury-exec",
+    label: "Казначей-исполнитель",
+    desc: "Чтение, сверка и инициация платежей до ₽500 000 в Казначействе",
+    critical: true,
+    grants: [
+      { resource_type: "mcp://ledger.invoices",  operation: "read",   scope_org: "fin-treasury" },
+      { resource_type: "mcp://ledger.recon",      operation: "read",   scope_org: "fin-treasury" },
+      { resource_type: "mcp://ledger.recon",      operation: "update", scope_org: "fin-treasury" },
+      { resource_type: "mcp://payments.initiate", operation: "invoke", scope_org: "fin-treasury",
+        constraint: { amount_le: 500000 } },
+    ],
+  },
+
+  // 3 — Наблюдатель аудита
+  // Source: gap-map §4 "наблюдатель аудита" role; read-only across financial registries.
+  {
+    id: "p-audit-observer",
+    label: "Наблюдатель аудита",
+    desc: "Чтение счетов, сверки и реестра договоров для аудиторских целей",
+    grants: [
+      { resource_type: "mcp://ledger.invoices",   operation: "read", scope_org: "fin" },
+      { resource_type: "mcp://ledger.recon",       operation: "read", scope_org: "fin" },
+      { resource_type: "mcp://contracts.lookup",   operation: "read", scope_org: "fin" },
+    ],
+  },
+
+  // 4 — Инициатор договорной работы
+  // Source: TEL reference process "Инициатор" role.
+  // Creates contract records and reads counterparties (own dept scope).
+  {
+    id: "p-contract-initiator",
+    label: "Инициатор договорной работы",
+    desc: "Создание договоров и чтение справочника контрагентов в своём подразделении",
+    grants: [
+      { resource_type: "mcp://contracts.lookup",   operation: "read",   scope_own: true },
+      { resource_type: "mcp://contracts.lookup",   operation: "create", scope_own: true },
+      { resource_type: "mcp://counterparty.kyc",   operation: "read",   scope_own: true },
+    ],
+  },
+
+  // 5 — Согласующий договоров
+  // Source: TEL reference process согласующие службы (SSD/LGM/Главбух).
+  // Reads and approves contracts in own department.
+  {
+    id: "p-contract-approver",
+    label: "Согласующий договоров",
+    desc: "Просмотр и согласование договоров в своём подразделении",
+    grants: [
+      { resource_type: "mcp://contracts.lookup", operation: "read",    scope_own: true },
+      { resource_type: "mcp://contracts.lookup", operation: "approve", scope_own: true },
+      { resource_type: "mcp://counterparty.kyc",  operation: "read",    scope_own: true },
+    ],
+  },
+
+  // 6 — Линия поддержки L1
+  // Source: ra-data.jsx SoD-04 "Линия поддержки L1", TRAIL "Линия поддержки L1".
+  {
+    id: "p-support-l1",
+    label: "Линия поддержки L1",
+    desc: "Обработка обращений L1: очередь, CRM и база знаний",
+    grants: [
+      { resource_type: "mcp://support.queue",  operation: "read",   scope_org: "cs-l1" },
+      { resource_type: "mcp://support.queue",  operation: "update", scope_org: "cs-l1" },
+      { resource_type: "mcp://crm.customer",   operation: "read",   scope_org: "cs-l1" },
+      { resource_type: "mcp://kb.search",      operation: "read",   scope_org: "cs-l1" },
+    ],
+  },
+
+  // 7 — Приёмник эскалаций агентов
+  // Source: ra-data.jsx TRAIL "Приёмник эскалаций агентов" (А. Кравцова).
+  {
+    id: "p-escalation-receiver",
+    label: "Приёмник эскалаций агентов",
+    desc: "Приём и обработка агентских эскалаций в Клиентском сервисе",
+    grants: [
+      { resource_type: "mcp://escalations.queue", operation: "read",   scope_org: "cs" },
+      { resource_type: "mcp://escalations.queue", operation: "update", scope_org: "cs" },
+      { resource_type: "mcp://crm.customer",      operation: "read",   scope_org: "cs" },
+    ],
+  },
+
+  // 8 — Бухгалтер сверки
+  // Source: TRAIL "Сверка платежей" (Е. Ларина), ra-data.jsx preset p-recon.
+  {
+    id: "p-recon-accountant",
+    label: "Бухгалтер сверки",
+    desc: "Чтение реестра счетов и ведение сверки платежей",
+    grants: [
+      { resource_type: "mcp://ledger.invoices", operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://ledger.recon",    operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://ledger.recon",    operation: "update", scope_org: "fin" },
+    ],
+  },
+
+  // 9 — Инициировать платёж до лимита
+  // Source: ra-data.jsx preset p-pay-init (SoD-01 counterpart), TRAIL "Согласование ≤ ₽250 000".
+  // Own dept scope; constrained to ≤ 250 000.
+  {
+    id: "p-pay-init-limited",
+    label: "Инициировать платёж до лимита",
+    desc: "Вызов платёжного шлюза до ₽250 000 в своём подразделении",
+    critical: true,
+    grants: [
+      { resource_type: "mcp://ledger.invoices",  operation: "read",   scope_own: true },
+      { resource_type: "mcp://payments.initiate", operation: "invoke", scope_own: true,
+        constraint: { amount_le: 250000 } },
+    ],
+  },
+
+  // 10 — Оператор возвратов
+  // Source: ra-data.jsx SoD-04 "Возвраты средств", TRAIL grant on payments.refund.
+  {
+    id: "p-refund-operator",
+    label: "Оператор возвратов",
+    desc: "Инициация возвратов до ₽30 000 и просмотр счетов в Финансах",
+    critical: true,
+    grants: [
+      { resource_type: "mcp://ledger.invoices",  operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://payments.refund",  operation: "invoke", scope_org: "fin",
+        constraint: { amount_le: 30000 } },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Route registration (ADR §2.6)
 // ---------------------------------------------------------------------------
 
@@ -432,6 +612,7 @@ export function registerDictionariesRoute(router: Router): void {
         operations: DICT_OPERATIONS,
         orgTree: DICT_ORG_TREE,
         scopeTags: DICT_SCOPE_TAGS,
+        presets: DICT_PRESETS,
       }),
     );
   });

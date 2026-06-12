@@ -1,0 +1,37 @@
+{
+  "task_id": "T-0135",
+  "status": "ready",
+  "summary": "Populate DICT_PRESETS in src/http/grants.ts with 10 real day-1 grant presets (named bundles: budget approver, treasury exec, audit observer, contract initiator/approver, support L1, escalation receiver, recon accountant, pay-init-limited, refund operator); include 'presets' key in GET /api/rights/dictionaries response; sync frontend PRESETS in ra-data.jsx; add unit tests (preset shape, atom counts, resource/operation vocabulary checks, non-degeneracy) and fitness checks (DICT_PRESETS exported, ra-data.jsx synced).",
+  "functional": [
+    "FR-1 DICT_PRESETS: TypeScript array of 10 GrantPreset objects in src/http/grants.ts, each with {id, label, desc, critical?, grants:[{resource_type, operation, scope_own?, scope_org?, constraint?, delegable?}]}.",
+    "FR-2 GET /api/rights/dictionaries response includes 'presets' key containing DICT_PRESETS.",
+    "FR-3 ra-data.jsx PRESETS updated to match DICT_PRESETS (same ids, same grant atom shapes); frontend expansion of preset → structural atoms remains client-side (AC-18 T-0030).",
+    "FR-4 Each resource_type in each preset grant atom is a URI present in DICT_RESOURCES (mcp:// namespaced); each operation is in the closed Operation union."
+  ],
+  "non_functional": [
+    "NF-1 No new DDL: presets live in TypeScript, not a DB table (AC-18 T-0030 anti-requirement).",
+    "NF-2 No new scope algebra: preset atoms express scope_own/scope_org as UI hints; actual ScopeElement construction happens on the frontend before POST /api/grants.",
+    "NF-3 DICT_PRESETS is exported from grants.ts (or a dedicated module imported by grants.ts) so the fitness check can import it without starting a server.",
+    "NF-4 Preset ids are stable (prefixed 'p-') and unique across the array."
+  ],
+  "out_of_scope": [
+    "Server-side preset expansion (AC-18 T-0030: expansion is client-side before POST).",
+    "Preset storage in a DB table (AC-18 anti-requirement).",
+    "New SoD rules or changes to ORG_TREE.",
+    "Authentication on GET /api/rights/dictionaries (seed-backed, read-only)."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-01", "text": "GET /api/rights/dictionaries returns 'presets' key — an array of at least 10 elements.", "verifiable_as": "test"},
+    {"id": "AC-02", "text": "Each preset in 'presets' has fields id, label, desc, grants; each grant atom has resource_type and operation.", "verifiable_as": "test"},
+    {"id": "AC-03", "text": "resource_type of each grant atom in every preset matches a URI in 'resources' from the same dictionaries response.", "verifiable_as": "test"},
+    {"id": "AC-04", "text": "operation of each grant atom is one of read|create|update|delete|approve|transition|invoke.", "verifiable_as": "test"},
+    {"id": "AC-05", "text": "Preset p-budget-approver contains exactly 2 atoms: mcp://ledger.invoices:read and mcp://ledger.invoices:approve.", "verifiable_as": "test"},
+    {"id": "AC-06", "text": "Preset p-treasury-exec contains 3 atoms covering ledger.invoices:read, ledger.recon:read+write, payments.initiate:invoke; marked critical:true.", "verifiable_as": "test"},
+    {"id": "AC-07", "text": "Preset p-pay-init-limited is marked critical:true, contains payments.initiate:invoke with constraint.amount_le = 250000.", "verifiable_as": "test"},
+    {"id": "AC-08", "text": "No preset has an empty grants array.", "verifiable_as": "test"},
+    {"id": "AC-09", "text": "DICT_PRESETS is exported from src/http/grants.ts and consumed by registerDictionariesRoute; no duplicate preset definition exists elsewhere.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "PRESETS in ra-data.jsx has the same ids and count as DICT_PRESETS in grants.ts (static grep / import check).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0135-grant-presets.spec.md"
+}
