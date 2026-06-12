@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0133",
+  "status": "pr_open",
+  "branch": "task/T-0133-process-templates-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/T-0133-adr-shape.sh",
+    "docs/design/T-0133-process-templates.adr.md",
+    "docs/design/T-0133.adr.contract.json",
+    "docs/design/T-0133.test-report.contract.json",
+    "docs/reviews/T-0133.review.md",
+    "docs/specs/T-0133-process-templates.spec.md",
+    "docs/test-reports/T-0133.test-report.md",
+    "docs/pr/T-0133.pr-handoff.json",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff) + ci/checks/T-0133-adr-shape.sh + package.json. Нет src/ изменений.",
+    "R-1 (nit): ci/checks/T-0133-adr-shape.sh отсутствовал на ветке до TEST-фазы — ADR §5 FF-self заявлял 'исполним сейчас', но файла не было. Создан кодером в TEST-фазе по предписанию R-1; самотест PASS.",
+    "R-2 (nit): claim 'лишняя секция отвергнется импортёром' (§1/§2.1) неточен — importer итерирует закрытый LIVE_ENTITY_ORDER, extras игнорируются, не отвергаются. §2.1 переформулирован: добавлен честный механизм аддитивной безопасности.",
+    "R-3 (nit): §5 строка 'ноль изменений существующих гардов' буквально противоречила §7 BUILD-A (схема pack.schema.json расширяется). Исправлено на 'ноль изменений логики существующих гардов; схема расширяется аддитивно (BUILD-A)'.",
+    "R-4 (nit): instantiateTemplate контракт в §4 и contracts[0] JSON читался как живой путь. Добавлен явный [deferred]-маркер симметрично §1 ('form-def/bpmn-def-таблиц нет'), наследуя deferral-контракт T-0082.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "PASS — docs/** + ci/checks/T-0133-adr-shape.sh + package.json only",
+    "npm_ci_result": "PASS — tsc 0 errors, eslint 0 errors, fitness all green (T-0133-adr-shape FF-self + --self-test PASS), vitest 1548/1554 passed (6 skipped flowable/kc offline)",
+    "review_verdict": "approved iter-1 (98ef49a); 14/14 AC covered; R-1/R-2/R-3/R-4 nits resolved",
+    "test_report": "docs/design/T-0133.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0133-process-templates.spec.md",
+    "adr": "docs/design/T-0133-process-templates.adr.md",
+    "adr_contract": "docs/design/T-0133.adr.contract.json",
+    "review_md": "docs/reviews/T-0133.review.md",
+    "test_report_md": "docs/test-reports/T-0133.test-report.md",
+    "test_report_contract": "docs/design/T-0133.test-report.contract.json (verdict=pass, schema VALID)",
+    "ff_self": "ci/checks/T-0133-adr-shape.sh (FF-self, AC-2/AC-5/AC-13/AC-14)"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-impl-T-0133-BUILD-A",
+      "title": "impl: BUILD-A — Расширить seed/pack.schema.json секцией process_templates[] + validateTemplatePack",
+      "scope": "ADR §3 / §7 BUILD-A: добавить в seed/pack.schema.json секцию process_templates[] с полной схемой ProcessTemplate/BundleRef/TemplateParameter/stage enum. Реализовать validateTemplatePack(pack) -> errors[]: process_templates[].bundle проходит T-0082; parameters[] непустой, kind ∈ {role-binding,threshold,sla}, target резолвится в узел/роль бандла. Наследует FF-2 (T-0133-template-params.sh — создать как отдельный check). seed/pack-schema-valid.sh должен оставаться зелёным (аддитивное расширение).",
+      "gates": "pack-schema-valid.sh green (схема расширена аддитивно, существующий seed не ломается); validateTemplatePack unit-тест: валидный шаблон pass, пустой parameters[] → reject, unknown kind → reject; FF-2 гард создан.",
+      "depends_on": ["seed/pack.schema.json (ЖИВОЙ)", "seed/importer.ts LIVE_ENTITY_ORDER (ЖИВОЙ)", "T-0082 bundle-coherence (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0133-BUILD-B",
+      "title": "impl: BUILD-B — instantiateTemplate [deferred] — importer-over-HTTP инстанциатор + provenance",
+      "scope": "ADR §2.4/§3.5/§4/§7 BUILD-B: реализовать instantiateTemplate(tenantSlug, templateSlug, catalogVersion) поверх публичных authoring-API (importer-over-HTTP путь T-0140, НЕ SQL). Создать draft-бандл в draft-тире (extensibility §8). Записать InstanceProvenance {origin:'vendor-template', catalog_version, template_slug, template_version, instantiated_at}. Аудит через appendAuditEvent (T-0031). ЗАБЛОКИРОВАН до появления process/BPMN/form authoring-API (нет day-1). Наследует FF-3 (no-direct-SQL) и FF-4 (provenance check).",
+      "gates": "FF-3 (no-direct-pg-in-importer.sh аналог — инстанциатор не содержит pg.Client/INSERT INTO); FF-4 (T-0133-provenance.sh — draft-бандл имеет provenance с origin∈{vendor-template,scratch}); appendAuditEvent вызывается на инстанцирование.",
+      "depends_on": ["BUILD-A", "seed/importer.ts applyPack (ЖИВОЙ)", "T-0129 authoring-API (deferred — process/BPMN/form)", "appendAuditEvent (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0133-BUILD-C",
+      "title": "impl: BUILD-C — Расширить bundle-coherence гард T-0082 на templates/*/pack.json + loadCatalogPack fail-closed",
+      "scope": "ADR §2.2/§2.6/§4/§7 BUILD-C: расширить ci/checks/bundle-coherence.sh (T-0082) обходом templates/*/pack.json::process_templates[].bundle — рассинхрон версий → exit 1. Реализовать loadCatalogPack(pack) -> {accepted, rejected}: каждый шаблон проходит bundle-coherence гард + validateTemplatePack; невалидный → rejected (fail-closed). Аудит поставки через appendAuditEvent (T-0031). Наследует FF-1.",
+      "gates": "bundle-coherence.sh расширен аддитивно (без изменения логики для существующих членов — R-3); FF-1 зелёный на templates/*/pack.json; loadCatalogPack unit-тест: невалидный шаблон → rejected, не throws; аудит-событие записано.",
+      "depends_on": ["BUILD-A", "ci/checks/bundle-coherence.sh (ЖИВОЙ T-0082)", "appendAuditEvent (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0133-BUILD-D",
+      "title": "impl: BUILD-D — detectVendorUpdates managed-solution day-1: notify-only под human-gate",
+      "scope": "ADR §2.5/§3.6/§4/§7 BUILD-D: реализовать detectVendorUpdates(tenantSlug) -> VendorUpdateProposal[]: сравнить catalog_version/template_version в provenance инстансов тенанта с текущим каталогом → предложение под human-gate (T-0129 FR-11) при обнаружении нового template_version. disposition: 'notify-only' (затирание локальных правок запрещено). Наследует FF-5: three-way-merge/autoMerge запрещены до снятия Stage-2-флага.",
+      "gates": "FF-5 (grep-запрет three-way-merge/autoMerge в коде инстанциатора); VendorUpdateProposal.disposition === 'notify-only' unit-тест; detectVendorUpdates не мутирует draft-бандл клиента без human-gate.",
+      "depends_on": ["BUILD-B", "InstanceProvenance (BUILD-B)", "T-0129 FR-11 human-gate (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0133-CONTENT-1",
+      "title": "impl: CONTENT-1 — Шаблон contracts day-1 из референса ТЭЛ",
+      "scope": "ADR §2.8/§7 CONTENT-1: наполнить бандл шаблона contracts из choros-reference-process-tel.md. Роли: Инициатор/Менеджер по договорной работе/SSD/LGM/юротдел. Маршрут по тип/сумма/направление; порог ≥5 млн ₽ → юротдел; циклы доработки; статусы/отказ. BPMN + form-JSON-Schema + object-schema + role/agent/MCP-grants. parameters[]: role-binding (роли→узлы), threshold (порог суммы), sla (срок согласования).",
+      "gates": "BUILD-A validateTemplatePack green на contracts pack.json; BUILD-C bundle-coherence гард green; parameters[] содержит role-binding/threshold/sla классы.",
+      "depends_on": ["BUILD-A", "BUILD-C", "choros-reference-process-tel.md (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0133-CONTENT-2",
+      "title": "impl: CONTENT-2/3 (Stage-2) — Шаблоны it-requests/trips: контент + founder-референс",
+      "scope": "ADR §2.8/§7 CONTENT-2/3: наполнение шаблонов it-requests (Заявки в IT/ITSM) и trips (Командировки). Нет founder-зафиксированного референса состава (аналог ТЭЛ) → Stage-2. Перед наполнением: определить нужен ли отдельный founder-референс по аналогии с ТЭЛ (поднимается content-задачей).",
+      "gates": "Stage-2 — не блокирует MVP.",
+      "depends_on": ["BUILD-A", "BUILD-C", "founder-референс состава (pending)"]
+    }
+  ],
+  "coordination_notes": [
+    {
+      "id": "CN-1",
+      "type": "build-sequencing",
+      "description": "BUILD-B [deferred] зависит от process/BPMN/form authoring-API, которых нет day-1. BUILD-B реализуется только после появления этих API (отдельные build-задачи). BUILD-A/BUILD-C/BUILD-D могут выполняться независимо от BUILD-B.",
+      "blocking": false,
+      "phase": "impl BUILD-B"
+    },
+    {
+      "id": "CN-2",
+      "type": "content-sequencing",
+      "description": "CONTENT-1 (contracts) зависит от BUILD-A + BUILD-C. CONTENT-2/3 (it-requests/trips) — Stage-2 и дополнительно требует founder-решения по источнику состава (нужен ли аналог ТЭЛ). Не блокирует механизм каталога.",
+      "blocking": false,
+      "phase": "impl CONTENT-1"
+    }
+  ],
+  "rationale": "T-0133 — design-задача (SPEC+ADR+review+FF-self). ADR зафиксировал: template-pack = аддитивное расширение seed-pack-механизма (T-0140) новой секцией process_templates[]; шаблон = пятичленный bundle T-0082 с машинно-читаемым манифестом параметризации (role-binding/threshold/sla); инстанцирование = draft-бандл в draft-тире через публичные authoring-API (importer-over-HTTP, НЕ SQL, [deferred] BUILD-B); версионирование + provenance; vendor-update = managed-solution §11 (notify-only day-1, three-way-merge Stage-2 deferral); governed/fail-closed; two-floor сохранён. 4 нита закрыты: R-1 (FF-self материализован), R-2 (importer игнорирует extras через LIVE_ENTITY_ORDER, не отвергает), R-3 (логика гардов неизменна, схема расширяется аддитивно), R-4 ([deferred] маркер на instantiateTemplate). CI PASS (tsc+eslint+fitness+vitest). Review approved (98ef49a, 14/14 AC)."
+}

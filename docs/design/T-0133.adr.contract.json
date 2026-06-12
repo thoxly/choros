@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0133",
+  "status": "ready",
+  "decision": "Template-pack = аддитивное расширение уже принятого seed-pack-механизма (T-0140) новой декларативной секцией process_templates[] в pack.json; шаблон = пятичленный bundle той же формы, что T-0082 (BPMN + форма-код + form-JSON-Schema + object-schema + role/agent/MCP-grants), несущий машинно-читаемый манифест параметризации parameters[] трёх классов (role-binding/threshold/sla); инстанцирование = создание draft-бандла в draft-тире клиента (extensibility §8) через те же публичные authoring-API, что у внедренца (importer-over-HTTP путь T-0140, не SQL), с последующей петлёй T-0129 (адаптация интервью → симуляция T-0130 → human-gated promote); каталог и шаблон версионируются как вендорский артефакт (meta.version), инстанс хранит provenance (catalog_version/template_slug/template_version); vendor-update vs local-edit разрешается моделью managed-solution (extensibility §11 vendor-documented cliff) — day-1 = detect+notify под human-gate без молчаливого затирания, полный three-way-merge отложен в Stage-2 явным deferral-контрактом (паттерн T-0082); поставка/инстанцирование governed и fail-closed (bundle-coherence гард T-0082 + валидация parameters[]), аудит через единый appendAuditEvent (T-0031); two-floor сохранён (выбор по человеко-понятному описанию, BPMN не читать); ноль переизобретения основ.",
+  "rejected_alternatives": [
+    {"option": "Новая privileged-сущность-хранилище шаблонов (отдельная таблица process_template + прямой SQL-инстанциатор)", "why_not": "Прямо запрещено спекой (FR-2/NF-1/AC-2/AC-12): прецедент T-0140 (решение фаундера 2026-06-11) — «пакет-как-данные через публичные API, не SQL». Каталог процессов — продуктовый сиблинг того же механизма; новая сущность дублирует хранилище и обходит публичные authoring-API."},
+    {"option": "Вторая модель «что есть процесс» рядом с бандлом (упрощённый template-формат без пятичленной связки)", "why_not": "FR-1/AC-1/AC-12: каталожный шаблон и draft-бандл интервью обязаны быть одним типом артефакта (различны только origin), иначе bundle-coherence гард T-0082 не покрывает шаблоны и появляется второй несогласованный путь когерентности."},
+    {"option": "Полный git-под-капотом three-way-merge vendor-update vs local-edit на day-1", "why_not": "Высоколеверажная git-машинерия; extensibility §11 секвенирует её инкрементально, спека (out-of-scope/AC-8/AC-11) допускает Stage-2 при явном deferral-контракте (паттерн T-0082). Day-1 достаточно detect+notify под human-gate, чтобы НЕ затирать правки клиента молча."},
+    {"option": "Свободнотекстовое описание точек настройки шаблона («настройте под себя»)", "why_not": "FR-4/AC-4: точки параметризации обязаны быть явным машинно-читаемым перечнем (role-binding/threshold/sla), проверяемым при загрузке (FF-2), иначе интервью T-0129 FR-4 не может валидировать роли против живой оргструктуры и пороги становятся зашитыми константами."},
+    {"option": "Инстанцирование сразу в published-процесс (минуя draft-тир и симуляцию)", "why_not": "FR-6/NF-2/AC-6: инстанс обязан пройти ту же петлю, что бандл «с нуля» (draft-тир §8 → симуляция T-0130 → human-gated promote). Прямой published-канал — параллельный обход интервью/прогона/гейта."}
+  ],
+  "object_model": [
+    {"entity": "TemplatePack", "fields": [
+      {"name": "meta.name", "type": "string"},
+      {"name": "meta.version", "type": "string (версия каталога — provenance-якорь, FR-7)"},
+      {"name": "meta.description", "type": "string (человеко-понятное, two-floor FR-10)"},
+      {"name": "process_templates", "type": "ProcessTemplate[] (новая аддитивная секция seed-pack)"}
+    ]},
+    {"entity": "ProcessTemplate", "fields": [
+      {"name": "slug", "type": "string (contracts | it-requests | trips)"},
+      {"name": "version", "type": "string (вендор-версия шаблона, когерентна версии бандла)"},
+      {"name": "display_name", "type": "string (two-floor выбор)"},
+      {"name": "bundle", "type": "BundleRef (пятичленная связка T-0082)"},
+      {"name": "parameters", "type": "TemplateParameter[] (манифест параметризации)"},
+      {"name": "stage", "type": "enum(mvp-content | stage2-content)"}
+    ]},
+    {"entity": "BundleRef", "fields": [
+      {"name": "bpmn", "type": "ref (процесс BPMN)"},
+      {"name": "form_code", "type": "ref (форма-код)"},
+      {"name": "form_schema", "type": "ref (form-JSON-Schema)"},
+      {"name": "object_schema", "type": "ref (object-schema)"},
+      {"name": "grants", "type": "ref (role/agent/MCP-grants)"},
+      {"name": "coherence", "type": "object { guard: \"T-0082\", version: string }"}
+    ]},
+    {"entity": "TemplateParameter", "fields": [
+      {"name": "id", "type": "string"},
+      {"name": "kind", "type": "enum(role-binding | threshold | sla)"},
+      {"name": "label", "type": "string (текст вопроса интервью T-0129 FR-4)"},
+      {"name": "target", "type": "string (роль шаблона | узел/шлюз BPMN | узел с дедлайном)"},
+      {"name": "required", "type": "boolean"},
+      {"name": "default", "type": "string | number | null"}
+    ]},
+    {"entity": "InstanceProvenance", "fields": [
+      {"name": "origin", "type": "enum(vendor-template | scratch)"},
+      {"name": "catalog_version", "type": "string | null"},
+      {"name": "template_slug", "type": "string | null"},
+      {"name": "template_version", "type": "string | null"},
+      {"name": "instantiated_at", "type": "string (ISO-8601)"}
+    ]},
+    {"entity": "VendorUpdateProposal", "fields": [
+      {"name": "template_slug", "type": "string"},
+      {"name": "from_version", "type": "string"},
+      {"name": "to_version", "type": "string"},
+      {"name": "locally_modified_members", "type": "string[]"},
+      {"name": "disposition", "type": "enum(notify-only [day-1] | three-way-merge [Stage-2])"}
+    ]}
+  ],
+  "contracts": [
+    "instantiateTemplate(tenantSlug, templateSlug, catalogVersion) -> { draftBundleId, provenance } — поверх публичных authoring-API (T-0129/T-0077, importer-over-HTTP путь T-0140, НЕ SQL); draft-бандл в draft-тире §8; далее петля T-0129 (адаптация → T-0130 → human-gated promote). [deferred — process/BPMN/form authoring-API не существуют day-1; реализует BUILD-B, наследуя deferral-контракт T-0082; симметрично §1 «form-def/bpmn-def-таблиц нет»]",
+    "loadCatalogPack(pack) -> { accepted: ProcessTemplate[], rejected: {slug, reason}[] } — governed/fail-closed: каждый шаблон проходит bundle-coherence гард T-0082 + валидацию parameters[]; пишет appendAuditEvent (T-0031)",
+    "detectVendorUpdates(tenantSlug) -> VendorUpdateProposal[] — managed-solution day-1: notify-only под human-gate (T-0129 FR-11); three-way-merge = Stage-2",
+    "validateTemplatePack(pack) -> errors[] — process_templates[].bundle проходит T-0082; parameters[] непустой, kind ∈ {role-binding, threshold, sla}, target резолвится"
+  ],
+  "fitness_functions": [
+    {"id": "FF-self", "rule": "ADR содержит обязательные именованные секции и поимённые ссылки на все опоры {T-0082, T-0140, T-0129, T-0130, T-0031, §7, §8, §11, ТЭЛ, draft-тир, managed-solution, two-floor, fail-closed}; отсутствуют запрещённые конструкции (новая сущность-хранилище / прямой SQL-путь инстанцирования без отрицания)", "ci_check": "bash ci/checks/T-0133-adr-shape.sh — grep наличия всех опор + regex-запрет маркеров новой сущности-хранилища/прямого-SQL-инстанцирования в docs/design/T-0133-process-templates.adr.md; exit≠0 → красный. Исполним на фазе DESIGN. Покрывает AC-2/AC-5/AC-13/AC-14 (fitness)."},
+    {"id": "FF-1", "rule": "Каждый член process_templates[].bundle проходит bundle-coherence гард T-0082 (пятичленная связка когерентна по версиям)", "ci_check": "расширить ci/checks/*bundle-coherence*.sh (T-0082) обходом templates/*/pack.json::process_templates[].bundle; рассинхрон версий → exit 1. Build-наследуемая (BUILD-C). Покрывает AC-1/AC-7/AC-9."},
+    {"id": "FF-2", "rule": "Каждый шаблон каталога несёт непустой parameters[]; каждый параметр имеет kind ∈ {role-binding, threshold, sla} и target, резолвящийся в существующий узел/роль бандла", "ci_check": "bash ci/checks/T-0133-template-params.sh — JSON-обход pack.json, fail-closed если перечень пуст или target висячий. Build-наследуемая (BUILD-A). Покрывает AC-4/AC-9."},
+    {"id": "FF-3", "rule": "Инстанциатор не содержит прямого SQL-пути — инстанцирование только через публичные /api/* (как seed importer T-0140)", "ci_check": "grep по коду инстанциатора на драйвер БД/INSERT INTO; любой прямой SQL вне публичного API → красный. Build-наследуемая (BUILD-B). Покрывает AC-2/AC-12."},
+    {"id": "FF-4", "rule": "Каждый инстанцированный draft-бандл имеет provenance с origin ∈ {vendor-template, scratch}; vendor-template обязан нести непустые catalog_version/template_slug/template_version", "ci_check": "bash ci/checks/T-0133-provenance.sh — fail-closed на отсутствие provenance. Build-наследуемая (BUILD-B). Покрывает AC-7/NF-3."},
+    {"id": "FF-5", "rule": "Vendor-update day-1 — disposition: notify-only; значение three-way-merge запрещено в коде day-1 (Stage-2 deferral-гард, паттерн T-0082)", "ci_check": "grep-запрет three-way-merge/autoMerge в инстанциаторе до снятия Stage-2-флага. Build-наследуемая (BUILD-D). Покрывает AC-8/AC-11."}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "ADR §2.2 (шаблон = bundle T-0082), §3.3 BundleRef, FF-1"},
+    {"ac": "AC-2", "covered_by": "ADR §2.1/§2.4 (template-pack = расширение seed-pack T-0140, инстанцирование через публичные API), контракты §4, FF-3"},
+    {"ac": "AC-3", "covered_by": "ADR §2.8 (состав day-1 contracts/it-requests/trips, ТЭЛ для contracts, механизм day-1 vs наполнение Stage-2), §3.2 stage"},
+    {"ac": "AC-4", "covered_by": "ADR §2.3 + §3.4 TemplateParameter (role-binding/threshold/sla, проверяемый при загрузке), FF-2"},
+    {"ac": "AC-5", "covered_by": "ADR §2.4 (граница T-0133=что параметризуемо / T-0129=как заполняется, не дублируем интервью), FF-self"},
+    {"ac": "AC-6", "covered_by": "ADR §2.4 (инстанцирование = draft-бандл §8 → петля → T-0130 → human-gated promote, не миновать), контракты §4"},
+    {"ac": "AC-7", "covered_by": "ADR §2.5 (вендор-версия + provenance), §3.2/§3.5, когерентность версии бандла §7, FF-1/FF-4"},
+    {"ac": "AC-8", "covered_by": "ADR §2.5 (managed-solution §11, не затирать молча, deferral three-way-merge), §3.6 VendorUpdateProposal, FF-5"},
+    {"ac": "AC-9", "covered_by": "ADR §2.6 (governed/fail-closed, bundle-гард T-0082 + валидация параметризации, аудит T-0031), контракты §4, FF-1/FF-2"},
+    {"ac": "AC-10", "covered_by": "ADR §2.7 (two-floor: выбор по описанию, не читать BPMN), §3.2 display_name/meta.description"},
+    {"ac": "AC-11", "covered_by": "ADR §2.8 (MVP механизм day-1) + §2.5/§7 (наполнение + three-way-merge = Stage-2), §3.2 stage, FF-5"},
+    {"ac": "AC-12", "covered_by": "ADR §2.1/§2.2/§2.6 (нет новой сущности-хранилища / 2-й модели процесса / нового аудита / SQL-пути), rejected_alternatives, FF-3"},
+    {"ac": "AC-13", "covered_by": "ADR §6 раздел трассировки (каждое требование → playbook §5п5/§1 или поимённая основа)"},
+    {"ac": "AC-14", "covered_by": "ADR §7 декомпозиция build-задач (BUILD-A..D, CONTENT-1..3) + design-only граница"}
+  ],
+  "runtime_target": "локально | контейнер (часть Choros-стека: тот же silo-Postgres и публичные authoring-API; внешнего ресурса нет — провижн не требуется)",
+  "adr_artifact_path": "docs/design/T-0133-process-templates.adr.md",
+  "escalation": ""
+}
