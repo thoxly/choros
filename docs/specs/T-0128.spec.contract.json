@@ -1,0 +1,120 @@
+{
+  "task_id": "T-0128",
+  "status": "ready",
+  "summary": "Завести первокласс tenant-сущность connector (тип системы 1С/AD/SMTP/HTTP — закрытый набор; opaque-конфиг; custody секрета по RL-3-паттерну T-0025; декларативный статус) + CRUD под RLS и аудит, БЕЗ живых драйверов и реальных внешних вызовов; зафиксировать seam для драйверов и связь с эффект-грантами T-0034 (вызов = invoke-грант на effect_resource), не сломав и не мигрировав принудительно email_channel_config (T-0170).",
+  "functional": [
+    "FR-1: connector — первокласс tenant-сущность; столбцы ≥ {tenant_id (ведущий PK), id, kind, display_name, config(jsonb opaque), secret_handle(nullable), status, created_at}; запись существует независимо от наличия драйвера",
+    "FR-2: kind — закрытый CHECK+TS-юнион набор, покрывающий минимум 1С/AD/почту (1c, ad_ldap, smtp, http_generic); неизвестный kind отвергается fail-closed; расширение = миграция CHECK + юнион (как EffectKind T-0034)",
+    "FR-3: secret_handle коннектора — opaque RL-3 хэндл; CRUD переиспользует примитивы T-0025 (shape-guard на set/rotate, redactHandle на status, SecretResolverPort-совместимый seam); сырой ключ никогда не хранится; НЕ второй механизм custody",
+    "FR-4: status ∈ {configured, disabled, error} — декларативный day-1, выставляется CRUD/admin-командой, НЕ живой пробой; health-check = Stage-2",
+    "FR-5: CRUD (setConnector/rotateConnectorSecret/revokeConnector/getConnectorStatus/listConnectors) под management-грантом (grant-resolver T-0021), shape-guard до записи, SET LOCAL choros.tenant_id (FORCE RLS), audit_event (connector.set/rotate/revoke) без secret_handle в payload; status-путь возвращает redactHandle",
+    "FR-6: вызов через коннектор = invoke-грант на effect_resource (T-0034), НЕ новый тип права на connector и НЕ параллельная connector-ACL поверхность; коннектор может декларативно ссылаться на бэкимый effect_resource, авторизация вызова остаётся за T-0034",
+    "FR-7: email_channel_config (T-0170) НЕ ломается и НЕ мигрирует принудительно — коннектор-модель сосуществует; конвергенция (email как kind='smtp') = отдельная Stage-2 задача; ADR обязан описать почему миграция отвергается day-1",
+    "FR-8: seam для драйверов без драйверов — ConnectorSecretResolverPort (структурно совместим с T-0025 SecretResolverPort) + ConnectorDriverPort (по образцу T-0170 SmtpSenderPort); day-1 в репо нет ни одного класса-драйвера и ни одного реального внешнего вызова из connector-пути",
+    "FR-9: connector — per-tenant: tenant_id ведущий PK, ENABLE+FORCE RLS, <table>_tenant_isolation policy, GRANT to choros_app, имя в known_tenant_tables.txt; коннектор tenant A невидим сессии tenant B"
+  ],
+  "non_functional": [
+    "NF-1: сырой secret_handle/resolved-секрет никогда в response/log/audit/exception; status-путь возвращает redactHandle (эталон T-0025 NF-1, T-0170 NF-1)",
+    "NF-2: заглушка без живых эффектов — ни один code-path T-0128 не инициирует реальный внешний вызов (нет fetch/net/SMTP/LDAP в connector core); платформа операбельна с нулём коннекторов и с коннектором без драйвера",
+    "NF-3: email_channel_config нетронут — коммит T-0128 не меняет email_channel_config-схему, notification-email.ts, notification-router.ts, миграции T-0168; git diff dev по ним чист",
+    "NF-4: один механизм прав (вызов = effect-грант T-0034, нет connector-ACL) и один механизм custody (переиспользование T-0025); нет второго dispatch/resolver-механизма",
+    "NF-5: pure-core — connector core не импортирует pg/fs/net/http/fetch напрямую; весь IO за инжектируемыми портами (как T-0034 EffectSource, T-0170 SmtpSenderPort); чистые функции детерминированы",
+    "NF-6: без новых driver-зависимостей — package.json не получает SDK/клиентов 1С/AD/LDAP/SMTP/HTTP",
+    "NF-7: tsc --noEmit зелёный; новый isolation-чек зелёный; существующий фитнес-суит без регрессий"
+  ],
+  "out_of_scope": [
+    "Любой живой драйвер (1С/AD-LDAP/SMTP/HTTP) и реальный внешний вызов — Stage-2 / производные",
+    "Health-check / живая проба связи — status day-1 декларативный",
+    "Резолв secret_handle к реальному credential и использование драйвером — Stage-2 (T-0025 FR-4/C-2)",
+    "Принудительная миграция email_channel_config под connector-модель — отдельная Stage-2 задача конвергенции",
+    "Webhook-подписки, входящие коннекторы, маппинг/трансформации полей — не MVP",
+    "egress_policy enforcement / runtime бюджет-egress агента — T-0041 / Stage-2",
+    "Дублирование грант-механики T-0034 — вызов остаётся invoke-грантом на effect_resource",
+    "UI управления коннекторами — фронтенд-задача",
+    "Postgres-DAO порта хранилища — может быть отложен (T-0053-паттерн), решает архитектор"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "ADR вводит первокласс tenant-сущность connector со столбцами ≥ {tenant_id, id, kind, display_name, config(jsonb), secret_handle(nullable), status, created_at}; tenant_id — ведущая колонка PK; типы/DDL-эскиз присутствуют в ADR",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-2",
+      "text": "kind — закрытое множество (CHECK + TS-юнион), включающее минимум покрытие 1С/AD/почты (1c, ad_ldap, smtp, http_generic или эквивалент); setConnector с kind='__bogus__' → ошибка fail-closed, запись не происходит",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Custody переиспользует T-0025: setConnector/rotateConnectorSecret с raw-секретом (sk-… / bare-hex-32+ / JWT-shape) → отказ shape-guard, запись хэндла не происходит (образец T-0025 AC-2..AC-6 / T-0170 AC-4)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "getConnectorStatus/listConnectors возвращают redactHandle(secret_handle) или {bound:false}, НЕ сырой хэндл; полное значение secret_handle не возвращается ни одним эндпоинтом",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Каждая мутирующая CRUD-операция эмитит audit_event (connector.set/rotate/revoke) с subject=connector id и kind/display_name в payload; ни одно поле аудита не содержит secret_handle/resolved-секрет (образец T-0025 AC-12, T-0170 AC-6)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "status day-1 устанавливается CRUD/admin-командой, не живой пробой; ADR помечает health-check как Stage-2; создание коннектора без драйвера → status валиден, ни одного внешнего вызова не сделано",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Связь вызова с T-0034: ADR фиксирует что вызов через коннектор = invoke-грант на effect_resource, без нового типа права на connector и без параллельной connector-ACL; ci/checks/connector-isolation.sh банит _acl/connector_visibility/connectorRights/connectorAcl в connector core",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "Seam без драйверов: ADR определяет ConnectorSecretResolverPort (структурно совместим с T-0025 SecretResolverPort под tsc) и ConnectorDriverPort (образец T-0170 SmtpSenderPort), НО day-1 в репо нет ни одного класса-драйвера и ни одного реального внешнего вызова из connector-пути; grep connector core не находит fetch/net/http/SMTP/LDAP-вызовов",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "email_channel_config (T-0170) не сломан: коммит T-0128 НЕ изменяет email_channel_config-схему, notification-email.ts, notification-router.ts, миграции T-0168; git diff dev по этим путям чист",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "После мержа T-0128 существующий T-0170-суит (email-канал) проходит без изменений; connector-код не перехватывает email-доставку; npm test + notification-email.sh зелёные",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "ADR явно описывает почему принудительная миграция email_channel_config отвергается day-1 и фиксирует путь будущей конвергенции (email как kind='smtp') как Stage-2 not-now",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-12",
+      "text": "connector — tenant-таблица: tenant_id ведущий PK, ENABLE+FORCE RLS, <table>_tenant_isolation policy, GRANT to choros_app, имя в known_tenant_tables.txt; force_rls.sql+tenant_id_leading.sql = 0 строк; таблица в списке",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "Cross-tenant изоляция: запрос коннектора tenant B в сессии tenant A возвращает 0 строк (red без RLS, green с FORCE)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "Заглушка без живых эффектов: ни один T-0128 code-path не делает реального внешнего вызова; платформа операбельна с нулём коннекторов и с коннектором без драйвера; grep connector core на отсутствие прямых pg/fs/net/http/fetch; npm run fitness зелёный",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-15",
+      "text": "Без новых driver-зависимостей: package.json не получает SDK/клиентов 1С/AD/LDAP/SMTP/HTTP в результате T-0128; git diff dev -- package.json не добавляет driver-пакетов",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "tsc --noEmit зелёный после T-0128; новый isolation-чек зелёный; существующий фитнес-суит без регрессий",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0128-connector-entity.spec.md"
+}
