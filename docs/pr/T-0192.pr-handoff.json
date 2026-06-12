@@ -1,0 +1,98 @@
+{
+  "task_id": "T-0192",
+  "status": "pr_open",
+  "branch": "task/T-0192-template-hash",
+  "merge_target": "dev",
+  "base_commit": "6d5788b",
+  "head_commit": "ce5877f",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0192: per-hash template name choros_test_template_<hash8> для кросс-веточной изоляции DB-тестов. Каждый migration-набор (SHA-256 по sorted filenames+contents, первые 8 hex) получает независимый шаблон. Ветки с разными миграциями больше не перебивают шаблон друг у друга. Добавлен --stale-templates в db-cleanup-orphans для явной ручной очистки. Два нита REVIEW (R-N1/R-N2) закрыты: computeMigrationsHash вынесен в ci/checks/db/migrations-hash.ts (один модуль), --stale-templates задокументирован в ADR и хелп-комментарии скрипта как ручной opt-in — НЕ для автоматики. CI: tsc/eslint/fitness (478 PASS)/vitest (1385 pass) + fitness:db×2 (43 files, 599 pass каждый, hash=4e98434b стабилен).",
+  "commits": [
+    {
+      "sha": "256393c",
+      "phase": "SPEC",
+      "message": "spec(T-0192): per-hash template naming — ADR amendment to T-0147"
+    },
+    {
+      "sha": "9adbbe1",
+      "phase": "BUILD",
+      "message": "feat(T-0192): per-hash template name — кросс-веточная изоляция шаблона БД"
+    },
+    {
+      "sha": "6ebe4e1",
+      "phase": "REVIEW",
+      "message": "T-0192 REVIEW: approved — per-hash template name, cross-branch isolation confirmed"
+    },
+    {
+      "sha": "ce5877f",
+      "phase": "TEST+PR",
+      "message": "nit(T-0192): R-N1+R-N2 — shared migrations-hash module + --stale-templates warning"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "6ebe4e1",
+      "findings_resolved": [
+        "R-N1 (nit, axis 6): --stale-templates danger documented in ADR §Orphan-cleanup and script header WARNING block. Race scenario, safety invariants, and 'manual opt-in only / NOT for CI' guidance explicit.",
+        "R-N2 (nit, axis 5): computeMigrationsHash extracted to ci/checks/db/migrations-hash.ts (builtins only). All 3 callers import from it. FF-T147-3 verified green (no src/ import path)."
+      ],
+      "findings_nit_open": [],
+      "artifact": "docs/design/T-0192.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "deterministic": {
+        "total": 1391,
+        "passed": 1385,
+        "failed": 0,
+        "skipped": 6
+      },
+      "fitness_static": "PASS — 478 PASS, 0 FAIL (incl. all FF-T147-1..9)",
+      "fitness_db_run1": "43 files, 599 passed, 0 failed — hash=4e98434b, clone=choros_test_1781222687960_c473",
+      "fitness_db_run2": "43 files, 599 passed, 0 failed — hash=4e98434b, clone=choros_test_1781222736804_a523",
+      "tested_commit": "ce5877f",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — 478 PASS, 0 FAIL",
+        "vitest_unit": "1385/1391 passed, 6 skipped",
+        "fitness_db_run1": "43 files, 599/599 passed — template choros_test_template_4e98434b",
+        "fitness_db_run2": "43 files, 599/599 passed — hash stable, template unchanged"
+      },
+      "artifact": "docs/test-reports/T-0192.test-report.md",
+      "contract_artifact": "docs/design/T-0192.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/migrations-hash.ts",
+    "ci/checks/db/globalSetup.ts",
+    "scripts/db-setup-template.ts",
+    "scripts/db-cleanup-orphans.ts",
+    "docs/design/T-0147-db-test-isolation.adr.md",
+    "docs/design/T-0192.review.contract.json",
+    "docs/reviews/T-0192.review.md",
+    "docs/test-reports/T-0192.test-report.md",
+    "docs/design/T-0192.test-report.contract.json",
+    "docs/pr/T-0192.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "OPERATIONAL_NOTE": "После мержа: на каждой машине/worktree нужно один раз запустить `npm run fitness:db:setup-template` — создаст `choros_test_template_<hash8>` для текущего migration-набора. Старый `choros_test_template` (без суффикса, legacy) остаётся в Postgres до ручной очистки. Удалить его вручную ПОСЛЕ прокатки всех веток на новый код:\n  UPDATE pg_database SET datistemplate = false WHERE datname = 'choros_test_template';\n  DROP DATABASE IF EXISTS choros_test_template;\nESLI база используется другим worktree — подождать завершения его fitness:db прогона.",
+    "stale_templates_safety": "--stale-templates в db-cleanup-orphans — ТОЛЬКО ручной opt-in. Не включать в CI/автоматические пайплайны. Дропает шаблоны других активных веток. Использовать только при намеренной пост-мерж очистке когда нет других активных worktree.",
+    "no_migration": "T-0192 не добавляет миграций. Schema не меняется. Только изменения в scripts/ и ci/checks/db/ и docs/.",
+    "ff_t147_3_compat": "FF-T147-3 (globalSetup.ts не импортирует src/) проходит: migrations-hash.ts находится в ci/checks/db/, не src/; импортирует только node:crypto/fs/path."
+  },
+  "friction_events": []
+}
