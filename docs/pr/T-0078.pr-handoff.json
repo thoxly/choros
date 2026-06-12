@@ -1,0 +1,95 @@
+{
+  "task_id": "T-0078",
+  "status": "pr_open",
+  "branch": "task/T-0078-authoring-redlines",
+  "merge_target": "dev",
+  "base_commit": "3106c26",
+  "head_commit": "bf2d89f",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "E11.7 authoring red-lines guard — pure-core classifyAuthoringOp + evaluateAuthoringRedLine (src/core/authoring-redlines.ts). Default-DENY principle: classifies AuthoringOp into non_destructive / destructive / core_pinned; evaluates verdict allow/deny with reason (requires_confirm / core_pinned / invalid_confirm). Semantic anti-autofill floor (AC-20) via isForbiddenTemplate (FORBIDDEN_SINGLE_WORDS + digit-only + repeated-char rules) — day-1 floor for T-0073 human-confirm surface. lossy_live_migration is core_pinned unconditionally (AC-19) — stricter than T-0177 isLossyNarrowing, enforces ADR §4 RED-LINES строки 154-155 categorical absolute (no escape-hatch, not even force+valid-confirm). Fitness check authoring-redlines-isolation.sh (ARL-1..6) + self-test. 51 unit tests (AC-2..AC-20). All CI gates green: tsc 0 errors, eslint 0 warnings, fitness all PASS, vitest 1612/1612 passed. RE-REVIEW approved (R-1/R-2/R-3 all closed — bf2d89f).",
+  "commits": [
+    {
+      "sha": "786d443",
+      "phase": "SPEC",
+      "message": "spec(T-0078): authoring red-lines guard — default-DENY + semantic human-confirm"
+    },
+    {
+      "sha": "e4e673f",
+      "phase": "BUILD",
+      "message": "build(T-0078): authoring-redlines guard — classifyAuthoringOp + evaluateAuthoringRedLine"
+    },
+    {
+      "sha": "dfcddc8",
+      "phase": "REVIEW",
+      "message": "T-0078 REVIEW: changes_requested — R-1 live-migration gap, R-2 forbidden-template spec-vs-impl"
+    },
+    {
+      "sha": "464cc8b",
+      "phase": "FIX",
+      "message": "fix(T-0078): R-1 lossy_live_migration core_pinned + R-2 forbidden-template + R-3 spec table"
+    },
+    {
+      "sha": "bf2d89f",
+      "phase": "RE-REVIEW",
+      "message": "review(T-0078): re-review verdict=approved — R-1/R-2/R-3 закрыты"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "bf2d89f",
+      "findings_resolved": [
+        "R-1 — lossy_live_migration absent from AuthoringOpKind: added with core_pinned classification (unconditional deny regardless of isCorePinned); spec Summary-table updated; AC-19 tests (4 cases) added",
+        "R-2 — forbidden-template check: spec promised in §1 п.2, impl missing; implemented isForbiddenTemplate with FORBIDDEN_SINGLE_WORDS + RE_DIGITS_ONLY + RE_REPEATED_CHAR; AC-20 tests (9 cases) added; confirm-contract in spec updated with forbidden-list docs and 'семантика = UI/T-0073' qualifier",
+        "R-3 (nit) — spec Summary-table row for core-owned ops said «destructive (всегда)» → corrected to «core_pinned (безусловный deny, escape-hatch запрещён §5)»"
+      ],
+      "findings_nit": [],
+      "artifact": "docs/reviews/T-0078.review.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "ac_coverage": "20/20",
+      "tested_commit": "bf2d89f",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 2 pre-existing cosmetic no-console warnings, 0 errors",
+        "fitness_static": "PASS — all checks green, ARL-1..6 fully green + self-test",
+        "vitest_unit": "1612/1612 passed, 6 skipped (workerAuth.kc offline + flowable integration offline) — authoring-redlines.test.ts 51/51",
+        "skipped_detail": "workerAuth.kc.e2e.test.ts (1 test, KC offline), flowable-client.integration.test.ts (4 tests, Flowable offline), flowable-client.adversarial.test.ts (1 test) — pre-existing pattern"
+      },
+      "artifact": "docs/test-reports/T-0078.test-report.md",
+      "contract_artifact": "docs/design/T-0078.test-report.contract.json"
+    }
+  },
+  "semantic_notes": {
+    "anti_autofill_floor": "AC-20 isForbiddenTemplate enforces a semantic floor on consequenceStatement. The floor is intentionally UI/human-surface enforcement (T-0073 confirm surface), not a content-security check. Forbidden: single words (ok/да/yes/no/нет/confirm/подтверждаю/confirmed), digit-only sequences, repeated-char sequences. This is a day-1 floor; richer semantic validation (e.g. field-name presence check) belongs to the T-0073 UI surface, not this core pure function.",
+    "core_pinned_absolute": "lossy_live_migration is classified core_pinned regardless of isCorePinned context (AC-19). This is stricter than T-0177 isLossyNarrowing (which only elevates destructive→core_pinned for core-pinned fields). Rationale: ADR §4 RED-LINES строки 154-155 lists live-migration as categorical absolute alongside drop/rename of core fields — no escape-hatch permitted regardless of context. The distinction from T-0177 is deliberate and documented in the spec."
+  },
+  "files_changed": [
+    "src/core/authoring-redlines.ts",
+    "src/__tests__/authoring-redlines.test.ts",
+    "ci/checks/authoring-redlines-isolation.sh",
+    "docs/specs/T-0078-authoring-redlines.spec.md",
+    "docs/specs/T-0078.spec.contract.json",
+    "docs/design/T-0078.review.contract.json",
+    "docs/reviews/T-0078.review.json",
+    "docs/reviews/T-0078.review.md",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator merges feature branch into dev после прохождения всех гейтов",
+    "infra_changes": "Только новый pure-core модуль (src/core/authoring-redlines.ts) + тест + fitness check. Нет DDL, нет миграций, нет изменений docker-compose. known_tenant_tables.txt не изменён. Безопасно мержить в dev.",
+    "frozen_seam": "src/core/authoring-redlines.ts экспортирует classifyAuthoringOp, evaluateAuthoringRedLine, AuthoringOp, AuthoringContext, AuthoringRedLineConfirm, AuthoringRedLineResult (frozen seam per ARL-4). Потребитель — T-0073 UI/human-confirm surface."
+  },
+  "friction_events": []
+}
