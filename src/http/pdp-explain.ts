@@ -23,9 +23,10 @@
  * Это задекларировано в ADR §3.5 как честное сужение, а не молчаливое игнорирование.
  *
  * Record-источник (R-3): для ref.kind === "record" читается реальная запись из БД
- * (tenant-isolated, RLS). Для ref.kind ∈ {registry, application} запись не применима;
- * resolveFor никогда не вызовет getRecord для этих видов, т.к. record_fetch относится
- * только к записям (шаг 5 резолвера срабатывает лишь после нахождения покрывающего гранта).
+ * (tenant-isolated, RLS). Для ref.kind ∈ {registry, application} возвращается non-null
+ * sentinel ({ __explain_resource_sentinel__: true }) — resolveFor вызывает getRecord
+ * безусловно для всех kind (шаг 5), sentinel нужен чтобы не получить ложный not_found;
+ * соответствующий шаг трассы record_fetch ok:true помечен note:"n/a for non-record ref".
  *
  * 503 NO_DATABASE (R-7): эндпоинт регистрируется всегда; без пула отдаёт 503.
  */
@@ -208,6 +209,10 @@ async function loadSubjectGrants(
 // stored in choros.record; the grant-scope check is what matters for these
 // resource types. The sentinel is NOT a lie — for registry/application refs,
 // record existence is not the gating concern (grant→scope is).
+// NOTE: resolveFor calls getRecord unconditionally for ALL ref kinds (step 5);
+// the sentinel prevents a false not_found. The resulting record_fetch ok:true
+// step in the trace is vacuous for non-record refs — annotated "n/a for
+// non-record ref (sentinel)" by the response builder (R-3-resid / N-1).
 // ---------------------------------------------------------------------------
 
 async function fetchRecordForExplain(
@@ -519,12 +524,22 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): 
     const verdict = result.denied ? "deny" : "allow";
     const reason = result.denied ? result.reason : null;
 
-    // Build response steps — apply anti-oracle filtering (AC-8).
+    // Build response steps — apply anti-oracle filtering (AC-8) and vacuous markers.
     // For self-query: strip maskedFields from the masking step.
+    // For non-record refs: record_fetch step is vacuous (resolveFor calls getRecord for
+    // all ref kinds unconditionally; the sentinel guarantees ok:true — it is N/A as an
+    // existence check for registry/application resources). Mark it explicitly so trace
+    // consumers are not misled (R-3-resid nit N-1).
+    const isNonRecordRef = explainReq.handle.ref.kind !== "record";
     const responseSteps = traceSteps.map((step) => {
       if (step.step === "masking" && callerRole === "self") {
         // Return only the governed flag — no field names (anti-oracle, invar-4).
         return { step: step.step, ok: step.ok, governed: step.governed };
+      }
+      if (step.step === "record_fetch" && isNonRecordRef) {
+        // Vacuous step for registry/application refs: sentinel was returned, not a real
+        // DB existence check. Annotate as N/A so trace consumers are not misled.
+        return { ...step, note: "n/a for non-record ref (sentinel)" };
       }
       return step;
     });
