@@ -175,7 +175,8 @@ function mapOp(op) {
 
 /**
  * Post a single GrantWriteRequest to POST /api/grants.
- * Returns { ok: true, id } or { ok: false, reason }.
+ * Returns { ok: true, id, state } or { ok: false, reason }.
+ * state = "confirmed" | "semi-confirmed"
  */
 async function postGrant(atom, actorId) {
   try {
@@ -186,7 +187,28 @@ async function postGrant(atom, actorId) {
     });
     if (resp.status === 201) {
       const data = await resp.json();
-      return { ok: true, id: data.id };
+      return { ok: true, id: data.id, state: data.state || "confirmed" };
+    }
+    const err = await resp.json().catch(() => ({}));
+    return { ok: false, reason: err?.error?.reason || err?.error?.code || String(resp.status) };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message || e) };
+  }
+}
+
+/**
+ * POST /api/grants with phase=confirm2 — second authenticator confirm.
+ * Returns { ok: true } or { ok: false, reason }.
+ */
+async function postSecondConfirm(changeRef, actorId) {
+  try {
+    const resp = await fetch("/api/grants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-dev-user": actorId },
+      body: JSON.stringify({ phase: "confirm2", change_ref: changeRef }),
+    });
+    if (resp.ok) {
+      return { ok: true };
     }
     const err = await resp.json().catch(() => ({}));
     return { ok: false, reason: err?.error?.reason || err?.error?.code || String(resp.status) };
@@ -208,6 +230,12 @@ function RoleEditorScreen() {
   const [proposalAgentId, setProposalAgentId] = useState(null);
   // Submit state: null | "loading" | { errors: [{ uri, reason }], success: number }
   const [submitResult, setSubmitResult] = useState(null);
+  // Dual-control: pending second confirmations from critical grants
+  // Each entry: { changeRef: string, uri: string, op: string }
+  const [pendingConfirms, setPendingConfirms] = useState([]);
+  // Second-confirm actor (separate from ACTOR_ID — simulates second admin)
+  const [confirmActor, setConfirmActor] = useState("e-owner2");
+  const [confirmResult, setConfirmResult] = useState(null); // null | "loading" | { ok, reason? }
 
   // Static role UUID for the dev silo "Согласующий счетов ≤ ₽50 000" (seed role).
   // In a DB-backed scenario this would come from the selected role context.
@@ -256,9 +284,12 @@ function RoleEditorScreen() {
    */
   const handleSubmit = async () => {
     setSubmitResult("loading");
+    setPendingConfirms([]);
+    setConfirmResult(null);
     const sourceGrants = mode === "simple" ? expandPresets() : grants;
     const errors = [];
     let successCount = 0;
+    const newPending = [];
 
     for (const g of sourceGrants) {
       for (const op of g.ops) {
@@ -269,16 +300,21 @@ function RoleEditorScreen() {
           operation: mapOp(op),
           scope,
           granted_by: ACTOR_ID,
-          confirmed_by: ACTOR_ID, // direct submission = confirmed
           delegable: true,
         };
         const result = await postGrant(atom, ACTOR_ID);
         if (result.ok) {
           successCount++;
+          if (result.state === "semi-confirmed") {
+            newPending.push({ changeRef: result.id, uri: g.uri, op });
+          }
         } else {
           errors.push({ uri: g.uri, op, reason: result.reason });
         }
       }
+    }
+    if (newPending.length > 0) {
+      setPendingConfirms(newPending);
     }
     setSubmitResult({ errors, success: successCount });
   };
@@ -368,10 +404,30 @@ function RoleEditorScreen() {
       proposed_by: proposalAgentId, // UUID from proposal response (AC-15)
       delegable: true,
     };
-    await postGrant(atom, ACTOR_ID);
+    const result = await postGrant(atom, ACTOR_ID);
+    if (result.ok && result.state === "semi-confirmed") {
+      setPendingConfirms((prev) => [...prev, { changeRef: result.id, uri: p.uri, op: p.ops[0] || "read" }]);
+    }
     setGrants((gs) => [...gs, { uri: p.uri, ops: p.ops, nodes: p.nodes, tags: p.tags, range: p.range }]);
     setProposal(i, "confirmed");
   };
+  const handleSecondConfirm = async () => {
+    if (pendingConfirms.length === 0) return;
+    setConfirmResult("loading");
+    const results = [];
+    for (const pc of pendingConfirms) {
+      const r = await postSecondConfirm(pc.changeRef, confirmActor);
+      results.push({ ...pc, ...r });
+    }
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length === 0) {
+      setConfirmResult({ ok: true });
+      setPendingConfirms([]);
+    } else {
+      setConfirmResult({ ok: false, reason: failed.map((f) => `${f.uri}: ${f.reason}`).join("; ") });
+    }
+  };
+
   const pendingCount = proposed.filter((p) => p.status === "pending").length;
 
   return (
@@ -416,6 +472,44 @@ function RoleEditorScreen() {
                     ✕ {e.uri} [{e.op}]: {e.reason}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* ── Dual-control: second-confirm panel ── */}
+            {pendingConfirms.length > 0 && (
+              <div className="chs-dualbanner" style={{ marginTop: "var(--chs-space-3)" }}>
+                <span className="chs-dualbanner__glyph" />
+                <div className="chs-dualbanner__txt">
+                  <b>Требуется второй аппрувер.</b>{" "}
+                  {pendingConfirms.length} грант(ов) в статусе <code>semi-confirmed</code> — критичное расширение.
+                  Войдите как второй администратор и подтвердите.
+                  <div style={{ marginTop: "var(--chs-space-3)", display: "flex", alignItems: "center", gap: "var(--chs-space-3)", flexWrap: "wrap" }}>
+                    <label style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-secondary)" }}>
+                      Второй аппрувер (X-Dev-User):
+                      <input
+                        className="chs-input chs-input--mono"
+                        style={{ marginLeft: "var(--chs-space-2)", width: "14ch" }}
+                        value={confirmActor}
+                        onChange={(e) => setConfirmActor(e.target.value)}
+                        placeholder="user-id"
+                      />
+                    </label>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      disabled={confirmResult === "loading" || !confirmActor}
+                      onClick={handleSecondConfirm}
+                    >
+                      {confirmResult === "loading" ? "Подтверждение…" : "Подтвердить (confirm2)"}
+                    </Button>
+                    {confirmResult && confirmResult !== "loading" && (
+                      confirmResult.ok
+                        ? <span style={{ color: "var(--chs-color-success, green)" }}>✓ подтверждено — гранты активны</span>
+                        : <span style={{ color: "var(--chs-color-danger, red)" }}>✕ {confirmResult.reason}</span>
+                    )}
+                  </div>
+                </div>
+                <span className="chs-dualbanner__tag">DUAL-CONTROL</span>
               </div>
             )}
           </div>
