@@ -11,6 +11,7 @@
  *          409 WRONG_FLOOR   — kind classified as Floor-2
  *          422 UNKNOWN_FIELD — fieldKey not in binding
  *          401 UNAUTHENTICATED — missing x-dev-user
+ *          403 FORBIDDEN     — role process_designer missing (keycloak mode)
  *          404 NOT_FOUND     — binding not found
  *
  * CONTRACT (ADR §4 / §9.1):
@@ -18,14 +19,19 @@
  *     carries transformed {fields, uiSchema}. No separate form_def table (deferred
  *     T-0125). Persistence is the caller's responsibility.
  *   - classifyAuthoringFloor() gate: kind in FLOOR2_EDIT_KINDS → 409 WRONG_FLOOR.
- *   - checkBindingCompat() is called after transformation to assert fields ↔ bpmnVars
- *     are still aligned (only relevant when fields[] is mutated, i.e. relabel_field /
- *     toggle_required). For hide/show/help/reorder (ui-schema only), checkBindingCompat
- *     is a no-op pass-through (fields unchanged — keys ≡ original → ok:true).
+ *   - checkBindingCompat() is intentionally NOT called here: Floor-1 ops never
+ *     add/drop fields, so the key-set is preserved and the check would always be
+ *     a trivially-ok no-op. Binding-compat enforcement is the responsibility of
+ *     the persistence path (PATCH /tenants/.../binding, T-0072) — the caller
+ *     persists the transformed result there.
  *   - Auth via x-dev-user convention (same as binding.ts / invoke.ts).
- *   - Tenant isolation: tenantId validated as UUID; withTenantTx only when reading
- *     the binding from DB (optional read-through path). In stateless-body mode,
- *     no DB read is needed — the client supplies both fields and uiSchema.
+ *   - Authz (review R-1): role process_designer via checkRole from binding.ts —
+ *     same semantics as the neighbour writing the same form_binding record:
+ *     dev auth mode softens to «authenticated» (ADR §4 footnote, role not seeded
+ *     in dev DB); keycloak mode does a real role_assignment lookup → 403.
+ *   - Tenant isolation: tenantId validated as UUID; withTenantTx (reused from
+ *     binding.ts) wraps only the keycloak-mode role lookup. In stateless-body
+ *     mode no other DB access happens — the client supplies fields and uiSchema.
  *
  * HONEST NARROWING (form_def deferred):
  *   The route is split into two modes based on the request body:
@@ -40,14 +46,20 @@
  *
  * DESIGN DISCIPLINE:
  *   - assertUuidShape for tenantId (SQL-injection guard, mirrors binding.ts R-4).
- *   - No second permission mechanism.
- *   - No ambient DATABASE_URL required for npm test (Mode A is pure).
- *   - Imports only: router, auth, floor1-editor core, binding-compat core.
+ *   - No second permission mechanism: authz reuses binding.ts checkRole verbatim.
+ *   - No ambient DATABASE_URL required for npm test (dev-mode authz needs no DB;
+ *     the transform itself is pure).
+ *   - This route never persists form_binding (no INSERT/UPDATE/DELETE) — that
+ *     stays the caller's job via PATCH /binding (fitness FE1-11).
+ *   - Imports only: router, auth, binding (authz reuse), floor1-editor core,
+ *     binding-compat core, pg (types only, for the authz pool parameter).
  */
 
 import type { IncomingMessage } from "node:http";
+import type pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthMode } from "./auth.js";
+import { checkRole, withTenantTx } from "./binding.js";
 import {
   validateFloor1Request,
   applyFloor1Edit,
@@ -90,6 +102,41 @@ function extractActor(req: IncomingMessage): string {
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// authorizeEditor — process_designer role check (review R-1, mirrors binding.ts)
+//
+// Same semantics as binding.ts checkRole (reused directly — no second
+// permission mechanism):
+//   - dev auth mode: authenticated = sufficient (ADR §4 footnote, role not
+//     seeded in dev DB). No DB access at all — Mode A stays DATABASE_URL-free
+//     in dev/test.
+//   - keycloak mode: real role_assignment lookup → 403 FORBIDDEN when the
+//     actor lacks process_designer. Requires a pool; if the server was wired
+//     without one, fail closed (503) rather than skipping authz.
+// ---------------------------------------------------------------------------
+
+async function authorizeEditor(
+  pool: pg.Pool | null,
+  tenantId: string,
+  actorId: string,
+): Promise<void> {
+  if (getAuthMode() === "dev") {
+    // dev mode: authenticated = sufficient (same softening as binding.ts)
+    return;
+  }
+  if (!pool) {
+    // fail-closed: keycloak mode demands a real role lookup
+    throw new HttpError(
+      503,
+      "NO_DATABASE",
+      "role check requires a database connection in keycloak auth mode",
+    );
+  }
+  await withTenantTx(pool, tenantId, (client) =>
+    checkRole(client, tenantId, actorId),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,10 +359,15 @@ function parseEditRequest(raw: unknown): Floor1EditRequest {
 /**
  * Registers the Floor-1 editor route on the given router.
  *
- * No pg.Pool required: Mode A (stateless body) is purely functional.
- * The route can be wired unconditionally in server.ts (no grantsPool dependency).
+ * `pool` is used exclusively for the keycloak-mode authz role lookup
+ * (authorizeEditor → checkRole, review R-1). The transform itself stays
+ * stateless/pure (Mode A). In dev auth mode the route works without a pool —
+ * server.ts passes grantsPool when DATABASE_URL is configured, null otherwise.
  */
-export function registerFloor1EditorRoutes(router: Router): void {
+export function registerFloor1EditorRoutes(
+  router: Router,
+  pool: pg.Pool | null = null,
+): void {
   //
   // POST /tenants/:tenantId/processes/:processKey/forms/:formKey/edits
   //
@@ -331,8 +383,8 @@ export function registerFloor1EditorRoutes(router: Router): void {
     "POST",
     "/tenants/:tenantId/processes/:processKey/forms/:formKey/edits",
     async (req, res, _params) => {
-      // Auth check
-      const _actorId = extractActor(req);
+      // Auth check (→ 401 if absent)
+      const actorId = extractActor(req);
 
       // URL parsing
       const urlParts = extractEditorUrlParts(req.url ?? "");
@@ -370,6 +422,10 @@ export function registerFloor1EditorRoutes(router: Router): void {
 
       // Parse edit request
       const editRequest = parseEditRequest(body["edit"]);
+
+      // Authz check (→ 403 if role process_designer missing, review R-1).
+      // Same ordering as binding.ts: 401 → 400 (validation) → 403 → operation.
+      await authorizeEditor(pool, urlParts.tenantId, actorId);
 
       // Apply transformation (pure core — includes validateFloor1Request)
       const result = applyFloor1Edit(editRequest, fields, uiSchema);

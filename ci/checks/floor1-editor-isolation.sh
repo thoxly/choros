@@ -16,7 +16,15 @@
 #  FE1-8 — HTTP route file src/http/floor1-editor.ts exists.
 #  FE1-9 — HTTP route registers POST …/edits endpoint.
 #  FE1-10 — HTTP route returns 409 for WRONG_FLOOR (Floor-2 guard).
-#  FE1-11 — HTTP route does NOT import pg directly (stateless Mode A — no DB).
+#  FE1-11 — HTTP route never persists form_binding (stateless Mode A: no SQL
+#           writes — INSERT/UPDATE/DELETE forbidden) AND carries the authz
+#           guard (checkRole, review R-1).
+#           Amended in fix iter2: the original "no pg import at all" assertion
+#           conflicted with the blocking authz requirement (keycloak-mode
+#           checkRole needs a pg client, plumbed the same way as binding.ts).
+#           The honest invariant is narrowed: pg is allowed solely for the
+#           authz role lookup; persistence from this route stays forbidden —
+#           the caller persists via PATCH /binding (T-0072).
 #
 # Exit 0 on clean, non-zero on any violation.
 
@@ -193,16 +201,34 @@ else
   fi
 fi
 
-# ---- FE1-11: HTTP route does NOT import pg directly (stateless Mode A) ------
+# ---- FE1-11: HTTP route never persists form_binding + authz guard present ---
+# Amended (T-0073 fix iter2, review R-1): pg import is permitted ONLY for the
+# authz dependency (checkRole / withTenantTx reused from binding.ts — keycloak
+# mode needs a role_assignment lookup). The stateless-Mode-A invariant is kept
+# where it matters: this route must never write form_binding (or any table) —
+# persistence remains the caller's job via PATCH /binding (T-0072).
 
 if [[ ! -f "${HTTP_ROUTE}" ]]; then
   echo "SKIP FE1-11: HTTP route not found"
 else
-  if grep -Eq "^import pg |from ['\"]pg['\"]" "${HTTP_ROUTE}" 2>/dev/null; then
-    echo "FAIL FE1-11: HTTP route imports pg directly — violates stateless Mode A (no DB for Floor-1 transform)"
-    ERRORS=$((ERRORS + 1))
+  FE11_ERRORS=0
+
+  # (a) No SQL writes from this route — stateless Mode A persistence ban.
+  if grep -Eqi "INSERT[[:space:]]+INTO|UPDATE[[:space:]]+choros\.|DELETE[[:space:]]+FROM" "${HTTP_ROUTE}" 2>/dev/null; then
+    echo "FAIL FE1-11a: HTTP route contains SQL write (INSERT/UPDATE/DELETE) — violates stateless Mode A (persistence belongs to PATCH /binding, T-0072)"
+    FE11_ERRORS=$((FE11_ERRORS + 1))
+  fi
+
+  # (b) Authz guard present — process_designer role check (review R-1).
+  if ! grep -q "checkRole" "${HTTP_ROUTE}" 2>/dev/null; then
+    echo "FAIL FE1-11b: HTTP route missing checkRole authz guard (process_designer, review R-1)"
+    FE11_ERRORS=$((FE11_ERRORS + 1))
+  fi
+
+  if [[ ${FE11_ERRORS} -eq 0 ]]; then
+    echo "PASS FE1-11: no SQL writes (stateless Mode A) and checkRole authz guard present"
   else
-    echo "PASS FE1-11: HTTP route does not import pg (stateless Mode A)"
+    ERRORS=$((ERRORS + FE11_ERRORS))
   fi
 fi
 

@@ -26,20 +26,25 @@
  *   AC-19 — toggle_required does not affect uiSchema
  *   AC-20 — hide_field + show_field round-trip restores hidden=false
  *
- * HTTP — route behaviour (in-process, no pg):
+ * HTTP — route behaviour (in-process, no real pg connection):
  *   AC-21 — POST /tenants/:tid/processes/:pk/forms/:fk/edits with valid relabel → 200
- *   AC-22 — Floor-2 kind in body.edit → 409 WRONG_FLOOR
+ *   AC-22 — Floor-2 kind in body.edit → 400 VALIDATION at HTTP parser
+ *           (409 WRONG_FLOOR covered at core level in AC-14)
  *   AC-23 — Missing x-dev-user → 401 UNAUTHENTICATED
  *   AC-24 — Malformed edit.kind → 400 VALIDATION
  *   AC-25 — Unknown fieldKey in body.edit → 422 UNKNOWN_FIELD
  *   AC-26 — Malformed fields body → 400 VALIDATION
+ *   AC-27 — keycloak mode, actor without process_designer → 403 FORBIDDEN (review R-1)
+ *   AC-28 — keycloak mode, actor with process_designer → 200 (authz allow path)
  *
- * No pg import, no DATABASE_URL, no network.
+ * No real DB: AC-27/AC-28 use an in-memory stub pool (pg imported as type only).
+ * No DATABASE_URL, no network.
  */
 
 import { describe, it, expect } from "vitest";
 import * as http from "node:http";
 import { AddressInfo } from "node:net";
+import type pg from "pg";
 import {
   applyFloor1Edit,
   validateFloor1Request,
@@ -680,9 +685,11 @@ describe("AC-20 — hide/show round-trip restores hidden=false", () => {
 // HTTP tests — spin up an in-process server
 // ---------------------------------------------------------------------------
 
-async function startTestServer(): Promise<{ port: number; close: () => Promise<void> }> {
+async function startTestServer(
+  pool: pg.Pool | null = null,
+): Promise<{ port: number; close: () => Promise<void> }> {
   const router = new Router();
-  registerFloor1EditorRoutes(router);
+  registerFloor1EditorRoutes(router, pool);
 
   const server = http.createServer((req, res) => {
     router.dispatch(req, res);
@@ -768,7 +775,7 @@ describe("HTTP AC-21 — valid relabel_field → 200 with transformed fields/uiS
   });
 });
 
-describe("HTTP AC-22 — Floor-2 kind in body.edit → 409 WRONG_FLOOR", () => {
+describe("HTTP AC-22 — Floor-2 kind in body.edit → 400 VALIDATION (409 WRONG_FLOOR covered at core level in AC-14)", () => {
   it("add_field kind returns 409", async () => {
     const { port, close } = await startTestServer();
     try {
@@ -898,6 +905,129 @@ describe("HTTP AC-26 — Malformed fields body → 400 VALIDATION", () => {
         edit: { kind: "hide_field", fieldKey: "123-invalid" },
       });
       expect(resp.status).toBe(400);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP AC-27 / AC-28 — authz: process_designer role check (review R-1)
+//
+// Mirrors binding.ts checkRole semantics: in keycloak auth mode the route does
+// a role_assignment lookup → 403 FORBIDDEN without the role, 200 with it.
+// A stub pool replays the lookup in-memory — no real pg connection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stub pg.Pool: BEGIN/SET LOCAL/COMMIT/ROLLBACK are no-ops; the
+ * role_assignment count query returns the configured cnt.
+ */
+function makeStubPool(roleCount: number): pg.Pool {
+  const client = {
+    query: async (text: string, _params?: unknown[]) => {
+      if (typeof text === "string" && text.includes("role_assignment")) {
+        return { rows: [{ cnt: roleCount }] };
+      }
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+  return { connect: async () => client } as unknown as pg.Pool;
+}
+
+async function withKeycloakMode<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env["CHOROS_AUTH_MODE"];
+  process.env["CHOROS_AUTH_MODE"] = "keycloak";
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) {
+      delete process.env["CHOROS_AUTH_MODE"];
+    } else {
+      process.env["CHOROS_AUTH_MODE"] = prev;
+    }
+  }
+}
+
+const VALID_EDIT_BODY = {
+  fields: BASE_FIELDS,
+  uiSchema: {},
+  edit: { kind: "relabel_field", fieldKey: "supplier", label: "Поставщик" },
+};
+
+describe("HTTP AC-27 — keycloak mode, actor without process_designer → 403 FORBIDDEN", () => {
+  it("returns 403 when role_assignment lookup finds no process_designer", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(makeStubPool(0));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+        );
+        expect(resp.status).toBe(403);
+        expect((resp.body as { error: { code: string } }).error.code).toBe("FORBIDDEN");
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("fails closed with 503 when keycloak mode has no pool wired", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(null);
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+        );
+        expect(resp.status).toBe(503);
+      } finally {
+        await close();
+      }
+    });
+  });
+});
+
+describe("HTTP AC-28 — keycloak mode, actor with process_designer → 200 (allow path)", () => {
+  it("returns 200 with transformed fields when the role is present", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(makeStubPool(1));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+        );
+        expect(resp.status).toBe(200);
+        const body = resp.body as { fields: BindingField[] };
+        expect(body.fields.find((f) => f.key === "supplier")?.label).toBe("Поставщик");
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("dev mode keeps the softened check: authenticated actor → 200 without pool", async () => {
+    // Explicit allow-path companion to AC-23: same request, dev mode, no pool.
+    const { port, close } = await startTestServer(null);
+    try {
+      const resp = await postEdit(
+        port,
+        DEV_TENANT_ID,
+        "purchase-approval",
+        "purchase-form",
+        VALID_EDIT_BODY,
+      );
+      expect(resp.status).toBe(200);
     } finally {
       await close();
     }
