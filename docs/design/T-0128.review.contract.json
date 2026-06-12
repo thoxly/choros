@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0128",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0128-connector-entity.adr.md:45 (cite grant-lattice.ts:33)",
+      "issue": "Цитата `grant-lattice.ts:33` указывает на начало `ResourceType` union; сам template `mgmt_object:${string}` — на строке 37. Дрейф номера ±4. Load-bearing факт (template существует → mgmt_object:connector без нового enum) держится.",
+      "suggestion": "Поправить цитату на `grant-lattice.ts:37` или диапазоном `:33-38`."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0128-connector-entity.adr.md §5 (backs_effect_resource_id)",
+      "issue": "Не зафиксировано явно, что висячий `backs_effect_resource_id` (логическая ссылка, не FK) = no-op; impl/tester может предположить ссылочную целостность. Orphan безвреден day-1 (авторизация на стороне effect_resource через verifyEffectGrants, не по этому полю), но семантика не проговорена.",
+      "suggestion": "Добавить строку: висячая ссылка безвредна day-1; драйвер day-2 валидирует существование при резолве; платформа целостность не держит."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0128-connector-entity.adr.md §4.1 (cite seed-write.ts:405)",
+      "issue": "Файл живёт в `src/http/seed-write.ts` (HTTP-слой), не в `src/core/`. Строка 405 (validateAdminDelegation gate для mgmt_object:role:create) точна, но префикс пути не должен подразумевать core.",
+      "suggestion": "Указать явный путь `src/http/seed-write.ts:405`."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "docs/design/T-0128-connector-entity.adr.md §3.1/§5 (kind 'http_generic')",
+      "issue": "`http_generic` как closed-kind может прочитаться как обещание generic-egress. Инвариант (вызов = invoke-грант на effect_resource, T-0034) соблюдён механически (FF-CONN-4 нет implements драйвера, NF-2/AC-14 банят реальный вызов), но для этого kind не проговорён.",
+      "suggestion": "Явно: http_generic-коннектор невызываем без backing effect_resource + invoke-гранта; closed-kind ≠ открытый egress."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 6,
+      "location": "docs/design/T-0128-connector-entity.adr.md §6 (FF-CONN-9)",
+      "issue": "FF-CONN-9 (`git diff dev` по T-0170-путям) — pre-merge ветко-гейт, не вечный fitness: после мержа diff пуст → тривиально-зелёный навсегда, поведение T-0170 не охраняет. Настоящий вечный инвариант — AC-10 (живой суит).",
+      "suggestion": "Переклассифицировать FF-CONN-9 как pre-merge diff-гейт против merge-base; вечную защиту поведения T-0170 оставить на AC-10 (npm test + notification-email.sh)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
