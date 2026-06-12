@@ -30,6 +30,7 @@ import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
+import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 
 const { Pool } = pg;
 
@@ -271,6 +272,10 @@ function buildRouter(
   if (grantsPool) {
     registerNotificationRoutes(router, grantsPool);
   }
+
+  // Register PDP explain endpoint (T-0136).
+  // Registered unconditionally — returns 503 NO_DATABASE when pool is absent (R-7).
+  registerPdpExplainRoutes(router, grantsPool ?? null);
 
   // Register report_page CRUD + promote routes (T-0178 T-0121d).
   registerReportPageRoutes(router);

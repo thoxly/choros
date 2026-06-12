@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0136",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 2023,
+    "passed": 2023,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "src/__tests__/pdp-explain.test.ts: property: explain verdict matches resolveFor verdict — 9 cases (cross_tenant/no_grant/expired/future/wrong_op/not_found/allow/windowed/two-grants)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: cross_tenant — tenant step ok:false, single step in trace",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: no_grant (empty grant set) — covering step ok:false reason:no_grant",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: scope_filter fails (wrong scope node) — scope_filter ok:false passed:0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: effective_filter fails (expired grant + future grant) — effective_filter ok:false passed:0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: not_found — record_fetch ok:false reason:not_found",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "src/__tests__/pdp-explain.test.ts: trace: allow path — masking step present with ok:true governed:false",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "src/__tests__/pdp-explain.test.ts: HTTP self-query → 200, masking step present WITHOUT maskedFields field (anti-oracle)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "src/__tests__/pdp-explain.test.ts: HTTP non-admin caller about foreign subject → 403 EXPLAIN_FORBIDDEN",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "src/__tests__/pdp-explain.test.ts: HTTP admin caller with mgmt_object:grant → 200 with trace steps including maskedFields",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "src/__tests__/pdp-explain.test.ts: HTTP pool=null → 503 NO_DATABASE",
+      "result": "pass"
+    },
+    {
+      "ac": "NF-1-backward-compat",
+      "test": "src/__tests__/pdp-explain.test.ts: backward compat: no trace = no behaviour change — resolveFor without trace returns same result",
+      "result": "pass"
+    },
+    {
+      "ac": "R-2-op-scope",
+      "test": "src/__tests__/pdp-explain.test.ts: HTTP invoke/approve/transition → 422 EXPLAIN_OP_UNSUPPORTED",
+      "result": "pass"
+    },
+    {
+      "ac": "tsc",
+      "test": "tsc --noEmit: exit 0, 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "unit-tests",
+      "test": "vitest run: 1420 pass, 6 skip (flowable offline), 0 fail; pdp-explain.test.ts 31/31",
+      "result": "pass"
+    },
+    {
+      "ac": "fitness-db",
+      "test": "npm run fitness:db (DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros): 44 files, 603 tests, 0 fail",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "FF-RC5 (role-criticality-isolation.sh) — grant-resolver.ts в frozen-set",
+      "result": "n/a",
+      "note": "Класс sibling/origin-lag: красный на ветке по design, зеленеет post-merge (BUILD be07613 редактировал resolver: +76/-4 trace-mode). Авторитетный freeze = grant-resolver-isolation.sh (FF-R6) → PASS. Единственный допустимый fail согласно заданию."
+    },
+    {
+      "check": "R-3-resid (nit N-1) — docstring неверен + record_fetch вакуумный для non-record refs",
+      "result": "pass",
+      "note": "Исправлен в коммите e7d7d29: docstring честен (resolveFor вызывает getRecord безусловно; sentinel предотвращает ложный not_found); response builder помечает record_fetch note:'n/a for non-record ref (sentinel)' для registry/application. Без изменения core TraceStep type."
+    },
+    {
+      "check": "R-5-resid (nit N-2) — parity тест против константы, не против live resolveFor baseline",
+      "result": "n/a",
+      "note": "Остаточный нит из ревью. Тест проверяет endpoint-behaviour против константы; property-тест (AC-1) уже использует live resolveFor baseline для structural guarantee. Нит не устраняется в этой задаче (приемлемо для нита)."
+    },
+    {
+      "check": "Op-scope сужение (R-2, Stage-2): invoke/approve/transition → 422; effects/sod = T-0053",
+      "result": "n/a",
+      "note": "Честное ограничение explain-а: EffectSource/SodSource без production-реализации в explain-контексте до T-0053. 422 EXPLAIN_OP_UNSUPPORTED гейт стоит ДО authz и ДО PDP-вызова. Stage-2 расширение при появлении effects/sod DAO (T-0053)."
+    },
+    {
+      "check": "Координация B-7 (T-0132 axisCtx): resolveFor 7-й параметр traceOut",
+      "result": "n/a",
+      "note": "T-0132 (axisCtx) обязан учесть traceOut на 7-й позиции при своём BUILD. Если T-0132 добавляет параметр — рекомендована 8-я позиция или options-объект."
+    }
+  ],
+  "failures": []
+}

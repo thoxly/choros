@@ -1,0 +1,121 @@
+{
+  "task_id": "T-0136",
+  "status": "pr_open",
+  "branch": "task/T-0136-pdp-explain",
+  "merge_target": "dev",
+  "base_commit": "8241c37",
+  "head_commit": "e7d7d29",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0136: PDP explain-эндпоинт (POST /api/pdp/explain). resolveFor получил аддитивный 7-й параметр traceOut? TraceCollector — единая логика, гарантированное совпадение вердиктов (AC-1). Authz: самоопрос (callerSubjectId===subjectId) или admin c mgmt_object:grant read. Op-scope честно сужен до {read,create,update,delete} — invoke/approve/transition → 422 EXPLAIN_OP_UNSUPPORTED (EffectSource/SodSource не реализованы в explain-контексте до T-0053). record-источник реален: RLS GUC + WHERE tenant_id (урок T-0184). Маскинг: maskedFields только для admin; самоопрос — только governed-флаг (anti-oracle). iter-1: changes_requested (R-1/R-2/R-3/R-6/R-7); iter-2: approved (afb4936); nit R-3-resid исправлен в e7d7d29 (docstring + vacuous note). CI: tsc 0 errors, eslint 0 errors (2 pre-existing no-console), fitness все PASS, vitest 1420/1426 (6 skip), fitness:db 603/603 (44 файла). FF-RC5: known origin-lag (grant-resolver.ts в diff BUILD).",
+  "commits": [
+    {
+      "sha": "e112b52",
+      "phase": "SPEC",
+      "message": "spec(T-0136): explain-endpoint PDP — trace-режим, authz-решение, AC"
+    },
+    {
+      "sha": "be07613",
+      "phase": "BUILD",
+      "message": "build(T-0136): trace-режим resolveFor + explain-эндпоинт PDP"
+    },
+    {
+      "sha": "c5d4d75",
+      "phase": "REVIEW-1",
+      "message": "T-0136 REVIEW: changes_requested"
+    },
+    {
+      "sha": "43be1e3",
+      "phase": "FIX",
+      "message": "T-0136 fix: honest explain (real/declared deps, op-scope), authz tests, endpoint-level verdict parity (R-1/R-2/R-3/R-5/R-6/R-7)"
+    },
+    {
+      "sha": "afb4936",
+      "phase": "REVIEW-2",
+      "message": "T-0136 RE-REVIEW: approved"
+    },
+    {
+      "sha": "e7d7d29",
+      "phase": "NIT",
+      "message": "nit(T-0136): R-3-resid — fix docstring + mark record_fetch vacuous for non-record refs"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "afb4936",
+      "findings_resolved": [
+        "R-1 (blocking): authz — 3 HTTP tests (self/foreign-403/admin) зелёные",
+        "R-2 (blocking): op-scope — 422 EXPLAIN_OP_UNSUPPORTED для invoke/approve/transition; гейт ДО authz и ДО resolveFor",
+        "R-3 (blocking): real fetchRecordForExplain (RLS GUC + WHERE tenant_id, grantsPool=choros_app, НЕ bypassrls)",
+        "R-6 (blocking): eslint exit 0 (убраны unused imports)",
+        "R-7 (nit→closed): 503 NO_DATABASE, маршрут безусловный"
+      ],
+      "findings_nit_open": [
+        "R-3-resid / N-1 (nit, ось 4): docstring строка 27 неверен + record_fetch вакуумный для non-record refs — ИСПРАВЛЕН в e7d7d29",
+        "R-5-resid / N-2 (nit, ось 5): parity-тест против константы, не против live resolveFor baseline — остаётся как evidence, не блокирует"
+      ],
+      "artifact": "docs/design/T-0136.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 2023,
+      "passed": 2023,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "11/11 + NF-1 + R-2",
+      "fitness_static": "PASS — все статические проверки зелёные (FF-RC5 origin-lag исключение)",
+      "fitness_db_total": "603/603 PASS, 0 failed, 44 files",
+      "pdp_explain_live": "31/31 PASS — src/__tests__/pdp-explain.test.ts (live pool via fitness:db env)",
+      "tested_commit": "e7d7d29",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — все статические проверки зелёные; FF-RC5 = единственный known fail (origin-lag)",
+        "vitest_unit": "1420/1426 passed, 6 skipped (flowable integration offline)",
+        "pdp_explain_unit": "src/__tests__/pdp-explain.test.ts — 31/31 PASS",
+        "fitness_db_total": "603/603 passed, 0 failed, 44 files",
+        "fitness_db_with_env": "DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros"
+      },
+      "artifact": "docs/test-reports/T-0136.test-report.md",
+      "contract_artifact": "docs/design/T-0136.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/grant-resolver.ts",
+    "src/http/pdp-explain.ts",
+    "src/server.ts",
+    "src/__tests__/pdp-explain.test.ts",
+    "docs/design/T-0136-pdp-explain.adr.md",
+    "docs/design/T-0136.review.contract.json",
+    "docs/reviews/T-0136.review.md",
+    "docs/test-reports/T-0136.test-report.md",
+    "docs/design/T-0136.test-report.contract.json",
+    "docs/pr/T-0136.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "design_notes": {
+    "op_scope_narrowed": "explain поддерживает op ∈ {read, create, update, delete}. invoke/approve/transition требуют EffectSource/SodSource без production-реализации в explain-контексте (T-0053 pending). Нечестная трасса (вердикт расходится с реальным PDP) = критический дефект → честный 422 EXPLAIN_OP_UNSUPPORTED. Stage-2 расширение при появлении DAO в T-0053.",
+    "trace_coordination_b7": "resolveFor получил 7-й параметр (позиция 6, 0-indexed): traceOut?: TraceCollector. T-0132 (axisCtx, B-7) ОБЯЗАН учесть при своём BUILD: если добавляет параметр — 8-я позиция (7 0-indexed) или options-объект. Сигнатура resolveFor: (deps, handle, subject, op, invokeCtx?, guardCtx?, traceOut?).",
+    "ff_rc5_structural_note": "FF-RC5 (role-criticality-isolation.sh, T-0040) вносит grant-resolver.ts в frozen-set, но авторитетный owner-freeze резолвера = grant-resolver-isolation.sh (FF-R6). Двойной freeze создаёт guaranteed false-red для каждого легального resolver-BUILD. Кандидат на демоушн grant-resolver.ts из FF-RC5 или механизм excludes (аналог migration-excludes). Эскалировано в role_gap_evidence ревью-контракта.",
+    "record_source_r3": "fetchRecordForExplain: для record-ref = реальный SELECT с RLS GUC + WHERE tenant_id (grantsPool = choros_app, НЕ bypassrls migrator). Для registry/application-ref = sentinel {__explain_resource_sentinel__: true} — resolveFor вызывает getRecord безусловно; sentinel предотвращает ложный not_found. record_fetch шаг в трассе помечается note:'n/a for non-record ref (sentinel)' response-builder'ом.",
+    "anti_oracle_masking": "maskedFields раскрывается только admin; при самоопросе — только governed-флаг. Имена drop-полей не раскрываются даже admin (они не в vis — fail-closed).",
+    "nit_r3_resid": "Исправлен в e7d7d29: docstring честен + response builder аннотирует record_fetch как vacuous для non-record refs. Изменение только в HTTP-слое, ядро TraceStep type не затронуто.",
+    "nit_r5_resid": "Endpoint-level parity-тест (describe 'endpoint-level verdict parity') сверяет вердикт против hardcoded константы. Structural guarantee AC-1 уже обеспечена property-тестом, использующим live resolveFor baseline. Нит остаётся как evidence, не устраняется."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "ff_rc5_post_merge": "После мержа в dev grant-resolver.ts попадает в base → FF-RC5 зеленеет для будущих веток (тот же паттерн: T-0035/T-0118/T-0032/T-0034/T-0033/T-0021).",
+    "downstream_effect": "POST /api/pdp/explain доступен. resolveFor с traceOut=undefined побайтово идентичен pre-T-0136 (NF-1/NF-2). Новые экспорты: TraceStep, TraceCollector из grant-resolver.ts (аддитивные, не ломают существующих импортёров).",
+    "coordination_t0132": "T-0132 (axisCtx, B-7) — при BUILD должен учесть 7-й параметр resolveFor (traceOut). Рекомендована 8-я позиция или options-объект."
+  },
+  "friction_events": []
+}
