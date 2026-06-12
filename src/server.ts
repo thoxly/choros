@@ -30,6 +30,7 @@ import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
+import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 
 const { Pool } = pg;
 
@@ -270,6 +271,11 @@ function buildRouter(
   // Register notification center endpoints (T-0173 E-N.6).
   if (grantsPool) {
     registerNotificationRoutes(router, grantsPool);
+  }
+
+  // Register PDP explain endpoint (T-0136).
+  if (grantsPool) {
+    registerPdpExplainRoutes(router, grantsPool);
   }
 
   // Register report_page CRUD + promote routes (T-0178 T-0121d).

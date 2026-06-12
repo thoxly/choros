@@ -381,6 +381,37 @@ export function visibleFields(
 // The decision core (single source of truth, operation-parameterized)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// T-0136 — Trace collector (diagnostic, optional 7th arg on resolveFor)
+// ---------------------------------------------------------------------------
+
+/**
+ * One step in the resolution trace produced by the explain path.
+ * `ok: true` means the check passed; `ok: false` is the first denial gate.
+ * Extra fields are informational and vary by step kind.
+ */
+export type TraceStep =
+  | { step: "tenant";           ok: boolean }
+  | { step: "grants_resolved";  ok: true; count: number }
+  | { step: "effective_filter"; ok: boolean; passed: number }
+  | { step: "scope_filter";     ok: boolean; passed: number }
+  | { step: "covering";         ok: boolean; reason?: string }
+  | { step: "effect_grants";    ok: boolean }
+  | { step: "sod";              ok: boolean }
+  | { step: "record_fetch";     ok: boolean; reason?: string }
+  | { step: "masking";          ok: true; governed: boolean; maskedFields?: string[] };
+
+/**
+ * Injected trace sink (T-0136). When provided to `resolveFor`, each gate
+ * emits a `TraceStep` into `push`. No IO; purely accumulates data.
+ *
+ * Additive: `resolveFor` calls `trace?.push(...)` at each key checkpoint.
+ * When absent, behaviour is byte-identical to pre-T-0136 (NF-1 / NF-2).
+ */
+export interface TraceCollector {
+  push(step: TraceStep): void;
+}
+
 /**
  * Optional invoke context: carries the tool's `declares` blob at invoke-time
  * (T-0034 step 3.5). This is an ADDITIVE optional 5th argument — callers that
@@ -493,32 +524,47 @@ export async function resolveFor(
   op: Operation,
   invokeCtx?: InvokeContext,
   guardCtx?: GuardContext,
+  // T-0136: optional trace collector — additive, no behaviour change when absent (NF-1).
+  traceOut?: TraceCollector,
 ): Promise<ResolvedView | EffectDeniedView | SodDeniedView> {
   // 1. Tenant-gate, fail-closed, before any grant/record read (NF-3, AC-2).
   if (handle.tenantId !== subject.tenantId) {
+    traceOut?.push({ step: "tenant", ok: false });
     return { denied: true, reason: "cross_tenant" };
   }
+  traceOut?.push({ step: "tenant", ok: true });
 
   // 2. Resolve grants at call-time (FR-2, AC-3). Single `now` decides validity.
   const now = (deps.now ?? Date.now)();
   const all = await deps.grants.getGrants(subject, now);
+  traceOut?.push({ step: "grants_resolved", ok: true, count: all.length });
 
   // 3. Filter to covering grants (FR-3, FR-6, AC-4, AC-7, AC-8).
   const handleScope = refToScope(handle.ref);
-  const covering = all.filter((g) => {
+
+  // T-0136 trace: count effective grants (pass time-window check).
+  const effective = all.filter((g) => {
     if (g.tenantId !== subject.tenantId) return false;
     if (g.operation !== op) return false;
-    if (!isEffective(g, now)) return false;
-    // A grant's scope may be free-form (owner-only, outside the lattice); only
-    // lattice scope elements participate in resource-containment here.
+    return isEffective(g, now);
+  });
+  traceOut?.push({ step: "effective_filter", ok: effective.length > 0, passed: effective.length });
+
+  // T-0136 trace: count scope-covering grants.
+  const scopePassed = effective.filter((g) => {
     if (!isLatticeScope(g.scope)) return false;
     return isNarrowerOrEqual(handleScope, g.scope, deps.ancestry);
   });
+  traceOut?.push({ step: "scope_filter", ok: scopePassed.length > 0, passed: scopePassed.length });
+
+  const covering = scopePassed;
 
   // 4. Fail closed if no covering grant (FR-5, AC-1).
   if (covering.length === 0) {
+    traceOut?.push({ step: "covering", ok: false, reason: "no_grant" });
     return { denied: true, reason: "no_grant" };
   }
+  traceOut?.push({ step: "covering", ok: true });
 
   // [step 3.5] T-0034 — invoke-path effect-grant verification.
   // Active ONLY when op === "invoke" AND deps.effects is present (NF-2, AC-8).
@@ -560,6 +606,7 @@ export async function resolveFor(
       declarations = [];
     } else if (profile.effects.length === 0) {
       // Malformed input → fail-closed (AC-9, FR-6, NF-3).
+      traceOut?.push({ step: "effect_grants", ok: false });
       return { denied: true, reason: "no_effect_grant" };
     } else {
       declarations = profile.effects;
@@ -573,8 +620,10 @@ export async function resolveFor(
       subject.tenantId,
     );
     if (!result.ok) {
+      traceOut?.push({ step: "effect_grants", ok: false });
       return { denied: true, reason: "no_effect_grant" };
     }
+    traceOut?.push({ step: "effect_grants", ok: true });
   }
 
   // [step 3.6] T-0032 — SoD guard. Active ONLY when op ∈ {approve, transition}
@@ -587,6 +636,7 @@ export async function resolveFor(
     // A guarded op with deps.sod present but guardCtx absent ⇒ fail-closed
     // (an unattributable transition cannot be proven SoD-clean — NF-3).
     if (guardCtx === undefined) {
+      traceOut?.push({ step: "sod", ok: false });
       return { denied: true, reason: "sod_violation" };
     }
     const sod = deps.sod;
@@ -601,18 +651,23 @@ export async function resolveFor(
       principalAssignments = await sod.effectiveAssignmentsOf(principal);
       decision = await evaluateSod(sod, deps.ancestry, guardedAct, principalAssignments);
     } catch {
+      traceOut?.push({ step: "sod", ok: false });
       return { denied: true, reason: "sod_violation" }; // fail-closed (NF-3).
     }
     if (decision.violated) {
+      traceOut?.push({ step: "sod", ok: false });
       return { denied: true, reason: "sod_violation" }; // zero actor_event rows.
     }
+    traceOut?.push({ step: "sod", ok: true });
   }
 
   // 5. Fetch the record — only after a covering grant is found (AC-9).
   const raw = await deps.records.getRecord(handle.ref);
   if (raw === null) {
+    traceOut?.push({ step: "record_fetch", ok: false, reason: "not_found" });
     return { denied: true, reason: "not_found" }; // still zero actor_event rows.
   }
+  traceOut?.push({ step: "record_fetch", ok: true });
 
   // [step 6.5] T-0032 — on a guarded op that PASSED grant ∧ SoD ∧ record fetch,
   // append EXACTLY ONE actor_event row recording the act (AC-10).
@@ -634,6 +689,23 @@ export async function resolveFor(
   // has no rows fails closed inside maskFields (max mask), never widened.
   const maskCtx = buildMaskContext(deps, handle, covering);
   const fields = projectFields(raw, vis, maskCtx);
+  // T-0136 trace: emit masking step on the allow path.
+  if (traceOut !== undefined) {
+    const governed = maskCtx !== undefined ? maskCtx.governed : false;
+    // Compute which fields received a non-raw transform (masked/hashed/redacted/dropped).
+    // We compare vis (fields the grant allows) against the actual projected fields to
+    // find those that were transformed or dropped by masking. This is admin-only info
+    // (the HTTP layer strips maskedFields for self-query — anti-oracle AC-8).
+    const maskedFields: string[] = [];
+    for (const f of vis) {
+      // A field is "masked" if it was visible but is absent in the projected output
+      // (dropped by masking), or its value differs from the raw value.
+      if (!(f in fields) || fields[f] !== (raw as Record<string, unknown>)[f]) {
+        maskedFields.push(f);
+      }
+    }
+    traceOut.push({ step: "masking", ok: true, governed, maskedFields });
+  }
   // TODO(T-0053): FR-8 (MAY) — thread the static-now T-0016 AuditObligation
   // shape ({ type, actor, subject, via, decision }) from here once the T-0016
   // ADR fixes its return contract. The durable append is explicitly deferred to
