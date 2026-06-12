@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0134",
+  "verdict": "approved",
+  "ci_seen": {"green": true},
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0134-agent-docs.adr.md:109 (§2.1-инвариант), §2.4:159, §5.3:303, FF-DOCS-SYSTEM-PROJECTION:390",
+      "issue": "RESOLVED (iter-1 blocking снят). iter-1 R-1 = 'чтение scope=system-доков из чужой tenant-сессии под FORCE RLS = второй read/authz-путь'. Fix fc6e899 решает read-путь per-tenant проекцией (§2.4): system-доки физически живут в каждом тенанте как обычные tenant_id=<его> строки (scope=system, authored_by=system, catalog_version), поэтому lint/MCP/UI читают ОДИН класс ОДНИМ RLS-путём (tenant_id = current_setting('choros.tenant_id')) — без второго USING-предиката, без context-switch; master-копия a0...001 структурно недостижима из чужой сессии (FORCE RLS режет до scope). Проверено против живой базы: migrations/051_report_page.sql:79 = единственный USING tenant_id (прецедент верен); a0000000-...-001 = живой dev-тенант (044_config_agent_seed). Отвергнутые ветви (б) выделенная RLS-политика USING(scope=system) и (в) глобальная таблица без RLS обоснованы честно в §7. FF-DOCS-SYSTEM-PROJECTION доказывает read-инвариант (static: единственный USING tenant_id + нет SET choros.tenant_id в MCP/UI; live: B-сессия читает свою проекцию, SELECT scope=system AND tenant_id=a0...001 ⇒ 0 строк). NF-1 на самой опасной (внешней harness read) поверхности удержан. Blocking снят; остаточная честность write-стороны вынесена в R-6.",
+      "suggestion": "Снято. Read-путь решён по существу. См. R-6 по write-стороне проекции."
+    },
+    {
+      "id": "R-6",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0134-agent-docs.adr.md (§2.4 write-path block + §8 FF-DOCS-PROJECTION-WRITE + §9 T-0134i + §7 rejected-alternatives)",
+      "issue": "RESOLVED. Write-путь проекции (vendor→tenant) = provision-time системная операция, context-обходная по определению. ADR §2.4 теперь явно называет: provision-роль (migrator/provisioner-класс), границы (только scope=system-строки, projection-only, catalog_version NOT NULL, provision-роль не делегируется harness delegable=false), аудит docs.system_projected как граница полномочия. Добавлена FF-DOCS-PROJECTION-WRITE (static-now: grep provision-writer => только scope=system-ветви; grep harness-grant => нет delegable=true для provision-роли; assert catalog_version IS NOT NULL). §9 T-0134i обновлён: depends-on T-0133 (в base) + FF-DOCS-PROJECTION-WRITE в DoD. §7 rejected-alternatives обновлён: write-путь ограничен, FF-DOCS-PROJECTION-WRITE упомянута. NF-1 удержан: read-поверхность harness без второго механизма; provision-write = инфраструктурный setup-класс.",
+      "suggestion": "Закрыт: §2.4 write-путь назван честно + FF-DOCS-PROJECTION-WRITE добавлена."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0134-agent-docs.adr.md:472-479 (§11 Координация)",
+      "issue": "RESOLVED. iter-1 R-2 (метка 'после мержа' stale) закрыт: §11 теперь 'report-page-compat.ts (T-0176) и binding-compat.ts физически присутствуют в базе этого worktree ... сверять можно сейчас'. Подтверждено: src/core/report-page-compat.ts (12 КБ, checkReportPageDepFields:99 / DepViolation:53) и binding-compat.ts (8 КБ) в base."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/design/T-0134-agent-docs.adr.md:235-245 (§3.2)",
+      "issue": "RESOLVED. iter-1 R-3 (граница code_symbol build/CI-time vs runtime недоговорена) закрыт: §3.2 новый блок 'Граница источника LiveSnapshot по ref_kind (R-3, явно)' — code_symbol = build/CI-time (на проде исходников нет), rest_endpoint/process/config_key/schema_field = runtime; зафиксировано для T-0134c."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0134-agent-docs.adr.md:486-490 (§11)",
+      "issue": "RESOLVED. iter-1 R-4 (висящий cross-ref на T-0126) закрыт: §11 'Headless/программная граница (R-4)' — 'T-0126 пока НЕ материализован (нет docs/design/T-0126*/docs/specs/T-0126*); граница держится T-0122 §0, не отдельным ADR T-0126'. Подтверждено: T-0126-файлы отсутствуют."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 3,
+      "location": "docs/design/T-0134-agent-docs.adr.md:24 (§0 бронь), §11:480-484",
+      "issue": "RESOLVED. iter-1 R-5 (слот 054 коллизия с T-0128) закрыт: §0/§11 — '054 уже занят дизайном T-0128 (connector, смержен e2f8d79); coder T-0134 берёт 055+'. Подтверждено: e2f8d79 IN base; T-0128.adr.contract.json пинит migration 054; макс. слот в base = 053; FF-SCHEMA-DOCS/T-0134a метят >=055."
+    },
+    {
+      "id": "R-7",
+      "severity": "nit",
+      "axis": 5,
+      "location": "docs/design/T-0134-agent-docs.adr.md (легенда прецедентов, §2.4, §7 rejected-alternatives, §9 T-0134i deps, §11 Координация)",
+      "issue": "RESOLVED. T-0133 (прецедент managed-solution/vendor-update) был смержен в dev 1a9176c. ADR обновлён: все ссылки на '[ЖИВОЙ] git db913d6' / 'сестринская ветка task/T-0133-...' заменены на 'смержен в dev 1a9176c'. §11 добавлена нота R-7: T-0133 — в base, сверять можно сейчас; порядок T-0133 → T-0134a → T-0134i зафиксирован. §9 T-0134i depends-on T-0133 помечен '(в base)'.",
+      "suggestion": "Закрыт: SHA-пин и формулировка обновлены к живому base."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": true},
+    {"ac": "AC-13", "covered": true},
+    {"ac": "AC-14", "covered": true},
+    {"ac": "AC-15", "covered": true},
+    {"ac": "AC-16", "covered": true},
+    {"ac": "AC-17", "covered": true},
+    {"ac": "AC-18", "covered": true},
+    {"ac": "AC-19", "covered": true},
+    {"ac": "AC-20", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
