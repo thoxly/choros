@@ -1,0 +1,54 @@
+{
+  "task_id": "T-0078",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:22-33, src/core/authoring-redlines.ts:59-75",
+      "issue": "ADR §4 RED-LINES (строки 154-155) перечисляет «lossy live-migration» в одном ряду с drop/rename core-поля — категорический абсолют, escape-hatch запрещён. Операция отсутствовала в AuthoringOpKind и в Summary-таблице спеки.",
+      "suggestion": "FIXED: добавлен 'lossy_live_migration' в AuthoringOpKind с классом core_pinned (безусловный deny независимо от isCorePinned). Spec Summary-таблица обновлена. Тест AC-19 (4 cases): deny даже при force=true и isCorePinned=false."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:61-62, src/core/authoring-redlines.ts:265-273",
+      "issue": "Spec §1 п.2 обещал forbidden-template check; impl не реализовывал — только length floor. Несоответствие spec→impl.",
+      "suggestion": "FIXED: реализован isForbiddenTemplate (FORBIDDEN_SINGLE_WORDS: ok/да/yes/no/нет/confirm/подтверждаю/confirmed; RE_DIGITS_ONLY; RE_REPEATED_CHAR). isValidConfirm теперь проверяет все три условия. Spec confirm-контракт обновлён с документацией forbidden-list и ограничением «семантика = UI/T-0073». Тест AC-20 (9 cases). Граничный тест AC-13 скорректирован ('удалю поле' вместо '1234567890')."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "docs/specs/T-0078-authoring-redlines.spec.md:32",
+      "issue": "Summary-таблица называла core-owned операции «destructive (всегда, без core-check)» вместо «core_pinned».",
+      "suggestion": "FIXED: исправлено на «core_pinned (безусловный deny, escape-hatch запрещён §5)»."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true, "note": "tsc --noEmit exit 0 ✓" },
+    { "ac": "AC-2", "covered": true, "note": "add_field → non_destructive; allow ✓" },
+    { "ac": "AC-3", "covered": true, "note": "drop_field non-core without confirm → deny(requires_confirm) ✓" },
+    { "ac": "AC-4", "covered": true, "note": "drop_field non-core + valid confirm → allow(destructive) ✓" },
+    { "ac": "AC-5", "covered": true, "note": "rename_field non-core without confirm → deny ✓" },
+    { "ac": "AC-6", "covered": true, "note": "change_type number→integer non-core without confirm → deny ✓" },
+    { "ac": "AC-7", "covered": true, "note": "change_type + confirm → allow(destructive+confirmedConsequence) ✓" },
+    { "ac": "AC-8", "covered": true, "note": "drop_field core-pinned → deny(core_pinned) даже с force=true ✓" },
+    { "ac": "AC-9", "covered": true, "note": "rename_field core-pinned → deny(core_pinned) ✓" },
+    { "ac": "AC-10", "covered": true, "note": "relabel core-pinned → non_destructive ✓" },
+    { "ac": "AC-11", "covered": true, "note": "enum_change widening → non_destructive ✓" },
+    { "ac": "AC-12", "covered": true, "note": "enum_change narrowing non-core without confirm → deny ✓" },
+    { "ac": "AC-13", "covered": true, "note": "consequenceStatement < 10 chars → deny(invalid_confirm); boundary test обновлён: 'удалю поле' (10 chars, non-forbidden) → allow ✓" },
+    { "ac": "AC-14", "covered": true, "note": "fitness ARL-2: нет pg/node:fs/node:http/node:net/import.meta/process.env/process.exit ✓" },
+    { "ac": "AC-15", "covered": true, "note": "fitness ARL-3: ADR-ссылки на T-0177+T-0072 в комментарии ✓" },
+    { "ac": "AC-16", "covered": true, "note": "fitness ARL-4: все экспорты присутствуют (включая lossy_live_migration в AuthoringOpKind) ✓" },
+    { "ac": "AC-17", "covered": true, "note": "npm run fitness exit 0 ✓" },
+    { "ac": "AC-18", "covered": true, "note": "fitness ARL-5/ARL-6: isLossyNarrowing referenced with T-0177 precedent ✓" },
+    { "ac": "AC-19", "covered": true, "note": "NEW: lossy_live_migration → core_pinned даже при isCorePinned=false; deny с force+valid-confirm (4 cases) ✓" },
+    { "ac": "AC-20", "covered": true, "note": "NEW: forbidden-template deny(invalid_confirm): ok/да/confirm/подтверждаю/1234567890/aaaaaaaaaa/----------/yes/confirmed (9 cases) ✓" }
+  ],
+  "role_gap_evidence": []
+}
