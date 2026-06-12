@@ -15,10 +15,9 @@
 // Owner: T-0147 (do not edit without updating FF-T147-* checks)
 
 import pg from 'pg';
-import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { computeMigrationsHash } from './migrations-hash.js';
 
 const { Client } = pg;
 
@@ -29,20 +28,6 @@ const { Client } = pg;
 const _HERE = dirname(fileURLToPath(import.meta.url));
 // globalSetup.ts lives at ci/checks/db/ → repo root = ../../../
 const _REPO_ROOT = resolve(_HERE, '..', '..', '..');
-
-/** Compute SHA-256 over sorted migration filenames+contents → first 8 hex chars. */
-function computeMigrationsHash(repoRoot: string): string {
-  const migrationsDir = join(repoRoot, 'migrations');
-  const files = readdirSync(migrationsDir)
-    .filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f))
-    .sort();
-  const h = createHash('sha256');
-  for (const f of files) {
-    h.update(f);
-    h.update(readFileSync(join(migrationsDir, f)));
-  }
-  return h.digest('hex').slice(0, 8);
-}
 
 const MIGRATIONS_HASH = computeMigrationsHash(_REPO_ROOT);
 const TEMPLATE_NAME = `choros_test_template_${MIGRATIONS_HASH}`;

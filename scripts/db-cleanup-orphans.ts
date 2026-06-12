@@ -18,32 +18,28 @@
 //   Also drop stale per-hash templates:
 //     ... npm run fitness:db:cleanup-orphans -- --stale-templates
 //
+// WARNING — --stale-templates is a MANUAL opt-in only. NEVER include it in
+// automated CI/fitness pipelines. It drops all per-hash templates whose hash
+// differs from THIS branch's migrations set. That includes templates belonging
+// to OTHER ACTIVE BRANCHES/WORKTREES currently running tests. Running it while
+// another branch is still setting up or cloning its template will cause that
+// branch's next `npm run fitness:db:setup-template` to re-create the template
+// from scratch, and its `fitness:db` run will fail with "template not found"
+// if it started between the drop and the re-create. Use only during deliberate
+// post-merge cleanup when you are certain no other worktree is actively using
+// its template on the same Postgres instance.
+//
 // Exit codes:
 //   0 — success (including N=0 when no orphans found)
 //   1 — connection or SQL error
 
 import pg from 'pg';
-import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { computeMigrationsHash } from '../ci/checks/db/migrations-hash.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
-
-/** Compute SHA-256 over sorted migration filenames+contents → first 8 hex chars. */
-function computeMigrationsHash(repoRoot: string): string {
-  const migrationsDir = join(repoRoot, 'migrations');
-  const files = readdirSync(migrationsDir)
-    .filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f))
-    .sort();
-  const h = createHash('sha256');
-  for (const f of files) {
-    h.update(f);
-    h.update(readFileSync(join(migrationsDir, f)));
-  }
-  return h.digest('hex').slice(0, 8);
-}
 
 const CURRENT_HASH = computeMigrationsHash(REPO_ROOT);
 const CURRENT_TEMPLATE = `choros_test_template_${CURRENT_HASH}`;

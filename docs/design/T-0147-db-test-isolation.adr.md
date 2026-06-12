@@ -350,6 +350,21 @@ Per-hash: `(parseInt(hash, 16) & 0x7fff_ffff) | 0x1000_0000`. Две ветки 
 
 `db-cleanup-orphans.ts` исключает шаблоны через `TEMPLATE_RE = /^choros_test_template_[0-9a-f]{8}$/` (вместо `!= 'choros_test_template'`). Добавлен флаг `--stale-templates` для явного удаления шаблонов с устаревшим хешем.
 
+#### Ограничение --stale-templates (R-N1)
+
+**`--stale-templates` — исключительно ручной opt-in. НЕ включать в автоматические CI/fitness-пайплайны.**
+
+Поведение: скрипт вычисляет hash текущей ветки и дропает все шаблоны `choros_test_template_<X>`, где `X != CURRENT_HASH`. Это включает шаблоны **других активных веток** на том же Postgres-инстансе.
+
+Сценарий гонки:
+- Ветка A (hash=`aaaa1234`) активна, тесты запущены (setup-template завершён, run-DB клонирован).
+- Ветка B запускает `--stale-templates` → видит `choros_test_template_aaaa1234` как stale → **дропает его**.
+- Ветка A при следующем прогоне: если setup-template ещё не запускался → `fitness:db` упадёт с «template not found».
+
+Безопасность стандартного workflow: обычный `npm run fitness:db:cleanup-orphans` (без `--stale-templates`) **не трогает ни один шаблон** — TEMPLATE_RE исключает все per-hash templates. Гонка возникает только при ручном вызове `--stale-templates`.
+
+Применять только при намеренной пост-мерж очистке, когда точно известно что ни одна другая ветка не использует свой шаблон на данном Postgres-инстансе.
+
 ### Совместимость с FF-T147-* (frozen, чужие — не трогаем)
 
 | Чек | Патч потребовался? | Почему |

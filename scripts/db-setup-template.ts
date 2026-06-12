@@ -21,10 +21,9 @@
 
 import pg from 'pg';
 import { execSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { computeMigrationsHash } from '../ci/checks/db/migrations-hash.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, '..');
@@ -32,20 +31,6 @@ const REPO_ROOT = join(HERE, '..');
 // ---------------------------------------------------------------------------
 // Migrations hash (T-0192) — 8-hex-char SHA-256 of all migrations/*.sql
 // ---------------------------------------------------------------------------
-
-/** Compute SHA-256 over sorted migration filenames+contents → first 8 hex chars. */
-function computeMigrationsHash(repoRoot: string): string {
-  const migrationsDir = join(repoRoot, 'migrations');
-  const files = readdirSync(migrationsDir)
-    .filter((f) => /^\d{3,}_[A-Za-z0-9_]+\.sql$/.test(f))
-    .sort();
-  const h = createHash('sha256');
-  for (const f of files) {
-    h.update(f);
-    h.update(readFileSync(join(migrationsDir, f)));
-  }
-  return h.digest('hex').slice(0, 8);
-}
 
 const MIGRATIONS_HASH = computeMigrationsHash(REPO_ROOT);
 const TEMPLATE_NAME = `choros_test_template_${MIGRATIONS_HASH}`;
