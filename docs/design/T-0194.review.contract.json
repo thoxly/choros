@@ -1,6 +1,6 @@
 {
   "task_id": "T-0194",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": { "green": true },
   "findings": [
     {
@@ -39,7 +39,7 @@
   "acceptance_coverage": [
     { "ac": "AC-1-grep-zero", "covered": true },
     { "ac": "AC-2-axesFromGrants-invoke", "covered": true },
-    { "ac": "AC-3-ALL_OPS-invoke", "covered": false },
+    { "ac": "AC-3-ALL_OPS-invoke", "covered": true },
     { "ac": "AC-4-ci-green", "covered": true }
   ],
   "role_gap_evidence": []
