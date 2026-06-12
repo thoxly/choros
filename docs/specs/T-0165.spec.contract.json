@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0165",
+  "status": "ready",
+  "summary": "Migrate the 4 legacy local ORG_SEED_CHILDREN / SEED_ORACLE copies in src/http/grants.ts, invoke.ts, agents.ts, secret-handle.ts to import the canonical SEED_ORACLE from src/http/seed-ancestry.ts (introduced by T-0136 hotfix)",
+  "functional": [
+    "FR-1: src/http/grants.ts imports SEED_ORACLE from ./seed-ancestry.js instead of declaring local ORG_SEED_CHILDREN",
+    "FR-2: src/http/invoke.ts imports and re-exports SEED_ORACLE from ./seed-ancestry.js (test imports preserved)",
+    "FR-3: src/http/agents.ts imports SEED_ORACLE from ./seed-ancestry.js instead of declaring local ORG_SEED_CHILDREN",
+    "FR-4: src/http/secret-handle.ts imports SEED_ORACLE from ./seed-ancestry.js instead of declaring local ORG_SEED_CHILDREN"
+  ],
+  "non_functional": [
+    "NF-1: diff is minimal — only replace local constant + helper + oracle block with import line; no other changes",
+    "NF-2: behavioral equivalence — all 1548 unit tests pass unchanged",
+    "NF-3: single-source.sh (FF-4) exits 0 after migration"
+  ],
+  "out_of_scope": [
+    "Modifying ci/checks/seed/single-source.sh allow-list (T-0140-owned; stale entries are harmless)",
+    "Fixing config-agent-seed.sh Check-6 frozen-guard (known branch-red class; greens post-merge)",
+    "DB-backed ancestry oracle (T-0053)",
+    "Any behavioral change to org ancestry logic"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "No ORG_SEED_CHILDREN const remains in grants.ts, invoke.ts, agents.ts, secret-handle.ts",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "npm run build exits 0 — no new TypeScript errors introduced",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "npm test exits 0 — all 1548 tests pass (invoke-grant, agent-hire, grant-presets, secret-handle tests included)",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "ci/checks/seed/single-source.sh exits 0 (FF-4 PASS)",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "npm run fitness produces only the 2 expected FAIL lines from config-agent-seed Check-6 (known branch-red class); all other checks green",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "npm run fitness:db exits 0 — all 603 DB tests pass",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0165-org-seed-dedup.spec.md"
+}
