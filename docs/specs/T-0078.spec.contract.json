@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0078",
+  "status": "ready",
+  "summary": "Authoring red-lines guard (E11.7): classifyAuthoringOp + evaluateAuthoringRedLine — чистые функции классификации необратимости авторинг-операций (drop/rename/lossy на полях форм и объектных схем). Default-DENY на необратимость (§9 гард 7 ADR extensibility-and-authoring). Для non-core полей — semantic human-confirm (consequenceStatement ≥10 символов + force). Для core/system-directory-полей — безусловный deny без escape-hatch. Прецедент: T-0177 classifySchemaChange.",
+  "functional": [
+    "FR-1: classifyAuthoringOp(op, context) → AuthoringChangeClass ('non_destructive' | 'destructive' | 'core_pinned') — чистая функция.",
+    "FR-2: drop_field, rename_field, lossy change_type → 'destructive' для non-core; 'core_pinned' для core-owned.",
+    "FR-3: add_field, relabel, toggle_required, enum_widening → 'non_destructive'.",
+    "FR-4: evaluateAuthoringRedLine(op, context, confirm?) → AuthoringRedLineDecision: allow / deny(requires_confirm) / deny(invalid_confirm) / deny(core_pinned).",
+    "FR-5: Semantic confirm = consequenceStatement ≥ 10 символов + force=true (только non-core).",
+    "FR-6: ADR-reference ссылается на T-0177 classifySchemaChange и T-0072 checkBindingCompat как прецеденты."
+  ],
+  "non_functional": [
+    "NF-1: Pure функции — no pg, no fs, no net, no process.env.",
+    "NF-2: Импортирует FieldSchemaEntry из schema-change-classifier.js (не копирует тип).",
+    "NF-3: Fitness check authoring-redlines-isolation.sh в npm run fitness."
+  ],
+  "out_of_scope": [
+    "HTTP-слой (T-0073 Floor-1 редактор)",
+    "DB-таблица form_def",
+    "Changelog-эмиссия (T-0084)",
+    "UI consequenceStatement form"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "src/core/authoring-redlines.ts существует; tsc exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "add_field → non_destructive; evaluateAuthoringRedLine → allow.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "drop_field non-core без confirm → deny(requires_confirm).", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "drop_field non-core + валидный confirm + force=true → allow(destructive).", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "rename_field non-core без confirm → deny.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "change_type number→integer non-core без confirm → deny.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "change_type number→integer + валидный confirm → allow(destructive, confirmedConsequence).", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "drop_field core-pinned → deny(core_pinned) даже при force=true.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "rename_field core-pinned → deny(core_pinned).", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "relabel core-pinned → non_destructive (soft op не блокируется pin).", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "enum_change widening → non_destructive.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "enum_change narrowing non-core без confirm → deny.", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "confirm с consequenceStatement < 10 символов → deny(invalid_confirm).", "verifiable_as": "test"},
+    {"id": "AC-14", "text": "Модуль pure: grep запрещённых импортов пустой.", "verifiable_as": "fitness"},
+    {"id": "AC-15", "text": "ADR-ссылки на T-0177 и T-0072 в комментарии модуля.", "verifiable_as": "fitness"},
+    {"id": "AC-16", "text": "Все 8 экспортов присутствуют: AuthoringOp, AuthoringContext, AuthoringChangeClass, AuthoringRedLineDecision, AuthoringRedLineConfirm, AuthoringOpKind, classifyAuthoringOp, evaluateAuthoringRedLine.", "verifiable_as": "fitness"},
+    {"id": "AC-17", "text": "npm run fitness exit 0 (authoring-redlines-isolation.sh добавлен).", "verifiable_as": "fitness"},
+    {"id": "AC-18", "text": "Нет дублирования алгоритма isLossyNarrowing: импорт или явная ADR-ссылка.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0078-authoring-redlines.spec.md"
+}

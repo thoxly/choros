@@ -1,0 +1,49 @@
+{
+  "task_id": "T-0078",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1612,
+    "passed": 1612,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    { "ac": "AC-1",  "test": "tsc --noEmit: 0 errors", "result": "pass" },
+    { "ac": "AC-2",  "test": "authoring-redlines.test.ts AC-2 describe block: add_field → non_destructive (3 tests)", "result": "pass" },
+    { "ac": "AC-3",  "test": "authoring-redlines.test.ts AC-3 describe block: drop_field non-core without confirm → deny(requires_confirm) (2 tests)", "result": "pass" },
+    { "ac": "AC-4",  "test": "authoring-redlines.test.ts AC-4 describe block: drop_field non-core + valid confirm → allow(destructive) (1 test)", "result": "pass" },
+    { "ac": "AC-5",  "test": "authoring-redlines.test.ts AC-5 describe block: rename_field non-core without confirm → deny (2 tests)", "result": "pass" },
+    { "ac": "AC-6",  "test": "authoring-redlines.test.ts AC-6 describe block: change_type lossy without confirm → deny (2 tests)", "result": "pass" },
+    { "ac": "AC-7",  "test": "authoring-redlines.test.ts AC-7 describe block: change_type lossy + confirm → allow(destructive+confirmedConsequence) (1 test)", "result": "pass" },
+    { "ac": "AC-8",  "test": "authoring-redlines.test.ts AC-8 describe block: drop_field core-pinned → deny(core_pinned) даже с force=true (3 tests)", "result": "pass" },
+    { "ac": "AC-9",  "test": "authoring-redlines.test.ts AC-9 describe block: rename_field core-pinned → deny(core_pinned) (2 tests)", "result": "pass" },
+    { "ac": "AC-10", "test": "authoring-redlines.test.ts AC-10 describe block: relabel core-pinned → non_destructive (3 tests)", "result": "pass" },
+    { "ac": "AC-11", "test": "authoring-redlines.test.ts AC-11 describe block: enum_change widening → non_destructive (3 tests)", "result": "pass" },
+    { "ac": "AC-12", "test": "authoring-redlines.test.ts AC-12 describe block: enum_change narrowing non-core without confirm → deny (3 tests)", "result": "pass" },
+    { "ac": "AC-13", "test": "authoring-redlines.test.ts AC-13 describe block: consequenceStatement < 10 chars → deny(invalid_confirm); boundary 'удалю поле' (10 chars) → allow (5 tests)", "result": "pass" },
+    { "ac": "AC-14", "test": "ARL-2 fitness static: no pg/node:fs/node:http/node:net/process.env/process.exit in authoring-redlines.ts", "result": "pass" },
+    { "ac": "AC-15", "test": "ARL-3 fitness static: ADR references T-0177+T-0072 present", "result": "pass" },
+    { "ac": "AC-16", "test": "ARL-4 fitness static: all required public-surface exports present (incl. lossy_live_migration in AuthoringOpKind)", "result": "pass" },
+    { "ac": "AC-17", "test": "npm run fitness exit 0 — all checks green", "result": "pass" },
+    { "ac": "AC-18", "test": "ARL-5/ARL-6 fitness static: FieldSchemaEntry imported from schema-change-classifier; isLossyNarrowing referenced with T-0177 precedent", "result": "pass" },
+    { "ac": "AC-19", "test": "authoring-redlines.test.ts AC-19 describe block: lossy_live_migration → core_pinned unconditionally; deny даже с force+valid-confirm (4 tests)", "result": "pass" },
+    { "ac": "AC-20", "test": "authoring-redlines.test.ts AC-20 describe block: forbidden-template check → deny(invalid_confirm) for ok/да/confirm/подтверждаю/1234567890/aaaaaaaaaa/----------/yes/confirmed; valid text → allow (10 tests)", "result": "pass" }
+  ],
+  "secondary_ux": [
+    {
+      "check": "anti-autofill floor (AC-20) — semantic not security",
+      "result": "pass",
+      "note": "isValidConfirm rejects length<10, digit-only, repeated-char, and forbidden single words. This is UI/human-surface enforcement per T-0073; the floor is documented in spec §1 paragraph 2."
+    },
+    {
+      "check": "core_pinned absolute for lossy_live_migration (AC-19 / ADR §5)",
+      "result": "pass",
+      "note": "lossy_live_migration classified core_pinned regardless of isCorePinned context. Stricter than T-0177 isLossyNarrowing by design — ADR §4 RED-LINES строки 154-155 categorical absolute."
+    },
+    {
+      "check": "vitest skipped (2 suites)",
+      "result": "n/a",
+      "note": "workerAuth.kc.e2e.test.ts (1 skipped — KC offline) + flowable-client.integration.test.ts (4 skipped — Flowable offline) + flowable-client.adversarial.test.ts (1 skipped). Pre-existing pattern, not introduced by T-0078."
+    }
+  ],
+  "failures": []
+}
