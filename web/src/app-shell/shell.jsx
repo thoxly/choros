@@ -7,7 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Routes, Route } from 'react-router-dom';
 import { Button } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
-import { getDevUser, clearDevUser, setDevUser } from './dev-auth.js';
+import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
@@ -94,15 +94,61 @@ function NavItem({ item, active }) {
   );
 }
 
+/**
+ * T-0138: download audit log by fetching /api/audit/export and triggering
+ * a browser file-save. Uses current devHeaders() for auth (x-dev-user).
+ * Falls back to alert on auth/network error.
+ */
+async function downloadAuditLog() {
+  try {
+    const res = await fetch('/api/audit/export', { headers: devHeaders() });
+    if (res.status === 401) {
+      alert('Войдите в систему, чтобы экспортировать лог аудита.');
+      return;
+    }
+    if (!res.ok) {
+      alert(`Ошибка экспорта: HTTP ${res.status}`);
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const filenameMatch = disposition.match(/filename="([^"]+)"/);
+    const filename = filenameMatch ? filenameMatch[1] : 'audit-export.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    alert('Не удалось выполнить экспорт лога аудита.');
+  }
+}
+
 function Topbar({ screen, theme, setTheme }) {
   const crumb = SCREEN_META[screen]?.crumb || [];
   const right =
     screen === "inbox" ? (
-      <Button variant="primary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Новая задача</Button>
+      // T-0138: «Новая задача» requires a running Flowable instance to start a
+      // process. No start-instance HTTP route exists in day-1. Button is disabled
+      // with a tooltip explaining the prerequisite. Forward obligation: when
+      // POST /api/processes/start is implemented this button opens a launch modal.
+      <Button
+        variant="primary"
+        size="sm"
+        glyph={<Icon name="plus" className="chs-btn__glyph" />}
+        disabled
+        title="Создание задачи требует подключения к Flowable (будет доступно в следующей итерации)"
+      >
+        Новая задача
+      </Button>
     ) : screen === "org" ? (
       <Button variant="secondary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Исполнитель</Button>
     ) : screen === "audit" ? (
-      <Button variant="secondary" size="sm">Экспорт лога</Button>
+      // T-0138: download current instance audit log via GET /api/audit/export
+      <Button variant="secondary" size="sm" onClick={downloadAuditLog}>Экспорт лога</Button>
     ) : screen === "rights" ? (
       <Button variant="secondary" size="sm">Экспорт прав</Button>
     ) : null;

@@ -2,11 +2,24 @@
  * src/http/audit.ts
  *
  * Read-API for instance audit trace (GET /api/audit and GET /api/audit/:instanceId).
+ * Export-API: GET /api/audit/export — download audit log as JSON file (T-0138).
  * In-memory seed data with audit events timeline for a single instance.
  * Zero external dependencies — only node:http types and router.ts.
+ *
+ * T-0138 export write-path:
+ *   GET /api/audit/export?instance=<id>  — download named instance as JSON.
+ *   GET /api/audit/export                — download default instance (INS-7731).
+ *   Authz: x-dev-user header required in dev mode (401 if absent).
+ *   PDP gate: NONE in dev slice — all three audit routes (GET /api/audit,
+ *   GET /api/audit/:instanceId, GET /api/audit/export) run without a PDP
+ *   grant check. Hardening MUST close all three before production: add
+ *   PDP operation=read on resource=audit_trace for each route (see
+ *   FORWARD-OBLIGATION comments inline).
+ *   Response: 200 application/json + Content-Disposition: attachment filename.
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
+import { DEV_USER_HEADER } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -259,6 +272,9 @@ export function getDefaultAuditInstance(): AuditData {
 
 export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   // GET /api/audit — return default instance (INS-7731)
+  //
+  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  // PDP check: operation=read, resource=audit_trace before returning data.
   router.register("GET", "/api/audit", async (_req, res) => {
     const data = getDefaultAuditInstance();
     res.statusCode = 200;
@@ -266,7 +282,61 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
     res.end(JSON.stringify(data));
   });
 
+  // GET /api/audit/export — download audit log as JSON file (T-0138).
+  //
+  // MUST be registered BEFORE GET /api/audit/:instanceId to prevent "export"
+  // from being captured as an instanceId param.
+  //
+  // Query params:
+  //   ?instance=<id>  — export a specific instance (404 if not found)
+  //   (absent)        — export the default instance (INS-7731)
+  //
+  // Authz: x-dev-user header required (dev mode); 401 if absent.
+  //   FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  //   PDP check: operation=read, resource=audit_trace before returning data.
+  //   (Same obligation applies to GET /api/audit and GET /api/audit/:instanceId
+  //   — all three routes must be closed together in the hardening pass.)
+  //
+  // Response: 200 application/json + Content-Disposition: attachment.
+  router.register("GET", "/api/audit/export", async (req, res) => {
+    // Dev-mode auth gate: require x-dev-user header
+    let devUser = req.headers[DEV_USER_HEADER];
+    if (Array.isArray(devUser)) devUser = devUser[0];
+    if (!devUser || typeof devUser !== "string") {
+      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+    }
+
+    // Parse optional ?instance= query param
+    const rawUrl = req.url ?? "/";
+    const questionIdx = rawUrl.indexOf("?");
+    const qs = questionIdx === -1 ? "" : rawUrl.slice(questionIdx + 1);
+    const params = new URLSearchParams(qs);
+    const instanceId = params.get("instance") ?? null;
+
+    let data: AuditData;
+    if (instanceId !== null && instanceId !== "") {
+      const found = findAuditData(instanceId);
+      if (!found) {
+        throw new HttpError(404, "NOT_FOUND", "instance not found");
+      }
+      data = found;
+    } else {
+      data = getDefaultAuditInstance();
+    }
+
+    const filename = `audit-${data.instance.id}-${Date.now()}.json`;
+    const body = JSON.stringify(data, null, 2);
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.end(body);
+  });
+
   // GET /api/audit/:instanceId — return specific instance or 404
+  //
+  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
+  // PDP check: operation=read, resource=audit_trace before returning data.
   router.register("GET", "/api/audit/:instanceId", async (_req, res, params) => {
     const data = findAuditData(params.instanceId as string);
     if (!data) {

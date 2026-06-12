@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0138",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/audit.ts:289-292",
+      "issue": "FORWARD-OBLIGATION comment annotates only the export route. Does not mention that GET /api/audit and GET /api/audit/:instanceId (pre-existing routes, lines 272-277 and 330-338) are also unauthenticated in dev mode. All three routes need PDP gating at production hardening time.",
+      "suggestion": "Add to registerAuditRoutes docstring or FORWARD-OBLIGATION: 'NOTE: GET /api/audit and GET /api/audit/:instanceId are also unauthenticated in dev mode and MUST receive a PDP gate at production hardening together with export'."
+    },
+    {
+      "id": "R-N2",
+      "severity": "nit",
+      "axis": 2,
+      "location": "src/http/audit.ts:12-17",
+      "issue": "Module docstring states 'PDP gate: same principal as GET /api/audit' — misleading because GET /api/audit has no principal check at all (no x-dev-user required). Export is actually stricter than the screen-read endpoint.",
+      "suggestion": "Rephrase to: 'In dev mode: export requires x-dev-user (401 otherwise); screen-read [GET /api/audit] is open without a gate — both routes will receive a PDP gate at production hardening'."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "claim-AC-1: 401 without auth", "covered": true},
+    {"ac": "claim-AC-2: 404 unknown task", "covered": true},
+    {"ac": "claim-AC-3: 200 + pool:false, mine:true", "covered": true},
+    {"ac": "claim-AC-4: 200 idempotent re-claim", "covered": true},
+    {"ac": "claim-AC-5: 409 ALREADY_CLAIMED", "covered": true},
+    {"ac": "claim-AC-6: 409 NOT_POOL_TASK", "covered": true},
+    {"ac": "claim-AC-7: GET /api/inbox reflects claim state", "covered": true},
+    {"ac": "export-AC-1: 401 without auth", "covered": true},
+    {"ac": "export-AC-2: 200 + Content-Disposition attachment", "covered": true},
+    {"ac": "export-AC-3: valid AuditData JSON shape", "covered": true},
+    {"ac": "export-AC-4: ?instance=INS-7731 exports named instance", "covered": true},
+    {"ac": "export-AC-5: 404 for unknown instance", "covered": true},
+    {"ac": "export-AC-6: /api/audit/:id not captured by export route", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "audit-export authz asymmetry: GET /api/audit/export has x-dev-user gate; GET /api/audit and GET /api/audit/:instanceId do not. Consistent only in that all audit routes lack PDP — the asymmetry is a documentation gap, not a security regression vs pre-existing pattern. FORWARD-OBLIGATION comments cover production hardening obligation. No systematic security class gap requiring a separate security-reviewer role at this time."
+  ]
+}
