@@ -2,10 +2,16 @@
  * src/http/inbox.ts
  *
  * Read-API for inbox task list (GET /api/inbox).
+ * Write-API: POST /api/inbox/:id/claim — claim a pool task (assign to caller).
  * In-memory seed data with task inbox items matching screen-inbox.jsx shape.
  * Zero external dependencies — only node:http types and router.ts.
+ *
+ * T-0138: claim write-path. In-memory claimed set (process-lifetime) models the
+ * "взять из пула" → "назначена мне" transition. A real implementation would
+ * write to a DB user_task_claim table; the seed-layer contract is identical
+ * (same HTTP shape, same error codes).
  */
-import { type Router } from "./router.js";
+import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER } from "./auth.js";
@@ -48,6 +54,19 @@ const INBOX_SEED: InboxItem[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// In-memory claim state (T-0138 write-path)
+// Maps taskId → { claimedBy: userId, claimedAt: ms }
+// Process-lifetime only — survives across requests in a running server.
+// ---------------------------------------------------------------------------
+
+interface ClaimRecord {
+  claimedBy: string;
+  claimedAt: number;
+}
+
+const CLAIMED: Map<string, ClaimRecord> = new Map();
+
+// ---------------------------------------------------------------------------
 // Data accessors
 // ---------------------------------------------------------------------------
 
@@ -58,8 +77,25 @@ async function findInboxItems(devUserId?: string): Promise<InboxItem[]> {
     person = await findEmployee(devUserId);
   }
 
-  // Add mine flag to each item: true if item is assigned to this person
+  // Add mine flag to each item: true if item is assigned to this person.
+  // T-0138: also apply in-memory claim state — claimed items lose pool flag
+  // and gain execType/execName of the claimer.
   return INBOX_SEED.map((item) => {
+    const claim = CLAIMED.get(item.id);
+
+    if (claim) {
+      // Claimed item: pool cleared, assigned to claimer.
+      const mine =
+        devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+      return {
+        ...item,
+        pool: false,
+        execType: "human" as const,
+        execName: claim.claimedBy, // day-1: userId as display name; real impl resolves to person.name
+        mine,
+      };
+    }
+
     const mine =
       person !== null &&
       item.execType === "human" &&
@@ -90,4 +126,73 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items }));
   });
+
+  // POST /api/inbox/:id/claim — claim a pool task (T-0138 write-path).
+  //
+  // Authz: requires x-dev-user header (dev mode); 401 if absent.
+  // Preconditions:
+  //   - task must exist: 404 NOT_FOUND
+  //   - task must be pool=true AND not already claimed: 409 ALREADY_CLAIMED
+  // Success: 200 { item } — item with pool:false, execType:"human",
+  //   execName=userId, mine:true (caller always mines their own claim).
+  //
+  // Idempotency: re-claiming own task → 200 (no-op, same record returned).
+  // Claiming another user's claimed task → 409 ALREADY_CLAIMED.
+  router.register("POST", "/api/inbox/:id/claim", async (req, res, params) => {
+    // Resolve caller identity — 401 if absent
+    let devUserId = req.headers[DEV_USER_HEADER];
+    if (Array.isArray(devUserId)) devUserId = devUserId[0];
+    if (!devUserId || typeof devUserId !== "string") {
+      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+    }
+
+    const taskId = params["id"] as string;
+
+    // Task must exist in seed
+    const taskExists = INBOX_SEED.some((t) => t.id === taskId);
+    if (!taskExists) {
+      throw new HttpError(404, "NOT_FOUND", "task not found");
+    }
+
+    // Check existing claim
+    const existing = CLAIMED.get(taskId);
+    if (existing) {
+      if (existing.claimedBy === devUserId) {
+        // Idempotent re-claim — return current state
+        const items = await findInboxItems(devUserId);
+        const item = items.find((t) => t.id === taskId);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ item }));
+        return;
+      }
+      // Claimed by someone else
+      throw new HttpError(409, "ALREADY_CLAIMED", "task already claimed by another user");
+    }
+
+    // Task must be pooled (not assigned to a specific person)
+    const task = INBOX_SEED.find((t) => t.id === taskId)!;
+    if (!task.pool) {
+      throw new HttpError(409, "NOT_POOL_TASK", "task is not a pool task and cannot be claimed");
+    }
+
+    // Register claim
+    CLAIMED.set(taskId, { claimedBy: devUserId, claimedAt: Date.now() });
+
+    // Return updated item
+    const items = await findInboxItems(devUserId);
+    const item = items.find((t) => t.id === taskId);
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ item }));
+  });
+}
+
+/**
+ * T-0138 test seam: reset in-memory claim state between tests.
+ * Not called from production code.
+ */
+export function _resetClaimStateForTests(): void {
+  CLAIMED.clear();
 }

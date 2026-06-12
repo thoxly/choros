@@ -41,6 +41,8 @@ function InboxScreen() {
   const [taken, setTaken] = useState(() => ({}));
   const [items, setItems] = useState(null);
   const [error, setError] = useState(null);
+  // T-0138: per-task claim inflight tracking (taskId → true)
+  const [claiming, setClaiming] = useState(() => ({}));
 
   const load = async () => {
     setError(null);
@@ -51,6 +53,32 @@ function InboxScreen() {
       setItems(data.items);
     } catch (e) {
       setError(e.message);
+    }
+  };
+
+  // T-0138: claim a pool task via POST /api/inbox/:id/claim
+  const claimTask = async (taskId) => {
+    if (claiming[taskId]) return; // inflight guard
+    setClaiming((s) => ({ ...s, [taskId]: true }));
+    try {
+      const res = await fetch(`/api/inbox/${taskId}/claim`, {
+        method: 'POST',
+        headers: devHeaders(),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const code = body?.error?.code ?? `HTTP ${res.status}`;
+        throw new Error(code === 'ALREADY_CLAIMED' ? 'Задача уже взята другим пользователем' : `Ошибка: ${code}`);
+      }
+      // Optimistic local state + re-fetch to sync mine flag
+      setTaken((s) => ({ ...s, [taskId]: true }));
+      await load();
+    } catch (e) {
+      // Surface error as alert — task remains in pool for retry
+      // eslint-disable-next-line no-alert
+      alert(e.message);
+    } finally {
+      setClaiming((s) => ({ ...s, [taskId]: false }));
     }
   };
 
@@ -154,7 +182,9 @@ function InboxScreen() {
                     <td><Mono style={{ color: "var(--chs-color-text-muted)", fontSize: "var(--chs-text-sm)" }}>{t.due}</Mono></td>
                     <td className="chs-r">
                       {inPool ? (
-                        <Button variant="secondary" size="sm" onClick={() => setTaken((s) => ({ ...s, [t.id]: true }))}>Взять</Button>
+                        <Button variant="secondary" size="sm" disabled={!!claiming[t.id]} onClick={() => claimTask(t.id)}>
+                          {claiming[t.id] ? '…' : 'Взять'}
+                        </Button>
                       ) : isTaken ? (
                         <span className="chs-taken-tag"><Icon name="check" /> взято</span>
                       ) : (
