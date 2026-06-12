@@ -23,24 +23,37 @@
 |---|---|---|
 | `ScopeElement` kind `interval` (числовой `axis` + `[lo,hi]`) | **[ЖИВОЙ `src/core/grant-lattice.ts:46`]** — РЕАЛЬНЫЙ элемент решётки, НЕ только ADR-текст | T-0018 |
 | `isNarrowerOrEqual` для `interval` (`parent.lo ≤ child.lo ∧ child.hi ≤ parent.hi`, axis-match) | **[ЖИВОЙ `grant-lattice.ts:279–282`]** | T-0018 |
-| `meet` (⊓) для `interval` (пересечение, closed) | **[ЖИВОЙ `grant-lattice.ts:367–372`]** | T-0018 |
+| `meet` (⊓) для `interval ⊓ interval` (пересечение двух интервалов, closed) | **[ЖИВОЙ `grant-lattice.ts:367–372`]** — но это interval⊓interval, **НЕ** способ собрать `set([node,interval])` (см. ниже) | T-0018 |
 | `ScopeElement` kind `node` (`hierarchy:"org"`, узел + поддерево) | **[ЖИВОЙ `grant-lattice.ts:44`]** + `isNarrowerOrEqual` через `AncestryOracle` (`:270`) | T-0018 |
-| `ScopeElement` kind `set` (комбинация `node ⊓ interval`) | **[ЖИВОЙ `grant-lattice.ts:47`]** | T-0018 |
+| `ScopeElement` kind `set` + `normalize` (комбинация `[node, interval]` как **конъюнкция-в-`set`**) | **[ЖИВОЙ `grant-lattice.ts:47`]** (kind) + **[ЖИВОЙ `normalize` `:124`]** — `set` строится `normalize({kind:"set",members:[node,interval]})`, а **НЕ** `meet`: `meet(node,interval)` для двух атомов разного kind уходит в `atomMeet` (`:333`) и даёт `BOTTOM` (`:376`, «Distinct non-set kinds: ⊥») | T-0018 |
 | `validateNarrowing(parent, child, oracle)` — write-time subset-гейт | **[ЖИВОЙ `grant-lattice.ts:408`]** | T-0018 |
 | `isEffective(grant, nowMs)` — `validUntil` ⇒ TTL = снятая возможность | **[ЖИВОЙ `grant-lattice.ts:497`]**; `Grant.validUntil?` (`:74`) | T-0018 |
-| `resolveFor(...)` — PDP read-path, фильтрует по `isEffective` + `isNarrowerOrEqual` | **[ЖИВОЙ `src/core/grant-resolver.ts:489`]**; `isEffective` вызов на `:511` | T-0021 |
+| `resolveFor(...)` — PDP read-path, фильтрует по `isEffective` + `isNarrowerOrEqual(refToScope(handle.ref), grant.scope)` | **[ЖИВОЙ `src/core/grant-resolver.ts:489`]** для **node-оси**; но `refToScope` (`:178`) — **identity-only** (`{kind:"node",hierarchy:"resource"}`), сумма кейса в scope **НЕ попадает** ⇒ amount-ось read-path **[НОВАЯ B-7]** | T-0021 |
+| Проводка значения axis (`amount` кейса) → resolve-scope: источник значения + передача в `resolveFor` + two-axis containment | **[НОВАЯ B-7]** — отсутствует на живом read-path (`refToScope` identity-only, `grant-resolver.ts:169`; ноль упоминаний `axis`/`amount`/`interval` в резолвере) | — (вводится этим ADR) |
+| Two-axis containment: org-узел пилота (`hierarchy:"org"`) ⊓ resource-scope гранта — выразимость в `isNarrowerOrEqual` для `set` с членами **разных hierarchy** | **[НОВАЯ B-8]** — **НЕ выразимо** живым `isNarrowerOrEqual`: set-parent ветка (`grant-lattice.ts:249`) требует handle ⊑ **хотя бы одного** члена, но resource-handle ⋢ org-node (разные hierarchy, `:269` ⇒ false) и ⋢ interval (cross-kind, `:285` ⇒ false) | — (вводится этим ADR) |
 | Эффект-гранты (`op="invoke"`, effect-resource) действуют в published | **[ЖИВОЙ `src/core/effect-resource.ts`]**; ветка в resolver `:527` | T-0034 |
 | `appendAuditEvent` / `GrantAuditEvent` — единый боевой аудит | **[ЖИВОЙ]** `appendAuditEvent` (`src/core/*`), `GrantAuditEvent` тип (`grant-lattice.ts:91`) | T-0016/T-0019/T-0031 |
 | Пилот = фаза петли, `propose_pilot_scope`, `impl.pilot.proposed`, scope `set([node,interval])`+TTL, drain-by-default | **[КОНТРАКТ-DONE]** | T-0129 §10.1/§10.3/§10.4, FR-10 |
 | Симуляция = draft-тир, эффекты застаблены fail-closed (противоположная граница) | **[КОНТРАКТ-DONE]** | T-0130 |
 
-> **ГЛАВНОЕ НАБЛЮДЕНИЕ (закрывает вопрос „interval = ЖИВОЙ или НОВАЯ?"):**
-> `interval` — **ЖИВОЙ элемент решётки**, не ADR-текст. Он присутствует в `ScopeElement`
-> (`grant-lattice.ts:46`) и **полностью обслужен** живыми `isNarrowerOrEqual`, `meet`,
-> `normalize`. Это **прошлый класс blocking** — он снят: три оси пилота (узел/интервал/срок)
-> выразимы **уже работающим** кодом. Пилот не вводит **ни одного** нового scope-примитива.
-> Весь вклад T-0132 — **новое продуктовое понятие** (сущность `Pilot` + его жизненный цикл +
-> UX-инвариант), материализуемое **существующими** грант-кортежами.
+> **ГЛАВНОЕ НАБЛЮДЕНИЕ (честная разметка ЖИВОЕ vs НОВОЕ, iter-2 R-3):**
+> `interval` — **ЖИВОЙ элемент решётки**, не ADR-текст: он присутствует в `ScopeElement`
+> (`grant-lattice.ts:46`). **ЖИВО** (подтверждено sed по исходнику): (1) **определение**
+> interval-элемента; (2) **сравнение двух интервалов** `isNarrowerOrEqual` (`:279`) и
+> `interval ⊓ interval` `meet` (`:367`); (3) **TTL/срок** `isEffective` (`:497`); (4) node-ось
+> и её containment через `AncestryOracle` (`:270`). **НОВАЯ работа** (вводится этим ADR как
+> производные задачи): (а) **композиция** `set([node, interval])` собирается **вызовом
+> `normalize` в новом коде компилятора** (`grant-lattice.ts:124`) — а **НЕ** `meet`, который на
+> `node ⊓ interval` даёт ⊥ (§3.3, R-1); (б) **проводка значения amount-оси в resolve**
+> ([B-7]) — на живом read-path сумма кейса в сравниваемый scope не попадает (R-2, §5.2);
+> (в) **двух-осевой containment** org-узел × resource-scope ([B-8]) — не выразим живым
+> `isNarrowerOrEqual` для одного `set` с членами разной hierarchy (R-2, §5.2).
+> Итог честно: **прошлый класс blocking снят для node-оси и срока, но НЕ для amount-оси на
+> read-path** — там нужна новая проводка. Пилот не вводит ни одного нового scope-**примитива**
+> (kind-ы interval/node/set все живы), но композиция и read-path-проводка amount-оси — **новый
+> код** (B-1/B-7/B-8), а не «уже работающий». Весь продуктовый вклад T-0132 — **новое
+> продуктовое понятие** `Pilot` (сущность + жизненный цикл + UX-инвариант); machinery его
+> материализации — частично живая, частично новая (разведено в §0/§3.3/§5/§11).
 
 ---
 
@@ -52,12 +65,17 @@
 кто участвует) ⊓ **интервал суммы** (`{kind:"interval", axis, lo, hi}`, какие кейсы) +
 **срок** (`Grant.validUntil`, окно `isEffective`, когда заканчивается). Декларация среза
 **компилируется** в грант-кортежи published-бандла: scope каждого пилотного гранта =
-`set([ node, interval ])` (комбинация через `meet`/⊓), `validUntil` = срок. Эти гранты —
+`set([ node, interval ])` (конъюнкция-в-`set`, собранная **живым `normalize`**, `grant-lattice.ts:124`
+— **НЕ** `meet`, см. §3.3 [iter-2, R-1]), `validUntil` = срок. Эти гранты —
 **монотонное сужение** (`пилотный.scope ⊑ полный.scope`) полного скоупа процесса, и каждый
 проходит **живой** `validateNarrowing` относительно санкционированного владельцем. Граница
-пилота **обеспечена решёткой**: кейс вне среза не обрабатывается пилотной версией как
-**следствие резолюции грантов** (`resolveFor` → `isNarrowerOrEqual`/`isEffective` его не
-покрывают), а не отдельным if-фильтром. Пилот — published+боевой (эффект-гранты T-0034
+пилота **по node-оси** (узел оргдерева) **обеспечена решёткой**: кейс вне поддерева не
+покрывается пилотным грантом как **следствие резолюции** (`resolveFor` → `isNarrowerOrEqual`
+по `node` его не покрывает), а не отдельным if-фильтром. Граница **по amount-оси** (сумма
+кейса) требует **проводки значения оси в resolve** — на сегодняшнем живом read-path
+(`resolveFor` identity-only, `refToScope` `grant-resolver.ts:178`) сумма кейса в сравниваемый
+scope **не попадает**, поэтому эта проводка — **НОВАЯ работа [B-7]** (§5, §11), а **НЕ** живой
+механизм. Пилот — published+боевой (эффект-гранты T-0034
 действуют по-настоящему), что является **точной противоположностью** симуляции T-0130
 (draft+стабы). Жизненный цикл `запланирован → активен → {расширен | откачен | истёк}`
 наблюдаем в **едином** аудите; расширение до полного прода — **ослабление среза под
@@ -113,7 +131,7 @@ human-gate**; откат — **drain-by-default**. Пилот не вводит 
 |---|---|---|
 | `pilotId` | `string` | к какому пилоту относится |
 | `grantId` | `string` | id гранта пилота (живой `Grant`, T-0018) |
-| `derivedScope` | `ScopeElement` | `set([ node, interval ])` или `node` (если `amountAxis=null`), полученный через `meet`/⊓ |
+| `derivedScope` | `ScopeElement` | `set([ node, interval ])` или `node` (если `amountAxis=null`), собранный живым `normalize({kind:"set",…})` (`grant-lattice.ts:124`) — **НЕ** `meet` (он дал бы ⊥ на node⊓interval, см. §3.3 [iter-2, R-1]) |
 
 > `PilotGrantBinding` — это и есть «отличимость по принадлежности к пилоту» (FR-7): пилотные
 > гранты — **обычные боевые гранты**, помеченные принадлежностью к `pilotId`, а НЕ отдельный
@@ -128,22 +146,49 @@ human-gate**; откат — **drain-by-default**. Пилот не вводит 
 derivedScope(decl) =
   decl.amountAxis === null
     ? { kind:"node", hierarchy:"org", nodeId: decl.nodeAxis.nodeId, nodeLevel: decl.nodeAxis.nodeLevel }
-    : meet(
-        { kind:"node", hierarchy:"org", nodeId: decl.nodeAxis.nodeId, nodeLevel: decl.nodeAxis.nodeLevel },
-        { kind:"interval", axis: decl.amountAxis.axis, lo: decl.amountAxis.lo, hi: decl.amountAxis.hi },
-        ancestryOracle
-      )            // ⇒ { kind:"set", members:[node, interval] }  (живой meet, grant-lattice.ts:367)
+    : normalize({
+        kind: "set",
+        members: [
+          { kind:"node", hierarchy:"org", nodeId: decl.nodeAxis.nodeId, nodeLevel: decl.nodeAxis.nodeLevel },
+          { kind:"interval", axis: decl.amountAxis.axis, lo: decl.amountAxis.lo, hi: decl.amountAxis.hi },
+        ],
+      })            // ⇒ { kind:"set", members:[node, interval] }  (живой normalize, grant-lattice.ts:124)
 
 grant.scope     = derivedScope(decl)
 grant.validUntil = decl.validUntil ?? undefined   // живой isEffective, grant-lattice.ts:497
 ```
 
+> **[iter-2, R-1] Способ сборки `set` исправлен.** Конъюнкция «узел И интервал» — это
+> `set`-**конструктор**, нормализованный живым `normalize` (`grant-lattice.ts:124`), а **НЕ**
+> `meet`. `meet(node, interval)` — это greatest-lower-bound (⊓); для двух атомов **разного
+> kind** он уходит в `atomMeet` (`:333`) и возвращает `BOTTOM` (`:376`). Ветка `meet`,
+> строящая `set`, работает лишь когда **один из операндов уже `set`** (`:307–330`) — здесь оба
+> операнда атомарны, так что `meet`-путь дал бы ⊥. Целевая форма `set([node,interval])`
+> (T-0129 §10.1) верна; неправильно был назван **живой способ её сборки** — теперь это
+> `normalize`. Прежняя цитата `:367–372` указывала на `interval ⊓ interval`, к комбинации
+> node+interval отношения не имеющую.
+
 **Интервал суммы — это grant-предикат (`interval`-элемент scope), участвующий в той же
 `⊑`-проверке `isNarrowerOrEqual`, что и любой scope, а НЕ внешний процессный if-фильтр**
 (AC-2, FR-2). «Договоры до 100 тыс.» = `{kind:"interval", axis:"amount", lo:0, hi:100000}`
-внутри scope гранта, проверяемый `validateNarrowing` на write-time и `resolveFor` на
-read-path. Пилот **НЕ** реализуется как `if (case.amount <= 100000)` в коде процесса поверх
-неограниченных грантов — это разорвало бы единый источник истины авторизации (T-0018 NF-1).
+внутри scope гранта. На **write-time** это уже живо: `validateNarrowing` (`:408`) сравнивает
+interval-член пилотного scope против владельческого — `interval ⊓ interval`/`isNarrowerOrEqual`
+для интервалов реальны (`:279`). Пилот **НЕ** реализуется как `if (case.amount <= 100000)` в
+коде процесса поверх неограниченных грантов — это разорвало бы единый источник истины
+авторизации (T-0018 NF-1).
+
+> **[iter-2, R-2] Честная разметка read-path amount-оси.** Чтобы interval-предикат **на
+> read-time** связался с суммой *конкретного кейса*, значение оси (`amount`) обязано попасть в
+> сравниваемый scope при `resolveFor`. Сегодня это **НЕ происходит**: `resolveFor`
+> (`grant-resolver.ts:489`) выводит проверяемый scope как `refToScope(handle.ref)` (`:507`), а
+> `refToScope` (`:178`) **identity-only** — возвращает исключительно
+> `{kind:"node", hierarchy:"resource", …}` (комментарий `:169`); ни `axis`, ни `amount`, ни
+> `interval` он не несёт (grep по резолверу пуст). Сверх того сам `handle.ref` —
+> **identity-only `ResourceRef`** (`object-handle.ts:42`, инвариант опаковости: handle **не
+> несёт** значения полей записи; `amount` доступен лишь через `resolveHandle`, которое и
+> гейтится). Поэтому **проводка amount-оси в resolve — НОВАЯ работа [B-7]**, спроектированная
+> в §5, а не живой механизм. Граница пилота **по amount-оси** на сегодняшнем коде либо не
+> проверяется, либо (при наивном `set([org-node,interval])`) даёт `no_grant` на всё (§5).
 
 ---
 
@@ -189,11 +234,77 @@ validUntil`, грант перестаёт быть эффективным, и `
 ## 5. Граница среза обеспечена решёткой: кейс вне среза не попадает в пилот — AC-5
 
 **Кейс вне среза не обрабатывается пилотной версией как СЛЕДСТВИЕ резолюции грантов, а НЕ
-отдельной проверкой** (FR-5). Для кейса с суммой выше интервала / узлом вне поддерева / по
-истёкшему сроку: грант, несущий полномочие на шаг пилотного процесса, по `isNarrowerOrEqual`
-(`grant-lattice.ts:279` для interval, `:270` для node) / `isEffective` (`:497`) к этому
-кейсу **не применим** — `resolveFor` (`grant-resolver.ts:489`) вернёт `no_grant`. Граница
-пилота — **выход PDP**, не if в движке.
+отдельной проверкой** (FR-5). Это **архитектурный тезис** AC-5; ниже честно разведено, что из
+него **живо**, а что — **НОВАЯ работа**.
+
+### 5.1 Что живо: node-ось и срок
+
+- **Узел вне поддерева** (node-ось): handle resource-scope vs grant `node`-scope —
+  `isNarrowerOrEqual` (`grant-lattice.ts:270`, через `AncestryOracle`) живо и работает на
+  read-path (`resolveFor` `:507` → `:262`). Вне-поддеревный кейс ⇒ `no_grant`. ✓ ЖИВОЕ.
+- **Истёкший срок** (TTL-ось): `isEffective(grant, now)` (`:497`, вызов `resolveFor :511`) —
+  живо, авто-истечение (§4.3). ✓ ЖИВОЕ.
+
+### 5.2 Что НОВОЕ: проводка amount-оси в resolve **[НОВАЯ B-7]** + two-axis containment **[НОВАЯ B-8]**
+
+**Граница по СУММЕ кейса на read-path сегодня НЕ обеспечена** (R-2, iter-2). Два связанных
+разрыва против живого кода:
+
+**(a) Значение оси не доходит до сравнения — [НОВАЯ B-7].** `resolveFor` сравнивает
+`refToScope(handle.ref)` против `grant.scope`. `refToScope` (`:178`) identity-only ⇒ в scope
+нет суммы кейса; `handle.ref` (`object-handle.ts:42`) — identity-only `ResourceRef`, значения
+полей записи (включая `amount`) не несёт by-design (опаковость; `amount` читается только через
+сам `resolveHandle`). Значит interval-предикат **не с чем** сравнивать на read-time.
+
+**(b) Двух-осевой containment не выразим живым `isNarrowerOrEqual` — [НОВАЯ B-8].** Наивный
+пилотный scope `set([org-node, interval])` против resource-handle **никогда не покрывает кейс**:
+set-parent ветка (`grant-lattice.ts:249`) требует handle ⊑ **хотя бы одного** члена, но
+resource-node ⋢ `org`-node (разные `hierarchy`, `atomIsNarrowerOrEqual :269` ⇒ false) и
+resource-node ⋢ `interval` (cross-kind, `:285` ⇒ false). Итог наивной сборки — `no_grant` на
+ВСЁ (drain-by-default это маскирует: и в-срезовый, и вне-срезовый кейс уходят в полный
+процесс — граница по сумме фактически не проверяется).
+
+**Решение B-7 (источник + проводка значения оси).** Значение axis передаётся в `resolveFor`
+**отдельным axis-контекстом**, а НЕ через `refToScope`/`handle.ref`:
+- расширить сигнатуру `resolveFor(deps, handle, subject, op, invokeCtx?, guardCtx?)` **новым
+  опциональным параметром** `axisCtx?: { [axis: string]: number }` (напр. `{ amount: 95000 }`);
+- источник значения — поле кейса/записи, читаемое **вызывающим** PDP-краем (тем же, что строит
+  `ObjectHandle`), и кладущееся в `axisCtx` **рядом** с handle, а не **внутрь** него (инвариант
+  опаковости `handle.ref` сохранён);
+- в `resolveFor` covering-фильтр (`:506`) при наличии interval-членов scope дополнительно
+  проверяет `axisCtx[member.axis] ∈ [member.lo, member.hi]` — interval-предикат против
+  переданного значения оси.
+
+**Решение B-8 (two-axis containment).** Срез «org-узел И сумма» — это конъюнкция по **двум
+разным осям/иерархиям**, и она **не сводится** к одному `set` с членами разной hierarchy на
+живом `isNarrowerOrEqual` (показано выше). Two-axis проверка вводится как **расширение
+covering-логики B-7**: грант покрывает кейс ⟺ (resource-handle ⊑ resource-scope гранта по
+**живому** `isNarrowerOrEqual`) **И** (для каждого interval-члена среза `axisCtx[axis]`
+попадает в `[lo,hi]`). Org-узел пилота при этом проецируется в **отдельный** субъект-предикат
+(кто инициировал кейс ⊑ org-поддерево) через `ResolveSubject`/grant-lookup, **а не** кладётся в
+тот же resource-`set`. То есть две оси проверяются **двумя живыми механизмами** (resource-scope
+containment + subject/org membership), сшитыми в covering-условии, а не одним cross-hierarchy
+`set`.
+
+> **Rejected (B-7/B-8), сверено с живыми сигнатурами:**
+> - **Класть `amount` в `handle.ref` / расширять `ResourceRef` axis-полем** — отвергнуто:
+>   нарушает инвариант опаковости (`object-handle.ts:42` — `ResourceRef` identity-only, handle
+>   by-design не несёт значений полей; чтобы узнать `amount`, надо сперва резолвить — а это и
+>   есть гейтящая операция). Курица-яйцо + дыра опаковости.
+> - **Расширять `refToScope` так, чтобы он возвращал interval** — отвергнуто: `refToScope`
+>   (`:169`) сознательно **identity-only и pure**, «owns no containment math»; значение оси —
+>   не свойство **идентичности** ресурса, а атрибут конкретной записи. Смешивать identity и
+>   value в одном адаптере = размывание единственного handle→scope edge.
+> - **Один `set([org-node, interval, resource-node])` с cross-hierarchy членами** — отвергнуто:
+>   `isNarrowerOrEqual` (`:249/:269/:285`) такую конъюнкцию по разным hierarchy **не
+>   выражает** (доказано выше) — пришлось бы менять семантику решётки T-0018 (запрещено NF-1).
+>
+> **Риски совместимости с FF резолвера (B-7):** новый `axisCtx?` — **опциональный** параметр;
+> при его отсутствии covering-фильтр ведёт себя как сегодня (interval-член без значения оси ⇒
+> грант не покрывает кейс, fail-closed) — обратная совместимость pre-T-0132 read-path
+> сохранена (как `deps.effects===undefined` отключает T-0034-блок `:527`). Существующие
+> resolver-FF (T-0021) не должны краснеть: сигнатура расширяется опциональным хвостовым
+> параметром, поведение без него не меняется. Это **build-риск B-7**, отмеченный для фазы импл.
 
 **Маршрутизация остатка (SEAM-2) — РЕШЕНО (design-owned, консервативный дефолт):** кейс вне
 среза **маршрутизируется по полному/старому процессу** (не-пилотной версии бандла), а не
@@ -203,6 +314,10 @@ validUntil`, грант перестаёт быть эффективным, и `
 выразимы на принятых примитивах: резолюция T-0021 + версионирование бандла T-0129); помечено
 как **design-owned**. Жёсткие альтернативы (отклонение/очередь до расширения) — Stage-2, не
 меняют объём MVP.
+
+> **Старая формулировка (до iter-2) «грант по сумме не применим ⇒ `resolveFor` вернёт
+> `no_grant` живым кодом» была неверна:** для amount-оси этот вывод требует B-7+B-8, а не
+> существует на живом read-path. Для node-оси и срока — верна и жива (§5.1).
 
 ---
 
@@ -228,6 +343,13 @@ validUntil`, грант перестаёт быть эффективным, и `
 **Откат:** пилотные гранты **дезактивируются** (revoke или `validUntil = now`) ⇒ срез
 закрывается, новые кейсы по пилотному процессу **не стартуют** (`resolveFor` их грантов не
 резолвит).
+
+> **[iter-2, R-4] Разграничитель.** Дезактивируются именно гранты, **гейтящие СТАРТ** новых
+> кейсов пилотной версии. Это **НЕ** те же гранты, что держат уже запущенные in-flight
+> инстансы: доигрывающие шаги резолвятся против грантов **СВОЕЙ версии бандла**, на которой
+> инстанс стартовал, и живут до его завершения. Поэтому «дезактивировали пилотные гранты» **НЕ
+> означает** «in-flight остался без прав» — откат для in-flight **не мгновенен** (kill = Stage-2,
+> SEAM-3, B-5).
 
 **Политика по уже запущенным в пилоте боевым инстансам — drain-by-default (РЕШЕНО,
 design-owned):** in-flight боевые инстансы **доигрывают по версии бандла, на которой
@@ -296,15 +418,22 @@ ADR фиксирует: **механизм/миграции/объектная �
 
 | Задача | Что | Тир |
 |---|---|---|
-| **[НОВАЯ B-1]** | Объектная модель `PilotDeclaration`/`PilotGrantBinding` в БД (миграция) + компилятор понятие→`set([node,interval])`+TTL поверх живых `meet`/`validateNarrowing` | MVP |
+| **[НОВАЯ B-1]** | Объектная модель `PilotDeclaration`/`PilotGrantBinding` в БД (миграция) + компилятор понятие→`set([node,interval])`+TTL: `set` собирается **`normalize({kind:"set",…})`** (`grant-lattice.ts:124`, **НЕ** `meet`, R-1), TTL через `validUntil`; subset-гейт через живой `validateNarrowing` | MVP |
 | **[НОВАЯ B-2]** | State machine пилота (`запланирован→активен→{расширен\|откачен\|истёк}`) + авто-истечение через `isEffective` | MVP |
 | **[НОВАЯ B-3]** | MCP-операции пилота (`pilot_declare`/`pilot_start`/`pilot_expand`/`pilot_rollback`) + human-gate расширения (наследует промоут T-0129) + аудит-вокабуляр `pilot.*` | MVP |
 | **[НОВАЯ B-4]** | UX карточки внедрения: действие «пилот» на уровне понятий + панель мониторинга (срез единого аудита по `pilotId`) | MVP |
+| **[НОВАЯ B-7]** | **Проводка amount-оси в resolve** (R-2): источник значения оси из поля кейса + передача `axisCtx?` в `resolveFor` (опциональный хвостовой параметр, обратно совместимо) + interval-предикат против переданного значения в covering-фильтре. Сегодня read-path identity-only (`refToScope` `grant-resolver.ts:178`), сумму не видит. Риск совместимости с resolver-FF — отмечен (§5.2) | MVP (несущий) |
+| **[НОВАЯ B-8]** | **Двух-осевой containment** org-узел × resource-scope (R-2): не выразим живым `isNarrowerOrEqual` для одного `set` с членами разной hierarchy (`:249/:269/:285`); сшивается в covering-условии B-7 как (resource-containment ⊑ живой) **И** (org-membership субъекта) **И** (axis-предикаты), а не cross-hierarchy `set`. Дизайн — в §5.2; реестр осей — связан с SEAM-3 | MVP (несущий) |
 | **[НОВАЯ B-5]** | Принудительная остановка in-flight боевых инстансов при откате (kill vs drain) | Stage-2 (SEAM-3) |
 | **[НОВАЯ B-6]** | Жёсткие альтернативы маршрутизации остатка (отклонение/очередь) | Stage-2 (SEAM-2) |
 
 **Design-owned/Stage-2, помеченные явно:** маршрутизация остатка (§5, дефолт=полный процесс),
 принудительная остановка in-flight (§7, дефолт=drain).
+
+> **[iter-2, R-2] B-7/B-8 — несущие MVP-задачи, без которых граница пилота по amount-оси не
+> существует.** Они НЕ design-owned развилки и НЕ Stage-2: это обязательная проводка, чтобы
+> «интервал = grant-предикат» (AC-2) был реализуем. До iter-2 эта работа была ошибочно
+> помечена [ЖИВОЙ]; теперь — явная build-задача с дизайном в §5.2.
 
 ---
 
@@ -316,7 +445,8 @@ ADR фиксирует: **механизм/миграции/объектная �
 
 | ID | Правило (граница) | ci_check |
 |---|---|---|
-| **FF-1** | **Foundations: несущие символы ЖИВЫ.** `interval`-kind, `isNarrowerOrEqual`, `meet`, `validateNarrowing`, `isEffective` реально присутствуют в `src/core/grant-lattice.ts`; `resolveFor` в `grant-resolver.ts`; `effect-resource.ts` существует. Защищает от дрейфа «ADR ссылается на удалённый символ» (FE-W23-0008). | `ci/checks/pilot-adr-foundations.sh`: `grep -qF` каждого символа в реальном исходнике; `--self-test` на фикстуре без символа ⇒ красный |
+| **FF-1** | **Foundations: несущие символы ЖИВЫ.** `interval`-kind, `isNarrowerOrEqual`, `meet`, `normalize`, `validateNarrowing`, `isEffective` реально присутствуют в `src/core/grant-lattice.ts`; `resolveFor`+`refToScope` в `grant-resolver.ts`; `effect-resource.ts` существует. Защищает от дрейфа «ADR ссылается на удалённый символ» (FE-W23-0008). | `ci/checks/pilot-adr-foundations.sh`: `grep -qF` каждого символа в реальном исходнике; `--self-test` на фикстуре без символа ⇒ красный |
+| **FF-1b** | **Anti-мис-применение (рецидив FE-W23-0008): цитаты формул сверены с фактическим поведением символа, не только с его присутствием.** Негатив-ассерты: §3.3 НЕ утверждает `meet(node,interval)⇒set` (R-1: `meet` атомов разного kind ⇒ ⊥); композиция помечена через `normalize`; amount-проводка read-path помечена `[НОВАЯ B-7]` (НЕ `[ЖИВОЙ]`). **Граница линтера признана явно:** `grep`-ассерт ловит лишь грубую мис-цитату в тексте — **глубокая сверка «символ делает то, что заявлено» = задача ревью** (адверсариальный sed по исходнику), а не doc-линтера. Опционально: unit-проба `meet({node},{interval})===BOTTOM` ∧ `normalize({set,[node,interval]}).kind==="set"` как импл-FF в B-1, чтобы зацементировать R-1 кодом. | `ci/checks/pilot-adr-structure.sh` Check-NOMISUSE: **absent** `meet(node` рядом с `⇒ … set`/`⇒ {kind:"set"` (asserted); **present** `normalize({kind:"set"`,`[НОВАЯ B-7]`,`identity-only`; **present** нота «глубокая сверка = ревью». `--self-test`: фикстура с `meet(node,interval) ⇒ set` ⇒ красный |
 | **FF-2** | **Три оси = существующие примитивы T-0018, ноль нового scope-механизма (AC-1, NF-1).** §0/§3.3 содержат токены `interval`/`node`/`isEffective`/`set([node` и поимённую ссылку на T-0018; банится утверждение нового scope-store/scope-алгоритма. | `ci/checks/pilot-adr-structure.sh` Check-AXES: present `interval`,`node`,`set([node`,`T-0018`; absent «новый scope-механизм» (asserted) |
 | **FF-3** | **Интервал = grant-предикат, НЕ if-фильтр (AC-2).** §3.3 содержит «grant-предикат» + «НЕ … if-фильтр»; банится «if (case.amount» / «процессный фильтр поверх неограниченных грантов» как асерт. | Check-PREDICATE: present `grant-предикат`,`validateNarrowing`; absent `if (case.amount` |
 | **FF-4** | **Монотонное сужение через живой гейт, без обхода (AC-3).** Присутствуют `⊑`/`validateNarrowing` + «сужение»; банится «обход validateNarrowing» / «self-apply расширение» как асерт. | Check-NARROW: present `validateNarrowing`,`сужение`,`пилотный.scope ⊑`; absent «обход `validateNarrowing`» |
@@ -333,22 +463,22 @@ ADR фиксирует: **механизм/миграции/объектная �
 
 | AC | Покрыто в дизайне |
 |---|---|
-| AC-1 | §0 (interval ЖИВОЙ), §3.3 (три оси = `node`/`interval`/окно), §1; FF-2 |
-| AC-2 | §3.3 (интервал = grant-предикат в `isNarrowerOrEqual`, НЕ if-фильтр); FF-3 |
+| AC-1 | §0 (interval-kind ЖИВОЙ; композиция `normalize`/amount-проводка = НОВАЯ B-1/B-7/B-8), §3.3, §1, §5.1/§5.2; FF-2 |
+| AC-2 | §3.3 (интервал = grant-предикат на write-time живо; read-path amount-предикат = НОВАЯ B-7, §5.2), НЕ if-фильтр; FF-3 |
 | AC-3 | §6 (расширение через живой `validateNarrowing`, без обхода), §1 (сужение ⊑); FF-4 |
 | AC-4 | §2 (таблица GRAN-1, охват≠боевость); FF-5 |
-| AC-5 | §5 (граница = следствие резолюции `resolveFor`; SEAM-2 design-owned); FF-* |
+| AC-5 | §5.1 (node-ось/срок = живое следствие `resolveFor`), §5.2 (amount-ось = НОВАЯ B-7/B-8); SEAM-2 design-owned; FF-* |
 | AC-6 | §4 (state machine + авто-истечение через `isEffective`); FF-6 |
 | AC-7 | §8 (мониторинг = срез единого аудита, без второго лога); FF-7 |
 | AC-8 | §6 (расширение = ослабление среза под human-gate, в границах владельца) |
 | AC-9 | §7 (откат: гранты дезактивированы, drain-by-default, эффекты не переписаны); FF-8 |
 | AC-10 | §10 (пилот = фаза петли T-0129 FR-10, промоут = предусловие, SEAM-1); FF-8 |
 | AC-11 | §8 (старт/расширение/откат пишутся в единый аудит, не исключены из комплаенс); FF-7 |
-| AC-12 | §0/§1/§3 (ноль переизобретения: всё на живом T-0018/T-0021/T-0034/T-0031/T-0129); FF-1, FF-2 |
+| AC-12 | §0/§1/§3 (ноль новых scope-**примитивов**: kind-ы interval/node/set живы; композиция и amount-проводка = новый код B-1/B-7/B-8, помечены явно); FF-1, FF-2 |
 | AC-13 | §0/§1 (добавляем продуктовое понятие, «не хватало только понятия»); FF-9 |
 | AC-14 | §9 (two-floor, карточка внедрения, не редактор грантов); FF-9 |
 | AC-15 | §13 (этот раздел) + §0 (опоры трассированы поимённо); FF-10 |
-| AC-16 | §11 (границы design-only + производные B-1..B-6 + design-owned/Stage-2 метки); FF-10 |
+| AC-16 | §11 (границы design-only + производные B-1..B-8 + design-owned/Stage-2 метки); FF-10 |
 
 ---
 
@@ -375,9 +505,16 @@ ADR фиксирует: **механизм/миграции/объектная �
 
 ---
 
-*Закрытие:* три оси среза пилота выразимы **живым** кодом решётки T-0018 (`interval` —
-ЖИВОЙ `grant-lattice.ts:46`, не ADR-текст; прошлый класс blocking снят). T-0132 добавляет
-**только продуктовое понятие** `Pilot` + его жизненный цикл + UX-инвариант; ноль нового
-scope-механизма. Развилки фаундера отсутствуют (рамка §2 п.5 подтверждена 2026-06-11); все
-design-owned развилки (SEAM-2 маршрутизация остатка, SEAM-3 in-flight откат, SEAM-1 стык с
-промоутом) разрешены консервативными дефолтами в этом ADR.
+*Закрытие (iter-2, честно):* scope-**примитивы** трёх осей живы в решётке T-0018 (`interval`
+kind `grant-lattice.ts:46`, `node` `:44`, `set` `:47` — не ADR-текст). **Живо** и применимо
+напрямую: node-ось containment (`:270`), сравнение интервалов (`:279`), TTL `isEffective`
+(`:497`), write-time subset-гейт `validateNarrowing` (`:408`). **Новый код** (производные
+задачи, помечены явно): композиция `set([node,interval])` через `normalize` (`:124`, **НЕ**
+`meet` — R-1, B-1); **проводка amount-оси в resolve** (B-7) и **двух-осевой containment** (B-8)
+— на сегодняшнем read-path сумма кейса в сравнение не попадает (R-2). Прошлый класс blocking
+снят **для node-оси и срока**, но для amount-оси на read-path требует B-7/B-8. T-0132 добавляет
+**продуктовое понятие** `Pilot` + жизненный цикл + UX-инвариант; **ноль новых
+scope-примитивов**, но machinery материализации — частично новая (разведено §0/§3.3/§5/§11).
+Развилки фаундера отсутствуют (рамка §2 п.5 подтверждена 2026-06-11); design-owned развилки
+(SEAM-2 маршрутизация остатка, SEAM-3 in-flight откат/реестр осей, SEAM-1 стык с промоутом)
+разрешены консервативными дефолтами в этом ADR.
