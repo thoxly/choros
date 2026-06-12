@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0136",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": false },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "src/__tests__/pdp-explain.test.ts (missing HTTP authz tests)",
+      "issue": "HTTP authz surface (checkExplainAuthz, 403 EXPLAIN_FORBIDDEN, self-vs-admin, maskedFields stripping for self) has zero test coverage. AC-9/AC-10/AC-8-self claimed but unverified. This is the anti-oracle core of a PDP-core change.",
+      "suggestion": "Add HTTP-level tests: non-admin about foreign subject -> 403; self-query -> 200 without maskedFields; admin with mgmt_object:grant -> 200 with maskedFields."
+    },
+    {
+      "id": "R-2",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/http/pdp-explain.ts:396-408,255",
+      "issue": "effects/sod ports not wired into explainDeps, so for op in {invoke,approve,transition} explain.verdict diverges from production resolveFor (no_effect_grant / sod_violation never reached). Endpoint accepts all 7 operations. Violates central AC-1 (verdict agreement).",
+      "suggestion": "Either wire the same effects/sod ports as production PDP, or restrict VALID_OPS to {read} (documented) until other ops are faithful."
+    },
+    {
+      "id": "R-3",
+      "severity": "blocking",
+      "axis": 4,
+      "location": "src/http/pdp-explain.ts:395,401",
+      "issue": "Stub RecordSource always returns non-null sentinel, so the record_fetch step in the live endpoint can never report not_found -- the trace lies about the record stage (always green). AC-6 unreachable via HTTP; limitation undeclared in the response.",
+      "suggestion": "Read the real record (or its existence) for a faithful record_fetch step, or explicitly mark record_fetch as stubbed/non-diagnostic in the response."
+    },
+    {
+      "id": "R-5",
+      "severity": "nit",
+      "axis": 5,
+      "location": "src/__tests__/pdp-explain.test.ts:358-421",
+      "issue": "The property test compares resolveFor-with-trace vs resolveFor-without-trace on identical deps -- validates NF-1 (non-mutation), not AC-1 (endpoint verdict == production PDP). Case matrix is read-only; no invoke/approve/transition.",
+      "suggestion": "Add a test asserting endpoint verdict against the real production dep set on non-read operations (depends on R-2)."
+    },
+    {
+      "id": "R-6",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "src/http/pdp-explain.ts:40,41,57",
+      "issue": "`eslint src` exits 1: unused isNarrowerOrEqual (40), isEffective (41), UUID_RE (57). `npm run ci` runs `eslint src` so the CI lower bound is red. Reviewer rule 2 -> automatic changes_requested.",
+      "suggestion": "Remove the unused imports and the unused UUID_RE constant."
+    },
+    {
+      "id": "R-7",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/server.ts:276-279",
+      "issue": "Without DB the route is not registered (`if (grantsPool)`), so the request returns 404, but ADR §3.4/AC-11 require 503 NO_DATABASE.",
+      "suggestion": "Register the route unconditionally and return 503 when the pool is absent, or amend the ADR/AC-11."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": false },
+    { "ac": "AC-2", "covered": true },
+    { "ac": "AC-3", "covered": true },
+    { "ac": "AC-4", "covered": true },
+    { "ac": "AC-5", "covered": true },
+    { "ac": "AC-6", "covered": false },
+    { "ac": "AC-7", "covered": true },
+    { "ac": "AC-8", "covered": false },
+    { "ac": "AC-9", "covered": false },
+    { "ac": "AC-10", "covered": false },
+    { "ac": "AC-11", "covered": false }
+  ],
+  "role_gap_evidence": [
+    "Anti-oracle / authz on a PDP-core change shipped with zero HTTP-level tests (R-1) despite being the most security-sensitive surface; candidate evidence for a dedicated security-reviewer gate (SQ11) and for a fitness check that the explain endpoint's verdict provably equals the production PDP verdict (not just trace-non-mutation)."
+  ]
+}
