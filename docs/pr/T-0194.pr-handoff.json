@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0194",
+  "status": "pr_open",
+  "branch": "task/T-0194-ui-invoke-axis",
+  "merge_target": "dev",
+  "base_commit": "94174bf",
+  "head_commit": "cf1b3f8",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Nit-sweep: renames Operation 'exec' → 'invoke' across web/src/screens/rights/ (T-0135 R-N2). Six files: ra-data.jsx (OP_LABEL/OP_RU/axesFromGrants/TRAIL), ra-role-editor.jsx (INITIAL_GRANTS/ALL_OPS/mapOp 'exec' branch removed), ra-criticality.jsx (scenario detail), rights-admin.css (.chs-opbtn--on.chs-opbtn--exec → --invoke, R-1 fix), screen-rights.jsx (user-facing text R-N2), components.jsx (comment R-N3). app.css: .chs-op--exec preserved for backend backcompat (rights.ts still returns 'exec'), .chs-op--invoke added alongside. Full gate: tsc exit 0, eslint exit 0, fitness PASS, vitest 1548/1554, vite build 208.86 kB. REVIEW approved iter 2 (re-review cf1b3f8).",
+  "commits": [
+    {
+      "sha": "ead910a",
+      "phase": "BUILD",
+      "message": "fix(T-0194): axesFromGrants — \"exec\" → \"invoke\" to match Operation union"
+    },
+    {
+      "sha": "2a3f7e6",
+      "phase": "REVIEW",
+      "message": "T-0194 REVIEW: changes_requested — CSS .chs-opbtn--on.chs-opbtn--exec не переименован"
+    },
+    {
+      "sha": "0999110",
+      "phase": "BUILD",
+      "message": "T-0194 fix: CSS invoke classes + user-facing text (R-1, R-N1..N3)"
+    },
+    {
+      "sha": "cf1b3f8",
+      "phase": "REVIEW",
+      "message": "T-0194 RE-REVIEW: approved (prescription fixes)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "cf1b3f8",
+      "findings_resolved": [
+        "R-1: .chs-opbtn--on.chs-opbtn--exec → .chs-opbtn--on.chs-opbtn--invoke (rights-admin.css:185)",
+        "R-N1: .chs-op--invoke added to app.css:534 alongside .chs-op--exec (backcompat preserved)",
+        "R-N2: user-facing text 'exec' → 'invoke' in screen-rights.jsx:198",
+        "R-N3: comment 'exec' → 'invoke' in components.jsx:171"
+      ],
+      "nits_noted": [],
+      "artifact": "docs/design/T-0194.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1554,
+      "passed": 1548,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "4/4",
+      "fitness_static": "PASS — all checks green",
+      "vite_build": "exit 0, 208.86 kB JS, 56.22 kB CSS",
+      "tested_commit": "cf1b3f8",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings",
+        "fitness": "PASS — all checks green",
+        "vitest_unit": "1548/1554 passed, 6 skipped (flowable integration offline — pre-existing), 70 files",
+        "vite_build": "exit 0 — 208.86 kB JS gzip 64.81 kB"
+      },
+      "artifact": "docs/test-reports/T-0194.test-report.md",
+      "contract_artifact": "docs/design/T-0194.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "web/src/app-shell/app.css",
+    "web/src/components/components.jsx",
+    "web/src/screens/rights/ra-criticality.jsx",
+    "web/src/screens/rights/ra-data.jsx",
+    "web/src/screens/rights/ra-role-editor.jsx",
+    "web/src/screens/rights/rights-admin.css",
+    "web/src/screens/rights/screen-rights.jsx",
+    "docs/reviews/T-0194.review.md",
+    "docs/design/T-0194.review.contract.json",
+    "docs/test-reports/T-0194.test-report.md",
+    "docs/design/T-0194.test-report.contract.json",
+    "docs/pr/T-0194.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "design_notes": {
+    "backcompat_chs_op_exec": ".chs-op--exec preserved in app.css for OpChip backcompat: src/http/rights.ts still returns string 'exec' in API responses. When backend is updated to return 'invoke', OpChip will automatically pick up .chs-op--invoke without further frontend change. Backend sync is a candidate task separate from T-0194.",
+    "chs_scope_exec_out_of_scope": ".chs-scope--exec in app.css:251 is a separate scope-filter component unrelated to the Operation axis — correctly not touched by T-0194.",
+    "mapOp_exec_branch_removed": "mapOp 'exec' → 'invoke' mapping removed: ALL_OPS no longer contains 'exec', making the path unreachable from handleSubmit UI flow. mapOp('invoke') → 'invoke' via fallthrough is canonical and correct."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration": "T-0194 is display-plane only — no DB schema changes, no migration needed post-merge.",
+    "backcompat_note": "Backend rights.ts returns 'exec' in live API; .chs-op--exec in app.css intentionally retained until backend sync. No visual regression on live data."
+  },
+  "friction_events": []
+}

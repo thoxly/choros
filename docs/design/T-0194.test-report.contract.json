@@ -1,0 +1,63 @@
+{
+  "task_id": "T-0194",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1554,
+    "passed": 1548,
+    "failed": 0,
+    "skipped": 6
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1-grep-exec-zero-in-rights",
+      "test": "grep '\"exec\"' web/src/screens/rights/ -r → 0 hits",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2-axesFromGrants-invoke",
+      "test": "code review ra-data.jsx:205-206 — g.ops.includes(\"invoke\") correct for guarded/external axes",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3-ALL_OPS-invoke-css-covered",
+      "test": "ra-role-editor.jsx:122 ALL_OPS=[read,write,invoke,approve]; rights-admin.css:185 .chs-opbtn--on.chs-opbtn--invoke present; app.css:534 .chs-op--invoke present",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4-ci-green",
+      "test": "npm run ci exit 0 (tsc+eslint+fitness+vitest); vite build exit 0",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "vite build 208.86 kB — no size regression",
+      "result": "pass",
+      "note": "208.86 kB JS, 56.22 kB CSS (identical to re-review pass)"
+    },
+    {
+      "check": ".chs-op--exec preserved in app.css for backend backcompat",
+      "result": "pass",
+      "note": "src/http/rights.ts still returns 'exec'; OpChip backcompat maintained until backend sync"
+    },
+    {
+      "check": "mapOp 'exec' branch removed — path unreachable from UI",
+      "result": "pass",
+      "note": "ALL_OPS no longer contains 'exec'; mapOp('invoke') → 'invoke' via fallthrough"
+    },
+    {
+      "check": ".chs-scope--exec in app.css:251 — out of scope, not touched",
+      "result": "n/a",
+      "note": "Separate scope-filter component, not the Operation axis; T-0194 is rights/screen only"
+    }
+  ],
+  "failures": [],
+  "ci_run": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings",
+    "fitness": "PASS — all checks green",
+    "vitest": "1548/1554 passed, 6 skipped (flowable integration offline — pre-existing)",
+    "vite_build": "exit 0 — 208.86 kB JS, 56.22 kB CSS"
+  },
+  "tested_commit": "cf1b3f8"
+}
