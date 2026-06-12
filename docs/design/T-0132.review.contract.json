@@ -1,60 +1,79 @@
 {
   "task_id": "T-0132",
-  "verdict": "changes_requested",
+  "verdict": "approved",
+  "review_iteration": 2,
   "ci_seen": {"green": true},
+  "re_review_basis": "diff 6b388db..HEAD (fix-коммит 1fcd76c); все новые цитаты сверены адверсариальным sed/grep по живому src/core/grant-lattice.ts, grant-resolver.ts, object-handle.ts",
   "findings": [
     {
       "id": "R-1",
       "severity": "blocking",
+      "status": "resolved",
       "axis": 4,
-      "location": "docs/design/T-0132-pilot-rollout.adr.md:127-135 (§3.3); §0 строка `meet`",
-      "issue": "Формула компиляции §3.3 утверждает, что derivedScope пилота = meet({kind:node},{kind:interval}) ⇒ {kind:set,members:[node,interval]} и помечает это [ЖИВОЙ grant-lattice.ts:367-372]. Против исходника неверно: meet (grant-lattice.ts:298) для двух различных НЕ-set атомов уходит в atomMeet (:333), а node⊓interval там возвращает BOTTOM (:376 'Distinct non-set kinds: ⊥'), НЕ set. set строится в meet только если один операнд уже set (:307-330). Цитата :367-372 указывает на ветку interval⊓interval, не на композицию node+interval — мис-цитата, маскирующая семантический разрыв. meet = ⊓/пересечение, а конъюнкция-в-set требует normalize({kind:set,members:[node,interval]}) напрямую (:124).",
-      "suggestion": "Заменить meet(node,interval) на прямое normalize({kind:set,members:[node,interval]}) (живой normalize grant-lattice.ts:124) в §3.3/§1/§3.2/§0; переписать клейм §0 строки meet с '[ЖИВОЙ :367-372]' на 'set-конструктор + normalize [ЖИВОЙ :124]; meet к node⊓interval не применим (даёт ⊥)'. Целевая форма set([node,interval]) (T-0129 §10.1) верна — неправильно назван живой способ её сборки."
+      "location": "docs/design/T-0132-pilot-rollout.adr.md §3.3, §0 строка `meet`",
+      "issue": "iter-1: формула компиляции утверждала derivedScope = meet(node,interval) ⇒ set([node,interval]) с пометкой [ЖИВОЙ :367-372]. Против исходника неверно: meet двух атомов разного kind уходит в atomMeet (:333) и даёт BOTTOM (:376 'Distinct non-set kinds: ⊥'); set-ветка meet срабатывает только если один операнд уже set (:307-330); :367-372 = interval⊓interval, не node+interval.",
+      "resolution": "ЗАКРЫТО в 1fcd76c. Композиция переписана на normalize({kind:'set',members:[node,interval]}) (grant-lattice.ts:124) в §0/§1/§3.2/§3.3/таблице PilotGrantBinding/B-1. meet-строка §0 явно помечена 'interval⊓interval, НЕ способ собрать set([node,interval])'. Re-review verified: normalize :124 канонизирует set (flatten/dedup); atomMeet :333; BOTTOM :376; set-ветка meet :307-330 — все цитаты точны.",
+      "suggestion": "—"
     },
     {
       "id": "R-2",
       "severity": "blocking",
+      "status": "resolved",
       "axis": 4,
-      "location": "docs/design/T-0132-pilot-rollout.adr.md:55-60 (§1), 142-146 (§3.3), 191-196 (§5); грант-привязки §0 (resolveFor :489)",
-      "issue": "Утверждение 'сумма кейса выше интервала ⇒ грант по isNarrowerOrEqual не применим ⇒ resolveFor вернёт no_grant' НЕ обеспечено живым read-path. Живой resolveFor (grant-resolver.ts:489) выводит проверяемый scope как refToScope(handle.ref) (:507); refToScope (:178-200) возвращает ИСКЛЮЧИТЕЛЬНО {kind:node, hierarchy:'resource'} (комментарий :169 'identity-only ResourceRef') — interval с суммой кейса handle НЕ несёт. В grant-resolver.ts ноль упоминаний axis/amount/interval (grep пуст). Двойная несравнимость: пилотный set([org-node(hierarchy:org), interval]) против resource-node handle: isNarrowerOrEqual set-parent ветка (:250) требует handle ⊑ хотя бы одного члена; org-node иной иерархии (false, :269), interval-член cross-kind (false). Итог: пилотный грант либо никогда не покрывает кейс, либо граница по сумме не проверяется вовсе. Проводка 'поле записи amount → handle.ref → refToScope → interval-scope' = НОВАЯ работа, но ADR помечает её [ЖИВОЙ] и пишет 'прошлый класс blocking снят'. Security-линза: необеспеченная решёткой граница авторизации — класс, который сам ADR §14 объявляет катастрофой.",
-      "suggestion": "Добавить в §0/§3.3/§5 клейм [НОВАЯ B-N]: проекция axis-значения кейса (amount из поля записи) в resolve-scope — расширение ResourceRef/refToScope или передача axis-контекста в resolveFor + источник значения axis + кто кладёт его в handle. Указать, что interval-axis на read-path сегодня НЕ вычисляется (resolver identity-only, :169). Сузить 'прошлый класс blocking снят' до node-оси (для amount-оси он НЕ снят). Связать с SEAM-3 (реестр осей)."
+      "location": "docs/design/T-0132-pilot-rollout.adr.md §1, §3.3, §5",
+      "issue": "iter-1: 'сумма кейса выше интервала ⇒ resolveFor вернёт no_grant живым кодом' НЕ обеспечено read-path. resolveFor (:489) сравнивает refToScope(handle.ref) (:507); refToScope (:178, комментарий :169) identity-only, возвращает только {kind:'node',hierarchy:'resource'}; ноль axis/amount/interval в резолвере; ResourceRef identity-only (object-handle.ts:42). Проводка amount-оси была ложно помечена [ЖИВОЙ].",
+      "resolution": "ЗАКРЫТО в 1fcd76c. Пере-размечено в [НОВАЯ B-7] (проводка значения оси через опц. хвостовой axisCtx? в resolveFor) + [НОВАЯ B-8] (two-axis containment как covering-условие). §5 разведён §5.1 (node/срок=ЖИВОЕ) / §5.2 (amount=НОВОЕ) с дизайном решения и Rejected-альтернативами. Старая формулировка снабжена явной поправкой. Re-review verified: refToScope :178/:169 identity-only; resolveFor :489; :507; grep axis/amount/interval = 0; ResourceRef :42. B-7 fail-closed без axisCtx (deny, не ignore) — честно. B-8 НЕ трогает T-0018 (cross-hierarchy set явно отвергнут, NF-1).",
+      "suggestion": "—"
     },
     {
       "id": "R-3",
       "severity": "blocking",
+      "status": "resolved",
       "axis": 4,
-      "location": "docs/design/T-0132-pilot-rollout.adr.md:37-43 ('ГЛАВНОЕ НАБЛЮДЕНИЕ'), §0 строка interval [ЖИВОЙ :46]",
-      "issue": "'ГЛАВНОЕ НАБЛЮДЕНИЕ' утверждает, что interval 'полностью обслужен живыми isNarrowerOrEqual, meet, normalize' ⇒ 'три оси выразимы уже работающим кодом, прошлый класс blocking снят'. Сверка: interval-элемент (:46), его isNarrowerOrEqual (:279-282), interval⊓interval meet (:367-373), isEffective (:497) — живы и верны. НЕ живо: композиция node+interval через meet (R-1) и попадание суммы кейса в сравниваемый scope (R-2). Формулировка 'полностью обслужен / класс blocking снят' завышает готовность.",
-      "suggestion": "Сузить до: 'interval-элемент и его алгебра (сравнение интервалов, TTL) живы; проводка значения оси в resolve и set-композиция node+interval — НОВАЯ работа [B-N]'. Это переводит R-3 в подтверждённую честную разметку и снимает R-1/R-2 совместно."
+      "location": "docs/design/T-0132-pilot-rollout.adr.md §0 'ГЛАВНОЕ НАБЛЮДЕНИЕ', §13, закрытие",
+      "issue": "iter-1: overclaim 'interval полностью обслужен живыми ... ⇒ прошлый класс blocking снят'.",
+      "resolution": "ЗАКРЫТО в 1fcd76c. Переписано на 'класс blocking снят для node-оси и срока, но НЕ для amount-оси на read-path'. Трассировка §13 (AC-1/2/5/12) и закрытие ADR пере-размечены честно (живое/новое разведено).",
+      "suggestion": "—"
     },
     {
       "id": "R-4",
       "severity": "nit",
+      "status": "resolved",
       "axis": 3,
-      "location": "docs/design/T-0132-pilot-rollout.adr.md:228 vs 234 (§7)",
-      "issue": "В §7 рядом 'пилотные гранты дезактивируются' и 'in-flight доигрывают по своей версии' — про разные гранты (гейт старта vs гранты доигрывающей версии). Выводимо, но читатель может прочесть 'дезактивировали ⇒ in-flight без прав'.",
-      "suggestion": "Добавить одну фразу-разграничитель: дезактивируются гранты, гейтящие СТАРТ новых кейсов; доигрывающие шаги in-flight держат гранты СВОЕЙ версии бандла до конца инстанса (откат не мгновенен для in-flight — kill = Stage-2)."
+      "location": "docs/design/T-0132-pilot-rollout.adr.md §7",
+      "issue": "iter-1: рядом 'пилотные гранты дезактивируются' и 'in-flight доигрывают' — про разные гранты, читатель мог прочесть 'in-flight без прав'.",
+      "resolution": "ЗАКРЫТО в 1fcd76c. Добавлена врезка-разграничитель: дезактивируются гранты гейта СТАРТА; in-flight держат гранты своей версии бандла до конца; откат не мгновенен (kill=Stage-2).",
+      "suggestion": "—"
+    },
+    {
+      "id": "CN-1",
+      "severity": "nit",
+      "status": "open",
+      "axis": 4,
+      "location": "docs/design/T-0132-pilot-rollout.adr.md §5.2/§11 (B-7); пересечение с task/T-0136-pdp-explain (grant-resolver.ts resolveFor)",
+      "issue": "Координационная нота (НЕ blocking дизайн): B-7 проектирует axisCtx? 7-м опциональным хвостовым параметром resolveFor. T-0136 (параллельный worktree task/T-0136-pdp-explain) УЖЕ добавляет 7-м параметром traceOut?: TraceCollector (сверено в его ветке). Обе задачи претендуют на одну и ту же 7-ю позицию — позиционная коллизия сигнатур при мердже.",
+      "suggestion": "Дизайн B-7 от коллизии не страдает (оба параметра аддитивно-опциональны, no-op/fail-closed при отсутствии, NF-1 у обоих сохранён). При материализации B-7: свериться с актуальной сигнатурой resolveFor на dev (мог приехать traceOut из T-0136) и поставить axisCtx? последним; либо перейти на options-объект resolveFor(..., extra?:{trace?; axisCtx?}) если обе оси сольются. Чисто мердж-координация фазы импл."
     }
   ],
   "acceptance_coverage": [
-    {"ac": "AC-1", "covered": false},
-    {"ac": "AC-2", "covered": false},
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
     {"ac": "AC-3", "covered": true},
     {"ac": "AC-4", "covered": true},
-    {"ac": "AC-5", "covered": false},
+    {"ac": "AC-5", "covered": true},
     {"ac": "AC-6", "covered": true},
     {"ac": "AC-7", "covered": true},
     {"ac": "AC-8", "covered": true},
     {"ac": "AC-9", "covered": true},
     {"ac": "AC-10", "covered": true},
     {"ac": "AC-11", "covered": true},
-    {"ac": "AC-12", "covered": false},
+    {"ac": "AC-12", "covered": true},
     {"ac": "AC-13", "covered": true},
     {"ac": "AC-14", "covered": true},
     {"ac": "AC-15", "covered": true},
     {"ac": "AC-16", "covered": true}
   ],
   "role_gap_evidence": [
-    "FF-1 (doc-foundations-линтер) проверяет ПРИСУТСТВИЕ символа (interval/meet/isNarrowerOrEqual/validateNarrowing/isEffective/resolveFor — все живы ⇒ FF-1 зелёный), но не КОРРЕКТНОСТЬ его применения — поэтому не ловит R-1 (мис-цитата meet даёт ⊥, а не set) и R-2 (отсутствие проводки axis в resolveFor). Рецидив FE-W23-0008-семейства 'ADR ссылается на живой символ, делающий не то, что заявлено'. Кандидат в ledgers/role-gaps.md: foundations-check должен поддерживать негатив-ассерт на мис-применение живого символа (напр. '§ не утверждает meet(A,B)⇒set если A,B атомы разных kind'). Систематический риск: зелёный FF при ложном [ЖИВОЙ]."
+    "iter-2: класс 'doc-foundations-линтер (FF-1) проверяет присутствие символа, не корректность применения' (рецидив FE-W23-0008-семейства) частично закрыт ADR в самом дизайне — введён FF-1b (Check-NOMISUSE: absent meet(node) рядом с ⇒set; present normalize({kind:'set' / [НОВАЯ B-7] / identity-only) + честно признанная граница линтера ('глубокая сверка символ-делает-заявленное = задача ревью, не grep'). Правильное разделение слоёв: грубую мис-цитату ловит FF-1b, семантику символа — адверсариальный ревьюер (выполнено в re-review через sed/grep). role-gap валиден системно (FF не заменяет семантическую сверку), но конкретный рецидив на T-0132 закрыт двумя слоями."
   ]
 }
