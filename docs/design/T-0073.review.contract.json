@@ -1,31 +1,31 @@
 {
   "task_id": "T-0073",
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "ci_seen": {"green": true},
-  "findings": [
+  "iter": 2,
+  "fix_commit": "e128dae",
+  "findings": [],
+  "iter1_findings_resolved": [
     {
       "id": "R-1",
       "severity": "blocking",
       "axis": 3,
-      "location": "src/http/floor1-editor.ts:335 — extractActor without checkRole",
-      "issue": "HTTP-роут авторизует только по наличию x-dev-user заголовка (аутентификация → 401), но не проверяет роль process_designer (авторизация → 403). Сосед binding.ts (записывающий в ту же form_binding запись) содержит явный checkRole(client, tenantId, actorId) → 403 FORBIDDEN при отсутствии роли. Авторинг формы — management-операция (ADR §4: config-агент = сотрудник в оргструктуре, роль→MCP-tools). Любой аутентифицированный пользователь может редактировать форму любого тенанта (UUID из URL) без authz-проверки.",
-      "suggestion": "Добавить checkRole-паттерн из binding.ts с dev-mode смягчением (getAuthMode()='dev' → только аутентификация, без role check). В keycloak-mode проверять role_assignment для process_designer. Добавить тест на 403 FORBIDDEN (аналог AC-23 для 401). Альтернатива: ADR-документировать решение об отложенном authz с явным тикетом — если Mode A признаётся dev-only surface."
+      "location": "src/http/floor1-editor.ts — authorizeEditor (lines 120–140)",
+      "resolution": "authorizeEditor reuses checkRole + withTenantTx from binding.ts (both exported for this purpose). Dev mode = authenticated-sufficient (no DB), keycloak = role_assignment lookup → 403 FORBIDDEN, keycloak + no-pool = 503 fail-closed. No second permission mechanism."
     },
     {
       "id": "R-N1",
       "severity": "nit",
       "axis": 3,
-      "location": "src/http/floor1-editor.ts:21–24 — CONTRACT docstring",
-      "issue": "Docstring утверждает «checkBindingCompat() is called after transformation to assert fields ↔ bpmnVars», но в коде этого вызова нет — из binding-compat импортируется только validateBindingFields. Функционально безопасно (Floor-1 не меняет key-множества → checkBindingCompat вернул бы ok:true), но комментарий вводит в заблуждение читателей о наличии гарда.",
-      "suggestion": "Заменить упоминание на честный комментарий: «checkBindingCompat not needed: Floor-1 ops preserve key-set (no add/drop fields) → always ok:true». Либо удалить строки 21–24 из docstring."
+      "location": "src/http/floor1-editor.ts:22–26 — CONTRACT docstring",
+      "resolution": "Docstring now honestly states checkBindingCompat is intentionally NOT called (Floor-1 ops preserve key-set → always ok:true; persistence path PATCH /binding owns compat enforcement)."
     },
     {
       "id": "R-N2",
       "severity": "nit",
       "axis": 2,
-      "location": "src/__tests__/floor1-editor.test.ts:1028 — describe «HTTP AC-22 — Floor-2 kind in body.edit → 409 WRONG_FLOOR»",
-      "issue": "Заголовок describe заявляет 409 WRONG_FLOOR, но тест ожидает 400 VALIDATION и в теле теста объясняется, что 409-путь не достигается через HTTP (parseEditRequest перехватывает unknown kind через default:case до applyFloor1Edit). Тест честный по содержанию, заголовок misleading.",
-      "suggestion": "Переименовать describe: «HTTP AC-22 — Floor-2 kind in body.edit → 400 VALIDATION (WRONG_FLOOR 409 covered at core level in AC-14)»."
+      "location": "src/__tests__/floor1-editor.test.ts — describe HTTP AC-22",
+      "resolution": "Renamed to: 'HTTP AC-22 — Floor-2 kind in body.edit → 400 VALIDATION (409 WRONG_FLOOR covered at core level in AC-14)'. Title now matches expected status 400."
     }
   ],
   "acceptance_coverage": [
@@ -50,11 +50,13 @@
     {"ac": "AC-19: toggle_required does not affect uiSchema", "covered": true},
     {"ac": "AC-20: hide+show round-trip restores hidden=false", "covered": true},
     {"ac": "AC-21: HTTP 200 valid relabel_field", "covered": true},
-    {"ac": "AC-22: HTTP Floor-2 kind → 409 WRONG_FLOOR (HTTP level)", "covered": false},
+    {"ac": "AC-22: HTTP Floor-2 kind → 400 VALIDATION (409 WRONG_FLOOR at core level in AC-14)", "covered": true},
     {"ac": "AC-23: Missing x-dev-user → 401", "covered": true},
     {"ac": "AC-24: Malformed edit.kind → 400", "covered": true},
     {"ac": "AC-25: Unknown fieldKey in body.edit → 422", "covered": true},
-    {"ac": "AC-26: Malformed fields body → 400", "covered": true}
+    {"ac": "AC-26: Malformed fields body → 400", "covered": true},
+    {"ac": "AC-27: keycloak mode, actor without process_designer → 403 FORBIDDEN (review R-1)", "covered": true},
+    {"ac": "AC-28: keycloak mode, actor with process_designer → 200 allow-path", "covered": true}
   ],
   "role_gap_evidence": []
 }
