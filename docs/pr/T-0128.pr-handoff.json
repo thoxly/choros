@@ -1,0 +1,107 @@
+{
+  "task_id": "T-0128",
+  "status": "pr_open",
+  "branch": "task/T-0128-connector-entity-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/design/T-0128-connector-entity.adr.md",
+    "docs/design/T-0128.adr.contract.json",
+    "docs/design/T-0128.review.contract.json",
+    "docs/design/T-0128.test-report.contract.json",
+    "docs/reviews/T-0128.review.md",
+    "docs/specs/T-0128-connector-entity.spec.md",
+    "docs/specs/T-0128.spec.contract.json",
+    "docs/test-reports/T-0128.test-report.md",
+    "docs/pr/T-0128.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff). Нет src/ изменений, нет ci/checks/ изменений, нет package.json изменений.",
+    "5 nit-findings (R-1..R-5) из review применены в коммите 4848c47: R-1 grant-lattice:33→:37, R-2 dangling no-op фраза в §5, R-3 src/http/ путь seed-write, R-4 http_generic нота, R-5 FF-CONN-9 переклассифицирован в pre-merge diff-gate.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "PASS — docs/** only, 6 files vs dev; ноль src/migrations/package.json/ci/checks изменений",
+    "npm_ci_result": "PASS — tsc 0 new errors; eslint clean; fitness all green (notification-email.sh PASS, pilot-adr-*.sh PASS, package-json-no-dup-keys PASS); vitest deferred-to-impl",
+    "review_verdict": "approved (57e1a6b); 16/16 AC covered; 0 blocking; 5 nits R-1..R-5 closed 4848c47",
+    "test_report": "docs/design/T-0128.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0128-connector-entity.spec.md",
+    "spec_contract": "docs/specs/T-0128.spec.contract.json",
+    "adr": "docs/design/T-0128-connector-entity.adr.md",
+    "adr_contract": "docs/design/T-0128.adr.contract.json",
+    "review_contract": "docs/design/T-0128.review.contract.json (verdict=approved; 0 blocking; 5 nits closed 4848c47)",
+    "review_md": "docs/reviews/T-0128.review.md",
+    "test_report_md": "docs/test-reports/T-0128.test-report.md",
+    "test_report_contract": "docs/design/T-0128.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-impl-T-0128-D1",
+      "title": "impl: D1 — migrations/054_connector.sql (таблица + RLS-канон + GRANT)",
+      "scope": "ADR §3.1: CREATE TABLE IF NOT EXISTS choros.connector (tenant_id uuid PK leading, id uuid, kind text CHECK IN('1c','ad_ldap','smtp','http_generic'), display_name, config jsonb DEFAULT '{}', secret_handle nullable, status text DEFAULT 'disabled' CHECK IN('configured','disabled','error'), backs_effect_resource_id uuid nullable, created_by/at/updated_by/at). ENABLE+FORCE RLS, isolation-policy verbatim 047_email_channel_config.sql, GRANT choros_app. Слот 054 (после 053_author_report_page_seed.sql).",
+      "gates": "force_rls.sql PASS; tenant_id_leading.sql PASS; connector в known_tenant_tables.txt (после D2); миграция идемпотентна (IF NOT EXISTS + DO-guard).",
+      "depends_on": ["migrations/047_email_channel_config.sql шаблон (ЖИВОЙ)", "T-0013 RLS-канон (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D2",
+      "title": "impl: D2 — ci/checks/known_tenant_tables.txt: дописать строку 'connector'",
+      "scope": "ADR §6 FF-CONN-6/FF-CONN-7: добавить 'connector' в ci/checks/known_tenant_tables.txt → cross_tenant.test.ts и tenant_id_leading/force_rls-чеки подхватят автоматически.",
+      "gates": "cross_tenant.test.ts зелёный для connector (AC-13); force_rls.sql/tenant_id_leading.sql PASS.",
+      "depends_on": ["T-impl-T-0128-D1"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D3",
+      "title": "impl: D3 — src/core/connector.ts (pure-core: типы + порты + CRUD-функции)",
+      "scope": "ADR §3.2/§4: ConnectorKind/ConnectorStatus union + isConnector* total-predicates; ConnectorWritePort/ConnectorSecretResolverPort/ConnectorDriverPort interfaces; CRUD: setConnector/rotateConnectorSecret/revokeConnector/getConnectorStatus/listConnectors. Импорт validateSecretHandleShape/redactHandle из secret-handle-validator.ts (без передекларации). Compile-time _assert SecretsResolverPort ≡ ConnectorSecretResolverPort (как notification-email.ts:453). Нет pg/fs/net/http(s)/fetch импортов.",
+      "gates": "FF-CONN-1..5 green (connector-isolation.sh из D6); tsc --noEmit green; isConnectorKind('__bogus__') === false; setConnector({kind:'__bogus__'}) → {ok:false}.",
+      "depends_on": ["src/core/secret-handle-validator.ts (ЖИВОЙ)", "T-impl-T-0128-D1"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D4",
+      "title": "impl: D4 — src/core/postgres/pgConnectorStore.ts (DAO: тонкий, по pgEmailConfigStore.ts)",
+      "scope": "ADR §8/D4: PgConnectorStore implements ConnectorWritePort. insert/update/get/list/delete с параметризованным SQL, GUC-RLS (SET choros.tenant_id). По образцу pgEmailConfigStore.ts:60.",
+      "gates": "cross_tenant.test.ts PASS (connector в known_tenant_tables.txt); тест tenant-изоляции DAO.",
+      "depends_on": ["T-impl-T-0128-D1", "T-impl-T-0128-D2", "T-impl-T-0128-D3", "src/core/postgres/pgEmailConfigStore.ts (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D5",
+      "title": "impl: D5 — src/http/connectors.ts (HTTP CRUD + PDP-gate mgmt_object:connector)",
+      "scope": "ADR §4.1/D5: POST/PATCH/DELETE /api/connectors с PDP-gate grant-resolver T-0021 на capability mgmt_object:connector (create|update|delete|read). GET /api/connectors/:id → ConnectorStatusView с redactHandle. Паттерн agent-hire.ts:179 + src/http/seed-write.ts:405 validateAdminDelegation.",
+      "gates": "PDP-gate работает до вызова core-функции; mgmt_object:connector резолвится через живой template mgmt_object:${string} (grant-lattice.ts:37); status/list отдают handleRedacted, не raw.",
+      "depends_on": ["T-impl-T-0128-D3", "T-impl-T-0128-D4", "src/core/grant-resolver.ts (ЖИВОЙ)", "src/http/seed-write.ts:405 (ЖИВОЙ)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D6",
+      "title": "impl: D6 — ci/checks/connector-isolation.sh (FF-CONN-1..5) + регистрация в npm run fitness",
+      "scope": "ADR §6 D6: connector-isolation.sh по образцу effect-resource-isolation.sh / secret-handle-isolation.sh. FF-CONN-1 (ACL-бан: _acl/connectorRights/connector_visibility); FF-CONN-2 (forbidden-import purity); FF-CONN-3 (custody-не-передекларирована); FF-CONN-4 (implements ConnectorDriverPort = 0); FF-CONN-5 (closed-kind CHECK sync). Игнор комментариев, rc=1 vs rc≥2 (урок T-0143). Зарегистрировать в package.json fitness-цепочке + --self-test сценарий.",
+      "gates": "connector-isolation.sh --self-test PASS; все FF-CONN-1..5 зелёные на итоговом src/core/connector.ts.",
+      "depends_on": ["T-impl-T-0128-D3", "ci/checks/effect-resource-isolation.sh (ЖИВОЙ шаблон)"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D7",
+      "title": "impl: D7 — src/__tests__/connector.test.ts (unit-тесты)",
+      "scope": "ADR §9 D7: (1) closed-kind reject: setConnector({kind:'__bogus__'}) → {ok:false}, no write (AC-2/FF-CONN-5); (2) shape-guard reject raw: setConnector({secretHandle:'raw-secret'}) → {ok:false}, no write (AC-3); (3) redact в status/list: getConnectorStatus/listConnectors → handleRedacted ≠ raw, secretBound=true (AC-4); (4) audit-без-секрета: capture appendAuditEvent-input, assert payload нет secret_handle (AC-5/FF-CONN-8); (5) status декларативный: noop внешних вызовов (AC-6).",
+      "gates": "vitest connector.test.ts PASS; все 5 групп зелёные; аудит-payload проверен без handle.",
+      "depends_on": ["T-impl-T-0128-D3", "T-impl-T-0128-D4"]
+    },
+    {
+      "suggested_id": "T-impl-T-0128-D8",
+      "title": "impl: D8 — cross-tenant + diff-чистота (AC-9/10/13/15)",
+      "scope": "ADR §9 D8: (1) cross_tenant.test.ts подхватывает connector авто (D2 = добавлен в known_tenant_tables.txt) (AC-13); (2) git diff <merge-base> HEAD по T-0170-путям пуст — проверить перед мержем (AC-9/FF-CONN-9 pre-merge gate); (3) T-0170-суит notification-email.sh зелёный (AC-10); (4) git diff package.json не добавляет driver-пакетов (AC-15/FF-CONN-10).",
+      "gates": "cross_tenant.test.ts PASS для connector; git diff T-0170-пути пуст; notification-email.sh PASS; package.json без sdk 1C/AD/LDAP/SMTP/HTTP.",
+      "depends_on": ["T-impl-T-0128-D1", "T-impl-T-0128-D2", "T-impl-T-0128-D4"]
+    }
+  ],
+  "coordination_notes": [],
+  "rationale": "T-0128 — design-задача (SPEC+ADR+review+nits). ADR зафиксировал: connector = первокласс tenant-сущность (миграция 054) по живому приёму email_channel_config/T-0170, с закрытой осью kind (как EffectKind T-0034), pure-core CRUD, custody verbatim T-0025 (shape-guard/redact/resolver-port без передекларации), управление грантом mgmt_object:connector (T-0021 прецедент), два пустых seam-порта day-1. Несущие инварианты: один механизм прав = invoke-грант T-0034 (FF-CONN-1); один механизм custody = T-0025 verbatim (FF-CONN-3); нет реального внешнего вызова day-1 (FF-CONN-2/4). Review approved 57e1a6b (16/16 AC, 0 blocking, 5 nits); nits закрыты 4848c47. Diff-gate чистый (docs/** only). CI green (tsc/eslint/fitness)."
+}

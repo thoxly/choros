@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0128",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 16,
+    "passed": 16,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "covered-by-review (ADR §3.1 DDL + §3.2 TS-типы; review approved 57e1a6b)", "result": "pass"},
+    {"ac": "AC-2", "test": "covered-by-review (ADR §3.2 isConnectorKind + §3.1 CHECK(kind); FF-CONN-5; D7)", "result": "pass"},
+    {"ac": "AC-3", "test": "covered-by-review (ADR §4.2 custody verbatim T-0025 validateSecretHandleShape :78; FF-CONN-3; D7)", "result": "pass"},
+    {"ac": "AC-4", "test": "covered-by-review (ADR §4 ConnectorStatusView.handleRedacted = redactHandle; D5/D7)", "result": "pass"},
+    {"ac": "AC-5", "test": "covered-by-review (ADR §4.3 audit-без-секрета connector.set/rotate/revoke; FF-CONN-8; D7)", "result": "pass"},
+    {"ac": "AC-6", "test": "covered-by-review (ADR §3.1 status декларативный default disabled no probe; D7)", "result": "pass"},
+    {"ac": "AC-7", "test": "covered-by-review (ADR §5 единый механизм invoke-грант T-0034 verifyEffectGrants; FF-CONN-1; D6)", "result": "pass"},
+    {"ac": "AC-8", "test": "covered-by-review (ADR §4 два seam-порта + compile-time _assert; FF-CONN-2/4; D6)", "result": "pass"},
+    {"ac": "AC-9", "test": "covered-by-review (ADR §7 + FF-CONN-9 pre-merge diff-gate T-0170-пути; D8)", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review (ADR §7 T-0170-суит сосуществование; notification-email.sh PASS)", "result": "pass"},
+    {"ac": "AC-11", "test": "covered-by-review (ADR §7 почему миграция отвергнута + Stage-2 конвергенция)", "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review (ADR §3.1 RLS-канон verbatim 047; FF-CONN-6; D1/D2)", "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review (ADR §3.1 FORCE RLS + §3.2 PgConnectorStore; FF-CONN-7 cross_tenant; D4/D8)", "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review (ADR §4 заглушка без эффектов NF-2; FF-CONN-2; D6)", "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review (ADR §8 без driver-deps; FF-CONN-10; D8)", "result": "pass"},
+    {"ac": "AC-16", "test": "covered-by-review (ADR §6 tsc --noEmit + connector-isolation.sh + существующий фитнес; NF-7)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "browser/UI", "result": "n/a", "note": "design-only artifact — no UI surface"}
+  ],
+  "failures": [],
+  "blocked_reason": "",
+  "diff_gate": "PASS — docs/** only (6 files); zero src/, migrations/, package.json, ci/checks/ changes",
+  "npm_ci_result": "PASS — tsc 0 new errors (pre-existing worktree lifecycle-bridge errors not introduced by T-0128); eslint no new errors; fitness all green (notification-email.sh PASS, pilot-adr-*.sh PASS, package-json-no-dup-keys PASS); vitest deferred-to-impl (no new test code)",
+  "review_verdict": "approved (57e1a6b); 16/16 AC covered; 0 blocking; 5 nits R-1..R-5 closed 4848c47",
+  "nits_applied": {
+    "R-1": "grant-lattice.ts:33 → :37 (template строка, не начало union) — CLOSED 4848c47",
+    "R-2": "§5 явная фраза dangling backs_effect_resource_id = no-op — CLOSED 4848c47",
+    "R-3": "seed-write.ts:405 → src/http/seed-write.ts:405 — CLOSED 4848c47",
+    "R-4": "§3.1/§5 нота http_generic = closed-kind, не generic-egress — CLOSED 4848c47",
+    "R-5": "FF-CONN-9 переклассифицирован в pre-merge diff-gate; AC-10 = вечный инвариант — CLOSED 4848c47"
+  }
+}
