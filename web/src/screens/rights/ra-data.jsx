@@ -12,8 +12,8 @@ import { Icon } from '../../app-shell/icon.jsx';
 /* ---------------------------------------------------------------------------
    ОПЕРАЦИИ ГРАНТА — машинные коды
    --------------------------------------------------------------------------- */
-const OP_LABEL = { read: "read", write: "write", exec: "exec", approve: "approve" };
-const OP_RU = { read: "чтение", write: "запись", exec: "вызов", approve: "утвердить" };
+const OP_LABEL = { read: "read", write: "write", invoke: "invoke", approve: "approve" };
+const OP_RU = { read: "чтение", write: "запись", invoke: "вызов", approve: "утвердить" };
 
 /* ---------------------------------------------------------------------------
    ОРГСТРУКТУРА — закрытая решётка для scope-пикера (узлы дерева)
@@ -205,8 +205,8 @@ function axesFromGrants(grants) {
   grants.forEach((g) => {
     const r = RES_BY_URI[g.uri];
     if (!r) return;
-    if (r.guarded && (g.ops.includes("exec") || g.ops.includes("approve"))) axes.guarded = true;
-    if (r.external && g.ops.includes("exec")) axes.external = true;
+    if (r.guarded && (g.ops.includes("invoke") || g.ops.includes("approve"))) axes.guarded = true;
+    if (r.external && g.ops.includes("invoke")) axes.external = true;
     if (r.sensitive && (g.ops.includes("read") || g.ops.includes("write"))) axes.sensitive = true;
   });
   return axes;
@@ -246,14 +246,14 @@ const SOD_RULES = [
    ЖУРНАЛ ВЫДАЧИ ПРАВ — append-only grant trail
    --------------------------------------------------------------------------- */
 const TRAIL = [
-  { ts: "2026-06-08 14:21:06.318", id: "grt-9f4a2c", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "human", name: "Е. Ларина" }, role: "Согласование ≤ ₽250 000", res: "mcp://payments.initiate", op: "exec", scope: "≤ ₽250 000", proposed: "human", confirmed: ["М. Соколов", "Д. Гаврилов"], crit: true },
+  { ts: "2026-06-08 14:21:06.318", id: "grt-9f4a2c", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "human", name: "Е. Ларина" }, role: "Согласование ≤ ₽250 000", res: "mcp://payments.initiate", op: "invoke", scope: "≤ ₽250 000", proposed: "human", confirmed: ["М. Соколов", "Д. Гаврилов"], crit: true },
   { ts: "2026-06-08 13:58:44.901", id: "grt-9f49b1", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "agent", name: "Счёт-агент" }, role: "Согласующий счетов ≤ ₽50 000", res: "mcp://ledger.invoices", op: "write", scope: "Финансы · Согласование", proposed: "llm", confirmed: ["М. Соколов"], crit: false },
-  { ts: "2026-06-08 13:58:44.901", id: "grt-9f49b0", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "agent", name: "Счёт-агент" }, role: "Согласующий счетов ≤ ₽50 000", res: "mcp://ocr.extract", op: "exec", scope: "Финансы · Согласование", proposed: "llm", confirmed: ["М. Соколов"], crit: false },
-  { ts: "2026-06-08 11:42:19.044", id: "grt-9f3d77", action: "revoke", actor: { type: "human", name: "А. Кравцова" }, subject: { type: "human", name: "К. Орлов" }, role: "Эскалации L2", res: "mcp://payments.refund", op: "exec", scope: "≤ ₽30 000", proposed: "human", confirmed: ["А. Кравцова", "И. Петров"], crit: true },
+  { ts: "2026-06-08 13:58:44.901", id: "grt-9f49b0", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "agent", name: "Счёт-агент" }, role: "Согласующий счетов ≤ ₽50 000", res: "mcp://ocr.extract", op: "invoke", scope: "Финансы · Согласование", proposed: "llm", confirmed: ["М. Соколов"], crit: false },
+  { ts: "2026-06-08 11:42:19.044", id: "grt-9f3d77", action: "revoke", actor: { type: "human", name: "А. Кравцова" }, subject: { type: "human", name: "К. Орлов" }, role: "Эскалации L2", res: "mcp://payments.refund", op: "invoke", scope: "≤ ₽30 000", proposed: "human", confirmed: ["А. Кравцова", "И. Петров"], crit: true },
   { ts: "2026-06-08 10:15:02.560", id: "grt-9f2a10", action: "narrow", actor: { type: "service", name: "policy-sync" }, subject: { type: "agent", name: "Триаж-агент" }, role: "Линия поддержки L1", res: "mcp://crm.customer", op: "read", scope: "Поддержка → Поддержка L1", proposed: "human", confirmed: ["М. Соколов"], crit: false },
   { ts: "2026-06-07 18:33:51.222", id: "grt-9e88c3", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "human", name: "Н. Савина" }, role: "Линия поддержки L1", res: "mcp://support.queue", op: "write", scope: "Поддержка", proposed: "llm", confirmed: ["М. Соколов"], crit: false },
   { ts: "2026-06-07 16:09:12.700", id: "grt-9e71fa", action: "grant", actor: { type: "human", name: "А. Кравцова" }, subject: { type: "human", name: "А. Кравцова" }, role: "Приёмник эскалаций агентов", res: "mcp://escalations.queue", op: "write", scope: "Финансы", proposed: "human", confirmed: ["А. Кравцова", "М. Соколов"], crit: false },
-  { ts: "2026-06-07 15:47:30.119", id: "grt-9e6d05", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "service", name: "ledger-sync" }, role: "Коннектор реестра", res: "mcp://bus.publish", op: "exec", scope: "Платформа", proposed: "human", confirmed: ["М. Соколов"], crit: false },
+  { ts: "2026-06-07 15:47:30.119", id: "grt-9e6d05", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "service", name: "ledger-sync" }, role: "Коннектор реестра", res: "mcp://bus.publish", op: "invoke", scope: "Платформа", proposed: "human", confirmed: ["М. Соколов"], crit: false },
   { ts: "2026-06-07 09:21:48.005", id: "grt-9e2b88", action: "grant", actor: { type: "human", name: "Д. Гаврилов" }, subject: { type: "human", name: "Е. Ларина" }, role: "Сверка платежей", res: "mcp://ledger.recon", op: "write", scope: "Финансы · Закрытие месяца", proposed: "llm", confirmed: ["Д. Гаврилов", "М. Соколов"], crit: false },
   { ts: "2026-06-06 17:55:13.840", id: "grt-9d04f1", action: "grant", actor: { type: "human", name: "М. Соколов" }, subject: { type: "human", name: "И. Петров" }, role: "Эскалации L2", res: "mcp://crm.customer", op: "write", scope: "Поддержка", proposed: "human", confirmed: ["М. Соколов"], crit: false },
 ];

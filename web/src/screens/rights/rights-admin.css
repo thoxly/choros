@@ -182,7 +182,7 @@
 .chs-opbtn:hover { color: var(--chs-color-text); border-color: var(--chs-color-text-faint); }
 .chs-opbtn--on.chs-opbtn--read  { color: var(--chs-color-info);    background: var(--chs-color-info-soft);    border-color: transparent; }
 .chs-opbtn--on.chs-opbtn--write { color: var(--chs-color-warning); background: var(--chs-color-warning-soft); border-color: transparent; }
-.chs-opbtn--on.chs-opbtn--exec  { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft);  border-color: transparent; }
+.chs-opbtn--on.chs-opbtn--invoke { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft);  border-color: transparent; }
 .chs-opbtn--on.chs-opbtn--approve { color: var(--chs-color-accent); background: var(--chs-color-accent-soft); border-color: transparent; }
 .chs-gedit__scope { display: flex; align-items: center; gap: var(--chs-space-3); flex-wrap: wrap; border: 1px dashed var(--chs-color-border-strong); background: transparent; border-radius: var(--chs-radius-2); padding: var(--chs-space-2) var(--chs-space-4); cursor: pointer; min-height: 26px; text-align: left; }
 .chs-gedit__scope:hover { border-color: var(--chs-color-accent-border); }

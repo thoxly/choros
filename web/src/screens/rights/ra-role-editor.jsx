@@ -26,7 +26,7 @@ const IN_CEILING = descendantsOf(CEILING_ID);
 const INITIAL_GRANTS = [
   { uri: "mcp://ledger.invoices", ops: ["read", "write"], nodes: ["fin-approve"], tags: [], range: "" },
   { uri: "mcp://contracts.lookup", ops: ["read"], nodes: ["fin"], tags: ["contracts"], range: "" },
-  { uri: "mcp://payments.initiate", ops: ["exec"], nodes: ["fin-approve"], tags: ["payments"], range: "≤ ₽50 000" },
+  { uri: "mcp://payments.initiate", ops: ["invoke"], nodes: ["fin-approve"], tags: ["payments"], range: "≤ ₽50 000" },
 ];
 
 // Static mock removed (AC-14 / T-0039). propose() makes a live HTTP call.
@@ -119,7 +119,7 @@ function scopeSummary(g) {
 /* ---------------- Строка гранта (advanced) ---------------- */
 function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
   const res = RES_BY_URI[g.uri];
-  const ALL_OPS = ["read", "write", "exec", "approve"];
+  const ALL_OPS = ["read", "write", "invoke", "approve"];
   const toggleOp = (op) => {
     const has = g.ops.includes(op);
     onChange(idx, { ...g, ops: has ? g.ops.filter((o) => o !== op) : [...g.ops, op] });
@@ -170,7 +170,6 @@ function nodeToScope(nodes, range) {
 /** Map UI op labels → canonical Operation literals. */
 function mapOp(op) {
   if (op === "write") return "update";
-  if (op === "exec") return "invoke";
   return op;
 }
 
