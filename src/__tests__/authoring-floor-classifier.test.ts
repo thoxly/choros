@@ -53,6 +53,7 @@ describe("AC-1 — Floor-1 kinds → requiredFloor:'1'", () => {
     "hide_field",
     "show_field",
     "reorder_fields",
+    "set_help_text",
   ];
 
   for (const kind of floor1Kinds) {
@@ -211,6 +212,7 @@ describe("AC-7 — result.reason is non-empty string", () => {
     "hide_field",
     "show_field",
     "reorder_fields",
+    "set_help_text",
     "add_field",
     "drop_field",
     "rename_field",
@@ -284,6 +286,22 @@ describe("AC-9 — Floor-1 kinds individually: requiredFloor + reason contains k
     const r = classifyAuthoringFloor(change("reorder_fields"));
     expect(r.requiredFloor).toBe("1");
     expect(r.reason).toContain("reorder_fields");
+  });
+
+  it("set_help_text → '1', reason mentions 'set_help_text' (ADR §9.1 sixth Floor-1 op)", () => {
+    // ADR §9.1 + T-0073: help-text is a first-class Floor-1 button operation,
+    // distinct from relabel_field. T-0073 emits set_help_text — must NOT fall
+    // through to unknown→Floor-2 (R-1 fix, review 2026-06-12).
+    const r = classifyAuthoringFloor(change("set_help_text", "description"));
+    expect(r.requiredFloor).toBe("1");
+    expect(r.reason).toContain("set_help_text");
+  });
+
+  it("set_help_text without fieldKey → Floor-1, valid reason", () => {
+    const r = classifyAuthoringFloor(change("set_help_text"));
+    expect(r.requiredFloor).toBe("1");
+    expect(typeof r.reason).toBe("string");
+    expect(r.reason.length).toBeGreaterThan(0);
   });
 });
 

@@ -43,18 +43,22 @@
  * Floor-1 kinds — декларативные, config-primary, button-edit, zero-LLM.
  * Детерминированны, переживают агента-офлайн (§4).
  *
- * relabel_field      — изменить label / placeholder / help-text поля.
+ * relabel_field      — изменить label / placeholder поля (без help-text).
  * toggle_required    — переключить required/optional у поля.
  * hide_field         — скрыть поле (visibility=hidden).
  * show_field         — показать скрытое поле.
  * reorder_fields     — изменить порядок отображения полей.
+ * set_help_text      — задать / обновить help-text поля (ADR §9.1, T-0073).
+ *                      Отдельный kind: T-0073 эмитирует set_help_text как
+ *                      самостоятельную кнопочную операцию (relabel/hide/required/order/help).
  */
 export type Floor1EditKind =
   | "relabel_field"
   | "toggle_required"
   | "hide_field"
   | "show_field"
-  | "reorder_fields";
+  | "reorder_fields"
+  | "set_help_text";
 
 /**
  * Floor-2 kinds — структурные, требуют агента / кода / schema-migration.
@@ -97,6 +101,7 @@ export const FLOOR1_EDIT_KINDS: ReadonlySet<Floor1EditKind> = new Set<Floor1Edit
   "hide_field",
   "show_field",
   "reorder_fields",
+  "set_help_text",
 ]);
 
 /** Все Floor-2 kinds — structural, requires agent / code / migration. */
