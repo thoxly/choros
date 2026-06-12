@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0189",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1385,
+    "passed": 1385,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1: break present after case 'effect_resource' body, no fall-through to outbox",
+      "test": "cross_tenant.test.ts > AC-2 effect_resource + effect_resource.test.ts FF-ER1/FF-ER2 — no spurious outbox row; 9 effect_resource tests green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2: No spurious outbox row when seeding effect_resource",
+      "test": "cross_tenant.test.ts > AC-2 … outbox — 1 row, own tenant only; T-0188 double-seed path confirmed eliminated",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-CT-4: effect_resource remains in SEEDED_TABLES (T-0188 guard not regressed)",
+      "test": "cross_tenant.test.ts > AC-CT-4 guard — all 36+ known_tenant_tables.txt entries covered, 115 tests green",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-ESL-1: no-fallthrough: error active for ci/checks/db/**/*.ts",
+      "test": "Planted fall-through probe in BUILD confirmed exit 1; eslint.config.js block additive at end, verified by git diff",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-ESL-2: eslint src block untouched (additive only)",
+      "test": "git diff — zero removal lines in src/**/*.ts eslint block; exit 0 confirmed",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-ESL-3: tsc --noEmit exits 0",
+      "test": "npm run ci — tsc --noEmit exit 0, 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-ESL-4: npm run fitness (static) exits 0",
+      "test": "npm run ci — all 38 static checks green",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "fitness:db total: 599/599 passed — full live DB suite clean",
+      "result": "pass",
+      "note": "43 files, 0 failed, 0 skipped; T-0147 cloned template isolation used"
+    },
+    {
+      "check": "effect_resource.test.ts: 9/9 green (FF-ER1 + FF-ER2)",
+      "result": "pass",
+      "note": "Covers effect_resource isolation from outbox — direct regression confirmation"
+    },
+    {
+      "check": "Nit R-N1 comment fix applied (05064c5) — docs-only, no functional change",
+      "result": "pass",
+      "note": "eslint.config.js comment now accurately states '3 most noisy TS-specific rules' disabled, not 'all'"
+    },
+    {
+      "check": "8 pre-existing prefer-const violations in ci/checks/db/ (not in CI scope)",
+      "result": "n/a",
+      "note": "Pre-existing on dev; invisible to npm run ci (eslint src only); candidate follow-up cleanup"
+    }
+  ],
+  "failures": [],
+  "tested_commit": "05064c5",
+  "branch": "task/T-0189-seeder-fallthrough",
+  "run_details": {
+    "tsc_noEmit": "exit 0 — 0 errors",
+    "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings",
+    "fitness_static": "PASS — all 38 checks green",
+    "vitest_unit": "1385/1385 passed, 6 skipped (2 skip files: kc.e2e, flowable integration), 70 files",
+    "fitness_db_effect_resource": "9/9 PASS (effect_resource.test.ts)",
+    "fitness_db_cross_tenant": "115/115 PASS — AC-CT-4 guard green, 0 skipped",
+    "fitness_db_total": "599/599 passed, 0 failed, 0 skipped, 43 files"
+  }
+}
