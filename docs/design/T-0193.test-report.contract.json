@@ -1,0 +1,74 @@
+{
+  "task_id": "T-0193",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1995,
+    "passed": 1992,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-T0193-DENY-FLOOR1",
+      "test": "ci/checks/db/report_page_render_t0193.test.ts: actor grant(read, App-A) + page of App-B → GET /render/:pageId → 403 NO_READ_GRANT (live-DB)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-T0193-DENY-FLOOR2",
+      "test": "ci/checks/db/report_page_render_t0193.test.ts: actor grant(read, App-A) + page of App-B → GET /data/:pageId → 403 NO_READ_GRANT (live-DB)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-T0193-ALLOW-FLOOR1",
+      "test": "ci/checks/db/report_page_render_t0193.test.ts: actor grant(read, App-A) + page of App-A → GET /render/:pageId → 200 (live-DB)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-T0193-ALLOW-FLOOR2",
+      "test": "ci/checks/db/report_page_render_t0193.test.ts: actor grant(read, App-A) + page of App-A → GET /data/:pageId → 200 (live-DB)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6-nevyroz",
+      "test": "ci/checks/db/report_page_render_ac6.test.ts: 4 deny/allow Floor-1/Floor-2 probes remain green post-T-0193 (live-DB)",
+      "result": "pass"
+    },
+    {
+      "ac": "tsc",
+      "test": "tsc --noEmit: exit 0, 0 errors",
+      "result": "pass"
+    },
+    {
+      "ac": "unit-tests",
+      "test": "vitest run: 1389 pass, 6 skip (flowable offline), 0 fail; src/__tests__/report-page-render.test.ts 26/26",
+      "result": "pass"
+    },
+    {
+      "ac": "fitness-db",
+      "test": "npm run fitness:db: 44 files, 603 tests, 0 fail",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "R-N1 (review nit): 404-disclosure oracle в ADR T-0121 §6 не задокументирован",
+      "result": "n/a",
+      "note": "Кандидат-амендмент ADR T-0121. Не правим чужой ADR в этой задаче (R-N1 по заданию). Зафиксировано в pr-handoff design_notes."
+    },
+    {
+      "check": "equality-only oracle — Stage-2 кандидат (T-0053 tree traversal)",
+      "result": "n/a",
+      "note": "Иерархические скоупы (parent→child) не поддерживаются до T-0053. Текущее поведение fail-safe: широкие гранты не открывают child-app. Зафиксировано в pr-handoff design_notes."
+    },
+    {
+      "check": "report_page_render_ac6.test.ts — caller adaptation (seedApplicationReadGrant +appId param)",
+      "result": "pass",
+      "note": "Легальная адаптация под новую семантику containment. Логика проб не ослаблена. Frozen-file политика: этот файл принадлежит T-0181 (адаптация разрешена)."
+    },
+    {
+      "check": "isNarrowerOrEqual — import, not duplication",
+      "result": "pass",
+      "note": "Импортируется из src/core/grant-lattice.ts. Паттерн идентичен secret-handle.ts."
+    }
+  ],
+  "failures": []
+}

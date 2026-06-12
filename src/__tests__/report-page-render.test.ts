@@ -84,6 +84,14 @@ const denyDeps: ReportPageRenderAuthzDeps = {
   checkReadGrant: async () => ({ ok: false, reason: "no_read_grant_on_application" }),
 };
 
+// Scope-scoped allow/deny: allow only for VALID_APP_ID, deny for any other app_id.
+const scopedAllowDeps = (allowedAppId: string): ReportPageRenderAuthzDeps => ({
+  checkReadGrant: async (_pool, _tenantId, _actorId, appId, _nowMs) => {
+    if (appId === allowedAppId) return { ok: true };
+    return { ok: false, reason: "no_read_grant_on_application" };
+  },
+});
+
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
@@ -701,7 +709,16 @@ describe("AC-6 — Floor-2 data: NO_READ_GRANT", () => {
     () =>
       new Promise<void>((resolve) => {
         resetRenderPoolForTesting();
-        const { server: s, baseUrl: b } = buildTestServer(denyDeps, makeFakePool([]));
+        // T-0193: page is loaded first (to get app_id), then denyDeps rejects.
+        // Row sequence: BEGIN, SET LOCAL ×2, SELECT report_page, ROLLBACK.
+        const rowSets: unknown[][] = [
+          [],               // BEGIN
+          [],               // SET LOCAL tenant_id
+          [],               // SET LOCAL search_path
+          [fakeFloor2Page], // SELECT report_page → page exists (floor=2)
+          [],               // ROLLBACK (error path — denyDeps rejects after page load)
+        ];
+        const { server: s, baseUrl: b } = buildTestServer(denyDeps, makeFakePool(rowSets));
         server = s;
         baseUrl = b;
         server.listen(0, "127.0.0.1", resolve);
@@ -813,8 +830,16 @@ describe("AC-10-FLOOR1 — Floor-1 render: 403 NO_READ_GRANT when denied", () =>
     () =>
       new Promise<void>((resolve) => {
         resetRenderPoolForTesting();
-        // denyDeps: checkReadGrant returns {ok:false} — no pool queries needed
-        const { server: s, baseUrl: b } = buildTestServer(denyDeps, makeFakePool([]));
+        // T-0193: page is loaded first (to get app_id), then denyDeps rejects.
+        // Row sequence: BEGIN, SET LOCAL ×2, SELECT report_page, ROLLBACK.
+        const rowSets: unknown[][] = [
+          [],               // BEGIN
+          [],               // SET LOCAL tenant_id
+          [],               // SET LOCAL search_path
+          [fakeFloor1Page], // SELECT report_page → page exists (floor=1)
+          [],               // ROLLBACK (error path — denyDeps rejects after page load)
+        ];
+        const { server: s, baseUrl: b } = buildTestServer(denyDeps, makeFakePool(rowSets));
         server = s;
         baseUrl = b;
         server.listen(0, "127.0.0.1", resolve);
@@ -835,6 +860,147 @@ describe("AC-10-FLOOR1 — Floor-1 render: 403 NO_READ_GRANT when denied", () =>
     const body = json as Record<string, unknown>;
     const err = body["error"] as Record<string, unknown> | undefined;
     expect(err?.["code"]).toBe("NO_READ_GRANT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0193 (R-6): Two-app scope-containment probe
+//
+// A grant scoped to App-A must allow App-A pages and DENY App-B pages.
+// Tests use scopedAllowDeps(allowedAppId) which returns ok:true only for
+// the specific appId matching the grant scope.
+// ---------------------------------------------------------------------------
+
+const OTHER_APP_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb02";  // different from VALID_APP_ID
+
+// Page belonging to OTHER_APP_ID
+const fakeFloor1PageOtherApp = {
+  id: VALID_PAGE_ID,
+  app_id: OTHER_APP_ID,
+  floor: "1",
+  page_def: [
+    { source_registry_def_id: VALID_REG_DEF_ID, field_key: "amount", agg: "sum" },
+  ],
+  page_code: null,
+};
+
+const fakeFloor2PageOtherApp = {
+  id: VALID_PAGE_ID,
+  app_id: OTHER_APP_ID,
+  floor: "2",
+  page_def: null,
+  page_code: "export default function() { return <div/>; }",
+};
+
+describe("T-0193 R-6 — two-app scope-containment: grant on App-A, page of App-B → 403", () => {
+  it("Floor-1 /render: App-B page with grant scoped to App-A → 403 NO_READ_GRANT", async () => {
+    resetRenderPoolForTesting();
+    // scopedAllowDeps(VALID_APP_ID): allows VALID_APP_ID, denies OTHER_APP_ID.
+    // Page has app_id = OTHER_APP_ID → grant does NOT cover → 403.
+    const rowSets: unknown[][] = [
+      [],                        // BEGIN
+      [],                        // SET LOCAL tenant_id
+      [],                        // SET LOCAL search_path
+      [fakeFloor1PageOtherApp],  // SELECT report_page → app_id=OTHER_APP_ID
+      [],                        // ROLLBACK (error path)
+    ];
+    const { server, baseUrl } = buildTestServer(
+      scopedAllowDeps(VALID_APP_ID),  // grant scoped to VALID_APP_ID only
+      makeFakePool(rowSets),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl() + `/api/report-pages/${VALID_PAGE_ID}/render`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(403);
+      const body = json as Record<string, unknown>;
+      const err = body["error"] as Record<string, unknown> | undefined;
+      expect(err?.["code"]).toBe("NO_READ_GRANT");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("Floor-2 /data: App-B page with grant scoped to App-A → 403 NO_READ_GRANT", async () => {
+    resetRenderPoolForTesting();
+    const rowSets: unknown[][] = [
+      [],                        // BEGIN
+      [],                        // SET LOCAL tenant_id
+      [],                        // SET LOCAL search_path
+      [fakeFloor2PageOtherApp],  // SELECT report_page → app_id=OTHER_APP_ID
+      [],                        // ROLLBACK (error path)
+    ];
+    const { server, baseUrl } = buildTestServer(
+      scopedAllowDeps(VALID_APP_ID),  // grant scoped to VALID_APP_ID only
+      makeFakePool(rowSets),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl() + `/api/report-pages/${VALID_PAGE_ID}/data?registry_def_id=${VALID_REG_DEF_ID}`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(403);
+      const body = json as Record<string, unknown>;
+      const err = body["error"] as Record<string, unknown> | undefined;
+      expect(err?.["code"]).toBe("NO_READ_GRANT");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("Floor-1 /render: App-A page with grant scoped to App-A → 200", async () => {
+    resetRenderPoolForTesting();
+    // Page has app_id = VALID_APP_ID → grant covers → 200.
+    const rowSets = makeFloor1RenderRowSets("42.00");
+    const { server, baseUrl } = buildTestServer(
+      scopedAllowDeps(VALID_APP_ID),  // grant scoped to VALID_APP_ID, matches page
+      makeFakePool(rowSets),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status } = await httpReq(
+        "GET",
+        baseUrl() + `/api/report-pages/${VALID_PAGE_ID}/render`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("Floor-2 /data: App-A page with grant scoped to App-A → 200", async () => {
+    resetRenderPoolForTesting();
+    const rowSets: unknown[][] = [
+      [],
+      [],
+      [],
+      [fakeFloor2Page],       // app_id = VALID_APP_ID → grant covers
+      [fakeRegDefForData],    // registry_def check
+      [{ total: "0" }],       // COUNT(*)
+      [],                     // empty records
+      [],                     // COMMIT
+    ];
+    const { server, baseUrl } = buildTestServer(
+      scopedAllowDeps(VALID_APP_ID),
+      makeFakePool(rowSets),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status } = await httpReq(
+        "GET",
+        baseUrl() + `/api/report-pages/${VALID_PAGE_ID}/data?registry_def_id=${VALID_REG_DEF_ID}`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
