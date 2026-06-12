@@ -135,6 +135,10 @@ describe("AC-06: p-treasury-exec content", () => {
     expect(preset).toBeDefined();
   });
 
+  it("has exactly 4 grant atoms", () => {
+    expect(preset!.grants).toHaveLength(4);
+  });
+
   it("is marked critical:true", () => {
     expect(preset!.critical).toBe(true);
   });

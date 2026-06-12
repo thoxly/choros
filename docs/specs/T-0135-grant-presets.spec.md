@@ -78,7 +78,7 @@ Slug-ключи: `org | fin | fin-calc | fin-approve | fin-treasury | cs | cs-l1
 | id | label | Гранты | Крит. |
 |----|-------|--------|-------|
 | `p-budget-approver` | Согласующий бюджета в Финансах | ledger.invoices:read + ledger.invoices:approve, scopeOrg=fin | нет |
-| `p-treasury-exec` | Казначей-исполнитель | ledger.invoices:read + ledger.recon:read,write + payments.initiate:invoke, constraint≤500k, scopeOrg=fin-treasury | **critical** |
+| `p-treasury-exec` | Казначей-исполнитель | ledger.invoices:read + ledger.recon:read + ledger.recon:update + payments.initiate:invoke (4 атома), constraint≤500k, scopeOrg=fin-treasury | **critical** |
 | `p-audit-observer` | Наблюдатель аудита | ledger.invoices:read + ledger.recon:read + contracts.lookup:read, scopeOrg=fin | нет |
 | `p-contract-initiator` | Инициатор договорной работы | contracts.lookup:read,create + counterparty.kyc:read, scopeOwn=true | нет |
 | `p-contract-approver` | Согласующий договоров | contracts.lookup:read,approve + counterparty.kyc:read, scopeOwn=true | нет |
@@ -131,7 +131,7 @@ interface GrantPreset {
 | AC-03 | `resource_type` каждого гранта в каждом пресете совпадает с URI из `resources` (тот же словарь из DICT_RESOURCES). | test |
 | AC-04 | `operation` каждого гранта — одно из `["read","create","update","delete","approve","transition","invoke"]`. | test |
 | AC-05 | Пресет `p-budget-approver` содержит ровно 2 атома: `mcp://ledger.invoices:read` и `mcp://ledger.invoices:approve`. | test |
-| AC-06 | Пресет `p-treasury-exec` содержит 3 атома с ресурсами `ledger.invoices` (read), `ledger.recon` (read, write) и `payments.initiate` (invoke); помечен `critical:true`. | test |
+| AC-06 | Пресет `p-treasury-exec` содержит ровно 4 атома: `ledger.invoices:read`, `ledger.recon:read`, `ledger.recon:update` и `payments.initiate:invoke`; помечен `critical:true`. | test |
 | AC-07 | Пресет `p-pay-init-limited` помечен `critical:true`; содержит `payments.initiate:invoke` с `constraint.amount_le = 250000`. | test |
 | AC-08 | Нет вырожденного пресета (пустой `grants` массив не допускается). | test |
 | AC-09 | `DICT_PRESETS` экспортируется из `src/http/grants.ts` (или отдельного модуля) и импортируется в обработчик `registerDictionariesRoute`; никакого дублирования логики расширения в другой ветке. | fitness |
