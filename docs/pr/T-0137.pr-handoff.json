@@ -1,0 +1,128 @@
+{
+  "task_id": "T-0137",
+  "status": "pr_open",
+  "branch": "task/T-0137-rights-ui-slice",
+  "merge_target": "dev",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "head_sha": "30d9ff3",
+  "review_sha": "e89c8d2",
+  "test_report_sha": "30d9ff3",
+  "files_changed": [
+    "docs/design/T-0137.review.contract.json",
+    "docs/reviews/T-0137.review.md",
+    "web/src/app-shell/shell.jsx",
+    "web/src/main.jsx",
+    "web/src/screens/rights/ra-criticality.jsx",
+    "web/src/screens/rights/ra-role-editor.jsx",
+    "web/src/screens/rights/ra-shell.jsx",
+    "web/src/screens/rights/rights-admin.css",
+    "docs/test-reports/T-0137.test-report.md",
+    "docs/design/T-0137.test-report.contract.json",
+    "docs/pr/T-0137.pr-handoff.json"
+  ],
+  "verdicts": {
+    "ci": "PASS — tsc 0 errors + eslint 0 errors (2 pre-existing no-console warnings) + fitness all PASS (dual-control-isolation / role-criticality-isolation / grant-editor-isolation / frozen-checks-immutable) + vitest 1548/1554 (6 skipped)",
+    "vite_build": "PASS — 51 modules clean, 96 kB CSS, 257 kB JS",
+    "review": "approved (e89c8d2) — 2 nits R-N1/R-N2; both closed in commit 30d9ff3",
+    "test_report": "pass (10/10 AC; 8 test/live-covered, 2 nit-application ACs)"
+  },
+  "nit_dispositions": {
+    "R-N1": {
+      "status": "closed",
+      "commit": "30d9ff3",
+      "note": "ra-shell.jsx header changed to 'standalone preview harness, не импортируется в AppShell — сохранён для дизайн-итераций'. File intentionally preserved as design-iteration artifact."
+    },
+    "R-N2": {
+      "status": "closed",
+      "commit": "30d9ff3",
+      "note": "chs-dualbanner in ra-criticality.jsx now includes span.chs-dualbanner__hint: 'Второй подтверждающий обязан иметь admin-полномочия — проверяется бэкендом.' CSS rule .chs-dualbanner__hint added (opacity:0.75, italic).",
+      "backend_finding": "handleSecondConfirm (grants.ts:1162) does NOT re-run validateAdminDelegation for the second confirmer — enforces only distinctness over authenticated principal ids (actor !== proposed_by && actor !== confirmed_by). Admin authority of the second actor is NOT re-checked. The UI hint text 'проверяется бэкендом' is a user-guidance statement; it technically overstates the backend enforcement. This is a deliberate T-0044 rev-2 design decision (R-AUTH §9.6 notes the second-confirm path 'only checks distinctness over the DB row'). Flagged as candidate follow-up — see handoff_candidates below."
+    }
+  },
+  "handoff_candidates": [
+    {
+      "id": "HC-T-0137-admin-authority-second-confirm",
+      "severity": "low",
+      "description": "handleSecondConfirm does not validate admin authority of the second confirmer — only enforces distinctness. A non-admin authenticated user can serve as the second confirmer on a dual-control escalation. The first-request validateAdminDelegation gate does not cover the second actor. This gap is intentional in T-0044 rev-2 (the assumption is that the second actor is also an authenticated principal with implicit authority). If the product requires admin-authority enforcement for the second confirmer, a follow-up task should add a validateAdminDelegation call in handleSecondConfirm before the UPDATE.",
+      "file": "src/http/grants.ts",
+      "function": "handleSecondConfirm",
+      "lines": "1162-1264",
+      "proposed_resolution": "Add loadAdminContext + validateAdminDelegation call inside handleSecondConfirm before the confirmed2_by UPDATE. Alternatively, document the current behaviour as 'distinctness-only, no admin-re-check' in the ADR and accept it."
+    }
+  ],
+  "founder_walkthrough": {
+    "purpose": "T-0137 closes gap-map Zone 7 (4 ra-screens disconnected from AppShell) + Zone 4 (dual-control UI). This walkthrough is the founder's attention queue for confirming the rights-panel UX and dual-control flow.",
+    "url": "http://100.121.76.86:8080/ (Tailscale homeserver) or http://localhost:8080/ (local)",
+    "prereqs": [
+      "Dev stack running: docker compose up -d postgres + migrations applied",
+      "Server: DATABASE_URL=postgres://choros_migrator:choros_dev_pw@localhost:55432/choros PORT=8080 node dist/index.js",
+      "Build: npm run build (produces dist/index.js + web/dist/)"
+    ],
+    "screens": [
+      {
+        "url": "/rights",
+        "label": "Права и доступ — список ролей",
+        "note": "Entry point — shows role-card list"
+      },
+      {
+        "url": "/rights/editor",
+        "label": "Редактор роли",
+        "note": "Role grant editor with dual-control UI — main T-0137 feature"
+      },
+      {
+        "url": "/rights/criticality",
+        "label": "Критичность · согласование",
+        "note": "Shows critical vs. standard change scenario; dual-control banner with R-N2 admin hint"
+      },
+      {
+        "url": "/rights/sod",
+        "label": "Разделение обязанностей",
+        "note": "SoD constraint viewer"
+      },
+      {
+        "url": "/rights/trail",
+        "label": "Журнал выдачи прав",
+        "note": "Grant audit trail"
+      }
+    ],
+    "dual_control_demo_steps": [
+      {
+        "step": 1,
+        "persona": "Persona A (e.g. e-owner or any user with admin rights)",
+        "action": "Navigate to /rights/editor. Select a role. Add a grant with resource_type=effect_resource, operation=invoke (this triggers external_invoke axis escalation). Click Сохранить. The response should show a dual-control banner: 'Требуется подтверждение второго аппрувера'."
+      },
+      {
+        "step": 2,
+        "persona": "Same as Persona A",
+        "action": "In the confirmActor input, enter the SAME actor id as Persona A (e.g. 'e-owner'). Click Confirm2. Backend returns 409 DUAL_CONTROL_UNSATISFIED/self_confirm. UI shows error reason. This confirms self-confirm is rejected."
+      },
+      {
+        "step": 3,
+        "persona": "Persona B (different slug, e.g. 'e-owner2')",
+        "action": "In the confirmActor input, enter a DIFFERENT actor id (e.g. 'e-owner2'). Click Confirm2. Backend returns 200 and the grant transitions to confirmed. Banner shows green confirmation."
+      }
+    ],
+    "r_n1_note": "ra-shell.jsx is a standalone preview harness intentionally kept for design iterations. It is NOT imported in the production AppShell. The header comment documents this.",
+    "r_n2_note": "The dual-control banner in /rights/criticality now shows the hint 'Второй подтверждающий обязан иметь admin-полномочия — проверяется бэкендом.' Note: the backend enforces distinctness only for the second actor (not re-validates admin authority). See handoff_candidates for the open design question.",
+    "gate_outcome": "If the founder confirms the rights-panel UX and dual-control flow on dev, T-0137 can be merged to dev."
+  },
+  "deviations_from_adr": [
+    "No ADR changes — T-0137 is a UI wiring task. Wiring uses the existing T-0044 dual-control backend (grants.ts) and existing T-0018 grant-lattice. No new architectural decisions."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "artifacts": {
+    "review_contract": "docs/design/T-0137.review.contract.json",
+    "review_md": "docs/reviews/T-0137.review.md",
+    "test_report_md": "docs/test-reports/T-0137.test-report.md",
+    "test_report_contract": "docs/design/T-0137.test-report.contract.json",
+    "pr_handoff": "docs/pr/T-0137.pr-handoff.json"
+  }
+}
