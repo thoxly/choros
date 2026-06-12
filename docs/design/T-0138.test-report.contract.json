@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0138",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1567,
+    "passed": 1561,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "claim-AC-1: 401 без auth", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-2: 404 unknown task", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-3: 200 + pool:false, mine:true", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-4: 200 idempotent re-claim", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-5: 409 ALREADY_CLAIMED", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-6: 409 NOT_POOL_TASK", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "claim-AC-7: GET /api/inbox reflects claim state", "test": "inbox-claim.e2e.test.ts", "result": "pass"},
+    {"ac": "export-AC-1: 401 без auth", "test": "audit-export.e2e.test.ts + curl T2", "result": "pass"},
+    {"ac": "export-AC-2: 200 + Content-Disposition attachment", "test": "audit-export.e2e.test.ts + curl T3", "result": "pass"},
+    {"ac": "export-AC-3: valid AuditData JSON shape", "test": "audit-export.e2e.test.ts", "result": "pass"},
+    {"ac": "export-AC-4: ?instance=INS-7731 exports named instance", "test": "audit-export.e2e.test.ts + curl T5", "result": "pass"},
+    {"ac": "export-AC-5: 404 unknown instance", "test": "audit-export.e2e.test.ts + curl T6", "result": "pass"},
+    {"ac": "export-AC-6: /api/audit/:id не захвачен export-роутом", "test": "audit-export.e2e.test.ts + curl T4", "result": "pass"},
+    {"ac": "nit-R-N1: FORWARD-OBLIGATION расширен на GET /api/audit + /:instanceId", "test": "code review + commit dfe943b", "result": "pass"},
+    {"ac": "nit-R-N2: misleading docstring исправлен", "test": "code review + commit dfe943b", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "vite build 51 modules clean", "result": "pass", "note": "96 kB CSS, 258 kB JS"},
+    {"check": "static.e2e.test.ts 13/13", "result": "pass", "note": "SPA shell serves correctly"},
+    {"check": "fitness checks 58/58", "result": "pass", "note": "frozen-checks-immutable / audit_append_only / audit_writer_isolation all PASS"},
+    {"check": "live curl 6/6", "result": "pass", "note": "PORT=19138 in-memory server, no DATABASE_URL"}
+  ],
+  "failures": [],
+  "blocked_reason": ""
+}
