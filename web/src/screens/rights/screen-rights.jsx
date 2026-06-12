@@ -195,7 +195,7 @@ function RightsScreen({ initialRole }) {
                 <div className="chs-derivedcol__items">
                   {tools.map((uri) => <DerivedChip key={uri} kind="tool">{toolName(uri)}</DerivedChip>)}
                 </div>
-                <div className="chs-derivedcol__note">↳ из грантов с операцией read / write / exec</div>
+                <div className="chs-derivedcol__note">↳ из грантов с операцией read / write / invoke</div>
               </div>
               <div className="chs-derivedcol">
                 <div className="chs-derivedcol__label">Видимые поля форм</div>

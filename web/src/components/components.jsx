@@ -168,7 +168,7 @@ function RoleAssignment({ role, scope, validity, expiring = false, onOpen }) {
   );
 }
 
-/* OpKbd — операция гранта (read/write/exec) — машинный «scope»-чип */
+/* OpKbd — операция гранта (read/write/invoke) — машинный «scope»-чип */
 function OpChip({ op }) {
   return <span className={`chs-op chs-op--${op}`}>{op}</span>;
 }

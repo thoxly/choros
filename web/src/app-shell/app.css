@@ -530,7 +530,8 @@
 .chs-op { font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs); letter-spacing: var(--chs-tracking-wide); padding: 1px var(--chs-space-3); border-radius: var(--chs-radius-1); line-height: 16px; }
 .chs-op--read  { color: var(--chs-color-info);    background: var(--chs-color-info-soft); }
 .chs-op--write { color: var(--chs-color-warning); background: var(--chs-color-warning-soft); }
-.chs-op--exec  { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft); }
+.chs-op--exec   { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft); }
+.chs-op--invoke { color: var(--chs-color-danger);  background: var(--chs-color-danger-soft); }
 
 .chs-derivedwrap { display: grid; grid-template-columns: 1fr 1fr; gap: var(--chs-space-7); }
 .chs-derivedcol { border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-3); background: var(--chs-color-surface); padding: var(--chs-space-6) var(--chs-space-7); }
