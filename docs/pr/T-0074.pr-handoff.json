@@ -1,0 +1,143 @@
+{
+  "task_id": "T-0074",
+  "status": "pr_open",
+  "branch": "task/T-0074-floor-boundary",
+  "merge_target": "dev",
+  "base_commit": "3106c26",
+  "head_commit": "d9b2061",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Pure TS module src/core/authoring-floor-classifier.ts implementing classifyAuthoringFloor (machine boundary Floor-1 ↔ Floor-2 for form edit kinds, §4/§9.2 extensibility-and-authoring.md). 6 Floor-1 kinds (relabel_field, toggle_required, hide_field, show_field, reorder_fields, set_help_text) + 8 Floor-2 kinds (add_field, drop_field, rename_field, type_change, add_conditional, custom_component, external_task, object_migration). Purity discipline: no I/O, no DB, no env — mirrors classifyReportPageFloor (T-0176, NF-1). FF-FLOOR-AUTH fitness check (authoring-floor-isolation.sh, AFC-1..AFC-7). 80 authoring-floor unit tests (12 ACs + §9.2 invariants). Full suite 1641/1641 passed. REVIEW: changes_requested → R-1 FIXED (set_help_text added as 6th Floor-1 kind per ADR §9.1/T-0073) → re-review approved (d9b2061). TEST phase fixed pre-existing lint error (unused var floor2 in test AC-8 block).",
+  "commits": [
+    {
+      "sha": "c369ec8",
+      "phase": "BUILD",
+      "message": "feat(T-0074): classifyAuthoringFloor — машинная граница Floor-1↔Floor-2 (E11.3)"
+    },
+    {
+      "sha": "cf10392",
+      "phase": "REVIEW",
+      "message": "T-0074 REVIEW: changes_requested — set_help_text missing from Floor-1 vocab (§9.2/T-0073)"
+    },
+    {
+      "sha": "3d186d5",
+      "phase": "BUILD",
+      "message": "T-0074 fix R-1: set_help_text as first-class Floor-1 kind"
+    },
+    {
+      "sha": "d9b2061",
+      "phase": "REVIEW",
+      "message": "T-0074 re-review: prescription compliance → verdict approved"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "d9b2061",
+      "findings_resolved": [
+        "R-1 (blocking): set_help_text missing from Floor1EditKind and FLOOR1_EDIT_KINDS — FIXED in 3d186d5: added as 6th Floor-1 kind; relabel_field docstring narrowed; 2 individual AC-9 tests added."
+      ],
+      "findings_nit": [
+        "R-N1 — commit message test count mismatch (74 vs 76) — ADDRESSED in 3d186d5: new commit states accurate counts."
+      ],
+      "artifact": "docs/design/T-0074.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1641,
+      "passed": 1641,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "12/12 ACs + §9.2 invariant block",
+      "fitness_static": "PASS — AFC-1..AFC-7 all green",
+      "tested_commit": "d9b2061",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors; 2 pre-existing no-console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — all checks green including FF-FLOOR-AUTH (AFC-1..AFC-7)",
+        "vitest_unit": "1641/1641 passed, 6 skipped (Flowable integration offline — pre-existing)",
+        "authoring_floor_tests": "80/80 — src/__tests__/authoring-floor-classifier.test.ts — AC-1..AC-12 + §9.2 invariants"
+      },
+      "artifact": "docs/test-reports/T-0074.test-report.md",
+      "contract_artifact": "docs/design/T-0074.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/core/authoring-floor-classifier.ts",
+    "src/__tests__/authoring-floor-classifier.test.ts",
+    "ci/checks/authoring-floor-isolation.sh",
+    "docs/design/T-0074.review.contract.json",
+    "docs/reviews/T-0074.review.md",
+    "docs/test-reports/T-0074.test-report.md",
+    "docs/design/T-0074.test-report.contract.json",
+    "docs/pr/T-0074.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [
+    "form_def as DB entity is deferred (T-0125 review) — classifier works from pure FormEditChange structs, not DB rows. No risk to classifier purity; downstream T-0073/T-0078 must adapt when form_def storage is resolved."
+  ],
+  "downstream_api_surface": {
+    "note": "The following exported symbols form the stable API surface for T-0073 (Floor-1 button editor). Callers must import from src/core/authoring-floor-classifier.ts.",
+    "exports": [
+      {
+        "name": "classifyAuthoringFloor",
+        "signature": "function classifyAuthoringFloor(change: FormEditChange): AuthoringFloorResult",
+        "note": "Core pure function — machine boundary Floor-1 ↔ Floor-2. T-0073 must call this before emitting any Floor-1 edit to verify the kind is not Floor-2. Unknown kinds default to Floor-2 (§9.2 safe-default)."
+      },
+      {
+        "name": "FormEditChange",
+        "kind": "interface",
+        "fields": "{ kind: FormEditKind; fieldKey?: string; meta?: Record<string, unknown> }",
+        "note": "Input artifact. Classifier reads ONLY kind; fieldKey is for audit/reason output; meta is fully ignored (purity guarantee)."
+      },
+      {
+        "name": "AuthoringFloorResult",
+        "kind": "interface",
+        "fields": "{ requiredFloor: '1' | '2'; reason: string }",
+        "note": "Discriminated result. T-0073 checks requiredFloor === '1' before allowing button-edit path. reason is human-readable audit string."
+      },
+      {
+        "name": "FormEditKind",
+        "kind": "type",
+        "shape": "Floor1EditKind | Floor2EditKind",
+        "note": "Full closed vocab union. Additive-only extension — new kinds always Floor-2 until explicit inclusion."
+      },
+      {
+        "name": "Floor1EditKind",
+        "kind": "type",
+        "shape": "'relabel_field' | 'toggle_required' | 'hide_field' | 'show_field' | 'reorder_fields' | 'set_help_text'",
+        "note": "6 Floor-1 kinds. T-0073 button-editor emits these. set_help_text added in R-1 fix (ADR §9.1 / T-0073 spec)."
+      },
+      {
+        "name": "Floor2EditKind",
+        "kind": "type",
+        "shape": "'add_field' | 'drop_field' | 'rename_field' | 'type_change' | 'add_conditional' | 'custom_component' | 'external_task' | 'object_migration'",
+        "note": "8 Floor-2 kinds. Structural — require agent/code/migration. drop_field and rename_field are RED-LINE (human-gate, §4)."
+      },
+      {
+        "name": "FLOOR1_EDIT_KINDS",
+        "kind": "const",
+        "shape": "ReadonlySet<Floor1EditKind>",
+        "note": "Machine-readable Floor-1 set. 6 members. T-0073 / T-0078 may use for validation without calling the classifier function."
+      },
+      {
+        "name": "FLOOR2_EDIT_KINDS",
+        "kind": "const",
+        "shape": "ReadonlySet<Floor2EditKind>",
+        "note": "Machine-readable Floor-2 set. 8 members. T-0078 red-lines authoring uses this to identify destructive ops."
+      }
+    ]
+  },
+  "promote_guide": "Standard merge to dev — no migrations, no env vars, no compose changes. No FF-RC6 (no known_tenant_tables.txt change). After merge, T-0073 can import classifyAuthoringFloor from src/core/authoring-floor-classifier.ts.",
+  "friction_events": [
+    "REVIEW iteration 1: R-1 blocking — set_help_text missing from Floor-1 vocab; fixed in 3d186d5 before TEST phase.",
+    "TEST phase: pre-existing eslint no-unused-vars on `floor2` in AC-8 test block (line 242) — would have failed CI; removed unused binding."
+  ]
+}

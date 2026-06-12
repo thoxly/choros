@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0074",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1641,
+    "passed": 1641,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "AC-1 describe: 6 per-kind Floor-1 tests + 1 'all Floor-1 kinds' aggregate (7 tests)",    "result": "pass"},
+    {"ac": "AC-2",  "test": "AC-2 describe: 8 per-kind Floor-2 tests + 1 'all Floor-2 kinds' aggregate (9 tests)",    "result": "pass"},
+    {"ac": "AC-3",  "test": "AC-3 describe: custom_widget, bulk_import, empty-string → Floor-2 (3 tests)",            "result": "pass"},
+    {"ac": "AC-4",  "test": "AC-4 describe: Floor-1/Floor-2/unknown each with fieldKey → in reason (3 tests)",        "result": "pass"},
+    {"ac": "AC-5",  "test": "AC-5 describe: relabel_field, add_field w/o fieldKey; reason no suffix (3 tests)",       "result": "pass"},
+    {"ac": "AC-6",  "test": "AC-6 describe: same kind + diff meta; Floor-2 + meta; undefined vs {} (3 tests)",        "result": "pass"},
+    {"ac": "AC-7",  "test": "AC-7 describe: reason non-empty for all 14 kinds (14 tests)",                            "result": "pass"},
+    {"ac": "AC-8",  "test": "AC-8 describe: FLOOR1 ∩ FLOOR2 = ∅; FLOOR1 non-empty; FLOOR2 non-empty (3 tests)",      "result": "pass"},
+    {"ac": "AC-9",  "test": "AC-9 describe: 6 Floor-1 kinds individually + set_help_text w/o fieldKey (7 tests)",    "result": "pass"},
+    {"ac": "AC-10", "test": "AC-10 describe: 8 Floor-2 kinds individually (8 tests)",                                 "result": "pass"},
+    {"ac": "AC-11", "test": "AC-11 describe: sync no-throw Floor-1/Floor-2, not a Promise (3 tests)",                 "result": "pass"},
+    {"ac": "AC-12", "test": "AC-12 describe: null/undefined/object/number/array/emoji/SQL/unicode → Floor-2 (8 tests)","result": "pass"},
+    {"ac": "§9.2",  "test": "§9.2 invariant describe: relabel/add_field/drop_field/rename/toggle_required/custom_component (6 tests)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "tsc --noEmit",                                   "result": "pass", "note": "0 errors"},
+    {"check": "eslint src",                                     "result": "pass", "note": "0 errors; 2 pre-existing no-console warnings unrelated to T-0074"},
+    {"check": "FF-FLOOR-AUTH: authoring-floor-isolation.sh",   "result": "pass", "note": "AFC-1..AFC-7 all green"},
+    {"check": "test lint fix: unused var floor2 at line 242",   "result": "pass", "note": "Removed unused `floor2` binding in AC-8 test — pre-existing code smell, not product defect"},
+    {"check": "vitest full suite 1641/1641",                    "result": "pass", "note": "6 skipped (Flowable integration offline — pre-existing)"}
+  ],
+  "failures": []
+}
