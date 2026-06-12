@@ -1,0 +1,35 @@
+{
+  "task_id": "T-0134",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1",  "test": "covered-by-review (ADR §1/§7 + FF-NO-RAW; review approved 76582b5)", "result": "pass"},
+    {"ac": "AC-2",  "test": "covered-by-review (ADR §2.1–§2.3 + FF-SCHEMA-DOCS)", "result": "pass"},
+    {"ac": "AC-3",  "test": "covered-by-review (ADR §2.1/§2.4/§7 + FF-T13-DOCS/FF-DOCS-SYSTEM-PROJECTION/FF-DOCS-PROJECTION-WRITE)", "result": "pass"},
+    {"ac": "AC-4",  "test": "covered-by-review (ADR §2.3 + FF-SCHEMA-DOCS)", "result": "pass"},
+    {"ac": "AC-5",  "test": "covered-by-review (ADR §2.2/§3.1 + FF-DOCREF-TYPED)", "result": "pass"},
+    {"ac": "AC-6",  "test": "covered-by-review (ADR §3.2 + FF-LINT-BEHAVIOR)", "result": "pass"},
+    {"ac": "AC-7",  "test": "covered-by-review (ADR §3.2/§3.3 + FF-LINT-PURE/FF-DOC-COHERENCE)", "result": "pass"},
+    {"ac": "AC-8",  "test": "covered-by-review (ADR §3.3 + FF-STALE-SIGNAL; hard-gate=SEAM-2)", "result": "pass"},
+    {"ac": "AC-9",  "test": "covered-by-review (ADR §4 + FF-UI-SAME-LAYER)", "result": "pass"},
+    {"ac": "AC-10", "test": "covered-by-review (ADR §4 stale-бейдж + FF-UI-SAME-LAYER)", "result": "pass"},
+    {"ac": "AC-11", "test": "covered-by-review (ADR §2.1/§2.4/§4 + FF-T13-DOCS/FF-UI-SAME-LAYER/FF-DOCS-SYSTEM-PROJECTION)", "result": "pass"},
+    {"ac": "AC-12", "test": "covered-by-review (ADR §5.1 read-only MCP + FF-DOCS-READONLY)", "result": "pass"},
+    {"ac": "AC-13", "test": "covered-by-review (ADR §5.2 authz внутри T-0018/T-0021 + FF-DOCS-NO-2ND-AUTHZ)", "result": "pass"},
+    {"ac": "AC-14", "test": "covered-by-review (ADR §5.3/§2.4 + FF-DOCS-TENANT/FF-DOCS-SYSTEM-PROJECTION/FF-DOCS-PROJECTION-WRITE)", "result": "pass"},
+    {"ac": "AC-15", "test": "covered-by-review (ADR §5.4 аудит docs.* + FF-DOCS-AUDIT)", "result": "pass"},
+    {"ac": "AC-16", "test": "covered-by-review (ADR §5.5 mcp_tool-строки T-0043 + FF-MCP-T43)", "result": "pass"},
+    {"ac": "AC-17", "test": "covered-by-review (ADR §1/§6 пайплайн=Stage-2/SEAM-3 + FF-DEFERRAL-PIPELINE)", "result": "pass"},
+    {"ac": "AC-18", "test": "covered-by-review (ADR §1/§6 доки=агенты, нет ручного редактора + FF-AGENTS-AUTHOR)", "result": "pass"},
+    {"ac": "AC-19", "test": "covered-by-review (ADR §10 трассировка 20 AC + FF-TRACE)", "result": "pass"},
+    {"ac": "AC-20", "test": "covered-by-review (ADR §6/§9 design-only границы + §9-декомпозиция + FF-DEFERRAL-PIPELINE)", "result": "pass"}
+  ],
+  "secondary_ux": [
+    {"check": "UI-поверхность в scope задачи", "result": "n/a", "note": "design-only артефакт; UI-компоненты = impl-зона T-0134e"}
+  ],
+  "failures": []
+}

@@ -1,0 +1,148 @@
+{
+  "task_id": "T-0134",
+  "status": "pr_open",
+  "branch": "task/T-0134-agent-docs-design",
+  "merge_target": "dev",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "docs/design/T-0134-agent-docs.adr.md",
+    "docs/design/T-0134.adr.contract.json",
+    "docs/design/T-0134.review.contract.json",
+    "docs/design/T-0134.test-report.contract.json",
+    "docs/reviews/T-0134.review.md",
+    "docs/specs/T-0134-agent-docs.spec.md",
+    "docs/specs/T-0134.spec.contract.json",
+    "docs/test-reports/T-0134.test-report.md",
+    "docs/pr/T-0134.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "DESIGN artifact only: все изменения — docs/ (spec + ADR + review + test-report + pr-handoff). Нет src/ изменений, нет ci/checks/ изменений, нет package.json изменений.",
+    "R-6 nit (write-path проекции): ADR §2.4 расширен write-path блоком (provision-time системная операция, границы: только scope='system', только проекция, catalog_version NOT NULL, provision-роль delegable=false); добавлена FF-DOCS-PROJECTION-WRITE (static-now). §7 rejected-alternatives обновлён (write-path ограничен). §9 T-0134i DoD расширен (FF-DOCS-PROJECTION-WRITE). review.contract.json R-6 → RESOLVED.",
+    "R-7 nit (T-0133 SHA): все ссылки на '[ЖИВОЙ] git db913d6' / 'сестринская ветка task/T-0133-...' заменены на 'смержен в dev 1a9176c' во всех секциях ADR (легенда, §2.4 ×2, §7, §9 T-0134i deps, §11 R-7 нота). adr.contract.json + review.contract.json синхронизированы. review.contract.json R-7 → RESOLVED.",
+    "Remote PR не открывается: commit на локальной ветке (local-review-handoff pattern; GitHub PR требует scoped agent PAT GT-4, не провижн в этом окружении)."
+  ],
+  "blocked_reason": "",
+  "friction_events": [],
+  "test_evidence": {
+    "diff_gate": "PASS — docs/** only; ноль src/migrations/package.json/ci/checks изменений",
+    "npm_ci_result": "PASS — tsc 0 новых ошибок (pre-existing errors в worktree идентичны до nit-sweep; не введены T-0134); eslint clean; fitness all green; vitest deferred-to-impl",
+    "schema_validation": {
+      "adr_contract": "PASS — T-0134.adr.contract.json vs adr.schema.json: errors NONE",
+      "review_contract": "PASS — T-0134.review.contract.json vs review.schema.json: errors NONE",
+      "test_report_contract": "PASS — T-0134.test-report.contract.json vs test-report.schema.json: errors NONE"
+    },
+    "review_verdict": "approved (iter-2, 76582b5); 20/20 AC covered; 0 blocking; R-6/R-7 nits closed HEAD",
+    "test_report": "docs/design/T-0134.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "artifacts": {
+    "spec": "docs/specs/T-0134-agent-docs.spec.md",
+    "spec_contract": "docs/specs/T-0134.spec.contract.json",
+    "adr": "docs/design/T-0134-agent-docs.adr.md",
+    "adr_contract": "docs/design/T-0134.adr.contract.json",
+    "review_contract": "docs/design/T-0134.review.contract.json (verdict=approved iter-2; 0 blocking; R-1 снят; R-2..R-7 closed HEAD)",
+    "review_md": "docs/reviews/T-0134.review.md",
+    "test_report_md": "docs/test-reports/T-0134.test-report.md",
+    "test_report_contract": "docs/design/T-0134.test-report.contract.json (verdict=pass, schema VALID)"
+  },
+  "review_history": [
+    {
+      "iter": "iter-1",
+      "commit": "6129141",
+      "verdict": "changes_requested",
+      "blocking": ["R-1: чтение scope=system из чужой tenant-сессии под FORCE RLS = второй read/authz-путь (NF-1); не специфицировано"],
+      "nits": ["R-2: lint-артефакты метились 'после мержа' — они в base сейчас", "R-3: граница code_symbol build/CI-time vs runtime", "R-4: T-0126 нематериализован", "R-5: слот 054 = T-0128/connector"]
+    },
+    {
+      "iter": "iter-2 fix",
+      "commit": "fc6e899",
+      "notes": "R-1 решён per-tenant проекцией (§2.4): system-доки физически = обычные tenant_id=<его> строки → один RLS-путь; master-копия структурно недостижима. FF-DOCS-SYSTEM-PROJECTION. R-2..R-5 закрыты."
+    },
+    {
+      "iter": "iter-2 re-review",
+      "commit": "76582b5",
+      "verdict": "approved",
+      "blocking": [],
+      "nits": [
+        "R-6 (nit): write-путь проекции (vendor→tenant) не назван честно — provision-time context-обходная операция, граница scope=system-only/projection-only/аудит/delegable=false не прописана, нет FF на write-сторону",
+        "R-7 (nit): T-0133 ещё НЕ смержен в base на момент re-review (git db913d6 / сестринская ветка)"
+      ]
+    },
+    {
+      "iter": "R-6/R-7 nit-sweep",
+      "commit": "HEAD",
+      "notes": "R-6 CLOSED: §2.4 write-path блок + FF-DOCS-PROJECTION-WRITE + §9 T-0134i DoD + §7 update. R-7 CLOSED: все SHA→1a9176c, 'смержен в dev', §11 нота координации."
+    }
+  ],
+  "follow_up_impl_tasks": [
+    {
+      "suggested_id": "T-0134a",
+      "title": "impl: doc_page (+catalog_version) + doc_ref + doc_log DDL (migrations ≥055; 054=T-0128) + known_tenant_tables",
+      "scope": "ADR §2.1–§2.3: CREATE TABLE IF NOT EXISTS choros.doc_page (tenant_id uuid NOT NULL, id uuid NOT NULL, slug text NOT NULL, title text NOT NULL, body text NOT NULL, scope text NOT NULL DEFAULT 'tenant' CHECK IN ('system','tenant'), catalog_version text NULL, app_id uuid NULL FK→application, stale boolean NOT NULL DEFAULT false, authored_by text NOT NULL, authored_at bigint NOT NULL, updated_at bigint NOT NULL; PK(tenant_id,id), UNIQUE(tenant_id,slug)); doc_ref (tenant_id,id,page_id FK→doc_page ON DELETE CASCADE,ref_kind CHECK IN ('code_symbol','rest_endpoint','schema_field','process','config_key'),ref_target jsonb NOT NULL,broken boolean NOT NULL DEFAULT false,created_at bigint NOT NULL; PK(tenant_id,id),UNIQUE(tenant_id,page_id,ref_kind,ref_target)); doc_log (tenant_id,id,page_id FK→doc_page ON DELETE CASCADE,op text NOT NULL,agent_actor text NOT NULL,diff_summary text NULL,at bigint NOT NULL; PK(tenant_id,id),index(tenant_id,page_id,at)). Все три: ENABLE+FORCE RLS policy на current_setting('choros.tenant_id',true)::uuid, GRANT choros_app, в known_tenant_tables.txt. Слот 055+ (054=T-0128).",
+      "gates": "FF-T13-DOCS (T-0013/T-0115-пробы: tenant_id_leading.sql, cross-tenant-fitness.sh — PASS); FF-SCHEMA-DOCS (grep DDL: колонки включая catalog_version/CHECK/UNIQUE/FK; grep bytea/lo_ ⇒ 0); FF-NO-RAW (grep doc_raw/raw_doc ⇒ 0); FF-DOCREF-TYPED (grep CHECK ref_kind IN (...)).",
+      "depends_on": ["T-0014 (camelCase-конвенция)", "T-0013/T-0017 (RLS-apparatus)", "migrations/051_report_page.sql (RLS-паттерн)", "migrations/044_config_agent_seed.sql (system-тенант a0…001)"],
+      "slot_note": "055 = doc_page, 056 = doc_ref, 057 = doc_log (порядок важен: FK doc_ref→doc_page, FK doc_log→doc_page); точный слот выбирает coder при материализации, держа монотонность"
+    },
+    {
+      "suggested_id": "T-0134b",
+      "title": "impl: src/core/doc-ref-lint.ts — checkDocRefs (pure) + DocRef/DocRefKind/LiveSnapshot типы",
+      "scope": "ADR §3.1/§3.2: export type DocRefKind = 'code_symbol'|'rest_endpoint'|'schema_field'|'process'|'config_key'; export interface DocRef { refKind: DocRefKind; refTarget: Record<string,string>; }; export interface LiveSnapshot { codeSymbols: ReadonlySet<string>; restEndpoints: ReadonlySet<string>; schemaFields: ReadonlySet<string>; processKeys: ReadonlySet<string>; configKeys: ReadonlySet<string>; }; export interface DocRefViolation { type: 'missing_referent'; refKind: DocRefKind; refTarget: Record<string,string>; }; export type DocLintResult = { ok:true }|{ ok:false; violations: DocRefViolation[] }; export function checkDocRefs(refs: readonly DocRef[], live: LiveSnapshot): DocLintResult — PURE, NO I/O, NO pg/fs/net. Комментарий ссылается на T-0121 checkReportPageDepFields / T-0132 FF-1. Сверить форму с живым src/core/report-page-compat.ts:99/DepViolation:53 (уже в base).",
+      "gates": "FF-LINT-PURE (grep -nE 'from \"(pg|fs|net|http|node:.*)\"' src/core/doc-ref-lint.ts ⇒ 0); FF-LINT-BEHAVIOR (vitest -t 'missing-referent': ссылка ∉ снимка ⇒ {ok:false,violations:[...]}; vitest -t 'all-present': все ∈ снимка ⇒ {ok:true}).",
+      "depends_on": ["T-0134a (для тестов с фикстурой)", "src/core/report-page-compat.ts (паттерн — в base)", "src/core/binding-compat.ts (паттерн — в base)"]
+    },
+    {
+      "suggested_id": "T-0134c",
+      "title": "impl: LiveSnapshot-сборщик (интроспекция кода/роутов/схем/процессов/конфигов) + ci/checks/doc-coherence.sh",
+      "scope": "ADR §3.2/§3.3: LiveSnapshot-DAO (импортёр): code_symbol = build/CI-time-интроспекция экспортов (или артефакт пакуется при сборке); rest_endpoint = роут-реестр; schema_field = registry_def.record_schema.properties; process = задеплоенные BPMN/DMN-ключи; config_key = конфиг-реестр. ci/checks/doc-coherence.sh: запускает checkDocRefs над doc_ref-фикстурой + снимком; битая ссылка ⇒ exit 1. doc_page/doc_ref/doc_log вносятся в реестр bundle-членов (bundle_members.txt или equiv T-0082-класс). Регистрация в npm run fitness.",
+      "gates": "FF-DOC-COHERENCE (запуск doc-coherence.sh на фикстуре с битой ссылкой ⇒ exit 1; grep реестра bundle-членов).",
+      "depends_on": ["T-0134a", "T-0134b", "ci/checks/bundle-coherence.sh (T-0082-паттерн — в base)"]
+    },
+    {
+      "suggested_id": "T-0134d",
+      "title": "impl: lint-runtime — doc_ref.broken/doc_page.stale + doc_log + audit (docs.stale_detected)",
+      "scope": "ADR §3.3: runtime lint-проход (плановый/по-триггеру): checkDocRefs → выставить doc_ref.broken=true + doc_page.stale=true + doc_log('marked_stale') + appendAuditEvent('docs.stale_detected'). Паттерн T-0016 open-vocab. SEAM-2 (hard-gate публикации/CI) = Stage-2 deferral, не реализуется здесь.",
+      "gates": "FF-STALE-SIGNAL (live-impl probe: lint над страницей с битой ссылкой ⇒ broken/stale выставлены + doc_log + audit_event записаны).",
+      "depends_on": ["T-0134a", "T-0134b", "T-0016 (audit-apparatus — в base)"]
+    },
+    {
+      "suggested_id": "T-0134e",
+      "title": "impl: UI-страница /docs (index-навигация + чтение страницы + stale-бейдж, RLS-gated /api/docs)",
+      "scope": "ADR §4: GET /api/docs (index = каталог видимых doc_page по scope/app, RLS-gated серверный API) + GET /api/docs/:slug (тело страницы + stale-флаг). UI рендерит index/body + бейдж «устаревший» при stale=true (+ детали broken doc_ref). Читает тот же слой (§2-таблицы), не отдельную копию. Tenant-scoped через RLS контекста сессии. scope='system'-проекции видны как обычные строки тенанта (бейдж «общесистемная»).",
+      "gates": "FF-UI-SAME-LAYER (static: assert /api/docs селектит из doc_page, ответ содержит stale; live-impl: cross-tenant docs invisible).",
+      "depends_on": ["T-0134a", "T-0021 (PDP — в base)", "src/http/ паттерн (в base)"]
+    },
+    {
+      "suggested_id": "T-0134f",
+      "title": "impl: docs-MCP read-only сервер (docs_list/read/search) + производный грант (T-0122) + audit",
+      "scope": "ADR §5: три read-операции (docs_list/docs_read/docs_search), никаких мутаций. Authz = производный read-only грант на is_external-роль (T-0122 §2.3): resource_type='doc_page', operation='read', delegable=false; резолв = resolveFor(handle,subject,'read') (T-0021) fail-closed. Tenant = токен harness fail-closed (T-0122 §2.4), не вход запроса. Аудит: appendAuditEvent T-0016 open-vocab docs.list/docs.read/docs.search/docs.deny; актор = external-surface:<id>, секрет не пишется; via='docs-mcp'. Нет docs_acl/mcp_doc_share/doc_page.public.",
+      "gates": "FF-DOCS-READONLY + FF-DOCS-NO-2ND-AUTHZ + FF-DOCS-TENANT + FF-DOCS-AUDIT (static: нет mutation-handler; grep forbidden tokens; нет docs_acl; assert resolveFor-call; live-impl: cross-tenant docs invisible; vitest -t 'docs-audit').",
+      "depends_on": ["T-0134a", "T-0122 (is_external-паттерн — в base)", "T-0021 (PDP — в base)", "T-0016 (audit — в base)"]
+    },
+    {
+      "suggested_id": "T-0134g",
+      "title": "impl: mcp_tool seed docs_list/docs_read/docs_search (dev-тенант, паттерн T-0077/T-0121)",
+      "scope": "ADR §5.5: INSERT mcp_tool-строки (docs_list, docs_read, docs_search) в dev-тенант (seed-миграция или seed-script по паттерну T-0077 §2.3 / T-0121 §6.1). declares='[]'::jsonb; pure_compute=true; resource_ops='[{\"resourceType\":\"doc_page\",\"operation\":\"read\"}]'::jsonb. Reachability через resolveAgentToolset/isToolReachable (T-0043) — нет нового authority-store.",
+      "gates": "FF-MCP-T43 (grep seed-строк mcp_tool; assert resource_ops={doc_page,read}; assert reachability-путь = T-0043 isToolReachable, не отдельный каталог).",
+      "depends_on": ["T-0134f", "T-0043 (mcp_tool-реестр — в base)", "T-0077 (seed-дисциплина — в base)"]
+    },
+    {
+      "suggested_id": "T-0134i",
+      "title": "impl: system-docs проекция — vendor-master (a0…001) → per-tenant репликация при provision/update + vendor-update (детект+перепроекция+doc_log/audit); FF-DOCS-PROJECTION-WRITE",
+      "scope": "ADR §2.4 (R-1 + R-6): provision-writer (migrator/provisioner-класс) реплицирует scope='system'-страницы из vendor-master (a0…001) в каждый тенант при provision/update: INSERT/UPDATE строки tenant_id=<target>, scope='system', authored_by='system', catalog_version=<version> (NOT NULL обязательно). Граница write-полномочия (R-6): ТОЛЬКО scope='system', ТОЛЬКО проекция (catalog_version NOT NULL), provision-роль не делегируется harness (delegable=false, T-0122). Vendor-update vX→vY: детект (catalog_version изменился) + перепроекция + doc_log('system_doc_projected',diff_summary) + audit_event('docs.system_projected'). Merge локально-изменённых проекций = Stage-2 deferral (как T-0133 §3.6, прецедент в base 1a9176c).",
+      "gates": "FF-DOCS-SYSTEM-PROJECTION (static-now: grep политик doc_page ⇒ единственный USING tenant_id=current_setting(...); grep docs-MCP/UI ⇒ нет SET choros.tenant_id/context-switch; live-impl: tenant-B читает scope='system' tenant_id=B, SELECT scope='system' AND tenant_id=a0…001 ⇒ 0 строк) + FF-DOCS-PROJECTION-WRITE (static-now: grep provision-writer ⇒ только scope='system'-ветви нет ветви без scope='system'-фильтра; grep harness-grant-seed ⇒ нет provision-роли в delegable=true; assert catalog_version IS NOT NULL при projection-insert).",
+      "depends_on": ["T-0134a", "T-0077 (system-тенант a0…001 — в base)", "T-0133 (managed-solution механика — смержен в dev 1a9176c, в base)"]
+    }
+  ],
+  "coordination_notes": [
+    "T-0134h (Stage-2): агентный docs-pipeline (обход живой системы, генерация/обновление/дедуп страниц, конфликт-резолюция, триггеры) — вне day-1; T-0134 даёт рамку (doc_page/doc_ref/doc_log + checkDocRefs), пайплайн = исследование №3 после T-0134a–g.",
+    "Слоты миграций: 055=doc_page, 056=doc_ref, 057=doc_log (порядок FK: doc_page первый; coder выбирает точные номера при материализации держа монотонность; 054=T-0128/connector).",
+    "T-0134i depends-on T-0133 (смержен в dev 1a9176c) — механика VendorUpdateProposal/catalog_version/origin в base; порядок задач T-0133 → T-0134a → T-0134i.",
+    "Diff-gate для impl-задач: T-0134a касается migrations/ + ci/; T-0134b/T-0134c касаются src/core/ + ci/checks/; не ломать FF frozen-file checks (T-0040/T-0044) — они редеют на in-flight amendment ветках по дизайну."
+  ],
+  "rationale": "T-0134 — design-задача (SPEC+ADR+review+nits). ADR зафиксировал: агентный wiki-слой поверх существующих grant/PDP/audit (T-0013/T-0016/T-0018/T-0021/T-0043) — нового механизма прав/аудита/согласованности НЕ вводится. scope='system'-доки = per-tenant проекция (R-1): один RLS-путь по tenant_id для всех трёх потребителей (lint/MCP/UI); write-путь проекции = provision-time системная операция под provision-ролью, ограниченная scope='system'/projection-only/аудит/delegable=false (R-6). T-0133 (прецедент managed-solution) смержен в dev 1a9176c (R-7). Review approved iter-2 (76582b5, 20/20 AC, 0 blocking); nits R-6/R-7 закрыты HEAD. Diff-gate чистый (docs/** only). CI green (tsc/eslint/fitness без новых ошибок). Schema-валидация всех контрактов: errors NONE."
+}

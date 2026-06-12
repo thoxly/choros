@@ -16,7 +16,7 @@
 - `docs/design/T-0082-bundle-coherence.adr.md` — **родство lint-механики**: реестр-как-данные + bash-fitness-гард + deferral-контракт; «баг в самой системе согласованности = security-регрессия, которую механизм призван предотвратить»; периметр day-1 + явное обязательство будущих задач. **docs-lint = тот же класс гарда «производный артефакт ↔ источник».**
 - `docs/design/T-0072-named-binding.adr.md` — `checkBindingCompat` / `form_binding`: контракт «артефакт ↔ поля схемы»; **переиспользуем форму, не плодим четвёртый механизм** (NF-6).
 - `docs/specs/...T-0132...` FF-1-паттерн — машинная сверка **структуры/ссылок** артефакта (наличие именованного утверждения/трассировки), вход = артефакт, выход = список нарушений (пусто = ок). **docs-lint и часть AC этого ADR — того же класса.**
-- `docs/design/T-0133-process-templates.adr.md` (§2.5/§3.6, [ЖИВОЙ] git `db913d6`) — **managed-solution / vendor-update**: каталог инстанцируется в тенант с `origin`-provenance + `catalog_version`; vendor-update vX→vY = governed-операция, **day-1 = детект+уведомление (`VendorUpdateProposal`), полная merge-машинерия = Stage-2 deferral** (соразмерность). **Прецедент для проекции `scope='system'`-доков в тенант (§2.4, R-1) — синхронизация копий тем же managed-solution-классом, не новый механизм.**
+- `docs/design/T-0133-process-templates.adr.md` (§2.5/§3.6, **смержен в dev** `1a9176c`) — **managed-solution / vendor-update**: каталог инстанцируется в тенант с `origin`-provenance + `catalog_version`; vendor-update vX→vY = governed-операция, **day-1 = детект+уведомление (`VendorUpdateProposal`), полная merge-машинерия = Stage-2 deferral** (соразмерность). **Прецедент для проекции `scope='system'`-доков в тенант (§2.4, R-1) — синхронизация копий тем же managed-solution-классом, не новый механизм.**
 
 > Это ADR **design-only.** Choros имеет Postgres-в-compose (T-0053/T-0114). Миграции, объектная
 > модель доков, код MCP-сервера, UI-компоненты, строки lint-правил и wire-протокол MCP —
@@ -171,13 +171,33 @@ blocking: T-0134 проектирует **рамку** (модель стран�
   (версия пакета system-доков; nullable для `scope='tenant'`). Чтение из любой tenant-сессии (UI / агент /
   docs-MCP) — **обычный RLS-путь** `tenant_id = current_setting('choros.tenant_id')` — **ноль второго
   предиката, ноль context-switch**. Изоляция остаётся структурой T-0013, не дисциплиной кода.
-- **Vendor-update-поток (managed-solution, прецедент T-0133 §2.5/§3.6, [ЖИВОЙ] git `db913d6`).** Версия
+- **Vendor-update-поток (managed-solution, прецедент T-0133 §2.5/§3.6, смержен в dev `1a9176c`).** Версия
   пакета system-доков растёт vX→vY; при provision/update проекция в тенант обновляется как
-  **governed-операция** (тот же класс, что `VendorUpdateProposal` T-0133): day-1 = **детект+перепроекция
+  **governed-операция** (тот же класс, что `VendorUpdateProposal` T-0133 `1a9176c`): day-1 = **детект+перепроекция
   с уведомлением** (`doc_log('system_doc_projected', diff_summary)` + `audit_event('docs.system_projected')`),
   полная diff/merge-машинерия локально-изменённых проекций — **Stage-2 deferral** (как T-0133 §3.6,
   соразмерность). Tenant НЕ редактирует system-проекцию (она read-only origin внутри его tenant-данных);
   попытка записи — обычный grant-deny, не спец-путь.
+- **Write-путь проекции = provision-time системная операция (R-6, честный шов).** Запись
+  `scope='system'`-строк в `tenant_id = B` (где `B ≠ system-тенант`) требует, чтобы агент-поставщик
+  работал под **привилегированной provision-ролью** (migrator/provisioner-класс), которая по природе
+  пишет мимо FORCE RLS — ровно как `migrations/044_config_agent_seed.sql` (seed `a0…001`), T-0077
+  system-тенант-сид, T-0133 managed-solution-инстанцирование. Это **легитимная provision-time
+  context-обходная операция**: она предшествует любому внешнему/harness-доступу (который read-only),
+  а не сосуществует с ним. Границы полномочия provision-writer:
+  - **Только `scope='system'`** — запись обычных `scope='tenant'`-строк в чужой тенант этой ролью
+    **запрещена** (FF-DOCS-PROJECTION-WRITE: grep provision-writer пишет только `scope='system'` строки;
+    запись `scope='tenant'` через тот же путь ⇒ 0).
+  - **Только проекция** — insert/update только тех строк, которые пришли из vendor-master `a0…001`
+    с `catalog_version`; произвольный cross-tenant write не предусмотрен.
+  - **Под аудитом** — каждая projection-операция фиксируется `doc_log('system_doc_projected')` +
+    `audit_event('docs.system_projected')` (§3.3, единый аудит, без второй таблицы).
+  - **Недоступна harness-поверхности** — provision-роль не передаётся harness-принципалу (T-0122
+    `delegable=false`); harness получает только производный read-only грант (§5.2).
+  Этот write-путь **не противоречит «нет второго пути»**: NF-1 («нет второго авторизационного
+  механизма») требует единого read/authz-пути для внешней/harness-поверхности — это соблюдено
+  (§5.2/§5.3, FF-DOCS-SYSTEM-PROJECTION). Write-путь проекции = provision-time setup,
+  инфраструктурный по классу (как seed-миграции), не authz-поверхность.
 - **Единообразие чтения двух классов (lint/MCP/UI).** Поскольку system-доки физически живут как
   `tenant_id = <его>` строки, **все три потребителя читают ОДИН класс данных одним путём**: lint
   (`checkDocRefs`) сверяет `scope='system'`- и `scope='tenant'`-строки **одинаково** (референты — тот же
@@ -355,7 +375,7 @@ widening-cast только на границе/в тестах.
 | **Носитель — гибрид** (файлы для system + таблицы для tenant) | Два носителя ⇒ два пути чтения/lint/authz ⇒ дрейф «один слой» (NF-3) в две подсистемы. `scope`-колонка в одной таблице-семье даёт разграничение без второго носителя. |
 | **Чтение `scope='system'` из system-тенанта (R-1, ветвь б)** | **Выделенная read-only RLS-политика `USING (scope='system')` на `doc_page`** (второй предикат рядом с tenant-ключом) | Это **именно второй authorization-предикат** не по `tenant_id` — буквально «второй read/authz-путь», который NF-1 запрещает. Аргумент «политика ≠ authz» слаб: RLS-предикат, решающий что видно, **и есть** read-time authorization-чекпойнт мимо PDP/grant. Даже с FF, доказывающей «не достаёт `scope='tenant'`-строк», остаётся два USING-предиката на одной таблице → структурный дрейф «одного пути» на самой опасной (harness) поверхности. **Отвергнут** в пользу проекции (§2.4): один RLS-путь по `tenant_id`. |
 | **Чтение `scope='system'` (R-1, ветвь в)** | **Отдельная глобальная таблица `doc_page_system` без RLS, read-only, своя FF-обвязка** | Честный отдельный класс данных, но **раскалывает «один слой» (NF-3) на две таблицы-семьи**: lint, docs-MCP, UI и `doc_ref`-FK обязаны нести **две ветки чтения** (RLS-таблица + глобальная) — тот же дрейф, что отвергнут в «гибридном носителе» выше. Глобальная таблица без RLS = новый класс «вне tenant-контекста», требующий собственной authz-обвязки на harness-поверхности. **Отвергнут** в пользу проекции: system-доки физически = обычные tenant-строки, один путь чтения для всех потребителей (§2.4). |
-| **Чтение `scope='system'` (R-1, ветвь а — ВЫБРАНА)** | *(per-tenant проекция, §2.4)* | system-доки реплицируются в каждый тенант при provision/update как обычные `tenant_id=<его>` строки → чтение обычным RLS-путём, **ноль второго механизма** (NF-1 удержан). Цена — синхронизация копий, решённая vendor-update-потоком (managed-solution, прецедент T-0133 §2.5/§3.6, git `db913d6`): day-1 = детект+перепроекция+уведомление, полная merge-машинерия = Stage-2 deferral (соразмерность). FF-DOCS-SYSTEM-PROJECTION доказывает один read-путь. |
+| **Чтение `scope='system'` (R-1, ветвь а — ВЫБРАНА)** | *(per-tenant проекция, §2.4)* | system-доки реплицируются в каждый тенант при provision/update как обычные `tenant_id=<его>` строки → чтение обычным RLS-путём, **ноль второго механизма** (NF-1 удержан). Цена — синхронизация копий, решённая vendor-update-потоком (managed-solution, прецедент T-0133 §2.5/§3.6, смержен в dev `1a9176c`): day-1 = детект+перепроекция+уведомление, полная merge-машинерия = Stage-2 deferral (соразмерность). Write-путь проекции = provision-time системная операция, ограниченная `scope='system'`-строками, projection-only, аудируемая, недоступная harness (§2.4 R-6). FF-DOCS-SYSTEM-PROJECTION доказывает один read-путь; FF-DOCS-PROJECTION-WRITE ограничивает write-сторону. |
 | **Реестр ссылок** (FR-5) | **Ссылка дока = свободный текст / markdown-линк** | Свободный текст неразрешим машинно — lint не сможет сверить с живой системой (вернёмся к «человек заметит», прямо запрещено FR-6/NF-4). Типизированный `doc_ref(ref_kind, ref_target)` — машинно-разрешимый идентификатор, как `report_page_dep.field_key` (T-0121) и `declares`/`resource_ops` (T-0043 — anti-free-text). |
 | **Lint-механизм** (FR-6) | **Сверка доков с замороженной копией системы (`raw`-снапшот, как gist Карпатого)** | `raw`-копия = **второй источник истины**, дрейфует от живой системы; устаревание детектировалось бы относительно копии, не реальности (NF-2 нарушен, прямо против решения фаундера «без raw»). Lint сверяет с **живым `LiveSnapshot`** (актуальные экспорты/роуты/схемы/процессы), не с замороженным. |
 | **Lint-механизм** | **Новый отдельный coherence-движок для доков** | Четвёртый параллельный механизм «артефакт↔источник» рядом с T-0072/T-0082/T-0121 (gap-map §4б / NF-6 запрещает). Переиспользуем класс: pure `checkDocRefs` (форма `checkReportPageDepFields`) + bash-гард (`doc-coherence.sh`, форма `bundle-coherence.sh`). |
@@ -388,6 +408,7 @@ widening-cast только на границе/в тестах.
 | **FF-DOCS-NO-2ND-AUTHZ** | Authz docs-MCP = grant-алгебра T-0018 + PDP T-0021 (производный read-only грант на `is_external`-роль); нет `docs_acl`/`mcp_doc_share`/`doc_page.public`; harness резолвится тем же `resolveFor`. | `grep` forbidden tokens в migrations/MCP-слое ⇒ 0; assert PDP-call (`resolveFor`), не локальный фильтр видимости. **static-now**. | AC-13 |
 | **FF-DOCS-TENANT** | Docs-MCP отдаёт только доки под грантом принципала **обычным RLS-путём** (один путь для `scope='tenant'` И `scope='system'`-проекции); tenant из токена (fail-closed, не вход); cross-tenant-утечка структурно невозможна. | live-impl probe (style `cross_tenant.test.ts`): токен tenant B не достаёт `doc_page` tenant A (ни `scope='tenant'`, ни system-проекцию A). **live-impl**. | AC-14 |
 | **FF-DOCS-SYSTEM-PROJECTION** | `scope='system'`-доки читаются из любой tenant-сессии **обычным RLS-путём** (`tenant_id = current_setting('choros.tenant_id')`) — нет второго RLS-предиката по `scope`, нет tenant-context-switch на внешней сессии (NF-1, R-1). System-доки присутствуют в каждом тенанте как проекция (§2.4); master-копия (`a0…001`) недостижима из чужой сессии. | (а) **static-now**: `grep` политик `doc_page` ⇒ единственный USING-предикат `tenant_id = current_setting(...)` (нет `scope`-предиката); `grep` docs-MCP/UI-слоя ⇒ нет `SET choros.tenant_id`/cross-tenant-context-switch. (б) **live-impl** probe: tenant-B-сессия читает `scope='system'`-строки `tenant_id=B` (своя проекция), `SELECT scope='system' AND tenant_id=a0…001` ⇒ 0 строк под FORCE RLS. | AC-3, AC-11, AC-14 |
+| **FF-DOCS-PROJECTION-WRITE** | Provision-writer (агент-поставщик) пишет в `doc_page` **только** строки `scope='system'` (system-docs проекция §2.4, R-6) — запись `scope='tenant'`-строк в чужой тенант через тот же provision-путь запрещена; provision-роль — только функция проекции (`scope='system'`, `catalog_version NOT NULL`), недоступна harness-принципалам (`delegable=false`, T-0122). | **static-now**: `grep` provision-writer (T-0134i impl) ⇒ пишет только `scope='system'` (assert: нет ветви без `scope='system'`-фильтра); `grep` harness-grant-seed ⇒ нет provision-роли в `delegable=true`; assert `catalog_version IS NOT NULL` при projection-insert. | AC-3, AC-14 |
 | **FF-DOCS-AUDIT** | Обращения к docs-MCP (allow И deny) ⇒ `audit_event` open-vocab `docs.*` (единый sink, без второй таблицы); актор производен от harness-токена, секрет не пишется. | vitest `-t 'docs-audit'`: каждая операция эмитит событие; assert нет audit-дубля/`docs_access_log`. **static-now + live-impl**. | AC-15 |
 | **FF-MCP-T43** | Docs-операции = `mcp_tool`-строки (T-0043): `declares='[]'`, `pure_compute=true`, `resource_ops` типизированы (`{doc_page,read}`); reachability через `resolveAgentToolset`; нет нового authority-store. | grep seed-строк mcp_tool; assert reachability-путь = T-0043 (`isToolReachable`), не отдельный каталог. **static-now**. | AC-16 |
 | **FF-DEFERRAL-PIPELINE** | ADR явно фиксирует: пайплайн генерации = исследование №3/Stage-2 (SEAM-3), НЕ blocking; T-0134 = рамка; границы design-only перечислены + вытекающие задачи (§9). | static (FF-1 T-0132-класс): assert ADR содержит именованные SEAM-3/Stage-2-утверждения + §9-декомпозицию. **static-now**. | AC-17, AC-20 |
@@ -407,7 +428,7 @@ widening-cast только на границе/в тестах.
 | **T-0134e** | `[impl] UI-страница /docs: index-навигация + чтение + stale-бейдж (RLS-gated /api/docs)` | T-0134a, T-0021 | FF-UI-SAME-LAYER; читает тот же слой, бейдж устаревания, tenant-scoped видимость |
 | **T-0134f** | `[impl] docs-MCP read-only сервер (docs_list/read/search) + производный грант (T-0122) + audit` | T-0134a, T-0122, T-0021, T-0016 | FF-DOCS-READONLY, FF-DOCS-NO-2ND-AUTHZ, FF-DOCS-TENANT, FF-DOCS-AUDIT; read-only, единый PDP, tenant fail-closed |
 | **T-0134g** | `[seed] mcp_tool docs_list/docs_read/docs_search (dev-тенант, паттерн T-0077/T-0121)` | T-0134f, T-0043, T-0077 | FF-MCP-T43; reachable в resolveAgentToolset, resource_ops `{doc_page,read}`, нет нового authority-store |
-| **T-0134i** | `[impl] system-docs проекция: vendor-master (a0…001) → per-tenant репликация при provision/update + vendor-update (детект+перепроекция+doc_log/audit, managed-solution T-0133)` | T-0134a, T-0077, T-0133 | FF-DOCS-SYSTEM-PROJECTION; system-доки читаются обычным RLS-путём в каждом тенанте; merge локально-изменённых = Stage-2 deferral |
+| **T-0134i** | `[impl] system-docs проекция: vendor-master (a0…001) → per-tenant репликация при provision/update + vendor-update (детект+перепроекция+doc_log/audit, managed-solution T-0133 смержен в dev 1a9176c)` | T-0134a, T-0077, T-0133 (в base) | FF-DOCS-SYSTEM-PROJECTION + **FF-DOCS-PROJECTION-WRITE** (R-6): provision-writer пишет только `scope='system'`, только проекция, `catalog_version NOT NULL`, provision-роль не делегируется harness; system-доки читаются обычным RLS-путём в каждом тенанте; merge локально-изменённых = Stage-2 deferral |
 | **T-0134h** *(Stage-2 / исследование №3)* | `[research] агентный docs-pipeline: обход живой системы, генерация/обновление/дедуп страниц, конфликт-резолюция, триггеры` | T-0134a–g (рамка) | вне day-1; T-0134 разблокирует, передаёт doc_page/doc_ref/doc_log + checkDocRefs как контракт |
 
 Внутренний агент-интерфейс (агенты Choros читают доки как контекст) = чтение тех же таблиц под тем же PDP —
@@ -469,7 +490,7 @@ widening-cast только на границе/в тестах.
 - **Версионная глубина** — полная git-под-капотом машинерия истории доков: инкрементально (соразмерность); day-1
   = `doc_log` + lint-сигнал.
 
-**Координация для оркестратора/coder (R-2, R-5):**
+**Координация для оркестратора/coder (R-2, R-5, R-7):**
 - **Прецедентные lint-артефакты — уже в base (R-2).** `src/core/report-page-compat.ts` (T-0176, 12 КБ) и
   `src/core/binding-compat.ts` (T-0072) **физически присутствуют в базе этого worktree** (смержены, не на
   сестринской ветке). При материализации T-0134b coder сверяет точную форму
@@ -477,6 +498,10 @@ widening-cast только на границе/в тестах.
   можно сейчас)** и зеркалит 1:1 (NF-6 — один механизм). Если сигнатуры разошлись — это синхронизация
   реализации, не развилка дизайна. (mcp_tool-seed-дисциплина T-0077 §2.3 — seed в dev-тенант — тоже живой
   прецедент.)
+- **T-0133 (прецедент managed-solution) — смержен в dev `1a9176c` (R-7).** На момент фиксации этого ADR
+  T-0133 (`task/T-0133-process-templates-design`) уже смержен в dev (`1a9176c`). Прецедент §2.5/§3.6
+  (`VendorUpdateProposal`, `catalog_version`, `origin`) **живой в base** этого worktree, сверять можно сейчас.
+  T-0134i (`system-docs проекция`) зависит от T-0133-механики; порядок: T-0133 → T-0134a → T-0134i.
 - **Слот миграции — `055+`, не `054` (R-5).** В базе этого worktree максимум `053` (051/052/053 = T-0121-волна;
   050 = tier-fix), но **слот `054` уже занят дизайном T-0128 (connector, смержен `e2f8d79`, ADR T-0128 §3.1 D1
   пинит `migrations/054_connector.sql`)**. Coder T-0134 обязан взять **`055+`** (порядок

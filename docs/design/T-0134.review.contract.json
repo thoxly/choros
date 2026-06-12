@@ -15,9 +15,9 @@
       "id": "R-6",
       "severity": "nit",
       "axis": 4,
-      "location": "docs/design/T-0134-agent-docs.adr.md:168-180 (§2.4), §9 T-0134i:410, FF-таблица §8",
-      "issue": "Write-путь проекции честно не назван. Чтобы записать scope=system-строки в tenant_id=B (B != сессия-источник и != system-тенант), агент-поставщик (§2.4 'реплицирует', T-0134i) под FORCE RLS + WITH CHECK(tenant_id=current_setting(...)) обязан ЛИБО выставить choros.tenant_id=B per-target (тот самый context-switch, что отвергнут на read-пути — теперь на write), ЛИБО писать привилегированной ролью мимо RLS. Это provision-time системная операция, PDP/RLS-context-обходная ПО ОПРЕДЕЛЕНИЮ. Защитимо (легитимный provision-write, прецедент = 044_config_agent_seed / mcp_tool-seed T-0077 §2.3 / инстанцирование каталога T-0133; предшествует любому внешнему read-доступу) — потому НЕ blocking. НО ADR довёл честность только до read: write-роль не названа, операция не помечена context-обходной provision-операцией (как read-ветви (а)/(б) прямо названы 'вторым путём'), не ограничена (только scope=system-строки, projection-only, недоступна harness, аудит как граница полномочия), и нет FF на write-сторону — 'нет второго пути' доказано лишь для read; write-bypass вынесен из-под FF-периметра (FF грепают MCP/UI read-слой, provision-writer вне его).",
-      "suggestion": "§2.4/T-0134i явно назвать проекцию provision-time context-обходной системной операцией + границы (только scope=system, projection-only, роль недоступна harness-поверхности, аудит docs.system_projected как граница полномочия) + FF, ограничивающая write-сторону (provision-writer пишет только scope=system, не scope=tenant)."
+      "location": "docs/design/T-0134-agent-docs.adr.md (§2.4 write-path block + §8 FF-DOCS-PROJECTION-WRITE + §9 T-0134i + §7 rejected-alternatives)",
+      "issue": "RESOLVED. Write-путь проекции (vendor→tenant) = provision-time системная операция, context-обходная по определению. ADR §2.4 теперь явно называет: provision-роль (migrator/provisioner-класс), границы (только scope=system-строки, projection-only, catalog_version NOT NULL, provision-роль не делегируется harness delegable=false), аудит docs.system_projected как граница полномочия. Добавлена FF-DOCS-PROJECTION-WRITE (static-now: grep provision-writer => только scope=system-ветви; grep harness-grant => нет delegable=true для provision-роли; assert catalog_version IS NOT NULL). §9 T-0134i обновлён: depends-on T-0133 (в base) + FF-DOCS-PROJECTION-WRITE в DoD. §7 rejected-alternatives обновлён: write-путь ограничен, FF-DOCS-PROJECTION-WRITE упомянута. NF-1 удержан: read-поверхность harness без второго механизма; provision-write = инфраструктурный setup-класс.",
+      "suggestion": "Закрыт: §2.4 write-путь назван честно + FF-DOCS-PROJECTION-WRITE добавлена."
     },
     {
       "id": "R-2",
@@ -51,9 +51,9 @@
       "id": "R-7",
       "severity": "nit",
       "axis": 5,
-      "location": "docs/design/T-0134-agent-docs.adr.md:19 (легенда), §9 T-0134i deps",
-      "issue": "T-0133 (прецедент vendor-update/managed-solution для проекции) сам ещё НЕ смержен в base этого worktree — живёт в commit db913d6 на ветке task/T-0133-process-templates-design, не в истории HEAD. ADR честно метит '[ЖИВОЙ] git db913d6' и прецедент валиден (§2.5 provenance {catalog_version,origin}, §3.6 VendorUpdateProposal day-1 детект+уведомление / merge=Stage-2 подтверждены в commit). Но T-0134i depends on T-0133 — импл-координация: проекция-vendor-update не материализуема, пока T-0133 не в base. Не дефект дизайна.",
-      "suggestion": "Оркестратору учесть порядок T-0133 → T-0134i при материализации build-задач."
+      "location": "docs/design/T-0134-agent-docs.adr.md (легенда прецедентов, §2.4, §7 rejected-alternatives, §9 T-0134i deps, §11 Координация)",
+      "issue": "RESOLVED. T-0133 (прецедент managed-solution/vendor-update) был смержен в dev 1a9176c. ADR обновлён: все ссылки на '[ЖИВОЙ] git db913d6' / 'сестринская ветка task/T-0133-...' заменены на 'смержен в dev 1a9176c'. §11 добавлена нота R-7: T-0133 — в base, сверять можно сейчас; порядок T-0133 → T-0134a → T-0134i зафиксирован. §9 T-0134i depends-on T-0133 помечен '(в base)'.",
+      "suggestion": "Закрыт: SHA-пин и формулировка обновлены к живому base."
     }
   ],
   "acceptance_coverage": [
