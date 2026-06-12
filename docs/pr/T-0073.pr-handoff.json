@@ -1,0 +1,76 @@
+{
+  "task_id": "T-0073",
+  "status": "pr_open",
+  "branch": "task/T-0073-floor1-editor",
+  "merge_target": "dev",
+  "base_commit": "d97a0fc",
+  "head_commit": "9b3607c28fb8b06291a4bd901cfcc2db0e790e73",
+  "review_verdict": "approved",
+  "review_iteration": 2,
+  "summary": "Floor-1 declarative form editor (E11.2, ADR extensibility-and-authoring §9.1). Появилось: (1) src/core/floor1-editor.ts — чистый модуль applyFloor1Edit/validateFloor1Request: 6 Floor-1 трансформаций (relabel_field, toggle_required, hide_field, show_field, reorder_fields, set_help_text) над BindingField[]+FormUiSchema, immutable (cloneFields/cloneUiSchema), zero-LLM, zero-I/O; Floor-2 kinds режутся классификатором T-0074 (classifyAuthoringFloor → WRONG_FLOOR). (2) src/http/floor1-editor.ts — POST /tenants/:tenantId/processes/:processKey/forms/:formKey/edits, Mode A stateless: роут НЕ пишет в БД, возвращает трансформированные fields+uiSchema, персистенция — на caller через PATCH /binding (T-0072). (3) Authz (R-1 fix, iter2): authorizeEditor реюзает checkRole/withTenantTx из binding.ts verbatim — dev-mode = authenticated-sufficient (DATABASE_URL-free); keycloak-mode = role_assignment lookup process_designer → 403 FORBIDDEN; keycloak без пула → 503 fail-closed. Ordering 401→400→403→operation как в binding.ts. (4) Fitness FF-FLOOR1-ED (ci/checks/floor1-editor-isolation.sh, FE1-1..FE1-11 + self-test); FE1-11 = no-SQL-writes + checkRole-present. (5) 61 тест (AC-1..AC-28). TEST: tsc 0 err; full suite без DATABASE_URL 1702/1702 (6 skipped pre-existing); build green; fitness FE1/AFC/NB все green; живой HTTP-smoke (dev-server :18173 без БД) 4/4: 401 без x-dev-user, 200 с трансформацией на relabel_field, 400 на Floor-2 drop_field (409 WRONG_FLOOR — core-уровень по контракту), 400 на malformed JSON.",
+  "ci_local": {
+    "build": true,
+    "types": true,
+    "tests": true,
+    "fitness": true,
+    "live_smoke": true
+  },
+  "files_changed": [
+    "src/core/floor1-editor.ts",
+    "src/http/floor1-editor.ts",
+    "src/http/binding.ts",
+    "src/server.ts",
+    "src/__tests__/floor1-editor.test.ts",
+    "ci/checks/floor1-editor-isolation.sh",
+    "package.json",
+    "docs/reviews/T-0073.review.md",
+    "docs/design/T-0073.review.contract.json",
+    "docs/test-reports/T-0073.test-report.md",
+    "docs/design/T-0073.test-report.contract.json",
+    "docs/pr/T-0073.pr-handoff.json"
+  ],
+  "ac_coverage": {
+    "total": 28,
+    "covered": 28,
+    "detail": "AC-1..AC-20 core transforms/validation/purity; AC-21..AC-26 HTTP contract (AC-22: HTTP=400 VALIDATION, 409 WRONG_FLOOR покрыт на core-уровне AC-14 — честно отражено в названии теста, R-N2 resolved); AC-27 authz deny-path 403/503 (R-1 fix); AC-28 authz allow-path keycloak+role и dev-mode. Artifact: docs/design/T-0073.test-report.contract.json"
+  },
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 2,
+      "reviewed_commit": "e128dae",
+      "findings_resolved": [
+        "R-1 (blocking): нет authz role-check на management-операции — FIXED e128dae: authorizeEditor реюзает checkRole из binding.ts (dev-soft, keycloak 403, fail-closed 503), тесты AC-27/AC-28.",
+        "R-N1 (nit): docstring ложно заявлял вызов checkBindingCompat — FIXED: честное объяснение, почему вызов не нужен (Floor-1 ops сохраняют key-set).",
+        "R-N2 (nit): заголовок HTTP AC-22 заявлял 409 при ожидании 400 — FIXED: переименован честно."
+      ],
+      "artifact": "docs/reviews/T-0073.review.md + docs/design/T-0073.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1708,
+      "passed": 1702,
+      "failed": 0,
+      "skipped": 6,
+      "target_suite": "src/__tests__/floor1-editor.test.ts — 61/61",
+      "fitness": "FF-FLOOR1-ED FE1-1..FE1-11 + self-test PASS; FF-FLOOR-AUTH AFC-1..7 PASS; FF-NB NB-1..6 PASS",
+      "live_smoke": "4/4 (401 / 200-transform / 400 Floor-2 / 400 malformed) на dev-server :18173 без DATABASE_URL",
+      "tested_commit": "9b3607c",
+      "artifact": "docs/test-reports/T-0073.test-report.md",
+      "contract_artifact": "docs/design/T-0073.test-report.contract.json"
+    }
+  },
+  "risks_known_gaps": [
+    "Binding-compat — ответственность caller: Mode A роут stateless, не персистирует и намеренно не вызывает checkBindingCompat (Floor-1 ops сохраняют key-set → вызов был бы no-op); реальная compat-проверка живёт на пути персистенции PATCH /tenants/.../binding (T-0072).",
+    "form_def как DB-сущность отложен (T-0125): редактор работает от fields+uiSchema в теле запроса (Mode A), Mode B (DB read-through) — будущая итерация; при появлении form_def storage потребуется адаптация.",
+    "Спек-файл docs/specs/T-0073*.spec.md в репо отсутствует — AC-источник = трассировка ревью (AC-1..AC-28) + тест-файл; зафиксировано в test-report §0.",
+    "required-ужесточение (toggle_required false→true) может ломать клиентскую логику, ожидающую optional — вне scope binding-compat T-0072, при необходимости — T-0078 (red-lines).",
+    "HTTP-путь Floor-2 kind возвращает 400 VALIDATION (parseEditRequest), 409 WRONG_FLOOR достижим только на core-уровне — задокументировано, ревьюер классифицировал как acceptable (нет false-pass)."
+  ],
+  "deviations_from_adr": [],
+  "promote_guide": "Standard merge to dev — без миграций, без env vars, без compose-изменений, без known_tenant_tables.txt. binding.ts изменён только экспортом checkRole/withTenantTx (реюз, не семантика). package.json — 1 строка.",
+  "friction_events": [
+    "REVIEW iter1: R-1 blocking authz-gap (нет role-check на management-операции) — пойман независимым ревью, исправлен до TEST.",
+    "TEST: спек-файл T-0073 отсутствует в docs/specs/ — AC восстановлены из ревью-трассировки; материализация спеки задним числом не делалась (не зона tester)."
+  ]
+}

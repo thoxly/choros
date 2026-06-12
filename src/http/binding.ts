@@ -56,7 +56,8 @@ function assertNonEmptyText(value: string, label: string): void {
 // withTenantTx — mirrors invoke.ts pattern
 // ---------------------------------------------------------------------------
 
-async function withTenantTx<T>(
+// Exported for reuse by floor1-editor.ts (T-0073 authz path) — same RLS semantics.
+export async function withTenantTx<T>(
   pool: pg.Pool,
   tenantId: string,
   fn: (client: pg.PoolClient) => Promise<T>,
@@ -100,7 +101,9 @@ function extractActor(req: IncomingMessage): string {
 // the dev path; keycloak tightening is a later task.
 // ---------------------------------------------------------------------------
 
-async function checkRole(
+// Exported for reuse by floor1-editor.ts (T-0073 review R-1) — single source of
+// truth for the process_designer authz convention; no second permission mechanism.
+export async function checkRole(
   client: pg.PoolClient,
   tenantId: string,
   actorId: string,
