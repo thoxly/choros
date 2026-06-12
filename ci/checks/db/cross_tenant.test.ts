@@ -733,6 +733,7 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     case 'effect_resource':
       await seedEffectResource(c, tenantId);
+      break;
     case 'outbox':
       await seedOutboxRow(c, tenantId);
       break;

@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0189",
+  "status": "pr_open",
+  "branch": "task/T-0189-seeder-fallthrough",
+  "merge_target": "dev",
+  "base_commit": "6d5788b",
+  "head_commit": "05064c5",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "Fixes pre-existing fall-through bug in seedRowForTable switch (case 'effect_resource' was missing a break, causing every effect_resource seed to also call seedOutboxRow). Adds eslint no-fallthrough guard targeting ci/checks/db/**/*.ts so this class of bug is caught at lint time going forward. Nit R-N1 (misleading comment in eslint block) fixed at 05064c5. Full gate: tsc exit 0, eslint src exit 0, vitest 1385/1385, fitness:db 599/599. REVIEW approved (iter 1).",
+  "commits": [
+    {
+      "sha": "75b51d4",
+      "phase": "BUILD",
+      "message": "fix(ci): add missing break in seedRowForTable case 'effect_resource' (T-0189)"
+    },
+    {
+      "sha": "fd38bdf",
+      "phase": "BUILD",
+      "message": "feat(ci): extend eslint no-fallthrough to ci/checks/db/*.ts (T-0189)"
+    },
+    {
+      "sha": "f4f4951",
+      "phase": "REVIEW",
+      "message": "T-0189 REVIEW: approved — break fix correct, eslint no-fallthrough guard active, all 599 db tests green"
+    },
+    {
+      "sha": "05064c5",
+      "phase": "NIT",
+      "message": "nit(T-0189): R-N1 — fix misleading comment in eslint.config.js ci/checks/db block"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "f4f4951",
+      "findings_resolved": [],
+      "nits_noted": [
+        "R-N1: eslint.config.js comment said 'Disable all rules inherited from flat/recommended' but prefer-const still fires on 8 pre-existing violations — comment overstated. Fixed at 05064c5."
+      ],
+      "artifact": "docs/design/T-0189.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1385,
+      "passed": 1385,
+      "failed": 0,
+      "ac_coverage": "7/7",
+      "fitness_static": "PASS — all 38 checks green",
+      "fitness_db_effect_resource": "9/9 PASS (effect_resource.test.ts)",
+      "fitness_db_cross_tenant": "115/115 PASS — AC-CT-4 guard green",
+      "fitness_db_total": "599/599 PASS, 0 failed, 0 skipped",
+      "tested_commit": "05064c5",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing no-console warnings",
+        "fitness_static_checks": "PASS — all 38 checks green",
+        "vitest_unit": "1385/1385 passed, 6 skipped (2 skip files), 70 files",
+        "fitness_db_total": "599/599 passed, 0 failed, 43 files"
+      },
+      "artifact": "docs/test-reports/T-0189.test-report.md",
+      "contract_artifact": "docs/design/T-0189.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "ci/checks/db/cross_tenant.test.ts",
+    "eslint.config.js",
+    "docs/reviews/T-0189.review.md",
+    "docs/design/T-0189.review.contract.json",
+    "docs/test-reports/T-0189.test-report.md",
+    "docs/design/T-0189.test-report.contract.json",
+    "docs/pr/T-0189.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration": "T-0189 adds no migration — changes are in ci/checks/db/cross_tenant.test.ts (break fix) and eslint.config.js (lint guard). No DB schema changes; no migrate run needed post-merge.",
+    "guard_note": "The new eslint no-fallthrough block for ci/checks/db/**/*.ts is additive and does not affect 'npm run ci' (which runs 'eslint src'). The block activates when running 'eslint ci/checks/db/' directly or in a targeted check. The src/**/*.ts block is unchanged.",
+    "prefer_const_note": "8 pre-existing prefer-const violations exist in 3 ci/checks/db/ files (pgJobStore.integration.test.ts, cross_tenant.test.ts, pgOutboxStore.integration.test.ts). These are invisible to CI (eslint src scope) and are NOT regressions from T-0189. Candidate follow-up cleanup task recommended."
+  },
+  "friction_events": []
+}

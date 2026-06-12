@@ -1,0 +1,26 @@
+{
+  "task_id": "T-0189",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "eslint.config.js:40",
+      "issue": "Comment says 'Disable all rules inherited from flat/recommended' but prefer-const (from flat/recommended item 1 **/*.ts) still fires on 8 pre-existing violations in 3 unmodified ci/checks/db files. The comment overstates what is silenced.",
+      "suggestion": "Amend comment to 'Disable the three most noisy TS-specific rules' or add 'prefer-const': 'off' to the block. Non-blocking: CI runs eslint src, not eslint ci/checks/db/."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1-break-placement", "covered": true},
+    {"ac": "AC-2-live-cross-tenant-no-spurious-outbox", "covered": true},
+    {"ac": "AC-3-eslint-no-fallthrough-active", "covered": true},
+    {"ac": "AC-4-eslint-config-additive", "covered": true},
+    {"ac": "AC-5-T0188-guard-not-regressed", "covered": true},
+    {"ac": "AC-6-tsc-vitest-fitness-green", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
