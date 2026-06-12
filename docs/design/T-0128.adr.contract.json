@@ -59,7 +59,7 @@
     "function revokeConnector(deps, tenantId, id, actor): Promise<SetConnectorResult> — audit 'connector.revoke', not_found если отсутствует",
     "function getConnectorStatus(store, tenantId, id): Promise<ConnectorStatusView|null> — handleRedacted = redactHandle(secretHandle), secretBound: boolean, никогда не сырой хэндл",
     "function listConnectors(store, tenantId): Promise<ConnectorStatusView[]> — redactHandle на каждом",
-    "PDP-gate (HTTP src/http/connectors.ts): мутации → grant-resolver T-0021 на capability mgmt_object:connector с operation create|update|delete; status/list → read; mgmt_object:connector укладывается в открытый шаблон mgmt_object:${string} (grant-lattice.ts:33) — новый enum в БД не нужен"
+    "PDP-gate (HTTP src/http/connectors.ts): мутации → grant-resolver T-0021 на capability mgmt_object:connector с operation create|update|delete; status/list → read; mgmt_object:connector укладывается в открытый шаблон mgmt_object:${string} (grant-lattice.ts:37) — новый enum в БД не нужен; validateAdminDelegation gate-прецедент: src/http/seed-write.ts:405 [nits R-1/R-3]"
   ],
   "fitness_functions": [
     {"id": "FF-CONN-1", "rule": "Нет параллельной connector-ACL/visibility-поверхности (один механизм прав = effect-грант T-0034)", "ci_check": "ci/checks/connector-isolation.sh: grep банит токены _acl/connector_visibility/connectorRights/connectorAcl в non-comment строках src/core/connector.ts → 0 (AC-7)"},
@@ -70,7 +70,7 @@
     {"id": "FF-CONN-6", "rule": "Tenant-таблица T-0013: tenant_id ведущий PK, ENABLE+FORCE RLS, isolation-policy, GRANT choros_app, имя в списке", "ci_check": "существующие ci/checks/db/force_rls.sql + tenant_id_leading.sql = 0 строк; connector в ci/checks/known_tenant_tables.txt (AC-12)"},
     {"id": "FF-CONN-7", "rule": "Cross-tenant изоляция: коннектор tenant B невидим сессии tenant A", "ci_check": "существующий ci/checks/db/cross_tenant.test.ts (читает KNOWN_TENANT_TABLES) покрывает connector авто после добавления в список (AC-13)"},
     {"id": "FF-CONN-8", "rule": "Audit без секрета: ни одно поле audit_event-payload в connector-пути не содержит secret_handle/resolved-секрет", "ci_check": "unit по образцу T-0170 AC-6: захват appendAuditEvent-инпута, assert payload без handle (AC-5/NF-1)"},
-    {"id": "FF-CONN-9", "rule": "T-0170 нетронут: коммит не меняет email_channel_config-схему/notification-email.ts/notification-router.ts/миграцию 047/046", "ci_check": "git diff dev -- migrations/047_email_channel_config.sql src/core/notification-email.ts src/core/notification-router.ts migrations/046_notification.sql пуст (AC-9/AC-10/NF-3)"},
+    {"id": "FF-CONN-9", "rule": "T-0170 нетронут (pre-merge diff-gate): ветка не меняет email_channel_config-схему/notification-email.ts/notification-router.ts/миграции 047/046. КЛАСС: pre-merge ветко-гейт (не вечный fitness — после мержа diff пуст = no-op). Вечная защита поведения T-0170 = AC-10 (npm test + notification-email.sh). [nits R-5]", "ci_check": "pre-merge: git diff <merge-base> HEAD -- migrations/047_email_channel_config.sql src/core/notification-email.ts src/core/notification-router.ts migrations/046_notification.sql пуст (AC-9/NF-3); вечный: npm test notification-email зелёный (AC-10)"},
     {"id": "FF-CONN-10", "rule": "Без driver-зависимостей: package.json не получает SDK 1С/AD/LDAP/SMTP/HTTP", "ci_check": "git diff dev -- package.json не добавляет driver-пакетов; package-json-no-dup-keys.sh зелёный (AC-15/NF-6)"}
   ],
   "traceability": [

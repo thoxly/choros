@@ -42,7 +42,7 @@ nullable-поле `backs_effect_resource_id` (логическая ссылка,
 | **T-0034** effect_resource | вызов = `invoke`-грант на `effect_resource`; closed-`kind` приём | `src/core/effect-resource.ts:38` (EffectKind union), `:194` (verifyEffectGrants), `migrations/022_effect_resource.sql` |
 | **T-0170** «коннектор-подобная» сущность | весь скелет: pure-core + порты + shape-guard + redact + audit-без-секрета | `src/core/notification-email.ts:160` (setEmailChannelConfig), `:273` (status+redact), `:441` (day-1 stub resolver); `src/core/postgres/pgEmailConfigStore.ts:60` (DAO) |
 | **T-0013** RLS-канон | tenant_id ведущий PK, ENABLE+FORCE RLS, isolation-policy, GRANT choros_app, known_tenant_tables | `migrations/047_email_channel_config.sql:20-56` (verbatim шаблон), `ci/checks/known_tenant_tables.txt` |
-| **T-0021** PDP/mgmt_object | gate мутаций на `mgmt_object:connector` | `src/core/scoped-admin.ts:54-57` (`mgmt_object:role/agent/process/grant`), `src/core/agent-hire.ts:179` (`mgmt_object:agent:create`), `src/core/grant-lattice.ts:33` (`mgmt_object:${string}`) |
+| **T-0021** PDP/mgmt_object | gate мутаций на `mgmt_object:connector` | `src/core/scoped-admin.ts:54-57` (`mgmt_object:role/agent/process/grant`), `src/core/agent-hire.ts:179` (`mgmt_object:agent:create`), `src/core/grant-lattice.ts:37` (`mgmt_object:${string}` template) | <!-- [nits] R-1: :33 = начало ResourceType union; template на :37 -->
 | **Миграционный стиль** | слот 054 (последний = 053), `IF NOT EXISTS`, DO-guard policy, идемпотентность | `migrations/047_email_channel_config.sql`, `migrations/run.mjs` |
 
 **Что НЕ существует сегодня (дыра, которую закрываем):** `effect_resource` отвечает на
@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS choros.connector (
   id                      uuid    NOT NULL,
   kind                    text    NOT NULL
     CHECK (kind IN ('1c', 'ad_ldap', 'smtp', 'http_generic')),
+  -- [nits] R-4: 'http_generic' — closed kind value, NOT a promise of generic-egress.
+  -- Any connector (including http_generic) is un-invokable without a backing effect_resource
+  -- + invoke-grant (T-0034 verifyEffectGrants); closed-kind ≠ open egress. NF-2/AC-14/FF-CONN-4 ban any live call day-1.
   display_name            text    NOT NULL,
   config                  jsonb   NOT NULL DEFAULT '{}'::jsonb, -- opaque; NOT used in authz
   secret_handle           text    NULL,                          -- RL-3 opaque handle (T-0025)
@@ -253,9 +256,12 @@ core-функции грантом на `mgmt_object:connector` через grant
 | get/list (status) | `mgmt_object:connector` / `read` |
 
 `mgmt_object:connector` укладывается в открытый шаблон `mgmt_object:${string}`
-(`grant-lattice.ts:33`) — **новый CHECK/enum в БД НЕ нужен**, grant-резолюция уже умеет
+(`grant-lattice.ts:37`) — **новый CHECK/enum в БД НЕ нужен**, grant-резолюция уже умеет
 такие resourceType. Это и есть ответ на развилку «какой mgmt_object kind» — прецедент
 T-0171/T-0191/scoped-admin даёт `mgmt_object:<entity>` напрямую.
+<!-- [nits] R-3: validateAdminDelegation gate живёт в src/http/seed-write.ts, не в core -->
+Прецедент `validateAdminDelegation` (gate для `mgmt_object:role:create`): `src/http/seed-write.ts:405`
+(HTTP-слой; путь не `src/core/`). <!-- [nits] R-3 -->
 
 ### 4.2 Custody — verbatim T-0025 (один механизм)
 
@@ -285,6 +291,19 @@ effect_resource — грант-точка «что вызвать». Ссылк�
 effect_resource данный коннектор бэкит (для будущего драйвера, который по `effect_resource.id`
 найдёт свой коннектор).
 
+<!-- [nits] R-2: dangling-reference semantics (no FK, no platform-enforced integrity) -->
+**Семантика висячей ссылки (no-op day-1):** Висячий `backs_effect_resource_id` (effect_resource
+удалён или ещё не создан) **безвреден day-1** — платформа целостность не держит (нет FK),
+авторизация вызова целиком на стороне effect_resource через `verifyEffectGrants` (не по этому
+полю). Драйвер day-2 обязан валидировать существование referenced effect_resource при резолве;
+до появления драйвера поле информативно и orphan остаётся no-op. <!-- [nits] R-2 -->
+
+<!-- [nits] R-4 (cont): http_generic invariant -->
+**`http_generic` — closed kind, НЕ generic-egress:** Коннектор с `kind='http_generic'` без
+backing `effect_resource` + `invoke`-гранта **невызываем** (тот же `verifyEffectGrants` гейт,
+что для любого другого `kind`); `closed-kind` ≠ обещание открытого egress. NF-2 (нет `fetch`/`net`
+day-1) + FF-CONN-4 (нет `implements ConnectorDriverPort`) закрывают вектор на уровне фитнеса. <!-- [nits] R-4 -->
+
 **Почему НЕ FK:** (1) effect_resource и connector — обе tenant-RLS-таблицы; cross-table FK с
 композитным `(tenant_id, id)` тянул бы составной FK и усложнял миграционный порядок без выгоды
 day-1 (драйверов нет, целостность не нужна для заглушки). (2) FK создаёт жёсткую связь, тогда как
@@ -310,7 +329,7 @@ cross-FK. **Инвариант, который держим:** НЕТ `connector
 | **FF-CONN-6** | Tenant-таблица T-0013: `tenant_id` ведущий PK, ENABLE+FORCE RLS, isolation-policy, GRANT choros_app, имя в списке. | существующие `ci/checks/db/force_rls.sql` + `tenant_id_leading.sql` = 0 строк; `connector` присутствует в `ci/checks/known_tenant_tables.txt` (AC-12). |
 | **FF-CONN-7** | Cross-tenant изоляция: коннектор tenant B невидим сессии tenant A. | существующий `ci/checks/db/cross_tenant.test.ts` (читает `KNOWN_TENANT_TABLES`) покрывает `connector` автоматически после добавления в список (AC-13). |
 | **FF-CONN-8** | Audit без секрета: ни одно поле `audit_event`-payload в connector-пути не содержит `secret_handle`/resolved-секрет. | unit-тест по образцу T-0170 AC-6: захват `appendAuditEvent`-инпута, assert `payload` не содержит handle (AC-5, NF-1). |
-| **FF-CONN-9** | T-0170 нетронут: коммит не меняет `email_channel_config`-схему, `notification-email.ts`, `notification-router.ts`, миграцию 047/T-0168. | CI/локально: `git diff dev -- migrations/047_email_channel_config.sql src/core/notification-email.ts src/core/notification-router.ts migrations/046_notification.sql` пуст (AC-9, AC-10, NF-3). |
+| **FF-CONN-9** | T-0170 нетронут (pre-merge diff-gate): ветка не изменяет `email_channel_config`-схему, `notification-email.ts`, `notification-router.ts`, миграцию 047/046. **Класс: pre-merge ветко-гейт** (проверяется до мержа в dev; после мержа diff пуст → тривиально-зелёный, поведение не охраняет). Вечная защита поведения T-0170 — AC-10 (живой суит `npm test` + `notification-email.sh`). <!-- [nits] R-5: переклассифицировано из «вечного fitness» в pre-merge diff-gate --> | pre-merge: `git diff <merge-base> HEAD -- migrations/047_email_channel_config.sql src/core/notification-email.ts src/core/notification-router.ts migrations/046_notification.sql` пуст (AC-9, NF-3). Вечный инвариант: AC-10 (`npm test` + `notification-email.sh` зелёный). |
 | **FF-CONN-10** | Без driver-зависимостей: `package.json` не получает SDK 1С/AD/LDAP/SMTP/HTTP. | `git diff dev -- package.json` не добавляет driver-пакетов; `package-json-no-dup-keys.sh` зелёный (AC-15, NF-6). |
 
 Регистрация: `connector-isolation.sh` добавляется в `npm run fitness` (как остальные
