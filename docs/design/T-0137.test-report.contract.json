@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0137",
+  "verdict": "pass",
+  "head_sha": "30d9ff3",
+  "review_sha": "e89c8d2",
+  "deterministic": {
+    "total": 1548,
+    "passed": 1548,
+    "failed": 0,
+    "notes": "vitest run: 1548 passed, 6 skipped (72 files). 0 failures. fitness (full chain incl. dual-control-isolation / role-criticality-isolation / grant-editor-isolation / frozen-checks-immutable): all PASS. vite build: 51 modules clean."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-shell-1",
+      "test": "diff: 4 ra-screens wired in shell.jsx RIGHTS_TABS + Routes; vite build 51 modules clean",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-shell-2",
+      "test": "diff: RightsSubTabs component renders on screen==='rights' via useLocation pathname",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-1",
+      "test": "live curl 1: POST /api/grants effect_resource/invoke on fresh role → HTTP 201 state=semi-confirmed second_approver_required=true reason=escalates_criticality",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-2",
+      "test": "live curl 2: POST /api/grants phase=confirm2 same actor (e-owner) → HTTP 409 DUAL_CONTROL_UNSATISFIED/self_confirm",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-3",
+      "test": "live curl 3: POST /api/grants phase=confirm2 distinct actor (e-second-approver) → HTTP 200 state=confirmed; DB row confirmed2_by=e-second-approver",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-4",
+      "test": "diff: ra-role-editor.jsx postSecondConfirm sends actorId as x-dev-user header, not in body",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-5",
+      "test": "diff: pendingConfirms state accumulates semi-confirmed responses; banner JSX conditional on pendingConfirms.length > 0",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-dc-6",
+      "test": "diff: confirmResult state stores {ok, reason}; UI renders reason in error banner",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-nit-1",
+      "test": "code: ra-shell.jsx header changed to standalone preview harness comment; commit 30d9ff3",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-nit-2",
+      "test": "code: chs-dualbanner in ra-criticality.jsx includes admin hint span + CSS .chs-dualbanner__hint; commit 30d9ff3",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "vite build clean",
+      "result": "pass",
+      "note": "51 modules, 96 kB CSS, 257 kB JS"
+    },
+    {
+      "check": ".chs-dualbanner__hint CSS rule present",
+      "result": "pass",
+      "note": "opacity 0.75 + italic; added to rights-admin.css line 293"
+    }
+  ],
+  "failures": [],
+  "known_limitations": [
+    {
+      "id": "R-N2-admin-authority",
+      "source": "R-N2 analysis — backend review of handleSecondConfirm",
+      "description": "handleSecondConfirm (grants.ts:1162) does NOT re-run validateAdminDelegation for the second confirmer — enforces only distinctness over authenticated principal ids. Banner hint 'проверяется бэкендом' technically overstates the backend check. Design decision T-0044 rev-2 (R-AUTH §9.6). Not a T-0137 regression. Flagged in PR handoff as candidate for follow-up.",
+      "ac_impact": "none"
+    }
+  ]
+}

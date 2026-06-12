@@ -14,8 +14,20 @@ import OrgScreen from '../screens/screen-org.jsx';
 import ProcessesScreen from '../screens/screen-processes.jsx';
 import AuditScreen from '../screens/screen-audit.jsx';
 import RightsScreen from '../screens/rights/screen-rights.jsx';
+import RoleEditorScreen from '../screens/rights/ra-role-editor.jsx';
+import CriticalityScreen from '../screens/rights/ra-criticality.jsx';
+import SoDScreen from '../screens/rights/ra-sod.jsx';
+import GrantTrailScreen from '../screens/rights/ra-grant-trail.jsx';
 
 export { Icon };
+
+const RIGHTS_TABS = [
+  { id: "overview", label: "Обзор ролей", path: "/rights" },
+  { id: "editor",   label: "Редактор роли", path: "/rights/editor" },
+  { id: "criticality", label: "Критичность", path: "/rights/criticality" },
+  { id: "sod",      label: "SoD", path: "/rights/sod" },
+  { id: "trail",    label: "Журнал", path: "/rights/trail" },
+];
 
 const NAV = [
   {
@@ -114,6 +126,31 @@ function Topbar({ screen, theme, setTheme }) {
   );
 }
 
+function RightsSubTabs() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const active = RIGHTS_TABS.find((t) =>
+    t.path === location.pathname ||
+    (t.path !== "/rights" && location.pathname.startsWith(t.path))
+  )?.id || "overview";
+  return (
+    <div className="chs-subtabs">
+      {RIGHTS_TABS.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          className="chs-subtab"
+          aria-selected={active === t.id}
+          onClick={() => navigate(t.path)}
+          data-screen-label={t.label}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "dark");
   const [rightsFocus, setRightsFocus] = useState(null);
@@ -193,6 +230,7 @@ function AppShell() {
 
       <main className="chs-main">
         <Topbar screen={screen} theme={theme} setTheme={setTheme} />
+        {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
             <Route path="/" element={<InboxScreen />} />
@@ -201,6 +239,10 @@ function AppShell() {
             <Route path="/processes" element={<ProcessesScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
+            <Route path="/rights/editor" element={<RoleEditorScreen />} />
+            <Route path="/rights/criticality" element={<CriticalityScreen />} />
+            <Route path="/rights/sod" element={<SoDScreen />} />
+            <Route path="/rights/trail" element={<GrantTrailScreen />} />
           </Routes>
         </div>
       </main>

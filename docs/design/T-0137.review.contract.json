@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0137",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-N1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "web/src/screens/rights/ra-shell.jsx:1",
+      "issue": "ra-shell.jsx is a standalone preview shell that is no longer imported anywhere after all 4 ra-* screens were wired into AppShell via shell.jsx router. The file is either dead code or an intentional dev preview artifact — the commit message does not clarify the intent.",
+      "suggestion": "Add a comment '// standalone preview — intentionally kept for local dev' at the top, or remove the file. No functional regression possible."
+    },
+    {
+      "id": "R-N2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/rights/ra-role-editor.jsx:237",
+      "issue": "confirmActor defaults to 'e-owner2' which is not a seeded admin employee; handleSecondConfirm bypasses validateAdminDelegation (checks only distinctness + confirmed2_by IS NULL). The second approver's admin authority is not re-verified on confirm2 by design (T-0044 rev-2). This is acceptable for the dev stand but the constraint is undocumented in the UI banner.",
+      "suggestion": "Add a hint in the dual-control banner that the second approver must hold admin authority, or add a comment to handleSecondConfirm explaining the intentional authority omission."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "Зона-7/ra-screens", "covered": true},
+    {"ac": "Зона-7/shell-routing", "covered": true},
+    {"ac": "Зона-4/dual-control-ui", "covered": true},
+    {"ac": "T-0044/same-actor-rejection", "covered": true},
+    {"ac": "T-0044/semi-confirmed-flow", "covered": true},
+    {"ac": "T-0044/confirm2-error-display", "covered": true},
+    {"ac": "tsc-clean", "covered": true},
+    {"ac": "vite-build-clean", "covered": true},
+    {"ac": "fitness/dual-control-isolation", "covered": true},
+    {"ac": "fitness/frozen-checks-immutable", "covered": true}
+  ],
+  "role_gap_evidence": []
+}

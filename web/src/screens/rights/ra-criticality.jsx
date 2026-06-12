@@ -123,7 +123,8 @@ function CriticalityScreen() {
               <span className="chs-dualbanner__glyph" />
               <div className="chs-dualbanner__txt">
                 <b>Требуется два аппрувера.</b> Назначение поднимает критичность роли до «критичной» —
-                добавляется вызов внешней интеграции и влияние на guarded-переход.
+                добавляется вызов внешней интеграции и влияние на guarded-переход.{" "}
+                <span className="chs-dualbanner__hint">Второй подтверждающий обязан иметь admin-полномочия — проверяется бэкендом.</span>
               </div>
               <span className="chs-dualbanner__tag">DUAL-CONTROL</span>
             </div>
