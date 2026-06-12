@@ -56,7 +56,7 @@
     ]}
   ],
   "contracts": [
-    "instantiateTemplate(tenantSlug, templateSlug, catalogVersion) -> { draftBundleId, provenance } — поверх публичных authoring-API (T-0129/T-0077, importer-over-HTTP путь T-0140, НЕ SQL); draft-бандл в draft-тире §8; далее петля T-0129 (адаптация → T-0130 → human-gated promote)",
+    "instantiateTemplate(tenantSlug, templateSlug, catalogVersion) -> { draftBundleId, provenance } — поверх публичных authoring-API (T-0129/T-0077, importer-over-HTTP путь T-0140, НЕ SQL); draft-бандл в draft-тире §8; далее петля T-0129 (адаптация → T-0130 → human-gated promote). [deferred — process/BPMN/form authoring-API не существуют day-1; реализует BUILD-B, наследуя deferral-контракт T-0082; симметрично §1 «form-def/bpmn-def-таблиц нет»]",
     "loadCatalogPack(pack) -> { accepted: ProcessTemplate[], rejected: {slug, reason}[] } — governed/fail-closed: каждый шаблон проходит bundle-coherence гард T-0082 + валидацию parameters[]; пишет appendAuditEvent (T-0031)",
     "detectVendorUpdates(tenantSlug) -> VendorUpdateProposal[] — managed-solution day-1: notify-only под human-gate (T-0129 FR-11); three-way-merge = Stage-2",
     "validateTemplatePack(pack) -> errors[] — process_templates[].bundle проходит T-0082; parameters[] непустой, kind ∈ {role-binding, threshold, sla}, target резолвится"
