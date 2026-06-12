@@ -29,7 +29,8 @@ T-0078 строит **авторинг-red-line гард** — чистую фу
 | drop field_key из object_schema | поле объектной схемы | destructive |
 | rename field_key в object_schema | поле объектной схемы | destructive |
 | lossy type-change object_schema (number→integer, string→enum-сужение) | поле объектной схемы | destructive |
-| delete/rename core/system-directory-поля (core-owned) | системный справочник | destructive (всегда, без core-check) |
+| delete/rename core/system-directory-поля (core-owned) | системный справочник | core_pinned (безусловный deny, escape-hatch запрещён §5) |
+| lossy live-migration (Camunda-grade перенос инстансов при деструктивном изменении schema) | live instance rerouting | core_pinned (безусловный deny, escape-hatch запрещён §4/§7 ADR) |
 | add field, relabel (title/description), toggle required, enum-widening | любой | soft (non-destructive) |
 
 Классификатор **не знает** о конкретном DB-сопровождении `form_def` (таблица ещё не
@@ -58,9 +59,18 @@ interface AuthoringRedLineConfirm {
 ```
 
 Гард принимает `confirm` в качестве аргумента и проверяет:
-1. `consequenceStatement.length >= 10` — не пустой.
-2. Подтверждение не является одним из запрещённых шаблонов (автозаполнение).
+1. `consequenceStatement.trim().length >= 10` — length floor против пустого флага.
+2. Подтверждение не является запрещённым шаблоном авто-заполнения (`isForbiddenTemplate`):
+   - Одиночные слова-согласия: `"ok"`, `"да"`, `"yes"`, `"no"`, `"нет"`, `"confirm"`,
+     `"подтверждаю"`, `"confirmed"` (case-insensitive, trimmed).
+   - Строка только из цифр: `"1234567890"`, `"0000000000"` и т.п.
+   - Повторяющийся символ ×N: `"aaaaaaaaaa"`, `"----------"` и т.п.
 3. `force === true` только если `context.isCorePinned === false`.
+
+**Ограничение семантики:** гард реализует length-floor + anti-autofill барьер, но НЕ
+полную семантическую проверку (машинно семантику не проверить без LLM-судьи, исключённого
+из scope). Истинная семантическая валидация — задача UX-слоя (T-0073): placeholder,
+server-side prompt, label. Гард — последняя линия против авто-шаблонов, не первая.
 
 Если подтверждение отсутствует → `deny` (default-DENY). Если core-pinned + force → `deny`.
 
@@ -112,7 +122,8 @@ type AuthoringOpKind =
   | 'change_type'
   | 'relabel'
   | 'toggle_required'
-  | 'enum_change';
+  | 'enum_change'
+  | 'lossy_live_migration';  // ADR §4/§7: Camunda-grade → core_pinned абсолют
 
 // Описание конкретной авторинг-операции
 interface AuthoringOp {
@@ -172,6 +183,8 @@ type AuthoringRedLineDecision =
 | AC-16 | Экспорты `AuthoringOp`, `AuthoringContext`, `AuthoringChangeClass`, `AuthoringRedLineDecision`, `AuthoringRedLineConfirm`, `AuthoringOpKind`, `classifyAuthoringOp`, `evaluateAuthoringRedLine` все присутствуют. | fitness |
 | AC-17 | `npm run fitness` exit 0 после добавления `authoring-redlines-isolation.sh`. | fitness |
 | AC-18 | Нет дублирования алгоритма isLossyNarrowing — либо импорт, либо явная ссылка в комментарии на T-0177 прецедент. | fitness |
+| AC-19 | `lossy_live_migration` → `core_pinned`; `evaluateAuthoringRedLine` → `deny` reason=`core_pinned` даже при force=true и isCorePinned=false. | test |
+| AC-20 | confirm с запрещённым шаблоном ("ok", "да", только цифры, повторяющийся символ) → `deny` reason=`invalid_confirm`. | test |
 
 ---
 
@@ -182,3 +195,5 @@ type AuthoringRedLineDecision =
 - Changelog-эмиссия (T-0084)
 - bundle-coherence enforcement (T-0082/T-0179)
 - Конкретная форма UI-представления consequenceStatement
+- Полная семантическая проверка consequenceStatement (требует LLM-судьи) — задача UX-слоя (T-0073)
+- Changelog-эмиссия событий live-migration (Camunda-grade rollback/rerouting) — задача T-0084/T-0085

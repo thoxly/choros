@@ -328,8 +328,9 @@ describe("AC-13 · confirm with too-short consequenceStatement → deny(invalid_
     }
   });
 
-  it("exactly 10 chars → allow (boundary)", () => {
-    const c: AuthoringRedLineConfirm = { consequenceStatement: "1234567890", force: true };
+  it("exactly 10 chars non-forbidden → allow (boundary)", () => {
+    // "удалю поле" = 10 символов (кириллица, осмысленный текст, не в forbidden-list)
+    const c: AuthoringRedLineConfirm = { consequenceStatement: "удалю поле", force: true };
     const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
     expect(result.verdict).toBe("allow");
   });
@@ -404,5 +405,127 @@ describe("Mixed: core-pinned lossy → core_pinned (not just destructive)", () =
       { type: "string", enum: ["a"] },
     );
     expect(classifyAuthoringOp(o, ctx(true))).toBe("core_pinned");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-19 — lossy_live_migration → core_pinned; deny even with force=true
+// (ADR §4 RED-LINES строки 154-155: категорический абсолют)
+// ---------------------------------------------------------------------------
+
+describe("AC-19 · lossy_live_migration → core_pinned (absolute deny)", () => {
+  it("lossy_live_migration non-core → core_pinned classification (not destructive)", () => {
+    // Even when isCorePinned=false — live-migration is unconditionally core_pinned
+    expect(classifyAuthoringOp(op("lossy_live_migration"), ctx(false))).toBe("core_pinned");
+  });
+
+  it("lossy_live_migration core-pinned → core_pinned classification", () => {
+    expect(classifyAuthoringOp(op("lossy_live_migration"), ctx(true))).toBe("core_pinned");
+  });
+
+  it("lossy_live_migration without confirm → deny(core_pinned)", () => {
+    const result = evaluateAuthoringRedLine(op("lossy_live_migration"), ctx(false));
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") {
+      expect(result.reason).toBe("core_pinned");
+      expect(result.requiresConfirm).toBe(false);
+      expect(result.classification).toBe("core_pinned");
+    }
+  });
+
+  it("lossy_live_migration WITH force + valid confirm → still deny(core_pinned)", () => {
+    // Escape-hatch запрещён даже для non-core — §4 ADR категорический абсолют
+    const c = confirm("migrating instances from activity A to activity B will discard state");
+    const result = evaluateAuthoringRedLine(op("lossy_live_migration"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") {
+      expect(result.reason).toBe("core_pinned");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-20 — forbidden-template check in isValidConfirm (R-2)
+// Запрещённые шаблоны авто-заполнения → deny(invalid_confirm)
+// ---------------------------------------------------------------------------
+
+describe("AC-20 · forbidden-template → deny(invalid_confirm)", () => {
+  // Helper: drop_field non-core (деструктив, чтобы дойти до confirm-проверки)
+  function dropNonCore(statement: string, force = true): AuthoringRedLineConfirm {
+    return { consequenceStatement: statement, force };
+  }
+
+  it("single-word 'ok' (padded to ≥10 chars) → deny(invalid_confirm)", () => {
+    // "ok" — запрещённое слово, несмотря на длину
+    const c = dropNonCore("ok");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    // "ok" is 2 chars → hits length floor first (< 10), still invalid_confirm
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("single-word 'да' (exactly, trimmed) → deny(invalid_confirm)", () => {
+    const c = dropNonCore("да");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("single-word 'confirm' exactly → deny(invalid_confirm)", () => {
+    const c = dropNonCore("confirm");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("single-word 'подтверждаю' (≥10 chars) → deny(invalid_confirm) via forbidden list", () => {
+    // "подтверждаю" = 11 chars (passes length floor), but is in FORBIDDEN_SINGLE_WORDS
+    const c = dropNonCore("подтверждаю");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("digit sequence '1234567890' (≥10 chars) → deny(invalid_confirm) via digit-only rule", () => {
+    const c = dropNonCore("1234567890");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("repeated char 'aaaaaaaaaa' (10 chars) → deny(invalid_confirm) via repeat rule", () => {
+    const c = dropNonCore("aaaaaaaaaa");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("repeated dash '----------' (10 chars) → deny(invalid_confirm)", () => {
+    const c = dropNonCore("----------");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("'yes' (3 chars, forbidden word) → deny(invalid_confirm)", () => {
+    const c = dropNonCore("yes");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
+  });
+
+  it("valid meaningful statement 'поле amount будет удалено' → allow(destructive)", () => {
+    // Убедиться, что нормальный текст не попадает под запреты
+    const c = dropNonCore("поле amount будет удалено");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("allow");
+    if (result.verdict === "allow") expect(result.classification).toBe("destructive");
+  });
+
+  it("'confirmed' (9 chars) → deny(invalid_confirm) — hits length floor", () => {
+    const c = dropNonCore("confirmed");
+    const result = evaluateAuthoringRedLine(op("drop_field"), ctx(false), c);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.reason).toBe("invalid_confirm");
   });
 });

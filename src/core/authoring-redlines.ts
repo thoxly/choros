@@ -57,13 +57,18 @@ export type { FieldSchemaEntry };
  * Vocab закрытый (аддитивное расширение при появлении новых операций).
  */
 export type AuthoringOpKind =
-  | "add_field"         // добавление нового поля (soft)
-  | "drop_field"        // удаление поля (destructive / core_pinned)
-  | "rename_field"      // переименование поля = drop старого + add нового (destructive / core_pinned)
-  | "change_type"       // изменение типа / enum-состава (может быть destructive или soft)
-  | "relabel"           // только title/description/help-text (soft)
-  | "toggle_required"   // toggle required (soft)
-  | "enum_change";      // изменение набора enum-значений (widening=soft, narrowing=destructive)
+  | "add_field"              // добавление нового поля (soft)
+  | "drop_field"             // удаление поля (destructive / core_pinned)
+  | "rename_field"           // переименование поля = drop старого + add нового (destructive / core_pinned)
+  | "change_type"            // изменение типа / enum-состава (может быть destructive или soft)
+  | "relabel"                // только title/description/help-text (soft)
+  | "toggle_required"        // toggle required (soft)
+  | "enum_change"            // изменение набора enum-значений (widening=soft, narrowing=destructive)
+  | "lossy_live_migration";  // Camunda-grade перенос инстансов при деструктивном изменении schema
+                             // (ADR §4 RED-LINES строки 154-155: «lossy live-migration» перечислен
+                             // в одном ряду с drop/rename core-поля — категорический абсолют).
+                             // Escape-hatch запрещён: core_pinned всегда, независимо от isCorePinned.
+                             // Rollback при живых инстансах — ADR §7, строки 246-248.
 
 /**
  * Описание конкретной авторинг-операции над одним полем.
@@ -114,8 +119,10 @@ export interface AuthoringRedLineConfirm {
  *  1. allow non_destructive — операция безопасна, confirm не нужен.
  *  2. allow destructive — деструктив подтверждён semantic confirm'ом.
  *  3. deny requires_confirm — деструктив, confirm отсутствует.
- *  4. deny invalid_confirm — деструктив, confirm есть но невалиден (< 10 символов).
- *  5. deny core_pinned — core-owned поле, escape-hatch запрещён без исключений.
+ *  4. deny invalid_confirm — деструктив, confirm есть но невалиден:
+ *       - force !== true, или < 10 символов (length floor), или
+ *       - запрещённый шаблон авто-заполнения (isForbiddenTemplate).
+ *  5. deny core_pinned — core-owned поле или lossy_live_migration; escape-hatch запрещён.
  */
 export type AuthoringRedLineDecision =
   | { verdict: "allow"; classification: "non_destructive" }
@@ -252,6 +259,13 @@ export function classifyAuthoringOp(
       }
       return "non_destructive";
     }
+
+    case "lossy_live_migration":
+      // ADR §4 RED-LINES (строки 154-155): «lossy live-migration» — категорический абсолют,
+      // перечислен в одном ряду с drop/rename core/system-directory-поля.
+      // core_pinned БЕЗУСЛОВНО — escape-hatch запрещён независимо от isCorePinned.
+      // (Camunda-grade перенос инстансов — риск живых данных; §7 ADR строки 246-248.)
+      return "core_pinned";
   }
 }
 
@@ -263,16 +277,90 @@ export function classifyAuthoringOp(
 const MIN_CONSEQUENCE_LENGTH = 10;
 
 /**
+ * Список запрещённых шаблонов авто-заполнения для consequenceStatement.
+ *
+ * Назначение: anti-autofill floor — блокирует программную/автоматическую
+ * подстановку кнопочного OK вместо семантически осмысленного текста.
+ * Семантическая проверка (понял ли человек последствие) — задача UI-слоя
+ * (T-0073) и UX-формы; гард = последняя линия против авто-шаблонов.
+ *
+ * Категории запрещённых шаблонов:
+ *  1. Одиночные слова-согласия (ru/en): "ok", "да", "yes", "no", "нет",
+ *     "confirm", "подтверждаю", "confirmed" — case-insensitive, trimmed.
+ *  2. Числовые последовательности: только цифры (1234567890, 000000000).
+ *  3. Повторяющийся символ × N (aaaaaaaaaa, ----------, ..........):
+ *     строка длиной ≥2 из одного и того же символа.
+ *
+ * Ограничение: гард НЕ проверяет полную семантику (требует LLM-судьи,
+ * исключённого из scope). Граница 10 символов + forbidden-list = минимальный
+ * ненулевой барьер против кнопки-OK и авто-заполнения; истинная семантическая
+ * валидация — UI-слой (T-0073).
+ */
+const FORBIDDEN_SINGLE_WORDS = new Set([
+  "ok", "да", "yes", "no", "нет", "confirm", "подтверждаю", "confirmed",
+]);
+
+/** Regexp: строка целиком из цифр (любой длины) */
+const RE_DIGITS_ONLY = /^\d+$/;
+
+/** Regexp: строка из одного повторяющегося символа (≥2 повтора) */
+const RE_REPEATED_CHAR = /^(.)\1+$/;
+
+/**
+ * Проверяет, является ли consequenceStatement запрещённым шаблоном авто-заполнения.
+ * Возвращает true, если строка попадает в один из запрещённых классов.
+ */
+function isForbiddenTemplate(statement: string): boolean {
+  const trimmed = statement.trim().toLowerCase();
+
+  // Категория 1: одиночные слова-согласия
+  if (FORBIDDEN_SINGLE_WORDS.has(trimmed)) {
+    return true;
+  }
+
+  // Категория 2: только цифры (числовая последовательность)
+  if (RE_DIGITS_ONLY.test(trimmed)) {
+    return true;
+  }
+
+  // Категория 3: повторяющийся символ (aaaaaaaaaa, ----------)
+  if (trimmed.length >= 2 && RE_REPEATED_CHAR.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Проверяет валидность semantic confirm (§4 ADR RED-LINES).
- * Подтверждение = человек ПИШЕТ последствие словами (≥10 символов, не пустой шаблон).
- * force=true также обязателен (только для non-core).
+ *
+ * Три условия:
+ *  1. force === true — явное намерение.
+ *  2. consequenceStatement.trim().length >= 10 — length floor против пустого флага.
+ *  3. consequenceStatement не является запрещённым шаблоном авто-заполнения
+ *     (isForbiddenTemplate) — anti-autofill барьер.
+ *
+ * force=true обязателен (только для non-core; core_pinned блокируется до этой проверки).
+ *
+ * Комментарий к дизайну: length=10 — не семантическая проверка (машинно
+ * семантику не проверить без LLM-судьи). Это length-floor = минимальный
+ * барьер против OK-флага. Истинная семантическая валидация — UX-слой (T-0073).
  */
 function isValidConfirm(confirm: AuthoringRedLineConfirm): boolean {
-  return (
-    confirm.force === true &&
-    typeof confirm.consequenceStatement === "string" &&
-    confirm.consequenceStatement.trim().length >= MIN_CONSEQUENCE_LENGTH
-  );
+  if (confirm.force !== true) {
+    return false;
+  }
+  if (typeof confirm.consequenceStatement !== "string") {
+    return false;
+  }
+  const trimmed = confirm.consequenceStatement.trim();
+  if (trimmed.length < MIN_CONSEQUENCE_LENGTH) {
+    return false;
+  }
+  if (isForbiddenTemplate(confirm.consequenceStatement)) {
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
