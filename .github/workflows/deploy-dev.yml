@@ -1,0 +1,56 @@
+name: deploy-dev
+
+# Triggered automatically on every push to dev (after CI passes).
+# Keeps the dev environment on homeserver-vm in sync with the dev branch.
+#
+# DORMANT until founder provides:
+#   - GitHub secret DEPLOY_SSH_KEY  (contents of ~/.ssh/homeserver_vm private key)
+#
+# Once the secret is set this workflow activates automatically — no other
+# changes required. See docs/environments.md §3 for context.
+#
+# Gate: this job depends on the ci workflow passing. It is wired via
+# `needs: ci` if ci.yml is reused, but here we rely on GitHub's
+# "required status checks" branch protection (founder sets that in RL-2 gate).
+# The deploy itself is non-prod (dev only), so it does NOT touch main or prod.
+
+on:
+  push:
+    branches: [dev]
+
+jobs:
+  deploy-dev:
+    name: Deploy to dev (homeserver-vm)
+    runs-on: ubuntu-latest
+
+    # DORMANCY GATE — workflow silently skips if the required secret is absent.
+    # This prevents noise on PRs/forks before the secret is provisioned.
+    # Condition: secret present = non-empty string after trim.
+    if: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        # Write the private key from GitHub secret to a temp file.
+        # The key must match the authorized_keys entry on homeserver-vm
+        # (ubuntu@localhost / ssh-ed25519 AAAA... homeserver-ubuntu-vm).
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Add known host to avoid interactive prompt
+          ssh-keyscan -H 100.121.76.86 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Deploy
+        env:
+          DEPLOY_HOST: "100.121.76.86"
+          DEPLOY_USER: "ubuntu"
+          DEPLOY_DIR: "/srv/choros"
+          SSH_KEY_PATH: "$HOME/.ssh/deploy_key"
+        run: bash scripts/deploy-dev.sh
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
