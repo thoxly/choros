@@ -62,7 +62,7 @@ run $SSH_CMD "
   git fetch origin dev
   git checkout dev
   git reset --hard origin/dev
-  echo 'Git pull done. HEAD: '$(git log --oneline -1)
+  echo Git pull done. HEAD: \$(git log --oneline -1)
 "
 
 # 3. Build and restart compose stack (only choros service rebuilt; substrates skip)

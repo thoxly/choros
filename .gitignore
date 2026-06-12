@@ -5,3 +5,8 @@ dist
 .env.local
 .env.*.local
 memory/
+# R-5: Prevent accidental tracking of server-side override file.
+# On homeserver-vm /srv/choros/docker-compose.override.yml is untracked by design
+# (holds restart: unless-stopped; survives git reset --hard). If staged accidentally
+# the next deploy reset --hard would delete it, breaking the stack restart-policy.
+docker-compose.override.yml
