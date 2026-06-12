@@ -29,6 +29,8 @@ COPY package*.json ./
 RUN npm ci
 COPY src/ ./src/
 COPY tsconfig.json ./
+# seed/ участвует в npm run build (tsc --project seed/tsconfig.json, T-0140)
+COPY seed/ ./seed/
 RUN npm run build
 
 # ---------------------------------------------------------------------------
