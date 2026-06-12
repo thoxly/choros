@@ -1,0 +1,97 @@
+{
+  "task_id": "T-0128",
+  "status": "ready",
+  "decision": "Завести первокласс tenant-сущность connector (новая таблица, миграция 054) как конфигурационную, несущую секрет, tenant-изолированную запись по живому архитектурному приёму email_channel_config/T-0170, но с закрытой осью kind (как EffectKind у T-0034). Core-модуль src/core/connector.ts — pure/IO-free CRUD (setConnector/rotateConnectorSecret/revokeConnector/getConnectorStatus/listConnectors) с инжектируемыми портами, переиспользует verbatim custody-примитивы T-0025 (validateSecretHandleShape/redactHandle/SecretResolverPort-seam) без передекларации. Право вызвать НЕ вводится: вызов = invoke-грант на effect_resource (T-0034); connector декларативно бэкит effect_resource через nullable backs_effect_resource_id (логическая ссылка, не FK). Мутации гейтятся грантом mgmt_object:connector через grant-resolver T-0021 (прецедент scoped-admin/agent-hire). Драйверы НЕ пишутся: два пустых seam-порта (ConnectorSecretResolverPort, ConnectorDriverPort); day-1 нет ни класса-драйвера, ни единого реального внешнего вызова. email_channel_config не трогается — две сущности сосуществуют, конвергенция = Stage-2.",
+  "rejected_alternatives": [
+    {"option": "Расширить effect_resource полями config/secret/status вместо новой таблицы", "why_not": "EffectKind ось — про тип эффекта (integration_endpoint/messaging_channel/external_account), не про тип системы (1С/AD/SMTP); смешение сломало бы closed-set и грант-семантику T-0034; спека §0 разделяет ответственность."},
+    {"option": "FK connector.backs_effect_resource_id → effect_resource(tenant_id,id)", "why_not": "составной cross-RLS-table FK без выгоды day-1 (драйверов нет), запирает кардинальность, усложняет миграционный порядок; логическая ссылка достаточна для заглушки."},
+    {"option": "Новый тип права connectorRights / connector как объект вызова", "why_not": "прямой запрет FR-6/NF-4 и инвариант gap-map §4б.2 один-механизм-прав; вызов = invoke-грант на effect_resource; вторая ACL-поверхность забанена FF-CONN-1."},
+    {"option": "Принудительная миграция email_channel_config под коннектор day-1", "why_not": "red-line не-ломать-T-0170; разная кардинальность (одна строка/тенант vs много) и типизация (типизированные колонки vs opaque jsonb); конвергенция — самостоятельная Stage-2 работа с миграцией данных."},
+    {"option": "Новый custody-механизм для connector-секрета", "why_not": "FR-3/NF-4 один-механизм-custody; переиспользуем T-0025 verbatim (shape-guard/redact/resolver-port), как T-0170."},
+    {"option": "Отложить Postgres DAO целиком (T-0053-паттерн)", "why_not": "AC-13 cross-tenant требует живой таблицы+DAO под RLS-тестом; тонкий PgConnectorStore по pgEmailConfigStore.ts в скоупе — это НЕ драйвер и НЕ внешний вызов, стоимость низкая, выгода — реальная проверка изоляции."},
+    {"option": "status с живой пробой связи day-1", "why_not": "FR-4/AC-6 статус декларативный; health-check = Stage-2; проба = внешний вызов = нарушение NF-2."},
+    {"option": "Открытый kind (свободный текст)", "why_not": "FR-2 fail-closed; неизвестный kind → deny; закрытый CHECK+union (приём T-0034 EffectKind)."}
+  ],
+  "object_model": [
+    {
+      "entity": "connector (choros.connector, migration 054)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL (ведущая колонка PK, T-0013)"},
+        {"name": "id", "type": "uuid NOT NULL (PK = (tenant_id, id), много строк/тенант)"},
+        {"name": "kind", "type": "text NOT NULL CHECK IN ('1c','ad_ldap','smtp','http_generic') — closed set"},
+        {"name": "display_name", "type": "text NOT NULL"},
+        {"name": "config", "type": "jsonb NOT NULL DEFAULT '{}' — opaque, НЕ в авторизации"},
+        {"name": "secret_handle", "type": "text NULL — RL-3 opaque handle (T-0025), nullable"},
+        {"name": "status", "type": "text NOT NULL DEFAULT 'disabled' CHECK IN ('configured','disabled','error') — декларативный"},
+        {"name": "backs_effect_resource_id", "type": "uuid NULL — логическая ссылка на бэкимый effect_resource (T-0034), не FK"},
+        {"name": "created_by", "type": "text NOT NULL"},
+        {"name": "created_at", "type": "bigint NOT NULL (epoch ms)"},
+        {"name": "updated_by", "type": "text NOT NULL"},
+        {"name": "updated_at", "type": "bigint NOT NULL (epoch ms)"}
+      ]
+    },
+    {
+      "entity": "Connector (TS domain record, src/core/connector.ts)",
+      "fields": [
+        {"name": "tenantId", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "kind", "type": "ConnectorKind = '1c'|'ad_ldap'|'smtp'|'http_generic'"},
+        {"name": "displayName", "type": "string"},
+        {"name": "config", "type": "Readonly<Record<string, unknown>> (opaque)"},
+        {"name": "secretHandle", "type": "string | null (opaque RL-3, NOT raw)"},
+        {"name": "status", "type": "ConnectorStatus = 'configured'|'disabled'|'error'"},
+        {"name": "backsEffectResourceId", "type": "string | null"},
+        {"name": "createdBy", "type": "string"},
+        {"name": "createdAt", "type": "number"},
+        {"name": "updatedBy", "type": "string"},
+        {"name": "updatedAt", "type": "number"}
+      ]
+    }
+  ],
+  "contracts": [
+    "type ConnectorKind = '1c' | 'ad_ldap' | 'smtp' | 'http_generic'; function isConnectorKind(v: unknown): v is ConnectorKind",
+    "type ConnectorStatus = 'configured' | 'disabled' | 'error'; function isConnectorStatus(v: unknown): v is ConnectorStatus",
+    "interface ConnectorWritePort { insert(c: Connector): Promise<void>; update(c: Connector): Promise<void>; get(tenantId, id): Promise<Connector|null>; list(tenantId): Promise<Connector[]>; delete(tenantId, id): Promise<boolean> } — Postgres DAO PgConnectorStore (mirrors pgEmailConfigStore.ts), GUC-RLS",
+    "interface ConnectorSecretResolverPort { resolveSecret(handle: string, ctx: {tenantId: string}): Promise<string> } — Stage-2 seam, структурно совместим с T-0025 SecretResolverPort (compile-time _assert), day-1 без prod-impl",
+    "interface ConnectorDriverPort { readonly kind: ConnectorKind; invoke(req, ctx): Promise<...> } — Stage-2 seam, day-1 НЕТ ни одного implements",
+    "function setConnector(deps:{store,auditWriter,tx,clock}, tenantId, input: SetConnectorInput): Promise<SetConnectorResult> — fail-closed kind, shape-guard secretHandle до записи, audit 'connector.set' без secret_handle",
+    "function rotateConnectorSecret(deps, tenantId, id, newSecretHandle, actor): Promise<SetConnectorResult> — shape-guard, audit 'connector.rotate'",
+    "function revokeConnector(deps, tenantId, id, actor): Promise<SetConnectorResult> — audit 'connector.revoke', not_found если отсутствует",
+    "function getConnectorStatus(store, tenantId, id): Promise<ConnectorStatusView|null> — handleRedacted = redactHandle(secretHandle), secretBound: boolean, никогда не сырой хэндл",
+    "function listConnectors(store, tenantId): Promise<ConnectorStatusView[]> — redactHandle на каждом",
+    "PDP-gate (HTTP src/http/connectors.ts): мутации → grant-resolver T-0021 на capability mgmt_object:connector с operation create|update|delete; status/list → read; mgmt_object:connector укладывается в открытый шаблон mgmt_object:${string} (grant-lattice.ts:33) — новый enum в БД не нужен"
+  ],
+  "fitness_functions": [
+    {"id": "FF-CONN-1", "rule": "Нет параллельной connector-ACL/visibility-поверхности (один механизм прав = effect-грант T-0034)", "ci_check": "ci/checks/connector-isolation.sh: grep банит токены _acl/connector_visibility/connectorRights/connectorAcl в non-comment строках src/core/connector.ts → 0 (AC-7)"},
+    {"id": "FF-CONN-2", "rule": "Pure-core / no live effects: connector core не импортирует pg/fs/net/http(s)/fetch/child_process, нет SMTP/LDAP-вызовов", "ci_check": "connector-isolation.sh: forbidden-import grep по src/core/connector.ts = 0 (AC-8/AC-14/NF-5)"},
+    {"id": "FF-CONN-3", "rule": "Custody не передекларирована: validateSecretHandleShape/redactHandle импортируются из secret-handle-validator.ts, не объявлены заново", "ci_check": "connector-isolation.sh: grep '^(export )?function (validateSecretHandleShape|redactHandle)' connector.ts = 0 И grep 'from .*secret-handle-validator' connector.ts >= 1 (AC-3/NF-4)"},
+    {"id": "FF-CONN-4", "rule": "Seam без драйвера: ConnectorSecretResolverPort структурно совместим с T-0025 SecretResolverPort под tsc; нет класса implements ConnectorDriverPort", "ci_check": "tsc --noEmit зелёный (compile-time _assert как notification-email.ts:453); connector-isolation.sh: grep 'implements ConnectorDriverPort' в src/ = 0 (AC-8)"},
+    {"id": "FF-CONN-5", "rule": "Closed-kind fail-closed: единственный источник истины kind — isConnectorKind + CHECK; нет строкового расширения", "ci_check": "unit setConnector({kind:'__bogus__'}) → reject, no write (AC-2); connector-isolation.sh сверяет CHECK в migrations/054 и union в connector.ts — один набор"},
+    {"id": "FF-CONN-6", "rule": "Tenant-таблица T-0013: tenant_id ведущий PK, ENABLE+FORCE RLS, isolation-policy, GRANT choros_app, имя в списке", "ci_check": "существующие ci/checks/db/force_rls.sql + tenant_id_leading.sql = 0 строк; connector в ci/checks/known_tenant_tables.txt (AC-12)"},
+    {"id": "FF-CONN-7", "rule": "Cross-tenant изоляция: коннектор tenant B невидим сессии tenant A", "ci_check": "существующий ci/checks/db/cross_tenant.test.ts (читает KNOWN_TENANT_TABLES) покрывает connector авто после добавления в список (AC-13)"},
+    {"id": "FF-CONN-8", "rule": "Audit без секрета: ни одно поле audit_event-payload в connector-пути не содержит secret_handle/resolved-секрет", "ci_check": "unit по образцу T-0170 AC-6: захват appendAuditEvent-инпута, assert payload без handle (AC-5/NF-1)"},
+    {"id": "FF-CONN-9", "rule": "T-0170 нетронут: коммит не меняет email_channel_config-схему/notification-email.ts/notification-router.ts/миграцию 047/046", "ci_check": "git diff dev -- migrations/047_email_channel_config.sql src/core/notification-email.ts src/core/notification-router.ts migrations/046_notification.sql пуст (AC-9/AC-10/NF-3)"},
+    {"id": "FF-CONN-10", "rule": "Без driver-зависимостей: package.json не получает SDK 1С/AD/LDAP/SMTP/HTTP", "ci_check": "git diff dev -- package.json не добавляет driver-пакетов; package-json-no-dup-keys.sh зелёный (AC-15/NF-6)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§3.1 DDL миграции 054 + §3.2 TS-типы (tenant_id ведущий PK, все столбцы)"},
+    {"ac": "AC-2", "covered_by": "§3.2 isConnectorKind + §3.1 CHECK(kind); FF-CONN-5; D7"},
+    {"ac": "AC-3", "covered_by": "§4.2 custody verbatim T-0025; FF-CONN-3; D7"},
+    {"ac": "AC-4", "covered_by": "§4 ConnectorStatusView.handleRedacted=redactHandle; D5/D7"},
+    {"ac": "AC-5", "covered_by": "§4.3 audit-без-секрета (connector.set/rotate/revoke); FF-CONN-8; D7"},
+    {"ac": "AC-6", "covered_by": "§3.1 status декларативный (default disabled, no probe); §4 нет внешних вызовов; D7"},
+    {"ac": "AC-7", "covered_by": "§5 единый механизм (invoke-грант T-0034); FF-CONN-1; D6"},
+    {"ac": "AC-8", "covered_by": "§4 два seam-порта + compile-time assert; FF-CONN-2/FF-CONN-4; D6"},
+    {"ac": "AC-9", "covered_by": "§7 + FF-CONN-9 (git diff чист по T-0170-путям); D8"},
+    {"ac": "AC-10", "covered_by": "§7 + FF-CONN-9 (T-0170-суит без изменений); D8"},
+    {"ac": "AC-11", "covered_by": "§7 (почему миграция отвергнута day-1 + путь конвергенции Stage-2)"},
+    {"ac": "AC-12", "covered_by": "§3.1 RLS-канон T-0013; FF-CONN-6; D1/D2"},
+    {"ac": "AC-13", "covered_by": "§3.1 FORCE RLS + §3.2 DAO PgConnectorStore; FF-CONN-7 (cross_tenant.test.ts); D4/D8"},
+    {"ac": "AC-14", "covered_by": "§4 заглушка без эффектов; FF-CONN-2; D6"},
+    {"ac": "AC-15", "covered_by": "§8 без driver-deps; FF-CONN-10; D8"},
+    {"ac": "AC-16", "covered_by": "§6 tsc --noEmit + новый connector-isolation.sh + существующий фитнес зелёный (NF-7)"}
+  ],
+  "runtime_target": "локально / контейнер (dev-стек choros на /srv/choros) — внешний ресурс НЕ требуется; чистая модель+CRUD+миграция 054, без новых сервисов/портов/кредов/провижна; GT-4 не задействован",
+  "adr_artifact_path": "docs/design/T-0128-connector-entity.adr.md",
+  "escalation": ""
+}
