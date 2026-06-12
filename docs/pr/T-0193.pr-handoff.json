@@ -1,0 +1,99 @@
+{
+  "task_id": "T-0193",
+  "status": "pr_open",
+  "branch": "task/T-0193-render-scope-containment",
+  "merge_target": "dev",
+  "base_commit": "6d5788b",
+  "head_commit": "307d38d",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "summary": "T-0193: scope-containment в render-path (R-6 fix). defaultCheckReadGrant расширен 5-м аргументом appId; RESOURCE_ORACLE (equality-only, day-1) + isNarrowerOrEqual (импорт из grant-lattice) фильтруют grant-pool до строк, чей scope содержит именно страницу-app. Порядок изменён: page загружается ПЕРВОЙ внутри withTenantTx для получения app_id, затем PDP-gate. genesis-owner short-circuit (isGenesisOwner) сохранён нетронутым. Паттерн mirrors secret-handle.ts. CI: tsc 0 errors, eslint 0 errors (2 pre-existing no-console), fitness все PASS, vitest 1389/1395 (6 skip = flowable offline), fitness:db 603/603 (44 файла). R-N1 (nit): 404-disclosure oracle — зафиксирован как кандидат-амендмент ADR T-0121, не устраняется в этой задаче.",
+  "commits": [
+    {
+      "sha": "a076ada",
+      "phase": "SPEC",
+      "message": "feat(render-path): T-0193 SPEC — scope-containment in defaultCheckReadGrant (R-6)"
+    },
+    {
+      "sha": "e4d74f3",
+      "phase": "BUILD",
+      "message": "test(render-path): T-0193 BUILD — two-app scope-containment probes + ac6 fix"
+    },
+    {
+      "sha": "307d38d",
+      "phase": "REVIEW",
+      "message": "T-0193 REVIEW: approved — scope-containment в render-path (equality-only oracle корректен, CI green)"
+    }
+  ],
+  "gates": {
+    "review_approved": {
+      "verdict": "approved",
+      "review_iteration": 1,
+      "reviewer": "claude-sonnet-4-6 (reviewer role)",
+      "reviewed_commit": "307d38d",
+      "findings_resolved": [],
+      "findings_nit_open": [
+        "R-N1 (nit, ось 6): ADR T-0121 §6 не документирует явный выбор page-id oracle (404 раскрывает существование страницы при UUID v4 entropy). Кандидат-амендмент — см. design_notes. Не исправляется в этой задаче (чужой ADR)."
+      ],
+      "artifact": "docs/design/T-0193.review.contract.json"
+    },
+    "test_pass": {
+      "verdict": "pass",
+      "total_tests": 1992,
+      "passed": 1992,
+      "failed": 0,
+      "skipped": 6,
+      "ac_coverage": "8/8",
+      "fitness_static": "PASS — все статические проверки зелёные (report-page-render-isolation + все остальные)",
+      "fitness_db_t0193": "4/4 PASS — ci/checks/db/report_page_render_t0193.test.ts (AC-DENY/ALLOW Floor-1/Floor-2)",
+      "fitness_db_ac6": "4/4 PASS — ci/checks/db/report_page_render_ac6.test.ts (невырождение AC-6)",
+      "fitness_db_total": "603/603 PASS, 0 failed, 44 files",
+      "tested_commit": "307d38d",
+      "run_details": {
+        "tsc_noEmit": "exit 0 — 0 errors",
+        "eslint_src": "exit 0 — 0 errors, 2 pre-existing console warnings (bridge-runner.ts, externalTaskBridge.ts)",
+        "fitness_static_checks": "PASS — все проверки зелёные",
+        "vitest_unit": "1389/1395 passed, 6 skipped (flowable integration offline)",
+        "report_page_render_unit_tests": "src/__tests__/report-page-render.test.ts — 26/26 PASS",
+        "fitness_db_total": "603/603 passed, 0 failed, 44 files",
+        "fitness_db_t0193": "4/4 — report_page_render_t0193.test.ts",
+        "fitness_db_ac6": "4/4 — report_page_render_ac6.test.ts"
+      },
+      "artifact": "docs/test-reports/T-0193.test-report.md",
+      "contract_artifact": "docs/design/T-0193.test-report.contract.json"
+    }
+  },
+  "files_changed": [
+    "src/http/report-page-render.ts",
+    "src/__tests__/report-page-render.test.ts",
+    "ci/checks/db/report_page_render_t0193.test.ts",
+    "ci/checks/db/report_page_render_ac6.test.ts",
+    "docs/design/T-0193.review.contract.json",
+    "docs/reviews/T-0193.review.md",
+    "docs/test-reports/T-0193.test-report.md",
+    "docs/design/T-0193.test-report.contract.json",
+    "docs/pr/T-0193.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "residual_risks": [],
+  "design_notes": {
+    "equality_only_oracle_day1": "RESOURCE_ORACLE equality-only (isDescendantOrSelf = a===b) — осознанный day-1 fail-safe выбор. Широкие узловые гранты (parent-uuid) не покрывают child-app страницы. Полная иерархическая traversal (tree walk по resource hierarchy) отложена на T-0053 (Stage-2 кандидат). До T-0053 только гранты с nodeId == appId дают доступ к странице.",
+    "page_first_order": "Страница загружается ПЕРВОЙ внутри withTenantTx (для получения app_id) → затем PDP-gate. Следствие: actор без гранта на ЧУЖОЕ приложение, запрашивающий несуществующую страницу, получит 404; существующую — 403 (раскрывает существование). Паттерн известный архитектурный компромисс. UUID v4 entropy (122 бит) делает перебор нецелесообразным. Cross-tenant RLS (g.tenant_id = $1) полностью блокирует межтенантный доступ.",
+    "candidate_adr_amendment": "R-N1 кандидат-амендмент ADR T-0121 §6: добавить примечание 'page-id oracle accepted — UUID v4 entropy (122 бит) делает перебор нецелесообразным; cross-tenant RLS полностью блокирует межтенантный доступ'. Этот выбор не зафиксирован в ADR явно. Рекомендуется как отдельный amendment-коммит в ADR T-0121.",
+    "isNarrowerOrEqual_import": "isNarrowerOrEqual импортируется из src/core/grant-lattice.ts — без дублирования. Паттерн идентичен secret-handle.ts.",
+    "genesis_owner_unaffected": "genesis-owner (e-owner) проходит через isGenesisOwner short-circuit в loadAdminContext до scope-containment. Нет изменений в genesis-owner поведении.",
+    "stage2_candidate_T0053": "Иерархические скоупы (широкий узел покрывает дочерние app) требуют T-0053 tree traversal. Equality-only oracle = Stage-2 кандидат на расширение после T-0053."
+  },
+  "promote_guide": {
+    "merge_target": "dev",
+    "merge_mode": "auto — orchestrator (D-053) rebases+merges feature branch into dev after all gates pass",
+    "no_migration_needed": "T-0193 не добавляет новых миграций. Изменения только в src/ и ci/checks/db/.",
+    "downstream_effect": "GET /render/:pageId и GET /data/:pageId теперь проверяют scope гранта (containment: grant.scope.nodeId === page.app_id). Акторы с грантом на App-A больше не могут читать страницы App-B. genesis-owner не затронут (short-circuit). Тест-тенанты ct-tenant-11111111/22222222 с scope={} — их {} гранты корректно не дают доступ (невалидный scope)."
+  },
+  "friction_events": []
+}
