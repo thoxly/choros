@@ -1,0 +1,175 @@
+{
+  "task_id": "T-0127",
+  "status": "ready",
+  "decision": "Deliver T-0127 as a wrapper over existing primitives plus a thin vendor-side key-verification layer that lives ONLY at the vendor-service boundary, never in core. (A) Genesis installer `ops/install.sh` — one POSIX-bash, idempotent, fail-closed, online/linux-amd64 (MVP) script: (1) Preflight before any mutation — assert docker + `docker compose` v2, free default host ports 55432/8180/9000/8082/3000, free disk; on failure exit != 0, print the failing precondition, nothing brought up (F-7/AC-5). (2) One config — if `.env.prod` absent, generate it from `.env.prod.example` filling every REPLACE_WITH_* with a secure random (`openssl rand`) and wiring the shared Postgres password into DATABASE_URL; if `.env.prod` exists, leave it untouched (F-2/F-5/AC-3/AC-4). `.env.prod` is the SINGLE required config source. (3) Activation key optional — if provided via `--key` or CHOROS_ACTIVATION_KEY, write to `config/activation/activation.key` (gitignored); if absent, installation proceeds without error (F-10) and the circuit comes up in autonomous mode. (4) Bring-up — `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d --wait`; migrations (incl. 026 genesis-owner) run by the existing `ops/docker-entrypoint.sh` -> `migrations/run.mjs` BEFORE app start — no second owner-creation path (F-3/F-4). (5) Verify — `GET /health` == 200 else fail-closed (F-6/AC-1), no false-green circuit. (6) Self-upgrade (same script, MVP) — re-run with `--upgrade` or existing `.env.prod` does `docker compose pull` (online) + `up -d --wait`; migrations idempotently catch up via the entrypoint (silo-upgrade semantic). Air-gapped/ARM = Stage-2, explicitly out of MVP. (7) Structured result — endpoint, how to log in as first owner (e-owner/tenant-owner), image version, activation status (active|autonomous) (F-6/AC-10). (B) Activation key format `choros-key.v1` — detached-signature envelope, offline-verifiable: wire `choros1.<base64url(payload)>.<base64url(sig)>`; payload = canonical JSON ActivationKey (circuit_id=identity, entitlements[]=service flags, not_before/not_after=term, issued_at, vendor, key_version); sig = Ed25519 over payload by the vendor private key, verified against a vendor PUBLIC key shipped with the image (`config/activation/vendor-pub.ed25519`) WITHOUT any network call (NF-2 offline; otherwise mandatory call-home = hidden kill-switch). Forgery/expiry is detected locally by signature + not_after but only changes the entitlement verdict, never starts anything in core. (C) Entitlement effect boundary — the key parser/verifier lives in `src/vendor/activation.ts`, a SEPARATE module outside `src/core/`, read only by the vendor layer (`src/vendor/`) and vendor HTTP edges (`src/http/vendor-*`), which is exactly the circuit<->control-plane boundary (fleet-ops ADR §2). On expired/missing/forged key the vendor layer returns a refusal ON the vendor-service call (updates / agentic maintenance / control-plane sync) -> HTTP 402/403 on `vendor-*` endpoints (F-11/AC-8). Core (`src/core/`: PDP, grant-resolver, processes/bridge, timers, audit, actor-event, RLS) does NOT import or read key status/term — RED-LINE, enforced statically (FF-T127-1). All four SPEC blocking questions (Q-1..Q-4) are resolved by the founder's 2026-06-13 licensing decisions: key sells the service layer (Q-1: entitlement gates only vendor-service calls), MVP = online/x86_64/self-upgrade (Q-2 single linux/amd64 target, offline images Stage-2; Q-3 installer is also the upgrader for online self-upgrade), key carries identity itself with offline-verifiable vendor signature (Q-4 bootstrap of trust = signature, not call-home).",
+  "rejected_alternatives": [
+    {
+      "option": "License daemon / runtime expiry-timer inside src/core/ that halts or degrades the circuit when the key is missing/expired/revoked",
+      "why_not": "This IS the kill-switch the founder red-lined (NF-1/NF-2). A circuit must never go down because of billing. Directly forbidden — and FF-T127-1 makes the absence of any such core branch a CI invariant."
+    },
+    {
+      "option": "Mandatory online activation as a precondition of install/start (call-home before the stack runs)",
+      "why_not": "No network (or control-plane down) would mean no working circuit — a covert kill-switch via availability. Violates NF-2 offline-friendly and the founder decision that an expired/absent key = autonomous mode, not failure. Activation stays optional and by-request (F-10)."
+    },
+    {
+      "option": "JWT (RS256) as the key format via a JWT library",
+      "why_not": "Pulls a JWT dependency and a claim zoo for a single-purpose token. A detached Ed25519 envelope is ~40 lines zero-dep on node:crypto and is more proportionate; it also keeps verification trivially offline and auditable."
+    },
+    {
+      "option": "Read the key in a global request middleware (even 'only for telemetry')",
+      "why_not": "Places key-status reads on the core hot path, makes FF-T127-1 dishonest, and creates the temptation for future gating. The key is read ONLY in src/vendor/ and vendor HTTP edges; core never sees it."
+    },
+    {
+      "option": "Installer ships its own forked compose/stack in an installer subtree",
+      "why_not": "Violates NF-4 (one artifact, mode=config — tenancy ADR §7) and AC-12. The installer parametrizes the EXISTING docker-compose.yml + prod overlay + migrations/run.mjs; no duplicate stack, no src/ fork."
+    },
+    {
+      "option": "Bake the activation key (or vendor private key) into the image / commit it",
+      "why_not": "RL-1/RL-3 secret discipline (NF-3): only the vendor PUBLIC key ships with the image; the activation.key is a runtime artifact under config/activation/*.key which is gitignored. The vendor PRIVATE signing key never enters the client circuit at all (key issuance is control-plane, OS-3)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "ActivationKey (signed payload)",
+      "fields": [
+        {"name": "key_version", "type": "string — 'choros-key.v1' (format/version pin)"},
+        {"name": "circuit_id", "type": "string (uuid) — identity of THIS circuit/installation to the vendor control-plane (Q-4: identity travels in the key)"},
+        {"name": "vendor", "type": "string — issuing vendor id (e.g. 'choros')"},
+        {"name": "entitlements", "type": "EntitlementSet — named service-layer flags the subscription grants (Q-1)"},
+        {"name": "issued_at", "type": "string (RFC3339)"},
+        {"name": "not_before", "type": "string (RFC3339) — start of validity"},
+        {"name": "not_after", "type": "string (RFC3339) — expiry; AFTER this the key is 'expired' => autonomous mode, NEVER a core halt"}
+      ]
+    },
+    {
+      "entity": "EntitlementSet",
+      "fields": [
+        {"name": "updates", "type": "boolean — entitled to self-upgrade / image pulls from vendor"},
+        {"name": "agentic_ops", "type": "boolean — entitled to vendor agentic maintenance (fleet-ops)"},
+        {"name": "support", "type": "boolean — entitled to vendor support channel"},
+        {"name": "tier", "type": "string — informational plan tier label (free-form, vendor-defined)"}
+      ]
+    },
+    {
+      "entity": "KeyEnvelope (wire form)",
+      "fields": [
+        {"name": "raw", "type": "string — 'choros1.<base64url(payload-json)>.<base64url(ed25519-sig)>'"},
+        {"name": "payload_b64", "type": "string (base64url) — canonical JSON of ActivationKey"},
+        {"name": "sig_b64", "type": "string (base64url) — Ed25519 signature over the canonical payload bytes"}
+      ]
+    },
+    {
+      "entity": "ActivationStatus (vendor-layer verdict; NEVER computed in core)",
+      "fields": [
+        {"name": "state", "type": "enum — 'active' | 'autonomous' (expired|missing) | 'invalid' (bad signature)"},
+        {"name": "circuit_id", "type": "string | null — present iff signature valid"},
+        {"name": "entitlements", "type": "EntitlementSet | null — present iff state=='active'"},
+        {"name": "not_after", "type": "string | null"},
+        {"name": "reason", "type": "string — human-readable ('no key present', 'expired 2026-..', 'signature mismatch')"}
+      ]
+    },
+    {
+      "entity": "InstallerConfig (.env.prod, single required source)",
+      "fields": [
+        {"name": "POSTGRES_PASSWORD / KEYCLOAK_ADMIN_PASSWORD / FLOWABLE_REST_APP_ADMIN_PASSWORD", "type": "string — generated via `openssl rand` if missing; never regenerated on re-run (AC-4)"},
+        {"name": "DATABASE_URL", "type": "string — wired with the generated POSTGRES_PASSWORD (consistency invariant)"},
+        {"name": "CHOROS_MASK_DIGEST_KEY", "type": "string — `openssl rand -hex 32` if missing (T-0118 fail-closed key)"},
+        {"name": "CHOROS_ACTIVATION_KEY", "type": "string | unset — OPTIONAL; if unset, autonomous mode (F-10)"},
+        {"name": "CHOROS_AUTH_MODE / NODE_ENV / PORT", "type": "string — non-secret prod values from .env.prod.example"}
+      ]
+    },
+    {
+      "entity": "InstallResult (structured stdout summary)",
+      "fields": [
+        {"name": "endpoint", "type": "string — e.g. http://<host>:3000"},
+        {"name": "first_owner_login", "type": "string — how to log in as e-owner/tenant-owner (genesis-owner from migration 026)"},
+        {"name": "version", "type": "string — choros image tag/version"},
+        {"name": "activation_status", "type": "enum — 'active' | 'autonomous' (the ONLY two operational outcomes; 'invalid' key also => autonomous core)"},
+        {"name": "exit_code", "type": "int — 0 on healthy /health, != 0 fail-closed with failing step (F-6)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "ops/install.sh: POSIX-bash, set -euo pipefail; phases preflight -> config -> (optional key) -> bring-up -> verify -> [self-upgrade] -> summary; exit 0 iff GET /health == 200; exit != 0 with the failing step name on any precondition/bring-up/verify failure (no partial false-green). Uses ONLY `docker compose` + the existing prod overlay + migrations via entrypoint; no second genesis-owner path; no src/ fork.",
+    "Activation key wire format `choros-key.v1`: 'choros1.<base64url(canonical-json payload)>.<base64url(ed25519 sig)>'; payload schema = ActivationKey object_model; canonical JSON = sorted keys, no insignificant whitespace, UTF-8.",
+    "verifyKey(envelope: string, vendorPubKey: Uint8Array, now: Date): ActivationStatus — PURE function in src/vendor/activation.ts; zero-dep (node:crypto Ed25519 verify); NO network, NO DB, NO process.env inside the verifier (env boundary stays in composition root); returns state 'active' iff signature valid AND not_before <= now < not_after, 'autonomous' iff valid signature but expired OR key missing, 'invalid' iff signature mismatch/parse error. A forged/expired key NEVER throws into a core path.",
+    "Dependency direction invariant: src/vendor/** MAY import src/core/**; src/core/** MUST NOT import src/vendor/** and MUST NOT read activation/license/entitlement status. This one-way edge is the executable form of the no-kill-switch red-line (FF-T127-1).",
+    "src/http/vendor-activation.ts: GET /vendor/activation returns ActivationStatus (200 always — reporting the verdict is not gating); vendor-service endpoints (updates/agentic-ops/control-plane-sync, src/http/vendor-*) return 402/403 when entitlement absent/expired — refusal lands ON the vendor call, user endpoints stay 200 (AC-8).",
+    "config/activation/: vendor-pub.ed25519 (public key, shipped with image, committed); activation.key (runtime, gitignored via config/activation/*.key in .gitignore); the vendor PRIVATE signing key never enters the client circuit.",
+    ".env.prod.example: extended with an optional `# CHOROS_ACTIVATION_KEY=` (commented, no value) documenting that an absent key => autonomous mode; no secret committed (RL-3).",
+    ".gitignore: add config/activation/*.key (alongside existing .env.prod).",
+    "Migration 026 reused verbatim — installer introduces NO new owner-creation path (SPEC §5 invariant).",
+    "docs/runbooks/install.md: the one documented command (AC-1), preconditions, the autonomous-vs-active explanation, and the first-owner login note.",
+    "package.json: ci/checks/genesis-installer.sh and ci/checks/no-killswitch-in-core.sh added to the fitness script chain.",
+    "No edits to src/core/*, agents/, constitution/, control-plane."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T127-1",
+      "rule": "RED-LINE (no kill-switch in core): no file under src/core/ reads activation/license/entitlement status or term, and no file under src/core/ imports src/vendor/. There is no core branch that halts/degrades the circuit on key state. Comment-only mentions are permitted.",
+      "ci_check": "ci/checks/no-killswitch-in-core.sh (set -euo pipefail, self-tested like no-env-in-core.sh): strip comment-only lines from every src/core/**/*.ts, then FAIL if any code line matches -iE 'activation|entitlement|license|killswitch|kill_switch|not_after|verifyKey' OR imports from '\\.\\./vendor|src/vendor|/vendor/'. Self-test 1: a planted core file importing src/vendor must be detected (else exit 2). Self-test 2: a comment-only mention must NOT match (else exit 2). Exit 0 clean, 1 violation, 2 self-test broken. (AC-6)"
+    },
+    {
+      "id": "FF-T127-2",
+      "rule": "Installer = wrapper, not a fork: install.sh references the existing docker-compose.yml + docker-compose.prod.yml + migrations/run.mjs; there is no duplicate compose/stack and no src/ fork in the installer tree.",
+      "ci_check": "ci/checks/genesis-installer.sh: assert ops/install.sh exists; grep that it invokes `docker compose -f docker-compose.yml -f docker-compose.prod.yml`; assert no second docker-compose*.yml under ops/ or an installer subtree; assert install.sh does NOT contain genesis-owner SQL (no second owner path — migration 026 only). FAIL on any. (AC-12)"
+    },
+    {
+      "id": "FF-T127-3",
+      "rule": "Key verifier is offline and zero-dep: src/vendor/activation.ts imports only node builtins (node:crypto, etc.), performs no network call, no DB, no process.env read inside the verifier function.",
+      "ci_check": "ci/checks/genesis-installer.sh step: grep src/vendor/activation.ts imports are node:* only (no http/https/fetch/pg/axios); grep no 'fetch('/'https?\\.'/'new Client'/'process.env' in the verify path. FAIL on any. Backs NF-2 offline + the 'no hidden call-home kill-switch' property. (AC-9)"
+    },
+    {
+      "id": "FF-T127-4",
+      "rule": "Entitlement gates ONLY vendor endpoints: refusal on missing/expired key occurs on src/http/vendor-* endpoints (402/403); user-facing endpoints (auth/processes/inbox/audit/rights/grants) have no entitlement/activation read.",
+      "ci_check": "ci/checks/genesis-installer.sh step: grep that activation/entitlement reads appear ONLY in src/vendor/** and src/http/vendor-*.ts; FAIL if any non-vendor http handler (auth.ts/processes.ts/inbox.ts/audit.ts/rights.ts/grants.ts/org.ts) references activation/entitlement/verifyKey. (AC-8)"
+    },
+    {
+      "id": "FF-T127-5",
+      "rule": "Installer idempotency + config discipline: install.sh must not regenerate an existing .env.prod and must not duplicate the genesis seed on re-run; .env.prod stays gitignored; secrets generated only when missing.",
+      "ci_check": "ci/checks/genesis-installer.sh step (static): grep install.sh guards `.env.prod` with an existence test before generation (no unconditional overwrite); grep it uses `openssl rand` only under the missing-secret branch; assert .env.prod and config/activation/*.key are in .gitignore. Dynamic half (CI integration, AC-4): run installer twice on the same volume, assert second run exit 0 and `git diff`/row-count of genesis seed unchanged. (AC-3/AC-4/AC-11)"
+    },
+    {
+      "id": "FF-T127-6",
+      "rule": "Offline end-to-end works: a circuit started with NO activation key (or an expired one) and NO control-plane connectivity completes 'genesis-owner login -> create process/task -> audit write' fully.",
+      "ci_check": "CI integration job (ci.yml): bring the stack up via install.sh with CHOROS_ACTIVATION_KEY unset and no egress to a control-plane; assert GET /health 200, then the seeded e-owner can authenticate, create a process instance, and an audit/actor_event row is written. All green => autonomous mode is fully functional. (AC-7)"
+    },
+    {
+      "id": "FF-T127-7",
+      "rule": "Genesis-owner present exactly once after install: one genesis role_assignment, e-owner has tenant-owner with >=17 delegable mgmt grants — via migration 026 only.",
+      "ci_check": "CI integration job: after install.sh, SELECT count(*) FROM choros.role_assignment WHERE source='genesis' == 1 AND count of grants on tenant-owner role >= 17. (AC-2)"
+    },
+    {
+      "id": "FF-T127-8",
+      "rule": "Preflight fail-closed: when a default port is occupied or `docker compose` is absent, install.sh exits != 0 BEFORE any `compose up`, printing the failing precondition; the stack is not brought up.",
+      "ci_check": "ci/checks/genesis-installer.sh step (static): grep install.sh runs all preflight port/binary/disk checks before the first `docker compose ... up` line (ordering check). Dynamic half (CI): occupy port 3000, run install.sh, assert exit != 0 and no containers created. (AC-5)"
+    },
+    {
+      "id": "FF-T127-9",
+      "rule": "Key signature is genuinely verified: a payload whose signature does not match the shipped vendor public key yields state 'invalid' and is rejected as identity/entitlement, but the circuit itself stays up (no core effect).",
+      "ci_check": "vitest unit (src/__tests__/vendor/activation.test.ts): verifyKey on a tampered payload => state 'invalid'; on an expired-but-validly-signed key => 'autonomous'; on a valid in-term key => 'active' with circuit_id+entitlements. Plus assert (via FF-T127-1) that none of these states reach core. (AC-9)"
+    },
+    {
+      "id": "FF-T127-10",
+      "rule": "Structured success summary: on success install.sh prints endpoint, first-owner login, version, and activation status (active|autonomous).",
+      "ci_check": "ci/checks/genesis-installer.sh step: grep install.sh's success path emits all four fields (endpoint, owner-login, version, activation status). Manual confirmation per AC-10. (AC-10)"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§1.A.1-5 install.sh bring-up+verify; runbook documented command; FF-T127-6 (health 200)"},
+    {"ac": "AC-2", "covered_by": "§1.A.4 migration 026 via entrypoint, no second owner path; FF-T127-7"},
+    {"ac": "AC-3", "covered_by": "§1.A.2 single .env.prod source; FF-T127-5"},
+    {"ac": "AC-4", "covered_by": "§1.A.2 no regenerate existing config; idempotent 026; FF-T127-5"},
+    {"ac": "AC-5", "covered_by": "§1.A.1 preflight before mutation; FF-T127-8"},
+    {"ac": "AC-6", "covered_by": "§1.C core has no key read + core !-> vendor import; FF-T127-1 (RED-LINE)"},
+    {"ac": "AC-7", "covered_by": "§1.A.3 optional key + §1.C autonomous core; FF-T127-6"},
+    {"ac": "AC-8", "covered_by": "§1.C refusal on vendor-* endpoints only; FF-T127-4"},
+    {"ac": "AC-9", "covered_by": "§1.B Ed25519 envelope, identity+entitlement, offline verify; FF-T127-9 + FF-T127-3"},
+    {"ac": "AC-10", "covered_by": "§1.A.7 structured InstallResult; FF-T127-10"},
+    {"ac": "AC-11", "covered_by": "§1.A.2 secret discipline + config/activation gitignore; FF-T127-5"},
+    {"ac": "AC-12", "covered_by": "§1 wrapper-not-fork; FF-T127-2"}
+  ],
+  "runtime_target": "MVP: online, linux/amd64. Installer runs from a terminal on a clean target host with Docker + `docker compose` v2 preinstalled (founder home-server class, /srv/choros via Tailscale; E0.7 owns TLS/proxy). Stack = existing docker-compose.yml + docker-compose.prod.yml; app/key-verifier = node:20 (zero-dep node:crypto Ed25519). Self-upgrade is online (docker compose pull). Air-gapped (preloaded images) and ARM64 are Stage-2, explicitly out of MVP per founder decision 2026-06-13.",
+  "adr_artifact_path": "docs/design/T-0127-genesis-installer.adr.md",
+  "escalation": ""
+}
