@@ -61,7 +61,6 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthMode } from "./auth.js";
 import { checkRole, withTenantTx } from "./binding.js";
 import {
-  validateFloor1Request,
   applyFloor1Edit,
   type Floor1EditRequest,
   type FieldUiMeta,
