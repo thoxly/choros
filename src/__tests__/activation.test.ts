@@ -184,6 +184,41 @@ describe("verifyKey — invalid (forgery detected locally, core stays up)", () =
 // isEntitled — vendor-layer helper
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// verifyKey NEVER throws — a forged/expired/garbage key must not crash a caller.
+// This is the testable face of the red-line: the verifier returns a verdict, it
+// never raises into a path. (Core never calls it at all — FF-T127-1 — but the
+// vendor edge that does must be safe.)
+// ---------------------------------------------------------------------------
+
+describe("verifyKey never throws (forged/expired never reaches a throw path)", () => {
+  const { publicPem } = makeKeypair();
+  const garbage = [
+    "",
+    "   ",
+    "choros1",
+    "choros1.",
+    "choros1.@@@.@@@",
+    "choros1.bm90anNvbg.c2ln", // valid b64url, non-JSON payload
+    "💥.💥.💥",
+    "choros1.AAAA.BBBB.CCCC",
+  ];
+  for (const g of garbage) {
+    it(`returns a verdict (no throw) for input ${JSON.stringify(g)}`, () => {
+      const status = verifyKey(g, publicPem, NOW_IN_TERM);
+      // Always one of the three states; never 'active' for garbage.
+      expect(["autonomous", "invalid"]).toContain(status.state);
+    });
+  }
+
+  it("returns a verdict even when the vendor public key is empty bytes", () => {
+    const { privateKey } = makeKeypair();
+    const env = signEnvelope(makeKey(), privateKey);
+    const status = verifyKey(env, new Uint8Array(0), NOW_IN_TERM);
+    expect(status.state).toBe("invalid"); // cannot build a key object => not trusted
+  });
+});
+
 describe("isEntitled", () => {
   it("true only when active AND the flag is set", () => {
     const { privateKey, publicPem } = makeKeypair();
