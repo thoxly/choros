@@ -1,0 +1,155 @@
+{
+  "task_id": "T-0123",
+  "status": "needs_founder",
+  "decision": "Компетентностный слой агента = отдельная additive тенант-изолированная CONFIG-таблица choros.agent_instruction (миграция 056), привязанная к employee(kind='agent') composite-FK-идиомом T-0020, PK (tenant_id, id) + UNIQUE (tenant_id, employee_id). Версионирование ПЕРЕИСПОЛЬЗУЕТ ратифицированный и приземлённый механизм T-0087 (migrations/049_tier.sql + src/core/env-tier.ts + src/http/artifacts.ts): таблица несёт колонку tier text DEFAULT 'draft' CHECK IN ('draft','published') по контракту 049, на неё вешается существующий триггер tier_published_locked (fail-closed published-lock), правки идут только в draft с app-гардом assertWritable. Promote draft→published — через СУЩЕСТВУЮЩИЙ POST /api/artifacts/:id/promote → promoteTier → decidePromote (human-gated, agent-self-promote forbidden), для чего agent_instruction вносится в CONFIG_TABLES; promote аудируется существующим типом artifact.promoted (NF-3, один механизм). Содержание: instruction_text + answer_form (банк-кейс 'sum'/'sum_with_breakdown') + instruction_meta jsonb. Draft create/edit и clear аудируются дотированными типами agent.instruction.draft_saved/cleared через AuditWriter (T-0016/T-0019) в той же tx. Связь с когерентной единицей E12.1/T-0082 — forward-compat колонка bundle_id uuid NULL БЕЗ FK (идиома 032 budget_policy_id), FK добавит T-0082 аддитивно. agent_instruction НЕ читается grant-resolver-ом (права из ролей/грантов, T-0021 fail-closed). Day-1 рантайм дормантен (исполнение — Stage-2 E5.6-E5.10). agent_card-DDL (032) и T-0042 write-path не трогаются (инструкция NULL-at-hire). Единственный открытый вопрос — Q-1 (продуктовый путь/право авторинга у клиента), эскалируется фаундеру; все инженерные оси решены и от него не зависят.",
+  "rejected_alternatives": [
+    {
+      "option": "Один столбец instruction_text на agent_card (как буквально читается 'additive column' в спеке/T-0020 §1.5)",
+      "why_not": "Инструкция — версионируемый CONFIG-артефакт; T-0087 крепит tier КОЛОНКОЙ на саму версионируемую таблицу, а agent_card сознательно НЕ получила tier в 049 (это карточка идентичности, не версионируемый конфиг). Столбец на agent_card сделал бы инструкцию неверсионируемой/непромоутируемой через общий механизм. Отдельная таблица agent_instruction с tier-колонкой остаётся additive к agent_card (032-DDL не трогается, карточка узкая — §1.5/§4.3) и делает инструкцию первоклассным tier-артефактом, промоутируемым тем же endpoint-ом."
+    },
+    {
+      "option": "Новый отдельный механизм версионирования инструкции (свои тиры authoring_draft/authoring_published из 044, свой promote/lock, свой аудит-тип)",
+      "why_not": "Нарушает NF-1 и инвариант gap-map §4б ('версионируется ВНУТРИ связки, не вторым механизмом'). Ратифицированный механизм УЖЕ приземлён — T-0087 (049_tier.sql: tier draft/published + триггер tier_published_locked + decidePromote/promoteTier + аудит artifact.promoted). Первая редакция ADR (до приземления T-0087) опиралась на PDP-seam 044 и теперь стейл; эта редакция переиспользует T-0087 целиком (tier-значения draft/published, триггер, promote-endpoint, тип artifact.promoted)."
+    },
+    {
+      "option": "Двухстрочная модель (отдельные строки draft и published на агента, tier в составе PK)",
+      "why_not": "T-0087 крепит tier колонкой на ОДНУ строку артефакта (как у application/grant), не двумя строками на сущность. Двухстрочная модель ввела бы свою семантику тиров параллельно T-0087 — повторное нарушение NF-1. Одна строка + tier-колонка + UNIQUE(tenant_id, employee_id) точно совпадает с тем, как версионируются прочие CONFIG-артефакты."
+    },
+    {
+      "option": "Живой FK bundle_id -> bundle(...) сейчас (жёсткая привязка к единице версионирования)",
+      "why_not": "Реестр когерентной связки bundle (E12.1/T-0082) ещё НЕ приземлён в БД (нет миграции до 055). Невозможный FK = BUILD-bounce (урок T-0017/T-0033, зафиксирован в 032 для budget_policy_id). Кладём bundle_id uuid NULL без FK (forward-compat сема), T-0082 добавит FK аддитивно."
+    },
+    {
+      "option": "Хранить answer_form исключительно как свободный текст внутри instruction_text",
+      "why_not": "Банк-кейс (reference §5) требует машинно-различимого параметра формы ответа ('сумма' vs 'сумма + декомпозиция') для будущего Stage-2-рантайма и семантического changelog. Выделенная колонка answer_form + расширяемый instruction_meta дают это без нового примитива и без миграции на каждый кейс; AC-1 проверяемо."
+    },
+    {
+      "option": "Разморозить рантайм-чтение инструкции day-1 (агент реально отвечает по ней)",
+      "why_not": "Исполнение инструкции — Stage-2 (E5.6-E5.10, запаркован за решением фаундера №6). Day-1 слой дормантен по дисциплине T-0020 (autonomy_threshold хранится, не исполняется). FF-COMP-6 грепом запрещает рантайм-чтение в src/core/engine/src/worker и в response-хендлерах."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "agent_instruction (новая таблица, миграция 056, T-0013 + T-0087 CONFIG-таблица)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid NOT NULL (ведущий в PK; RLS-якорь)"},
+        {"name": "id", "type": "uuid NOT NULL (id артефакта; target для POST /api/artifacts/:id/promote)"},
+        {"name": "employee_id", "type": "uuid NOT NULL (агент-владелец)"},
+        {"name": "employee_kind", "type": "text NOT NULL DEFAULT 'agent' (FK-дискриминатор; CHECK = 'agent')"},
+        {"name": "tier", "type": "text NOT NULL DEFAULT 'draft' CHECK IN ('draft','published') — контракт T-0087/049_tier.sql"},
+        {"name": "instruction_text", "type": "text NOT NULL (основной текст компетенции, AC-1)"},
+        {"name": "answer_form", "type": "text NULL ('sum'/'sum_with_breakdown'/…; NULL=не задано)"},
+        {"name": "instruction_meta", "type": "jsonb NOT NULL DEFAULT '{}' (расширяемый конверт доп-параметров формы)"},
+        {"name": "bundle_id", "type": "uuid NULL — forward-compat указатель на связку E12.1/T-0082, NO FK day-1 (дормантен)"},
+        {"name": "created_at", "type": "bigint NOT NULL"},
+        {"name": "updated_at", "type": "bigint NOT NULL"},
+        {"name": "__pk", "type": "PRIMARY KEY (tenant_id, id) — идиома промоутируемого артефакта (promoteTier адресует по tenant_id,id)"},
+        {"name": "__uniq", "type": "UNIQUE (tenant_id, employee_id) — один артефакт инструкции на агента"},
+        {"name": "__fk", "type": "FOREIGN KEY (tenant_id, employee_id, employee_kind) -> employee(tenant_id, id, kind) — kind='agent' only"},
+        {"name": "__trigger", "type": "tier_published_locked BEFORE UPDATE OR DELETE EXECUTE FUNCTION choros.tier_published_locked() — переиспользует функцию из 049"},
+        {"name": "__rls", "type": "ENABLE+FORCE ROW LEVEL SECURITY; policy tenant_id = current_setting('choros.tenant_id', true)::uuid; GRANT DML TO choros_app"}
+      ]
+    },
+    {
+      "entity": "CONFIG_TABLES (правка реестра в src/http/artifacts.ts, не новый механизм)",
+      "fields": [
+        {"name": "before", "type": "{application, registry_def, grant}"},
+        {"name": "after", "type": "{application, registry_def, grant, agent_instruction} — additive; promoteTier/decidePromote/триггер НЕ меняются"}
+      ]
+    },
+    {
+      "entity": "AgentInstruction (TS тип, src/core/agent-instruction.ts)",
+      "fields": [
+        {"name": "tenantId", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "employeeId", "type": "string"},
+        {"name": "employeeKind", "type": "'agent'"},
+        {"name": "tier", "type": "Tier (импорт из ./env-tier.js; 'draft' | 'published')"},
+        {"name": "instructionText", "type": "string"},
+        {"name": "answerForm", "type": "string | null"},
+        {"name": "instructionMeta", "type": "Record<string, unknown>"},
+        {"name": "bundleId", "type": "string | null"},
+        {"name": "createdAt", "type": "number"},
+        {"name": "updatedAt", "type": "number"}
+      ]
+    },
+    {
+      "entity": "audit event types",
+      "fields": [
+        {"name": "artifact.promoted", "type": "draft→published инструкции; СУЩЕСТВУЮЩИЙ тип T-0087 (promoteTier), НЕ новый; actor.type='human' (decidePromote human-gate)"},
+        {"name": "agent.instruction.draft_saved", "type": "create/edit draft-контента; через AuditWriter в DAO; actor.type='human'|'agent' (config-агент)"},
+        {"name": "agent.instruction.cleared", "type": "удаление/очистка; через AuditWriter в DAO; actor.type='human' (RED-LINES default-DENY, AC-14)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "migrations/056_agent_instruction.sql — DDL таблицы agent_instruction (object_model §2); tier-колонка по контракту 049; CREATE TRIGGER tier_published_locked … EXECUTE FUNCTION choros.tier_published_locked(); FORCE RLS; bundle_id без FK (сема T-0082); без сид-инструкций; любой будущий INSERT-сид — ON CONFLICT DO NOTHING.",
+    "src/core/agent-instruction.ts — тип AgentInstruction (поля выше); поле tier ПЕРЕИСПОЛЬЗУЕТ Tier из env-tier.ts, не объявляет свой union.",
+    "src/db/agent-instruction-store.ts — DAO под открытой withTenantTx (паттерн agent-provision.ts/artifacts.ts): saveDraft (UPSERT tier='draft'; ПЕРЕД записью assertWritable из env-tier.ts, при PUBLISHED_LOCKED → typed error/409; НЕ пишет tier='published'), readDraft/readPublished (read-only, дефолт через readTierScope), clear (через RED-LINES human-confirm). Каждый мутатор пишет appendAuditEvent в той же tx. PROMOTE НЕ реализуется здесь — идёт через существующий artifacts.ts::promoteTier.",
+    "src/http/artifacts.ts — единственная правка: добавить 'agent_instruction' в CONFIG_TABLES. promoteTier/decidePromote/route-контракт НЕ меняются.",
+    "diffInstruction(published, draft): SemanticChange[] — детерминированный пофолевой диффер (answer_form, признак изменения instruction_text, instruction_meta), НЕ raw code-diff; источник семантического changelog (AC-7).",
+    "PDP-инвариант (контракт для tester, нет нового кода): agent_instruction НЕ читается src/core/grant-resolver.ts (frozen); авторизация авторинга/promote — через существующую authority-проверку promote-endpoint-а (T-0087 §4.5 mgmt_object:tier_promote).",
+    "Совместимость импортёров: env-tier.ts НЕ меняется (только импорт Tier/assertWritable/readTierScope); CONFIG_TABLES расширяется additive (frozen-тесты T-0087 на application/grant не затрагиваются); insertAgentRows (agent-provision.ts) НЕ расширяется (инструкция NULL-at-hire); agent_card-DDL (032) не трогается; frozen-checks agent-hire-frozen-additive.sh / agent-hire-migration-seam.sh не затрагиваются."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-COMP-1",
+      "rule": "Additive к T-0020: миграция 056 не трогает 032_agent_card.sql и не добавляет колонок в agent_card/employee; компетентностный слой — отдельная таблица.",
+      "ci_check": "ci/checks/agent-instruction-additive.sh: git diff --name-only \"$BASE\" -- migrations/032_agent_card.sql пусто; ! grep -q 'ALTER TABLE choros.agent_card' migrations/056_agent_instruction.sql; grep -q 'CREATE TABLE choros.agent_instruction' migrations/056_agent_instruction.sql."
+    },
+    {
+      "id": "FF-COMP-2",
+      "rule": "T-0013 изоляция: agent_instruction несёт tenant_id ведущим в PK, FORCE ROW LEVEL SECURITY, tenant-policy на current_setting('choros.tenant_id'), и внесена в known_tenant_tables.txt.",
+      "ci_check": "ci/checks/agent-instruction-rls.sh: grep -q 'FORCE ROW LEVEL SECURITY' и grep -q \"current_setting('choros.tenant_id'\" в 056; grep -q '^agent_instruction$' ci/checks/known_tenant_tables.txt; PK начинается с tenant_id."
+    },
+    {
+      "id": "FF-COMP-3",
+      "rule": "Версионирование = T-0087 как есть (NF-1): tier-CHECK содержит РОВНО draft/published (контракт 049), таблица несёт триггер tier_published_locked; своего версионного enum/механизма нет.",
+      "ci_check": "ci/checks/agent-instruction-tier-reuse.sh: grep -qE \"tier IN \\('draft', ?'published'\\)\" в 056; grep -q 'EXECUTE FUNCTION choros.tier_published_locked()' в 056; перекрёстная сверка, что функция определена в migrations/049_tier.sql; отсутствие литералов authoring_draft/authoring_published в артефактах T-0123."
+    },
+    {
+      "id": "FF-COMP-4",
+      "rule": "Promote — общий механизм T-0087, не свой (NF-1/NF-3): agent_instruction зарегистрирован в CONFIG_TABLES; в коде T-0123 нет своего UPDATE … SET tier='published', нет своего promote-эндпоинта и нет своего promote-аудит-типа.",
+      "ci_check": "ci/checks/agent-instruction-promote-shared.sh: grep -q '\"agent_instruction\"' src/http/artifacts.ts (в CONFIG_TABLES); ! grep -rq \"SET tier = 'published'\\|tier='published'\" src/db/agent-instruction-store.ts; ! grep -rq 'agent.instruction.promoted' src/."
+    },
+    {
+      "id": "FF-COMP-5",
+      "rule": "Права не расширяются (AC-8): grant-resolver не импортирует/не читает agent_instruction; src/core/grant-resolver.ts остаётся frozen (0 diff к base).",
+      "ci_check": "ci/checks/agent-instruction-no-pdp.sh: git diff --name-only \"$BASE\" -- src/core/grant-resolver.ts пусто; ! grep -q 'agent_instruction\\|agent-instruction' src/core/grant-resolver.ts src/core/grant-lattice.ts."
+    },
+    {
+      "id": "FF-COMP-6",
+      "rule": "Дормантность рантайма (AC-11): ни один рантайм-модуль ответа вне Stage-2-парковки не читает agent_instruction; чтение допустимо только в authoring-DAO/changelog/audit/тестах и в artifacts.ts CONFIG_TABLES.",
+      "ci_check": "ci/checks/agent-instruction-runtime-dormant.sh: grep -rl 'agent_instruction' src/core/engine src/worker — любой хит FAIL; в src/http хит допустим только в authoring-маршрутах и artifacts.ts (allowlist), запрещён в response-формирующих хендлерах."
+    },
+    {
+      "id": "FF-COMP-7",
+      "rule": "Published-lock fail-closed (AC-5): writer (saveDraft) вызывает assertWritable из env-tier.ts перед правкой и не обходит триггер (SET LOCAL choros.promoting нигде в T-0123-коде — это привилегия promote-сервиса).",
+      "ci_check": "ci/checks/agent-instruction-published-locked.sh: grep -q 'assertWritable' src/db/agent-instruction-store.ts; ! grep -q 'choros.promoting' src/db/agent-instruction-store.ts."
+    },
+    {
+      "id": "FF-COMP-8",
+      "rule": "Семантический changelog (AC-7): наружу — SemanticChange[] из diffInstruction, не raw text-diff; человеко-facing changelog не сериализует instruction_text целиком.",
+      "ci_check": "ci/checks/agent-instruction-semantic-changelog.sh: существует diffInstruction; changelog-builder не эмитит полный instruction_text (несёт флаг изменения, не тело)."
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "object_model agent_instruction (instruction_text + answer_form + instruction_meta)"},
+    {"ac": "AC-2", "covered_by": "FF-COMP-2 + decision 'Изоляция'"},
+    {"ac": "AC-3", "covered_by": "FF-COMP-1 + contracts 'Совместимость импортёров' (frozen seams как BUILD-фиксы)"},
+    {"ac": "AC-4", "covered_by": "FF-COMP-3 (tier = контракт T-0087/049) + bundle_id forward-compat без FK"},
+    {"ac": "AC-5", "covered_by": "FF-COMP-7 (assertWritable + DB-триггер tier_published_locked; promote не обходится)"},
+    {"ac": "AC-6", "covered_by": "contracts promote через существующий POST /api/artifacts/:id/promote → decidePromote human-gate (deploy≠active)"},
+    {"ac": "AC-7", "covered_by": "FF-COMP-8 + diffInstruction"},
+    {"ac": "AC-8", "covered_by": "FF-COMP-5 (grant-resolver frozen, не читает инструкцию)"},
+    {"ac": "AC-9", "covered_by": "аудит: promote → существующий artifact.promoted; draft/clear → agent.instruction.draft_saved/cleared через AuditWriter"},
+    {"ac": "AC-10", "covered_by": "object_model 'Нет инструкции = отсутствие строки'; миграция без сидов, без потери данных"},
+    {"ac": "AC-11", "covered_by": "FF-COMP-6 (runtime-dormant grep-guard)"},
+    {"ac": "AC-12", "covered_by": "decision авторинг через tier-draft-поверхность + config-агент draft-only; точная роль/путь — Q-1/escalation"},
+    {"ac": "AC-13", "covered_by": "ADR §6 'Что НЕ делает' с владельцами задач"},
+    {"ac": "AC-14", "covered_by": "аудит-тип agent.instruction.cleared + DAO clear через RED-LINES human-confirm"}
+  ],
+  "runtime_target": "home-server silo (/srv/choros, tenancy silo-only); компетентностный слой day-1 dormant (хранится/версионируется/правится/аудируется через T-0087), рантайм-потребитель — Stage-2 (E5.6-E5.10).",
+  "adr_artifact_path": "docs/design/T-0123-agent-competency-layer.adr.md",
+  "escalation": "Q-1 (gap-map §3#4) — продуктовый выбор фаундера: дефолтный путь появления/правки инструкции у клиента ((а) self-service / (б) config-агент предлагает+человек promote / (в) каталог вендора+донастройка; аудит рекомендовал (в)+(б)) и роль/право на правку (отдельное право авторинга компетенции vs переиспользование authority-гейта promote-endpoint-а T-0087 mgmt_object:tier_promote). Меняет объём авторинг-UI (FR-3) и приёмку AC-12; угадывание 'self-service' противоречит выводу аудита (red-lines правило при сомнении). Все инженерные оси (хранение, версионирование через T-0087, promote, аудит, изоляция, дормантность, не-расширение прав) решены и НЕ зависят от Q-1 — coder может строить миграцию 056/DAO/регистрацию в CONFIG_TABLES/аудит/fitness немедленно (дети T-0123a..d); ответ Q-1 финализирует только авторинг-UI и роль/право (ребёнок T-0123e)."
+}
