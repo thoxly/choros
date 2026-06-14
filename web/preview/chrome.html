@@ -4,31 +4,68 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Choros — Каркас продукта (П1)</title>
-  <!-- Превью П1 (Chrome): оргструктура · инбокс · аудит · права (in-shell) · каркас.
-       Подключено к каноническим путям web/src/. Открой в браузере. -->
+  <!--
+    Превью П1 (Chrome): оргструктура · инбокс · аудит · права (in-shell) · каркас.
+
+    ЗАПУСК через Vite (рекомендуется):
+      cd web && npm install && npm run dev
+      Откройте http://localhost:5173/
+
+    Все экраны wired в shell.jsx (роутинг):
+      / и /inbox  → InboxScreen (плотная таблица задач, SLA, взять из пула)
+      /org        → OrgScreen   (дерево: подразделение → должность → сотрудник)
+      /processes  → ProcessesScreen (таблица инстансов процессов)
+      /audit      → AuditScreen (таймлайн аудита инстанса)
+      /rights     → RightsScreen + вкладки (редактор · критичность · SoD · журнал)
+  -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="../src/design/tokens.css" />
   <link rel="stylesheet" href="../src/components/components.css" />
   <link rel="stylesheet" href="../src/app-shell/app.css" />
+  <link rel="stylesheet" href="../src/screens/rights/rights-admin.css" />
 </head>
 <body>
   <div id="root"></div>
 
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-router-dom@6.30.0/dist/umd/react-router-dom.development.js" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
+  <!-- helpers loaded first (shell.jsx and screens depend on these) -->
+  <script type="text/babel" src="../src/app-shell/icon.jsx"></script>
+  <script type="text/babel" src="../src/app-shell/dev-auth.js"></script>
+
+  <!-- shared UI primitives -->
   <script type="text/babel" src="../src/components/components.jsx"></script>
+
+  <!-- screens (load order: no mutual deps between screens) -->
+  <script type="text/babel" src="../src/screens/screen-login.jsx"></script>
   <script type="text/babel" src="../src/screens/screen-org.jsx"></script>
   <script type="text/babel" src="../src/screens/screen-inbox.jsx"></script>
   <script type="text/babel" src="../src/screens/screen-audit.jsx"></script>
+  <script type="text/babel" src="../src/screens/screen-processes.jsx"></script>
+
+  <!-- rights sub-screens -->
+  <script type="text/babel" src="../src/screens/rights/ra-data.jsx"></script>
   <script type="text/babel" src="../src/screens/rights/screen-rights.jsx"></script>
+  <script type="text/babel" src="../src/screens/rights/ra-role-editor.jsx"></script>
+  <script type="text/babel" src="../src/screens/rights/ra-criticality.jsx"></script>
+  <script type="text/babel" src="../src/screens/rights/ra-sod.jsx"></script>
+  <script type="text/babel" src="../src/screens/rights/ra-grant-trail.jsx"></script>
+
+  <!-- app shell (router + nav + theme) — must come after all screens -->
   <script type="text/babel" src="../src/app-shell/shell.jsx"></script>
 
   <script type="text/babel" data-presets="react">
-    ReactDOM.createRoot(document.getElementById("root")).render(<AppShell />);
+    const { BrowserRouter } = ReactRouterDOM;
+    ReactDOM.createRoot(document.getElementById("root")).render(
+      <BrowserRouter>
+        <AppShell />
+      </BrowserRouter>
+    );
   </script>
 </body>
 </html>
