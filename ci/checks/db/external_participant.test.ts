@@ -91,71 +91,28 @@ beforeAll(async () => {
   // DIAGNOSTIC (temporary): replicate the audit writer's exact head sequence via the
   // choros_app pool client, then read row_hash back — under TENANT_B so we don't
   // disturb TENANT_A's chain.
+  const ZERO = Buffer.alloc(32, 0);
+  const NONZERO = Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex');
   const dc = await appPool.connect();
   try {
     await dc.query('BEGIN');
     await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
     await dc.query('SET LOCAL search_path TO choros');
-    await dc.query(
-      `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
-       VALUES (current_setting('choros.tenant_id', false)::uuid, 0, $1, 0, 1)
-       ON CONFLICT (tenant_id) DO NOTHING`,
-      [Buffer.alloc(32, 0)],
-    );
-    const hr = await dc.query(
-      `SELECT seq, row_hash, length(row_hash) AS n FROM choros.audit_head
-        WHERE tenant_id = current_setting('choros.tenant_id', false)::uuid FOR UPDATE`,
-    );
-    const rh = (hr.rows[0] as { row_hash: unknown; n: number }).row_hash;
+    await dc.query('CREATE TEMP TABLE ep_diag (k int, v bytea) ON COMMIT DROP');
+    await dc.query('INSERT INTO ep_diag VALUES (1, $1), (2, $2)', [ZERO, NONZERO]);
+    const rs = await dc.query('SELECT k, length(v) AS n FROM ep_diag ORDER BY k');
+    const inlineZero = await dc.query('SELECT length($1::bytea) AS n', [ZERO]);
     // eslint-disable-next-line no-console
-    console.log('[DIAG ep] writer-style head.row_hash:', {
-      dbLen: (hr.rows[0] as { n: number }).n,
-      readLen: (rh as { length?: number }).length,
-      isBuffer: Buffer.isBuffer(rh),
-      ctor: rh && (rh as object).constructor ? (rh as { constructor: { name: string } }).constructor.name : String(rh),
+    console.log('[DIAG ep] Pool col-store:', {
+      zeroColLen: (rs.rows.find((r) => (r as { k: number }).k === 1) as { n: number }).n,
+      nonzeroColLen: (rs.rows.find((r) => (r as { k: number }).k === 2) as { n: number }).n,
+      zeroInlineLen: (inlineZero.rows[0] as { n: number }).n,
     });
     await dc.query('ROLLBACK');
   } finally {
     dc.release();
   }
-
-  // Compare: same all-zero bytea insert via a standalone pg.Client (not Pool).
-  const cc = new pg.Client({ connectionString: appUrl() });
-  await cc.connect();
-  try {
-    await cc.query('BEGIN');
-    await cc.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
-    await cc.query('SET LOCAL search_path TO choros');
-    const r = await cc.query('SELECT length($1::bytea) AS n', [Buffer.alloc(32, 0)]);
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] Client all-zero bytea length:', (r.rows[0] as { n: number }).n);
-    const r2 = await cc.query('SELECT length($1::bytea) AS n', [Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex')]);
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] Client nonzero bytea length:', (r2.rows[0] as { n: number }).n);
-    const r3 = await dc0Query(cc);
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] Pool-client nonzero bytea length (via fresh pool):', r3);
-    await cc.query('ROLLBACK');
-  } finally {
-    await cc.end();
-  }
 });
-
-async function dc0Query(_c: pg.Client): Promise<number> {
-  const p = new pg.Pool({ connectionString: appUrl() });
-  const c = await p.connect();
-  try {
-    await c.query('BEGIN');
-    await c.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
-    await c.query('SET LOCAL search_path TO choros');
-    const r = await c.query('SELECT length($1::bytea) AS n', [Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex')]);
-    await c.query('ROLLBACK');
-    return (r.rows[0] as { n: number }).n;
-  } finally {
-    c.release();
-    await p.end();
-  }
-}
 
 afterAll(async () => {
   if (appPool) await appPool.end();
