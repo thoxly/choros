@@ -111,28 +111,28 @@ beforeAll(async () => {
   {
     const { makePgAuditWriter } = await import('../../../src/db/audit-writer.js');
     const w = makePgAuditWriter();
-    const t = crypto.randomUUID();
-    const probe = new pg.Client({ connectionString: appUrl() });
-    await probe.connect();
-    try {
-      await probe.query('BEGIN');
-      await probe.query(`SET LOCAL choros.tenant_id = '${t}'`);
-      await probe.query('SET LOCAL search_path TO choros');
-      // need a tenant row for FK? audit_event/head have no tenant FK; genesis ok.
-      const res = await w.appendAuditEvent(probe as never, {
-        id: crypto.randomUUID(), type: 'instance.started', actor: 'ep-probe',
-        subject: 'pi-1', scope: null, via: 'engine', proposed_by: null,
-        confirmed_by: null, payload: { actorType: 'human' }, occurred_at: 1700000000000,
-      });
-      // eslint-disable-next-line no-console
-      console.log('[DIAG ep] raw chain-style writer genesis seq:', res.seq);
-      await probe.query('ROLLBACK');
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.log('[DIAG ep] raw chain-style writer FAILED:', (e as Error).message);
-      await probe.query('ROLLBACK').catch(() => {});
-    } finally {
-      await probe.end();
+    for (const [label, t] of [['random', crypto.randomUUID()], ['TENANT_A', TENANT_A]] as const) {
+      const probe = new pg.Client({ connectionString: appUrl() });
+      await probe.connect();
+      try {
+        await probe.query('BEGIN');
+        await probe.query(`SET LOCAL choros.tenant_id = '${t}'`);
+        await probe.query('SET LOCAL search_path TO choros');
+        const res = await w.appendAuditEvent(probe as never, {
+          id: crypto.randomUUID(), type: 'instance.started', actor: 'ep-probe',
+          subject: 'pi-1', scope: null, via: 'engine', proposed_by: null,
+          confirmed_by: null, payload: { actorType: 'human' }, occurred_at: 1700000000000,
+        });
+        // eslint-disable-next-line no-console
+        console.log(`[DIAG ep] raw writer genesis (${label}) seq:`, res.seq);
+        await probe.query('ROLLBACK');
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.log(`[DIAG ep] raw writer (${label}) FAILED:`, (e as Error).message);
+        await probe.query('ROLLBACK').catch(() => {});
+      } finally {
+        await probe.end();
+      }
     }
   }
 
