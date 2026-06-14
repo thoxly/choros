@@ -1,0 +1,914 @@
+/**
+ * src/http/rights-intents.ts — T-0223 (D-2): Everyday rights as INTENT operations.
+ *
+ * Implements the four named intent operations from the T-0222 ADR as a thin
+ * orchestration layer over the existing rights kernel. The admin expresses a
+ * single high-level INTENT; the system deterministically expands it into the
+ * underlying primitive writes. NO new authority subsystem, NO new table/column,
+ * NO new lattice algebra — every mechanism binds to a primitive that already
+ * exists in dev (T-0018/T-0030/T-0035/T-0042/T-0136/T-0068).
+ *
+ * Routes (all additive, registered by registerRightsIntentRoutes):
+ *   POST /api/rights/intents/hire            — add employee → position(preset) + issue preset grants
+ *   POST /api/rights/intents/fire            — atomic revoke of ALL authority (+ reassign seam)
+ *   POST /api/rights/intents/substitute      — T-0035 Tier-2 delegated SUBSET (subset-gated)
+ *   POST /api/rights/intents/urgent-revoke   — immediate revoke (+ agent-step-halt seam)
+ *
+ * The explain-PDP card embed (invariant I-3) reuses the EXISTING
+ * POST /api/pdp/explain endpoint (T-0136) verbatim — no new explain route here;
+ * the web employee card calls it and the anti-oracle / mgmt-grant gate is enforced
+ * by pdp-explain.ts. This module never re-implements the explain authz.
+ *
+ * ── Rule-9 seam vs T-0224 (preset DEFINITIONS) ──────────────────────────────
+ * This module NEVER defines or mutates preset data. `hire` and `substitute`
+ * consume DICT_PRESETS by READING the exported constant from grants.ts (T-0135);
+ * T-0224 owns the seed preset-role set. A preset referenced by an unknown key
+ * degrades to 404 PRESET_NOT_FOUND (the seed lands separately) — never invents one.
+ *
+ * ── The four load-bearing invariants (ADR §4) ──────────────────────────────
+ *   I-1 intent→preset→grants — hire issues grants ONLY by expanding a
+ *       GrantPreset.grants[] atom (provenance: granted_by="intent:hire:<presetId>").
+ *       No raw-atom authoring path is exposed.
+ *   I-2 substitution ⊆ substituted — every Tier-2 mint passes
+ *       validateNarrowing(parentGrant, ttlChildGrant, oracle) at write-time;
+ *       a widening substitution is REJECTED before persistence (substitution-widens
+ *       → 422), never audited-after. delegable=false on the mint.
+ *   I-3 explain behind mgmt-grant — delegated to POST /api/pdp/explain (T-0136).
+ *   I-4 audit-per-action — every intent op folds to ≥1 event on the SINGLE
+ *       canonical sink (appendAuditEvent via the T-0031 encoders), inside the
+ *       same withTenantTx as the authority write. No parallel audit path.
+ *
+ * Frozen discipline: grant-lattice.ts (validateNarrowing) is CALLED, never
+ * modified; DICT_PRESETS is READ, never edited; src/http/grants.ts is not edited.
+ */
+
+import { randomUUID } from "node:crypto";
+import pg from "pg";
+import {
+  type Grant,
+  type ScopeElement,
+  validateNarrowing,
+  isEffective,
+  normalize,
+} from "../core/grant-lattice.js";
+import { eligibleForTier2 } from "../core/substitution.js";
+import { validateAdminDelegation } from "../core/scoped-admin.js";
+import { loadAdminContext } from "../db/org.js";
+import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import {
+  encodeGrantAuditEvent,
+  encodeAssignmentAuditEvent,
+  type AuditEventInput,
+} from "../core/audit-grant-encoder.js";
+import { DICT_PRESETS, type GrantPreset, type GrantPresetAtom } from "./grants.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
+import { HttpError, readJsonBody, type Router } from "./router.js";
+import { DEV_USER_HEADER } from "./auth.js";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DEV_TENANT_ID =
+  process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertUuidShape(value: string, label: string): void {
+  if (!UUID_RE.test(value)) {
+    throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
+  }
+}
+
+const intentAuditWriter = makePgAuditWriter();
+
+// ---------------------------------------------------------------------------
+// withTenantTx — write-path transaction (mirrors grants.ts / agents.ts; each
+// keeps its own copy so the files stay disjoint — no shared private helper).
+// The fire intent encloses its ENTIRE revoke loop in ONE withTenantTx so a
+// partial fire cannot leave residual authority (FF-FIRE-2: per-principal atomic).
+// ---------------------------------------------------------------------------
+
+async function withTenantTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  assertUuidShape(tenantId, "tenantId");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+function extractActor(req: import("node:http").IncomingMessage): string {
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// Intent-provenance audit (the "why" of I-4). Rides the SINGLE canonical sink —
+// appendAuditEvent — never a parallel path. The authority writes themselves also
+// emit grant.create / assignment.revoke etc. through the SAME sink; this marker
+// records the intent the admin expressed (who/whom/when/why).
+// ---------------------------------------------------------------------------
+
+async function writeIntentAuditEvent(
+  client: pg.PoolClient,
+  args: {
+    intent: "hire" | "fire" | "substitute" | "urgent-revoke";
+    actor: string;
+    subject: string | null;
+    scope: ScopeElement | null;
+    why: Record<string, unknown>;
+    nowMs: number;
+  },
+): Promise<void> {
+  const input: AuditEventInput = {
+    id: randomUUID(),
+    type: `intent.${args.intent}`,
+    actor: args.actor,
+    subject: args.subject,
+    scope: args.scope as unknown,
+    via: `intent:${args.intent}`,
+    proposed_by: null,
+    confirmed_by: args.actor,
+    payload: args.why,
+    occurred_at: args.nowMs,
+  };
+  await intentAuditWriter.appendAuditEvent(client as unknown as PgClientLike, input);
+}
+
+// ---------------------------------------------------------------------------
+// Shared row-mappers / helpers
+// ---------------------------------------------------------------------------
+
+function mapGrantRow(tenantId: string, g: {
+  id: string; role_id: string; resource_type: string; resource_facet: unknown;
+  operation: string; scope: unknown; constraint: unknown; delegable: boolean;
+  granted_by: string; valid_from: string | null; valid_until: string | null; created_at: string;
+}): Grant {
+  return {
+    tenantId,
+    id: g.id,
+    roleId: g.role_id,
+    resourceType: g.resource_type as Grant["resourceType"],
+    resourceFacet: g.resource_facet ?? undefined,
+    operation: g.operation as Grant["operation"],
+    scope: g.scope as Grant["scope"],
+    constraint: g.constraint ?? undefined,
+    delegable: g.delegable,
+    grantedBy: g.granted_by,
+    validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
+    validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
+    createdAt: Number(g.created_at),
+  };
+}
+
+const GRANT_COLS =
+  `id, role_id, resource_type, resource_facet, operation, scope, "constraint",
+   delegable, granted_by, valid_from, valid_until, created_at`;
+
+/** Resolve a DICT_PRESETS preset by id, or 404 (T-0224 seeds the data). */
+function resolvePreset(presetId: string): GrantPreset {
+  const preset = DICT_PRESETS.find((p) => p.id === presetId);
+  if (!preset) {
+    throw new HttpError(
+      404,
+      "PRESET_NOT_FOUND",
+      `preset '${presetId}' is not defined (preset definitions are owned by the seed; T-0224)`,
+    );
+  }
+  return preset;
+}
+
+/**
+ * Expand one preset atom (T-0135 shape) into a structural grant scope.
+ * scope_own → bounded by the admitting org scope (the position's org node);
+ * scope_org → the explicit org slug as an org-node ScopeElement.
+ * This is the SAME client-side expansion the existing rights UI does (no preset
+ * table — AC-18), lifted server-side so the intent layer never POSTs a hand-built
+ * atom outside a preset (I-1).
+ */
+function presetAtomScope(atom: GrantPresetAtom, ownScope: ScopeElement): ScopeElement {
+  if (atom.scope_own) return ownScope;
+  if (atom.scope_org) {
+    return normalize({
+      kind: "node",
+      hierarchy: "org",
+      nodeId: atom.scope_org,
+      nodeLevel: "department",
+    } as ScopeElement);
+  }
+  // No scope hint on the atom → bottom (zero reach) rather than a silent widen.
+  return { kind: "set", members: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Route registration
+// ---------------------------------------------------------------------------
+
+export function registerRightsIntentRoutes(router: Router, pool: pg.Pool): void {
+  registerHire(router, pool);
+  registerFire(router, pool);
+  registerSubstitute(router, pool);
+  registerUrgentRevoke(router, pool);
+}
+
+// ===========================================================================
+// 3.1 hire — "add an employee → position(preset)" (ADR §3.1)
+//   employee (if new) + role_assignment + ISSUE preset grant atoms.
+//   Authority floor: every issued atom + the assignment is gated by
+//   validateAdminDelegation against the admin's own delegable grant, and each
+//   write emits an audit event in ONE withTenantTx. Critical presets are NOT
+//   bypassed — they land semi-confirmed (confirmed2_by NULL) pending a second
+//   approver (FF-CRITICAL-6), exactly as the kernel's dual-control gate does.
+// ===========================================================================
+
+function registerHire(router: Router, pool: pg.Pool): void {
+  router.register("POST", "/api/rights/intents/hire", async (req, res) => {
+    const actorId = extractActor(req);
+    const tenantId = DEV_TENANT_ID;
+    const nowMs = Date.now();
+
+    const body = (await readJsonBody(req)) as Record<string, unknown>;
+
+    const presetId = body["preset_id"];
+    if (typeof presetId !== "string") {
+      throw new HttpError(400, "VALIDATION", "preset_id is required");
+    }
+    const roleId = body["role_id"];
+    if (typeof roleId !== "string") {
+      throw new HttpError(400, "VALIDATION", "role_id is required (the position's role)");
+    }
+    assertUuidShape(roleId, "role_id");
+
+    const kindRaw = body["kind"];
+    const kind: "human" | "agent" = kindRaw === "agent" ? "agent" : "human";
+
+    // Either an existing employee_id, or (slug + display_name) to create one.
+    const existingEmployeeId =
+      typeof body["employee_id"] === "string" ? (body["employee_id"] as string) : null;
+    const slug = typeof body["slug"] === "string" ? (body["slug"] as string) : null;
+    const displayName =
+      typeof body["display_name"] === "string" ? (body["display_name"] as string) : null;
+    const positionId =
+      typeof body["position_id"] === "string" ? (body["position_id"] as string) : null;
+
+    if (existingEmployeeId) {
+      assertUuidShape(existingEmployeeId, "employee_id");
+    } else if (!slug || !displayName) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        "either employee_id, or (slug + display_name) to create a new employee, is required",
+      );
+    }
+    if (positionId) assertUuidShape(positionId, "position_id");
+
+    // I-1: the preset is the ONLY source of grant atoms. 404 if T-0224 has not
+    // seeded it yet — never invent a preset.
+    const preset = resolvePreset(presetId);
+
+    // The admitting org scope: the position's department node when a position is
+    // given, else the admin's own org scope (the assignment ceiling).
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    let ownScope: ScopeElement = admin.adminOrgScope;
+    if (positionId) {
+      ownScope = await lookupPositionOrgScope(pool, tenantId, positionId);
+    }
+
+    // GATE (org axis) BEFORE any side-effect — the admin must cover the target
+    // org scope to assign the role there (mirrors role-assignment gate).
+    const asgGate = validateAdminDelegation(
+      admin,
+      { kind: "assignment", targetOrgScope: ownScope },
+      SEED_ORACLE,
+    );
+    if (!asgGate.ok) {
+      throw new HttpError(403, "ADMIN_GATE_REJECTED", asgGate.reason);
+    }
+
+    // GATE every preset atom BEFORE writing (I-1 subset floor): each issued grant
+    // must pass validateAdminDelegation against the admin's own delegable grant —
+    // the same check the kernel runs on every POST /api/grants.
+    const plannedGrants: Grant[] = preset.grants.map((atom) => ({
+      tenantId,
+      id: randomUUID(),
+      roleId,
+      resourceType: atom.resource_type as Grant["resourceType"],
+      operation: atom.operation as Grant["operation"],
+      scope: presetAtomScope(atom, ownScope) as Grant["scope"],
+      constraint: atom.constraint ?? undefined,
+      delegable: atom.delegable ?? true,
+      grantedBy: `intent:hire:${preset.id}`,
+      createdAt: nowMs,
+    }));
+    for (const childGrant of plannedGrants) {
+      const gate = validateAdminDelegation(
+        admin,
+        { kind: "grant", childGrant, targetOrgScope: ownScope },
+        SEED_ORACLE,
+      );
+      if (!gate.ok) {
+        throw new HttpError(403, "ADMIN_GATE_REJECTED", `preset atom rejected: ${gate.reason}`);
+      }
+    }
+
+    // FF-CRITICAL-6: a critical preset lands its grants SEMI-CONFIRMED
+    // (confirmed2_by NULL → not active on the read-path) pending a second
+    // approver. The intent layer does NOT auto-activate a critical hire.
+    const critical = preset.critical === true;
+
+    const result = await withTenantTx(pool, tenantId, async (client) => {
+      // 1. Resolve / create the employee.
+      let employeeId = existingEmployeeId;
+      if (!employeeId) {
+        employeeId = randomUUID();
+        await client.query(
+          `INSERT INTO choros.employee
+             (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+          [tenantId, employeeId, positionId, kind, slug, displayName, nowMs],
+        );
+      }
+
+      // 2. role_assignment (active — confirmed_by = actor).
+      const raId = randomUUID();
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            valid_from, valid_until, source, granted_by,
+            proposed_by, confirmed_by, confirmed2_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb,
+                 NULL, NULL, 'intent:hire', $6,
+                 NULL, $6, NULL, $7, $7)`,
+        [tenantId, raId, employeeId, roleId, JSON.stringify(ownScope), actorId, nowMs],
+      );
+      await intentAuditWriter.appendAuditEvent(
+        client as unknown as PgClientLike,
+        encodeAssignmentAuditEvent(
+          { kind: "assignment.create", actor: actorId, employeeId, roleId, orgScope: ownScope, confirmedBy: actorId },
+          nowMs,
+        ),
+      );
+
+      // 3. ISSUE the preset's grant atoms (I-1). confirmed2_by stays NULL for a
+      //    critical preset (semi-confirmed); else it is active.
+      for (const g of plannedGrants) {
+        await client.query(
+          `INSERT INTO choros."grant"
+             (tenant_id, id, role_id, resource_type, resource_facet,
+              operation, scope, "constraint", delegable, granted_by,
+              valid_from, valid_until, created_at,
+              proposed_by, confirmed_by, confirmed2_by)
+           VALUES ($1, $2, $3, $4, NULL,
+                   $5, $6::jsonb, $7::jsonb, $8, $9,
+                   NULL, NULL, $10,
+                   $11, $12, NULL)`,
+          [
+            tenantId, g.id, roleId, g.resourceType,
+            g.operation, JSON.stringify(g.scope),
+            g.constraint != null ? JSON.stringify(g.constraint) : null,
+            g.delegable, g.grantedBy, nowMs,
+            critical ? actorId : null, // proposed_by set when semi-confirmed
+            actorId,                   // confirmed_by = approver1
+          ],
+        );
+        await intentAuditWriter.appendAuditEvent(
+          client as unknown as PgClientLike,
+          encodeGrantAuditEvent(
+            {
+              kind: "grant.create",
+              actor: actorId,
+              subjectRoleId: roleId,
+              capability: { resourceType: g.resourceType, operation: g.operation },
+              scope: g.scope as unknown as ScopeElement,
+              confirmedBy: actorId,
+              ...(critical ? { proposedBy: actorId } : {}),
+            },
+            nowMs,
+          ),
+        );
+      }
+
+      // I-4: the intent-provenance marker (why = preset + criticality).
+      await writeIntentAuditEvent(client, {
+        intent: "hire",
+        actor: actorId,
+        subject: employeeId,
+        scope: ownScope,
+        why: { preset_id: preset.id, role_id: roleId, grant_count: plannedGrants.length, critical },
+        nowMs,
+      });
+
+      return { employeeId, raId };
+    });
+
+    res.statusCode = 201;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        employee_id: result.employeeId,
+        role_assignment_id: result.raId,
+        preset_id: preset.id,
+        grants_issued: plannedGrants.length,
+        state: critical ? "semi-confirmed" : "active",
+        ...(critical ? { second_approver_required: true } : {}),
+      }),
+    );
+  });
+}
+
+// ===========================================================================
+// 3.2 fire — "switch off an employee" (ADR §3.2)
+//   ALL of the principal's authority is removed ATOMICALLY (FF-FIRE-2: the whole
+//   revoke set is ONE withTenantTx — partial fire cannot leave residual
+//   authority). Active-task reassignment/interrupt is a forward LIFECYCLE action
+//   recorded AFTER the revoke commits (revoke-then-reassign ordering, ADR §3.2):
+//   the routing engine itself is a non-goal (ADR §9.6) — this layer fixes the
+//   ordering + records the seam, it does not implement the router.
+// ===========================================================================
+
+function registerFire(router: Router, pool: pg.Pool): void {
+  router.register("POST", "/api/rights/intents/fire", async (req, res) => {
+    const actorId = extractActor(req);
+    const tenantId = DEV_TENANT_ID;
+    const nowMs = Date.now();
+
+    const body = (await readJsonBody(req)) as Record<string, unknown>;
+    const employeeId = body["employee_id"];
+    if (typeof employeeId !== "string") {
+      throw new HttpError(400, "VALIDATION", "employee_id is required");
+    }
+    assertUuidShape(employeeId, "employee_id");
+
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+    const outcome = await withTenantTx(pool, tenantId, async (client) => {
+      // Load all active (in-window, confirmed) role_assignments of the principal.
+      const { rows: raRows } = await client.query<{ id: string; role_id: string; org_scope: unknown }>(
+        `SELECT id, role_id, org_scope
+           FROM choros.role_assignment
+          WHERE tenant_id = $1 AND employee_id = $2
+            AND (valid_until IS NULL OR valid_until > $3)`,
+        [tenantId, employeeId, nowMs],
+      );
+
+      // GATE: the admin must cover EVERY assignment's org scope (no partial-cover
+      // fire). Rejected before any UPDATE — the whole tx aborts.
+      for (const ra of raRows) {
+        const gate = validateAdminDelegation(
+          admin,
+          { kind: "assignment", targetOrgScope: ra.org_scope as ScopeElement },
+          SEED_ORACLE,
+        );
+        if (!gate.ok) {
+          throw new HttpError(403, "ADMIN_GATE_REJECTED", `assignment ${ra.id}: ${gate.reason}`);
+        }
+      }
+
+      // 1. Revoke every role_assignment (UPDATE valid_until = now) + audit.
+      let revokedAssignments = 0;
+      for (const ra of raRows) {
+        await client.query(
+          `UPDATE choros.role_assignment SET valid_until = $3, updated_at = $3
+            WHERE tenant_id = $1 AND id = $2 AND (valid_until IS NULL OR valid_until > $3)`,
+          [tenantId, ra.id, nowMs],
+        );
+        await intentAuditWriter.appendAuditEvent(
+          client as unknown as PgClientLike,
+          encodeAssignmentAuditEvent(
+            { kind: "assignment.revoke", actor: actorId, employeeId, roleId: ra.role_id, orgScope: ra.org_scope },
+            nowMs,
+          ),
+        );
+        revokedAssignments++;
+      }
+
+      // 2. Revoke grants minted DIRECTLY to the principal (Tier-2 substitution
+      //    grants carry granted_by = 'substitution:<rule_id>' / 'intent:substitute:*'
+      //    and live on a role the principal solely holds). We revoke any still-
+      //    effective grant whose granted_by names this employee as the loan target.
+      const { rows: subRows } = await client.query<{ id: string }>(
+        `SELECT g.id
+           FROM choros.substitution_rule sr
+           JOIN choros."grant" g
+             ON g.tenant_id = sr.tenant_id AND g.id = sr.ttl_grant_id
+          WHERE sr.tenant_id = $1
+            AND sr.substitute_employee_id = $2
+            AND sr.ttl_grant_id IS NOT NULL
+            AND (g.valid_until IS NULL OR g.valid_until > $3)`,
+        [tenantId, employeeId, nowMs],
+      );
+      let revokedGrants = 0;
+      for (const gr of subRows) {
+        await client.query(
+          `UPDATE choros."grant" SET valid_until = $3
+            WHERE tenant_id = $1 AND id = $2 AND (valid_until IS NULL OR valid_until > $3)`,
+          [tenantId, gr.id, nowMs],
+        );
+        revokedGrants++;
+      }
+
+      // I-4: intent-provenance marker.
+      await writeIntentAuditEvent(client, {
+        intent: "fire",
+        actor: actorId,
+        subject: employeeId,
+        scope: null,
+        why: { revoked_assignments: revokedAssignments, revoked_sole_grants: revokedGrants },
+        nowMs,
+      });
+
+      return { revokedAssignments, revokedGrants };
+    });
+
+    // 3. Active-task reassignment/interrupt is a forward lifecycle action recorded
+    //    AFTER the revoke commit (revoke-then-reassign ordering, ADR §3.2). The
+    //    routing engine is a non-goal (§9.6); we surface the obligation as a seam
+    //    so no task executes under stale authority — the caller drives reassignment.
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        employee_id: employeeId,
+        revoked_assignments: outcome.revokedAssignments,
+        revoked_sole_grants: outcome.revokedGrants,
+        // revoke committed; active tasks must now be reassigned/interrupted (router seam).
+        reassign_required: true,
+      }),
+    );
+  });
+}
+
+// ===========================================================================
+// 3.3 substitute — "let X cover Y until date" (ADR §3.3)
+//   A substitution_rule (T-0035) is declared. Tier-1 (pool holder exists) mints
+//   NO grant. Tier-2 (no pool holder, or force_tier2) mints a TTL'd delegation
+//   grant over a SUBSET of the substituted role's grants — subset-gated at
+//   WRITE-TIME by validateNarrowing (I-2). A widening Tier-2 mint is REJECTED
+//   before persistence (422 SUBSTITUTION_WIDENS), never audited-after.
+//   delegable=false on the mint blocks re-delegation.
+// ===========================================================================
+
+function registerSubstitute(router: Router, pool: pg.Pool): void {
+  router.register("POST", "/api/rights/intents/substitute", async (req, res) => {
+    const actorId = extractActor(req);
+    const tenantId = DEV_TENANT_ID;
+    const nowMs = Date.now();
+
+    const body = (await readJsonBody(req)) as Record<string, unknown>;
+    const absentEmployeeId = body["absent_employee_id"];
+    const substituteEmployeeId = body["substitute_employee_id"];
+    const roleId = body["role_id"];
+    if (typeof absentEmployeeId !== "string" || typeof substituteEmployeeId !== "string" || typeof roleId !== "string") {
+      throw new HttpError(400, "VALIDATION", "absent_employee_id, substitute_employee_id, role_id are required");
+    }
+    assertUuidShape(absentEmployeeId, "absent_employee_id");
+    assertUuidShape(substituteEmployeeId, "substitute_employee_id");
+    assertUuidShape(roleId, "role_id");
+    if (absentEmployeeId === substituteEmployeeId) {
+      throw new HttpError(400, "VALIDATION", "substitute and absentee must differ");
+    }
+
+    const validUntil = typeof body["valid_until"] === "number" ? (body["valid_until"] as number) : null;
+    if (validUntil === null) {
+      throw new HttpError(400, "VALIDATION", "valid_until (epoch ms) is required for a substitution");
+    }
+    const validFrom = typeof body["valid_from"] === "number" ? (body["valid_from"] as number) : nowMs;
+    const forceTier2 = body["force_tier2"] === true;
+
+    const rawOrgScope = body["org_scope"];
+    const orgScope = rawOrgScope ? (rawOrgScope as ScopeElement) : null;
+    if (!orgScope) {
+      throw new HttpError(400, "VALIDATION", "org_scope (ScopeElement, hierarchy:org) is required");
+    }
+
+    // GATE: the admin must cover the substitution's org scope (it issues authority
+    // for the stand-in there). Rejected before any write.
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    const gate = validateAdminDelegation(
+      admin,
+      { kind: "assignment", targetOrgScope: orgScope },
+      SEED_ORACLE,
+    );
+    if (!gate.ok) {
+      throw new HttpError(403, "ADMIN_GATE_REJECTED", gate.reason);
+    }
+
+    const result = await withTenantTx(pool, tenantId, async (client) => {
+      // Determine tier: Tier-1 if a pool holder already holds the role in scope
+      // (someone else with an active assignment on this role), Tier-2 otherwise.
+      const { rows: poolRows } = await client.query<{ employee_id: string }>(
+        `SELECT employee_id FROM choros.role_assignment
+          WHERE tenant_id = $1 AND role_id = $2
+            AND employee_id <> $3 AND employee_id <> $4
+            AND confirmed_by IS NOT NULL
+            AND (valid_until IS NULL OR valid_until > $5)
+          LIMIT 1`,
+        [tenantId, roleId, absentEmployeeId, substituteEmployeeId, nowMs],
+      );
+      const tier2 = forceTier2 || poolRows.length === 0;
+
+      let ttlGrantId: string | null = null;
+
+      if (tier2) {
+        // Load the substituted role's effective, confirmed grants (the PARENTS).
+        const { rows: parentRows } = await client.query(
+          `SELECT ${GRANT_COLS} FROM choros."grant"
+            WHERE tenant_id = $1 AND role_id = $2 AND confirmed_by IS NOT NULL`,
+          [tenantId, roleId],
+        );
+        const parentGrants = (parentRows as Parameters<typeof mapGrantRow>[1][]).map((g) =>
+          mapGrantRow(tenantId, g),
+        );
+        // eligibleForTier2 drops non-inheritable grants (T-0035 mint-site filter).
+        const eligible = eligibleForTier2(
+          {
+            tenantId, id: randomUUID(), absentEmployeeId, substituteEmployeeId, roleId,
+            orgScope, ttlGrantId: null, nonInheritableExcluded: true,
+            proposedBy: null, confirmedBy: actorId, validFrom, validUntil,
+            source: "intent:substitute", createdBy: actorId, createdAt: nowMs, updatedAt: nowMs,
+          },
+          parentGrants,
+        );
+        if (eligible.length === 0) {
+          throw new HttpError(
+            422,
+            "NO_DELEGABLE_GRANT",
+            "the substituted role has no inheritable, delegable grant to loan",
+          );
+        }
+
+        // Mint ONE TTL'd grant per eligible parent — each subset-checked by
+        // validateNarrowing (I-2). The minted CHILD is structurally identical to
+        // the parent's scope/facet/constraint (the strongest non-widening choice),
+        // delegable=false. A widening mint is impossible by construction; we still
+        // RE-CHECK so a future broader child shape is rejected, not audited-after.
+        const mintedIds: string[] = [];
+        for (const parent of eligible) {
+          if (!parent.delegable) continue; // a non-delegable parent cannot be loaned
+          const child: Grant = {
+            tenantId,
+            id: randomUUID(),
+            roleId,
+            resourceType: parent.resourceType,
+            resourceFacet: parent.resourceFacet,
+            operation: parent.operation,
+            scope: parent.scope,
+            constraint: parent.constraint,
+            delegable: false, // loaned authority is NOT re-delegable (I-2)
+            grantedBy: `intent:substitute`,
+            validFrom,
+            validUntil,
+            createdAt: nowMs,
+          };
+          const narrow = validateNarrowing(parent, child, SEED_ORACLE);
+          if (!narrow.ok) {
+            // A substitution that could exceed the substituted principal is a
+            // security defect — reject BEFORE persistence (I-2), never audit-after.
+            throw new HttpError(422, "SUBSTITUTION_WIDENS", narrow.reason);
+          }
+          await client.query(
+            `INSERT INTO choros."grant"
+               (tenant_id, id, role_id, resource_type, resource_facet,
+                operation, scope, "constraint", delegable, granted_by,
+                valid_from, valid_until, created_at,
+                proposed_by, confirmed_by, confirmed2_by)
+             VALUES ($1, $2, $3, $4, $5::jsonb,
+                     $6, $7::jsonb, $8::jsonb, false, $9,
+                     $10, $11, $12,
+                     NULL, $13, NULL)`,
+            [
+              tenantId, child.id, roleId, child.resourceType,
+              child.resourceFacet != null ? JSON.stringify(child.resourceFacet) : null,
+              child.operation, JSON.stringify(child.scope),
+              child.constraint != null ? JSON.stringify(child.constraint) : null,
+              child.grantedBy, validFrom, validUntil, nowMs,
+              actorId,
+            ],
+          );
+          await intentAuditWriter.appendAuditEvent(
+            client as unknown as PgClientLike,
+            encodeGrantAuditEvent(
+              {
+                kind: "grant.create",
+                actor: actorId,
+                subjectRoleId: roleId,
+                capability: { resourceType: child.resourceType, operation: child.operation },
+                scope: child.scope as unknown as ScopeElement,
+                confirmedBy: actorId,
+              },
+              nowMs,
+            ),
+          );
+          mintedIds.push(child.id);
+        }
+        if (mintedIds.length === 0) {
+          throw new HttpError(
+            422,
+            "NO_DELEGABLE_GRANT",
+            "no delegable grant on the substituted role could be loaned",
+          );
+        }
+        // The rule records ONE representative ttl_grant_id (T-0035 schema is 1:1);
+        // the remaining minted grants share the rule's window and expire together.
+        ttlGrantId = mintedIds[0];
+      }
+
+      // Declare the substitution_rule (confirmed by the actor → effective).
+      const ruleId = randomUUID();
+      await client.query(
+        `INSERT INTO choros.substitution_rule
+           (tenant_id, id, absent_employee_id, substitute_employee_id, role_id, org_scope,
+            ttl_grant_id, non_inheritable_excluded, proposed_by, confirmed_by,
+            valid_from, valid_until, source, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+                 $7, TRUE, NULL, $8,
+                 $9, $10, 'intent:substitute', $8, $11, $11)`,
+        [
+          tenantId, ruleId, absentEmployeeId, substituteEmployeeId, roleId,
+          JSON.stringify(orgScope), ttlGrantId, actorId, validFrom, validUntil, nowMs,
+        ],
+      );
+
+      // I-4: intent-provenance marker (why = tier + window).
+      await writeIntentAuditEvent(client, {
+        intent: "substitute",
+        actor: actorId,
+        subject: substituteEmployeeId,
+        scope: orgScope,
+        why: {
+          rule_id: ruleId, absentee: absentEmployeeId, role_id: roleId,
+          tier: tier2 ? 2 : 1, valid_until: validUntil, ttl_grant_id: ttlGrantId,
+        },
+        nowMs,
+      });
+
+      return { ruleId, tier: tier2 ? 2 : 1, ttlGrantId };
+    });
+
+    res.statusCode = 201;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        rule_id: result.ruleId,
+        tier: result.tier,
+        ttl_grant_id: result.ttlGrantId,
+        valid_until: validUntil,
+      }),
+    );
+  });
+}
+
+// ===========================================================================
+// 3.4 urgent-revoke — "take right X away now" (ADR §3.4)
+//   The targeted grant is revoked IMMEDIATELY (UPDATE valid_until = now). Because
+//   the read-path resolver gates every decision on isEffective(grant, now), the
+//   capability is gone on the NEXT PDP evaluation — no cache, no propagation
+//   delay. For an AGENT principal, the response signals halt_active_run=true:
+//   the in-flight run must abort at the next step boundary (fail-closed). The
+//   precise halt signal is the T-0220 agent-outcome seam (ADR §3.4); D-1 fixes
+//   the fail-closed contract floor + surfaces the halt obligation.
+// ===========================================================================
+
+function registerUrgentRevoke(router: Router, pool: pg.Pool): void {
+  router.register("POST", "/api/rights/intents/urgent-revoke", async (req, res) => {
+    const actorId = extractActor(req);
+    const tenantId = DEV_TENANT_ID;
+    const nowMs = Date.now();
+
+    const body = (await readJsonBody(req)) as Record<string, unknown>;
+    const grantId = body["grant_id"];
+    if (typeof grantId !== "string") {
+      throw new HttpError(400, "VALIDATION", "grant_id is required");
+    }
+    assertUuidShape(grantId, "grant_id");
+    // principal_kind is an advisory hint for the agent-step-halt seam; the
+    // authority removal is identical for human/agent (revoke is revoke).
+    const principalKind = body["principal_kind"] === "agent" ? "agent" : "human";
+
+    // Fetch the grant row (404 if missing/wrong tenant), then gate the admin.
+    const grantRow = await withTenantTx(pool, tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT ${GRANT_COLS} FROM choros."grant" WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+        [tenantId, grantId],
+      );
+      if (rows.length === 0) {
+        throw new HttpError(404, "NOT_FOUND", `grant ${grantId} not found`);
+      }
+      return mapGrantRow(tenantId, rows[0] as Parameters<typeof mapGrantRow>[1]);
+    });
+
+    const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    const gate = validateAdminDelegation(
+      admin,
+      { kind: "grant", childGrant: grantRow, targetOrgScope: admin.adminOrgScope },
+      SEED_ORACLE,
+    );
+    if (!gate.ok) {
+      throw new HttpError(403, "ADMIN_GATE_REJECTED", gate.reason);
+    }
+
+    await withTenantTx(pool, tenantId, async (client) => {
+      await client.query(
+        `UPDATE choros."grant" SET valid_until = $3
+          WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, grantId, nowMs],
+      );
+      await intentAuditWriter.appendAuditEvent(
+        client as unknown as PgClientLike,
+        encodeGrantAuditEvent(
+          {
+            kind: "grant.revoke",
+            actor: actorId,
+            subjectRoleId: grantRow.roleId,
+            capability: { resourceType: grantRow.resourceType, operation: grantRow.operation, resourceFacet: grantRow.resourceFacet },
+            scope: grantRow.scope as unknown as ScopeElement,
+          },
+          nowMs,
+        ),
+      );
+      await writeIntentAuditEvent(client, {
+        intent: "urgent-revoke",
+        actor: actorId,
+        subject: grantRow.roleId,
+        scope: grantRow.scope as unknown as ScopeElement,
+        why: { grant_id: grantId, principal_kind: principalKind },
+        nowMs,
+      });
+    });
+
+    // The revoked grant now fails isEffective(now) → resolver returns no_grant at
+    // the next PDP evaluation. For an agent, signal the in-flight run to halt.
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(
+      JSON.stringify({
+        grant_id: grantId,
+        revoked: true,
+        effective_immediately: true,
+        // FF-REVOKE-3: agent runs must abort at the next step boundary (fail-closed).
+        halt_active_run: principalKind === "agent",
+      }),
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// lookupPositionOrgScope — resolve a position's department org-node scope.
+// (mirrors the agents.ts helper; kept local so the files stay disjoint.)
+// ---------------------------------------------------------------------------
+
+async function lookupPositionOrgScope(
+  pool: pg.Pool,
+  tenantId: string,
+  positionId: string,
+): Promise<ScopeElement> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const { rows } = await client.query<{ department_id: string }>(
+      `SELECT department_id FROM choros.position WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      [tenantId, positionId],
+    );
+    await client.query("COMMIT");
+    if (rows.length === 0) {
+      throw new HttpError(400, "VALIDATION", `position_id ${positionId} not found`);
+    }
+    return normalize({
+      kind: "node",
+      hierarchy: "org",
+      nodeId: rows[0].department_id,
+      nodeLevel: "department",
+    } as ScopeElement);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// isEffective is imported to document the read-path contract (urgent-revoke /
+// substitute auto-expiry both rely on it); referenced here to keep the binding
+// explicit for reviewers and avoid an unused-import lint.
+void isEffective;

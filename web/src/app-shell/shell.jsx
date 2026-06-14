@@ -18,12 +18,14 @@ import RoleEditorScreen from '../screens/rights/ra-role-editor.jsx';
 import CriticalityScreen from '../screens/rights/ra-criticality.jsx';
 import SoDScreen from '../screens/rights/ra-sod.jsx';
 import GrantTrailScreen from '../screens/rights/ra-grant-trail.jsx';
+import IntentsScreen from '../screens/rights/ra-intents.jsx';
 import FormsScreen from '../screens/screen-forms.jsx';
 
 export { Icon };
 
 const RIGHTS_TABS = [
   { id: "overview", label: "Обзор ролей", path: "/rights" },
+  { id: "intents",  label: "Бытовые операции", path: "/rights/intents" },
   { id: "editor",   label: "Редактор роли", path: "/rights/editor" },
   { id: "criticality", label: "Критичность", path: "/rights/criticality" },
   { id: "sod",      label: "SoD", path: "/rights/sod" },
@@ -293,6 +295,7 @@ function AppShell() {
             <Route path="/processes" element={<ProcessesScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
+            <Route path="/rights/intents" element={<IntentsScreen />} />
             <Route path="/rights/editor" element={<RoleEditorScreen />} />
             <Route path="/rights/criticality" element={<CriticalityScreen />} />
             <Route path="/rights/sod" element={<SoDScreen />} />
