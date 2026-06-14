@@ -548,6 +548,49 @@
 .chs-derived--hidden { opacity: 0.6; }
 .chs-derived--hidden .chs-derived__a { color: var(--chs-color-text-faint); }
 
+/* ============================================================================
+   FORMS SCREEN (.chs-forms-screen)
+   Обёртка для sandbox-iframe с формой: бар выбора формы + канвас.
+   ============================================================================ */
+.chs-forms-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.chs-forms-screen__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--chs-space-7);
+  padding: 0 var(--chs-space-8);
+  border-bottom: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface);
+  flex: none;
+}
+.chs-forms-screen__hint {
+  font-family: var(--chs-font-mono);
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-text-faint);
+  letter-spacing: var(--chs-tracking-mono);
+  margin-left: auto;
+}
+.chs-forms-screen__canvas {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  background: var(--chs-color-bg);
+  display: flex;
+  justify-content: center;
+  padding: var(--chs-space-8);
+}
+/* Sandbox iframe: заполняет ширину, высота авто через postMessage */
+.chs-form-viewer {
+  width: 100%;
+  max-width: 720px;
+  border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-3);
+  background: var(--chs-color-surface);
+  display: block;
+}
+
 /* Узкие вьюпорты — оргструктура и трасса остаются читаемыми */
 @media (max-width: 1080px) {
   .chs-shell { grid-template-columns: 64px 1fr; }
