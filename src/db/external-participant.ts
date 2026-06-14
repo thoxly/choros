@@ -117,13 +117,32 @@ function assertUuidShape(value: string, label: string): void {
   }
 }
 
+/**
+ * A connection source the model can run a tenant transaction on. A pg.Pool checks
+ * out a client per call (the production HTTP path); a pg.Client is used directly
+ * (the audit-append path uses one dedicated client — the choros_app + Client
+ * combination is the proven-stable way to drive the canonical audit writer's bytea
+ * round-trip across Node runtimes, vs a pooled connection which mis-encoded a
+ * 32-byte bytea param on the Node-20 CI runner).
+ */
+export type ParticipantDb = pg.Pool | pg.Client;
+
+function isPool(db: ParticipantDb): db is pg.Pool {
+  // pg.Pool exposes a numeric `totalCount` accessor; pg.Client does not.
+  return typeof (db as pg.Pool).totalCount === "number";
+}
+
 async function withTenantTx<T>(
-  pool: pg.Pool,
+  db: ParticipantDb,
   tenantId: string,
-  fn: (client: pg.PoolClient) => Promise<T>,
+  fn: (client: pg.PoolClient | pg.Client) => Promise<T>,
 ): Promise<T> {
   assertUuidShape(tenantId, "tenantId");
-  const client = await pool.connect();
+  // For a Pool, check out a client and release it after; for a Client, use it directly.
+  const usingPool = isPool(db);
+  const client: pg.PoolClient | pg.Client = usingPool
+    ? await (db as pg.Pool).connect()
+    : (db as pg.Client);
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
@@ -135,7 +154,7 @@ async function withTenantTx<T>(
     await client.query("ROLLBACK");
     throw err;
   } finally {
-    client.release();
+    if (usingPool) (client as pg.PoolClient).release();
   }
 }
 
@@ -199,7 +218,7 @@ export function validateParticipantData(input: unknown): ExternalParticipantData
  * choros.record under the system external-participant directory — no new entity.
  */
 export async function createExternalParticipant(args: {
-  pool: pg.Pool;
+  pool: ParticipantDb;
   tenantId: string;
   actor: string;
   data: unknown;
@@ -261,7 +280,7 @@ export async function createExternalParticipant(args: {
  * (a cross-tenant id is structurally invisible, so it reads as not-found).
  */
 export async function getExternalParticipant(args: {
-  pool: pg.Pool;
+  pool: ParticipantDb;
   tenantId: string;
   id: string;
 }): Promise<ExternalParticipant | null> {
@@ -291,7 +310,7 @@ export async function getExternalParticipant(args: {
  * only this tenant's rows are returned — tenant A never sees tenant B's records.
  */
 export async function listExternalParticipants(args: {
-  pool: pg.Pool;
+  pool: ParticipantDb;
   tenantId: string;
 }): Promise<ExternalParticipant[]> {
   const { pool, tenantId } = args;

@@ -112,18 +112,27 @@ beforeAll(async () => {
   });
   appPool = new pg.Pool({ connectionString: appUrl() });
 
-  recA = await createExternalParticipant({
-    pool: appPool,
-    tenantId: TENANT_A,
-    actor: 'ep-tester-a',
-    data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
-  });
-  recB = await createExternalParticipant({
-    pool: appPool,
-    tenantId: TENANT_B,
-    actor: 'ep-tester-b',
-    data: { display_name: 'Only-B', kind: 'visitor' },
-  });
+  // The audit-appending creates run on a dedicated pg.Client (choros_app), the
+  // proven-stable connection class for the canonical audit writer's bytea round-trip
+  // (a pooled connection mis-encoded a 32-byte bytea param on the Node-20 CI runner).
+  const wc = new pg.Client({ connectionString: appUrl() });
+  await wc.connect();
+  try {
+    recA = await createExternalParticipant({
+      pool: wc,
+      tenantId: TENANT_A,
+      actor: 'ep-tester-a',
+      data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
+    });
+    recB = await createExternalParticipant({
+      pool: wc,
+      tenantId: TENANT_B,
+      actor: 'ep-tester-b',
+      data: { display_name: 'Only-B', kind: 'visitor' },
+    });
+  } finally {
+    await wc.end();
+  }
 });
 
 afterAll(async () => {
