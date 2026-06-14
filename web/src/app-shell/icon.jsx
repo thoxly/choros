@@ -25,6 +25,7 @@ function Icon({ name, className }) {
       {name === "dots" && (<><circle cx="3.5" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="8" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="12.5" cy="8" r="1.1" fill="currentColor" stroke="none" /></>)}
       {name === "split" && (<><path {...p} d="M4 2.5v4M4 6.5c0 4 8 1 8 5" /><circle {...p} cx="4" cy="2" r="1.2" /><circle {...p} cx="12" cy="13" r="1.2" /></>)}
       {name === "rights" && (<><path {...p} d="M8 1.8l5 1.7v4.1c0 3-2.1 5.1-5 6.4-2.9-1.3-5-3.4-5-6.4V3.5z" /><circle {...p} cx="8" cy="7" r="1.3" /><path {...p} d="M8 8.3v2.1" /></>)}
+      {name === "forms" && (<><rect {...p} x="3" y="2" width="10" height="12" rx="1" /><path {...p} d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" /></>)}
     </svg>
   );
 }

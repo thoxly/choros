@@ -18,6 +18,7 @@ import RoleEditorScreen from '../screens/rights/ra-role-editor.jsx';
 import CriticalityScreen from '../screens/rights/ra-criticality.jsx';
 import SoDScreen from '../screens/rights/ra-sod.jsx';
 import GrantTrailScreen from '../screens/rights/ra-grant-trail.jsx';
+import FormsScreen from '../screens/screen-forms.jsx';
 
 export { Icon };
 
@@ -51,6 +52,12 @@ const NAV = [
       { id: "rights", label: "Права и доступ", icon: "rights", count: 8, screen: true },
     ],
   },
+  {
+    group: "Разработка",
+    items: [
+      { id: "forms", label: "Формы задач", icon: "forms", screen: true },
+    ],
+  },
 ];
 
 const SCREEN_META = {
@@ -59,6 +66,7 @@ const SCREEN_META = {
   processes: { crumb: ["Оркестрация", "Процессы"] },
   audit: { crumb: ["Наблюдаемость", "Аудит инстанса"] },
   rights: { crumb: ["Доступ", "Права и доступ"] },
+  forms:  { crumb: ["Разработка", "Формы задач"] },
 };
 
 function ThemeToggle({ theme, setTheme }) {
@@ -289,6 +297,7 @@ function AppShell() {
             <Route path="/rights/criticality" element={<CriticalityScreen />} />
             <Route path="/rights/sod" element={<SoDScreen />} />
             <Route path="/rights/trail" element={<GrantTrailScreen />} />
+            <Route path="/forms" element={<FormsScreen theme={theme} />} />
           </Routes>
         </div>
       </main>
