@@ -1,0 +1,11 @@
+# T-0153 · Enemy Arena tenant registry (≥2 tenants for cross-tenant isolation probing)
+#
+# One tenant slug per line (comments / blank lines ignored). arena-up.sh seeds
+# each slug via the public seed API; ci/checks/enemy/arena-sealed.sh reads THIS
+# file (anti-hardcode) to assert the arena seeds ≥2 isolated tenants so the Враг
+# can probe TENANT-ISO (catalogue §1). Add tenants here, not in the scripts.
+#
+# Each tenant gets its own owner principal (the dev genesis e-owner per tenant) —
+# all FAKE, no real founder, no real creds.
+arena-alpha
+arena-bravo

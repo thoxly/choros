@@ -1,0 +1,117 @@
+# Choros ENEMY ARENA overlay (T-0153, эпик E-VRG / T-0151 «Враг»)
+# spec: playbooks/enemy-redteam-backlog.md §5 (репо Demiurge) — «Арена — отдельная
+#       sealed-инфра, не делит рантайм со строителем» (§7).
+#
+# WHAT THIS IS
+#   A SINGLE-USE, SEALED snapshot of the dev stack used ONLY to run the Враг's
+#   adversarial attacks (T-0154+) against the security invariants catalogued in
+#   docs/design/T-0152-security-invariants-catalog.md. It is brought up by
+#   ops/arena/arena-up.sh, attacked, then ops/arena/arena-down.sh tears it down
+#   (-v) leaving NO persistent state. The Враг writes only its own sandbox; it
+#   never patches/merges (spec §2/§7).
+#
+# HOW TO MERGE (always base + arena overlay — NEVER plain `up`):
+#   docker compose -p choros-arena \
+#     -f docker-compose.yml -f docker-compose.arena.yml up -d
+#   (ops/arena/arena-up.sh wraps this with seeding + the project name guard.)
+#
+# THE FIVE SEALING INVARIANTS (asserted statically by
+# ci/checks/enemy/arena-sealed.sh, owned by T-0153):
+#
+#   1. SEPARATE INFRA — distinct compose project (-p choros-arena) and a distinct
+#      volume (choros_pgdata_arena, _arena suffix) so the arena NEVER touches the
+#      real dev volume choros_pgdata or the dev/CI stack. One-shot: arena-down.sh
+#      removes the project + named volume.
+#
+#   2. NO OUTBOUND NETWORK — every service is attached ONLY to the `arena_internal`
+#      network, declared `internal: true`. Compose `internal: true` creates a
+#      bridge with NO gateway to the host/Internet → containers can reach each
+#      other but have ZERO egress. No service joins the `default` network. The
+#      Враг cannot exfiltrate or phone home from inside the arena.
+#
+#   3. NO REAL CREDENTIALS — only fake/dev placeholder secrets, all carrying the
+#      `arena_fake_` prefix. No ${VAR:-default} that could inherit a host-side
+#      prod secret; no .env / .env.prod is read (arena-up.sh passes --env-file
+#      /dev/null). Distinct from prod overlay which uses ${VAR:?required}.
+#
+#   4. ≥2 TENANTS — arena-up.sh seeds at least two isolated tenants
+#      (arena-alpha, arena-bravo) via the public seed API so the Враг can probe
+#      cross-tenant isolation (TENANT-ISO, catalogue §1). Tenants are listed in
+#      ops/arena/arena-tenants.txt (the check reads that registry — anti-hardcode).
+#
+#   5. FAKE-FOUNDER — the arena's owner principal is the dev genesis e-owner
+#      (migration 026, stable dev UUID d0000000-…-00ff) running under
+#      CHOROS_AUTH_MODE=dev. It is NOT the real founder identity and holds NO real
+#      trust-root: there is no founder-trust-root in the arena (spec §7 «Нет
+#      founder-trust-root»). arena-up.sh stamps ARENA_FAKE_FOUNDER for clarity.
+#
+# NOTE: host ports are bound to 127.0.0.1 loopback only (the Враг driver runs on
+# the same host); the arena is never reachable from the LAN. Egress (the security-
+# relevant direction) is closed by `internal: true` regardless of host binds.
+
+services:
+  postgres:
+    # _arena volume — physically isolated from dev choros_pgdata and prod _prod.
+    environment:
+      POSTGRES_DB:       choros_arena
+      POSTGRES_USER:     arena_migrator
+      POSTGRES_PASSWORD: arena_fake_pg_pw          # FAKE — never a real/prod secret
+    ports:
+      - "127.0.0.1:${ARENA_POSTGRES_PORT:-55433}:5432"   # loopback-only
+    networks:
+      - arena_internal
+    volumes:
+      - "choros_pgdata_arena:/var/lib/postgresql/data"
+      - "./config/postgres:/docker-entrypoint-initdb.d:ro"
+
+  keycloak:
+    # Arena runs the dev-mode app (CHOROS_AUTH_MODE=dev); Keycloak is kept for
+    # parity but is NOT issuing real tokens — fake admin creds, no egress.
+    environment:
+      KEYCLOAK_ADMIN:          arena_fake_kc_admin
+      KEYCLOAK_ADMIN_PASSWORD: arena_fake_kc_pw    # FAKE — never a real/prod secret
+      KC_DB_URL:               jdbc:postgresql://postgres:5432/choros_arena
+      KC_DB_USERNAME:          arena_migrator
+      KC_DB_PASSWORD:          arena_fake_pg_pw
+    ports:
+      - "127.0.0.1:${ARENA_KEYCLOAK_PORT:-8181}:8180"
+      - "127.0.0.1:${ARENA_KEYCLOAK_MGMT_PORT:-9001}:9000"
+    networks:
+      - arena_internal
+
+  flowable:
+    environment:
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/choros_arena?currentSchema=flowable
+      SPRING_DATASOURCE_USERNAME: arena_migrator
+      SPRING_DATASOURCE_PASSWORD: arena_fake_pg_pw
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: arena_fake_flowable_pw   # FAKE
+    ports:
+      - "127.0.0.1:${ARENA_FLOWABLE_PORT:-8083}:8080"
+    networks:
+      - arena_internal
+
+  choros:
+    # Dev auth mode with the FAKE-FOUNDER (genesis e-owner) — NO real trust-root.
+    environment:
+      DATABASE_URL:        postgres://arena_migrator:arena_fake_pg_pw@postgres:5432/choros_arena
+      CHOROS_AUTH_MODE:    dev
+      ARENA_FAKE_FOUNDER:  e-owner                 # fake-founder principal marker
+      KC_ISSUER:           http://keycloak:8180/realms/choros
+      KEYCLOAK_URL:        http://keycloak:8180
+      NODE_ENV:            development
+      PORT:                3000
+    ports:
+      - "127.0.0.1:${ARENA_APP_PORT:-3001}:3000"   # loopback-only — Враг driver is local
+    networks:
+      - arena_internal
+
+networks:
+  # SEALED: internal=true → bridge has no gateway to host/Internet. No service is
+  # on the compose `default` network, so the arena has ZERO outbound reachability.
+  arena_internal:
+    internal: true
+
+volumes:
+  # _arena suffix — physically isolated from dev choros_pgdata and prod _prod.
+  # arena-down.sh removes this with `down -v` → one-shot, no persistent state.
+  choros_pgdata_arena: {}
