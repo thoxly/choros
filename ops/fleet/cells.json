@@ -1,0 +1,18 @@
+{
+  "meta": {
+    "registry_version": "1",
+    "description": "Choros silo-fleet cell registry (tenancy ADR §10). Machine-readable list of isolated silo cells: tier, mode, migration version, endpoint, status. The fleet head is the dev cell until the first paid silo cells are provisioned. Validated by ci/checks/fleet-migration-matrix.sh; reported on by ops/fleet/fleet-monitor."
+  },
+  "cells": [
+    {
+      "slug": "dev",
+      "display_name": "Founder dev cell (homeserver-vm)",
+      "tier": "standard",
+      "mode": "silo",
+      "migration_version": "055_fix_mcp_tool_demo_tenant",
+      "endpoint": "100.121.76.86:3000",
+      "status": "active",
+      "last_backup_at": null
+    }
+  ]
+}
