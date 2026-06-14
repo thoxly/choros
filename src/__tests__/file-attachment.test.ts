@@ -22,6 +22,7 @@ import {
   getFileContentUrl,
   addVersion,
   eraseForRetention,
+  setRetentionState,
   type FileMetaSource,
   type FileRow,
   type FileVersionRow,
@@ -98,6 +99,18 @@ class FakeFileStore implements FileMetaSource {
   async markContentErased(tenantId: string, versionId: string, atMs: number): Promise<void> {
     const v = this.versions.get(this.fk(tenantId, versionId));
     if (v && v.contentErasedAt === null) v.contentErasedAt = atMs;
+  }
+  async updateRetentionState(
+    tenantId: string,
+    fileId: string,
+    newState: FileRow["retentionState"],
+    atMs: number,
+  ): Promise<void> {
+    const f = this.files.get(this.fk(tenantId, fileId));
+    if (f) {
+      f.retentionState = newState;
+      f.updatedAt = atMs;
+    }
   }
 }
 
@@ -625,5 +638,189 @@ describe("audit events (FF-AUDIT-EVENTS)", () => {
     expect(payload["file_id"]).toBe(FILE_A);
     expect(payload["content_hash"]).toBeDefined();
     expect(payload["data_class"]).toBe("internal");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0202 — Retention lifecycle state-machine (setRetentionState).
+//   Legal forward edges: active→archived, archived→pending_deletion.
+//   Deny-by-default: backward/no-op/unknown denied; read-only grant fail-closed;
+//   audit emitted; erase reachable ONLY after the lawful walk to pending_deletion.
+// ---------------------------------------------------------------------------
+
+describe("setRetentionState — retention lifecycle (T-0202)", () => {
+  it("legal forward: active→archived (delete-grant; state moved; audit emitted)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const { sink, events } = recordingSink();
+
+    const r = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store, audit: sink },
+      FILE_A, "archived", subjectA,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.from).toBe("active");
+      expect(r.to).toBe("archived");
+    }
+    expect((await store.getFile(TENANT_A, FILE_A))!.retentionState).toBe("archived");
+
+    // file.retention audit row: subject = record ref; payload from/to.
+    const ev = events.find((e) => e.type === "file.retention")!;
+    expect(ev).toBeDefined();
+    expect(ev.subject).toBe(`record:${RECORD_A}`);
+    const p = ev.payload as Record<string, unknown>;
+    expect(p["file_id"]).toBe(FILE_A);
+    expect(p["from_state"]).toBe("active");
+    expect(p["to_state"]).toBe("archived");
+  });
+
+  it("legal forward: archived→pending_deletion", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "archived" });
+    const r = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store },
+      FILE_A, "pending_deletion", subjectA,
+    );
+    expect(r.ok).toBe(true);
+    expect((await store.getFile(TENANT_A, FILE_A))!.retentionState).toBe("pending_deletion");
+  });
+
+  it("illegal skip: active→pending_deletion DENIED (strictly stepwise)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const r = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store },
+      FILE_A, "pending_deletion", subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("illegal_retention_transition");
+    expect((await store.getFile(TENANT_A, FILE_A))!.retentionState).toBe("active");
+  });
+
+  it("backward edges DENIED: pending_deletion→active and archived→active", async () => {
+    const store1 = new FakeFileStore();
+    seedFile(store1, { retentionState: "pending_deletion" });
+    const back1 = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store1 }, FILE_A, "active", subjectA,
+    );
+    expect(back1.ok).toBe(false);
+    if (!back1.ok) expect(back1.reason).toBe("illegal_retention_transition");
+
+    const store2 = new FakeFileStore();
+    seedFile(store2, { retentionState: "archived" });
+    const back2 = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store2 }, FILE_A, "active", subjectA,
+    );
+    expect(back2.ok).toBe(false);
+    if (!back2.ok) expect(back2.reason).toBe("illegal_retention_transition");
+  });
+
+  it("no-op (same state) DENIED with retention_noop", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "archived" });
+    const r = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store }, FILE_A, "archived", subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("retention_noop");
+  });
+
+  it("unknown target DENIED with unknown_target_state", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const r = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store },
+      FILE_A,
+      "deleted" as unknown as "archived",
+      subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("unknown_target_state");
+    expect((await store.getFile(TENANT_A, FILE_A))!.retentionState).toBe("active");
+  });
+
+  it("read-only grant CANNOT transition (fail-closed; no state write, no audit)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const { sink, events } = recordingSink();
+    const r = await setRetentionState(
+      { resolver: grantOnly("read"), meta: store, audit: sink },
+      FILE_A, "archived", subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("no_grant");
+    // No state write, no audit (PDP delete-deny short-circuits before any write).
+    expect((await store.getFile(TENANT_A, FILE_A))!.retentionState).toBe("active");
+    expect(events.length).toBe(0);
+  });
+
+  it("update-only grant CANNOT transition (fail-closed)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const r = await setRetentionState(
+      { resolver: grantOnly("update"), meta: store }, FILE_A, "archived", subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("no_grant");
+  });
+
+  it("cross-tenant subject DENIED before any state write", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const other: ResolveSubject = { tenantId: TENANT_B, subjectId: SUBJECT };
+    const r = await setRetentionState(
+      { resolver: allowResolver, meta: store }, FILE_A, "archived", other,
+    );
+    expect(r.ok).toBe(false);
+    // tenant B has no such file ⇒ not_found (tenant-keyed read fails closed).
+    if (!r.ok) expect(r.reason).toBe("not_found");
+  });
+
+  it("absent file ⇒ not_found", async () => {
+    const store = new FakeFileStore();
+    const r = await setRetentionState(
+      { resolver: allowResolver, meta: store }, FILE_A, "archived", subjectA,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("not_found");
+  });
+
+  it("erase is reachable ONLY after the lawful walk to pending_deletion", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "active" });
+    const s3 = new InMemoryObjectStore();
+    // Seed a version (legit update grant).
+    const seeded = await addVersion(
+      { resolver: grantOnly("update"), store: s3, meta: store, hash: hashDep },
+      FILE_A, subjectA, new TextEncoder().encode("body"), { mime: "text/plain" },
+    );
+    if (seeded.denied) throw new Error("seed failed");
+
+    // From `active`, erase is refused (FF-RETENTION-DENY).
+    const earlyErase = await eraseForRetention(
+      { resolver: grantOnly("delete"), store: s3, meta: store }, seeded.versionId, subjectA,
+    );
+    expect(earlyErase.erased).toBe(false);
+    if (!earlyErase.erased) expect(earlyErase.reason).toBe("retention_state_forbids_erase");
+    expect(s3.has(seeded.objectKey)).toBe(true);
+
+    // Walk the lawful lifecycle: active → archived → pending_deletion.
+    const toArchived = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store }, FILE_A, "archived", subjectA,
+    );
+    expect(toArchived.ok).toBe(true);
+    const toPending = await setRetentionState(
+      { resolver: grantOnly("delete"), meta: store }, FILE_A, "pending_deletion", subjectA,
+    );
+    expect(toPending.ok).toBe(true);
+
+    // NOW erase is reachable.
+    const erase = await eraseForRetention(
+      { resolver: grantOnly("delete"), store: s3, meta: store }, seeded.versionId, subjectA,
+    );
+    expect(erase.erased).toBe(true);
+    expect(s3.has(seeded.objectKey)).toBe(false);
+    expect((await store.getVersion(TENANT_A, seeded.versionId))!.contentErasedAt).not.toBeNull();
   });
 });

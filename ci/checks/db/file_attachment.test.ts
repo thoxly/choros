@@ -31,7 +31,16 @@ import pg from 'pg';
 import { migratorUrl, appUrl, withClient } from './_helpers.js';
 import { PgFileStore } from '../../../src/core/postgres/pgFileStore.js';
 import type { FileRow, FileVersionRow } from '../../../src/core/file-attachment.js';
-import { buildObjectKey } from '../../../src/core/file-attachment.js';
+import { buildObjectKey, getFileContentUrl } from '../../../src/core/file-attachment.js';
+import type { ObjectStore } from '../../../src/core/file-attachment.js';
+import {
+  makeFileRecordResolver,
+  type GrantSource,
+  type RecordSource,
+  type ResolverDeps,
+} from '../../../src/core/grant-resolver.js';
+import type { Grant, AncestryOracle } from '../../../src/core/grant-lattice.js';
+import type { ResolveSubject, ResourceRef } from '../../../src/core/object-handle.js';
 
 function requireDb<T>(fn: () => Promise<T>): () => Promise<T | void> {
   return async () => {
@@ -94,6 +103,163 @@ async function seedRecord(c: pg.Client, tenantId: string, registryId: string): P
   );
   return id;
 }
+
+// --- AC-9 derived-authz seed helpers (employee / role / assignment / grant) ---
+
+async function seedEmployee(c: pg.Client, tenantId: string): Promise<string> {
+  const id = crypto.randomUUID();
+  await c.query(
+    `INSERT INTO choros.employee (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, NULL, 'human', $3, $3, 0, 0)`,
+    [tenantId, id, `file-emp-${id.slice(0, 8)}`],
+  );
+  return id;
+}
+
+async function seedRole(c: pg.Client, tenantId: string): Promise<string> {
+  const id = crypto.randomUUID();
+  await c.query(
+    `INSERT INTO choros.role (tenant_id, id, slug, display_name, description, created_at, updated_at)
+     VALUES ($1, $2, $3, $3, 'AC-9 file derived-authz role', 0, 0)`,
+    [tenantId, id, `file-role-${id.slice(0, 8)}`],
+  );
+  return id;
+}
+
+async function seedRoleAssignment(
+  c: pg.Client,
+  tenantId: string,
+  employeeId: string,
+  roleId: string,
+): Promise<void> {
+  const orgScope = JSON.stringify({
+    kind: 'node',
+    hierarchy: 'org',
+    nodeId: 'b0000000-0000-0000-0000-000000000001',
+    nodeLevel: 'department',
+  });
+  await c.query(
+    `INSERT INTO choros.role_assignment
+       (tenant_id, id, employee_id, role_id, org_scope, valid_from, valid_until,
+        source, granted_by, proposed_by, confirmed_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, NULL, NULL, 'test', 'seed', NULL, 'seed', 0, 0)`,
+    [tenantId, crypto.randomUUID(), employeeId, roleId, orgScope],
+  );
+}
+
+/** Seed a record/read grant scoped at the RECORD node (so containment is
+ *  equality-only — the AncestryOracle below is a===b, no resource hierarchy to
+ *  stand up). This is the grant whose presence/absence the AC-9 probe toggles. */
+async function seedRecordReadGrant(
+  c: pg.Client,
+  tenantId: string,
+  roleId: string,
+  recordId: string,
+): Promise<void> {
+  const scope = JSON.stringify({
+    kind: 'node',
+    hierarchy: 'resource',
+    nodeId: recordId,
+    nodeLevel: 'record',
+  });
+  // resource_facet MUST be NON-NULL for a record grant (FF-13 / AC-13, enforced
+  // DB-globally by bundle-coherence.test.ts in the shared db tier). The record's
+  // data is {} so an empty well-formed facet still yields a COVERING grant
+  // (denied:false) — all getFileContentUrl needs — without a hanging null facet
+  // that would pollute the sibling FF-13 suite.
+  const facet = JSON.stringify({ fields: [] });
+  await c.query(
+    `INSERT INTO choros."grant"
+       (tenant_id, id, role_id, resource_type, resource_facet,
+        operation, scope, "constraint", delegable,
+        granted_by, valid_from, valid_until, created_at)
+     VALUES ($1, $2, $3, 'record', $4::jsonb, 'read', $5::jsonb, NULL, false, 'seed', NULL, NULL, 0)`,
+    [tenantId, crypto.randomUUID(), roleId, facet, scope],
+  );
+}
+
+// --- PG-backed ResolverDeps ports for the live AC-9 probe -------------------
+//
+// These wire the REAL T-0021 PDP (resolveFor via makeFileRecordResolver) to live
+// Postgres: grants come from choros."grant" JOIN choros.role_assignment (the
+// production join, mirrors src/http/invoke.ts loadCallerInvokeGrants), the record
+// is read from choros.record, and the ancestry oracle is equality-only because
+// the grant is scoped exactly at the record node. NOTHING in-memory decides authz.
+
+/** GrantSource: the subject's current grants via their role assignments, live. */
+function pgGrantSource(pool: pg.Pool): GrantSource {
+  return {
+    async getGrants(subject: ResolveSubject): Promise<Grant[]> {
+      const { rows } = await pool.query<{
+        id: string; role_id: string; resource_type: string; resource_facet: unknown;
+        operation: string; scope: unknown; constraint: unknown; delegable: boolean;
+        granted_by: string; valid_from: string | null; valid_until: string | null; created_at: string;
+      }>(
+        `SELECT g.id, g.role_id, g.resource_type, g.resource_facet,
+                g.operation, g.scope, g."constraint", g.delegable,
+                g.granted_by, g.valid_from, g.valid_until, g.created_at
+           FROM choros."grant" g
+           JOIN choros.role_assignment ra
+             ON ra.tenant_id = g.tenant_id AND ra.role_id = g.role_id
+          WHERE g.tenant_id = $1 AND ra.employee_id = $2`,
+        [subject.tenantId, subject.subjectId],
+      );
+      return rows.map((g) => ({
+        tenantId: subject.tenantId,
+        id: g.id,
+        roleId: g.role_id,
+        resourceType: g.resource_type as Grant['resourceType'],
+        resourceFacet: (g.resource_facet ?? undefined) as Grant['resourceFacet'],
+        operation: g.operation as Grant['operation'],
+        scope: g.scope as Grant['scope'],
+        constraint: (g.constraint ?? undefined) as Grant['constraint'],
+        delegable: g.delegable,
+        grantedBy: g.granted_by,
+        validFrom: g.valid_from != null ? Number(g.valid_from) : undefined,
+        validUntil: g.valid_until != null ? Number(g.valid_until) : undefined,
+        createdAt: Number(g.created_at),
+      }));
+    },
+  };
+}
+
+/** RecordSource: raw record fields for a `record` ref (read only after allow). */
+function pgRecordSource(pool: pg.Pool): RecordSource {
+  return {
+    async getRecord(ref: ResourceRef): Promise<Record<string, unknown> | null> {
+      if (ref.kind !== 'record') return null;
+      const { rows } = await pool.query<{ data: Record<string, unknown> }>(
+        `SELECT data FROM choros.record WHERE tenant_id = $1 AND id = $2`,
+        [ref.tenantId, ref.recordId],
+      );
+      return rows.length === 0 ? null : (rows[0].data ?? {});
+    },
+  };
+}
+
+/** Equality-only oracle: the grant is scoped exactly at the record node, so the
+ *  handle's record node is contained iff it IS the grant's node (a===b). */
+const EQUALITY_ORACLE: AncestryOracle = {
+  isDescendantOrSelf: (_h, a, b) => a === b,
+};
+
+function pgResolverDeps(pool: pg.Pool): ResolverDeps {
+  return {
+    grants: pgGrantSource(pool),
+    records: pgRecordSource(pool),
+    ancestry: EQUALITY_ORACLE,
+  };
+}
+
+/** A no-byte ObjectStore stub: presignGet is the ONLY method the AC-9 download
+ *  path calls (and only AFTER a PDP allow). put/erase are never reached here. */
+const PRESIGN_STORE: ObjectStore = {
+  async put() { throw new Error('AC-9 probe must not put'); },
+  async presignGet(key: string, ttl: number): Promise<string> {
+    return `https://example.invalid/${encodeURIComponent(key)}?ttl=${ttl}`;
+  },
+  async erase() { throw new Error('AC-9 probe must not erase'); },
+};
 
 interface Seeded {
   recordId: string;
@@ -240,6 +406,59 @@ describe('file/attachment DB model + tenant isolation (T-0201)', () => {
       // Metadata + hash + key survive the byte-erase (NF-5 / T-0016 append-only).
       expect(got!.contentHash).toBe('erase-hash');
       expect(got!.objectKey).toBe(v.objectKey);
+    }),
+  );
+
+  it(
+    'AC-9 FF-DERIVED-AUTHZ (live): no record read-grant ⇒ download denied; with grant ⇒ allowed — REAL PDP against Postgres',
+    requireDb(async () => {
+      const store = new PgFileStore(poolA);
+      const recordId = seeded[TENANT_A].recordId;
+
+      // Seed a file + one (non-erased) version to download.
+      const file = mkFile(TENANT_A, recordId);
+      await store.insertFile(file);
+      const v1 = mkVersion(TENANT_A, file.id, 1, 'ac9-hash');
+      await store.insertVersion(v1);
+      await store.setCurrentVersion(TENANT_A, file.id, v1.id, 1);
+
+      // Seed an employee + role + assignment (migrator bypasses RLS for setup).
+      // The grant is seeded LATER (toggled) to prove derived-authz both ways.
+      let employeeId = '';
+      let roleId = '';
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+        employeeId = await seedEmployee(c, TENANT_A);
+        roleId = await seedRole(c, TENANT_A);
+        await seedRoleAssignment(c, TENANT_A, employeeId, roleId);
+      });
+
+      const subject: ResolveSubject = { tenantId: TENANT_A, subjectId: employeeId };
+      const deps = {
+        // The REAL op-carrying PDP seam over resolveFor against live Postgres.
+        resolver: makeFileRecordResolver(pgResolverDeps(poolA)),
+        store: PRESIGN_STORE,
+        meta: store,
+        ttl: 120,
+      };
+
+      // (1) WITHOUT a record read-grant ⇒ deny (no_grant), no presign.
+      const denied = await getFileContentUrl(deps, v1.id, subject);
+      expect(denied.denied).toBe(true);
+      if (denied.denied) expect(denied.reason).toBe('no_grant');
+
+      // (2) Grant the role a record/read scoped to this record, then retry ⇒ allow.
+      await withClient(migratorUrl(), async (c) => {
+        await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+        await seedRecordReadGrant(c, TENANT_A, roleId, recordId);
+      });
+
+      const allowed = await getFileContentUrl(deps, v1.id, subject);
+      expect(allowed.denied).toBe(false);
+      if (!allowed.denied) {
+        expect(allowed.url).toContain('https://example.invalid/');
+        expect(allowed.expiresAt).toBeGreaterThan(0);
+      }
     }),
   );
 
