@@ -28,11 +28,12 @@ import {
   type FileAuditSink,
 } from "../core/file-attachment.js";
 import { InMemoryObjectStore } from "../adapters/s3-object-store.js";
+import type { FileRecordResolver } from "../core/file-attachment.js";
 import {
-  type HandleResolver,
   type ResolveSubject,
   type ResolvedView,
 } from "../core/object-handle.js";
+import { type Operation } from "../core/grant-lattice.js";
 import { type AuditEventInput } from "../core/audit-grant-encoder.js";
 
 // ---------------------------------------------------------------------------
@@ -101,21 +102,35 @@ class FakeFileStore implements FileMetaSource {
 }
 
 // ---------------------------------------------------------------------------
-// Mock resolvers (the SAME HandleResolver port the PDP implements).
+// Mock resolvers (the SAME op-carrying FileRecordResolver seam the T-0021 PDP
+// implements via makeFileRecordResolver). These mocks are OP-AWARE: they filter
+// by `op` exactly like the real `resolveFor` (g.operation !== op ⇒ no grant), so
+// a read→write/delete privilege-escalation is STRUCTURALLY visible in the test
+// (an op-ignoring mock would have hidden the bypass — the original bug).
 // ---------------------------------------------------------------------------
 
-const allowResolver: HandleResolver = {
-  async resolveHandle(handle, subject): Promise<ResolvedView> {
-    if (handle.tenantId !== subject.tenantId) return { denied: true, reason: "cross_tenant" };
-    return { denied: false, ref: handle.ref, fields: {} };
-  },
-};
+/**
+ * Resolver that grants ONLY the listed record operations to the subject. Any file
+ * op whose mapped record op is not in the allow-set is denied `no_grant` — the
+ * same fail-closed verdict `resolveFor` returns when no covering grant matches the
+ * requested op. Cross-tenant is denied first (fail-closed, mirrors resolveFor).
+ */
+function grantOnly(...ops: Operation[]): FileRecordResolver {
+  const allowed = new Set<Operation>(ops);
+  return {
+    async resolveRecordOp(handle, subject, op): Promise<ResolvedView> {
+      if (handle.tenantId !== subject.tenantId) return { denied: true, reason: "cross_tenant" };
+      if (!allowed.has(op)) return { denied: true, reason: "no_grant" };
+      return { denied: false, ref: handle.ref, fields: {} };
+    },
+  };
+}
 
-const denyResolver: HandleResolver = {
-  async resolveHandle(): Promise<ResolvedView> {
-    return { denied: true, reason: "no_grant" };
-  },
-};
+// Grants every CRUD op (used by tests that only need a yes for any op). Still
+// op-aware in shape, but the allow-set is the full file-op surface.
+const allowResolver: FileRecordResolver = grantOnly("read", "update", "delete");
+
+const denyResolver: FileRecordResolver = grantOnly(); // grants nothing
 
 // A recording audit sink.
 function recordingSink(): { sink: FileAuditSink; events: AuditEventInput[] } {
@@ -183,6 +198,153 @@ describe("authorizeFileOp — derived authz (FF-DERIVED-AUTHZ)", () => {
     const v = await authorizeFileOp(allowResolver, file, otherTenant, "read");
     expect(v.denied).toBe(true);
     if (v.denied) expect(v.reason).toBe("cross_tenant");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FF-DERIVED-AUTHZ (per-op) — each file op decided as the CORRESPONDING record
+// op. A `read`-only grant MUST NOT authorize update/delete (privilege-escalation
+// regression guard). Mocks are OP-AWARE (grantOnly), so a resolver that ignored
+// `op` — the original bug — would make these assertions fail.
+// ---------------------------------------------------------------------------
+
+describe("authorizeFileOp — per-op mapping (read≠update≠delete)", () => {
+  it("read-only grant: read allowed, update DENIED, delete DENIED", async () => {
+    const store = new FakeFileStore();
+    const file = seedFile(store);
+    const readOnly = grantOnly("read");
+
+    expect((await authorizeFileOp(readOnly, file, subjectA, "read")).denied).toBe(false);
+
+    const upd = await authorizeFileOp(readOnly, file, subjectA, "update");
+    expect(upd.denied).toBe(true);
+    if (upd.denied) expect(upd.reason).toBe("no_grant");
+
+    const del = await authorizeFileOp(readOnly, file, subjectA, "delete");
+    expect(del.denied).toBe(true);
+    if (del.denied) expect(del.reason).toBe("no_grant");
+  });
+
+  it("update grant: update allowed; read & delete decided independently", async () => {
+    const store = new FakeFileStore();
+    const file = seedFile(store);
+    const updateOnly = grantOnly("update");
+
+    expect((await authorizeFileOp(updateOnly, file, subjectA, "update")).denied).toBe(false);
+    expect((await authorizeFileOp(updateOnly, file, subjectA, "read")).denied).toBe(true);
+    expect((await authorizeFileOp(updateOnly, file, subjectA, "delete")).denied).toBe(true);
+  });
+
+  it("delete grant: delete allowed; read & update decided independently", async () => {
+    const store = new FakeFileStore();
+    const file = seedFile(store);
+    const deleteOnly = grantOnly("delete");
+
+    expect((await authorizeFileOp(deleteOnly, file, subjectA, "delete")).denied).toBe(false);
+    expect((await authorizeFileOp(deleteOnly, file, subjectA, "read")).denied).toBe(true);
+    expect((await authorizeFileOp(deleteOnly, file, subjectA, "update")).denied).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PRIVILEGE-ESCALATION REGRESSION — read-only grant must not write/delete CONTENT
+// at the write-path entry points (addVersion / eraseForRetention), not just at
+// the authz helper. This is the structural lock for the T-0201 blocking finding.
+// ---------------------------------------------------------------------------
+
+describe("read-only grant cannot replace or erase content (write-path guard)", () => {
+  it("addVersion is DENIED for a read-only subject (no put, no insert)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store);
+    const s3 = new InMemoryObjectStore();
+    let putCalls = 0;
+    const spyStore = {
+      ...s3,
+      put: async (k: string, b: Uint8Array, m: { mime: string; size: number }) => {
+        putCalls++;
+        return s3.put(k, b, m);
+      },
+      presignGet: s3.presignGet.bind(s3),
+      erase: s3.erase.bind(s3),
+    };
+    const r = await addVersion(
+      { resolver: grantOnly("read"), store: spyStore, meta: store, hash: hashDep },
+      FILE_A,
+      subjectA,
+      new TextEncoder().encode("attacker-replacement"),
+      { mime: "text/plain" },
+    );
+    expect(r.denied).toBe(true);
+    if (r.denied) expect(r.reason).toBe("no_grant");
+    // No content written, no version row inserted.
+    expect(putCalls).toBe(0);
+    expect(store.versions.size).toBe(0);
+  });
+
+  it("eraseForRetention is DENIED for a read-only subject even in pending_deletion (no erase, no tombstone)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "pending_deletion" });
+    const s3 = new InMemoryObjectStore();
+    // seed a version with an UPDATE-capable resolver (legit replace).
+    const seeded = await addVersion(
+      { resolver: grantOnly("update"), store: s3, meta: store, hash: hashDep },
+      FILE_A, subjectA, new TextEncoder().encode("body"), { mime: "text/plain" },
+    );
+    if (seeded.denied) throw new Error("seed failed");
+
+    let eraseCalls = 0;
+    const spyStore = {
+      ...s3,
+      put: s3.put.bind(s3),
+      presignGet: s3.presignGet.bind(s3),
+      erase: async (k: string) => {
+        eraseCalls++;
+        return s3.erase(k);
+      },
+    };
+    const res = await eraseForRetention(
+      { resolver: grantOnly("read"), store: spyStore, meta: store },
+      seeded.versionId,
+      subjectA,
+    );
+    expect(res.erased).toBe(false);
+    if (!res.erased) expect(res.reason).toBe("no_grant");
+    // Bytes NOT erased; no tombstone stamped (PDP delete-deny short-circuits before S3).
+    expect(eraseCalls).toBe(0);
+    expect(s3.has(seeded.objectKey)).toBe(true);
+    expect((await store.getVersion(TENANT_A, seeded.versionId))!.contentErasedAt).toBeNull();
+  });
+
+  it("update grant authorizes addVersion (replace)", async () => {
+    const store = new FakeFileStore();
+    seedFile(store);
+    const s3 = new InMemoryObjectStore();
+    const r = await addVersion(
+      { resolver: grantOnly("update"), store: s3, meta: store, hash: hashDep },
+      FILE_A, subjectA, new TextEncoder().encode("legit"), { mime: "text/plain" },
+    );
+    expect(r.denied).toBe(false);
+    expect(store.versions.size).toBe(1);
+  });
+
+  it("delete grant authorizes eraseForRetention from pending_deletion", async () => {
+    const store = new FakeFileStore();
+    seedFile(store, { retentionState: "pending_deletion" });
+    const s3 = new InMemoryObjectStore();
+    const seeded = await addVersion(
+      { resolver: grantOnly("update"), store: s3, meta: store, hash: hashDep },
+      FILE_A, subjectA, new TextEncoder().encode("body"), { mime: "text/plain" },
+    );
+    if (seeded.denied) throw new Error("seed failed");
+
+    const res = await eraseForRetention(
+      { resolver: grantOnly("delete"), store: s3, meta: store },
+      seeded.versionId,
+      subjectA,
+    );
+    expect(res.erased).toBe(true);
+    expect(s3.has(seeded.objectKey)).toBe(false);
+    expect((await store.getVersion(TENANT_A, seeded.versionId))!.contentErasedAt).not.toBeNull();
   });
 });
 
@@ -381,7 +543,7 @@ describe("eraseForRetention deny-by-default (FF-RETENTION-DENY)", () => {
 
   it("refuses erase for an active file (bytes remain, no tombstone)", async () => {
     const { store, s3, versionId, objectKey } = await seedVersioned("active");
-    const res = await eraseForRetention({ store: s3, meta: store }, versionId, TENANT_A, SUBJECT);
+    const res = await eraseForRetention({ resolver: allowResolver, store: s3, meta: store }, versionId, subjectA);
     expect(res.erased).toBe(false);
     if (!res.erased) expect(res.reason).toBe("retention_state_forbids_erase");
     expect(s3.has(objectKey)).toBe(true);
@@ -390,14 +552,14 @@ describe("eraseForRetention deny-by-default (FF-RETENTION-DENY)", () => {
 
   it("refuses erase for an archived file", async () => {
     const { store, s3, versionId } = await seedVersioned("archived");
-    const res = await eraseForRetention({ store: s3, meta: store }, versionId, TENANT_A, SUBJECT);
+    const res = await eraseForRetention({ resolver: allowResolver, store: s3, meta: store }, versionId, subjectA);
     expect(res.erased).toBe(false);
   });
 
   it("erases for pending_deletion: bytes gone, tombstone set, metadata/hash live", async () => {
     const { store, s3, versionId, objectKey } = await seedVersioned("pending_deletion");
     const before = await store.getVersion(TENANT_A, versionId);
-    const res = await eraseForRetention({ store: s3, meta: store }, versionId, TENANT_A, SUBJECT);
+    const res = await eraseForRetention({ resolver: allowResolver, store: s3, meta: store }, versionId, subjectA);
     expect(res.erased).toBe(true);
     // Bytes physically gone.
     expect(s3.has(objectKey)).toBe(false);
@@ -410,7 +572,7 @@ describe("eraseForRetention deny-by-default (FF-RETENTION-DENY)", () => {
 
   it("a content-erased version is undownloadable (content_erased)", async () => {
     const { store, s3, versionId } = await seedVersioned("pending_deletion");
-    await eraseForRetention({ store: s3, meta: store }, versionId, TENANT_A, SUBJECT);
+    await eraseForRetention({ resolver: allowResolver, store: s3, meta: store }, versionId, subjectA);
     const res = await getFileContentUrl(
       { resolver: allowResolver, store: s3, meta: store, ttl: 300 },
       versionId, subjectA,
@@ -448,7 +610,7 @@ describe("audit events (FF-AUDIT-EVENTS)", () => {
 
     // move file to pending_deletion then erase ⇒ file.delete
     (await store.getFile(TENANT_A, FILE_A))!.retentionState = "pending_deletion";
-    await eraseForRetention({ store: s3, meta: store, audit: sink }, r1.versionId, TENANT_A, SUBJECT);
+    await eraseForRetention({ resolver: allowResolver, store: s3, meta: store, audit: sink }, r1.versionId, subjectA);
 
     const types = events.map((e) => e.type);
     expect(types).toContain("file.upload");

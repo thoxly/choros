@@ -33,15 +33,46 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  type HandleResolver,
   type ResolveSubject,
   type ResolvedView,
   type ResourceRef,
+  type ObjectHandle,
   makeHandle,
 } from "./object-handle.js";
 import { type Operation } from "./grant-lattice.js";
 import { type DataClass } from "./data-classification.js";
 import { type AuditEventInput } from "./audit-grant-encoder.js";
+
+// ---------------------------------------------------------------------------
+// Record-op resolver port — the op-carrying seam over the SAME T-0021 PDP.
+// ---------------------------------------------------------------------------
+
+/**
+ * The injectable seam the file module uses to ask the T-0021 PDP for a decision
+ * on a SPECIFIC record operation.
+ *
+ * WHY THIS, NOT `HandleResolver`: `HandleResolver.resolveHandle` is the read-only
+ * facade — it is hardwired to `resolveFor(.., "read")` (grant-resolver.ts). A file
+ * write/delete MUST be decided as the CORRESPONDING record op (`update`/`delete`,
+ * ADR §2.4 / §4.4-step-2); the read facade cannot express that, so authorizing a
+ * write through it silently down-decides it to a `read` check — a privilege
+ * escalation (a `read`-only grant would authorize replace/erase). This port carries
+ * the mapped record op so the file module decides each op correctly.
+ *
+ * THIS IS NOT A SECOND AUTHORITY. `resolveRecordOp` is wired in the composition
+ * root (makeFileRecordResolver, grant-resolver.ts) to the ONE PDP core
+ * `resolveFor(deps, handle, subject, op)` — the identical decision core
+ * `resolveHandle` delegates to, just with the correct `op`. The file module still
+ * owns no grant math (FF-NOACL): it only TRANSLATES a file op into a record op and
+ * delegates. Tenant fail-closed stays first (in `resolveFor` and re-checked here).
+ */
+export interface FileRecordResolver {
+  resolveRecordOp(
+    handle: ObjectHandle,
+    subject: ResolveSubject,
+    op: Operation,
+  ): Promise<ResolvedView>;
+}
 
 // ---------------------------------------------------------------------------
 // S3 port (the adapter; dev = MinIO). Injected; the core does not know the
@@ -177,24 +208,24 @@ function ownerRecordRef(file: FileRow): Extract<ResourceRef, { kind: "record" }>
 }
 
 /**
- * Authorize a file operation by TRANSLATING it into an operation over the owner
- * record and asking the SAME PDP (T-0021). This module owns no grant math.
+ * Authorize a file operation by TRANSLATING it into the CORRESPONDING operation
+ * over the owner record and asking the SAME PDP (T-0021). This module owns no
+ * grant math.
  *
  * Sequence (ADR §4.4, fail-closed):
  *  1. tenant-gate: subject's tenant must equal the file's tenant — else
  *     `cross_tenant` BEFORE any record/grant read (FF-FAILCLOSED).
- *  2. build the owner-record handle; resolve `read` for the record via the
- *     resolver. For `read` we use `resolveHandle` (the read facade); for
- *     `update`/`delete` we still gate on a `read`-resolution of the record AND
- *     the caller is expected to have already write-gated the record mutation —
- *     here the file authz returns the PDP verdict for the requested op.
+ *  2. build the owner-record handle; resolve the MAPPED record op via the
+ *     op-carrying resolver. read→`read`, add/replace→`update`, delete→`delete`
+ *     (`recordOpFor`). Each file op is decided as its corresponding record op —
+ *     a `read`-only grant authorizes ONLY download, never replace/erase.
  *
  * Returns the resolver's `ResolvedView`: `{denied:true, reason}` or
  * `{denied:false, ref, fields}`. The reason-union is inherited verbatim from
  * T-0021 (`"no_grant" | "cross_tenant" | "not_found"`) — no new reasons.
  */
 export async function authorizeFileOp(
-  resolver: HandleResolver,
+  resolver: FileRecordResolver,
   file: FileRow,
   subject: ResolveSubject,
   op: FileOp,
@@ -204,18 +235,15 @@ export async function authorizeFileOp(
     return { denied: true, reason: "cross_tenant" };
   }
 
-  // 2. Translate to a record handle + delegate to the single PDP. The handle is
-  //    constructed via makeHandle (which re-checks tenant binding, fail-closed).
+  // 2. Translate to a record handle + delegate to the single PDP for the MAPPED
+  //    record op. The handle is constructed via makeHandle (which re-checks tenant
+  //    binding, fail-closed). The op is NOT discarded: read→read, update→update,
+  //    delete→delete (ADR §2.4 / §4.4-step-2). A read-only grant therefore cannot
+  //    authorize a write/erase — `resolveFor` filters grants by exact operation.
   const ref = ownerRecordRef(file);
   const handle = makeHandle(ref, file.tenantId);
-
-  // The read facade (resolveHandle) is the public HandleResolver surface and is
-  // the right call for a `read` (download) decision. For write ops the same
-  // record-scope grant check is what authorizes the file mutation; the read
-  // facade resolves the SAME covering-grant gate (a subject that may not read
-  // the record may not touch its files). `recordOpFor(op)` documents the mapping.
-  void recordOpFor(op);
-  return resolver.resolveHandle(handle, subject);
+  const recordOp = recordOpFor(op);
+  return resolver.resolveRecordOp(handle, subject, recordOp);
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +251,7 @@ export async function authorizeFileOp(
 // ---------------------------------------------------------------------------
 
 export interface GetFileContentDeps {
-  resolver: HandleResolver;
+  resolver: FileRecordResolver;
   store: ObjectStore;
   meta: FileMetaSource;
   /** presign TTL seconds (deploy-time; default ≤ 300). Clamped to maxTtl. */
@@ -298,7 +326,7 @@ export async function getFileContentUrl(
 // ---------------------------------------------------------------------------
 
 export interface AddVersionDeps {
-  resolver: HandleResolver;
+  resolver: FileRecordResolver;
   store: ObjectStore;
   meta: FileMetaSource;
   audit?: FileAuditSink;
@@ -405,6 +433,7 @@ export async function addVersion(
 // ---------------------------------------------------------------------------
 
 export interface EraseRetentionDeps {
+  resolver: FileRecordResolver;
   store: ObjectStore;
   meta: FileMetaSource;
   audit?: FileAuditSink;
@@ -418,19 +447,26 @@ export type EraseRetentionResult =
 /**
  * Physically erase a version's content under retention — DENY-BY-DEFAULT.
  *
- * Content is erased ONLY when the owner file is in `pending_deletion` (the
- * lifecycle/manual transition to that state is out of scope here — sweeper is
- * Stage-2). On erase: `store.erase(object_key)` + stamp `content_erased_at`. The
- * metadata rows (`file`/`file_version`) and the audit trail SURVIVE (NF-5 /
- * T-0016 append-only) — only the bytes go. An `active`/`archived` file is refused.
+ * TWO gates, BOTH required (fail-closed):
+ *  (a) PDP-allow `delete` on the owner record (via `authorizeFileOp`, the SAME
+ *      T-0021 PDP, mapped op `delete`). A subject holding only a `read` (or
+ *      `update`) grant on the record CANNOT erase content — content erase is a
+ *      record `delete` decision (ADR §2.4 / §4.4-step-2). NO S3 call before allow.
+ *  (b) retention-state: content is erased ONLY when the owner file is in
+ *      `pending_deletion` (the lifecycle/manual transition to that state is out of
+ *      scope here — sweeper is Stage-2).
+ *
+ * On erase: `store.erase(object_key)` + stamp `content_erased_at`. The metadata
+ * rows (`file`/`file_version`) and the audit trail SURVIVE (NF-5 / T-0016
+ * append-only) — only the bytes go. An `active`/`archived` file is refused.
  */
 export async function eraseForRetention(
   deps: EraseRetentionDeps,
   fileVersionId: string,
-  tenantId: string,
-  actor: string,
+  subject: ResolveSubject,
 ): Promise<EraseRetentionResult> {
   const now = (deps.now ?? Date.now)();
+  const tenantId = subject.tenantId;
 
   const version = await deps.meta.getVersion(tenantId, fileVersionId);
   if (version === null) {
@@ -446,7 +482,15 @@ export async function eraseForRetention(
     return { erased: false, reason: "not_found" };
   }
 
-  // DENY-BY-DEFAULT: only pending_deletion files may have content erased.
+  // (a) PDP-allow `delete` on the owner record, fail-closed, BEFORE any S3 call.
+  //     read-only / update-only grants are denied here — content erase = record
+  //     `delete`, decided by the SAME PDP (no second authority).
+  const verdict = await authorizeFileOp(deps.resolver, file, subject, "delete");
+  if (verdict.denied) {
+    return { erased: false, reason: verdict.reason };
+  }
+
+  // (b) DENY-BY-DEFAULT: only pending_deletion files may have content erased.
   if (file.retentionState !== "pending_deletion") {
     return { erased: false, reason: "retention_state_forbids_erase" };
   }
@@ -455,7 +499,9 @@ export async function eraseForRetention(
   await deps.store.erase(version.objectKey);
   await deps.meta.markContentErased(tenantId, fileVersionId, now);
 
-  await deps.audit?.emit(fileAuditEvent("file.delete", { tenantId, subjectId: actor }, file, version, now));
+  await deps.audit?.emit(
+    fileAuditEvent("file.delete", { tenantId, subjectId: subject.subjectId }, file, version, now),
+  );
 
   return { erased: true, objectKey: version.objectKey };
 }
