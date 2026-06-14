@@ -1,0 +1,17 @@
+# frozen-sanctions.jsonl — FF-FCI12 founder-sanction channel (design T-0199)
+# APPEND-ONLY. One compact JSON record per line. Each line authorizes the named
+# task to modify/delete the named FOREIGN ci/checks/*.sh, bypassing the
+# frozen-checks-immutable meta-gate (FF-FCI1).
+#
+# Authorization of every entry traces to a control-plane founder_decide record
+# (the founder's audited decision). The meta-gate prints SANCTION+AUDIT lines on
+# each granted bypass; abuse (a task self-granting an unauthorized pair) is
+# visible in the pre-merge diff — same accepted residual-risk class as R-2.
+#
+# Schema (compact JSON, NO interior spaces in "key":"value" so the grep matcher
+# stays exact): {"task":"T-XXXX","file":"ci/checks/...","owner":"T-YYYY",
+# "decision":"founder_decide@DATE","sanctioned_by":"founder","note":"..."}
+#
+# T-0160 appends its own 4 sibling-class rows here at impl time (self-service +
+# audit), per its founder_decide of 2026-06-14.
+{"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh","owner":"T-0040","decision":"founder_decide@2026-06-14","sanctioned_by":"founder","note":"FF-RC6 known_tenant_tables-excludes escape-hatch for legit tenant table registry_schema_history (migration 056); design T-0199"}

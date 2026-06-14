@@ -375,3 +375,107 @@ describe('FF-FCI6: subdirectory ci/checks/kc/*.sh not matched → exit 0', () =>
     expect(stdout).toMatch(/PASS/);
   });
 });
+
+// =============================================================================
+// FF-FCI12: founder-sanction channel (design T-0199)
+// A {task,file} pair in ci/checks/data/frozen-sanctions.jsonl lets a task modify
+// a FOREIGN frozen check (bypass FF-FCI1) — but ONLY that exact pair.  The
+// matcher requires BOTH tokens on the same JSONL line, so a sanction cannot leak
+// across files or across tasks.
+// =============================================================================
+
+/** Write (and commit, on the current branch) a frozen-sanctions.jsonl. */
+function writeSanctions(repoDir: string, lines: string[]): void {
+  const dataDir = join(repoDir, 'ci', 'checks', 'data');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'frozen-sanctions.jsonl'), lines.join('\n') + '\n');
+  sh('git', ['add', 'ci/checks/data/frozen-sanctions.jsonl'], repoDir);
+  sh('git', ['commit', '-m', 'add frozen-sanctions allowlist'], repoDir);
+}
+
+describe('FF-FCI12: founder-sanction channel', () => {
+  const ROLE_CHECK = {
+    file: 'role-criticality-isolation.sh',
+    header: '# T-0040 · FF-RC1 — role-criticality-isolation',
+  };
+
+  it('SANCTIONED: task/T-0085 edits foreign T-0040 check listed in allowlist → exit 0 + SANCTION/AUDIT', () => {
+    const repoDir = createBaseRepo(tmpRoot, [ROLE_CHECK]);
+    writeSanctions(repoDir, [
+      '# allowlist',
+      '{"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh","owner":"T-0040","sanctioned_by":"founder"}',
+    ]);
+
+    sh('git', ['checkout', '-b', 'task/T-0085-versioning'], repoDir);
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'role-criticality-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0040 · FF-RC1 — role-criticality-isolation\n# T-0085: known_tenant_tables-excludes hatch\necho "stub"\n`,
+    );
+    sh('git', ['add', 'ci/checks/role-criticality-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0085: edit foreign check under founder sanction'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+    expect(exitCode, `Expected exit 0 (sanctioned). Output:\n${stdout}`).toBe(0);
+    expect(stdout).toMatch(/SANCTION \[FF-FCI12\]/);
+    expect(stdout).toMatch(/AUDIT \[FF-FCI12\]/);
+    expect(stdout).toMatch(/role-criticality-isolation\.sh/);
+  });
+
+  it('NO ALLOWLIST: same foreign edit with no sanctions file → exit 1 (FF-FCI9 preserved)', () => {
+    const repoDir = createBaseRepo(tmpRoot, [ROLE_CHECK]);
+    sh('git', ['checkout', '-b', 'task/T-0085-versioning'], repoDir);
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'role-criticality-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0040 · FF-RC1 — role-criticality-isolation\n# unsanctioned edit\necho "stub"\n`,
+    );
+    sh('git', ['add', 'ci/checks/role-criticality-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0085: unsanctioned foreign edit'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+    expect(exitCode, `Expected exit 1 (no allowlist). Output:\n${stdout}`).toBe(1);
+    expect(stdout).toMatch(/FAIL/);
+  });
+
+  it('FILE LEAK GUARD: allowlist sanctions a DIFFERENT file → edit to non-listed file exits 1', () => {
+    const repoDir = createBaseRepo(tmpRoot, [
+      ROLE_CHECK,
+      { file: 'dual-control-isolation.sh', header: '# T-0044 · FF-DC1 — dual-control-isolation' },
+    ]);
+    writeSanctions(repoDir, [
+      '{"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh","sanctioned_by":"founder"}',
+    ]);
+
+    sh('git', ['checkout', '-b', 'task/T-0085-versioning'], repoDir);
+    // Edit the OTHER foreign check, which is NOT in the allowlist for T-0085
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'dual-control-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0044 · FF-DC1 — dual-control-isolation\n# sneaky edit not in allowlist\necho "stub"\n`,
+    );
+    sh('git', ['add', 'ci/checks/dual-control-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0085: edit a foreign check NOT sanctioned'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+    expect(exitCode, `Expected exit 1 (file not in allowlist). Output:\n${stdout}`).toBe(1);
+    expect(stdout).toMatch(/FAIL/);
+    expect(stdout).toMatch(/dual-control-isolation\.sh/);
+  });
+
+  it('TASK LEAK GUARD: allowlist grants T-0085 → a different branch (T-0999) cannot ride it → exit 1', () => {
+    const repoDir = createBaseRepo(tmpRoot, [ROLE_CHECK]);
+    writeSanctions(repoDir, [
+      '{"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh","sanctioned_by":"founder"}',
+    ]);
+
+    sh('git', ['checkout', '-b', 'task/T-0999-impersonate'], repoDir);
+    writeFileSync(
+      join(repoDir, 'ci', 'checks', 'role-criticality-isolation.sh'),
+      `#!/usr/bin/env bash\n# T-0040 · FF-RC1 — role-criticality-isolation\n# T-0999 riding T-0085 sanction\necho "stub"\n`,
+    );
+    sh('git', ['add', 'ci/checks/role-criticality-isolation.sh'], repoDir);
+    sh('git', ['commit', '-m', 'T-0999: ride another tasks sanction'], repoDir);
+
+    const { exitCode, stdout } = runCheck(repoDir);
+    expect(exitCode, `Expected exit 1 (sanction is for T-0085, not T-0999). Output:\n${stdout}`).toBe(1);
+    expect(stdout).toMatch(/FAIL/);
+  });
+});
