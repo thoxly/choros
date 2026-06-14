@@ -38,15 +38,68 @@ function takenWhen(claimedAt) {
   return `${hh}:${mm}`;
 }
 
-function SLACell({ sla }) {
-  const pct = Math.max(0, Math.min(100, (sla.left / sla.min) * 100));
-  const over = sla.left < 0;
-  const warn = !over && pct <= 25;
-  const cls = over ? "over" : warn ? "warn" : "";
-  const txt = over ? `−${Math.abs(sla.left)} мин` : `${sla.left} мин`;
+/* ---------------------------------------------------------------------------
+   SLA state model (T-0095) — kept in LOCKSTEP with src/http/sla.ts.
+   The SERVER owns the deadline (epoch-ms, `item.deadline`); the client derives the
+   live remaining time + warn/over state PURELY from (now, deadline, total-window).
+   No deadlines are invented client-side. Pure functions so the boundaries are
+   unit-testable with an injected `now` (do NOT read the wall clock here).
+   --------------------------------------------------------------------------- */
+const SLA_WARN_FRACTION = 0.25;
+const SLA_WARN_FLOOR_MS = 5 * 60000;
+const SLA_WARN_CEIL_MS = 60 * 60000;
+
+export function warnWindowMs(totalMin) {
+  const total = Number.isFinite(totalMin) && totalMin > 0 ? totalMin * 60000 : 0;
+  const raw = total * SLA_WARN_FRACTION;
+  return Math.min(SLA_WARN_CEIL_MS, Math.max(SLA_WARN_FLOOR_MS, raw));
+}
+
+/** "normal" | "warn" | "over" from injected `nowMs` + server `deadlineMs` + total window. */
+export function slaState(nowMs, deadlineMs, totalMin) {
+  if (!Number.isFinite(nowMs) || !Number.isFinite(deadlineMs)) return "normal";
+  if (nowMs >= deadlineMs) return "over";
+  if (nowMs >= deadlineMs - warnWindowMs(totalMin)) return "warn";
+  return "normal";
+}
+
+/** Whole minutes of headroom remaining (negative once past due). Rounds toward zero. */
+export function remainingMin(nowMs, deadlineMs) {
+  return Math.trunc((deadlineMs - nowMs) / 60000);
+}
+
+/**
+ * Render the live SLA state for one item. Prefers the server deadline (epoch-ms) and
+ * runs a 1-Hz tick so the countdown + warn/over state advance in real time; falls back
+ * to the static `sla.left` snapshot when no deadline is present (legacy rows).
+ */
+function SLACell({ sla, deadline }) {
+  const hasLive = typeof deadline === "number" && Number.isFinite(deadline);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!hasLive) return undefined;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasLive]);
+
+  const left = hasLive ? remainingMin(now, deadline) : sla.left;
+  const state = hasLive
+    ? slaState(now, deadline, sla.min)
+    : sla.left < 0
+      ? "over"
+      : (sla.left / sla.min) * 100 <= 25
+        ? "warn"
+        : "normal";
+
+  const over = state === "over";
+  const cls = over ? "over" : state === "warn" ? "warn" : "";
+  // Bar fill: proportion of the SLA window still remaining (0 when overdue, full bar in red).
+  const pct = over ? 100 : Math.max(0, Math.min(100, (left / sla.min) * 100));
+  const txt = over ? `−${Math.abs(left)} мин` : `${left} мин`;
   return (
     <span className="chs-sla">
-      <span className="chs-sla__bar"><span className={`chs-sla__fill ${cls ? "chs-sla__fill--" + cls : ""}`} style={{ width: (over ? 100 : pct) + "%" }} /></span>
+      <span className="chs-sla__bar"><span className={`chs-sla__fill ${cls ? "chs-sla__fill--" + cls : ""}`} style={{ width: pct + "%" }} /></span>
       <span className={`chs-sla__txt ${cls ? "chs-sla__txt--" + cls : ""}`}>{txt}</span>
     </span>
   );
@@ -212,7 +265,7 @@ function InboxScreen() {
                         <ExecutorBadge type={t.execType} name={t.execName} />
                       )}
                     </td>
-                    <td><SLACell sla={t.sla} /></td>
+                    <td><SLACell sla={t.sla} deadline={t.deadline} /></td>
                     <td><Mono style={{ color: "var(--chs-color-text-muted)", fontSize: "var(--chs-text-sm)" }}>{t.due}</Mono></td>
                     <td className="chs-r">
                       {inPool ? (

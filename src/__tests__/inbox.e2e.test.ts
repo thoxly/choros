@@ -108,6 +108,26 @@ describe("Inbox API E2E", () => {
     }
   });
 
+  it("T-0095: Each item carries a live SLA deadline (epoch-ms) consistent with sla.left", async () => {
+    const before = Date.now();
+    const result = await makeRequest("GET", "/api/inbox");
+    const after = Date.now();
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    const items = data.items as Array<Record<string, unknown>>;
+
+    for (const item of items) {
+      const deadline = item.deadline as number;
+      const sla = item.sla as { left: number };
+      expect(typeof deadline).toBe("number");
+      expect(Number.isFinite(deadline)).toBe(true);
+      // deadline === now + sla.left·60s, anchored to request-time `now`. Bound the
+      // request window so the relation is asserted deterministically without a fixed clock.
+      const offsetMs = sla.left * 60_000;
+      expect(deadline).toBeGreaterThanOrEqual(before + offsetMs - 5_000);
+      expect(deadline).toBeLessThanOrEqual(after + offsetMs + 5_000);
+    }
+  });
+
   it("T-0106: Items have either (execType + execName) or pool property", async () => {
     const result = await makeRequest("GET", "/api/inbox");
     const data = JSON.parse(result.body) as Record<string, unknown>;
