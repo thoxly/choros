@@ -118,7 +118,44 @@ beforeAll(async () => {
   } finally {
     dc.release();
   }
+
+  // Compare: same all-zero bytea insert via a standalone pg.Client (not Pool).
+  const cc = new pg.Client({ connectionString: appUrl() });
+  await cc.connect();
+  try {
+    await cc.query('BEGIN');
+    await cc.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
+    await cc.query('SET LOCAL search_path TO choros');
+    const r = await cc.query('SELECT length($1::bytea) AS n', [Buffer.alloc(32, 0)]);
+    // eslint-disable-next-line no-console
+    console.log('[DIAG ep] Client all-zero bytea length:', (r.rows[0] as { n: number }).n);
+    const r2 = await cc.query('SELECT length($1::bytea) AS n', [Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex')]);
+    // eslint-disable-next-line no-console
+    console.log('[DIAG ep] Client nonzero bytea length:', (r2.rows[0] as { n: number }).n);
+    const r3 = await dc0Query(cc);
+    // eslint-disable-next-line no-console
+    console.log('[DIAG ep] Pool-client nonzero bytea length (via fresh pool):', r3);
+    await cc.query('ROLLBACK');
+  } finally {
+    await cc.end();
+  }
 });
+
+async function dc0Query(_c: pg.Client): Promise<number> {
+  const p = new pg.Pool({ connectionString: appUrl() });
+  const c = await p.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
+    await c.query('SET LOCAL search_path TO choros');
+    const r = await c.query('SELECT length($1::bytea) AS n', [Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex')]);
+    await c.query('ROLLBACK');
+    return (r.rows[0] as { n: number }).n;
+  } finally {
+    c.release();
+    await p.end();
+  }
+}
 
 afterAll(async () => {
   if (appPool) await appPool.end();
