@@ -151,6 +151,19 @@ export interface FileMetaSource {
   setCurrentVersion(tenantId: string, fileId: string, versionId: string, atMs: number): Promise<void>;
   /** Retention tombstone: stamp content_erased_at on a version (metadata survives). */
   markContentErased(tenantId: string, versionId: string, atMs: number): Promise<void>;
+  /**
+   * Retention lifecycle pointer-update: move file.retention_state to a new lawful
+   * state (T-0202). This is a state-column mutation on `choros.file` ONLY — it
+   * NEVER touches any `file_version` content column (immutability, FF-V). It is a
+   * pure pointer/state update analogous to setCurrentVersion; the legality of the
+   * transition is decided in `setRetentionState` BEFORE this is called.
+   */
+  updateRetentionState(
+    tenantId: string,
+    fileId: string,
+    newState: FileRow["retentionState"],
+    atMs: number,
+  ): Promise<void>;
 }
 
 /** Optional audit sink (T-0016 file.* events). Additive — when absent, no audit emit. */
@@ -507,6 +520,123 @@ export async function eraseForRetention(
 }
 
 // ---------------------------------------------------------------------------
+// Retention lifecycle — lawful state transitions (T-0202).
+//
+// THE GAP THIS CLOSES: T-0201 shipped `eraseForRetention`, which erases content
+// ONLY from `pending_deletion`, but NOTHING lawfully PRODUCED `archived` /
+// `pending_deletion` — the precondition was unreachable. `setRetentionState` is
+// the lawful producer: a PDP-gated, deny-by-default forward-only state machine.
+//
+// ADR §2.7: `archived` is the signal when the owner record goes terminal; content
+// is erased only after policy expiry and only from `pending_deletion`. The ADR
+// describes a STEPWISE lifecycle (active → archived → pending_deletion) and does
+// NOT state a direct active → pending_deletion edge, so this machine is strictly
+// stepwise: the only legal forward edges are active→archived and
+// archived→pending_deletion. Every other target (backward, no-op, unknown) is
+// DENIED with a typed reason (deny-by-default).
+// ---------------------------------------------------------------------------
+
+export type RetentionState = FileRow["retentionState"];
+
+/**
+ * The lawful forward transitions of the retention lifecycle (ADR §2.7). The map
+ * is the WHOLE state machine: a transition is legal iff `to` is in the allow-set
+ * for `from`. Strictly stepwise + forward-only — a terminal/illegal target is not
+ * listed and is therefore denied by default.
+ */
+const LAWFUL_RETENTION_TRANSITIONS: Readonly<Record<RetentionState, readonly RetentionState[]>> = {
+  active: ["archived"],
+  archived: ["pending_deletion"],
+  pending_deletion: [], // terminal: only content-erase follows (eraseForRetention)
+};
+
+export interface SetRetentionStateDeps {
+  resolver: FileRecordResolver;
+  meta: FileMetaSource;
+  audit?: FileAuditSink;
+  now?: () => number;
+}
+
+export type SetRetentionStateResult =
+  | { ok: false; reason: string }
+  | { ok: true; from: RetentionState; to: RetentionState };
+
+/**
+ * Transition a file's `retention_state` to `targetState` — DENY-BY-DEFAULT.
+ *
+ * A retention transition is a WRITE-CLASS op over the OWNER record: it is gated
+ * through the SAME `authorizeFileOp` as content mutation, mapped to the record
+ * `delete` op (mirrors `eraseForRetention` — archiving / requesting deletion is a
+ * lifecycle act on the owner record's data, decided by the one T-0021 PDP). A
+ * read-only (or update-only) grant therefore CANNOT drive a retention transition
+ * — fail-closed. This module introduces NO file ACL and NO second authority.
+ *
+ * Sequence (strict, fail-closed):
+ *  1. load the file; absent ⇒ `not_found`.
+ *  2. PDP-allow `delete` on the owner record (via `authorizeFileOp`). On `{denied}`
+ *     ⇒ stop — no state write (FF-FAILCLOSED, mirrors eraseForRetention gate (a)).
+ *  3. legality: `targetState` must be a lawful FORWARD edge from the current state
+ *     (LAWFUL_RETENTION_TRANSITIONS). A no-op (from===to), a backward edge
+ *     (pending_deletion→active, archived→active), or an unknown target is DENIED.
+ *  4. persist via `updateRetentionState` (pointer-only on choros.file) + emit a
+ *     `file.retention` audit event (subject = record_ref; payload carries
+ *     file_id / from_state / to_state). T-0016 append-only.
+ *
+ * This makes the `pending_deletion` precondition of `eraseForRetention` lawfully
+ * reachable: active → archived → pending_deletion → (erase).
+ */
+export async function setRetentionState(
+  deps: SetRetentionStateDeps,
+  fileId: string,
+  targetState: RetentionState,
+  subject: ResolveSubject,
+): Promise<SetRetentionStateResult> {
+  const now = (deps.now ?? Date.now)();
+  const tenantId = subject.tenantId;
+
+  // 1. Load the owner file (tenant-scoped DAO read).
+  const file = await deps.meta.getFile(tenantId, fileId);
+  if (file === null) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  // 2. PDP-allow `delete` on the owner record, fail-closed, BEFORE any state write.
+  //    A read-only / update-only grant is denied here — a retention transition is a
+  //    write-class lifecycle act, decided by the SAME PDP (no second authority).
+  const verdict = await authorizeFileOp(deps.resolver, file, subject, "delete");
+  if (verdict.denied) {
+    return { ok: false, reason: verdict.reason };
+  }
+
+  // 3. Legality — deny-by-default. Unknown target, no-op, and backward edges all
+  //    fall through the lawful forward allow-set and are refused with a typed reason.
+  const from = file.retentionState;
+  if (!isRetentionStateValue(targetState)) {
+    return { ok: false, reason: "unknown_target_state" };
+  }
+  if (targetState === from) {
+    return { ok: false, reason: "retention_noop" };
+  }
+  const lawful = LAWFUL_RETENTION_TRANSITIONS[from];
+  if (!lawful.includes(targetState)) {
+    return { ok: false, reason: "illegal_retention_transition" };
+  }
+
+  // 4. Persist the pointer-only state change + audit (T-0016 append-only).
+  await deps.meta.updateRetentionState(tenantId, fileId, targetState, now);
+  await deps.audit?.emit(
+    fileRetentionAuditEvent(subject, file, from, targetState, now),
+  );
+
+  return { ok: true, from, to: targetState };
+}
+
+/** Type guard for the closed retention-state axis (deny-by-default on unknown). */
+function isRetentionStateValue(v: unknown): v is RetentionState {
+  return v === "active" || v === "archived" || v === "pending_deletion";
+}
+
+// ---------------------------------------------------------------------------
 // Audit encoding (T-0016 file.* events; rows in audit_event, NO new table).
 // ---------------------------------------------------------------------------
 
@@ -540,6 +670,39 @@ function fileAuditEvent(
       mime: version.mimeType,
       size: version.sizeBytes,
       data_class: version.dataClass,
+    },
+    occurred_at: nowMs,
+  };
+}
+
+/**
+ * Encode a retention LIFECYCLE transition (T-0202) as a T-0016 `file.retention`
+ * audit row. Like the other file.* events the audit subject is the owner RECORD
+ * ref (record-derived authority). The payload carries the file identity and the
+ * from/to retention states — no version row is involved (a retention transition
+ * is file-level, not version-level), so this is a distinct encoder from
+ * `fileAuditEvent`. Open-vocab `file.*`, NO new audit table (rows in audit_event).
+ */
+function fileRetentionAuditEvent(
+  actor: ResolveSubject,
+  file: FileRow,
+  fromState: RetentionState,
+  toState: RetentionState,
+  nowMs: number,
+): AuditEventInput {
+  return {
+    id: randomUUID(),
+    type: "file.retention",
+    actor: actor.subjectId,
+    subject: `record:${file.recordId}`,
+    scope: null,
+    via: null,
+    proposed_by: null,
+    confirmed_by: null,
+    payload: {
+      file_id: file.id,
+      from_state: fromState,
+      to_state: toState,
     },
     occurred_at: nowMs,
   };

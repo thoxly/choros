@@ -225,6 +225,25 @@ export class PgFileStore implements FileMetaSource {
     );
   }
 
+  async updateRetentionState(
+    tenantId: string,
+    fileId: string,
+    newState: FileRow["retentionState"],
+    atMs: number,
+  ): Promise<void> {
+    // T-0202: retention lifecycle state move on choros.file. Pointer/state-only —
+    // this UPDATEs choros.file, NEVER a choros.file_version content column, so the
+    // immutable-version invariant (FF-V) is preserved. The CHECK constraint on
+    // retention_state (migration 058) is the schema-side backstop; the lawful
+    // transition is decided in setRetentionState before this runs.
+    await this.pool.query(
+      `UPDATE choros.file
+         SET retention_state = $3, updated_at = $4
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, fileId, newState, atMs],
+    );
+  }
+
   async markContentErased(tenantId: string, versionId: string, atMs: number): Promise<void> {
     // The ONLY post-insert mutation of a file_version: the retention tombstone.
     // content_hash / object_key / size / mime are NOT touched — metadata survives
