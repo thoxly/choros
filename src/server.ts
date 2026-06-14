@@ -29,6 +29,7 @@ import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
 import { registerNotificationPrefRoutes } from "./http/notification-prefs.js";
 import { registerNotificationRoutes } from "./http/notifications.js";
+import { registerEmailChannelConfigRoutes } from "./http/email-channel-config.js";
 import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
@@ -283,6 +284,12 @@ function buildRouter(
   // Register notification center endpoints (T-0173 E-N.6).
   if (grantsPool) {
     registerNotificationRoutes(router, grantsPool);
+  }
+
+  // Register email-channel-config endpoints (T-0203: HTTP surface over the
+  // already-implemented notification-email.ts CRUD; ADR T-0120 §2.3).
+  if (grantsPool) {
+    registerEmailChannelConfigRoutes(router, grantsPool);
   }
 
   // Register PDP explain endpoint (T-0136).

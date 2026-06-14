@@ -608,3 +608,40 @@
   .chs-rights__rail { display: none; }
   .chs-derivedwrap { grid-template-columns: 1fr; }
 }
+
+/* ============================================================================
+   Notification center (T-0203) — in-app delivery surface + self settings.
+   ============================================================================ */
+.chs-notif-screen { display: flex; flex-direction: column; height: 100%; }
+.chs-notif { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.chs-notif__bar {
+  display: flex; align-items: center; gap: var(--chs-space-3);
+  padding: var(--chs-space-3) var(--chs-space-4);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+}
+.chs-notif__spacer { flex: 1; }
+.chs-notif__scroll { overflow-y: auto; flex: 1; min-height: 0; }
+.chs-notif__list { list-style: none; margin: 0; padding: 0; }
+.chs-notif__row {
+  display: flex; align-items: flex-start; gap: var(--chs-space-3);
+  padding: var(--chs-space-3) var(--chs-space-4);
+  border-bottom: 1px solid var(--chs-color-border-faint);
+}
+.chs-notif__row[data-read="true"] { opacity: 0.62; }
+.chs-notif__dot {
+  width: 8px; height: 8px; margin-top: 6px; border-radius: var(--chs-radius-full);
+  background: transparent; flex: 0 0 auto;
+}
+.chs-notif__dot[data-unread="true"] { background: var(--chs-color-info); }
+.chs-notif__body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.chs-notif__title { font-weight: 600; color: var(--chs-color-text); }
+.chs-notif__text { color: var(--chs-color-text-muted); }
+.chs-notif__meta { color: var(--chs-color-text-faint); font-size: var(--chs-text-sm); }
+.chs-notif__action {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: 1px solid var(--chs-color-border);
+  border-radius: var(--chs-radius-2); color: var(--chs-color-text-muted);
+  padding: 2px 8px; cursor: pointer; font-size: var(--chs-text-sm);
+  flex: 0 0 auto;
+}
+.chs-notif__action:hover { color: var(--chs-color-text); border-color: var(--chs-color-border-strong); }
