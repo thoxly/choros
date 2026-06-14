@@ -192,4 +192,22 @@ describe("Inbox tabs/filters/role-addressing E2E (T-0093)", () => {
     const r = await request("POST", "/api/inbox/x1/claim", { "x-dev-user": "e-kravtsova" });
     expect(r.statusCode).toBe(404);
   });
+
+  // ---- R-2: internal `tenant` field must NOT leak on the wire ----
+
+  it("R-2: GET /api/inbox items do NOT expose the internal tenant field", async () => {
+    const data = await getInbox("?tab=all", "e-kravtsova");
+    expect(data.items.length).toBeGreaterThan(0);
+    for (const item of data.items) {
+      expect(item).not.toHaveProperty("tenant");
+    }
+  });
+
+  it("R-2: claim response item does NOT expose the internal tenant field", async () => {
+    // e-petrov holds cs-l2 → may claim t6 (pooled cs-l2 escalation)
+    const r = await request("POST", "/api/inbox/t6/claim", { "x-dev-user": "e-petrov" });
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body) as { item: Record<string, unknown> };
+    expect(body.item).not.toHaveProperty("tenant");
+  });
 });
