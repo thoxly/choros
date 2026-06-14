@@ -100,28 +100,24 @@ beforeAll(async () => {
   });
   appPool = new pg.Pool({ connectionString: appUrl(), types: BUFFER_TYPES });
 
-  // DIAGNOSTIC (temporary): observe how bytea round-trips on this runtime/runner.
-  const dc = await appPool.connect();
+  // DIAGNOSTIC (temporary): how does a 32-byte Buffer param round-trip on this runner?
+  const mc = new pg.Client({ connectionString: migratorUrl() });
+  await mc.connect();
   try {
-    await dc.query('BEGIN');
-    await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
-    await dc.query('SET LOCAL search_path TO choros');
-    const r = await dc.query('SELECT row_hash FROM choros.audit_head WHERE tenant_id = $1', [TENANT_A]);
-    const h = r.rows[0] ? (r.rows[0] as { row_hash: unknown }).row_hash : undefined;
+    const so = await mc.query('SHOW bytea_output');
     // eslint-disable-next-line no-console
-    console.log('[DIAG ep] head.row_hash:', {
-      present: r.rows.length,
-      isBuffer: Buffer.isBuffer(h),
-      ctor: h && (h as object).constructor ? (h as { constructor: { name: string } }).constructor.name : String(h),
-      len: h && (h as { length?: number }).length,
-    });
-    const rb = await dc.query("SELECT '\\x0011'::bytea AS b");
-    const b = (rb.rows[0] as { b: unknown }).b;
+    console.log('[DIAG ep] bytea_output =', (so.rows[0] as { bytea_output: string }).bytea_output);
+    // write a 32-byte buffer param into a temp and read back
+    await mc.query('SET search_path TO choros');
+    const w = await mc.query('SELECT $1::bytea AS b, length($1::bytea) AS n', [Buffer.alloc(32, 0)]);
+    const b = (w.rows[0] as { b: unknown; n: number }).b;
     // eslint-disable-next-line no-console
-    console.log('[DIAG ep] literal bytea:', { isBuffer: Buffer.isBuffer(b), ctor: b && (b as object).constructor ? (b as { constructor: { name: string } }).constructor.name : String(b) });
-    await dc.query('COMMIT');
+    console.log('[DIAG ep] param Buffer.alloc(32,0):', { dbLen: (w.rows[0] as { n: number }).n, readLen: (b as { length?: number }).length, isBuffer: Buffer.isBuffer(b) });
+    const w2 = await mc.query("SELECT length('\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea) AS n");
+    // eslint-disable-next-line no-console
+    console.log('[DIAG ep] literal 32-zero bytea dbLen:', (w2.rows[0] as { n: number }).n);
   } finally {
-    dc.release();
+    await mc.end();
   }
 });
 
