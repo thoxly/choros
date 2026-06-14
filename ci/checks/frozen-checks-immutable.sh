@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T-0146 · FF-FCI1..FF-FCI11 — frozen-checks-immutable meta-gate
+# T-0146 · FF-FCI1..FF-FCI12 — frozen-checks-immutable meta-gate
 #
 # Meta-gate: on a task branch, forbids modification or deletion of any
 # ci/checks/*.sh file that does not belong to the current task.
@@ -39,6 +39,13 @@
 #  FF-FCI9  — Hostile-probe красный при exclusion-правке чужого чека.
 #  FF-FCI10 — Hostile-probe зелёный для правки собственного чека.
 #  FF-FCI11 — Чек без T-ID заголовка (legacy) считается чужим → FAIL.
+#  FF-FCI12 — Канал founder-санкций (design T-0199): пара {task,file} в data-файле
+#             ci/checks/data/frozen-sanctions.jsonl (append-only; НЕ ci/checks/*.sh
+#             → не захватывается glob'ом, не самоохраняется) разрешает TASK_ID
+#             править/удалять ЧУЖОЙ чек. Каждый bypass печатает SANCTION+AUDIT
+#             строки (никогда не молча). Авторизация записи = founder_decide
+#             (control-plane); злоупотребление видно в pre-merge diff — тот же
+#             класс остаточного риска, что принятый R-2 (branch-name spoof).
 #
 # Exit 0 on clean, non-zero on any violation.
 set -euo pipefail
@@ -47,6 +54,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Allow PROJECT_ROOT override (used by hostile-probe tests to run against an
 # isolated git repo without symlinking or copying the script).
 PROJECT_ROOT="${PROJECT_ROOT:-"$(cd "${SCRIPT_DIR}/../.." && pwd)"}"
+
+# ---- Founder-sanction channel (FF-FCI12, design T-0199) ----------------------
+# Append-only allowlist of {task,file} pairs the FOUNDER has sanctioned to let a
+# task modify a FOREIGN frozen check.  Path is PROJECT_ROOT-relative (NOT
+# SCRIPT_DIR) so the hostile-probe harness can supply an isolated allowlist via
+# PROJECT_ROOT.  Entries are compact JSON, one per line, e.g.:
+#   {"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh",...}
+# Comment lines (^#) and blanks are ignored by the grep-based matcher.
+SANCTIONS_FILE="${PROJECT_ROOT}/ci/checks/data/frozen-sanctions.jsonl"
+
+# is_sanctioned <file> — true iff a single JSONL record carries BOTH the current
+# TASK_ID and this file path (compact "key":"value" tokens, no interior spaces).
+# Both tokens must be on the SAME line (piped grep), so a sanction for file A
+# cannot leak to file B, nor a sanction for task X to task Y.
+is_sanctioned() {
+  local f="$1"
+  [[ -f "${SANCTIONS_FILE}" ]] || return 1
+  grep -F "\"task\":\"${TASK_ID}\"" "${SANCTIONS_FILE}" 2>/dev/null \
+    | grep -qF "\"file\":\"${f}\""
+}
 
 # ---- Step 1: Extract TASK_ID from branch name --------------------------------
 BRANCH="$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -119,6 +146,9 @@ while IFS= read -r f; do
 
   if [[ "${header_tid}" == "${TASK_ID}" ]]; then
     echo "PASS [FF-FCI1]: ${f} is own check for ${TASK_ID} (BASE_REF/HEAD header), modification allowed"
+  elif is_sanctioned "${f}"; then
+    echo "SANCTION [FF-FCI12]: ${f} belongs to '${header_tid:-<no-T-ID>}' but ${TASK_ID} carries a FOUNDER frozen-sanction (ci/checks/data/frozen-sanctions.jsonl) — modification ALLOWED"
+    echo "AUDIT [FF-FCI12]: frozen-sanction GRANTED — task=${TASK_ID} file=${f} owner=${header_tid:-<no-T-ID>} branch=${BRANCH}"
   else
     echo "FAIL [FF-FCI1]: ${f} belongs to task '${header_tid:-<no-T-ID>}' (BASE_REF/HEAD header), not ${TASK_ID}; modification/deletion forbidden on this branch"
     ERRORS=$((ERRORS + 1))
