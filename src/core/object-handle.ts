@@ -50,6 +50,17 @@ export type ResourceRef =
       tenantId: string;
       registryId: string;
       recordId: string;
+    }
+  // T-0227 / ADR T-0125 §2.2.1 — process_instance is a FIRST-CLASS addressable
+  // ResourceRef kind, structurally DISJOINT from `record`. A card-action
+  // terminate/message addresses a process instance via this kind ONLY; mapping a
+  // terminate onto a `record` ref is the transition→terminate privilege
+  // escalation T-0125 §2.2.1 rejected. Identity-only: the engine instance id is
+  // a UUID, never a record payload.
+  | {
+      kind: "process_instance";
+      tenantId: string;
+      processInstanceId: string;
     };
 
 /**
@@ -350,6 +361,31 @@ function validateAndReconstructRef(raw: Record<string, unknown>): ResourceRef {
       }
     }
     return { kind: "record", tenantId, registryId, recordId };
+  }
+
+  if (kind === "process_instance") {
+    // T-0227 / ADR T-0125 §2.2.1 — fail-closed parse for the process_instance
+    // kind: known-keys allowlist exactly like the other kinds. Identity-only —
+    // a process instance carries NO record payload. Reject unknown/payload keys.
+    const tenantId = raw["tenantId"];
+    const processInstanceId = raw["processInstanceId"];
+    if (
+      typeof tenantId !== "string" ||
+      typeof processInstanceId !== "string"
+    ) {
+      throw new MalformedHandleError(
+        "malformed handle: process_instance ref missing required identity fields",
+      );
+    }
+    const knownKeys = new Set(["kind", "tenantId", "processInstanceId"]);
+    for (const k of Object.keys(raw)) {
+      if (!knownKeys.has(k)) {
+        throw new MalformedHandleError(
+          `malformed handle: process_instance ref has unexpected key "${k}"`,
+        );
+      }
+    }
+    return { kind: "process_instance", tenantId, processInstanceId };
   }
 
   throw new MalformedHandleError(

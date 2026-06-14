@@ -20,6 +20,11 @@ export type NodeLevel =
   | "application"
   | "registry"
   | "record"
+  // T-0227 / ADR T-0125 §2.2.1 — a process instance lives in its OWN branch of
+  // the resource hierarchy, NOT under the record/registry/application chain.
+  // This disjointness is what makes a (transition, record) grant unable to
+  // cover a process-instance target (the transition→terminate escalation).
+  | "process_instance"
   | "department"
   | "position";
 export type Operation =
@@ -34,6 +39,12 @@ export type ResourceType =
   | "application"
   | "registry"
   | "record"
+  // T-0227 / ADR T-0125 §2.2.1 [iter-2, R-1] — process_instance is an additive,
+  // first-class ResourceType under the SAME closed Operation enum and the SAME
+  // covering algorithm. terminate/message card-actions resolve onto op=transition
+  // over THIS resource type — disjoint from (transition, record). NOT a new
+  // right-type (NF-1): same operations, new resource.
+  | "process_instance"
   | `mgmt_object:${string}`
   | "effect_resource";
 

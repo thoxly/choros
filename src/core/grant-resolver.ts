@@ -199,6 +199,22 @@ export function refToScope(ref: ResourceRef): ScopeElement {
         nodeId: ref.recordId,
         nodeLevel: "record",
       };
+    case "process_instance":
+      // T-0227 / ADR T-0125 §2.2.1 — a process_instance maps to a node in a
+      // SEPARATE branch of the resource hierarchy (nodeLevel "process_instance",
+      // nodeId = the instance id). It is DISJOINT from the application→registry→
+      // record chain: a record-scoped (or registry/application-scoped) grant's
+      // scope can never CONTAIN this instance node, because the AncestryOracle
+      // does not place an instance id under any record/registry/application
+      // ancestor. So a (transition, record) grant can never cover a
+      // process-instance terminate target — closing the escalation T-0125
+      // §2.2.1 rejected. FF-CA-10 (broad-scope probe) proves this disjointness.
+      return {
+        kind: "node",
+        hierarchy: "resource",
+        nodeId: ref.processInstanceId,
+        nodeLevel: "process_instance",
+      };
   }
 }
 
@@ -215,6 +231,10 @@ function refToResourceType(ref: ResourceRef): string {
       return "registry";
     case "record":
       return "record";
+    case "process_instance":
+      // T-0227 / ADR T-0125 §7 condition 2 — the process_instance ResourceRef
+      // kind maps 1:1 to the additive `process_instance` ResourceType.
+      return "process_instance";
   }
 }
 
@@ -460,6 +480,14 @@ function refToActorEventRef(ref: ResourceRef): ActorEventObjectRef {
       return { objectKind: "registry", registryId: ref.registryId };
     case "record":
       return { objectKind: "record", recordId: ref.recordId };
+    case "process_instance":
+      // T-0227 — actor_event object_kind is IN (application,registry,record)
+      // (T-0019 CHECK; the process_instance object_kind migration is part of
+      // B-8). The guarded-transition path only ever fires over a record target,
+      // so a process_instance here is a wiring bug — fail closed.
+      throw new Error(
+        "refToActorEventRef: process_instance has no actor_event object_kind (T-0227 / B-8)",
+      );
   }
 }
 

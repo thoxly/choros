@@ -46,6 +46,9 @@ const TENANT_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const REG = "11111111-1111-1111-1111-111111111111";
 const REC = "22222222-2222-2222-2222-222222222222";
 const SUBJECT_ID = "33333333-3333-3333-3333-333333333333";
+// T-0227 — a process instance id, living in its OWN resource-hierarchy branch
+// (disjoint from REG/REC), so a record-scoped grant can never contain it.
+const INST = "44444444-4444-4444-4444-444444444444";
 
 function recordRef(tenantId = TENANT_A): ResourceRef {
   return { kind: "record", tenantId, registryId: REG, recordId: REC };
@@ -65,6 +68,24 @@ function oracle(): AncestryOracle {
     isDescendantOrSelf(_h, d, a): boolean {
       if (d === a) return true;
       return d === REC && a === REG;
+    },
+  };
+}
+
+/**
+ * T-0227 oracle: rec ⊑ reg (registry grant covers the record) AND the instance
+ * node is in its OWN branch — it is descendant-or-self ONLY of itself, never of
+ * REG/REC/any record ancestor. This is the B-8 "separate hierarchy branch"
+ * wiring that makes a (transition, record) scope unable to contain the instance.
+ */
+function instOracle(): AncestryOracle {
+  return {
+    isDescendantOrSelf(_h, d, a): boolean {
+      if (d === a) return true;
+      // record under registry (so a registry-scoped record grant covers the record)
+      if (d === REC && a === REG) return true;
+      // the instance node is NOT under REG/REC/application — disjoint branch.
+      return false;
     },
   };
 }
@@ -252,7 +273,25 @@ describe("FF-CA-8 tenant fail-closed", () => {
 // ---------------------------------------------------------------------------
 
 describe("FF-CA-5 dormant gate: terminate not ready", () => {
+  // T-0227: a PROPER process_instance-targeted terminate (target.kind AND
+  // handle.ref.kind both process_instance) so the dormant GATE is what denies —
+  // not the target-kind guard. The record-handle escalation case is its own
+  // dedicated test below.
+  const instTermHandle = makeHandle(
+    { kind: "process_instance", tenantId: TENANT_A, processInstanceId: INST },
+    TENANT_A,
+  );
   const terminateDecl = transitionDecl({
+    id: "abort_approval",
+    label: "Прервать согласование",
+    operation: SEMANTICS_TO_OPERATION.terminate,
+    semantics: "terminate",
+    target: { kind: "process_instance", handle: instTermHandle, processInstanceId: INST },
+    readiness: "dormant",
+  });
+  // The record-handle escalation variant (used by the FF-CA-10 record-targeted
+  // terminate test) — target says process_instance but the handle is a RECORD.
+  const recordTermDecl = transitionDecl({
     id: "abort_approval",
     label: "Прервать согласование",
     operation: SEMANTICS_TO_OPERATION.terminate,
@@ -278,15 +317,97 @@ describe("FF-CA-5 dormant gate: terminate not ready", () => {
     expect(actorWriter.appended.length).toBe(0);
   });
 
-  it("when the bridge reports ready, the dormant gate no longer blocks (declaration unchanged)", async () => {
-    // Simulated B-8: bridge supports terminate. The declaration is identical.
+  it("T-0227 FF-CA-10: a RECORD-targeted terminate is DENIED even under a ready bridge (escalation closed)", async () => {
+    // Simulated B-8: bridge supports terminate. terminateDecl above targets a
+    // process_instance KIND but carries a RECORD handle (ref.kind="record") —
+    // the exact transition→terminate escalation T-0125 §2.2.1 rejected. Before
+    // T-0227 this asserted res.ok === true (a record-scoped (transition,record)
+    // grant satisfied the PDP for a terminate, i.e. status-change == kill). Now
+    // the target-kind guard denies it fail-closed BEFORE the PDP / engine call.
     const readyBridge: EngineBridgeReadiness = { supports: () => true };
-    const { deps } = harness({}, readyBridge);
-    // With a covering grant over the record handle, terminate now passes the gate
-    // and the PDP. (Day-1 the engine call itself is a no-op stub; FF-CA-3 covers
-    // the single-channel constraint statically.)
-    const res = await fireCardAction(deps, terminateDecl, subject(), {}, GUARD);
-    expect(res.ok).toBe(true);
+    const { deps, audit, actorWriter } = harness({}, readyBridge);
+    const res = await fireCardAction(deps, recordTermDecl, subject(), {}, GUARD);
+    expect(res).toEqual({ ok: false, reason: "target_kind_mismatch" });
+    // exactly one audit_event(denied), NO mutation (no actor_event)
+    expect(audit.rows(TENANT_A).length).toBe(1);
+    expect(audit.rows(TENANT_A)[0].type).toBe("card_action.denied");
+    expect(audit.rows(TENANT_A)[0].via).toBe("transition:target_kind_mismatch");
+    expect(actorWriter.appended.length).toBe(0);
+  });
+
+  it("T-0227 positive path: a proper process_instance terminate + process_instance grant is accepted under a ready bridge", async () => {
+    // Legitimate terminate: target.kind=process_instance AND the handle's
+    // ref.kind=process_instance, with a grant over the process_instance
+    // ResourceType scoped at the instance node. Passes the target-kind guard,
+    // the dormant gate (ready bridge), and the PDP. The engine call is still a
+    // no-op stub day-1, so C-2 emits card_action.deferred (NOT executed) and the
+    // result is ok (authorized + accepted).
+    const readyBridge: EngineBridgeReadiness = { supports: () => true };
+    const instHandle = makeHandle(
+      { kind: "process_instance", tenantId: TENANT_A, processInstanceId: INST },
+      TENANT_A,
+    );
+    // Grant over the process_instance ResourceType, scope = the instance node.
+    const instGrant: Grant = {
+      tenantId: TENANT_A,
+      id: "g-inst",
+      roleId: "role-1",
+      resourceType: "process_instance",
+      operation: "transition",
+      scope: {
+        kind: "node",
+        hierarchy: "resource",
+        nodeId: INST,
+        nodeLevel: "process_instance",
+      },
+      delegable: true,
+      grantedBy: "admin",
+      createdAt: 0,
+    };
+    const { deps, audit, actorWriter } = harness(
+      { grants: staticGrants([instGrant]), ancestry: instOracle() },
+      readyBridge,
+    );
+    const decl = transitionDecl({
+      id: "abort_approval",
+      label: "Прервать согласование",
+      operation: SEMANTICS_TO_OPERATION.terminate,
+      semantics: "terminate",
+      target: { kind: "process_instance", handle: instHandle, processInstanceId: INST },
+      readiness: "dormant",
+    });
+    const res = await fireCardAction(deps, decl, subject(), { reason: "founder order" }, GUARD);
+    expect(res).toEqual({ ok: true, actionId: "abort_approval" });
+    // C-2: a no-op terminate is DEFERRED, never falsely `executed`; no actor_event.
+    expect(audit.rows(TENANT_A).length).toBe(1);
+    expect(audit.rows(TENANT_A)[0].type).toBe("card_action.deferred");
+    expect(actorWriter.appended.length).toBe(0);
+  });
+
+  it("T-0227 FF-CA-10 broad-scope: a (transition, record) grant at the REGISTRY node does NOT cover a process_instance terminate", async () => {
+    // The instance node lives in a SEPARATE hierarchy branch; even a broad
+    // record grant scoped at the registry (which DOES cover the record) cannot
+    // contain the instance node. A holder of only (transition, record) — narrow
+    // OR broad — cannot terminate the instance: PDP denies no_grant.
+    const readyBridge: EngineBridgeReadiness = { supports: () => true };
+    const instHandle = makeHandle(
+      { kind: "process_instance", tenantId: TENANT_A, processInstanceId: INST },
+      TENANT_A,
+    );
+    // Only a broad record grant (registry scope) — NO process_instance grant.
+    const { deps } = harness(
+      { grants: staticGrants([transitionGrant()]), ancestry: instOracle() },
+      readyBridge,
+    );
+    const decl = transitionDecl({
+      id: "abort_approval",
+      operation: SEMANTICS_TO_OPERATION.terminate,
+      semantics: "terminate",
+      target: { kind: "process_instance", handle: instHandle, processInstanceId: INST },
+      readiness: "dormant",
+    });
+    const res = await fireCardAction(deps, decl, subject(), {}, GUARD);
+    expect(res).toEqual({ ok: false, reason: "no_grant" });
   });
 });
 
