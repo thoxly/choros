@@ -197,6 +197,18 @@ jobs:
       KEYCLOAK_AUDIENCE: choros-api
       KEYCLOAK_PORT: "8180"
       KEYCLOAK_MGMT_PORT: "9000"
+      # DEV-only realm credentials the live-KC e2e test fetches tokens with.
+      # These are NOT secrets: they ship in config/keycloak/realm-choros.json
+      # (clearly DEV-labeled) and are the same values the fitness:kc token
+      # checks (ci/checks/kc/{human,agent}-token.sh) already hardcode and that
+      # docs/environments.md documents. Without them the test sends empty
+      # client_secret/password → Keycloak returns 401 unauthorized_client
+      # (T-0216; surfaced once the static-check + bare-vitest fixes let the
+      # live-KC step actually run).
+      CHOROS_API_SECRET: choros-api-dev-secret
+      AGENT_ORCHESTRATOR_SECRET: agent-orchestrator-dev-secret
+      KC_TEST_USERNAME: e-kravtsova
+      KC_USER_PASSWORD: dev-pw-kravtsova
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
