@@ -22,8 +22,11 @@
  *   wiring (T-0021) is a separate task; the authority check stub is clearly marked.
  *
  * SUPPORTED ARTIFACT TABLES (ADR §4.1 tier-bearing config class):
- *   application, registry_def, grant
+ *   application, registry_def, grant, agent_instruction
  *   (record is the data class — not promotable via this endpoint).
+ *   agent_instruction is the T-0123 competence layer: it reuses this promote path
+ *   verbatim (NF-1) — promoteTier/decidePromote/the trigger are NOT modified, only
+ *   the CONFIG_TABLES registry is extended additively.
  *
  * Promote does NOT touch choros.record or any data rows — config-only (FR-3 / AC-3).
  */
@@ -141,7 +144,7 @@ async function extractActorWithType(
 // Supported artifact tables (config class only — ADR §4.1)
 // ---------------------------------------------------------------------------
 
-const CONFIG_TABLES = new Set(["application", "registry_def", "grant"]);
+const CONFIG_TABLES = new Set(["application", "registry_def", "grant", "agent_instruction"]);
 
 /**
  * Validates that `table` is a promotable config-artifact table.
