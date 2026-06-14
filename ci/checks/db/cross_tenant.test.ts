@@ -533,6 +533,54 @@ async function seedConnector(c: pg.Client, tenantId: string): Promise<void> {
   );
 }
 
+/** Seed one row into choros.file (T-0201 migration 058). Returns the file id.
+ * Composite tenant-leading FK: (tenant_id, record_id) → record(tenant_id, id).
+ * Must be seeded after a record exists for the tenant. current_version is left
+ * NULL here (it's an intra-tenant pointer maintained by addVersion, not a DB FK).
+ */
+async function seedFile(
+  c: pg.Client,
+  tenantId: string,
+  recordId: string,
+): Promise<string> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.file
+       (tenant_id, id, record_id, original_name, current_version,
+        retention_state, retention_policy_ref, created_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, NULL, 'active', NULL, 'ct-seed', 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, recordId, `ct-file-${id.slice(0, 8)}.txt`],
+  );
+  return id;
+}
+
+/** Seed one row into choros.file_version (T-0201 migration 058).
+ * Composite tenant-leading FK: (tenant_id, file_id) → file(tenant_id, id).
+ * Must be seeded after a file exists for the tenant. object_key is unique per
+ * tenant (UNIQUE (tenant_id, object_key)) — uuid-derived to keep both tenants'
+ * seeds independent.
+ */
+async function seedFileVersion(
+  c: pg.Client,
+  tenantId: string,
+  fileId: string,
+): Promise<void> {
+  const id = uuid();
+  const objectKey = `${tenantId}/${fileId}/${id}`;
+  await c.query(
+    `INSERT INTO choros.file_version
+       (tenant_id, id, file_id, version_no, object_key, mime_type, size_bytes,
+        content_hash, data_class, is_snapshot, cycle_ref, content_erased_at,
+        uploaded_by, uploaded_at)
+     VALUES ($1, $2, $3, 1, $4, 'text/plain', 1,
+             $5, 'internal', false, NULL, NULL,
+             'ct-seed', 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, fileId, objectKey, `ct-hash-${id.slice(0, 8)}`],
+  );
+}
+
 /** Seed one row into choros.report_page (T-0175 migration 051).
  * FK: (tenant_id, app_id) → application(tenant_id, id).
  * Must be seeded after application. Returns the report_page id.
@@ -643,6 +691,11 @@ const seedState = {
   // T-0175 chain: report_page → report_page_dep (page_id FK)
   reportPageIdA: '',
   reportPageIdB: '',
+  // T-0201 chain: record → file → file_version (file FKs record; file_version FKs file)
+  recordIdA: '',
+  recordIdB: '',
+  fileIdA: '',
+  fileIdB: '',
 };
 
 /**
@@ -662,13 +715,17 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
         tenantId === TENANT_A ? seedState.appIdA : seedState.appIdB,
       );
       break;
-    case 'record':
-      await seedRecord(
+    case 'record': {
+      // Store the record id for the downstream file seed (T-0201 FK target).
+      const recId = await seedRecord(
         c,
         tenantId,
         tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB,
       );
+      if (tenantId === TENANT_A) seedState.recordIdA = recId;
+      else seedState.recordIdB = recId;
       break;
+    }
     case 'audit_event': {
       const seq = tenantId === TENANT_A ? seedState.auditSeqA++ : seedState.auditSeqB++;
       await seedAuditEvent(c, tenantId, seq);
@@ -874,6 +931,23 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       // (backs_effect_resource_id is a logical link, not a FK).
       await seedConnector(c, tenantId);
       break;
+    case 'file': {
+      // T-0201 (migration 058) — FK (tenant_id, record_id) → record.
+      // KNOWN_TENANT_TABLES order (…, record, …, file, file_version) guarantees
+      // a record is already seeded. Store file id for downstream file_version seed.
+      const recId = tenantId === TENANT_A ? seedState.recordIdA : seedState.recordIdB;
+      const fileId = await seedFile(c, tenantId, recId);
+      if (tenantId === TENANT_A) seedState.fileIdA = fileId;
+      else seedState.fileIdB = fileId;
+      break;
+    }
+    case 'file_version': {
+      // T-0201 (migration 058) — FK (tenant_id, file_id) → file.
+      // KNOWN_TENANT_TABLES order guarantees the file is seeded before this case.
+      const fileId = tenantId === TENANT_A ? seedState.fileIdA : seedState.fileIdB;
+      await seedFileVersion(c, tenantId, fileId);
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1212,6 +1286,8 @@ const SEEDED_TABLES = new Set<string>([
   'report_page',
   'report_page_dep',
   'connector',
+  'file',
+  'file_version',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
