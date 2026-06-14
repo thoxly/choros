@@ -9,6 +9,7 @@ import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
+import { registerFormsRoutes } from "./http/forms.js";
 import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
@@ -213,6 +214,10 @@ function buildRouter(
 
   // Register inbox endpoints
   registerInboxRoutes(router, store as JobStore);
+
+  // Register form-submission endpoints (T-0102). Server-side field validation;
+  // schema lookup is pure/in-process so no DATABASE_URL is required.
+  registerFormsRoutes(router);
 
   // Register audit endpoints
   registerAuditRoutes(router, store as JobStore);
