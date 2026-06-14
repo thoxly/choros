@@ -5,37 +5,29 @@ on:
     branches: [main, dev]
   pull_request:
 
-# Pin a UTF-8 locale for ALL jobs. ubuntu-latest's default locale (C/POSIX)
-# makes GNU grep raise "Invalid collation character" (exit 2) on Cyrillic
-# char-classes like [а-яё] used by frozen checks (e.g. T-0133-adr-shape.sh),
-# turning a green-local run red-on-runner (locale-dependent gate bug, T-0216).
-# C.UTF-8 is always present on ubuntu-latest. Job-level env keys still override
-# these per the GitHub Actions env precedence, so flowable/stack/db/kc keep
-# their own vars; locale is purely additive and safe for every job.
+# Pin a collation-capable UTF-8 locale for ALL jobs. ubuntu-latest's default
+# locale is C.UTF-8, whose collation table REJECTS multibyte range expressions:
+# GNU grep raises "Invalid collation character" (exit 2) on Cyrillic ranges like
+# [а-яё] used by frozen checks (e.g. T-0133-adr-shape.sh), turning a green-local
+# run red-on-runner (locale-dependent gate bug, T-0216).
+# Empirically verified on ubuntu-latest (T-0216 diag run 27496192707):
+#   LC_ALL=C.UTF-8   → grep "нов[а-яё]+"  →  "Invalid collation character", rc=2
+#   LC_ALL=en_US.UTF-8 → matches, rc=0       (en_US.utf8 is PRE-INSTALLED; it
+#                                             appears in `locale -a` with no
+#                                             locale-gen needed)
+# en_US.UTF-8 is UTF-8-aware AND carries a real collation table, so the range
+# resolves correctly. Job-level env keys still override these per GitHub Actions
+# env precedence, so flowable/stack/db/kc keep their own vars; locale is purely
+# additive and safe for every job.
 env:
-  LANG: C.UTF-8
-  LC_ALL: C.UTF-8
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
 
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: DIAG locale (TEMP T-0216)
-        run: |
-          set -x
-          echo "LANG=$LANG LC_ALL=$LC_ALL"
-          locale || true
-          locale -a || true
-          PAT='нов[а-яё]+'
-          for L in C.UTF-8 en_US.UTF-8 C POSIX; do
-            echo "--- LC_ALL=$L ---"
-            LC_ALL="$L" bash -c 'echo "новая сущность" | grep -E "нов[а-яё]+" ; echo "rc=$?"' 2>&1 || true
-          done
-          echo "--- after locale-gen en_US.UTF-8 ---"
-          sudo locale-gen en_US.UTF-8 || true
-          sudo update-locale || true
-          LC_ALL=en_US.UTF-8 bash -c 'echo "новая сущность" | grep -E "нов[а-яё]+" ; echo "rc=$?"' 2>&1 || true
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -239,7 +231,10 @@ jobs:
           env -u KEYCLOAK_URL -u CHOROS_AUTH_MODE bash ci/checks/worker-auth-config-failfast.sh
           bash ci/checks/worker-auth-env-docs.sh
       - name: Run live-KC integration tests (FF-1/FF-7, AC-22/23)
-        run: vitest run src/__tests__/workerAuth.kc.e2e.test.ts
+        # Use npx so the LOCAL vitest binary resolves: a bare `vitest` is not on
+        # PATH on the runner → exit 127 (command not found). This was masked until
+        # the static-checks step above stopped failing first (T-0216).
+        run: npx vitest run src/__tests__/workerAuth.kc.e2e.test.ts
       - name: Stop services
         if: always()
         run: docker compose stop keycloak postgres

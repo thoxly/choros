@@ -2,20 +2,29 @@
 # T-0216 · CI workflow pins a UTF-8 locale (runner-locale invariant)
 #
 # Runner-locale invariant. Several frozen fitness checks grep over Cyrillic
-# char-classes like [а-яё] (e.g. ci/checks/T-0133-adr-shape.sh). On a runner
-# whose locale is C/POSIX, GNU grep raises "Invalid collation character" and
-# exits 2 — turning a green-local run red-on-runner (the exact failure that
-# T-0216 fixed). This check asserts .github/workflows/ci.yml pins BOTH LANG and
-# LC_ALL to a UTF-8 locale at the workflow level, so a future locale-dependent
-# bug cannot regress unnoticed.
+# RANGE expressions like [а-яё] (e.g. ci/checks/T-0133-adr-shape.sh). GNU grep
+# resolves a multibyte range against the locale's LC_COLLATE table; locales
+# WITHOUT a real collation table (C, POSIX, and — counter-intuitively — C.UTF-8)
+# raise "Invalid collation character" (exit 2) on such ranges, turning a
+# green-local run red-on-runner.
+#
+# Empirically verified on ubuntu-latest (T-0216 diag run 27496192707):
+#   LC_ALL=C.UTF-8      → grep "нов[а-яё]+"  → "Invalid collation character" rc=2
+#   LC_ALL=C / POSIX    → byte-wise match, rc=0 (works, but not UTF-8-aware)
+#   LC_ALL=en_US.UTF-8  → match, rc=0  (UTF-8-aware AND has a collation table)
+#
+# So a *.UTF-8 value alone is NOT sufficient — C.UTF-8 is the broken default.
+# This check asserts ci.yml pins BOTH LANG and LC_ALL to a TERRITORY UTF-8
+# locale (xx_YY.UTF-8, e.g. en_US.UTF-8) and explicitly REJECTS C.UTF-8 / C /
+# POSIX, so the locale-dependent regression cannot return unnoticed.
 #
 # Assertions:
-#   A1 — ci.yml declares LANG pinned to a *.UTF-8 (or *.utf8) locale.
-#   A2 — ci.yml declares LC_ALL pinned to a *.UTF-8 (or *.utf8) locale.
+#   A1 — ci.yml pins LANG   to a territory UTF-8 locale (xx_YY.UTF-8), not C.UTF-8.
+#   A2 — ci.yml pins LC_ALL to a territory UTF-8 locale (xx_YY.UTF-8), not C.UTF-8.
 #
-# SELF-TEST (--self-test): plant a workflow fixture WITHOUT a locale pin and
-# assert this check's machinery flags it; exit 0 if the demonstration succeeds,
-# 2 if the check machinery is broken.
+# SELF-TEST (--self-test): plant workflow fixtures (no pin / partial pin /
+# broken C.UTF-8 pin / good territory pin) and assert the machinery classifies
+# each correctly; exit 0 if the demonstration succeeds, 2 if the check is broken.
 #
 # EXIT CODES: 0 clean · 1 violation · 2 self-test broken
 set -euo pipefail
@@ -23,16 +32,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# UTF-8 locale value matcher: LANG/LC_ALL = C.UTF-8, en_US.UTF-8, *.utf8, …
-# (quoted or unquoted YAML scalar). Accepts .UTF-8 / .UTF8 / .utf-8 / .utf8.
-UTF8_RE='[A-Za-z0-9_]+\.(UTF-?8|utf-?8)'
+# Territory UTF-8 locale matcher: language_TERRITORY.UTF-8 (e.g. en_US.UTF-8,
+# ru_RU.UTF-8). Requires the lang_TERR prefix, which excludes bare C.UTF-8 /
+# C / POSIX (those have no collation table for multibyte ranges).
+# Accepts .UTF-8 / .UTF8 / .utf-8 / .utf8, quoted or unquoted YAML scalar.
+TERR_UTF8_RE="[a-z]{2,3}_[A-Z]{2}\.(UTF-?8|utf-?8)"
+
+# assert_var_pinned <var> <ci.yml path> — true iff <var> is pinned to a
+# territory UTF-8 locale.
+assert_var_pinned() {
+  local var="$1" f="$2"
+  grep -Eq "^[[:space:]]*${var}:[[:space:]]*[\"']?${TERR_UTF8_RE}[\"']?[[:space:]]*$" "$f"
+}
 
 # assert_locale_pinned <ci.yml path> — true iff BOTH LANG and LC_ALL are pinned
-# to a UTF-8 locale somewhere in the workflow file.
+# to a territory UTF-8 locale.
 assert_locale_pinned() {
   local f="$1"
-  grep -Eq "^[[:space:]]*LANG:[[:space:]]*[\"']?${UTF8_RE}[\"']?[[:space:]]*$" "$f" \
-    && grep -Eq "^[[:space:]]*LC_ALL:[[:space:]]*[\"']?${UTF8_RE}[\"']?[[:space:]]*$" "$f"
+  assert_var_pinned "LANG" "$f" && assert_var_pinned "LC_ALL" "$f"
 }
 
 # ---------------------------------------------------------------------------
@@ -43,7 +60,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' EXIT
 
-  # Fixture 1: NO locale pin → must be flagged (assertion returns false).
+  # Fixture 1: NO locale pin → must be flagged.
   cat >"${tmp}/no-locale.yml" <<'YML'
 name: ci
 on:
@@ -51,8 +68,6 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    steps:
-      - run: npm run ci
 YML
   if assert_locale_pinned "${tmp}/no-locale.yml"; then
     echo "SELF-TEST FAIL: assertion passed a workflow with NO locale pin"
@@ -64,7 +79,7 @@ YML
   cat >"${tmp}/lang-only.yml" <<'YML'
 name: ci
 env:
-  LANG: C.UTF-8
+  LANG: en_US.UTF-8
 on:
   push:
 jobs:
@@ -77,8 +92,9 @@ YML
   fi
   echo "  [OK] flagged workflow with LANG but no LC_ALL"
 
-  # Fixture 3: both pinned to UTF-8 → must pass.
-  cat >"${tmp}/ok.yml" <<'YML'
+  # Fixture 3: pinned to the BROKEN C.UTF-8 → must be flagged (this is the exact
+  # regression T-0216 fixed; a *.UTF-8 value that lacks a collation table).
+  cat >"${tmp}/c-utf8.yml" <<'YML'
 name: ci
 env:
   LANG: C.UTF-8
@@ -89,11 +105,29 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 YML
-  if ! assert_locale_pinned "${tmp}/ok.yml"; then
-    echo "SELF-TEST FAIL: assertion rejected a correctly-pinned workflow"
+  if assert_locale_pinned "${tmp}/c-utf8.yml"; then
+    echo "SELF-TEST FAIL: assertion accepted C.UTF-8 (no collation table → broken)"
     exit 2
   fi
-  echo "  [OK] accepted workflow with LANG+LC_ALL pinned to C.UTF-8"
+  echo "  [OK] flagged workflow pinned to C.UTF-8 (collation-broken)"
+
+  # Fixture 4: both pinned to a territory UTF-8 locale → must pass.
+  cat >"${tmp}/ok.yml" <<'YML'
+name: ci
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+on:
+  push:
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+YML
+  if ! assert_locale_pinned "${tmp}/ok.yml"; then
+    echo "SELF-TEST FAIL: assertion rejected a correctly-pinned (en_US.UTF-8) workflow"
+    exit 2
+  fi
+  echo "  [OK] accepted workflow with LANG+LC_ALL pinned to en_US.UTF-8"
 
   echo "[T-0216] ci-locale-pinned: --self-test PASS"
   exit 0
@@ -103,7 +137,7 @@ fi
 # MAIN
 # ---------------------------------------------------------------------------
 CI="${ROOT}/.github/workflows/ci.yml"
-echo "[T-0216] ci-locale-pinned: asserting ci.yml pins a UTF-8 locale (runner-locale invariant)"
+echo "[T-0216] ci-locale-pinned: asserting ci.yml pins a collation-capable UTF-8 locale (runner-locale invariant)"
 
 if [[ ! -f "${CI}" ]]; then
   echo "FAIL: ${CI} not found"
@@ -111,10 +145,11 @@ if [[ ! -f "${CI}" ]]; then
 fi
 
 if assert_locale_pinned "${CI}"; then
-  echo "PASS: ci.yml pins LANG and LC_ALL to a UTF-8 locale"
+  echo "PASS: ci.yml pins LANG and LC_ALL to a territory UTF-8 locale (collation-capable)"
   exit 0
 fi
 
-echo "FAIL [T-0216]: ci.yml must pin BOTH LANG and LC_ALL to a UTF-8 locale" >&2
-echo "  (Cyrillic-char-class greps in frozen checks fail with exit 2 under a C/POSIX locale.)" >&2
+echo "FAIL [T-0216]: ci.yml must pin BOTH LANG and LC_ALL to a territory UTF-8 locale (e.g. en_US.UTF-8)" >&2
+echo "  Cyrillic-RANGE greps (e.g. [а-яё]) in frozen checks fail with exit 2 ('Invalid collation" >&2
+echo "  character') under C / POSIX / C.UTF-8 — those locales carry no multibyte collation table." >&2
 exit 1
