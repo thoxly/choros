@@ -32,8 +32,9 @@ const MIN_HEIGHT = 280;
  * @param {string} script    — CHOROS_SANDBOX_SCRIPT (строка)
  */
 function buildSrcdoc(formHtml, theme, css, script) {
+  const safeTheme = ['dark', 'light'].includes(theme) ? theme : 'dark';
   return `<!DOCTYPE html>
-<html lang="ru" data-theme="${theme}">
+<html lang="ru" data-theme="${safeTheme}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -50,6 +51,7 @@ function FormViewer({ formKey, theme }) {
   // Слушаем fjs-height от sandbox
   useEffect(() => {
     function onMessage(e) {
+      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
       if (e.data && e.data.type === 'fjs-height' && typeof e.data.h === 'number') {
         setHeight(Math.max(MIN_HEIGHT, Math.ceil(e.data.h)));
       }
