@@ -76,6 +76,17 @@ async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [tenantId, EXTERNAL_PARTICIPANT_REGISTRY_ID, APP_ID],
   );
+  // Seed the audit-chain genesis anchor for this fresh test tenant (T-0016 §3.2:
+  // seq=0, row_hash = 32×0x00 genesis prev_hash). The dev tenant gets this via
+  // migration 026; brand-new test tenants do not, so seed it here so the first
+  // model append is an ordinary append against a committed head row — the same
+  // pre-existing-head path proven green by schema_change_api.test.ts (AC-10).
+  await c.query(
+    `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
+     VALUES ($1, 0, $2, 0, 1)
+     ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId, Buffer.alloc(32, 0)],
+  );
 }
 
 let appPool: pg.Pool;
