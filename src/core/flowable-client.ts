@@ -28,7 +28,7 @@
  *   - resolveFor imported and referenced at the completeTask variable-processing
  *     seam (the record-mutation boundary; T-0068 will wire the full auth path).
  *
- * Uses Node 20 built-in globalThis.fetch — no new npm dependencies.
+ * Uses Node 22 built-in globalThis.fetch — no new npm dependencies.
  * Config read at call time (not module load time) so vi.stubEnv works in tests.
  */
 
