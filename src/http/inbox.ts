@@ -57,6 +57,14 @@ type InboxItem = {
   pool?: boolean;
   sla: { min: number; left: number };
   due: string;
+  /**
+   * Deadline in epoch-ms — the SERVER's source of truth for the live SLA countdown
+   * (T-0095). The client derives the live remaining time + warn/over state purely from
+   * this (see src/http/sla.ts slaState); it never invents deadlines client-side.
+   * Materialized per request as now + sla.left·60s so the countdown is anchored to a
+   * real wall-clock instant while the static `sla.left` stays stable for legacy callers.
+   */
+  deadline?: number;
   mine?: boolean;
   /**
    * Taken-task state (T-0094). Present IFF the task has been claimed from the pool.
@@ -171,7 +179,10 @@ function toWire(item: SeedItem): InboxItem {
  * applied. Does NOT apply tab/filter — that is layered on top so the tab counts
  * can be computed from the same base list.
  */
-async function findInboxItems(devUserId?: string | null): Promise<InboxItem[]> {
+async function findInboxItems(
+  devUserId?: string | null,
+  nowMs: number = Date.now(),
+): Promise<InboxItem[]> {
   const tenantId = await resolveTenant(devUserId);
 
   // Resolve dev-user to person if provided (findEmployee is async: DB-backed or in-memory)
@@ -199,6 +210,11 @@ async function findInboxItems(devUserId?: string | null): Promise<InboxItem[]> {
   return tenantItems.map((seed) => {
     const item = toWire(seed);
     const claim = CLAIMED.get(item.id);
+
+    // SLA deadline (T-0095): anchor the static `sla.left` headroom (minutes) to a real
+    // wall-clock instant so the client can run a live countdown + warn/over state off a
+    // single server-provided source of truth. Stays additive — `sla` itself is untouched.
+    item.deadline = nowMs + item.sla.left * 60_000;
 
     if (claim) {
       // Claimed item: pool cleared, assigned to claimer. Surface the taken-state
