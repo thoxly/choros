@@ -32,6 +32,7 @@ import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
+import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 
 const { Pool } = pg;
 
@@ -288,6 +289,12 @@ function buildRouter(
   // Pool is used solely for the keycloak-mode process_designer authz lookup
   // (review R-1); dev mode works without it, so wiring stays unconditional.
   registerFloor1EditorRoutes(router, grantsPool ?? null);
+
+  // Register vendor activation + vendor-service endpoints (T-0127 / T-0198).
+  // The ONLY HTTP surface that reads activation/entitlement state. GET /vendor/activation
+  // always 200 (reporting is not gating); vendor-service calls return 402/403 when the
+  // subscription does not grant the service. Core/user endpoints never read the key.
+  registerVendorActivationRoutes(router);
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
