@@ -161,8 +161,8 @@ services:
       flowable:
         condition: service_healthy
     healthcheck:
-      # node:20-slim has no wget; use the built-in Node.js fetch API (Node 18+).
-      # fetch() is available globally in Node 20. Exit 0 on HTTP 200, 1 otherwise.
+      # node:22-slim has no wget; use the built-in Node.js fetch API (Node 18+).
+      # fetch() is available globally in Node 22. Exit 0 on HTTP 200, 1 otherwise.
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:' + (process.env.PORT||'3000') + '/health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))\""]
       interval: 5s
       timeout: 5s

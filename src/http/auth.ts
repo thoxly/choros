@@ -247,7 +247,7 @@ function verifyRsaSignature(
   jwk: Jwk
 ): boolean {
   try {
-    // Node 20 supports JWK format directly via createPublicKey
+    // Node 22 supports JWK format directly via createPublicKey
     const keyObject = crypto.createPublicKey({ key: jwk as unknown as crypto.JsonWebKey, format: "jwk" });
     return crypto.verify(
       "RSA-SHA256",
