@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ops/fleet/cells.schema.json",
+  "title": "Choros Silo-Fleet Cell Registry",
+  "description": "JSON Schema draft-07 for the machine-readable silo-fleet cell registry (tenancy ADR §10). One entry per isolated silo cell: tier, mode, migration version, endpoint, status. T-0069.",
+  "type": "object",
+  "required": ["meta", "cells"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["registry_version", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "registry_version": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    },
+    "cells": {
+      "type": "array",
+      "description": "Each element is one silo cell (isolated tenant contour). slug is unique across the fleet.",
+      "items": {
+        "type": "object",
+        "required": ["slug", "tier", "mode", "migration_version", "endpoint", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "Stable fleet-unique identifier for the cell.",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "display_name": { "type": "string", "minLength": 1 },
+          "tier": {
+            "type": "string",
+            "description": "Tenant tier (governs isolation/compliance posture). See ADR §5/§12.",
+            "enum": ["standard", "regulated", "enterprise"]
+          },
+          "mode": {
+            "type": "string",
+            "description": "Isolation mode. silo now; pooled deferred (ADR §5/§11).",
+            "enum": ["silo", "pooled"]
+          },
+          "migration_version": {
+            "type": "string",
+            "description": "Migration stem the cell is provisioned to (e.g. 055_fix_mcp_tool_demo_tenant). Must exist in migrations/ and be the head of an appliable linear prefix.",
+            "pattern": "^[0-9]{3,}_[A-Za-z0-9_]+$"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Where the cell is reachable (Tailscale/host:port or URL). Probing it for liveness/backup is a documented seam — never probed by CI (servers are not provisioned here).",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "description": "Lifecycle status of the cell.",
+            "enum": ["active", "provisioning", "draining", "retired"]
+          },
+          "last_backup_at": {
+            "type": ["string", "null"],
+            "description": "ISO-8601 UTC timestamp of the last verified backup, or null if never. Populated by the centralized monitor (real source = endpoint probe seam)."
+          }
+        }
+      }
+    }
+  }
+}
