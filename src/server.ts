@@ -34,6 +34,7 @@ import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
+import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 
 const { Pool } = pg;
 
@@ -244,6 +245,10 @@ function buildRouter(
     // Register seed write-API (T-0140): POST /api/tenants|departments|positions|employees|roles
     // and DELETE variants for reset. Same pool as grants.
     registerSeedWriteRoutes(router, grantsPool);
+    // Register rights-INTENT operations (T-0223 D-2): hire/fire/substitute/urgent-revoke.
+    // Thin orchestration over the existing kernel (grants/substitution/validateNarrowing/
+    // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
+    registerRightsIntentRoutes(router, grantsPool);
   }
 
   // Register processes endpoints

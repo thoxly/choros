@@ -152,7 +152,111 @@ function OrgTree({ org, selectedId, onSelect }) {
 function fmtRu(n) { return n.toLocaleString("ru-RU"); }
 const moneyFmt = (n) => "₽" + fmtRu(n);
 
-function ExecutorDetail({ data, onOpenRights }) {
+/* ---- Explain-PDP в карточке сотрудника (T-0223 · инвариант I-3) ----
+   «Почему Вася не видит X» = трасса PDP, ВСТРОЕНА в карточку, ЗА mgmt-грантом.
+   Сам эндпойнт POST /api/pdp/explain (T-0136) проверяет авторизацию:
+   самоопрос ИЛИ admin с delegable mgmt_object:grant — иначе 403 (анти-oracle,
+   без подробностей). UI лишь показывает вердикт/трассу и честно сообщает 403.
+   Скрытые поля (drop-маска) эндпойнт не раскрывает даже при самоопросе. */
+function ExplainPanel({ subjectSlug }) {
+  const [resourceType, setResourceType] = useState("mcp://ledger.invoices");
+  const [operation, setOperation] = useState("read");
+  const [recordId, setRecordId] = useState("");
+  const [result, setResult] = useState(null); // null | "loading" | {verdict,reason,steps} | {forbidden} | {error}
+
+  const run = async () => {
+    setResult("loading");
+    // tenantId фиксирован dev-силом на сервере; UI передаёт согласованный плейсхолдер.
+    const TENANT = "a0000000-0000-0000-0000-000000000001";
+    const ref = recordId
+      ? { kind: "record", tenantId: TENANT, registryId: resourceType, recordId }
+      : { kind: "registry", tenantId: TENANT, applicationId: resourceType, registryId: resourceType };
+    try {
+      const resp = await fetch("/api/pdp/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...devHeaders() },
+        body: JSON.stringify({
+          subject: { tenantId: TENANT, subjectId: subjectSlug },
+          handle: { ref, tenantId: TENANT },
+          operation,
+        }),
+      });
+      if (resp.status === 403) {
+        // Анти-oracle: не-admin о чужом субъекте — без деталей (инвариант I-3).
+        setResult({ forbidden: true });
+        return;
+      }
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setResult({ error: data?.error?.code || data?.error?.message || `HTTP ${resp.status}` });
+        return;
+      }
+      setResult(data);
+    } catch (e) {
+      setResult({ error: String(e?.message || e) });
+    }
+  };
+
+  return (
+    <section className="chs-section2">
+      <div className="chs-section2__head">
+        <h3 className="chs-section2__title">Почему видит / не видит — explain-PDP</h3>
+        <span className="chs-section2__aux">за mgmt-грантом · анти-oracle</span>
+      </div>
+      <div style={{ display: "flex", gap: "var(--chs-space-3)", flexWrap: "wrap", alignItems: "flex-end" }}>
+        <label className="chs-field" style={{ flex: "1 1 14ch" }}>
+          <span className="chs-label">Ресурс</span>
+          <input className="chs-input chs-input--mono" value={resourceType} onChange={(e) => setResourceType(e.target.value)} />
+        </label>
+        <label className="chs-field">
+          <span className="chs-label">Операция</span>
+          <select className="chs-input" value={operation} onChange={(e) => setOperation(e.target.value)}>
+            {["read", "create", "update", "delete"].map((op) => <option key={op} value={op}>{op}</option>)}
+          </select>
+        </label>
+        <label className="chs-field">
+          <span className="chs-label">ID записи (опц.)</span>
+          <input className="chs-input chs-input--mono" value={recordId} onChange={(e) => setRecordId(e.target.value)} placeholder="—" />
+        </label>
+        <Button variant="secondary" size="sm" disabled={result === "loading"} onClick={run}>
+          {result === "loading" ? "Трасса…" : "Объяснить"}
+        </Button>
+      </div>
+      {result && result !== "loading" && (
+        <div style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
+          {result.forbidden ? (
+            <span style={{ color: "var(--chs-color-danger, red)" }}>
+              403 — нет mgmt-гранта на просмотр прав этого субъекта (анти-oracle: подробности скрыты).
+            </span>
+          ) : result.error ? (
+            <span style={{ color: "var(--chs-color-danger, red)" }}>Ошибка: {result.error}</span>
+          ) : (
+            <>
+              <div>
+                Вердикт:{" "}
+                <b style={{ color: result.verdict === "allow" ? "var(--chs-color-success, green)" : "var(--chs-color-danger, red)" }}>
+                  {result.verdict === "allow" ? "ДОСТУП" : "ОТКАЗ"}
+                </b>
+                {result.reason && <> · <Mono>{result.reason}</Mono></>}
+              </div>
+              {Array.isArray(result.steps) && (
+                <ol style={{ marginTop: "var(--chs-space-2)", paddingLeft: "var(--chs-space-5)" }}>
+                  {result.steps.map((s, i) => (
+                    <li key={i}>
+                      <Mono>{s.step}</Mono> — {s.ok ? "ok" : "fail"}{s.reason ? ` (${s.reason})` : ""}{s.note ? ` · ${s.note}` : ""}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExecutorDetail({ data, onOpenRights, subjectSlug }) {
   const isAgent = data.type === "agent";
   const isService = data.type === "service";
   const primaryRole = data.assignments[0]?.roleId;
@@ -300,6 +404,9 @@ function ExecutorDetail({ data, onOpenRights }) {
             </div>
           </div>
         </section>
+
+        {/* Explain-PDP (T-0223 · I-3): встроен в карточку, за mgmt-грантом */}
+        <ExplainPanel subjectSlug={subjectSlug} />
       </div>
     </div>
   );
@@ -346,7 +453,7 @@ function OrgScreen({ onOpenRights }) {
       ) : (
         <>
           <OrgTree org={departments} selectedId={selected} onSelect={setSelected} />
-          <ExecutorDetail data={data} onOpenRights={onOpenRights} />
+          <ExecutorDetail data={data} onOpenRights={onOpenRights} subjectSlug={selected} />
         </>
       )}
     </div>

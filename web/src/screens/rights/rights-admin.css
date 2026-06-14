@@ -451,4 +451,27 @@
   .chs-prop__main { grid-template-columns: 1fr; gap: var(--chs-space-4); }
   .chs-approver { grid-template-columns: 1fr; gap: var(--chs-space-4); }
   .chs-subtabs { overflow-x: auto; }
+  .chs-intent__grid { grid-template-columns: 1fr; }
+}
+
+/* ---- T-0223 · бытовые intent-операции прав ---- */
+.chs-intent__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--chs-space-3);
+  margin-top: var(--chs-space-3);
+}
+.chs-intent__bar {
+  margin-top: var(--chs-space-4);
+  display: flex;
+  gap: var(--chs-space-3);
+}
+.chs-intent__json {
+  font-family: var(--chs-font-mono, monospace);
+  font-size: var(--chs-text-xs);
+  background: var(--chs-color-surface-2, rgba(127,127,127,0.08));
+  padding: var(--chs-space-3);
+  border-radius: var(--chs-radius-2, 6px);
+  overflow-x: auto;
+  white-space: pre-wrap;
 }
