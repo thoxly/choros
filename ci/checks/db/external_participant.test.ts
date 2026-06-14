@@ -88,26 +88,33 @@ beforeAll(async () => {
   });
   appPool = new pg.Pool({ connectionString: appUrl() });
 
-  // DIAGNOSTIC (temporary): read a 32-byte bytea via the choros_app pool client —
-  // the exact connection class the audit writer uses.
+  // DIAGNOSTIC (temporary): replicate the audit writer's exact head sequence via the
+  // choros_app pool client, then read row_hash back — under TENANT_B so we don't
+  // disturb TENANT_A's chain.
   const dc = await appPool.connect();
   try {
     await dc.query('BEGIN');
-    await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+    await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
     await dc.query('SET LOCAL search_path TO choros');
-    const w = await dc.query(
-      'SELECT $1::bytea AS b, length($1::bytea) AS n',
+    await dc.query(
+      `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
+       VALUES (current_setting('choros.tenant_id', false)::uuid, 0, $1, 0, 1)
+       ON CONFLICT (tenant_id) DO NOTHING`,
       [Buffer.alloc(32, 0)],
     );
-    const b = (w.rows[0] as { b: unknown; n: number }).b;
+    const hr = await dc.query(
+      `SELECT seq, row_hash, length(row_hash) AS n FROM choros.audit_head
+        WHERE tenant_id = current_setting('choros.tenant_id', false)::uuid FOR UPDATE`,
+    );
+    const rh = (hr.rows[0] as { row_hash: unknown; n: number }).row_hash;
     // eslint-disable-next-line no-console
-    console.log('[DIAG ep] app-pool Buffer.alloc(32,0):', {
-      dbLen: (w.rows[0] as { n: number }).n,
-      readLen: (b as { length?: number }).length,
-      isBuffer: Buffer.isBuffer(b),
-      ctor: b && (b as object).constructor ? (b as { constructor: { name: string } }).constructor.name : String(b),
+    console.log('[DIAG ep] writer-style head.row_hash:', {
+      dbLen: (hr.rows[0] as { n: number }).n,
+      readLen: (rh as { length?: number }).length,
+      isBuffer: Buffer.isBuffer(rh),
+      ctor: rh && (rh as object).constructor ? (rh as { constructor: { name: string } }).constructor.name : String(rh),
     });
-    await dc.query('COMMIT');
+    await dc.query('ROLLBACK');
   } finally {
     dc.release();
   }
