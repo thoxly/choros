@@ -231,21 +231,13 @@ export async function createExternalParticipant(args: {
   const data = validateParticipantData(args.data);
 
   return withTenantTx(pool, tenantId, async (client) => {
-    await client.query(
-      `INSERT INTO choros.record
-         (tenant_id, id, registry_id, data, created_at, updated_at, created_by)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $5, $6)`,
-      [
-        tenantId,
-        id,
-        EXTERNAL_PARTICIPANT_REGISTRY_ID,
-        JSON.stringify(data),
-        nowMs,
-        actor,
-      ],
-    );
-
-    // Audit (T-0016) — same tx, open-vocab type string, no secret in payload.
+    // Audit (T-0016) FIRST — same tx, open-vocab type string, no secret in payload.
+    // Ordering note: the audit writer issues the only bytea-parameter statements in
+    // this transaction; running them before the (jsonb/text-param) record INSERT keeps
+    // the writer's prev_hash/row_hash bytea binding from being affected by a prior
+    // parameterized statement's inferred param types on the same connection — a
+    // node-pg quirk that mis-encoded the 32-byte bytea param on the Node-20 CI runner.
+    // Atomicity is unchanged: both statements live in the same withTenantTx transaction.
     const writer = makePgAuditWriter();
     await writer.appendAuditEvent(client as unknown as PgClientLike, {
       id: randomUUID(),
@@ -259,6 +251,20 @@ export async function createExternalParticipant(args: {
       payload: { kind: data.kind, display_name: data.display_name },
       occurred_at: nowMs,
     });
+
+    await client.query(
+      `INSERT INTO choros.record
+         (tenant_id, id, registry_id, data, created_at, updated_at, created_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $5, $6)`,
+      [
+        tenantId,
+        id,
+        EXTERNAL_PARTICIPANT_REGISTRY_ID,
+        JSON.stringify(data),
+        nowMs,
+        actor,
+      ],
+    );
 
     return {
       id,
