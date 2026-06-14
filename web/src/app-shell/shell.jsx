@@ -20,6 +20,7 @@ import SoDScreen from '../screens/rights/ra-sod.jsx';
 import GrantTrailScreen from '../screens/rights/ra-grant-trail.jsx';
 import IntentsScreen from '../screens/rights/ra-intents.jsx';
 import FormsScreen from '../screens/screen-forms.jsx';
+import NotificationsScreen from '../screens/screen-notifications.jsx';
 
 export { Icon };
 
@@ -44,6 +45,7 @@ const NAV = [
   {
     group: "Наблюдаемость",
     items: [
+      { id: "notifications", label: "Уведомления", icon: "bell", screen: true },
       { id: "audit", label: "Аудит инстанса", icon: "audit", screen: true },
       { id: "budgets", label: "Бюджеты", icon: "budget", soon: true },
     ],
@@ -66,6 +68,7 @@ const SCREEN_META = {
   inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
   org:   { crumb: ["Оркестрация", "Оргструктура"] },
   processes: { crumb: ["Оркестрация", "Процессы"] },
+  notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит инстанса"] },
   rights: { crumb: ["Доступ", "Права и доступ"] },
   forms:  { crumb: ["Разработка", "Формы задач"] },
@@ -293,6 +296,7 @@ function AppShell() {
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
             <Route path="/processes" element={<ProcessesScreen />} />
+            <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
             <Route path="/rights/intents" element={<IntentsScreen />} />

@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0203",
+  "status": "pr_open",
+  "branch": "task/T-0203",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/http/email-channel-config.ts",
+    "src/server.ts",
+    "src/__tests__/email-channel-config.test.ts",
+    "web/src/screens/screen-notifications.jsx",
+    "web/src/app-shell/shell.jsx",
+    "web/src/app-shell/icon.jsx",
+    "web/src/app-shell/app.css",
+    "docs/design/T-0203.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "No new SQL migration. The ADR's three tables (notification 046, email_channel_config 047, notification_preference 048) plus routing/email/templates/REST already exist from sibling tasks T-0168/0169/0170/0171/0173. T-0203's residual gap is the in-app center + per-event settings UI and the one missing HTTP surface (email-channel-config). Reserved migration slot 059 was therefore not used — no schema change is needed.",
+    "ChannelDriver carries two optional flags (requiresInAppRow / requiresEmailConfig) above the ADR §2.5 base contract — pre-existing E-N.2 decision in notification-router.ts (documented there), not introduced by T-0203.",
+    "Email-config status endpoint added a DELETE verb (revoke) in addition to ADR §2.3's GET/PUT, reusing the already-implemented revokeEmailChannelConfig core CRUD (audit notif.email_config.revoke). Additive, within the §2.3 management surface."
+  ],
+  "friction_events": [
+    "Local tsc/vitest/eslint binaries absent at start — ran `npm ci` in repo root and web/ to populate node_modules.",
+    "DB test tier needs a provisioned PG with the choros_migrator role; credentials are not in the task brief. Found them in docker-compose.yml (port 55432, password choros_dev_pw) — DB tier then ran green (627 tests)."
+  ]
+}
