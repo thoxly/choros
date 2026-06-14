@@ -58,6 +58,14 @@ type InboxItem = {
   sla: { min: number; left: number };
   due: string;
   mine?: boolean;
+  /**
+   * Taken-task state (T-0094). Present IFF the task has been claimed from the pool.
+   *  - `claimedBy` is the actor id (employee slug) that holds the claim — the «кто взял».
+   *  - `claimedAt` is the claim timestamp in epoch-ms — the «когда взял».
+   * These let the UI render «взято <name>, <when>» truthfully instead of guessing.
+   */
+  claimedBy?: string;
+  claimedAt?: number;
 };
 
 /** Internal seed shape — carries tenant + role for addressing; tenant is stripped on the wire. */
@@ -172,33 +180,49 @@ async function findInboxItems(devUserId?: string | null): Promise<InboxItem[]> {
     person = await findEmployee(devUserId);
   }
 
-  return INBOX_SEED
+  const tenantItems = INBOX_SEED
     // Tenant isolation: only this actor's tenant. Foreign-tenant tasks never leak.
-    .filter((item) => item.tenant === tenantId)
-    .map((seed) => {
-      const item = toWire(seed);
-      const claim = CLAIMED.get(item.id);
+    .filter((item) => item.tenant === tenantId);
 
-      if (claim) {
-        // Claimed item: pool cleared, assigned to claimer.
-        const mine =
-          devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
-        return {
-          ...item,
-          pool: false,
-          execType: "human" as const,
-          execName: claim.claimedBy, // day-1: userId as display name; real impl resolves to person.name
-          mine,
-        };
-      }
+  // Resolve display names for the distinct claimers present in this tenant view, so a
+  // claimed row can render «взято <name>» rather than a raw slug. findEmployee is
+  // tolerant of unknown ids (returns null) — we fall back to the slug in that case.
+  const claimerNames = new Map<string, string>();
+  for (const seed of tenantItems) {
+    const claim = CLAIMED.get(seed.id);
+    if (claim && !claimerNames.has(claim.claimedBy)) {
+      const claimer = await findEmployee(claim.claimedBy);
+      claimerNames.set(claim.claimedBy, claimer?.name ?? claim.claimedBy);
+    }
+  }
 
+  return tenantItems.map((seed) => {
+    const item = toWire(seed);
+    const claim = CLAIMED.get(item.id);
+
+    if (claim) {
+      // Claimed item: pool cleared, assigned to claimer. Surface the taken-state
+      // (who + when) as first-class wire fields — the UI reflects it, not guesses it.
       const mine =
-        person !== null &&
-        item.execType === "human" &&
-        item.execName === person.name;
+        devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+      return {
+        ...item,
+        pool: false,
+        execType: "human" as const,
+        execName: claimerNames.get(claim.claimedBy) ?? claim.claimedBy,
+        claimedBy: claim.claimedBy,
+        claimedAt: claim.claimedAt,
+        mine,
+      };
+    }
 
-      return { ...item, mine };
-    });
+    const mine =
+      person !== null &&
+      item.execType === "human" &&
+      item.execName === person.name;
+
+    return { ...item, mine };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -303,10 +327,12 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
   //   - task must be pool=true AND not already claimed: 409 ALREADY_CLAIMED
   //   - task must be addressed to a ROLE the actor holds: 403 NOT_ELIGIBLE
   //     (the claim-from-pool invariant: you may only take pool work for your role)
-  // Success: 200 { item } — item with pool:false, execType:"human",
-  //   execName=userId, mine:true (caller always mines their own claim).
+  // Success: 200 { item } — item with pool:false, execType:"human", mine:true
+  //   (caller always mines their own claim) and the taken-state (T-0094):
+  //   claimedBy=actor id, claimedAt=epoch-ms, execName=claimer display name.
   //
-  // Idempotency: re-claiming own task → 200 (no-op, same record returned).
+  // Idempotency: re-claiming own task → 200 (no-op, SAME claim record — claimedAt
+  //   is preserved, NOT advanced — so «когда взято» is stable across re-claims).
   // Claiming another user's claimed task → 409 ALREADY_CLAIMED.
   router.register("POST", "/api/inbox/:id/claim", async (req, res, params) => {
     let devUserId = req.headers[DEV_USER_HEADER];

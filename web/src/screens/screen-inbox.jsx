@@ -22,6 +22,22 @@ const MARKER_COLOR = {
   failed: "var(--chs-color-danger)", waiting: "var(--chs-color-warning)", paused: "var(--chs-color-text-faint)",
 };
 
+/**
+ * Render a claim timestamp (epoch-ms) as a compact «когда взято» label.
+ * Relative for fresh claims (сейчас / N мин назад), absolute clock for older ones.
+ * Tolerant of missing/invalid input — returns null so the caller can omit the «·» separator.
+ */
+function takenWhen(claimedAt) {
+  if (typeof claimedAt !== "number" || !Number.isFinite(claimedAt)) return null;
+  const diffMin = Math.floor((Date.now() - claimedAt) / 60000);
+  if (diffMin <= 0) return "сейчас";
+  if (diffMin < 60) return `${diffMin} мин назад`;
+  const d = new Date(claimedAt);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 function SLACell({ sla }) {
   const pct = Math.max(0, Math.min(100, (sla.left / sla.min) * 100));
   const over = sla.left < 0;
@@ -166,8 +182,15 @@ function InboxScreen() {
             </thead>
             <tbody>
               {rows.map((t) => {
-                const isTaken = !!taken[t.id];
+                // Taken-state is server-truth: a claimed item comes back with claimedBy set
+                // (pool cleared). The local `taken[t.id]` flag only bridges the brief optimistic
+                // window before load() re-syncs, so the «взято» state never flickers back.
+                const claimedByServer = !!t.claimedBy;
+                const isTaken = claimedByServer || !!taken[t.id];
                 const inPool = t.pool && !isTaken;
+                // Who took it (server display name) + when — the «взято кем, когда».
+                const takenName = t.execName || "—";
+                const whenLabel = takenWhen(t.claimedAt);
                 return (
                   <tr key={t.id} data-taken={isTaken ? "true" : undefined}>
                     <td>
@@ -184,7 +207,7 @@ function InboxScreen() {
                       {inPool ? (
                         <span className="chs-pool"><span className="chs-pool__glyph" /> в пуле</span>
                       ) : isTaken ? (
-                        <ExecutorBadge type="human" name="М. Соколов" />
+                        <ExecutorBadge type="human" name={takenName} />
                       ) : (
                         <ExecutorBadge type={t.execType} name={t.execName} />
                       )}
@@ -197,7 +220,9 @@ function InboxScreen() {
                           {claiming[t.id] ? '…' : 'Взять'}
                         </Button>
                       ) : isTaken ? (
-                        <span className="chs-taken-tag"><Icon name="check" /> взято</span>
+                        <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
+                          <Icon name="check" /> взято{t.mine ? " (мной)" : ""}{whenLabel ? ` · ${whenLabel}` : ""}
+                        </span>
                       ) : (
                         <Button variant="ghost" size="sm">Открыть</Button>
                       )}
