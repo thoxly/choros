@@ -29,7 +29,6 @@ import {
   getExternalParticipant,
   listExternalParticipants,
   EXTERNAL_PARTICIPANT_REGISTRY_ID,
-  BUFFER_TYPES,
 } from '../../../src/db/external-participant.js';
 
 // ---------------------------------------------------------------------------
@@ -77,17 +76,6 @@ async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [tenantId, EXTERNAL_PARTICIPANT_REGISTRY_ID, APP_ID],
   );
-  // Seed the audit-chain genesis anchor for this fresh test tenant (T-0016 §3.2:
-  // seq=0, row_hash = 32×0x00 genesis prev_hash). The dev tenant gets this via
-  // migration 026; brand-new test tenants do not, so seed it here so the first
-  // model append is an ordinary append against a committed head row — the same
-  // pre-existing-head path proven green by schema_change_api.test.ts (AC-10).
-  await c.query(
-    `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
-     VALUES ($1, 0, $2, 0, 1)
-     ON CONFLICT (tenant_id) DO NOTHING`,
-    [tenantId, Buffer.alloc(32, 0)],
-  );
 }
 
 let appPool: pg.Pool;
@@ -98,26 +86,30 @@ beforeAll(async () => {
     await seedDirectory(c, TENANT_A);
     await seedDirectory(c, TENANT_B);
   });
-  appPool = new pg.Pool({ connectionString: appUrl(), types: BUFFER_TYPES });
+  appPool = new pg.Pool({ connectionString: appUrl() });
 
-  // DIAGNOSTIC (temporary): how does a 32-byte Buffer param round-trip on this runner?
-  const mc = new pg.Client({ connectionString: migratorUrl() });
-  await mc.connect();
+  // DIAGNOSTIC (temporary): read a 32-byte bytea via the choros_app pool client —
+  // the exact connection class the audit writer uses.
+  const dc = await appPool.connect();
   try {
-    const so = await mc.query('SHOW bytea_output');
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] bytea_output =', (so.rows[0] as { bytea_output: string }).bytea_output);
-    // write a 32-byte buffer param into a temp and read back
-    await mc.query('SET search_path TO choros');
-    const w = await mc.query('SELECT $1::bytea AS b, length($1::bytea) AS n', [Buffer.alloc(32, 0)]);
+    await dc.query('BEGIN');
+    await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+    await dc.query('SET LOCAL search_path TO choros');
+    const w = await dc.query(
+      'SELECT $1::bytea AS b, length($1::bytea) AS n',
+      [Buffer.alloc(32, 0)],
+    );
     const b = (w.rows[0] as { b: unknown; n: number }).b;
     // eslint-disable-next-line no-console
-    console.log('[DIAG ep] param Buffer.alloc(32,0):', { dbLen: (w.rows[0] as { n: number }).n, readLen: (b as { length?: number }).length, isBuffer: Buffer.isBuffer(b) });
-    const w2 = await mc.query("SELECT length('\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea) AS n");
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] literal 32-zero bytea dbLen:', (w2.rows[0] as { n: number }).n);
+    console.log('[DIAG ep] app-pool Buffer.alloc(32,0):', {
+      dbLen: (w.rows[0] as { n: number }).n,
+      readLen: (b as { length?: number }).length,
+      isBuffer: Buffer.isBuffer(b),
+      ctor: b && (b as object).constructor ? (b as { constructor: { name: string } }).constructor.name : String(b),
+    });
+    await dc.query('COMMIT');
   } finally {
-    await mc.end();
+    dc.release();
   }
 });
 
