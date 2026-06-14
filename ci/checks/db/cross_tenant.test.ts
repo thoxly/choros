@@ -516,6 +516,23 @@ async function seedNotificationPreference(c: pg.Client, tenantId: string): Promi
   );
 }
 
+/** Seed one row into choros.connector (T-0128 migration 054).
+ * PK is (tenant_id, id); a fresh uuid id per call keeps both tenants' seeds independent
+ * under RLS. No cross-table FK (backs_effect_resource_id is a logical link, not a FK).
+ */
+async function seedConnector(c: pg.Client, tenantId: string): Promise<void> {
+  const id = uuid();
+  await c.query(
+    `INSERT INTO choros.connector
+       (tenant_id, id, kind, display_name, config, secret_handle, status,
+        backs_effect_resource_id, created_by, created_at, updated_by, updated_at)
+     VALUES ($1, $2, 'http_generic', $3, '{}'::jsonb, NULL, 'disabled',
+             NULL, 'ct-seed', 0, 'ct-seed', 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, id, `ct-conn-${id.slice(0, 8)}`],
+  );
+}
+
 /** Seed one row into choros.report_page (T-0175 migration 051).
  * FK: (tenant_id, app_id) → application(tenant_id, id).
  * Must be seeded after application. Returns the report_page id.
@@ -852,6 +869,11 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       await seedReportPageDep(c, tenantId, pageId, regId);
       break;
     }
+    case 'connector':
+      // T-0128 (migration 054) — PK=(tenant_id, id), no cross-table FK
+      // (backs_effect_resource_id is a logical link, not a FK).
+      await seedConnector(c, tenantId);
+      break;
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1189,6 +1211,7 @@ const SEEDED_TABLES = new Set<string>([
   'notification_preference',
   'report_page',
   'report_page_dep',
+  'connector',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
