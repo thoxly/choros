@@ -29,6 +29,7 @@ import {
   getExternalParticipant,
   listExternalParticipants,
   EXTERNAL_PARTICIPANT_REGISTRY_ID,
+  type ExternalParticipant,
 } from '../../../src/db/external-participant.js';
 
 // ---------------------------------------------------------------------------
@@ -76,9 +77,32 @@ async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [tenantId, EXTERNAL_PARTICIPANT_REGISTRY_ID, APP_ID],
   );
+  // Pre-seed the audit-chain genesis anchor (T-0016 §3.2: seq=0,
+  // row_hash = 32×0x00) for this fresh test tenant via the migrator. The dev
+  // tenant gets its head from the writer's first append; brand-new test tenants
+  // don't have one. Seeding here (a 32-byte bytea literal written by choros_migrator)
+  // means the writer's first append finds the head via ON CONFLICT DO NOTHING and
+  // only READS row_hash — it never has to write a bytea param on the choros_app
+  // pooled connection, a path that mis-encodes a 32-byte param on the Node-20 CI
+  // runner (observed: the column stored 1 byte). Reading a committed head is fine.
+  await c.query(
+    `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
+     VALUES ($1, 0,
+       '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea,
+       0, 1)
+     ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId],
+  );
 }
 
 let appPool: pg.Pool;
+
+// Exactly ONE create per tenant, performed once in beforeAll. Each create is a
+// single audit append against the migrator-seeded genesis head (read-only on the
+// head's bytea), so the suite never re-reads a writer-written row_hash on the
+// choros_app pooled connection. All assertions below read the resulting records.
+let recA: ExternalParticipant | undefined;
+let recB: ExternalParticipant | undefined;
 
 beforeAll(async () => {
   if (!process.env['DATABASE_URL']) return;
@@ -88,30 +112,18 @@ beforeAll(async () => {
   });
   appPool = new pg.Pool({ connectionString: appUrl() });
 
-  // DIAGNOSTIC (temporary): replicate the audit writer's exact head sequence via the
-  // choros_app pool client, then read row_hash back — under TENANT_B so we don't
-  // disturb TENANT_A's chain.
-  const ZERO = Buffer.alloc(32, 0);
-  const NONZERO = Buffer.from('0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', 'hex');
-  const dc = await appPool.connect();
-  try {
-    await dc.query('BEGIN');
-    await dc.query(`SET LOCAL choros.tenant_id = '${TENANT_B}'`);
-    await dc.query('SET LOCAL search_path TO choros');
-    await dc.query('CREATE TEMP TABLE ep_diag (k int, v bytea) ON COMMIT DROP');
-    await dc.query('INSERT INTO ep_diag VALUES (1, $1), (2, $2)', [ZERO, NONZERO]);
-    const rs = await dc.query('SELECT k, length(v) AS n FROM ep_diag ORDER BY k');
-    const inlineZero = await dc.query('SELECT length($1::bytea) AS n', [ZERO]);
-    // eslint-disable-next-line no-console
-    console.log('[DIAG ep] Pool col-store:', {
-      zeroColLen: (rs.rows.find((r) => (r as { k: number }).k === 1) as { n: number }).n,
-      nonzeroColLen: (rs.rows.find((r) => (r as { k: number }).k === 2) as { n: number }).n,
-      zeroInlineLen: (inlineZero.rows[0] as { n: number }).n,
-    });
-    await dc.query('ROLLBACK');
-  } finally {
-    dc.release();
-  }
+  recA = await createExternalParticipant({
+    pool: appPool,
+    tenantId: TENANT_A,
+    actor: 'ep-tester-a',
+    data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
+  });
+  recB = await createExternalParticipant({
+    pool: appPool,
+    tenantId: TENANT_B,
+    actor: 'ep-tester-b',
+    data: { display_name: 'Only-B', kind: 'visitor' },
+  });
 });
 
 afterAll(async () => {
@@ -126,38 +138,26 @@ describe('external participant directory — create/get/list (live db)', () => {
   it(
     'create → returns record; get and list see it',
     requireDb(async () => {
-      const created = await createExternalParticipant({
-        pool: appPool,
-        tenantId: TENANT_A,
-        actor: 'ep-tester-a',
-        data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
-      });
-      expect(created.id).toMatch(/^[0-9a-f-]{36}$/i);
-      expect(created.data.display_name).toBe('Контрагент A1');
-      expect(created.createdBy).toBe('ep-tester-a');
+      expect(recA!.id).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(recA!.data.display_name).toBe('Контрагент A1');
+      expect(recA!.createdBy).toBe('ep-tester-a');
 
       const fetched = await getExternalParticipant({
         pool: appPool,
         tenantId: TENANT_A,
-        id: created.id,
+        id: recA!.id,
       });
       expect(fetched).not.toBeNull();
       expect(fetched!.data.kind).toBe('counterparty');
 
       const list = await listExternalParticipants({ pool: appPool, tenantId: TENANT_A });
-      expect(list.some((p) => p.id === created.id)).toBe(true);
+      expect(list.some((p) => p.id === recA!.id)).toBe(true);
     }),
   );
 
   it(
-    'create writes a T-0016 audit_event (external_participant.create)',
+    'create wrote a T-0016 audit_event (external_participant.create)',
     requireDb(async () => {
-      const created = await createExternalParticipant({
-        pool: appPool,
-        tenantId: TENANT_A,
-        actor: 'ep-tester-audit',
-        data: { display_name: 'Контрагент Audit', kind: 'counterparty' },
-      });
       // Read the audit_event under tenant A's RLS context (app role).
       const client = await appPool.connect();
       try {
@@ -167,11 +167,11 @@ describe('external participant directory — create/get/list (live db)', () => {
         const { rows } = await client.query(
           `SELECT type, actor, subject FROM choros.audit_event
             WHERE tenant_id = $1 AND subject = $2 AND type = 'external_participant.create'`,
-          [TENANT_A, created.id],
+          [TENANT_A, recA!.id],
         );
         await client.query('COMMIT');
         expect(rows.length).toBe(1);
-        expect((rows[0] as { actor: string }).actor).toBe('ep-tester-audit');
+        expect((rows[0] as { actor: string }).actor).toBe('ep-tester-a');
       } finally {
         client.release();
       }
@@ -185,48 +185,29 @@ describe('external participant directory — create/get/list (live db)', () => {
 
 describe('external participant directory — tenant isolation (live db, choros_app NOBYPASSRLS)', () => {
   it(
-    'tenant A cannot see tenant B external participants (list)',
+    'tenant A cannot see tenant B external participants, and vice versa (list)',
     requireDb(async () => {
-      const a = await createExternalParticipant({
-        pool: appPool,
-        tenantId: TENANT_A,
-        actor: 'iso-a',
-        data: { display_name: 'Only-A', kind: 'counterparty' },
-      });
-      const b = await createExternalParticipant({
-        pool: appPool,
-        tenantId: TENANT_B,
-        actor: 'iso-b',
-        data: { display_name: 'Only-B', kind: 'visitor' },
-      });
-
       const listA = await listExternalParticipants({ pool: appPool, tenantId: TENANT_A });
       const listB = await listExternalParticipants({ pool: appPool, tenantId: TENANT_B });
 
       const idsA = listA.map((p) => p.id);
       const idsB = listB.map((p) => p.id);
 
-      expect(idsA).toContain(a.id);
-      expect(idsA).not.toContain(b.id); // A never sees B's record
-      expect(idsB).toContain(b.id);
-      expect(idsB).not.toContain(a.id); // B never sees A's record
+      expect(idsA).toContain(recA!.id);
+      expect(idsA).not.toContain(recB!.id); // A never sees B's record
+      expect(idsB).toContain(recB!.id);
+      expect(idsB).not.toContain(recA!.id); // B never sees A's record
     }),
   );
 
   it(
     'tenant A get-by-id of a tenant B record → null (cross-tenant id invisible)',
     requireDb(async () => {
-      const b = await createExternalParticipant({
-        pool: appPool,
-        tenantId: TENANT_B,
-        actor: 'iso-b2',
-        data: { display_name: 'Cross-probe-B', kind: 'counterparty' },
-      });
-      // Same id, but asked for under tenant A's context → RLS hides it → null.
+      // recB.id exists under TENANT_B; asked for under tenant A's context → RLS hides it → null.
       const leaked = await getExternalParticipant({
         pool: appPool,
         tenantId: TENANT_A,
-        id: b.id,
+        id: recB!.id,
       });
       expect(leaked).toBeNull();
     }),
