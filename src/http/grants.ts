@@ -414,8 +414,19 @@ export interface GrantPreset {
  * (AC-18 T-0030 — no preset table, client-side expansion only).
  *
  * Vocabulary invariants (AC-03 / AC-04):
- *  - resource_type: must be a URI present in DICT_RESOURCES.
+ *  - resource_type: must be a URI present in DICT_RESOURCES, OR a `mgmt_object:*`
+ *    management-object kind (grant-lattice.ts ResourceType union). The latter is
+ *    used ONLY by the "Админ" management preset (T-0224 / T-0222 ADR §10 D.5):
+ *    "Админ" is a mgmt_object holder, structurally distinct from a resource
+ *    competence — it is NOT a malformed competence preset.
  *  - operation: must be one of read|create|update|delete|approve|transition|invoke.
+ *
+ * T-0224 (D-3 — demo-minimum job-role presets, T-0222 ADR §10 / D.5):
+ * the four NAMED demo-minimum position-presets — Инициатор / Руководитель /
+ * Финконтролёр / Админ — are appended below the original 10 day-1 presets with
+ * stable `p-role-*` ids so the T-0223 intent UI can reference them by id/key.
+ * They compose ONLY from the existing scope/effect/object vocabulary; the FULL
+ * preset catalog beyond this demo-minimum remains founder/T-0207-owned.
  */
 export const DICT_PRESETS: GrantPreset[] = [
   // 1 — Согласующий бюджета в Финансах
@@ -555,6 +566,81 @@ export const DICT_PRESETS: GrantPreset[] = [
       { resource_type: "mcp://ledger.invoices",  operation: "read",   scope_org: "fin" },
       { resource_type: "mcp://payments.refund",  operation: "invoke", scope_org: "fin",
         constraint: { amount_le: 30000 } },
+    ],
+  },
+
+  // =========================================================================
+  // T-0224 (D-3) — DEMO-MINIMUM JOB-ROLE PRESETS (T-0222 ADR §10 / D.5).
+  // The four NAMED position-presets for the seed-demo procurement scenario:
+  //   Инициатор → submits requests
+  //   Руководитель → approves
+  //   Финконтролёр → financial controls
+  //   Админ → management/admin (mgmt_object holder, NOT a competence preset)
+  // Stable `p-role-*` ids — the T-0223 intent UI references these by id.
+  // =========================================================================
+
+  // 11 — Инициатор (демо-минимум)
+  // Заводит заявку на закупку: читает реестр счетов и инициирует платёж до
+  // ₽100 000 в своём подразделении. Не согласует — это разделение обязанностей
+  // (SoD: инициатор ≠ согласующий). Источник вокабуляра: DICT_RESOURCES.
+  {
+    id: "p-role-initiator",
+    label: "Инициатор",
+    desc: "Заводит заявку: читает счета и инициирует платёж до ₽100 000 в своём подразделении",
+    critical: true,
+    grants: [
+      { resource_type: "mcp://ledger.invoices",   operation: "read",   scope_own: true },
+      { resource_type: "mcp://ledger.invoices",   operation: "create", scope_own: true },
+      { resource_type: "mcp://payments.initiate", operation: "invoke", scope_own: true,
+        constraint: { amount_le: 100000 } },
+    ],
+  },
+
+  // 12 — Руководитель (демо-минимум)
+  // Согласует заявки в своём подразделении: читает и утверждает счета.
+  // Не инициирует платёж — SoD-зеркало Инициатора.
+  {
+    id: "p-role-manager",
+    label: "Руководитель",
+    desc: "Согласует заявки: просмотр и утверждение счетов в своём подразделении",
+    grants: [
+      { resource_type: "mcp://ledger.invoices", operation: "read",    scope_own: true },
+      { resource_type: "mcp://ledger.invoices", operation: "approve", scope_own: true },
+    ],
+  },
+
+  // 13 — Финконтролёр (демо-минимум)
+  // Финансовый контроль: читает реестр счетов, читает и ведёт сверку платежей,
+  // читает справочник договоров в Финансах. Контролирует, но не инициирует и
+  // не утверждает платёж.
+  {
+    id: "p-role-fincontrol",
+    label: "Финконтролёр",
+    desc: "Финансовый контроль: чтение счетов, ведение сверки платежей и чтение договоров в Финансах",
+    grants: [
+      { resource_type: "mcp://ledger.invoices",  operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://ledger.recon",     operation: "read",   scope_org: "fin" },
+      { resource_type: "mcp://ledger.recon",     operation: "update", scope_org: "fin" },
+      { resource_type: "mcp://contracts.lookup", operation: "read",   scope_org: "fin" },
+    ],
+  },
+
+  // 14 — Админ (демо-минимум)
+  // ADR §10 / D.5 + §4: «Админ» — это держатель управляющих грантов
+  // (mgmt_object:*), а НЕ ресурсная компетенция. Структурно отличается от
+  // остальных пресетов: управляет ролями и гранами в своём org-поддереве.
+  // resource_type здесь — mgmt_object:* (ResourceType-union grant-lattice.ts),
+  // НЕ URI из DICT_RESOURCES. Это корректная форма, а не «сломанный» пресет.
+  // delegable:true — управляющий грант должен переделегироваться вниз (admin
+  // pattern, scoped-admin.ts: covering/delegable mgmt_object:* grant).
+  {
+    id: "p-role-admin",
+    label: "Админ",
+    desc: "Управление правами: держатель управляющих грантов (роли и гранты) в своём подразделении — НЕ ресурсная компетенция",
+    critical: true,
+    grants: [
+      { resource_type: "mgmt_object:role",  operation: "create", scope_own: true, delegable: true },
+      { resource_type: "mgmt_object:grant", operation: "create", scope_own: true, delegable: true },
     ],
   },
 ];
