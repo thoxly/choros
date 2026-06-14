@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0200",
+  "status": "pr_open",
+  "branch": "task/T-0200",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/card-action.ts",
+    "src/__tests__/card-action.test.ts",
+    "ci/checks/card-action-isolation.sh",
+    "package.json",
+    "docs/design/T-0200.pr-handoff.json"
+  ],
+  "migration": null,
+  "shared_files_touched": {
+    "package.json": "additive — appended `&& bash ci/checks/card-action-isolation.sh` to the end of the `fitness` script chain; no reorder/rewrite of existing entries. No src/server.ts or web app-shell edit (day-1 primitive is pure-core; no route added)."
+  },
+  "deviations_from_adr": [
+    "No SQL migration created. The ADR day-1 scope (B-1..B-7) is a pure-core declarative primitive over LIVE foundations (grant-lattice/PDP/audit/actor-event) and needs no new table. The custom-layer store (B-9) and the process_instance ResourceType (B-8) are DORMANT behind the form_def / lattice-extension gates per ADR §4.2/§7 — migration 057 (reserved) is left UNUSED on purpose, not consumed.",
+    "fireCardAction orchestrates the transition actor_event append directly via the injected ActorEventWriter rather than relying solely on resolveFor's internal deps.sod writer path. This keeps the card-action module independently testable and decoupled; it does NOT introduce a second authorization edge (resolveFor remains the sole arbiter — the actor_event is appended ONLY after an allow). Reconciliation with the resolveFor-internal writer wiring is a composition-root concern (B-3 wiring), not a contract change."
+  ],
+  "deferred_to_runner": [
+    "fitness:db tier (none added — no new db test): the card-action primitive is pure-core and has no db test in this PR.",
+    "Flowable/KC live-service fitness tiers (fitness:flowable, fitness:kc) — terminate/message engine path is DORMANT (B-8 not built); the 6 skipped flowable-client integration tests require a live engine.",
+    "B-8 (terminate/message unfreeze: deleteProcessInstance/correlateMessage REST + process_instance ResourceType lattice extension) and B-9 (form_def custom-layer store) are separate future build tasks behind the readiness gate — NOT in scope of T-0200."
+  ],
+  "tests_added": {
+    "file": "src/__tests__/card-action.test.ts",
+    "count": 17,
+    "coverage": "FF-CA-2 closed enums (semantics→operation map, unknown fails closed); FF-CA-1/7 ALLOW (covering grant ⇒ 1 audit_event(executed)+1 actor_event, params captured) and DENY (no_grant / op-mismatch ⇒ 1 audit_event(denied), 0 actor_event); FF-CA-8 cross-tenant fail-closed; FF-CA-5 dormant gate (terminate not-ready ⇒ denied(path_not_ready), no effect; isReady flips on a ready bridge with declaration unchanged); batch render visibility (resolveCardVisibility); FF-CA-9 default-card generation from status model (+dormant terminate on bound instance, no invoke in defaults); custom overlay merge (add/override by id, fail-closed on widened op/semantics)."
+  },
+  "gates": {
+    "tsc": "pass — node_modules/.bin/tsc --noEmit exit 0 (with tests)",
+    "lint": "pass — eslint src exit 0; 0 errors, 2 PRE-EXISTING warnings on base f67c763 (no-console in src/bridge-runner.ts:71, src/core/externalTaskBridge.ts:172) — not mine",
+    "fitness_static": "pass — card-action-isolation.sh green (FF-CA-1..4); also re-ran audit_append_only, actor_event_append_only, actor_event_vocab_pinned, audit_writer_isolation, cross-tenant-fitness, mutation-gateway-isolation, package-json-no-dup-keys, bundle-coherence — all green",
+    "db_tests": "n/a — no db test added (pure-core primitive); local PG was up but no fitness:db tier needed",
+    "unit_tests": "pass — full vitest run: 1983 passed | 6 skipped (flowable integration, live engine) | 0 failed; the 17 new card-action tests included"
+  },
+  "blockers": [],
+  "commit_sha": "a047d5f30867cffc1e5d54e947e6d50b8cb59894",
+  "friction_events": []
+}
