@@ -179,6 +179,58 @@ const PRESETS = [
         constraint: { amount_le: 30000 } },
     ],
   },
+
+  /* =========================================================================
+     T-0224 (D-3) — пресеты-должности демо-минимума (T-0222 ADR §10 / D.5).
+     Синхронизированы 1:1 с DICT_PRESETS в src/http/grants.ts (id + count).
+     Инициатор / Руководитель / Финконтролёр / Админ.
+     «Админ» — держатель управляющих грантов (mgmt_object:*), а не ресурсная
+     компетенция (uri здесь — mgmt_object:*, не из RESOURCES; axesFromGrants
+     корректно его игнорирует через RES_BY_URI).
+     ========================================================================= */
+  // 11 — Инициатор
+  {
+    id: "p-role-initiator",
+    label: "Инициатор",
+    desc: "Заводит заявку: читает счета и инициирует платёж до ₽100 000 в своём подразделении",
+    critical: true,
+    grants: [
+      { uri: "mcp://ledger.invoices",   ops: ["read", "create"], scopeOwn: true },
+      { uri: "mcp://payments.initiate", ops: ["invoke"],         scopeOwn: true,
+        constraint: { amount_le: 100000 } },
+    ],
+  },
+  // 12 — Руководитель
+  {
+    id: "p-role-manager",
+    label: "Руководитель",
+    desc: "Согласует заявки: просмотр и утверждение счетов в своём подразделении",
+    grants: [
+      { uri: "mcp://ledger.invoices", ops: ["read", "approve"], scopeOwn: true },
+    ],
+  },
+  // 13 — Финконтролёр
+  {
+    id: "p-role-fincontrol",
+    label: "Финконтролёр",
+    desc: "Финансовый контроль: чтение счетов, ведение сверки платежей и чтение договоров в Финансах",
+    grants: [
+      { uri: "mcp://ledger.invoices",  ops: ["read"],           scopeOrg: "fin" },
+      { uri: "mcp://ledger.recon",     ops: ["read", "update"], scopeOrg: "fin" },
+      { uri: "mcp://contracts.lookup", ops: ["read"],           scopeOrg: "fin" },
+    ],
+  },
+  // 14 — Админ (mgmt_object holder, не ресурсная компетенция)
+  {
+    id: "p-role-admin",
+    label: "Админ",
+    desc: "Управление правами: держатель управляющих грантов (роли и гранты) в своём подразделении — НЕ ресурсная компетенция",
+    critical: true,
+    grants: [
+      { uri: "mgmt_object:role",  ops: ["create"], scopeOwn: true, delegable: true },
+      { uri: "mgmt_object:grant", ops: ["create"], scopeOwn: true, delegable: true },
+    ],
+  },
 ];
 
 /* ---------------------------------------------------------------------------
