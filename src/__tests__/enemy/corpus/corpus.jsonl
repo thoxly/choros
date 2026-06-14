@@ -1,0 +1,27 @@
+# T-0154 · ВРАГ — append-only regression corpus (antibody store).
+#
+# spec: playbooks/enemy-redteam-backlog.md §6 «Корпус-антитела — каждая
+# подтверждённая атака навсегда в регрессии» (репо Demiurge).
+# Each line is one compact-JSON AttackCase. `#`/blank lines are comments.
+#
+# DISCIPLINE — APPEND-ONLY. A confirmed attack, once recorded here, is a
+# PERMANENT regression case: the line is NEVER deleted, reordered, or weakened.
+# New confirmed attacks are appended at the END. The fitness check
+# ci/checks/enemy/corpus-append-only.sh (owned by # T-0154) enforces this
+# against the merge base (no deleted/mutated existing lines), mirroring
+# frozen-checks-immutable's BASE_REF technique and the audit ledger's
+# append-only law. Every case here is REPLAYED against the REAL surfaces on
+# every CI run (enemy.adversarial.test.ts) — the system must forever deny each.
+#
+# SEED SET — the canonical first confirmed attack(s) of each T-0152 invariant
+# family the deterministic Enemy probes (TENANT-ISO, PDP-DENY, GRANT-ESCALATION,
+# DEV-AUTH-PROD). Produced verbatim by generateCases(0xe9e0154) so they
+# round-trip byte-identically through the harness.
+{"id":"TENANT-ISO:tenant-A->tenant-B/reg-2/rec-288#0","family":"TENANT-ISO","attack":"subject in tenant-A (with app-wide grant) resolves a handle owned by tenant-B","input":{"surface":"pdp","subject":{"tenantId":"tenant-A","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-B","registryId":"reg-2","recordId":"rec-288"},"grants":[{"tenantId":"tenant-A","id":"g-enemy","roleId":"role-enemy","resourceType":"record","operation":"read","scope":{"kind":"node","hierarchy":"resource","nodeId":"app-1","nodeLevel":"application"},"delegable":true,"grantedBy":"admin","createdAt":0}]},"expect":{"kind":"pdp-deny","reason":"cross_tenant"}}
+{"id":"TENANT-ISO:tenant-A->tenant-B/reg-2/rec-620#1","family":"TENANT-ISO","attack":"subject in tenant-A (with app-wide grant) resolves a handle owned by tenant-B","input":{"surface":"pdp","subject":{"tenantId":"tenant-A","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-B","registryId":"reg-2","recordId":"rec-620"},"grants":[{"tenantId":"tenant-A","id":"g-enemy","roleId":"role-enemy","resourceType":"record","operation":"read","scope":{"kind":"node","hierarchy":"resource","nodeId":"app-1","nodeLevel":"application"},"delegable":true,"grantedBy":"admin","createdAt":0}]},"expect":{"kind":"pdp-deny","reason":"cross_tenant"}}
+{"id":"PDP-DENY:tenant-C/reg-1/rec-661/v0#0","family":"PDP-DENY","attack":"subject with NO grants reads a record (must default-deny)","input":{"surface":"pdp","subject":{"tenantId":"tenant-C","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-C","registryId":"reg-1","recordId":"rec-661"},"grants":[]},"expect":{"kind":"pdp-deny","reason":"no_grant"}}
+{"id":"PDP-DENY:tenant-B/reg-1/rec-881/v0#1","family":"PDP-DENY","attack":"subject with NO grants reads a record (must default-deny)","input":{"surface":"pdp","subject":{"tenantId":"tenant-B","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-B","registryId":"reg-1","recordId":"rec-881"},"grants":[]},"expect":{"kind":"pdp-deny","reason":"no_grant"}}
+{"id":"GRANT-ESCALATION:tenant-C/reg-2-grant->reg-1-handle/rec-974#0","family":"GRANT-ESCALATION","attack":"subject holds a grant on reg-2 only, attempts to reach a record under reg-1 (disjoint scope)","input":{"surface":"pdp","subject":{"tenantId":"tenant-C","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-C","registryId":"reg-1","recordId":"rec-974"},"grants":[{"tenantId":"tenant-C","id":"g-enemy","roleId":"role-enemy","resourceType":"record","operation":"read","scope":{"kind":"node","hierarchy":"resource","nodeId":"reg-2","nodeLevel":"registry"},"delegable":true,"grantedBy":"admin","createdAt":0}]},"expect":{"kind":"pdp-deny","reason":"no_grant"}}
+{"id":"GRANT-ESCALATION:tenant-C/reg-2-grant->reg-1-handle/rec-992#1","family":"GRANT-ESCALATION","attack":"subject holds a grant on reg-2 only, attempts to reach a record under reg-1 (disjoint scope)","input":{"surface":"pdp","subject":{"tenantId":"tenant-C","subjectId":"attacker"},"handleRef":{"kind":"record","tenantId":"tenant-C","registryId":"reg-1","recordId":"rec-992"},"grants":[{"tenantId":"tenant-C","id":"g-enemy","roleId":"role-enemy","resourceType":"record","operation":"read","scope":{"kind":"node","hierarchy":"resource","nodeId":"reg-2","nodeLevel":"registry"},"delegable":true,"grantedBy":"admin","createdAt":0}]},"expect":{"kind":"pdp-deny","reason":"no_grant"}}
+{"id":"DEV-AUTH-PROD:tenant-A:owner/basic#0","family":"DEV-AUTH-PROD","attack":"keycloak-mode request with forged x-dev-user='tenant-A:owner' + non-Bearer Authorization must be rejected (dev stub not honoured in prod)","input":{"surface":"auth","authMode":"keycloak","headers":{"x-dev-user":"tenant-A:owner","authorization":"Basic Zm9vOmJhcg=="}},"expect":{"kind":"http-401"}}
+{"id":"DEV-AUTH-PROD:root/basic#1","family":"DEV-AUTH-PROD","attack":"keycloak-mode request with forged x-dev-user='root' + non-Bearer Authorization must be rejected (dev stub not honoured in prod)","input":{"surface":"auth","authMode":"keycloak","headers":{"x-dev-user":"root","authorization":"Basic Zm9vOmJhcg=="}},"expect":{"kind":"http-401"}}
