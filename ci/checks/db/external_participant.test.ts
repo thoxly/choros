@@ -77,22 +77,12 @@ async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [tenantId, EXTERNAL_PARTICIPANT_REGISTRY_ID, APP_ID],
   );
-  // Pre-seed the audit-chain genesis anchor (T-0016 §3.2: seq=0,
-  // row_hash = 32×0x00) for this fresh test tenant via the migrator. The dev
-  // tenant gets its head from the writer's first append; brand-new test tenants
-  // don't have one. Seeding here (a 32-byte bytea literal written by choros_migrator)
-  // means the writer's first append finds the head via ON CONFLICT DO NOTHING and
-  // only READS row_hash — it never has to write a bytea param on the choros_app
-  // pooled connection, a path that mis-encodes a 32-byte param on the Node-20 CI
-  // runner (observed: the column stored 1 byte). Reading a committed head is fine.
-  await c.query(
-    `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
-     VALUES ($1, 0,
-       '\\x0000000000000000000000000000000000000000000000000000000000000000'::bytea,
-       0, 1)
-     ON CONFLICT (tenant_id) DO NOTHING`,
-    [tenantId],
-  );
+  // NOTE: audit_head is intentionally NOT pre-seeded here. The audit writer creates
+  // the genesis head itself on the first append (seq=0 anchor → first append seq=1),
+  // exactly like the green audit-writer.chain.test.ts. Pre-seeding the head with a
+  // separately-written bytea was observed to corrupt the row_hash read on the CI
+  // runner; letting the writer own genesis (on a dedicated pg.Client) matches the
+  // proven-stable path.
 }
 
 let appPool: pg.Pool;
