@@ -833,6 +833,29 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
          VALUES ($1,$2,$3,0,0) ON CONFLICT DO NOTHING`, [tenantId, id, `ct-kc-${id.slice(0,8)}`]);
       break;
     }
+    case 'agent_instruction': {
+      // T-0123 (migration 057) — FK (tenant_id, employee_id, employee_kind)
+      // → employee(tenant_id, id, kind), kind='agent' only. Self-sufficient: seed a
+      // dedicated kind='agent' employee + its instruction. Does NOT depend on
+      // KNOWN_TENANT_TABLES order or on the shared human empId (mirrors agent_card).
+      const id = uuid();
+      const slug = `ct-aiagent-${id.slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id,id,position_id,kind,slug,display_name,created_at,updated_at)
+         VALUES ($1,$2,NULL,'agent',$3,$3,0,0) ON CONFLICT DO NOTHING`,
+        [tenantId, id, slug],
+      );
+      await c.query(
+        `INSERT INTO choros.agent_instruction
+           (tenant_id, id, employee_id, employee_kind, tier, instruction_text,
+            answer_form, instruction_meta, bundle_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 'agent', 'draft', 'ct-instruction',
+                 NULL, '{}'::jsonb, NULL, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, uuid(), id],
+      );
+      break;
+    }
     case 'instance_budget': {
       // T-0023 — no deps beyond tenant. Store id for downstream reservation seed.
       const ibId = await seedInstanceBudget(c, tenantId);
@@ -1288,6 +1311,7 @@ const SEEDED_TABLES = new Set<string>([
   'connector',
   'file',
   'file_version',
+  'agent_instruction',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

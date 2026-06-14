@@ -26,3 +26,4 @@
 052_report_page_dep           # T-0175 — reports DDL (choros.report_page_dep)
 053_author_report_page_seed   # T-0180 — mcp_tool seed author_report_page (T-0121f)
 055_fix_mcp_tool_demo_tenant  # T-0161 — delete misplaced 040 demo mcp_tool rows (wrong tenant 00000000-…-001)
+057_agent_instruction         # T-0230 — competence layer DDL (choros.agent_instruction); owned by agent-instruction-*.sh (T-0123 impl)
