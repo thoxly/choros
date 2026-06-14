@@ -5,7 +5,7 @@
    действие «взять из пула».
    ============================================================================ */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button, MonoId, Mono, ExecutorBadge } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
@@ -38,19 +38,31 @@ function SLACell({ sla }) {
 
 function InboxScreen() {
   const [tab, setTab] = useState("all");
+  const [exec, setExec] = useState(null); // executor-type filter: agent|human|service|null
+  const [sortSla, setSortSla] = useState(false); // sort by SLA headroom ascending
   const [taken, setTaken] = useState(() => ({}));
   const [items, setItems] = useState(null);
+  const [counts, setCounts] = useState({ all: 0, mine: 0, pool: 0, esc: 0 });
   const [error, setError] = useState(null);
   // T-0138: per-task claim inflight tracking (taskId → true)
   const [claiming, setClaiming] = useState(() => ({}));
 
+  // T-0093: tabs/filters/sort are applied SERVER-SIDE. The query mirrors the API:
+  // ?tab=...&exec=...&sort=sla. The server returns the filtered `items` plus full
+  // per-tab `counts` (computed from the tenant-scoped base, not the filtered view).
   const load = async () => {
     setError(null);
     try {
-      const res = await fetch('/api/inbox', { headers: devHeaders() });
+      const qs = new URLSearchParams();
+      if (tab && tab !== "all") qs.set("tab", tab);
+      if (exec) qs.set("exec", exec);
+      if (sortSla) qs.set("sort", "sla");
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      const res = await fetch(`/api/inbox${suffix}`, { headers: devHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems(data.items);
+      if (data.counts) setCounts(data.counts);
     } catch (e) {
       setError(e.message);
     }
@@ -82,27 +94,14 @@ function InboxScreen() {
     }
   };
 
+  // Re-fetch whenever the tab/filter/sort changes — semantics live on the server.
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, exec, sortSla]);
 
-  const list = items || [];
-
-  const counts = useMemo(() => ({
-    all: list.length,
-    mine: list.filter((t) => t.mine || taken[t.id]).length,
-    pool: list.filter((t) => t.pool && !taken[t.id]).length,
-    esc: list.filter((t) => t.step.includes("эскалация") || t.step.includes("L2") || t.status === "failed").length,
-  }), [list, taken]);
-
-  const rows = useMemo(() => {
-    return list.filter((t) => {
-      if (tab === "mine") return t.mine || taken[t.id];
-      if (tab === "pool") return t.pool && !taken[t.id];
-      if (tab === "esc") return t.step.includes("эскалация") || t.step.includes("L2") || t.status === "failed";
-      return true;
-    });
-  }, [list, tab, taken]);
+  // Server already applied tab/filter/sort; render the returned rows as-is.
+  const rows = items || [];
 
   return (
     <div className="chs-inbox">
@@ -115,8 +114,20 @@ function InboxScreen() {
           ))}
         </div>
         <div className="chs-inbox__spacer" />
-        <button className="chs-inbox__filter"><Icon name="filter" /> Тип исполнителя</button>
-        <button className="chs-inbox__filter">SLA ↑</button>
+        <button
+          className="chs-inbox__filter"
+          aria-pressed={exec ? "true" : undefined}
+          onClick={() => setExec((cur) => (cur === "agent" ? "human" : cur === "human" ? "service" : cur === "service" ? null : "agent"))}
+        >
+          <Icon name="filter" /> {exec ? `Тип: ${exec}` : "Тип исполнителя"}
+        </button>
+        <button
+          className="chs-inbox__filter"
+          aria-pressed={sortSla ? "true" : undefined}
+          onClick={() => setSortSla((s) => !s)}
+        >
+          SLA ↑
+        </button>
       </div>
 
       <div className="chs-inbox__scroll">
