@@ -1,0 +1,112 @@
+{
+  "task_id": "T-0222",
+  "status": "ready",
+  "decision": "Adopt four named everyday-rights intent operations (hire / fire / substitute / urgent-revoke) as a thin orchestration layer over the already-ratified rights kernel, with the load-bearing principle intent -> preset -> grants (never a manual lattice edit). (1) hire: admin names a person/agent + a preset-role; the layer creates/resolves employee (T-0017/T-0042 buildAgentHirePlan), attaches a role_assignment, and ISSUES the preset's grant atoms (T-0135 DICT_PRESETS, client-side-expanded constants, no preset table) via the existing per-atom POST /api/grants; critical:true presets route through the existing dual-control gate (dualControlDecision) unchanged. (2) fire: per-principal ATOMIC revoke of all role_assignment + sole-held grant rows (UPDATE valid_until=now via the existing withTenantTx revoke routes), the impl wrapping the revoke SET in one transaction (FF-FIRE-2); active tasks are reassigned/interrupted as a lifecycle transition recorded in the actor-event ledger (T-0019) STRICTLY AFTER the revoke commits (revoke-then-reassign, no step under stale authority); read-path goes silent once isEffective(grant,now) is false. (3) substitute: a T-0035 substitution_rule, Tier-1 routing (zero-mint, stand-in uses own role) or Tier-2 TTL'd delegation grant (valid_until=end, delegable=false, granted_by='substitution:<rule_id>') over a SUBSET of the substituted role's grants; subset is structurally guaranteed by validateNarrowing (T-0018) at write-time (substitution can never be broader than the substituted principal) and by eligibleForTier2; auto-expiry needs zero new code (isEffective). (4) urgent-revoke: immediate POST /api/grants/:id/revoke (valid_until=now), capability gone on the next PDP evaluation (no cache); for an AGENT principal the active steps MUST stop fail-closed (resolver returns no_grant/no_effect_grant at the next step boundary) AND the intent layer signals the active run to halt; the in-flight halt signal is a forward seam to T-0220's agent-outcome model (T-0220 ADR not yet present), D-1 fixes only the next-step-boundary fail-closed floor. Four invariants are the acceptance floor: I-1 intent->preset->grants (no manual lattice; preset = distribution of competence); I-2 substitution subset-of substituted (validateNarrowing, T-0018, write-time pre-persistence rejection, delegable=false); I-3 explain-PDP behind a mgmt_object:grant with anti-oracle and no hidden drop-field leak (POST /api/pdp/explain, T-0136); I-4 every intent action emits >=1 tamper-evident audit event (who/whom/when/why) through the single canonical sink appendAuditEvent (T-0031/T-0068), no parallel audit path. ZERO new tables, ZERO new columns, ZERO new lattice algebra: intents are a named composition of existing kernel calls. Doc-only ADR; no production code, no ci/checks edits. Founder-confirmable open question (D.5, non-blocking): the seed preset-role set (Initiator/Manager/FinController/Admin) for T-0224, where the codebase already ships 10 DICT_PRESETS and 'Admin' is a management-grant holder structurally distinct from a competence preset.",
+  "rejected_alternatives": [
+    {
+      "option": "A manual grant-lattice editor as the everyday surface",
+      "why_not": "The exact trap D.1 names: forces resource_type x operation x scope math on a non-technical admin and kills adoption for a self-delivered product. Presets (T-0135) already exist; D-1 layers intents over them and never exposes the lattice."
+    },
+    {
+      "option": "A new intent_operation table / new authority subsystem",
+      "why_not": "Two sources of truth for who-may-do-what; they drift. Intents are a composition of existing kernel calls, not a new store. grant + role_assignment + substitution_rule remain the single truth; D-1 adds vocabulary, not tables (mirrors T-0035 discipline)."
+    },
+    {
+      "option": "A new preset registry table the intent layer reads from",
+      "why_not": "T-0135 keeps presets as client-side-expanded constants (DICT_PRESETS, AC-18 no preset table). A DB preset table re-opens a ratified decision for zero gain; the intent layer consumes the same constants."
+    },
+    {
+      "option": "fire = soft-flag the employee, leave grants live",
+      "why_not": "Leaves residual authority: the principal can still act through still-effective grants. Fire MUST remove ALL authority atomically; the read-path goes silent only once valid_until<=now. A flag the resolver does not read is a silent leak."
+    },
+    {
+      "option": "substitute mints a fresh broad grant for the stand-in",
+      "why_not": "Breaks I-2: a hand-built substitution grant could be wider than the substituted role. T-0035 Tier-2 mint is subset-checked by validateNarrowing against the substituted grant as parent; a fresh unconstrained mint bypasses the gate."
+    },
+    {
+      "option": "urgent-revoke for an agent = stamp valid_until and trust the next run",
+      "why_not": "An in-flight agent run mid-step could complete a step under the removed right if it snapshotted authority. The contract (FF-REVOKE-3) requires the resolver to deny at the next step boundary (fail-closed) AND the intent layer to signal the active run to halt; not silent stamp-and-walk."
+    },
+    {
+      "option": "Embed explain for any caller (no mgmt-grant gate)",
+      "why_not": "Turns explain into an oracle: a non-admin could enumerate another subject's rights or discover hidden fields. T-0136's gate (subject-self OR mgmt_object:grant) + anti-oracle 403 + no drop-field leak is the floor (I-3)."
+    },
+    {
+      "option": "A separate audit channel for intent operations",
+      "why_not": "Two preimage rules / two chains make a verifier false-positive tamper on a mixed chain (the T-0030->T-0068 lesson). One sink, one chain (I-4)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "NO NEW ENTITY (D-1 introduces zero new tables and zero new columns)",
+      "fields": [
+        {"name": "hire", "type": "composition: reads DICT_PRESETS/employee/position/admin-context; writes employee (if new) + role_assignment + N x grant (preset atoms), all via existing write-API in withTenantTx, all audited"},
+        {"name": "fire", "type": "composition: reads employee role_assignment rows + sole-held grant rows + active tasks; writes UPDATE grant.valid_until=now + UPDATE role_assignment.valid_until=now (one tx over the set) + actor-event transitions (after revoke commit)"},
+        {"name": "substitute", "type": "composition: reads substituted role grants + pool holders + admin-context; writes substitution_rule (proposal->confirm) + optional Tier-2 grant (subset via validateNarrowing, valid_until=TTL, delegable=false)"},
+        {"name": "urgent-revoke", "type": "composition: reads target grant row + principal kind; writes UPDATE grant.valid_until=now + (agent) active-run halt signal; PDP denies fail-closed at next step boundary"}
+      ]
+    }
+  ],
+  "contracts": [
+    "C-1 T-0223 (D-2 UI): the intent layer exposes ONLY the four named operations; the admin UI has NO raw grant-atom editor. hire issues grants exclusively by expanding a GrantPreset from DICT_PRESETS (carry preset_id provenance); the employee card embeds POST /api/pdp/explain behind loadAdminContext + validateAdminDelegation (mgmt_object:grant).",
+    "C-2 T-0223 (D-2 fire atomicity): the revoke SET for one fire intent is wrapped in a SINGLE withTenantTx (atomic per-principal); active-task reassign/interrupt is a lifecycle transition recorded in the actor-event ledger STRICTLY AFTER the revoke commits (revoke-then-reassign).",
+    "C-3 T-0223 (D-2 substitute): a Tier-2 mint passes validateNarrowing(parent=substituted-role grant, child=ttl grant, oracle) before persistence and sets delegable=false; eligibleForTier2 drops non-inheritable grants; auto-expiry rides isEffective (no new gateway code).",
+    "C-4 T-0223 (D-2 urgent-revoke / agent): after revoke, resolveFor returns no_grant/no_effect_grant for the revoked capability (no cache); for an agent principal the active run receives a halt signal and no subsequent step is dispatched under the removed right. The precise in-flight halt signal is forward-bound to T-0220 (agent-outcome model); D-1 fixes the next-step-boundary fail-closed floor.",
+    "C-5 T-0224 (D-3 seed presets): seed the founder-confirmed preset-role set (D.5). Existing DICT_PRESETS (10) are the baseline; the four demo-minimum roles (Initiator/Manager/FinController/Admin) are mapped onto presets, with 'Admin' provisioned as a mgmt_object:* assignment (not a competence preset) pending founder confirmation.",
+    "C-6 audit sink: every intent op folds to >=1 audit event via appendAuditEvent (writeGrantAuditEvent/writeAssignmentAuditEvent); NO parallel audit path (NF-7). GrantAuditEvent carries actor/subjectRoleId/capability/scope/proposedBy?/confirmedBy?."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-HIRE-1",
+      "rule": "A hire writes grants ONLY by expanding a GrantPreset from DICT_PRESETS; each issued atom's (resource_type, operation, scope, constraint) matches a DICT_PRESETS[preset].grants[] atom; no atom outside a preset.",
+      "ci_check": "vitest/integration: assert hire grant POSTs carry preset_id provenance and match a DICT_PRESETS atom"
+    },
+    {
+      "id": "FF-INTENT-2",
+      "rule": "No intent op writes a grant except via a preset or a T-0035 substituted subset; the intent layer exposes no raw-atom authoring path (no lattice editor in the admin UI).",
+      "ci_check": "static lint: the only grant-issuing call sites in the intent layer reference a preset or eligibleForTier2"
+    },
+    {
+      "id": "FF-SUB-3",
+      "rule": "A substitution can never be broader than the substituted principal: for any substituted role R and Tier-2 mint M, validateNarrowing(parent in R, M, oracle).ok===true; a constructed widening M is rejected with the matching typed reason and never persisted; M.delegable===false.",
+      "ci_check": "static-now property test over validateNarrowing (T-0018) + eligibleForTier2 (T-0035)"
+    },
+    {
+      "id": "FF-FIRE-2",
+      "rule": "Fire is per-principal atomic + revoke-then-reassign: after a fire the principal has zero effective grants and zero active role-assignments; a partial failure rolls back the whole revoke set (single withTenantTx over the loop); no active task executes a step under stale authority.",
+      "ci_check": "integration test against the live write-API: post-fire isEffective/assignment-window all false; partial-failure rollback; reassign strictly after revoke commit"
+    },
+    {
+      "id": "FF-REVOKE-3",
+      "rule": "Urgent-revoke is immediate; for an agent it stops active steps fail-closed: immediately after revoke resolveFor returns no_grant/no_effect_grant (no cache); an agent active run receives a halt signal and no subsequent step is dispatched under the removed right.",
+      "ci_check": "integration test: post-revoke PDP denies; agent-run halt signal asserted (floor); in-flight halt sharpened by T-0220"
+    },
+    {
+      "id": "FF-EXPLAIN-4",
+      "rule": "Explain is embedded behind a mgmt-grant with no hidden-field leak: the employee-card explain goes through POST /api/pdp/explain; a non-admin caller about another subject gets 403 (anti-oracle); drop-masked field names never appear in a self-query response.",
+      "ci_check": "integration test against POST /api/pdp/explain (T-0136): admin trace 200, non-admin cross-subject 403, no drop-field leak on self-query"
+    },
+    {
+      "id": "FF-AUDIT-5",
+      "rule": "Every intent op emits >=1 tamper-evident audit event (who/whom/when/why) via the single sink appendAuditEvent; no parallel audit path.",
+      "ci_check": "integration test: each of hire/fire/substitute/urgent-revoke produces audit event(s) with actor/subject/timestamp/intent-provenance, all via appendAuditEvent"
+    },
+    {
+      "id": "FF-CRITICAL-6",
+      "rule": "A critical:true preset routes through the existing dual-control gate: hiring into p-treasury-exec/p-pay-init-limited/p-refund-operator where the criticality fold escalates lands the grant semi-confirmed pending a distinct second approver, not auto-active.",
+      "ci_check": "integration test: critical-preset hire lands semi-confirmed (dualControlDecision required_approvers===2)"
+    }
+  ],
+  "traceability": [
+    {"ac": "I-1 intent->preset->grants", "covered_by": "ADR section 3.1/4 + FF-HIRE-1/FF-INTENT-2; DICT_PRESETS src/http/grants.ts:420 (T-0135)"},
+    {"ac": "I-2 substitution subset-of substituted", "covered_by": "ADR section 3.3/4 + FF-SUB-3; validateNarrowing src/core/grant-lattice.ts:408 (T-0018) + eligibleForTier2 src/core/substitution.ts:233 (T-0035)"},
+    {"ac": "I-3 explain behind mgmt-grant, no hidden-field leak", "covered_by": "ADR section 4 + FF-EXPLAIN-4; POST /api/pdp/explain src/http/pdp-explain.ts (T-0136)"},
+    {"ac": "I-4 audit-per-action tamper-evident", "covered_by": "ADR section 4 + FF-AUDIT-5; writeGrantAuditEvent/appendAuditEvent src/http/grants.ts:222 (T-0031/T-0068), GrantAuditEvent T-0018 section 4.6"},
+    {"ac": "hire", "covered_by": "ADR section 3.1; buildAgentHirePlan src/core/agent-hire.ts:126 (T-0042), POST /api/role-assignments src/http/grants.ts:927, employee/position src/db/org.ts (T-0017)"},
+    {"ac": "fire", "covered_by": "ADR section 3.2 + FF-FIRE-2; POST /api/grants/:id/revoke + /role-assignments/:id/revoke src/http/grants.ts:871,1083; isEffective (T-0018); actor-event.ts/lifecycle-guard.ts (T-0019)"},
+    {"ac": "substitute", "covered_by": "ADR section 3.3 + FF-SUB-3; SubstitutionRule/eligibleForTier2/resolveSubstitution src/core/substitution.ts (T-0035); validateNarrowing (T-0018)"},
+    {"ac": "urgent-revoke", "covered_by": "ADR section 3.4 + FF-REVOKE-3; POST /api/grants/:id/revoke src/http/grants.ts:871; resolver fail-closed src/core/grant-resolver.ts:564 (T-0021); halt seam -> T-0220"},
+    {"ac": "D.5 seed preset-role set (open question)", "covered_by": "ADR section 10; surfaced for founder + T-0224, NOT decided here"}
+  ],
+  "adr_artifact_path": "docs/design/T-0222-rights-intent-operations.adr.md"
+}
