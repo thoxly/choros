@@ -16,14 +16,18 @@
 // surface (external_surface / external_token) is Stage-2 and intentionally untested
 // here — it does not exist in v1.
 //
-// Seeds go through migratorUrl() (bypasses RLS). The model's data ops run through
-// an explicit choros_app pool (appUrl) so RLS is the thing under test — same
-// strategy as cross_tenant.test.ts. Test tenants TENANT_A/_B are distinct from the
-// dev-seed tenant (a0…0001), so rows never collide with migration seeds.
+// FRESH TENANTS: the db-tier runs all files against ONE shared cloned DB
+// (globalSetup, --no-file-parallelism). Other files seed audit_head for the shared
+// TENANT_A/_B fixtures with short bytea literals, which would corrupt this suite's
+// audit-chain genesis read. So this suite mints its OWN random tenant ids per run
+// (like audit-writer.chain.test.ts's freshTenant), isolating it from cross-file state.
+//
+// Seeds go through migratorUrl() (bypasses RLS). The model's data ops run through an
+// explicit choros_app pool (appUrl) so RLS is the thing actually under test.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
-import { migratorUrl, appUrl, withClient, TENANT_A, TENANT_B, uuid } from './_helpers.js';
+import { migratorUrl, appUrl, withClient } from './_helpers.js';
 import {
   createExternalParticipant,
   getExternalParticipant,
@@ -47,13 +51,21 @@ function requireDb<T>(fn: () => Promise<T>): () => Promise<T | void> {
 }
 
 // ---------------------------------------------------------------------------
-// Seed helpers (migrator role — bypasses RLS).
-// Each test tenant gets: tenant row → application → external-participant
-// registry_def with the well-known EXTERNAL_PARTICIPANT_REGISTRY_ID (PK is
-// (tenant_id, id), so the same id across tenants is correct and expected).
+// Fresh per-run tenant ids (avoid shared-fixture cross-file contamination).
 // ---------------------------------------------------------------------------
 
-const APP_ID = 'a5000000-0000-0000-0000-000000000001';
+const TENANT_A = crypto.randomUUID();
+const TENANT_B = crypto.randomUUID();
+const APP_ID = crypto.randomUUID();
+
+// ---------------------------------------------------------------------------
+// Seed helper (migrator role — bypasses RLS).
+// Each fresh tenant gets: tenant row → application → external-participant
+// registry_def with the well-known EXTERNAL_PARTICIPANT_REGISTRY_ID (PK is
+// (tenant_id, id), so the same registry id across tenants is correct and expected).
+// audit_head is intentionally NOT seeded — the audit writer owns genesis on the
+// first append (matching audit-writer.chain.test.ts).
+// ---------------------------------------------------------------------------
 
 async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
   await c.query(
@@ -77,20 +89,11 @@ async function seedDirectory(c: pg.Client, tenantId: string): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [tenantId, EXTERNAL_PARTICIPANT_REGISTRY_ID, APP_ID],
   );
-  // NOTE: audit_head is intentionally NOT pre-seeded here. The audit writer creates
-  // the genesis head itself on the first append (seq=0 anchor → first append seq=1),
-  // exactly like the green audit-writer.chain.test.ts. Pre-seeding the head with a
-  // separately-written bytea was observed to corrupt the row_hash read on the CI
-  // runner; letting the writer own genesis (on a dedicated pg.Client) matches the
-  // proven-stable path.
 }
 
 let appPool: pg.Pool;
 
-// Exactly ONE create per tenant, performed once in beforeAll. Each create is a
-// single audit append against the migrator-seeded genesis head (read-only on the
-// head's bytea), so the suite never re-reads a writer-written row_hash on the
-// choros_app pooled connection. All assertions below read the resulting records.
+// One create per tenant, performed once in beforeAll; assertions read the results.
 let recA: ExternalParticipant | undefined;
 let recB: ExternalParticipant | undefined;
 
@@ -102,58 +105,18 @@ beforeAll(async () => {
   });
   appPool = new pg.Pool({ connectionString: appUrl() });
 
-  // The audit-appending creates run on a dedicated pg.Client (choros_app), the
-  // proven-stable connection class for the canonical audit writer's bytea round-trip
-  // (a pooled connection mis-encoded a 32-byte bytea param on the Node-20 CI runner).
-  // DIAGNOSTIC (temporary): call the canonical writer exactly like the green
-  // audit-writer.chain.test.ts — fresh random tenant, dedicated Client, writer-only —
-  // to isolate whether the raw writer genesis works in THIS test's environment.
-  {
-    const { makePgAuditWriter } = await import('../../../src/db/audit-writer.js');
-    const w = makePgAuditWriter();
-    for (const [label, t] of [['random', crypto.randomUUID()], ['TENANT_A', TENANT_A]] as const) {
-      const probe = new pg.Client({ connectionString: appUrl() });
-      await probe.connect();
-      try {
-        await probe.query('BEGIN');
-        await probe.query(`SET LOCAL choros.tenant_id = '${t}'`);
-        await probe.query('SET LOCAL search_path TO choros');
-        const res = await w.appendAuditEvent(probe as never, {
-          id: crypto.randomUUID(), type: 'instance.started', actor: 'ep-probe',
-          subject: 'pi-1', scope: null, via: 'engine', proposed_by: null,
-          confirmed_by: null, payload: { actorType: 'human' }, occurred_at: 1700000000000,
-        });
-        // eslint-disable-next-line no-console
-        console.log(`[DIAG ep] raw writer genesis (${label}) seq:`, res.seq);
-        await probe.query('ROLLBACK');
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.log(`[DIAG ep] raw writer (${label}) FAILED:`, (e as Error).message);
-        await probe.query('ROLLBACK').catch(() => {});
-      } finally {
-        await probe.end();
-      }
-    }
-  }
-
-  const wc = new pg.Client({ connectionString: appUrl() });
-  await wc.connect();
-  try {
-    recA = await createExternalParticipant({
-      pool: wc,
-      tenantId: TENANT_A,
-      actor: 'ep-tester-a',
-      data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
-    });
-    recB = await createExternalParticipant({
-      pool: wc,
-      tenantId: TENANT_B,
-      actor: 'ep-tester-b',
-      data: { display_name: 'Only-B', kind: 'visitor' },
-    });
-  } finally {
-    await wc.end();
-  }
+  recA = await createExternalParticipant({
+    pool: appPool,
+    tenantId: TENANT_A,
+    actor: 'ep-tester-a',
+    data: { display_name: 'Контрагент A1', kind: 'counterparty', inn: '5000000001' },
+  });
+  recB = await createExternalParticipant({
+    pool: appPool,
+    tenantId: TENANT_B,
+    actor: 'ep-tester-b',
+    data: { display_name: 'Only-B', kind: 'visitor' },
+  });
 });
 
 afterAll(async () => {
@@ -243,6 +206,3 @@ describe('external participant directory — tenant isolation (live db, choros_a
     }),
   );
 });
-
-// silence unused-import lint when DB is absent (uuid kept for parity with siblings)
-void uuid;
