@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: web frontend
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS web-builder
+FROM node:22-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
@@ -23,7 +23,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # Stage 2: app builder (TypeScript → dist/)
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS app-builder
+FROM node:22-alpine AS app-builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -34,9 +34,9 @@ COPY seed/ ./seed/
 RUN npm run build
 
 # ---------------------------------------------------------------------------
-# Stage 3: runtime (node:20-slim — lean production base)
+# Stage 3: runtime (node:22-slim — lean production base)
 # ---------------------------------------------------------------------------
-FROM node:20-slim AS runtime
+FROM node:22-slim AS runtime
 WORKDIR /app
 
 # Application JS
