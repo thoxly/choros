@@ -5,6 +5,24 @@ on:
     branches: [main, dev]
   pull_request:
 
+# Pin a collation-capable UTF-8 locale for ALL jobs. ubuntu-latest's default
+# locale is C.UTF-8, whose collation table REJECTS multibyte range expressions:
+# GNU grep raises "Invalid collation character" (exit 2) on Cyrillic ranges like
+# [а-яё] used by frozen checks (e.g. T-0133-adr-shape.sh), turning a green-local
+# run red-on-runner (locale-dependent gate bug, T-0216).
+# Empirically verified on ubuntu-latest (T-0216 diag run 27496192707):
+#   LC_ALL=C.UTF-8   → grep "нов[а-яё]+"  →  "Invalid collation character", rc=2
+#   LC_ALL=en_US.UTF-8 → matches, rc=0       (en_US.utf8 is PRE-INSTALLED; it
+#                                             appears in `locale -a` with no
+#                                             locale-gen needed)
+# en_US.UTF-8 is UTF-8-aware AND carries a real collation table, so the range
+# resolves correctly. Job-level env keys still override these per GitHub Actions
+# env precedence, so flowable/stack/db/kc keep their own vars; locale is purely
+# additive and safe for every job.
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -58,6 +76,15 @@ jobs:
       - run: node migrations/run.mjs
       # 2. Re-run to prove idempotency (FF-2 / AC-3): zero new applications.
       - run: node migrations/run.mjs
+      # 2b. Provision the per-migration-hash template DB
+      #     (choros_test_template_<hash8>). The T-0147 db-isolation harness'
+      #     globalSetup.ts CLONES per-test DBs from this template and ERRORS
+      #     ("template database ... not found") if it is absent — it does NOT
+      #     create it. This provisioning step (fitness:db:setup-template) was
+      #     never wired into the db job when T-0147 landed, so every db run
+      #     failed before tests started (T-0216). Idempotent: re-creates only
+      #     if missing, then runs migrations against the template.
+      - run: npm run fitness:db:setup-template
       # 3. Live probe suite: schema + behavior + idempotency + ≥2-tenant guard
       #    (FF-RLS/DENY/LEAD/SCOPE/ROLE/APPEND/FK-RESOLVE/JSONB/ACT/2TENANT).
       - run: npm run fitness:db
@@ -170,6 +197,18 @@ jobs:
       KEYCLOAK_AUDIENCE: choros-api
       KEYCLOAK_PORT: "8180"
       KEYCLOAK_MGMT_PORT: "9000"
+      # DEV-only realm credentials the live-KC e2e test fetches tokens with.
+      # These are NOT secrets: they ship in config/keycloak/realm-choros.json
+      # (clearly DEV-labeled) and are the same values the fitness:kc token
+      # checks (ci/checks/kc/{human,agent}-token.sh) already hardcode and that
+      # docs/environments.md documents. Without them the test sends empty
+      # client_secret/password → Keycloak returns 401 unauthorized_client
+      # (T-0216; surfaced once the static-check + bare-vitest fixes let the
+      # live-KC step actually run).
+      CHOROS_API_SECRET: choros-api-dev-secret
+      AGENT_ORCHESTRATOR_SECRET: agent-orchestrator-dev-secret
+      KC_TEST_USERNAME: e-kravtsova
+      KC_USER_PASSWORD: dev-pw-kravtsova
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -190,10 +229,24 @@ jobs:
           bash ci/checks/worker-auth-single-branch.sh
           bash ci/checks/worker-auth-zero-dep.sh
           bash ci/checks/worker-auth-public-surface.sh
-          bash ci/checks/worker-auth-config-failfast.sh
+          # worker-auth-config-failfast.sh is HERMETIC: each of its 4 subtests
+          # sets CHOROS_AUTH_MODE / KEYCLOAK_URL inline. But the kc job exports
+          # CHOROS_AUTH_MODE=keycloak and KEYCLOAK_URL=... at job-env level for
+          # the live KC tests, and those leak into the subtests' node processes:
+          #   - negative subtest (keycloak, no KEYCLOAK_URL → must throw) sees
+          #     the ambient KEYCLOAK_URL → no throw → false FAIL;
+          #   - dev-mode subtest (no inline mode → must be no-op) sees the
+          #     ambient CHOROS_AUTH_MODE=keycloak → throws → false FAIL.
+          # Both subtests pass in the `ci` job precisely because neither var is
+          # set there. Clear both ambient vars for THIS check only so its inline
+          # per-subtest env governs; the other four checks keep the job env (T-0216).
+          env -u KEYCLOAK_URL -u CHOROS_AUTH_MODE bash ci/checks/worker-auth-config-failfast.sh
           bash ci/checks/worker-auth-env-docs.sh
       - name: Run live-KC integration tests (FF-1/FF-7, AC-22/23)
-        run: vitest run src/__tests__/workerAuth.kc.e2e.test.ts
+        # Use npx so the LOCAL vitest binary resolves: a bare `vitest` is not on
+        # PATH on the runner → exit 127 (command not found). This was masked until
+        # the static-checks step above stopped failing first (T-0216).
+        run: npx vitest run src/__tests__/workerAuth.kc.e2e.test.ts
       - name: Stop services
         if: always()
         run: docker compose stop keycloak postgres
