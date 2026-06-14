@@ -21,6 +21,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: DIAG locale (TEMP T-0216)
+        run: |
+          set -x
+          echo "LANG=$LANG LC_ALL=$LC_ALL"
+          locale || true
+          locale -a || true
+          PAT='нов[а-яё]+'
+          for L in C.UTF-8 en_US.UTF-8 C POSIX; do
+            echo "--- LC_ALL=$L ---"
+            LC_ALL="$L" bash -c 'echo "новая сущность" | grep -E "нов[а-яё]+" ; echo "rc=$?"' 2>&1 || true
+          done
+          echo "--- after locale-gen en_US.UTF-8 ---"
+          sudo locale-gen en_US.UTF-8 || true
+          sudo update-locale || true
+          LC_ALL=en_US.UTF-8 bash -c 'echo "новая сущность" | grep -E "нов[а-яё]+" ; echo "rc=$?"' 2>&1 || true
       - uses: actions/setup-node@v4
         with:
           node-version: 20
