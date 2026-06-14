@@ -89,7 +89,7 @@ tier-артефактом, который promote-ится тем же endpoint-
 
 Ввести компетентностный слой агента как **отдельную тенант-изолированную CONFIG-
 таблицу `choros.agent_instruction`** (additive-миграция, следующий свободный слот
-**056**), привязанную к `employee(kind='agent')` тем же composite-FK-идиомом, что и
+**057**), привязанную к `employee(kind='agent')` тем же composite-FK-идиомом, что и
 `agent_card`, и **полностью встроенную в ратифицированный tier-механизм T-0087**:
 
 - **Содержание инструкции (AC-1).** `instruction_text` (основной текст компетенции
@@ -164,14 +164,14 @@ tier-артефактом, который promote-ится тем же endpoint-
 продуктовый выбор фаундера (см. §7 Escalation). Всё остальное (хранение,
 tier-механика через T-0087, promote, аудит, изоляция, дормантность, не-расширение
 прав) спроектировано в рамках ратифицированных решений и от ответа на Q-1 НЕ
-зависит — coder может строить миграцию 056, DAO, аудит draft-типов, регистрацию в
+зависит — coder может строить миграцию 057, DAO, аудит draft-типов, регистрацию в
 `CONFIG_TABLES` и fitness-чеки немедленно.
 
 ---
 
 ## 2. Object model
 
-### Таблица `choros.agent_instruction` (новая, миграция 056, additive, CONFIG-класс)
+### Таблица `choros.agent_instruction` (новая, миграция 057, additive, CONFIG-класс)
 
 | Колонка | Тип | Назначение |
 |---|---|---|
@@ -203,7 +203,7 @@ tier-механика через T-0087, promote, аудит, изоляция, 
 - `GRANT SELECT, INSERT, UPDATE, DELETE ON choros.agent_instruction TO choros_app`.
 
 «Нет инструкции» (AC-10) = отсутствие строки для агента — валидное дормантное
-состояние. Миграция 056 НЕ сидит инструкции для dev-агентов (они остаются без
+состояние. Миграция 057 НЕ сидит инструкции для dev-агентов (они остаются без
 инструкции); ни одна существующая строка `agent_card`/`employee` не меняется.
 
 ### Реестр промоутируемых таблиц (правка, не новый механизм)
@@ -228,7 +228,7 @@ raw-text.
 
 ## 3. Contracts (единый контракт полей/типов для coder и tester)
 
-1. **Миграция** `migrations/056_agent_instruction.sql` — DDL таблицы §2; колонка
+1. **Миграция** `migrations/057_agent_instruction.sql` — DDL таблицы §2; колонка
    `tier` по контракту 049; `CREATE TRIGGER tier_published_locked … EXECUTE
    FUNCTION choros.tier_published_locked()`; FORCE RLS; `bundle_id` без FK
    (комментарий-сема для T-0082); без сид-инструкций; любой будущий сид-INSERT —
@@ -290,9 +290,9 @@ PASS/FAIL — как в `agent-hire-frozen-additive.sh` (merge-base с `dev`,
 
 | id | rule | ci_check |
 |---|---|---|
-| FF-COMP-1 | Additive к T-0020: миграция 056 не трогает `032_agent_card.sql` и не добавляет колонок в `agent_card`/`employee`; новая таблица — отдельная. | `ci/checks/agent-instruction-additive.sh`: `git diff --name-only "$BASE" -- migrations/032_agent_card.sql` пусто; `! grep -q "ALTER TABLE choros.agent_card" migrations/056_agent_instruction.sql`; `grep -q "CREATE TABLE choros.agent_instruction" migrations/056_agent_instruction.sql`. |
-| FF-COMP-2 | T-0013 изоляция: `agent_instruction` несёт `tenant_id` ведущим в PK, `FORCE ROW LEVEL SECURITY`, tenant-policy, и внесена в `known_tenant_tables.txt`. | `ci/checks/agent-instruction-rls.sh`: `grep -q "FORCE ROW LEVEL SECURITY"` и `grep -q "current_setting('choros.tenant_id'"` в 056; `grep -q "^agent_instruction$" ci/checks/known_tenant_tables.txt`; PK начинается с `tenant_id`. |
-| FF-COMP-3 | Версионирование = T-0087 как есть (NF-1): `tier`-CHECK содержит РОВНО `draft`/`published` (контракт 049), и таблица несёт триггер `tier_published_locked`; своего версионного enum/механизма нет. | `ci/checks/agent-instruction-tier-reuse.sh`: `grep -qE "tier IN \('draft', ?'published'\)"` в 056; `grep -q "EXECUTE FUNCTION choros.tier_published_locked()"` в 056; перекрёстная сверка, что функция определена в `migrations/049_tier.sql`; отсутствие литералов `authoring_draft`/`authoring_published` в артефактах T-0123. |
+| FF-COMP-1 | Additive к T-0020: миграция 057 не трогает `032_agent_card.sql` и не добавляет колонок в `agent_card`/`employee`; новая таблица — отдельная. | `ci/checks/agent-instruction-additive.sh`: `git diff --name-only "$BASE" -- migrations/032_agent_card.sql` пусто; `! grep -q "ALTER TABLE choros.agent_card" migrations/057_agent_instruction.sql`; `grep -q "CREATE TABLE choros.agent_instruction" migrations/057_agent_instruction.sql`. |
+| FF-COMP-2 | T-0013 изоляция: `agent_instruction` несёт `tenant_id` ведущим в PK, `FORCE ROW LEVEL SECURITY`, tenant-policy, и внесена в `known_tenant_tables.txt`. | `ci/checks/agent-instruction-rls.sh`: `grep -q "FORCE ROW LEVEL SECURITY"` и `grep -q "current_setting('choros.tenant_id'"` в 057; `grep -q "^agent_instruction$" ci/checks/known_tenant_tables.txt`; PK начинается с `tenant_id`. |
+| FF-COMP-3 | Версионирование = T-0087 как есть (NF-1): `tier`-CHECK содержит РОВНО `draft`/`published` (контракт 049), и таблица несёт триггер `tier_published_locked`; своего версионного enum/механизма нет. | `ci/checks/agent-instruction-tier-reuse.sh`: `grep -qE "tier IN \('draft', ?'published'\)"` в 057; `grep -q "EXECUTE FUNCTION choros.tier_published_locked()"` в 057; перекрёстная сверка, что функция определена в `migrations/049_tier.sql`; отсутствие литералов `authoring_draft`/`authoring_published` в артефактах T-0123. |
 | FF-COMP-4 | Promote — общий механизм T-0087, не свой (NF-1/NF-3): `agent_instruction` зарегистрирован в `CONFIG_TABLES`; в коде T-0123 нет своего `UPDATE … SET tier='published'` и нет своего promote-эндпоинта/типа. | `ci/checks/agent-instruction-promote-shared.sh`: `grep -q '"agent_instruction"' src/http/artifacts.ts` (в CONFIG_TABLES); `! grep -rq "SET tier = 'published'\|tier='published'" src/db/agent-instruction-store.ts`; `! grep -rq "agent.instruction.promoted" src/`. |
 | FF-COMP-5 | Права не расширяются (AC-8): `src/core/grant-resolver.ts` не импортирует/не читает `agent_instruction`; файл frozen (0 diff к base). | `ci/checks/agent-instruction-no-pdp.sh`: `git diff --name-only "$BASE" -- src/core/grant-resolver.ts` пусто; `! grep -q "agent_instruction\|agent-instruction" src/core/grant-resolver.ts src/core/grant-lattice.ts`. |
 | FF-COMP-6 | Дормантность рантайма (AC-11): ни один рантайм-модуль ответа вне Stage-2-парковки не читает `agent_instruction`; чтение допустимо только в authoring-DAO/changelog/audit/тестах. | `ci/checks/agent-instruction-runtime-dormant.sh`: `grep -rl "agent_instruction" src/core/engine src/worker` — любой хит FAIL; в `src/http` хит допустим ТОЛЬКО в authoring-маршрутах и `artifacts.ts` CONFIG_TABLES (allowlist), запрещён в response-формирующих хендлерах. |
@@ -347,7 +347,7 @@ PASS/FAIL — как в `agent-hire-frozen-additive.sh` (merge-base с `dev`,
 **Status = `needs_founder`.** Все инженерные оси (хранение, версионирование через
 T-0087, promote, аудит, изоляция, дормантность, не-расширение прав) решены в рамках
 ратифицированных решений и от ответа Q-1 НЕ зависят — coder может строить миграцию
-056, таблицу, DAO, регистрацию в `CONFIG_TABLES`, аудит draft-типов и fitness-чеки
+057, таблицу, DAO, регистрацию в `CONFIG_TABLES`, аудит draft-типов и fitness-чеки
 немедленно.
 
 Открыт ровно один продуктовый вопрос (gap-map §3#4, не зафиксирован фаундером для
@@ -386,7 +386,7 @@ day-1 dormant, рантайм-потребитель — Stage-2.
 
 DESIGN-only; impl приземляется детьми (точный split — за CP/founder):
 
-1. **T-0123a · миграция + изоляция.** `migrations/056_agent_instruction.sql` (DDL
+1. **T-0123a · миграция + изоляция.** `migrations/057_agent_instruction.sql` (DDL
    §2, tier-колонка по 049, триггер `tier_published_locked`, FORCE RLS, `bundle_id`
    без FK, без сидов) + строка в `known_tenant_tables.txt`. Покрывает
    FF-COMP-1/2/3. Зависит от: ничего (T-0087/049 уже на dev).
