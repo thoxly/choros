@@ -31,6 +31,35 @@ import pg from "pg";
 import { makePgAuditWriter, type PgClientLike } from "./audit-writer.js";
 
 // ---------------------------------------------------------------------------
+// bytea → Buffer coercion (Node-runtime robustness)
+//
+// The canonical audit writer (audit-writer.ts) reads choros.audit_head.row_hash
+// and feeds it to canonicalPreimage, which asserts Buffer.isBuffer(prev_hash). On
+// some Node/pg runtime combinations a bytea column comes back as a Uint8Array (a
+// real Buffer is a Uint8Array subclass, but a plain Uint8Array is not a Buffer).
+// We pin a per-pool bytea (OID 17) type parser that always yields a real Buffer,
+// so the audit append is deterministic across runtimes (Node 20 CI / Node 23 dev).
+// This is local to our pools — it does not mutate pg's global parsers.
+// ---------------------------------------------------------------------------
+
+const BYTEA_OID = 17;
+
+export const BUFFER_TYPES: pg.CustomTypesConfig = {
+  getTypeParser: ((oid: number, format?: unknown) => {
+    const base = (
+      pg.types.getTypeParser as (o: number, f?: unknown) => (v: unknown) => unknown
+    )(oid, format);
+    if (oid === BYTEA_OID) {
+      return (value: unknown) => {
+        const parsed = base(value);
+        return Buffer.isBuffer(parsed) ? parsed : Buffer.from(parsed as Uint8Array);
+      };
+    }
+    return base;
+  }) as pg.CustomTypesConfig["getTypeParser"],
+};
+
+// ---------------------------------------------------------------------------
 // Constants — directory identity (matches migration 056 stable UUIDs)
 // ---------------------------------------------------------------------------
 
@@ -53,7 +82,7 @@ export function getExternalParticipantPool(): pg.Pool {
     if (!url) {
       throw new Error("DATABASE_URL not set — cannot build external-participant pool");
     }
-    _pool = new pg.Pool({ connectionString: url });
+    _pool = new pg.Pool({ connectionString: url, types: BUFFER_TYPES });
   }
   return _pool;
 }

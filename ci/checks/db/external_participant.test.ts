@@ -29,6 +29,7 @@ import {
   getExternalParticipant,
   listExternalParticipants,
   EXTERNAL_PARTICIPANT_REGISTRY_ID,
+  BUFFER_TYPES,
 } from '../../../src/db/external-participant.js';
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ beforeAll(async () => {
     await seedDirectory(c, TENANT_A);
     await seedDirectory(c, TENANT_B);
   });
-  appPool = new pg.Pool({ connectionString: appUrl() });
+  appPool = new pg.Pool({ connectionString: appUrl(), types: BUFFER_TYPES });
 });
 
 afterAll(async () => {
