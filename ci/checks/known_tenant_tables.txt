@@ -35,3 +35,5 @@ notification_preference
 report_page
 report_page_dep
 connector
+file
+file_version

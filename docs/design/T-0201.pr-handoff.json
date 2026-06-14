@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0201",
+  "status": "pr_open",
+  "branch": "task/T-0201",
+  "pr_url": "",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": false
+  },
+  "files_changed": [
+    "migrations/058_files_attachments.sql",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/file-attachment-isolation.sh",
+    "src/core/file-attachment.ts",
+    "src/core/postgres/pgFileStore.ts",
+    "src/adapters/s3-object-store.ts",
+    "src/__tests__/file-attachment.test.ts",
+    "ci/checks/db/file_attachment.test.ts",
+    "package.json",
+    "docs/design/T-0201.pr-handoff.json"
+  ],
+  "migration": "058_files_attachments.sql",
+  "tests_added": {
+    "unit": "src/__tests__/file-attachment.test.ts (16 tests): FF-KEY, FF-DERIVED-AUTHZ (no-grant deny / grant allow / cross-tenant), FF-PRESIGN-AFTER-ALLOW (deny=>no presign, allow=>ttl<=300), FF-FAILCLOSED, storage round-trip, FF-V immutable-version (two rows, distinct key/version_no/hash, old readable, zero overwrite), addVersion deny path, declared limits (size/mime), FF-RETENTION-DENY (active/archived refuse, pending_deletion erase+tombstone, content_erased undownloadable), FF-AUDIT-EVENTS (upload/replace/download/delete with record subject + payload)",
+    "db": "ci/checks/db/file_attachment.test.ts (5 tests, live PG): round-trip + getFile JOIN registry_id, tenant isolation (RLS cross-tenant get=null), immutable-versions readable after replace (current=v2, hashes differ, maxVersionNo), retention tombstone (metadata/hash survive), structural cross-tenant-attach FK rejection"
+  },
+  "gates": {
+    "tsc": "pass — `node_modules/.bin/tsc --noEmit` clean; `npm run build` (tsc + seed tsconfig) clean",
+    "lint": "pass — `eslint src` 0 errors (2 pre-existing warnings in untouched bridge-runner.ts/externalTaskBridge.ts); new files lint clean",
+    "fitness_static": "pass — new ci/checks/file-attachment-isolation.sh green (FF-NOACL/NB/KEY/V/EGRESS-CLASS/PURE); frozen-checks-immutable.sh green (own check, additive package.json); single-resolver/no-env-in-core/package-json-no-dup-keys/pg-single-dep green. EXCEPTION: grant-trail-no-new-table.sh Check-1 RED — see deferred_to_runner",
+    "db_tests": "pass — 5/5 against live Postgres (choros DB created locally, migration 058 applied clean, setup-template built, RLS isolation verified)"
+  },
+  "shared_files_touched": [
+    "package.json (ADDITIVE: appended ` && bash ci/checks/file-attachment-isolation.sh` to fitness script — no existing entry altered)",
+    "ci/checks/known_tenant_tables.txt (ADDITIVE: appended `file` + `file_version` — required by T-0013/FF-T13 contract, same pattern as connector/report_page/notification)"
+  ],
+  "deferred_to_runner": [
+    "grant-trail-no-new-table.sh Check-1 fails on the task branch because known_tenant_tables.txt differs from merge-base-with-dev. This is the SAME accepted false-positive every prior tenant-table task hit (T-0206 connector, T-0175 report_page, T-0168 notifications, T-0024 invoke_proposal): adding a new tenant table to that file is the legitimate T-0013/FF-T13 action explicitly sanctioned by ADR T-0119 §9 ('это легитимное добавление, не нарушение grant-trail-no-new-table.sh — та проба специфична T-0031'). The check is FROZEN (owned by T-0031); I must not edit it. It goes green automatically once this branch merges to dev and the merge-base updates. Verified precedent: connector/report_page/notification all merged with this same diff present.",
+    "live-S3/MinIO probes (AC-9 FF-DERIVED-AUTHZ live, AC-10 FF-CROSS-TENANT presign-denied, AC-11 FF-VERSION-READABLE via S3 GET): the dev-stack MinIO + an @aws-sdk/client-s3 adapter are not wired here (repo is zero-dep beyond pg; the real MinIO SDK adapter is a deploy-time wiring concern per ADR §8). The ObjectStore port + FsObjectStore/InMemoryObjectStore adapters prove the round-trip contract locally; the SDK-backed S3ObjectStore + live-S3 probes activate on the runner where MinIO is up.",
+    "compose-фрагмент MinIO (service + bucket-init + deny-by-default policy + env creds): deferred to runner/dev-stack provisioning (ADR §5 build plan); not buildable/verifiable without the compose stack here."
+  ],
+  "blockers": [],
+  "deviations_from_adr": [
+    "S3 adapter: shipped InMemoryObjectStore + FsObjectStore behind the ADR ObjectStore port instead of an @aws-sdk/client-s3-backed S3ObjectStore. Rationale: the repo is strictly zero-dep beyond `pg`; pulling the AWS SDK is a non-additive heavy dependency + network install, against the codebase's zero-dep convention. The port abstraction is exactly what the ADR §8 prescribes ('provider = инъектируемая деталь'); the SDK adapter is deploy-time wiring. The presign contract (short-lived url, allow-before-presign) is honored faithfully by both adapters. NOT a contract divergence — the core (buildObjectKey/authorizeFileOp/getFileContentUrl/addVersion/eraseForRetention) matches the ADR §4.3 signatures.",
+    "authorizeFileOp uses the resolver's resolveHandle (read facade) for all file ops. The HandleResolver port only exposes resolveHandle (op=read); the full operation-parameterized resolveFor is internal to grant-resolver.ts and not on the injectable port. The file op→record op mapping is preserved (recordOpFor) and documented; a subject without a covering record grant is denied for any file op. If the reviewer wants per-op (update/delete) PDP enforcement distinct from read-grant, that requires widening the HandleResolver port — flagged for review, not silently widened (ADR honors 'тот же резолвер'; the read-grant gate is the conservative fail-closed floor)."
+  ],
+  "commit_sha": "a739b5740a653fa2a69c6ea6d9bff2fedf31bef5",
+  "friction_events": [
+    "worktree had no node_modules — ran `npm ci` (176 pkgs) to get tsc/eslint/vitest locally.",
+    "local Postgres had no `choros` DB (personal PG instance, not the choros compose stack) — created the DB as choros_migrator and ran the migration runner + db-setup-template to enable the db-tier locally.",
+    "grant-trail-no-new-table.sh Check-1 false-positive on branch (accepted precedent, ADR-sanctioned — see deferred_to_runner)."
+  ]
+}

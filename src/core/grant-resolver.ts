@@ -34,6 +34,7 @@ import {
   type Facet,
   type HandleResolver,
 } from "./object-handle.js";
+import { type FileRecordResolver } from "./file-attachment.js";
 import {
   type Grant,
   type Operation,
@@ -754,6 +755,34 @@ export function makeGrantResolver(deps: ResolverDeps): HandleResolver {
       // HandleResolver.resolveHandle is typed Promise<ResolvedView>, so we cast
       // the widened return down — the read path never emits "no_effect_grant".
       return resolveFor(deps, handle, subject, "read") as Promise<ResolvedView>;
+    },
+  };
+}
+
+/**
+ * Build a `FileRecordResolver` (T-0201/T-0119) over the SAME single decision core
+ * (`resolveFor`). Unlike `makeGrantResolver` (which is hardwired to `op="read"`),
+ * this op-carrying seam lets the file module decide each file op as its
+ * CORRESPONDING record op — read→`read`, add/replace→`update`, delete→`delete`
+ * (ADR T-0119 §2.4 / §4.4). This is NOT a second authority: it is the identical
+ * `resolveFor(deps, ...)` PDP the read facade uses, parameterized by the correct
+ * `op`. Built from the same `ResolverDeps` as `makeGrantResolver`, so both share
+ * one composition root and one grant table (T-0018 / T-0021 FF-R6).
+ *
+ * The cast to `Promise<ResolvedView>` is safe: a file op is ∈ {read, update,
+ * delete} — none reaches the invoke-path effect check (step 3.5 is `op ===
+ * "invoke"` guarded), so the widened `EffectDeniedView` arm is never emitted.
+ * `delete`/`update` may reach the SoD branch only for `approve`/`transition`, not
+ * for CRUD, so the `SodDeniedView` arm is likewise never emitted on this path.
+ */
+export function makeFileRecordResolver(deps: ResolverDeps): FileRecordResolver {
+  return {
+    resolveRecordOp(
+      handle: ObjectHandle,
+      subject: ResolveSubject,
+      op: Operation,
+    ): Promise<ResolvedView> {
+      return resolveFor(deps, handle, subject, op) as Promise<ResolvedView>;
     },
   };
 }
