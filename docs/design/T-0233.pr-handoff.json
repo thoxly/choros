@@ -1,0 +1,41 @@
+{
+  "task_id": "T-0233",
+  "status": "pr_open",
+  "branch": "task/T-0233",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/llm-port.ts",
+    "src/core/agent-precheck-motor.ts",
+    "src/core/__tests__/stub-llm-port.ts",
+    "src/runtime/legal-precheck/run-precheck.ts",
+    "src/runtime/legal-precheck/__tests__/run-precheck.test.ts",
+    "src/adapters/openai-llm-port.ts",
+    "src/__tests__/fixtures/demo-legal-precheck-contract.ts",
+    "ci/checks/llm-port-injectable.sh",
+    "ci/checks/precheck-no-reasoning-egress.sh",
+    "ci/checks/precheck-no-network-in-core.sh",
+    "ci/checks/legal-precheck-unpark-narrow.sh",
+    "ci/checks/legal-precheck-single-resolver.sh",
+    "ci/checks/legal-precheck-single-audit.sh",
+    "ci/checks/precheck-secret-custody.sh",
+    "ci/checks/agent-instruction-runtime-dormant.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "package.json"
+  ],
+  "deviations_from_adr": [
+    "AC-6 text mentions 'inbox task (E7)' — ADR §5.3 clarifies this is day-1 deferred to audit-floor (agent.deferred open-vocab event); implementation follows ADR §5.3 exactly, not the AC-6 surface text.",
+    "Optional dispatch-stub in src/http/invoke.ts for legal_precheck → runLegalPrecheck: not implemented (marked OPTIONAL in ADR §8 MODIFY; excluded to keep scope minimal; existing invoke no-op stub is unchanged).",
+    "Demo fixture AC-15: not in seed/showcase/pack.json (that would require a new seed pack entry). Instead placed as src/__tests__/fixtures/demo-legal-precheck-contract.ts and inline DEMO_DEAL in stub/tests. ADR says 'in the existing seed-pack/fixture mechanism' — day-1 the seed pack doesn't include record-level document fixtures; the test fixture satisfies AC-15's verifiability requirement."
+  ],
+  "friction_events": [
+    "frozen-checks-immutable blocked modification of agent-instruction-runtime-dormant.sh (owned by T-0230); resolved by appending additive auto-sanction line to frozen-sanctions.jsonl per D-060 additive path and FR-FCI12 channel.",
+    "dormantLlmPort.complete() throws synchronously (not returning a rejected Promise) — initial test used async rejects.toThrow() which failed; fixed to synchronous expect(...).toThrow() pattern.",
+    "precheck-no-reasoning-egress.sh initial grep was too broad — matched LlmResult.reasoning (which IS allowed as an internal field); fixed to scope the check to PrecheckAnswer interface block only."
+  ]
+}

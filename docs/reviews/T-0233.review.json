@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0233",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "nit",
+      "axis": 6,
+      "location": "ci/checks/frozen-checks-immutable.sh:71-76 (is_sanctioned)",
+      "issue": "The FF-FCI12 meta-gate's is_sanctioned() only matches the {task,file} pair on a line; it does NOT validate the sanctioned_by or decision fields. T-0233's new entry is sanctioned_by:\"mechanism\" with decision:\"ADR-T-0233-§6/§8-additive-allowlist\" (not a founder_decide@DATE/sanctioned_by:\"founder\" as the file's own documented schema on lines 6/12 states). For THIS task the self-grant is legitimate under D-060 (additive thaw + narrow-unpark negative self-test = the auto-sanctionable class; widening is additive-only, frozen files untouched, narrow check verified). But the gate would equally accept a DESTRUCTIVE self-grant labelled mechanism with no founder trace — a latent provenance gap. Recommend the founder ratify the D-060 auto-sanction trace for audit completeness, and a follow-up harden is_sanctioned() to assert sanctioned_by/decision class (founder vs mechanism, additive vs destructive).",
+      "suggestion": "Founder: confirm the D-060 additive auto-sanction for T-0233 in the control-plane audit. Follow-up task: extend is_sanctioned() to validate sanctioned_by ∈ {founder,mechanism} and reject mechanism-class self-grants on destructive thaws."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/runtime/legal-precheck/__tests__/run-precheck.test.ts:416-464 (AC-2 'zero network calls')",
+      "issue": "The AC-2 test comment claims 'zero network calls' and constructs the stub with recordCalls:true, but never asserts stub.calls.length (or that the real adapter was not invoked). The zero-network guarantee is genuinely enforced elsewhere (precheck-no-network-in-core.sh + dormantLlmPort design + StubLlmPort being injected), so this is cosmetic, but the assertion text overstates what the test body checks.",
+      "suggestion": "Add expect(stub.calls.length).toBe(1) (and assert stub === injected port) to make the 'zero external network' claim self-evident in the test."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/core/__tests__/stub-llm-port.ts:91-93 (doc comment)",
+      "issue": "The stub's doc comment says 'Zero network: throws if the test environment has OPENAI_API_KEY set (safety check)', but complete() implements no such OPENAI_API_KEY guard. Doc/code mismatch — harmless (the stub never touches the network regardless), but the promised safety check is absent.",
+      "suggestion": "Either implement the OPENAI_API_KEY guard in the constructor, or remove the claim from the doc comment."
+    },
+    {
+      "id": "R-4",
+      "severity": "nit",
+      "axis": 3,
+      "location": "ci/checks/precheck-no-reasoning-egress.sh:80-81",
+      "issue": "The (b) allowlist grep -vE 'appendAuditEvent|payload|reasoningTrace|traceRef|undefined|null|...' would also pass a hypothetical line that reads result.reasoning and assigns it elsewhere if that line happened to contain one of the allowlisted tokens. Not a real leak today (verified: run-precheck.ts:407-410 uses result.reasoning only to derive a random-UUID reasoningTraceRef; the reasoning text never reaches answer/outcome/res.json), but the grep is permissive enough that a future regression could slip through.",
+      "suggestion": "Tighten the egress check to assert .reasoning appears ONLY in the reasoningTraceRef derivation / appendAuditEvent payload, anchored more strictly than a token-allowlist."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-1", "covered": true, "by": "llm-port.ts LlmPort export + PrecheckDeps.llm injection; llm-port-injectable.sh PASS+self-test; tsc 0" },
+    { "ac": "AC-2", "covered": true, "by": "run-precheck.test.ts AC-2 (StubLlmPort, DEMO_DEAL 5.5M₽ → proceed + 3 redFlags, answerForm echoed); see nit R-2" },
+    { "ac": "AC-3", "covered": true, "by": "run-precheck.test.ts AC-3 determinism (byte-identical outcome x2) + classifyOutcome determinism test" },
+    { "ac": "AC-4", "covered": true, "by": "dormantLlmPort throws (llm-port.ts) → orchestrator maps to defer; classifyOutcome never proceeds on llmDormant; tests AC-4 (liveEnabled=false → defer, NOT proceed); precheck-no-network-in-core.sh PASS" },
+    { "ac": "AC-5", "covered": true, "by": "classifyOutcome fail-closed for pdp_deny/llm_error/llm_timeout; run-precheck PDP-deny → agent.blocked; tests cover all branches; legal-precheck-single-audit.sh PASS" },
+    { "ac": "AC-6", "covered": true, "by": "defer → agent.deferred audit with doubt_reason + inboxTaskRef=audit id (ADR §5.3 audit-floor, documented deviation from AC-6 'inbox task E7' surface text); tests AC-4/AC-6" },
+    { "ac": "AC-7", "covered": true, "by": "single resolveFor in run-precheck.ts; legal-precheck-single-resolver.sh PASS+self-test (forbids authorize*/checkGrant/covers*); existing single-resolver.sh in fitness" },
+    { "ac": "AC-8", "covered": true, "by": "single appendAuditEvent sink; legal-precheck-single-audit.sh PASS+self-test (no direct INSERT, agent.blocked/deferred present)" },
+    { "ac": "AC-9", "covered": true, "by": "PrecheckAnswer structurally has no reasoning/trace/raw/chainOfThought; reasoning only as reasoningTraceRef (UUID) in audit; precheck-no-reasoning-egress.sh PASS+self-test; D-139 test; tsc 0; see nit R-4" },
+    { "ac": "AC-10", "covered": true, "by": "llmReq.answerForm from readPublished instr.answerForm; answer echoes answerForm; proceeded audit carries answer_form; test asserts answerForm=legal_precheck_v1" },
+    { "ac": "AC-11", "covered": true, "by": "FF-COMP-6 ALLOWED_RE += src/runtime/legal-precheck/ ONLY; legal-precheck-unpark-narrow.sh PASS + negative self-test plants src/worker violation and DETECTS it; all other runtime paths still fail on agent_instruction read" },
+    { "ac": "AC-12", "covered": true, "by": "vitest 2053 passed / 0 failed with OPENAI_API_KEY UNSET; precheck-no-network-in-core.sh PASS; adapter (https) not imported by core/runtime/tests" },
+    { "ac": "AC-13", "covered": true, "by": "openai-llm-port.ts uses validateSecretHandleShape/redactHandle/SecretResolverPort; dormant path resolves no secret; precheck-secret-custody.sh PASS+self-test; no raw secret in console/audit/res" },
+    { "ac": "AC-14", "covered": true, "by": "run-precheck.test.ts AC-14 cross-tenant handle (TENANT_B doc + TENANT_A subject) → fail-closed(pdp_deny: cross_tenant) via real resolveFor" },
+    { "ac": "AC-15", "covered": true, "by": "src/__tests__/fixtures/demo-legal-precheck-contract.ts DEMO_DEAL_CONTEXT amount 5.5M₽ + DEMO_PRECHECK_ANSWER in stub; fictional, demo-tenant scoped (deviation noted in pr-handoff: test fixture, not seed-pack entry — acceptable, satisfies verifiability)" },
+    { "ac": "AC-16", "covered": true, "by": "tsc --noEmit exit 0; eslint 0 errors (2 pre-existing warnings outside T-0233); npm run fitness checks PASS; vitest 2053/0" }
+  ],
+  "role_gap_evidence": [
+    "FF-FCI12 frozen-sanction channel (is_sanctioned) does not validate sanctioned_by/decision provenance — it matches only {task,file}. This lets any task self-grant a foreign-check modification labelled 'mechanism' with no auditable founder_decide/Враг trace, additive or destructive alike. Candidate for a security-reviewer hardening: assert sanction class (founder vs mechanism) against thaw class (additive vs destructive) per D-060. See finding R-1."
+  ]
+}
