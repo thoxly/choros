@@ -29,11 +29,14 @@ import {
   DEMO_ROLE_INTAKE,
   DEMO_EMPLOYEE_INTAKE,
   DEMO_GRANTS_INTAKE,
+  DEMO_AGENT_CARD_INTAKE,
+  DEMO_INTAKE_INSTRUCTION,
   DEMO_DEAL,
   DEMO_DEAL_CONTEXT,
   legalGateFires,
   type DemoScreen,
 } from "../seed/demo/tel-scenario.js";
+import { classifyIntake } from "../src/runtime/intake/classify-intake.js";
 
 type Args = { baseUrl: string; tenant: string; devUser: string; dryRun: boolean };
 
@@ -173,6 +176,21 @@ async function applyDemoActorSeed(args: Args): Promise<{ created: string[]; skip
 
 function narrateScreen(s: DemoScreen): Record<string, unknown> {
   const slot = s.slot ? AGENT_SLOTS.find((x) => x.id === s.slot) : undefined;
+
+  // S2 (intake slot): run the deterministic classifier-demonstrator (T-0219) so
+  // the walkthrough surfaces the actual triage output + reasoning-trace.
+  // D-139: reasoning_trace is the in-process structured «why» (safe level), not
+  // an external egress of raw reasoning.
+  const intake =
+    s.slot === "intake"
+      ? classifyIntake({
+          subject: DEMO_DEAL.subject,
+          amount: DEMO_DEAL.amount,
+          justification: DEMO_DEAL.justification,
+          requester: DEMO_DEAL.requester,
+        })
+      : undefined;
+
   return {
     screen: s.id,
     title: s.title,
@@ -190,6 +208,13 @@ function narrateScreen(s: DemoScreen): Record<string, unknown> {
           ...(slot.engine ? { engine: slot.engine } : {}),
         }
       : null,
+    ...(intake
+      ? {
+          intake_classification: intake.answer,
+          intake_reasoning_trace: intake.reasoning_trace,
+          intake_answer_form: intake.answer_form,
+        }
+      : {}),
   };
 }
 
@@ -207,6 +232,16 @@ async function main(): Promise<void> {
     demo_deal: DEMO_DEAL,
     legal_gate_fires: gateFires,
     legal_precheck_deal_context: DEMO_DEAL_CONTEXT,
+    // T-0219 intake-agent competence seed (S2): DORMANT card (no paid LLM) +
+    // DRAFT-FIRST classifier instruction.
+    intake_agent: {
+      agent_card: DEMO_AGENT_CARD_INTAKE,
+      instruction: {
+        tier: DEMO_INTAKE_INSTRUCTION.tier,
+        answer_form: DEMO_INTAKE_INSTRUCTION.answer_form,
+      },
+      no_approve_grant: true,
+    },
     flow,
   };
 

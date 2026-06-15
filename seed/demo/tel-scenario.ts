@@ -215,6 +215,81 @@ export const DEMO_GRANTS_INTAKE: readonly DemoGrant[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// T-0219 — intake-agent competence seed (S2 slot): agent_card + instruction.
+// ADDITIVE to the actor-seed plane (NOT display plane; FF-PACK-2 8/8 untouched).
+// Applied through the importer / public API path, NOT direct PG.
+//
+// agent_card is DORMANT (llm_* NULL) → ZERO paid LLM in CI; live wire = deploy-time.
+// The instruction is DRAFT-FIRST (T-0123: saveDraft always writes tier='draft';
+// promote draft→published is a separate human gate, NOT seeded here).
+// ---------------------------------------------------------------------------
+
+/** Minimal agent_card seed shape (form of migration 032 agent_card). */
+export type DemoAgentCard = {
+  employee_slug: string;
+  kc_client_id: string;
+  /** DORMANT: NULL = not configured → no network call, no paid LLM. */
+  llm_endpoint: null;
+  llm_model: null;
+  llm_secret_handle: null;
+  autonomy_threshold: null;
+};
+
+/**
+ * agent_card for a-intake — DORMANT by design (T-0219 FR-1): all llm_* NULL so the
+ * runtime makes no network call (T-0233 FR-7 dormant gate) → ZERO paid LLM.
+ */
+export const DEMO_AGENT_CARD_INTAKE: DemoAgentCard = {
+  employee_slug: "a-intake",
+  kc_client_id: "agent-intake",
+  llm_endpoint: null,
+  llm_model: null,
+  llm_secret_handle: null,
+  autonomy_threshold: null,
+};
+
+/** answer_form code for the intake-agent classifier output (T-0123). */
+export const INTAKE_ANSWER_FORM = "intake_triage_v1" as const;
+
+/** Draft instruction shape (T-0123 AgentInstructionDraft writable subset). */
+export type DemoAgentInstructionDraft = {
+  employee_slug: string;
+  /** Always 'draft' — DRAFT-FIRST. promote draft→published = separate human gate. */
+  tier: "draft";
+  instruction_text: string;
+  answer_form: string;
+  /** category→budget_article справочник (the classifier's competence data). */
+  instruction_meta: Record<string, unknown>;
+};
+
+/**
+ * Classifier instruction for the intake-agent (T-0219 FR-3), seeded DRAFT-FIRST.
+ * The competence text the agent applies at S2; the deterministic demonstrator is
+ * src/runtime/intake/classify-intake.ts (this is the seed data side of T-0123).
+ */
+export const DEMO_INTAKE_INSTRUCTION: DemoAgentInstructionDraft = {
+  employee_slug: "a-intake",
+  tier: "draft",
+  instruction_text: [
+    "Вы — агент-классификатор заявок на расход/закупку (триаж, шаг S2 ТЭЛ).",
+    "По поданной заявке (предмет, сумма, обоснование, инициатор) определите:",
+    "1. Категорию: it_expense / aho / marketing (по ключевым словам предмета/обоснования).",
+    "2. Бюджетную статью по справочнику категория→статья (it_expense→BUD-14, aho→BUD-21, marketing→BUD-33).",
+    "3. Направление: для заявок на расход/закупку — buy.",
+    "4. Маршрут согласования: всегда финконтролёр; при сумме ≥ 5 000 000 ₽ —",
+    "   обязательны юротдел и финдиректор (порог ТЭЛ §1.4).",
+    "Дайте reasoning-trace (почему категория/статья/маршрут). НЕ согласовывайте",
+    "заявку — у вас нет права approve (это решение человека на шаге S4).",
+    "Отвечайте строго в формате answer_form.",
+  ].join("\n"),
+  answer_form: INTAKE_ANSWER_FORM,
+  instruction_meta: {
+    category_article: { it_expense: "BUD-14", aho: "BUD-21", marketing: "BUD-33" },
+    legal_threshold_rub: TEL_LEGAL_THRESHOLD_RUB,
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Demo deal (the linear ТЭЛ instance payload) — ≥ 5M₽ so BOTH slots fire.
 // Aligned with T-0233 DEMO_DEAL_CONTEXT. Fictional fixture (NF-5), not real
 // client data.
