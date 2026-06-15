@@ -1,0 +1,57 @@
+{
+  "task_id": "T-0219",
+  "status": "ready",
+  "decision": "intake-agent навык-классификатор вписан в размеченный слот S2 линейного ТЭЛ (T-0218). Review-флаг 'route = проза' закрыт: route типизирован как IntakeRoute { steps: IntakeApprover[] (order/role/reason/mandatory, упорядоченная цепочка обязательных согласующих), legal_required: boolean, approver_chain: string[] }. Правило вывода детерминированное (порог ТЭЛ §1.4): всегда fin_controller; при amount≥5M₽ добавляются legal+cfo. Несущая связь S2→S3: route.legal_required === (amount ≥ TEL_LEGAL_THRESHOLD_RUB) === legalGateFires(amount) === условие срабатывания слота legal-precheck (T-0234); выход S2 кормит S3 dealContext {amount, kind:category, direction} (сигнатура runLegalPrecheck T-0233). Навык поставлен как additive demo-seed в actor-плоскости (расширение tel-scenario.ts, S2/intake-часть, через importer/публичный API НЕ прямой PG): роль role-intake-agent (read+update, БЕЗ approve — структурный moat) + employee a-intake (существуют из T-0218) + НОВОЕ agent_card DEMO_AGENT_CARD_INTAKE (llm_* NULL = dormant, ноль платных LLM) + НОВАЯ инструкция-классификатор DEMO_INTAKE_INSTRUCTION (T-0123 AgentInstructionDraft: instruction_text + answer_form='intake_triage_v1' + instruction_meta, tier='draft' draft-first; promote = отдельный человеко-гейт). Демонстратор навыка = classifyIntake(input) в src/runtime/intake/classify-intake.ts — ЧИСТАЯ функция (ноль pg/сети/LLM/чтения agent_instruction → не триггерит dormant-гейт), производит {answer:{category,budget_article,direction,route}, reasoning_trace:[{claim,basis}], answer_form}. reasoning-trace на S2 = структурированный in-process 'почему' (claim/basis), safe-уровень — НЕ chain-of-thought-verbatim, НЕ внешний egress (D-139). Moat: роль только read+update, ни approve/exec/invoke (PDP-deny). FF-PACK-2 (8/8) не трогаем (actor-плоскость не в display-счётчиках). Ноль frozen-файлов тронуто.",
+  "rejected_alternatives": [
+    { "option": "Живой LLM-инференс intake-агента в этой задаче", "why_not": "Нарушает 'ноль платных LLM' (run=$0); live-провод = deploy-time founder. agent_card dormant + детерминированный демонстратор закрывают демо." },
+    { "option": "Промоут инструкции draft→published в seed", "why_not": "Promote = человеко-гейт (T-0123 promoteTier); seed несёт черновик, публикация = осознанное действие, не побочный эффект." },
+    { "option": "route оставить прозой / string[] без типа", "why_not": "Ревью T-0218 явно пометило; типизированный IntakeRoute нужен чтобы T-0234 читал legal_required машинно (мерж-стабильность S2→S3)." },
+    { "option": "Классификатор читает agent_instruction из рантайма", "why_not": "Триггерит dormant-гейт (narrow allowlist = только legal-precheck). Демо-классификатор pure-compute; инструкция = seed-данные." },
+    { "option": "Новая таблица под классификацию", "why_not": "OOS — демо переиспользует actor-плоскость; навык = seed + pure-функция, без новой DDL (NF-1)." },
+    { "option": "Грант approve роли intake", "why_not": "Ломает moat (FR-6). Роль только read+update." },
+    { "option": "Раздуть showcase pack новой rights-card/process_instance", "why_not": "Ломает FF-PACK-2 (8/8) → красный dev (T-0218 §6.1)." }
+  ],
+  "object_model": [
+    {
+      "entity": "IntakeRoute (src/runtime/intake/intake-types.ts — закрытие review-флага)",
+      "fields": [
+        { "name": "steps", "type": "readonly IntakeApprover[] — упорядоченная цепочка { order, role: fin_controller|legal|cfo, reason, mandatory:true }" },
+        { "name": "legal_required", "type": "boolean — amount ≥ TEL_LEGAL_THRESHOLD_RUB; === legalGateFires(amount); несущая связь S2→S3" },
+        { "name": "approver_chain", "type": "readonly string[] — плоский упорядоченный список role-кодов (UI/audit)" }
+      ]
+    },
+    {
+      "entity": "DEMO_AGENT_CARD_INTAKE (tel-scenario.ts — НОВОЕ, dormant)",
+      "fields": [
+        { "name": "kc_client_id", "type": "'agent-intake'" },
+        { "name": "llm_endpoint / llm_model / llm_secret_handle", "type": "null (dormant — ноль платных LLM, форма migration 032)" },
+        { "name": "autonomy_threshold", "type": "null" }
+      ]
+    },
+    {
+      "entity": "DEMO_INTAKE_INSTRUCTION (tel-scenario.ts — НОВОЕ, draft-first T-0123)",
+      "fields": [
+        { "name": "instruction_text", "type": "правила классификации/маршрута (классификатор-промпт)" },
+        { "name": "answer_form", "type": "'intake_triage_v1'" },
+        { "name": "instruction_meta", "type": "справочник category→budget_article (it_expense→BUD-14 …)" },
+        { "name": "tier", "type": "'draft' (draft-first; promote draft→published = отдельный человеко-гейт)" }
+      ]
+    },
+    {
+      "entity": "classifyIntake (src/runtime/intake/classify-intake.ts — pure демонстратор)",
+      "fields": [
+        { "name": "input", "type": "IntakeInput { subject, amount, justification, requester }" },
+        { "name": "answer", "type": "{ category, budget_article, direction:'buy'|'sell', route: IntakeRoute } (safe external, answer_form=intake_triage_v1)" },
+        { "name": "reasoning_trace", "type": "readonly { claim, basis }[] — in-process структурированный 'почему' (D-139 safe-уровень, не egress)" }
+      ]
+    }
+  ],
+  "fitness_functions": [
+    "FF-INTAKE-1 (новая, static, self-test): артефакты present; route типизирован (IntakeRoute с legal_required/steps/approver_chain); роль role-intake-agent БЕЗ approve/exec/invoke (moat); agent_card intake dormant (llm_* null); инструкция tier='draft' + answer_form='intake_triage_v1'.",
+    "FF-PACK-2 (существующая, не ломать): rights→8, processes→8.",
+    "fitness:seed (существующие): pack-schema-valid / single-source / display-plane-no-write после demo actor-seed добавок.",
+    "agent-instruction-runtime-dormant (существующая): классификатор НЕ читает agent_instruction из рантайма (не в allowlist).",
+    "tsc/eslint/vitest: типизация + детерминизм classifyIntake + граничная проба route.legal_required."
+  ],
+  "adr_artifact_path": "docs/design/T-0219-intake-agent.adr.md"
+}
