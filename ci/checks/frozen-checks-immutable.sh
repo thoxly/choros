@@ -46,6 +46,12 @@
 #             строки (никогда не молча). Авторизация записи = founder_decide
 #             (control-plane); злоупотребление видно в pre-merge diff — тот же
 #             класс остаточного риска, что принятый R-2 (branch-name spoof).
+#  FF-FCI13 — Канал auto-additive-санкций (design T-0232): второй класс строки
+#             в frozen-sanctions.jsonl (sanctioned_by:"auto_additive") разрешает
+#             TASK_ID внести АДДИТИВНЫЙ thaw чужого чека БЕЗ founder_decide —
+#             ТОЛЬКО если делегат ci/checks/auto-sanction-additive.sh независимо
+#             верифицирует A-1..A-4 аддитивности над BASE_REF + валидную
+#             Враг-аттестацию. Founder-путь (FF-FCI12) поведенчески неизменён.
 #
 # Exit 0 on clean, non-zero on any violation.
 set -euo pipefail
@@ -62,6 +68,13 @@ PROJECT_ROOT="${PROJECT_ROOT:-"$(cd "${SCRIPT_DIR}/../.." && pwd)"}"
 # PROJECT_ROOT.  Entries are compact JSON, one per line, e.g.:
 #   {"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh",...}
 # Comment lines (^#) and blanks are ignored by the grep-based matcher.
+#
+# FF-FCI13 (T-0232) — auto_additive class: a second sanctioned_by value
+# "auto_additive" lets a task bypass the frozen-check gate for provably ADDITIVE
+# thaws (A-1..A-4 verified independently by auto-sanction-additive.sh) that
+# carry a valid Враг-attestation. The founder path (FF-FCI12) is byte-equivalent.
+# Bootstrap: this very edit to frozen-checks-immutable.sh requires a one-time
+# founder-class sanction (see blocked_reason in T-0232.pr-handoff.json).
 SANCTIONS_FILE="${PROJECT_ROOT}/ci/checks/data/frozen-sanctions.jsonl"
 
 # is_sanctioned <file> — true iff a single JSONL record carries BOTH the current
@@ -73,6 +86,29 @@ is_sanctioned() {
   [[ -f "${SANCTIONS_FILE}" ]] || return 1
   grep -F "\"task\":\"${TASK_ID}\"" "${SANCTIONS_FILE}" 2>/dev/null \
     | grep -qF "\"file\":\"${f}\""
+}
+
+# sanction_class <file> — return "auto_additive" or "founder" for the sanction line.
+# Reads the sanctioned_by field from the matching line. Defaults to "founder" if
+# field absent (backward-compatible with pre-T-0232 lines).
+sanction_class() {
+  local f="$1"
+  local matching_line
+  matching_line="$(grep -F "\"task\":\"${TASK_ID}\"" "${SANCTIONS_FILE}" 2>/dev/null \
+    | grep -F "\"file\":\"${f}\"" | head -1 || true)"
+  if echo "${matching_line}" | grep -qF '"sanctioned_by":"auto_additive"'; then
+    echo "auto_additive"
+  else
+    echo "founder"
+  fi
+}
+
+# sanction_line <file> — return the full matching sanction JSON line (for passing
+# to the auto_additive delegate verifier).
+sanction_line() {
+  local f="$1"
+  grep -F "\"task\":\"${TASK_ID}\"" "${SANCTIONS_FILE}" 2>/dev/null \
+    | grep -F "\"file\":\"${f}\"" | head -1 || true
 }
 
 # ---- Step 1: Extract TASK_ID from branch name --------------------------------
@@ -147,8 +183,24 @@ while IFS= read -r f; do
   if [[ "${header_tid}" == "${TASK_ID}" ]]; then
     echo "PASS [FF-FCI1]: ${f} is own check for ${TASK_ID} (BASE_REF/HEAD header), modification allowed"
   elif is_sanctioned "${f}"; then
-    echo "SANCTION [FF-FCI12]: ${f} belongs to '${header_tid:-<no-T-ID>}' but ${TASK_ID} carries a FOUNDER frozen-sanction (ci/checks/data/frozen-sanctions.jsonl) — modification ALLOWED"
-    echo "AUDIT [FF-FCI12]: frozen-sanction GRANTED — task=${TASK_ID} file=${f} owner=${header_tid:-<no-T-ID>} branch=${BRANCH}"
+    klass="$(sanction_class "${f}")"
+    if [[ "${klass}" == "auto_additive" ]]; then
+      # FF-FCI13 (T-0232): auto_additive class — delegate to auto-sanction-additive.sh
+      # which INDEPENDENTLY verifies A-1..A-4 aditivity over BASE_REF + Враг-attestation.
+      # The gate does NOT trust the sanctioned_by marker alone (D-007: no self-assessment).
+      san_json="$(sanction_line "${f}")"
+      if "${SCRIPT_DIR}/auto-sanction-additive.sh" --verify "${TASK_ID}" "${f}" "${BASE_REF}" "${san_json}"; then
+        echo "SANCTION [FF-FCI13]: ${f} — ${TASK_ID} carries an AUTO-ADDITIVE frozen-sanction (A-1..A-4 PASS + Враг-аттестация) — modification ALLOWED"
+        echo "AUDIT [FF-FCI13]: auto-additive frozen-sanction GRANTED — task=${TASK_ID} file=${f} owner=${header_tid:-<no-T-ID>} class=auto_additive branch=${BRANCH}"
+      else
+        echo "FAIL [FF-FCI13]: ${f} — auto_additive sanction REJECTED (not additive OR Враг-attestation invalid); founder-class sanction required (D-060 boundary)"
+        ERRORS=$((ERRORS + 1))
+      fi
+    else
+      # FF-FCI12: founder class — existing behaviour, byte-equivalent (FR-6)
+      echo "SANCTION [FF-FCI12]: ${f} belongs to '${header_tid:-<no-T-ID>}' but ${TASK_ID} carries a FOUNDER frozen-sanction (ci/checks/data/frozen-sanctions.jsonl) — modification ALLOWED"
+      echo "AUDIT [FF-FCI12]: frozen-sanction GRANTED — task=${TASK_ID} file=${f} owner=${header_tid:-<no-T-ID>} class=founder branch=${BRANCH}"
+    fi
   else
     echo "FAIL [FF-FCI1]: ${f} belongs to task '${header_tid:-<no-T-ID>}' (BASE_REF/HEAD header), not ${TASK_ID}; modification/deletion forbidden on this branch"
     ERRORS=$((ERRORS + 1))
