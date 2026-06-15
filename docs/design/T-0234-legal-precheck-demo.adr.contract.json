@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0234",
+  "status": "ready",
+  "decision": "DEMO-3 impl: на S3 «Юр-предпроверка» линейного ТЭЛ-демо (T-0218 слот agent_slot.legal_precheck) роль человека заменяет агент = живой мотор runLegalPrecheck (T-0233), который мы ПОТРЕБЛЯЕМ через инъектируемый порт (frozen-ядро не правим, touched_frozen=false). Новый модуль src/runtime/legal-precheck/demo-run.ts композирует runLegalPrecheck + StubLlmPort/dormantLlmPort + in-memory InMemoryAuditWriter/inMemoryTx + in-memory ResolverDeps (allow) + T-0233-фикстуру (DEMO_DEAL_CONTEXT/DEMO_CONTRACT_BODY/DEMO_AGENT_INSTRUCTION) → детерминированный прогон без БД/сети. Экспортирует runDemoLegalPrecheck (live-stub→proceed+red-flags / dormant→defer) и buildLegalPrecheckSliceView (D-139-safe сериализуемый view: kind/red-flags/summary/opaque reasoning_trace_ref, БЕЗ сырого reasoning). Видимость в слайсе: добавляется демо-аудит-инстанс INS-TEL-DEMO в in-memory AUDIT_SEED (src/http/audit.ts), обслуживаемый GET /api/audit/:instanceId; его S3-узел рендерит ФАКТИЧЕСКИЙ исход мотора + moat-событие (попытка approve → PDP-deny) + S4 человеческое ожидание. Это аудит-инстанс, не process_instances/rights_cards-строка → FF-PACK-2 (8/8) не ломается; новых React-экранов нет (переиспользуем audit-экран). Moat: role-intake-agent (T-0218 §6.2) имеет read+update гранты, НЕ имеет approve — resolveFor(...,'approve') для агента → denied (single arbiter T-0021); card-action approve-кнопка маршрутизирует на тот же resolveFor → no_grant. dealContext демо = {5_500_000, service_agreement, outbound} = фикстура T-0233 (единственная с телом договора DEMO_CONTRACT_BODY + детерминированным ответом DEMO_PRECHECK_ANSWER 3 red-flags); закрывает review-note T-0218 (был amount-only it_expense/buy). Правки tel-scenario.ts локализованы в S3/legal-precheck-секции (T-0219 строит S2 параллельно, мерж аддитивен). No paid LLM: StubLlmPort/dormantLlmPort, ноль fetch/SDK к OpenAI, openai=$0; live-провод = deploy-time founder (RL-3).",
+  "rejected_alternatives": [
+    { "option": "Оставить it_expense/buy в tel-scenario.ts", "why_not": "Нет тела договора/детерминированного ответа под эту dealContext у T-0233 → red-flags из ниоткуда; review-note T-0218 предписал align-with-T-0233." },
+    { "option": "Править run-precheck.ts чтобы вшить demo-deal", "why_not": "Frozen-ядро T-0233; правка требует frozen-санкции (governance, не наше). Композиция в новом модуле аддитивна." },
+    { "option": "Показать исход новой process_instances-строкой", "why_not": "Ломает FF-PACK-2 (8/8) → красный dev. Аудит-инстанс в счётчики не входит." },
+    { "option": "Реальный live-вызов OpenAI в демо", "why_not": "Нарушает openai=$0; live-провод = deploy-time founder (RL-3); stub детерминирован и достаточен." },
+    { "option": "Surface сырого reasoning в слайс", "why_not": "Нарушает D-139 (no-reasoning-egress); surface только answer + opaque reasoning_trace_ref." },
+    { "option": "Новый React-экран под исход агента", "why_not": "T-0218 §5: новых экранов не вводим; переиспользуем экран audit слайса." },
+    { "option": "Второй PDP/audit-канал под демо", "why_not": "Нарушает single-resolver/single-audit T-0233; переиспользуем runLegalPrecheck (один resolveFor, один appendAuditEvent)." }
+  ],
+  "object_model": [
+    {
+      "entity": "src/runtime/legal-precheck/demo-run.ts (новый, потребитель T-0233)",
+      "fields": [
+        { "name": "runDemoLegalPrecheck(opts)", "type": "прогон runLegalPrecheck со stub/dormant портом + in-memory deps → { outcome: PrecheckOutcome, auditRows, dealContext }" },
+        { "name": "buildLegalPrecheckSliceView(outcome)", "type": "D-139-safe сериализуемый view: { kind, redFlags, summary, reasoningTraceRef(opaque), dealSummary } — БЕЗ сырого reasoning" },
+        { "name": "DEMO_LEGAL_PRECHECK_DEAL", "type": "= T-0233 DEMO_DEAL_CONTEXT {5_500_000, service_agreement, outbound}" },
+        { "name": "agent-is-S3-actor", "type": "мотор runLegalPrecheck выступает актором S3 вместо человека" }
+      ]
+    },
+    {
+      "entity": "src/http/audit.ts AUDIT_SEED['INS-TEL-DEMO'] (новый аудит-инстанс)",
+      "fields": [
+        { "name": "instance", "type": "линейный ТЭЛ-инстанс демо (execs: human/agent)" },
+        { "name": "trace S3", "type": "agent-событие legal-precheck (red-flags из buildLegalPrecheckSliceView) + moat-событие approve→PDP-deny + masked reasoning_trace_ref" },
+        { "name": "trace S4", "type": "human-ожидание согласования (card-action approve = человек)" },
+        { "name": "FF-PACK-2", "type": "аудит-инстанс НЕ входит в rights(8)/processes(8) счётчики" }
+      ]
+    },
+    {
+      "entity": "seed/demo/tel-scenario.ts (правка ТОЛЬКО S3-секции)",
+      "fields": [
+        { "name": "DEMO_DEAL.subject/kind/direction", "type": "договор оказания услуг → service_agreement/outbound" },
+        { "name": "DEMO_DEAL_CONTEXT", "type": "{5_500_000, service_agreement, outbound} (выровнено с T-0233)" },
+        { "name": "S2/intake-секция", "type": "НЕ трогается (T-0219 параллельно, мерж аддитивен)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "demo-run: runLegalPrecheck(tx=inMemoryTx, deps={llm:StubLlmPort, resolverDeps:allow, auditWriter:InMemoryAuditWriter, liveEnabled}, args={dealContext:DEMO_DEAL_CONTEXT, document:DEMO_CONTRACT_BODY}) → PrecheckOutcome",
+    "slice-view: PrecheckOutcome(proceed) → { kind:'proceed', redFlags[], summary, reasoningTraceRef(opaque) } [D-139: no raw reasoning]",
+    "moat: resolveFor(deps, handle, agentSubject, 'approve') → denied [role-intake-agent без approve-гранта]",
+    "slice: GET /api/audit/INS-TEL-DEMO → trace с S3 legal-precheck-узлом"
+  ],
+  "fitness_functions": [
+    { "id": "FF-DEMO3-1", "kind": "static-self-test", "asserts": "demo-run зовёт runLegalPrecheck + инъектирует stub/dormant порт (agent-is-S3-actor); role-intake-agent гранты НЕ содержат approve/exec/invoke transition (no-approve moat); demo-run БЕЗ сетевых вызовов (no-paid-LLM: нет fetch(/new OpenAI/https.request); dealContext = T-0233-фикстура. Имеет # SELF-TEST: + --self-test." },
+    { "id": "AC-2/3/5/6 (vitest)", "kind": "unit", "asserts": "demo-run→proceed+red-flags(stub)/defer(dormant); slice-view S3 рендерится; D-139 нет сырого reasoning." },
+    { "id": "AC-4 (vitest)", "kind": "unit", "asserts": "resolveFor(...,'approve') для агента → denied (moat)." },
+    { "id": "FF-PACK-2", "kind": "static-existing-must-not-break", "asserts": "rights→8, processes→8." },
+    { "id": "FF-LP-2/3/4, precheck-no-*", "kind": "static-existing", "asserts": "новый модуль не нарушает (не run-precheck.ts, без сети, под legal-precheck/)." },
+    { "id": "tsc/eslint/build", "kind": "static", "asserts": "demo-run + audit-fixture типизированы, lint-clean." }
+  ],
+  "traceability": {
+    "T-0218 §4.2 (слот legal_precheck S3, trigger ≥5млн, dealContext)": "ADR §3/§5",
+    "T-0218 FR-6 (moat S3→S4 PDP-deny)": "ADR §5",
+    "T-0218 FR-7 / D-139": "ADR §4 (opaque reasoning_trace_ref)",
+    "T-0233 runLegalPrecheck/StubLlmPort/InMemoryAuditWriter": "ADR §3 (потребление)",
+    "T-0233 fixture DEMO_DEAL_CONTEXT/DEMO_CONTRACT_BODY/DEMO_PRECHECK_ANSWER": "ADR §2/§4",
+    "review-note T-0218 (dealContext amount-only)": "ADR §2",
+    "FF-PACK-2": "ADR §4 (audit-инстанс не display-строка)",
+    "grant-lattice Operation.approve": "ADR §5 (moat выразим точечно)"
+  },
+  "runtime_target": "dev-стенд showcase-тенанта (T-0141), кликабельный слайс (экран audit); публичный стенд T-0142 = Stage-2 founder-gated",
+  "adr_artifact_path": "docs/design/T-0234-legal-precheck-demo.adr.md",
+  "escalation": "нет founder-only форка. Единственное под фаундера в будущем = реальный live-провод LLM (OPENAI-ключ/среда, RL-3) для legal-precheck на проде — deploy-time, НЕ блокер демо (день-1 stub/dormant). touched_frozen=false.",
+  "touched_frozen": false
+}

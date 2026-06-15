@@ -77,7 +77,15 @@ echo "Check FF-25-3: llm_secret_handle must appear only in the explicit custody 
 #   src/http/grant-propose.ts
 #   src/runtime/legal-precheck/run-precheck.ts   (T-0233 runtime custody)
 #   src/adapters/openai-llm-port.ts              (T-0233 adapter comment)
+#   src/runtime/legal-precheck/demo-run.ts       (T-0234 DEMO-3 fictional handle)
 # Any other file containing llm_secret_handle is a dormancy leak → FAIL.
+#
+# T-0234 AMENDMENT (DEMO-3 custody site): the linear-TEL demo runner sets a
+# FICTIONAL opaque reference (vault://demo/llm-key — NO real secret) in the
+# llm_secret_handle column so the live-stub motor reaches its proceed branch.
+# The value never egresses (FF-25-4 green). Additive allow-set entry, same class
+# as the T-0233/T-0236 runtime-custody extension; frozen-sanction appended for
+# this task in ci/checks/data/frozen-sanctions.jsonl (FF-FCI12, D-060).
 ALLOWED_FILES=(
   "src/http/secret-handle.ts"
   "src/core/secret-handle-validator.ts"
@@ -87,6 +95,7 @@ ALLOWED_FILES=(
   "src/http/grant-propose.ts"
   "src/runtime/legal-precheck/run-precheck.ts"
   "src/adapters/openai-llm-port.ts"
+  "src/runtime/legal-precheck/demo-run.ts"
 )
 DORMANCY_HITS=$(grep -rn "llm_secret_handle" "${ROOT}/src/" --include="*.ts" -l 2>/dev/null || true)
 DORMANCY_ERRORS=0
