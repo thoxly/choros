@@ -180,6 +180,19 @@ export interface RenderAndFixDeps extends RenderDeps {
   snapshot: SnapshotPort;
   /** The file object id to attach the new version to. */
   fileId: string;
+  /**
+   * Optional back-reference to the rework cycle that triggered this fixation
+   * (T-0229 / AC-14). Passed through to addVersion(cycleRef) on the file_version
+   * row so the snapshot is traceable back to its originating cycle.
+   *
+   * DEFERRAL NOTE: live population of cycle_ref awaits a future "return-to-revision"
+   * (rework/возврат на доработку) transition event source — there is no such event
+   * in the BPMN engine today. The plumbing surface is complete here so that when
+   * the rework-transition event is implemented (Stage-2 / separate task), callers
+   * supply cycleRef without any further changes to this module or addVersion.
+   * Until then this field remains undefined and cycleRef=null on stored versions.
+   */
+  cycleRef?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +577,8 @@ export async function renderAndFix(
   }
 
   // 2. addVersion(isSnapshot=true) — via T-0119 port (FF-SNAPSHOT-IMMUTABLE)
+  // cycleRef is threaded through from RenderAndFixDeps (T-0229 AC-14 plumbing).
+  // See RenderAndFixDeps.cycleRef JSDoc for the live-population deferral note.
   const snapResult = await deps.snapshot.addVersion(
     deps.fileId,
     subject,
@@ -572,6 +587,7 @@ export async function renderAndFix(
       mime: mimeOf(result.format),
       isSnapshot: true,
       dataClass: "internal",
+      ...(deps.cycleRef !== undefined ? { cycleRef: deps.cycleRef } : {}),
     },
   );
 
