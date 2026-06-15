@@ -22,7 +22,12 @@ import formThemeCss from './form-theme.css?inline';
 // Подключаем form-defs — регистрирует window.CHOROS_FORMS, window.CHOROS_SANDBOX_SCRIPT
 import './form-defs.js';
 
-const MIN_HEIGHT = 280;
+// Чистый origin-валидирующий приёмник авто-высоты (T-0101). Принимает height ТОЛЬКО
+// от своего iframe-окна И опакового origin ('null') И корректной формы сообщения,
+// и клампит её — а не доверяет любому postMessage.
+import { acceptFrameHeight, FRAME_MIN_HEIGHT } from './frame-height.js';
+
+const MIN_HEIGHT = FRAME_MIN_HEIGHT;
 
 /**
  * Собирает полный srcdoc для sandbox-iframe одной формы.
@@ -48,13 +53,15 @@ function FormViewer({ formKey, theme }) {
   const iframeRef = useRef(null);
   const [height, setHeight] = useState(MIN_HEIGHT);
 
-  // Слушаем fjs-height от sandbox
+  // Слушаем fjs-height от sandbox. Вся валидация (source + опаковый origin 'null'
+  // + форма сообщения + клампинг) — в чистой acceptFrameHeight (T-0101): любое
+  // сообщение от чужого окна/origin/неверной формы возвращает null и игнорируется.
   useEffect(() => {
     function onMessage(e) {
-      if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
-      if (e.data && e.data.type === 'fjs-height' && typeof e.data.h === 'number') {
-        setHeight(Math.max(MIN_HEIGHT, Math.ceil(e.data.h)));
-      }
+      const win = iframeRef.current && iframeRef.current.contentWindow;
+      if (!win) return;
+      const h = acceptFrameHeight(e, win);
+      if (h !== null) setHeight(h);
     }
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);

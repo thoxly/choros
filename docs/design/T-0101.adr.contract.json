@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0101",
+  "status": "ready",
+  "decision": "Выделить чистую IO-free функцию-приёмник acceptFrameHeight(evt, expectedSource) в новый модуль web/src/forms/frame-height.js как единственный источник истины для приёмки fjs-height-сообщений: принимает высоту ТОЛЬКО при evt.source===expectedSource (контентwindow целевого iframe), evt.origin==='null' (подпись опакового origin sandbox без allow-same-origin), evt.data.type==='fjs-height' и конечной неотрицательной evt.data.h; возвращает высоту, заклампленную в [FRAME_MIN_HEIGHT=280, FRAME_MAX_HEIGHT=20000] (анти-DoS), иначе null (= игнор). FormViewer.jsx делегирует свой message-обработчик в acceptFrameHeight; forms.html (превью, не бандлится Vite) добавляет инлайн origin-валидацию того же контракта. iframe остаётся sandbox=allow-scripts БЕЗ allow-same-origin (опаковый origin). form-defs.js шлёт РОВНО {type,h} наружу с target-origin '*' (защита — на валидирующем родителе). Новый статический гейт ci/checks/forms-sandbox-iframe.sh (FF-FORMS2) утверждает: каждый form-iframe = allow-scripts без allow-same-origin; чистый приёмник валидирует origin и клампит; оба родительских приёмника ссылаются на origin-валидацию; имеет --self-test. Серверная валидация форм (FF-FORMS1/form-validator.ts/form-schema.ts/forms.ts) НЕ меняется. Byte-frozen (grant-lattice/object-handle/frozen-checks) НЕ трогается. Аддитивно.",
+  "rejected_alternatives": [
+    { "option": "Добавить allow-same-origin для упрощения замера высоты", "why_not": "Прямое уничтожение sandbox (SI-1, red-line) — скрипт формы получит DOM/cookie/storage/origin родителя. Опаковый origin — суть задачи." },
+    { "option": "Доверять любому postMessage с type==='fjs-height'", "why_not": "Любой фрейм/расширение спамит height; origin-confusion. Нужна origin+source-валидация (SI-2)." },
+    { "option": "Резолвить реальный origin родителя в ребёнке и слать как target", "why_not": "Ребёнок в опаковом origin надёжно не знает origin родителя; '*'+строгая родительская валидация проще и безопаснее (тело = только высота, не секрет)." },
+    { "option": "Без верхней границы высоты", "why_not": "Скомпрометированная форма постит h=1e9 → раздутие iframe (DoS вёрстки). MAX-кламп обязателен (SI-3)." },
+    { "option": "Слушать message без проверки e.source", "why_not": "Любой iframe на странице мог бы ресайзить чужой viewer. Source-match обязателен." },
+    { "option": "Инлайнить проверку в каждый обработчик без общей функции", "why_not": "Дрейф двух копий логики, не unit-тестируемо. Чистая acceptFrameHeight = single source + покрытие." }
+  ],
+  "object_model": [
+    {
+      "entity": "acceptFrameHeight (web/src/forms/frame-height.js, PURE)",
+      "fields": [
+        { "name": "signature", "type": "(evt: {source,origin,data:{type,h}}, expectedSource: Window) => number | null" },
+        { "name": "returns", "type": "заклампленная высота [MIN,MAX] при валидном fjs-height; null при невалидном (игнор)" }
+      ]
+    },
+    {
+      "entity": "FRAME_MIN_HEIGHT / FRAME_MAX_HEIGHT (web/src/forms/frame-height.js)",
+      "fields": [
+        { "name": "FRAME_MIN_HEIGHT", "type": "280 — минимум для читаемости" },
+        { "name": "FRAME_MAX_HEIGHT", "type": "20000 — анти-DoS верхняя граница" }
+      ]
+    },
+    {
+      "entity": "fjs-height message (form-defs.js → parent)",
+      "fields": [
+        { "name": "type", "type": "'fjs-height' — единственный принимаемый тип" },
+        { "name": "h", "type": "number — content scrollHeight" }
+      ]
+    }
+  ],
+  "fitness_functions": [
+    { "id": "FF-FORMS2-1", "check": "ci/checks/forms-sandbox-iframe.sh", "asserts": "каждый form-iframe (FormViewer.jsx + оба в forms.html) = sandbox с allow-scripts И БЕЗ allow-same-origin" },
+    { "id": "FF-FORMS2-2", "check": "ci/checks/forms-sandbox-iframe.sh", "asserts": "frame-height.js существует, валидирует origin (греп origin + 'null') и клампит (FRAME_MAX_HEIGHT)" },
+    { "id": "FF-FORMS2-3", "check": "ci/checks/forms-sandbox-iframe.sh", "asserts": "оба родительских приёмника (FormViewer.jsx + forms.html) ссылаются на origin-валидацию" },
+    { "id": "FF-FORMS2-self-test", "check": "ci/checks/forms-sandbox-iframe.sh --self-test", "asserts": "синтетический allow-same-origin iframe И приёмник без origin-проверки → RED" },
+    { "id": "FF-FORMS1", "check": "ci/checks/forms-schema-binding.sh", "asserts": "без изменений — серверная валидация форм зелёная" },
+    { "id": "frozen", "check": "ci/checks/frozen-checks-immutable.sh", "asserts": "byte-frozen не тронут" }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "artifact": "FF-FORMS2-1 + frame-height.test.js (sandbox string)" },
+    { "ac": "AC-2", "artifact": "acceptFrameHeight + frame-height.test.js (origin/source/shape branches)" },
+    { "ac": "AC-3", "artifact": "acceptFrameHeight + frame-height.test.js (clamp/finite)" },
+    { "ac": "AC-4", "artifact": "FormViewer.jsx onMessage + frame-height.test.js" },
+    { "ac": "AC-5", "artifact": "ci/checks/forms-sandbox-iframe.sh (+ --self-test)" },
+    { "ac": "AC-6", "artifact": "FF-FORMS1 + frozen-checks-immutable (unchanged)" },
+    { "ac": "AC-7", "artifact": "tsc/eslint/build/fitness/vitest" }
+  ],
+  "runtime_target": "Браузер (web). Чистый приёмник тестируется в vitest без DOM. Гейт статический (bash-grep). Live-инфра не требуется.",
+  "adr_artifact_path": "docs/design/T-0101-forms-sandbox-iframe.adr.md",
+  "escalation": "none"
+}

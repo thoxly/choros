@@ -66,12 +66,26 @@
       });
     }
 
-    // Авто-высота: форма постит {type:'fjs-height', h} наружу.
+    // Авто-высота: форма постит {type:'fjs-height', h} наружу. Приёмник НЕ доверяет
+    // любому postMessage — валидирует source + опаковый origin 'null' (подпись
+    // sandbox без allow-same-origin) + форму сообщения, затем клампит высоту
+    // [MIN,MAX] (анти-DoS). Зеркало src/core/form-frame-height.ts (T-0101).
+    const FRAME_MIN_HEIGHT = 280;
+    const FRAME_MAX_HEIGHT = 20000;
+    function acceptFrameHeight(e, expectedSource) {
+      if (!e || expectedSource == null || e.source !== expectedSource) return null;
+      if (e.origin !== 'null') return null; // opaque-origin sandbox only
+      const d = e.data;
+      if (!d || d.type !== 'fjs-height') return null;
+      const h = d.h;
+      if (typeof h !== 'number' || !Number.isFinite(h) || h < 0) return null;
+      return Math.min(FRAME_MAX_HEIGHT, Math.max(FRAME_MIN_HEIGHT, Math.ceil(h)));
+    }
     window.addEventListener('message', function (e) {
-      if (e.data && e.data.type === 'fjs-height') {
-        const f = frames.filter(function (fr) { return fr.contentWindow === e.source; })[0];
-        if (f) f.style.height = Math.max(200, e.data.h) + 'px';
-      }
+      const f = frames.filter(function (fr) { return fr.contentWindow === e.source; })[0];
+      if (!f) return;
+      const h = acceptFrameHeight(e, f.contentWindow);
+      if (h !== null) f.style.height = h + 'px';
     });
 
     document.querySelectorAll('.hbar button').forEach(function (b) {
