@@ -16,7 +16,7 @@
  */
 // ---------------------------------------------------------------------------
 // ТЭЛ threshold (reference-tel §1.4) — ≥ 5M₽ requires legal review.
-// Aligned with T-0233 DEMO_DEAL_CONTEXT.amount (5_500_000).
+// Aligned with T-0233 DEMO_DEAL_CONTEXT (5_500_000, service_agreement, outbound).
 // ---------------------------------------------------------------------------
 export const TEL_LEGAL_THRESHOLD_RUB = 5_000_000;
 export const INTAKE_SLOT = {
@@ -163,20 +163,32 @@ export const DEMO_INTAKE_INSTRUCTION = {
 };
 // ---------------------------------------------------------------------------
 // Demo deal (the linear ТЭЛ instance payload) — ≥ 5M₽ so BOTH slots fire.
-// Aligned with T-0233 DEMO_DEAL_CONTEXT. Fictional fixture (NF-5), not real
-// client data.
+// dealContext aligned EXACTLY with T-0233 DEMO_DEAL_CONTEXT
+// (src/__tests__/fixtures/demo-legal-precheck-contract.ts):
+//   { amount: 5_500_000, kind: "service_agreement", direction: "outbound" }.
+// This is the only dealContext T-0233 ships a contract body (DEMO_CONTRACT_BODY)
+// AND a deterministic expected answer (DEMO_PRECHECK_ANSWER, 3 red flags) for, so
+// the S3 legal-precheck has real clauses to flag. A договор оказания услуг
+// (outbound service contract) is a procurement/expense ТЭЛ — a subset of the
+// "заявка на расход/закупку" domain (T-0218 §2), not a different class.
+// Closes T-0218 review-note (the slot comment was previously amount-only and the
+// kind/direction (it_expense/buy) diverged from T-0233). Fictional fixture
+// (NF-5), not real client data. [T-0234 S3-slot edit]
 // ---------------------------------------------------------------------------
 export const DEMO_DEAL = {
-    subject: "Закупка лицензий ПО для отдела ИТ (годовая)",
+    subject: "Договор оказания услуг по разработке ПО (годовой)",
     amount: 5_500_000,
-    justification: "Продление корпоративных лицензий, истекают 30.06.2026",
+    justification: "Закупка услуг внешней разработки, контракт на 12 месяцев",
     requester: "e-orlov",
     // Produced by S2 intake (shown here as the expected triage output):
-    category: "it_expense",
+    category: "service_agreement",
     budget_article: "BUD-14",
-    direction: "buy",
+    direction: "outbound",
 };
-/** dealContext exactly as runLegalPrecheck (T-0233) expects it. */
+/**
+ * dealContext exactly as runLegalPrecheck (T-0233) expects it — and exactly
+ * T-0233's DEMO_DEAL_CONTEXT { 5_500_000, "service_agreement", "outbound" }.
+ */
 export const DEMO_DEAL_CONTEXT = {
     amount: DEMO_DEAL.amount,
     kind: DEMO_DEAL.category,
