@@ -38,3 +38,5 @@ connector
 file
 file_version
 agent_instruction
+template_def
+template_dep

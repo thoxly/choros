@@ -48,15 +48,30 @@ export interface FieldSchemaEntry {
 }
 
 /**
- * Одна запись о затронутой зависимости страницы при изменении схемы.
+ * Одна запись о затронутой зависимости при изменении схемы.
  * Shape машинно-читаемый (NF-5 ADR, NF-7 spec — payload для T-0084 changelog).
+ *
+ * Extends report_page_dep shape additive (NF-1): optional template_id/template_slug
+ * fields added for template_dep rows (T-0235/T-0124 §2.9 / FF-TEMPLATE-COHERENCE).
+ * dep_source discriminates which table the dep came from:
+ *   "report_page" (default) — page_id/page_slug are populated, template_id/template_slug absent.
+ *   "template"              — template_id/template_slug are populated, page_id/page_slug absent.
+ * One classifier, one dep-set, no forked path (NF-1 — mirrors report_page_dep exactly).
  */
 export interface AffectedDep {
-  page_id: string;         // UUID report_page
-  page_slug: string;       // URL-safe slug страницы
+  /** UUID report_page (populated for dep_source='report_page'; absent for template deps). */
+  page_id?: string;
+  /** URL-safe slug страницы (populated for dep_source='report_page'; absent for template deps). */
+  page_slug?: string;
+  /** UUID template_def (populated for dep_source='template'; absent for report_page deps). */
+  template_id?: string;
+  /** Human-readable id/slug of template (populated for dep_source='template'). */
+  template_slug?: string;
   registry_def_id: string; // UUID registry_def
   field_key: string;       // ключ поля в record_schema.properties
   dep_kind: DepKind;       // 'read' | 'aggregate'
+  /** Discriminates the dep source table. Default 'report_page' (backward-compatible). */
+  dep_source?: "report_page" | "template";
 }
 
 /**

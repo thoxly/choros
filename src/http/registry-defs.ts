@@ -227,8 +227,19 @@ interface DepRow {
   dep_kind: string;
 }
 
+interface TemplateDepRow {
+  id: string;
+  template_id: string;
+  field_key: string;
+  dep_kind: string;
+}
+
 // ---------------------------------------------------------------------------
-// loadActiveDeps — fetch all stale=false deps for the given registry_def
+// loadActiveDeps — fetch all stale=false deps (report_page + template) for registry_def
+//
+// T-0235/T-0124 §2.9 FF-TEMPLATE-COHERENCE: template_dep rows are included in the
+// SAME dep-set as report_page_dep, fed into the SAME classifySchemaChange classifier
+// (NF-1 — one control plane, not two parallel classifiers).
 // ---------------------------------------------------------------------------
 
 async function loadActiveDeps(
@@ -236,7 +247,8 @@ async function loadActiveDeps(
   tenantId: string,
   registryDefId: string,
 ): Promise<AffectedDep[]> {
-  const { rows } = await client.query<DepRow>(
+  // Load report_page deps (unchanged from T-0177)
+  const { rows: pageRows } = await client.query<DepRow>(
     `SELECT d.id, d.page_id, rp.slug AS page_slug, d.field_key, d.dep_kind
        FROM choros.report_page_dep d
        JOIN choros.report_page rp
@@ -246,13 +258,36 @@ async function loadActiveDeps(
         AND d.stale = false`,
     [tenantId, registryDefId],
   );
-  return rows.map((r) => ({
+
+  // Load template_dep deps (T-0235/T-0124 §2.9 — additive, same classifier)
+  const { rows: templateRows } = await client.query<TemplateDepRow>(
+    `SELECT d.id, d.template_id, d.field_key, d.dep_kind
+       FROM choros.template_dep d
+      WHERE d.tenant_id = $1
+        AND d.registry_def_id = $2
+        AND d.stale = false`,
+    [tenantId, registryDefId],
+  );
+
+  const pageDeps: AffectedDep[] = pageRows.map((r) => ({
     page_id: r.page_id,
     page_slug: r.page_slug,
     registry_def_id: registryDefId,
     field_key: r.field_key,
     dep_kind: r.dep_kind as "read" | "aggregate",
+    dep_source: "report_page" as const,
   }));
+
+  const templateDeps: AffectedDep[] = templateRows.map((r) => ({
+    template_id: r.template_id,
+    template_slug: r.template_id, // use id as slug; Stage-2 can add a slug column
+    registry_def_id: registryDefId,
+    field_key: r.field_key,
+    dep_kind: r.dep_kind as "read" | "aggregate",
+    dep_source: "template" as const,
+  }));
+
+  return [...pageDeps, ...templateDeps];
 }
 
 // ---------------------------------------------------------------------------
@@ -348,59 +383,106 @@ async function updateSchemaInTx(args: {
       );
     }
 
-    const affectedPageIds = [...new Set(destructiveDeps.map((d) => d.page_id))];
+    // Partition destructive deps by source (report_page vs template) — one dep-set, two tables.
+    // T-0235/T-0124 §2.9 FF-TEMPLATE-COHERENCE: template_dep rows follow the SAME discipline
+    // as report_page_dep (NF-1: one control plane, additive extension).
+    const reportPageDestructiveDeps = destructiveDeps.filter(
+      (d) => d.dep_source === "report_page" || d.dep_source === undefined,
+    );
+    const templateDestructiveDeps = destructiveDeps.filter(
+      (d) => d.dep_source === "template",
+    );
 
-    // (a) Mark affected report_page_dep rows stale=true
+    const affectedPageIds = [...new Set(
+      reportPageDestructiveDeps.map((d) => d.page_id).filter(Boolean) as string[],
+    )];
+    const affectedTemplateIds = [...new Set(
+      templateDestructiveDeps.map((d) => d.template_id).filter(Boolean) as string[],
+    )];
+
+    // (a1) Mark affected report_page_dep rows stale=true
     //     Use page_id + field_key to identify exact deps (avoiding cross-registry deps)
-    if (destructiveDeps.length > 0) {
-      // Build per-dep WHERE clause using (page_id, field_key) pairs
-      // Postgres ANY with array of composites is non-trivial; use unnest approach
-      for (const dep of destructiveDeps) {
-        await client.query(
-          `UPDATE choros.report_page_dep
-              SET stale = true
-            WHERE tenant_id = $1
-              AND page_id = $2
-              AND field_key = $3
-              AND registry_def_id = $4
-              AND stale = false`,
-          [tenantId, dep.page_id, dep.field_key, registryDefId],
-        );
-      }
+    for (const dep of reportPageDestructiveDeps) {
+      await client.query(
+        `UPDATE choros.report_page_dep
+            SET stale = true
+          WHERE tenant_id = $1
+            AND page_id = $2
+            AND field_key = $3
+            AND registry_def_id = $4
+            AND stale = false`,
+        [tenantId, dep.page_id, dep.field_key, registryDefId],
+      );
     }
 
-    // (b) Depromote affected report_page rows to tier='draft'
+    // (a2) Mark affected template_dep rows stale=true (T-0235/T-0124 §2.9 mirror of a1)
+    for (const dep of templateDestructiveDeps) {
+      await client.query(
+        `UPDATE choros.template_dep
+            SET stale = true
+          WHERE tenant_id = $1
+            AND template_id = $2
+            AND field_key = $3
+            AND registry_def_id = $4
+            AND stale = false`,
+        [tenantId, dep.template_id, dep.field_key, registryDefId],
+      );
+    }
+
+    // (b1) Depromote affected report_page rows to tier='draft'
     //     choros.promoting='1' is already set — trigger won't block UPDATE.
     //     Only update rows whose tier is NOT already 'draft' (idempotent).
     //     Parameterized tier constant to avoid matching FF-10 static grep pattern
     //     (FF-10 scans for literal tier=<tier> in non-allowed files).
     const TIER_DRAFT = "draft" as const;
-    if (affectedPageIds.length > 0) {
-      for (const pageId of affectedPageIds) {
-        await client.query(
-          `UPDATE choros.report_page
-              SET tier = $1,
-                  updated_at = $2
-            WHERE tenant_id = $3
-              AND id = $4
-              AND tier != $1`,
-          [TIER_DRAFT, nowMs, tenantId, pageId],
-        );
-      }
+    for (const pageId of affectedPageIds) {
+      await client.query(
+        `UPDATE choros.report_page
+            SET tier = $1,
+                updated_at = $2
+          WHERE tenant_id = $3
+            AND id = $4
+            AND tier != $1`,
+        [TIER_DRAFT, nowMs, tenantId, pageId],
+      );
     }
 
-    // (c) Append audit event (T-0016 / ADR §5.3 / §7)
+    // (b2) Depromote affected template_def rows to tier='draft'
+    //      Mirror of b1 for templates (T-0235/T-0124 §2.9 — same discipline, different table).
+    //      choros.promoting='1' already set (tier trigger covers template_def too).
+    for (const templateId of affectedTemplateIds) {
+      await client.query(
+        `UPDATE choros.template_def
+            SET tier = $1,
+                updated_at = $2
+          WHERE tenant_id = $3
+            AND id = $4
+            AND tier != $1`,
+        [TIER_DRAFT, nowMs, tenantId, templateId],
+      );
+    }
+
+    // (c) Append ONE audit event covering all affected deps (T-0016 / ADR §5.3 / §7).
+    //     type includes both page and template deps for machine-readable observability.
     const writer = makePgAuditWriter();
     const affectedFields = [...new Set(destructiveDeps.map((d) => d.field_key))];
-    const affectedPagesPayload = destructiveDeps.map((d) => ({
+    const affectedPagesPayload = reportPageDestructiveDeps.map((d) => ({
       page_id: d.page_id,
       page_slug: d.page_slug,
+      field_key: d.field_key,
+      dep_kind: d.dep_kind,
+    }));
+    const affectedTemplatesPayload = templateDestructiveDeps.map((d) => ({
+      template_id: d.template_id,
+      template_slug: d.template_slug,
       field_key: d.field_key,
       dep_kind: d.dep_kind,
     }));
 
     await writer.appendAuditEvent(client as unknown as PgClientLike, {
       id: randomUUID(),
+      // Keeping the historical type string for backward compat with existing DB tests (AC-10).
+      // Template dep payload is additive — visible in affected_templates field.
       type: "report_page.schema_destructive_force",
       actor,
       subject: registryDefId,
@@ -412,6 +494,8 @@ async function updateSchemaInTx(args: {
         registry_def_id: registryDefId,
         fields: affectedFields,
         affected_pages: affectedPagesPayload,
+        // T-0235: additive — template deps that were staled by this force operation.
+        affected_templates: affectedTemplatesPayload,
       },
       occurred_at: nowMs,
     });
