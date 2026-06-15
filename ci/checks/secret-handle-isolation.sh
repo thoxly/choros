@@ -54,12 +54,29 @@ fi
 echo ""
 echo "Check FF-25-3: llm_secret_handle must appear only in the explicit custody allow-set (src/)"
 # ADR §13.3 AMENDMENT: Variant B adds the T-0042 hire-path files to the allow-set.
+#
+# T-0236 AMENDMENT (runtime-custody extension): the first live agent (T-0233,
+# legal-precheck motor) introduced a runtime custody path. The motor must READ
+# the llm_secret_handle column REFERENCE — not the secret value — to decide
+# dormancy (all three llm_* fields NULL ⇒ dormant) and to custody the handle
+# hand-off into the injected LlmPort. The production OpenAI adapter only mentions
+# the handle in a header COMMENT (custody is via the opaque SecretResolverPort,
+# never a raw column/log/audit/response). These are legitimate custody sites, so
+# the allow-set is extended additively (this check is NOT frozen — no sanction):
+#   src/runtime/legal-precheck/run-precheck.ts  — column read / type / null-check
+#   src/adapters/openai-llm-port.ts             — header comment reference only
+# Its __tests__/run-precheck.test.ts sibling is auto-allowed by the *.test.ts
+# stem rule below (vault:// handle-references in fixtures, never raw secrets).
+#
 # Allowed basenames (and their __tests__ / *.test.ts siblings):
 #   src/http/secret-handle.ts
 #   src/core/secret-handle-validator.ts
 #   src/db/agent-provision.ts
 #   src/core/agent-hire.ts
 #   src/http/agents.ts
+#   src/http/grant-propose.ts
+#   src/runtime/legal-precheck/run-precheck.ts   (T-0233 runtime custody)
+#   src/adapters/openai-llm-port.ts              (T-0233 adapter comment)
 # Any other file containing llm_secret_handle is a dormancy leak → FAIL.
 ALLOWED_FILES=(
   "src/http/secret-handle.ts"
@@ -68,6 +85,8 @@ ALLOWED_FILES=(
   "src/core/agent-hire.ts"
   "src/http/agents.ts"
   "src/http/grant-propose.ts"
+  "src/runtime/legal-precheck/run-precheck.ts"
+  "src/adapters/openai-llm-port.ts"
 )
 DORMANCY_HITS=$(grep -rn "llm_secret_handle" "${ROOT}/src/" --include="*.ts" -l 2>/dev/null || true)
 DORMANCY_ERRORS=0
