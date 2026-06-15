@@ -1,0 +1,86 @@
+{
+  "task_id": "T-0232",
+  "status": "ready",
+  "decision": "Ввести второй класс санкции 'auto_additive' в ci/checks/data/frozen-sanctions.jsonl рядом с существующим 'founder'-классом (T-0199). Логика классификации/аддитивности живёт в отдельном владеемом-T-0232 чеке ci/checks/auto-sanction-additive.sh, который мета-гейт frozen-checks-immutable.sh ВЫЗЫВАЕТ (минимальная аддитивная elif-ветка FF-FCI13). Для auto_additive-строки делегат НЕЗАВИСИМО доказывает A-1..A-4 над BASE_REF (не верит маркеру строки — D-007) И сверяет валидность Враг-аттестации (поле vrag_attestation: families ⊆ каталог T-0152 + corpus_ref-якорь + зелёный enemy-сегмент в той же fitness-цепочке). Деструктивный/редуктивный thaw, поданный как auto_additive, краснит делегата → FAIL → founder-only (граница D-060). Founder-путь (T-0085/T-0227) байт-эквивалентен. Враг-аттестация — поле В auto-строке jsonl (не отдельный файл): одна append-only запись держит и 'что санкционировано', и 'чем подтверждено', видима фаундеру постфактум.",
+  "rejected_alternatives": [
+    {"option": "Инлайн A-1..A-4 в frozen-checks-immutable.sh", "why_not": "Раздувает frozen-файл T-0146 толстой логикой парсинга диффа → деструктивная правка чужого чека, против NF-4/OOS-6; ломает тонкое ядро (ось 5). Отдельный владеемый чек само-защищён T-0146 без нового trust-root."},
+    {"option": "Отдельный артефакт-файл аттестации (ci/checks/data/vrag-attestations/<task>.json)", "why_not": "Вторая append-only поверхность → рассинхрон с jsonl; не несёт ценности сверх поля vrag_attestation в строке; больше surface для подделки. NF-2/NF-5 удовлетворены полем в строке."},
+    {"option": "Гейт ВЕРИТ маркеру sanctioned_by:auto_additive без ре-верификации A-1..A-4", "why_not": "Прямое нарушение D-007 (самооценка): оркестратор подписал бы сам себе деструктивный thaw. Гейт ОБЯЗАН независимо доказать аддитивность над BASE_REF."},
+    {"option": "Делегат повторно прогоняет Врага (enemy-тесты) внутри себя", "why_not": "Нарушает NF-1 (offline/детерминизм без БД/сети — Враг гоняет surface), дублирует уже-в-цепочке enemy-сегмент, медленно. Враг гоняется ОДИН раз в fitness; делегат сверяет аттестацию (FR-3/OOS-2)."},
+    {"option": "Семантический доказатель эквивалентности прав вместо Врага", "why_not": "OOS-5: статанализ не докажет 'новый enum-член = всё разрешено'; достаточность даёт Враг (D-007). A-1..A-4 необходимое, зелёный Враг достаточное."},
+    {"option": "Расширить control-plane founder_decide новым тихим режимом", "why_not": "OOS-3: не трогаем founder_decide тул; класс различается в data-файле (sanctioned_by), не в control-plane."}
+  ],
+  "object_model": [
+    {
+      "entity": "sanction_line (frozen-sanctions.jsonl, append-only компактный JSON, одна строка)",
+      "fields": [
+        {"name": "task", "type": "string T-NNNN — санкционируемая задача"},
+        {"name": "file", "type": "string ci/checks/... — чужой frozen-чек/защищаемая поверхность"},
+        {"name": "owner", "type": "string T-NNNN — владелец чужого чека (BASE_REF header)"},
+        {"name": "sanctioned_by", "type": "enum 'founder'|'auto_additive' — класс-дискриминатор (машинно-различим)"},
+        {"name": "decision", "type": "string 'founder_decide@DATE' — ТОЛЬКО founder-класс (как сегодня)"},
+        {"name": "vrag_attestation", "type": "object — ТОЛЬКО auto_additive-класс (см. ниже)"},
+        {"name": "additive_basis", "type": "string — привязка к A-1..A-4 над BASE_REF (аудит)"},
+        {"name": "note", "type": "string — аудит-нота"}
+      ]
+    },
+    {
+      "entity": "vrag_attestation (вложенный объект в auto_additive-строке)",
+      "fields": [
+        {"name": "families", "type": "string[] — семьи инвариантов Врага, покрывающие поверхность; каждая ⊆ каталог T-0152 (docs/design/T-0152-security-invariants-catalog.md)"},
+        {"name": "corpus_ref", "type": "string git-sha — детерминированный якорь corpus.jsonl (достижим на этом sha)"},
+        {"name": "enemy_segment", "type": "string — имя зелёного enemy-сегмента (enemy.adversarial.test.ts)"},
+        {"name": "attested_at", "type": "string date — метка аттестации"}
+      ]
+    },
+    {
+      "entity": "delegate-check ci/checks/auto-sanction-additive.sh (владелец T-0232)",
+      "fields": [
+        {"name": "--verify <TASK_ID> <file> <BASE_REF> <sanction_line>", "type": "режим: exit 0 = A-1..A-4 PASS И аттестация валидна → bypass разрешён; 1 = аддитивность нарушена/аттестация невалидна → bypass запрещён; 2 = сломана машинерия"},
+        {"name": "--self-test", "type": "режим: AC-1..AC-5, чистый git/grep/awk/diff без БД/сети/часов"},
+        {"name": "standalone (без аргументов)", "type": "режим: на task-ветке сверяет auto_additive-строки своей задачи; вне task-ветки/без merge-base — no-op fail-open"},
+        {"name": "verify_additive(base_file,head_file)", "type": "pure-функция → 0/1, A-1..A-4 над двумя файлами без git (драйвится self-test'ом)"},
+        {"name": "entities(file)", "type": "pure-функция → отсортированное множество именованных токенов (pluggable structural extractor: кавыченные литералы + UPPER-CASE-токены из непустых не-комментарий строк)"},
+        {"name": "attestation_valid(sanction_line)", "type": "pure-функция → 0/1: поля присутствуют, families ⊆ каталог T-0152, corpus_ref достижим"}
+      ]
+    }
+  ],
+  "contracts": [
+    "ci/checks/auto-sanction-additive.sh --verify <TASK_ID> <file> <BASE_REF> <sanction_json_line> → exit 0 (bypass разрешён) | 1 (запрещён → founder-only) | 2 (broken)",
+    "ci/checks/auto-sanction-additive.sh --self-test → exit 0 (все bite-кейсы пойманы + чистый кейс принят) | 1 (bite-кейс не пойман) | 2 (broken machinery)",
+    "ci/checks/auto-sanction-additive.sh (standalone в npm run fitness) → exit 0 на dev/non-task (no-op) или на чистой task-ветке; 1 на невалидной auto_additive-строке своей задачи",
+    "frozen-checks-immutable.sh: при is_sanctioned(file)+class=auto_additive ВЫЗЫВАЕТ auto-sanction-additive.sh --verify; PASS → SANCTION+AUDIT[FF-FCI13] class=auto_additive; FAIL → ERRORS++ (founder-only). class=founder → существующий FF-FCI12 путь байт-эквивалентен.",
+    "sanction_class(file)/sanction_line(file): новые хелперы мета-гейта, читают sanctioned_by/строку из jsonl по grep-логике is_sanctioned",
+    "A-1..A-4 (BASE_REF-якорь через git show): A-1 каждая непустая не-комментарий BASE_REF-строка байт-идентична в HEAD (дифф '+'-only); A-2 entities(BASE_REF) ⊆ entities(HEAD); A-3 нет переименования/переопределения/scope-расширения существующего члена; A-4 дельта = только новые сущности, не дописывает в существующий allowlist. Любое нарушение для любого f ∈ F ⇒ НЕ аддитивен ⇒ founder-only."
+  ],
+  "fitness_functions": [
+    {"id": "FF-ASA1", "rule": "Делегат --verify принимает чистый аддитивный thaw (только +-строки/новые сущности) с валидной Враг-аттестацией (exit 0).", "ci_check": "bash ci/checks/auto-sanction-additive.sh --self-test (case A: аддитивный+аттестован → ПРИНЯТ)"},
+    {"id": "FF-ASA2", "rule": "Делегат ОТКЛОНЯЕТ thaw с удалённой существующей сущностью/строкой (A-1/A-2 краснит, exit 1).", "ci_check": "bash ci/checks/auto-sanction-additive.sh --self-test (case B: удалён enum-член → ОТКЛОНЕНА)"},
+    {"id": "FF-ASA3", "rule": "Делегат ОТКЛОНЯЕТ thaw с мутацией/переопределением/scope-расширением существующего члена (A-1/A-3 краснит).", "ci_check": "bash ci/checks/auto-sanction-additive.sh --self-test (case C: мутирована строка/расширен scope → ОТКЛОНЕНА)"},
+    {"id": "FF-ASA4", "rule": "Делегат ОТКЛОНЯЕТ аддитивный thaw БЕЗ валидной Враг-аттестации (precondition Врага обязателен, FR-3).", "ci_check": "bash ci/checks/auto-sanction-additive.sh --self-test (case D: нет/невалидна аттестация → ОТКЛОНЕНА)"},
+    {"id": "FF-ASA5", "rule": "На dev/main/non-task ветке или без merge-base делегат и standalone-режим — no-op (fail-open), как frozen-checks-immutable/corpus/catalog.", "ci_check": "bash ci/checks/auto-sanction-additive.sh на dev → exit 0, INFO skip (FF-FCI3/FF-CORPUS3-стиль)"},
+    {"id": "FF-ASA6", "rule": "Делегат зарегистрирован в npm run fitness (package.json) с --self-test; 2-я строка = ^# T-0232[[:space:]]· (frozen-checks discipline → T-0146 сторожит его сам).", "ci_check": "grep 'auto-sanction-additive.sh' package.json && sed -n '2p' ci/checks/auto-sanction-additive.sh | grep -E '^# T-0232 ·'"},
+    {"id": "FF-FCI13", "rule": "Мета-гейт распознаёт класс auto_additive и ДЕЛЕГИРУЕТ верификацию auto-sanction-additive.sh; founder-класс (FF-FCI12) поведенчески неизменён/байт-эквивалентен (FR-6).", "ci_check": "bash ci/checks/frozen-checks-immutable.sh — founder-регрессия (T-0085/T-0227) зелёная; новая auto_additive-ветка покрыта hostile-probe"},
+    {"id": "FF-ASA7", "rule": "Деструктивный thaw, поданный как auto_additive (нет founder-строки), НЕ проходит мета-гейт (exit 1); тот же thaw с founder-строкой проходит (FR-5/AC-8).", "ci_check": "frozen-checks-immutable.sh hostile-probe: синтетика destructive+auto_additive → FAIL; +founder-строка → PASS"},
+    {"id": "FF-ASA8", "rule": "frozen-sanctions.jsonl остаётся append-only: существующие founder-строки (T-0085, T-0227) байт-сохранены; новый формат только аппендится (структурно как corpus-append-only, NF-2/AC-9).", "ci_check": "corpus-append-only-стиль diff BASE_REF jsonl: ни одна существующая строка не удалена/мутирована (grep -qxF каждой base-строки в HEAD)"},
+    {"id": "FF-ASA9", "rule": "AUDIT-строка auto-санкции содержит class=auto_additive + Враг-ссылку; founder — class=founder; классы машинно-различимы (AC-7).", "ci_check": "grep AUDIT-вывода мета-гейта на синтетике обоих классов: class=auto_additive+vrag= vs class=founder"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-ASA1 — delegate --self-test case A (аддитивный+аттестован → ПРИНЯТ)"},
+    {"ac": "AC-2", "covered_by": "FF-ASA2 — delegate --self-test case B (удалена сущность → A-1/A-2 краснит)"},
+    {"ac": "AC-3", "covered_by": "FF-ASA3 — delegate --self-test case C (мутация/scope → A-1/A-3 краснит)"},
+    {"ac": "AC-4", "covered_by": "FF-ASA4 — delegate --self-test case D (нет аттестации → ОТКЛОНЕНА), ADR §2-Q2"},
+    {"ac": "AC-5", "covered_by": "FF-FCI13 + FF-ASA9 — founder-класс поведенчески неизменён (ADR §5.3)"},
+    {"ac": "AC-6", "covered_by": "ADR §4 A-1..A-4 над диффом T-0227 (mutation-gateway-isolation.sh thaw process_instance) — A-1..A-4 выполнены, auto-путь ПРИНЯЛ БЫ; verifiable_as=test"},
+    {"ac": "AC-7", "covered_by": "FF-ASA9 — AUDIT class=auto_additive+vrag vs class=founder (ADR §5.3)"},
+    {"ac": "AC-8", "covered_by": "FF-ASA7 — destructive-as-auto_additive → FAIL; +founder-строка → PASS (ADR §7 шаг 5)"},
+    {"ac": "AC-9", "covered_by": "FF-ASA8 — jsonl append-only, T-0085/T-0227 байт-сохранены"},
+    {"ac": "AC-10", "covered_by": "FF-ASA6 — регистрация в npm run fitness + 2-я строка # T-0232 ·"},
+    {"ac": "AC-11", "covered_by": "FF-ASA5 — fail-open вне task-ветки/без merge-base (ADR §4)"},
+    {"ac": "AC-12", "covered_by": "FF-FCI13 — founder-регрессия T-0085/T-0227 зелёная в полном fitness; verifiable_as=test"},
+    {"ac": "AC-13", "covered_by": "вся §8 — npm run fitness зелёный end-to-end на ветке T-0232 (после bootstrap-founder-строки на мета-гейт, ADR §2-Q1)"}
+  ],
+  "runtime_target": "локально/CI — CI-gate-change (поведение fitness-чеков + формат data-строки jsonl), не рантайм-продукта, не объектная модель Choros; самотестируем --self-test, чист (git/grep/awk/diff без БД/сети/часов), исполняется на каждом npm run fitness; внешний ресурс не требуется. Один человек-в-петле: одноразовая bootstrap founder-строка на frozen-checks-immutable.sh (вводит сам класс, founder_decide-гейт T-0199-канала), помечается coder в preflight — не блокирующая эскалация (D-060 границу уже ратифицировал).",
+  "adr_artifact_path": "docs/design/T-0232-auto-sanction-additive-thaw.adr.md",
+  "escalation": ""
+}
