@@ -29,7 +29,9 @@ RUNTIME_PATHS=(
 )
 
 # Files anywhere that ARE allowed to reference agent_instruction (authoring surface).
-ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|src/http/artifacts\.ts|__tests__|\.test\.ts'
+# T-0233 FF-LP-4: src/runtime/legal-precheck/ is the ONLY runtime path allowed to read
+# agent_instruction (narrow unpark — the only live skill gate at day-1).
+ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|src/http/artifacts\.ts|src/runtime/legal-precheck/|__tests__|\.test\.ts'
 
 if [[ "${1:-}" == "--self-test" ]]; then
   if printf 'SELECT * FROM choros.agent_instruction\n' | grep -qE "agent_instruction"; then
