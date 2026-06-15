@@ -9,5 +9,5 @@
     "outDir": ".",
     "declaration": false
   },
-  "files": ["cli.ts", "importer.ts"]
+  "files": ["cli.ts", "importer.ts", "demo/tel-scenario.ts"]
 }

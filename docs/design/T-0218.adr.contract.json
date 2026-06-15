@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0218",
+  "status": "ready",
+  "decision": "Первая демо Choros = ОДИН линейный ТЭЛ (straight-through, без циклов/исключений), проходимый незнакомым зрителем за 5 именованных экранов (S1 Подача → S2 Триаж → S3 Юр-предпроверка(условный гейт) → S4 Согласование человеком → S5 Аудит-floor), переиспользующих существующие 5 экранов слайса (T-0141). Домен = (a) заявка на расход/закупку, переоформленная как упрощённый линейный ТЭЛ (выбор фабрики по делегации founder G.1): триаж самый яркий, т.к. agent выдаёт структурированные именованные корзины (категория/бюджетная статья/направление) И вычисляет маршрутное следствие «деньги → кто обязан согласовать» (≥порога→финконтролёр, ≥5млн₽→юротдел), что делает moat-момент наглядным и держит демо точным подмножеством ТЭЛ-эталона (§1.4/§3), а не другим классом как ITSM (таймеры/SLA, reference-tel §4). Два навыка вписаны в РАЗМЕЧЕННЫЕ слоты ОДНОГО потока (два агентских акта на одном инстансе, не две демо): agent_slot.intake (T-0219) на S2 — вход поля заявки, выход категория/статья/направление/маршрут + reasoning-trace; agent_slot.legal_precheck (T-0234) на S3 как условный гейт при amount≥5млн₽ — живой мотор runLegalPrecheck (T-0233), вход dealContext{amount,kind,direction}+document, выход PrecheckOutcome(proceed/defer/fail-closed); вход S3 производен от выхода S2 (общий поток данных = несущая связь «одного потока»). Реализуемая часть DESIGN-задачи = исполнимый demo-seed через importer/публичный API (НЕ прямой PG) + написанный 5-экранный walkthrough; навыки агентов = T-0219/T-0234, здесь только СЛОТЫ. Несущее инженерное ограничение: FF-PACK-2 (pack-serve-counts) жёстко assert-ит 8 rights/8 processes в showcase — поэтому демо-инстанс ТЭЛ показывается ПЕРЕИСПОЛЬЗОВАНИЕМ существующей process_instances-строки (репозиционирование INS-7731), а актор-слой слотов (роль role-intake-agent без гранта approve, агент a-intake, demo-deal≥5млн₽) = additive demo-seed в actor-плоскости (не в display-счётчиках), всё через importer. Moat (S3→S4): агент структурно не может approve (PDP-deny, не новый механизм). reasoning naружу не утекает (D-139, опора на T-0233 FR-6).",
+  "rejected_alternatives": [
+    { "option": "Домен ITSM (b)", "why_not": "Площе триаж, нет нативной логики «деньги→кто обязан согласовать», другой класс (таймеры/SLA = сердце ITSM, reference-tel §4) — уводит первую демо из ТЭЛ-эталона и разводит intake-триаж и legal-precheck по разным механикам." },
+    { "option": "Две отдельные демо (intake-демо + legal-демо)", "why_not": "legal-precheck теряет естественный триггер (порог, вычисляемый именно intake-агентом); два инстанса = лишняя когнитивная нагрузка за те же 5 минут. Один поток показывает оба навыка как конвейер штатных единиц." },
+    { "option": "Добавить новые process_instances/rights_cards в seed/showcase/pack.json", "why_not": "Ломает FF-PACK-2 (жёсткий assert 8/8 в основной fitness-цепи) → красный dev." },
+    { "option": "Обновить FF-PACK-2 на 9/9", "why_not": "Счётчик — чужой (T-0141) frozen-by-convention контракт; репозиционирование существующей строки честнее и не трогает чужой тест." },
+    { "option": "Полная ТЭЛ с циклами/исключениями в первой демо", "why_not": "Фаундер явно просил straight-through за ~5 экранов; циклы/исключения = расширение демо позже (reference-tel §1 «внести правки»-цикл)." },
+    { "option": "Строить навыки агентов (intake/legal-precheck) в этой задаче", "why_not": "OOS: навыки = T-0219/T-0234; DEMO-1 проектирует СЛОТЫ (контракт вход/выход + место в потоке)." },
+    { "option": "Demo-deal как реальные клиентские данные", "why_not": "Нарушает приватность/детерминизм; demo-deal = фикстура демо-тенанта (как T-0233 AC-15)." },
+    { "option": "Прямой PG для demo-seed", "why_not": "Нарушает I-1 (T-0140) и no-direct-pg-in-importer; всё через публичный API/importer." }
+  ],
+  "object_model": [
+    {
+      "entity": "agent_slot.intake (T-0219, разметка)",
+      "fields": [
+        { "name": "screen", "type": "S2 Триаж" },
+        { "name": "actor", "type": "intake-agent (role-intake-agent, персона a-intake)" },
+        { "name": "consumes", "type": "{ subject, amount, justification, requester } из формы S1" },
+        { "name": "produces", "type": "{ category, budget_article, direction, route }" },
+        { "name": "reasoning_surface", "type": "reasoning-trace «почему категория/порог/статья»; наружу answer+метаданные, raw reasoning в audit (D-139)" },
+        { "name": "outcomes", "type": "proceed / defer-to-human / fail-closed (T-0220), низкий тир day-1" },
+        { "name": "competency", "type": "agent_instruction (T-0123 instruction_text+answer_form, импл T-0230); инструкцию заводит T-0219" },
+        { "name": "cannot", "type": "переход «Согласовано» — нет гранта approve (moat)" }
+      ]
+    },
+    {
+      "entity": "agent_slot.legal_precheck (T-0234, разметка)",
+      "fields": [
+        { "name": "screen", "type": "S3 Юр-предпроверка (условный гейт)" },
+        { "name": "trigger", "type": "intake.amount ≥ 5_000_000 ₽ (ТЭЛ §1.4); иначе шаг пропускается" },
+        { "name": "engine", "type": "runLegalPrecheck (src/runtime/legal-precheck/run-precheck.ts, T-0233 — уже смержен, строить не нужно)" },
+        { "name": "consumes", "type": "dealContext { amount: number; kind: string; direction: string } + document; производно от выхода S2" },
+        { "name": "produces", "type": "PrecheckOutcome (proceed{answer:PrecheckAnswer} / defer-to-human{doubt_reason→agent.deferred} / fail-closed{agent.blocked})" },
+        { "name": "pdp_audit", "type": "resolveFor (T-0021) + единственный appendAuditEvent (T-0016) — переиспользование" },
+        { "name": "dormant_default", "type": "без agent_card.llm_*/live-флага — нет сетевого вызова → defer/fail-closed (T-0233 FR-7); live-провод = deploy-time founder" }
+      ]
+    },
+    {
+      "entity": "demo display-плоскость (репозиционирование, FF-PACK-2 8/8)",
+      "fields": [
+        { "name": "process_instances", "type": "существующая INS-7731 переоформлена на ТЭЛ-линейный инстанс; КОЛИЧЕСТВО строк не меняется (8)" },
+        { "name": "rights_cards", "type": "остаётся 8; role-intake-agent показывается без добавления 9-й карточки" }
+      ]
+    },
+    {
+      "entity": "demo actor-плоскость (additive, через importer)",
+      "fields": [
+        { "name": "role-intake-agent", "type": "роль + грант read заявки / write классификации, БЕЗ approve" },
+        { "name": "a-intake", "type": "employee kind=agent, назначен на позицию обработчика заявок" },
+        { "name": "demo-deal", "type": "договор/заявка amount ≥ 5_000_000 ₽, совместим с runLegalPrecheck dealContext (фикстура демо-тенанта)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "S1→S2: form { subject, amount, justification } → intake-agent",
+    "S2→S3: intake { category, budget_article, direction, amount } → (amount≥5млн?) → legal_precheck dealContext { amount, kind:category, direction }",
+    "S3→S4: PrecheckOutcome → human approve (card action; грант approve НЕ у агента)",
+    "S4→S5: цепочка → audit-floor (intake + legal-precheck + human, tamper-evident, reasoning в audit_event T-0139)"
+  ],
+  "fitness_functions": [
+    { "id": "FF-DEMO1-1", "kind": "static-self-test", "asserts": "SPEC+ADR+walkthrough+pr-handoff присутствуют; walkthrough перечисляет S1..S5 по порядку; agent_slot.intake (S2) и agent_slot.legal_precheck (S3, ≥5млн, dealContext) специфицированы. Имеет # SELF-TEST: и --self-test." },
+    { "id": "FF-PACK-2", "kind": "static-existing-must-not-break", "asserts": "GET /api/rights→8, GET /api/processes→8 — display не раздут." },
+    { "id": "fitness:seed", "kind": "static-existing", "asserts": "pack-schema-valid, pack-refs-resolve, single-source, display-plane-no-write зелёные после demo actor-seed." },
+    { "id": "seed-apply-smoke", "kind": "infra", "asserts": "demo actor-seed применяется к свежему showcase-тенанту чисто, идемпотентно (Postgres)." },
+    { "id": "tsc/eslint", "kind": "static", "asserts": "demo-скрипт типизирован и lint-clean." }
+  ],
+  "traceability": {
+    "v1-demo §A.1/A.3": "ADR §5 (5 экранов S1..S5)",
+    "v1-demo §0 доказательства 1-4": "ADR §5 колонка Доказательство",
+    "founder G.1 (оба кандидата)": "ADR §2 (выбор (a) + обоснование)",
+    "founder 2026-06-15 (ТЭЛ=эталон, демо=линейный ТЭЛ)": "ADR §1/§2.2/§3",
+    "reference-tel §1.4 + §3": "ADR §4.2 trigger (≥5млн→юр-precheck red-flags)",
+    "T-0233 runLegalPrecheck dealContext": "ADR §4.2 вход",
+    "T-0123/T-0230 agent_instruction": "ADR §4.1 механика компетентности",
+    "T-0140 importer / I-1": "ADR §6.2 actor-seed путь",
+    "FF-PACK-2": "ADR §6.1 ограничение (репозиционирование)",
+    "T-0220 outcomes": "ADR §4.1/§4.2 исходы"
+  },
+  "runtime_target": "dev-стенд showcase-тенанта (T-0141), кликабельный слайс; публичный стенд T-0142 = Stage-2 founder-gated",
+  "adr_artifact_path": "docs/design/T-0218-demo-1-scenario.adr.md",
+  "escalation": "нет founder-only форка. Выбор домена (a vs b) делегирован и сделан (§2). ТЭЛ-рамка и порог ≥5млн уже зафиксированы фаундером. Реальный live-провод LLM для legal-precheck на проде = deploy-time T-0234, НЕ блокер этой design-задачи."
+}
