@@ -8,6 +8,9 @@
  *  FF-LIVE-NO-CACHE    — two live renders around mutation return different bytes
  *  FF-AUDIT-EVERY-RENDER — every render (success and denial) emits exactly one audit event
  *  FF-SNAPSHOT-IMMUTABLE — renderAndFix calls addVersion(isSnapshot=true), never writes file_version directly
+ *  FF-RENDER-VIA-PDP (allow-path) — render output = projectFields of an allowed read, never rawRow.data
+ *  FF-NO-MASK-ROW (allow-path)   — field the subject may NOT see is PHYSICALLY ABSENT from output
+ *  FF-LIVE-NO-CACHE (allow-path) — registry partial-grant yields only visible rows in output
  *
  * All ports are in-memory fakes — no DB required for these tests.
  *
@@ -29,8 +32,9 @@ import {
   type RenderAuditSink,
   type SnapshotPort,
 } from "../document-render.js";
-import type { ResolveSubject } from "../object-handle.js";
+import type { ResolveSubject, ResourceRef } from "../object-handle.js";
 import type { ResolverDeps } from "../grant-resolver.js";
+import type { Grant } from "../grant-lattice.js";
 import type { AuditEventInput } from "../audit-grant-encoder.js";
 
 // ---------------------------------------------------------------------------
@@ -559,6 +563,378 @@ describe("sourceDigest — determinism (NF-2)", () => {
     const r2 = await render(deps, TEMPLATE_ID, { kind: "registry", registryId: REGISTRY_ID }, SUBJECT);
     if (!r1.denied && !r2.denied) {
       expect(r1.meta.sourceDigest).toBe(r2.meta.sourceDigest);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ALLOW-PATH TESTS — Finding #1
+//
+// The invariant: render output = projectFields result of an allowed read,
+// never raw row data. A regression swapping `view.fields → rawRow.data`
+// would bypass projection and expose all fields regardless of grant scope.
+//
+// Strategy: build a ResolverDeps whose GrantSource returns a covering grant
+// for a specific record, and whose RecordSource returns the raw row data.
+// resolveFor is exercised on the ALLOW path, projectFields is called, and
+// the output is verified to match the projected (not raw) field set.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a ResolverDeps that ALLOWS reads for the given allowed records.
+ *
+ * For each allowed record a Grant is synthesized covering exactly that record
+ * (scope = node, hierarchy=resource, nodeId=recordId, nodeLevel=record).
+ * AncestryOracle: isDescendantOrSelf returns true when a===b (exact-node match).
+ * GrantSource: returns all grants for the tenant (subject must match tenant).
+ * RecordSource: returns rawData for the given resourceRef.
+ *
+ * @param allowedRecords — maps recordId → rawData for records that should be allowed.
+ * @param grantFacetFields — when supplied, the grant carries a facet restricting visible
+ *        fields to exactly these keys. When absent, grant is whole-resource (all fields visible).
+ */
+function makeAllowResolverDeps(
+  allowedRecords: Array<{ recordId: string; registryId: string; rawData: Record<string, unknown> }>,
+  grantFacetFields?: string[],
+): ResolverDeps {
+  // Build one Grant per allowed record
+  const grants: Grant[] = allowedRecords.map((rec, i) => ({
+    tenantId: TENANT,
+    id: `grant-allow-${i}`,
+    roleId: "role-test",
+    resourceType: "record" as const,
+    // When grantFacetFields is set, use a field-scoped facet (partial access);
+    // when absent, no resourceFacet → whole-resource grant (all fields visible).
+    resourceFacet: grantFacetFields !== undefined
+      ? { fields: grantFacetFields }
+      : undefined,
+    operation: "read" as const,
+    // Scope = exact record node in resource hierarchy
+    scope: {
+      kind: "node" as const,
+      hierarchy: "resource" as const,
+      nodeId: rec.recordId,
+      nodeLevel: "record" as const,
+    },
+    delegable: false,
+    grantedBy: "seed",
+    createdAt: 0,
+  }));
+
+  // Build a raw-data map keyed by recordId
+  const dataMap = new Map<string, Record<string, unknown>>(
+    allowedRecords.map((r) => [r.recordId, r.rawData]),
+  );
+
+  return {
+    grants: {
+      async getGrants() { return grants; },
+    },
+    records: {
+      async getRecord(ref: ResourceRef) {
+        if (ref.kind !== "record") return null;
+        return dataMap.get(ref.recordId) ?? null;
+      },
+    },
+    ancestry: {
+      // Exact-node oracle: descendantOrSelf only when IDs match
+      isDescendantOrSelf(_hierarchy: string, descendantId: string, ancestorId: string) {
+        return descendantId === ancestorId;
+      },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// (a) Allowed record's projected fields appear in render output bytes
+// ---------------------------------------------------------------------------
+
+describe("ALLOW-PATH (a): visible record fields appear in rendered output", () => {
+  it("allowed single record: visible fields appear in CSV bytes", async () => {
+    const rawData = { contractNo: "A-001", status: "active", secret: "s3cr3t" };
+    // Grant covers all fields (no facet restriction)
+    const resolverDeps = makeAllowResolverDeps([
+      { recordId: RECORD_ID, registryId: REGISTRY_ID, rawData },
+    ]);
+
+    const rows = [{ id: RECORD_ID, registryId: REGISTRY_ID, data: rawData }];
+    const tmpl = makeTemplate({ format: "csv" });
+    const { sink } = makeAuditSink();
+
+    const deps: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch(rows),
+      templates: makeTemplateSource(tmpl),
+      audit: sink,
+    };
+    const params: RenderParams = {
+      kind: "single",
+      recordRef: { tenantId: TENANT, registryId: REGISTRY_ID, recordId: RECORD_ID },
+    };
+    const result = await render(deps, TEMPLATE_ID, params, SUBJECT);
+
+    expect(result.denied).toBe(false);
+    if (!result.denied) {
+      const text = Buffer.from(result.bytes).toString("utf8");
+      // Visible fields appear in the output
+      expect(text).toContain("A-001");
+      expect(text).toContain("active");
+      // All fields visible (whole-resource grant) — 'secret' is also present
+      expect(text).toContain("secret");
+      expect(result.meta.recordCount).toBe(1);
+    }
+  });
+
+  it("allowed single record: visible fields appear in HTML bytes", async () => {
+    const rawData = { contractNo: "B-002", status: "closed" };
+    const resolverDeps = makeAllowResolverDeps([
+      { recordId: RECORD_ID, registryId: REGISTRY_ID, rawData },
+    ]);
+
+    const rows = [{ id: RECORD_ID, registryId: REGISTRY_ID, data: rawData }];
+    const tmpl = makeTemplate({ format: "html" });
+    const { sink } = makeAuditSink();
+
+    const deps: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch(rows),
+      templates: makeTemplateSource(tmpl),
+      audit: sink,
+    };
+    const params: RenderParams = {
+      kind: "single",
+      recordRef: { tenantId: TENANT, registryId: REGISTRY_ID, recordId: RECORD_ID },
+    };
+    const result = await render(deps, TEMPLATE_ID, params, SUBJECT);
+
+    expect(result.denied).toBe(false);
+    if (!result.denied) {
+      const text = Buffer.from(result.bytes).toString("utf8");
+      expect(text).toContain("B-002");
+      expect(text).toContain("closed");
+      // HTML table structure
+      expect(text).toContain("<table");
+      expect(result.meta.recordCount).toBe(1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (b) Field the subject may NOT see is PHYSICALLY ABSENT from output
+//     Drive through a real facet-restricted grant (partial field access).
+// ---------------------------------------------------------------------------
+
+describe("ALLOW-PATH (b): denied field is PHYSICALLY ABSENT from output", () => {
+  it("single record with field-scoped grant: hidden field physically absent in CSV", async () => {
+    // Raw record has two fields: 'contractNo' and 'salaryBand' (confidential)
+    const rawData = { contractNo: "C-003", salaryBand: "L5" };
+    // Grant restricts to only 'contractNo' (facet with fields:["contractNo"])
+    const resolverDeps = makeAllowResolverDeps(
+      [{ recordId: RECORD_ID, registryId: REGISTRY_ID, rawData }],
+      ["contractNo"], // only contractNo is visible
+    );
+
+    const rows = [{ id: RECORD_ID, registryId: REGISTRY_ID, data: rawData }];
+    const tmpl = makeTemplate({ format: "csv" });
+    const { sink } = makeAuditSink();
+
+    const deps: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch(rows),
+      templates: makeTemplateSource(tmpl),
+      audit: sink,
+    };
+    const params: RenderParams = {
+      kind: "single",
+      recordRef: { tenantId: TENANT, registryId: REGISTRY_ID, recordId: RECORD_ID },
+    };
+    const result = await render(deps, TEMPLATE_ID, params, SUBJECT);
+
+    expect(result.denied).toBe(false);
+    if (!result.denied) {
+      const text = Buffer.from(result.bytes).toString("utf8");
+      // Visible field appears
+      expect(text).toContain("contractNo");
+      expect(text).toContain("C-003");
+      // PHYSICAL ABSENCE (FF-NO-MASK-ROW): 'salaryBand' and 'L5' are NOT in output
+      // Not null, not "***", not an empty-labeled cell — the key itself is absent.
+      expect(text).not.toContain("salaryBand");
+      expect(text).not.toContain("L5");
+      // No masking tokens
+      expect(text).not.toContain("***");
+      expect(text).not.toContain("null");
+    }
+  });
+
+  it("single record with field-scoped grant: hidden field physically absent in HTML", async () => {
+    const rawData = { name: "Alice", internalCode: "IC-99" };
+    // Grant: only 'name' visible
+    const resolverDeps = makeAllowResolverDeps(
+      [{ recordId: RECORD_ID, registryId: REGISTRY_ID, rawData }],
+      ["name"],
+    );
+
+    const rows = [{ id: RECORD_ID, registryId: REGISTRY_ID, data: rawData }];
+    const tmpl = makeTemplate({ format: "html" });
+    const { sink } = makeAuditSink();
+
+    const deps: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch(rows),
+      templates: makeTemplateSource(tmpl),
+      audit: sink,
+    };
+    const params: RenderParams = {
+      kind: "single",
+      recordRef: { tenantId: TENANT, registryId: REGISTRY_ID, recordId: RECORD_ID },
+    };
+    const result = await render(deps, TEMPLATE_ID, params, SUBJECT);
+
+    expect(result.denied).toBe(false);
+    if (!result.denied) {
+      const text = Buffer.from(result.bytes).toString("utf8");
+      // Visible field in HTML
+      expect(text).toContain("name");
+      expect(text).toContain("Alice");
+      // Hidden field and its value are PHYSICALLY ABSENT — not even as empty cell header
+      expect(text).not.toContain("internalCode");
+      expect(text).not.toContain("IC-99");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (c) Registry render under PARTIAL grant (some rows visible, some denied)
+//     recordCount = number of visible rows; denied rows entirely absent.
+// ---------------------------------------------------------------------------
+
+describe("ALLOW-PATH (c): registry partial-grant — only visible rows in output", () => {
+  const RECORD_ID_2 = "d0000000-0000-0000-0000-000000000002";
+  const RECORD_ID_3 = "d0000000-0000-0000-0000-000000000003";
+
+  it("registry render: only allowed rows appear; denied rows entirely absent; recordCount correct", async () => {
+    // Three records; only records 1 and 3 have covering grants
+    const row1 = { id: RECORD_ID,   registryId: REGISTRY_ID, data: { contractNo: "A-001", status: "active" } };
+    const row2 = { id: RECORD_ID_2, registryId: REGISTRY_ID, data: { contractNo: "B-002", status: "closed" } };
+    const row3 = { id: RECORD_ID_3, registryId: REGISTRY_ID, data: { contractNo: "C-003", status: "pending" } };
+
+    // Grant covers only row1 and row3 (not row2)
+    const resolverDeps = makeAllowResolverDeps([
+      { recordId: RECORD_ID,   registryId: REGISTRY_ID, rawData: row1.data },
+      { recordId: RECORD_ID_3, registryId: REGISTRY_ID, rawData: row3.data },
+    ]);
+
+    const tmpl = makeTemplate({ format: "csv" });
+    const { sink, events } = makeAuditSink();
+
+    const deps: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch([row1, row2, row3]),
+      templates: makeTemplateSource(tmpl),
+      audit: sink,
+    };
+    const params: RenderParams = { kind: "registry", registryId: REGISTRY_ID };
+    const result = await render(deps, TEMPLATE_ID, params, SUBJECT);
+
+    expect(result.denied).toBe(false);
+    if (!result.denied) {
+      // Only 2 visible rows (FF-NO-MASK-ROW: denied row2 is absent, not a dash-row)
+      expect(result.meta.recordCount).toBe(2);
+      const text = Buffer.from(result.bytes).toString("utf8");
+      // Allowed records present
+      expect(text).toContain("A-001");
+      expect(text).toContain("C-003");
+      // Denied record (row2) entirely absent — no "B-002" anywhere in output
+      expect(text).not.toContain("B-002");
+      expect(text).not.toContain("closed");
+    }
+
+    // One audit event for the whole render
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("doc.render");
+  });
+
+  it("registry render with partial grants: sourceDigest reflects only projected rows", async () => {
+    // Same setup — verify sourceDigest changes when the allowed set changes
+    const row1 = { id: RECORD_ID,   registryId: REGISTRY_ID, data: { x: "1" } };
+    const row2 = { id: RECORD_ID_2, registryId: REGISTRY_ID, data: { x: "2" } };
+
+    // Allow only row1
+    const deps1: RenderDeps = {
+      resolver: makeAllowResolverDeps([{ recordId: RECORD_ID, registryId: REGISTRY_ID, rawData: row1.data }]),
+      records: makeRecordBatch([row1, row2]),
+      templates: makeTemplateSource(makeTemplate({ format: "csv" })),
+      audit: makeAuditSink().sink,
+      now: () => 42,
+    };
+    // Allow both rows
+    const deps2: RenderDeps = {
+      resolver: makeAllowResolverDeps([
+        { recordId: RECORD_ID,   registryId: REGISTRY_ID, rawData: row1.data },
+        { recordId: RECORD_ID_2, registryId: REGISTRY_ID, rawData: row2.data },
+      ]),
+      records: makeRecordBatch([row1, row2]),
+      templates: makeTemplateSource(makeTemplate({ format: "csv" })),
+      audit: makeAuditSink().sink,
+      now: () => 42,
+    };
+
+    const r1 = await render(deps1, TEMPLATE_ID, { kind: "registry", registryId: REGISTRY_ID }, SUBJECT);
+    const r2 = await render(deps2, TEMPLATE_ID, { kind: "registry", registryId: REGISTRY_ID }, SUBJECT);
+
+    expect(r1.denied).toBe(false);
+    expect(r2.denied).toBe(false);
+    if (!r1.denied && !r2.denied) {
+      // Different projected sets → different digests
+      expect(r1.meta.sourceDigest).not.toBe(r2.meta.sourceDigest);
+      // Different byte outputs
+      expect(r1.bytes).not.toEqual(r2.bytes);
+    }
+  });
+
+  it("FF-LIVE-NO-CACHE (allow-path): two renders around a mutation return different bytes", async () => {
+    // Simulate mutation: before=status:active, after=status:closed
+    const rowBefore = { id: RECORD_ID, registryId: REGISTRY_ID, data: { contractNo: "D-004", status: "active" } };
+    const rowAfter  = { id: RECORD_ID, registryId: REGISTRY_ID, data: { contractNo: "D-004", status: "closed" } };
+
+    const resolverDeps = makeAllowResolverDeps([
+      { recordId: RECORD_ID, registryId: REGISTRY_ID, rawData: rowBefore.data },
+    ]);
+
+    // First render (before mutation)
+    const depsBefore: RenderDeps = {
+      resolver: resolverDeps,
+      records: makeRecordBatch([rowBefore]),
+      templates: makeTemplateSource(makeTemplate({ format: "csv" })),
+      audit: makeAuditSink().sink,
+      now: () => 1000,
+    };
+
+    // Second render (after mutation — different RecordBatch port with updated data)
+    const depsAfter: RenderDeps = {
+      resolver: makeAllowResolverDeps([
+        { recordId: RECORD_ID, registryId: REGISTRY_ID, rawData: rowAfter.data },
+      ]),
+      records: makeRecordBatch([rowAfter]),
+      templates: makeTemplateSource(makeTemplate({ format: "csv" })),
+      audit: makeAuditSink().sink,
+      now: () => 2000,
+    };
+
+    const rBefore = await render(depsBefore, TEMPLATE_ID, { kind: "registry", registryId: REGISTRY_ID }, SUBJECT);
+    const rAfter  = await render(depsAfter, TEMPLATE_ID, { kind: "registry", registryId: REGISTRY_ID }, SUBJECT);
+
+    expect(rBefore.denied).toBe(false);
+    expect(rAfter.denied).toBe(false);
+    if (!rBefore.denied && !rAfter.denied) {
+      // Mutation is reflected: bytes differ
+      const textBefore = Buffer.from(rBefore.bytes).toString("utf8");
+      const textAfter  = Buffer.from(rAfter.bytes).toString("utf8");
+      expect(textBefore).toContain("active");
+      expect(textAfter).toContain("closed");
+      expect(rBefore.bytes).not.toEqual(rAfter.bytes);
+      // sourceDigests differ (different projected row content)
+      expect(rBefore.meta.sourceDigest).not.toBe(rAfter.meta.sourceDigest);
     }
   });
 });
