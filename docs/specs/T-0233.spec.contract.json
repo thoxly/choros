@@ -1,0 +1,119 @@
+{
+  "task_id": "T-0233",
+  "status": "ready",
+  "summary": "Первый ЖИВОЙ навык агента: рантайм-мотор «инструкция (T-0123 instruction_text+answer_form) + документ договора → модель → структурированный red-flags-ответ обратно в процесс как answer_form-исход» на ОДНОМ навыке legal_precheck (юр-предпроверка при сумме ≥ 5 млн ₽, ТЭЛ §1/§3), под существующим PDP (resolveFor T-0021), аудитом (appendAuditEvent T-0016) и моделью исходов T-0220. Узкая разморозка dormant-рантайма T-0123. Несущее решение напряжения «live = реальный LLM, но бюджет=$0»: модель зовётся через инъектируемый порт LlmPort, тесты/CI инжектят детерминированную стаб-фикстуру (ноль платных вызовов), живой провод config-gated и dormant-by-default (agent_card.llm_* NULL = dormant); реальный ключ флипает live позже на среде фаундера (deploy-time, не impl-блокер).",
+  "functional": [
+    "FR-1: Мотор исполняет РОВНО один named skill legal_precheck — вход «договор + контекст (сумма/тип/направление)», выход — структурированный red-flags-ответ (рисковые пункты до юротдела). Никакого generic «агент отвечает на любой запрос».",
+    "FR-2: Инъектируемый порт модели LlmPort (напр. complete(req)→Promise<LlmResult>); мотор зависит от интерфейса-порта, инжектируемого через deps/конструктор (DI, как resolveFor/AncestryOracle/SecretResolverPort), НЕ от конкретного SDK. Production-провод и тест-стаб — разные реализации порта.",
+    "FR-3: Сборка запроса из компетентностного слоя T-0123: мотор читает agent_instruction целевого агента через существующий read-путь agent-instruction-store.ts (readPublished); instruction_text = system-инструкция, answer_form определяет форму ответа; свой формат-стор не вводится.",
+    "FR-4: Ответ обратно в процесс как answer_form-исход под аудитом; исход проходит классификатор T-0220 — proceed (≥ порога И в рамках грантов) / defer-to-human (сомнение → задача инбокса E7 с doubt_reason) / fail-closed (вне грантов / ошибка модели / egress-блок → стоп+аудит, НИКОГДА тихо не пропустить).",
+    "FR-5: Под PDP/аудитом — любой data-access мотора через существующий единый resolveFor (T-0021), action-time fail-closed, без второго резолвера; каждое исполнение (успех И отказ) пишет аудит через единственный appendAuditEvent (T-0016): успех → actor_event/governed-эффект (T-0019), сомнение → agent.deferred, отказ → agent.blocked (T-0220).",
+    "FR-6: D-139 — reasoning не утекает: reasoning-trace (если есть) пишется во внутренний audit_event под T-0139-маскированием; ответ-исход наружу несёт answer (форма answer_form) + безопасные метаданные, сырой reasoning в тело не уходит.",
+    "FR-7: Dormant-by-default live-провод — без сконфигурированных agent_card.llm_* (NULL=dormant) И без явного live-флага мотор НЕ делает сетевой LLM-вызов; в dormant-состоянии исход = defer-to-human/fail-closed (default-to-human T-0220), не оптимистичное продолжение. Размороженность ограничена ОДНИМ навыком; рантайм для других навыков остаётся dormant.",
+    "FR-8: Демо-данные — навык верифицируется на демо-договоре(ах) с суммой ≥ 5 млн ₽ (ТЭЛ-порог), заведённых как фикстура/seed демо-тенанта, не на реальных клиентских данных."
+  ],
+  "non_functional": [
+    "NF-1: Ноль платных LLM-вызовов в тестах/CI — npm run ci / npm test / fitness зелёные без сети к LLM-провайдеру и без LLM-кредла; CI не требует OPENAI_API_KEY/любого LLM-секрета (тест инжектит стаб-порт).",
+    "NF-2: Один PDP, один audit-sink, один versioning/формат — никакого второго резолвера прав, audit-канала, формат-стора ответа или механизма инструкций; переиспользуются T-0021/T-0016/T-0123 как есть.",
+    "NF-3: RL-3 custody (T-0025) — если live-провод требует LLM-секрет, он резолвится как handle (validateSecretHandleShape/SecretResolverPort), сырой ключ не в столбец/лог/audit/ответ/exception (redactHandle); day-1 (dormant) секрет-путь не активен.",
+    "NF-4: Узость разморозки структурно ограничена — dormant-gate (agent-instruction-runtime-dormant.sh/FF-COMP-6) остаётся зелёным либо узко расширяется ровно на legal_precheck-путь (allowlist), не открывая generic runtime-чтение agent_instruction.",
+    "NF-5: Tenant-изоляция (T-0013) — доступ мотора к данным под tenant-контекстом (RLS, SET LOCAL choros.tenant_id); cross-tenant неконструируем; демо-данные в демо-тенанте.",
+    "NF-6: Детерминизм исхода при стабе — фиксированный вход + фиксированная стаб-фикстура → тот же answer/исход/аудит (делает приёмку machine-checkable).",
+    "NF-7: tsc --noEmit exit 0; npm test exit 0; npm run fitness exit 0; fitness:db (если затронут) зелёный."
+  ],
+  "out_of_scope": [
+    "Выбор «какие агенты где» / каталог навыков — решает фаундер отдельно; здесь ОДИН навык.",
+    "Рантайм-разморозка ДРУГИХ навыков (проверка контрагента, классификация типовой/нетиповой, разбор протокола разногласий, парсинг спецификаций, генерация реестра) — остаются dormant.",
+    "Headless/программная поверхность (/api/headless/agent-query, внешний запрос → ответ агента) — T-0126, отдельная задача; T-0233 — внутренний рантайм-шаг процесса.",
+    "Реальный production LLM-провайдер-клиент как ОБЯЗАТЕЛЬНАЯ часть приёмки — live-провод = отдельная реализация порта; его реальное включение (ключ/среда/оплата) = deploy-time за фаундером.",
+    "Бюджет/reservation/spend_ledger-энфорсмент рантайма (T-0023, FF-BUD-10) — остаётся dormant; T-0233 не вводит runtime-биллинг.",
+    "Промт-инжиниринг качества red-flags / оценка качества ответа живой модели — приёмка проверяет КОНТРАКТ мотора, не «насколько хороши red-flags».",
+    "Авторинг-UI инструкции навыка / право на правку (T-0123 Q-1) — инструкция предполагается заведённой (seed/фикстура).",
+    "Полный egress-runtime-гейт (T-0041 Stage-2) — структурная граница фиксируется, полный движок Stage-2.",
+    "DMN-порог «≥ 5 млн ₽» как новый механизм — переиспользует существующую маршрутизацию/атрибуты процесса."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "LlmPort-интерфейс экспортирован; мотор принимает его как инъектируемую зависимость (deps/конструктор), не импортирует конкретный LLM-SDK напрямую в core-пути. tsc --noEmit exit 0.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Юнит-тест: мотор legal_precheck с детерминированным стаб-портом на демо-договоре (сумма ≥ 5 млн ₽) → структурированный red-flags-ответ, помеченный применённым answer_form; ноль сетевых вызовов.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "Детерминизм: один и тот же вход + одна и та же стаб-фикстура → побайтово одинаковый answer/исход/аудит-payload (NF-6).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "Dormant-by-default: при NULL agent_card.llm_* (или выключенном live-флаге) мотор НЕ делает сетевой LLM-вызов и возвращает defer-to-human/fail-closed (T-0220), не proceed. Юнит-тест с портом, бросающим при любом сетевом вызове.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "Классификатор исхода T-0220: вне грантов / ошибка модели / egress-блок → fail-closed + agent.blocked-аудит, ноль success-аудита, НИКОГДА не тихо пропустить. Юнит-тест трёх веток fail-closed.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "defer-to-human материализует обычную задачу инбокса (E7) «нужна проверка» с doubt_reason и пишет agent.deferred. Юнит/интеграционный тест.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Data-access мотора идёт через существующий resolveFor (T-0021); grep — нет второго резолвера/authority-функции на пути навыка; single-resolver.sh зелёный.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "Аудит через единственный appendAuditEvent (T-0016): success/deferred/blocked-пути эмитят ожидаемый audit_event; grep — нет второго audit-writer на пути навыка.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "D-139: тип ответа-исхода структурно НЕ несёт reasoning/trace/raw-поля (tsc на типе); grep — reasoning не пишется в тело ответа/исход, только в appendAuditEvent (T-0139).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-10",
+      "text": "Форма ответа = agent_instruction.answer_form (T-0123): мотор читает answer_form через agent-instruction-store readPublished; grep — нет локального responseFormat-стора; ответ эхо-ит применённую форму.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-11",
+      "text": "Узость разморозки: dormant-gate (agent-instruction-runtime-dormant.sh/FF-COMP-6) зелёный — рантайм-чтение agent_instruction допущено РОВНО на legal_precheck-пути (узкий allowlist), прочие runtime-пути по-прежнему не читают инструкцию.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-12",
+      "text": "Ноль платных LLM-вызовов в CI (NF-1): npm run ci / npm test / npm run fitness зелёные без OPENAI_API_KEY/LLM-секрета в окружении и без сети к провайдеру (стаб-порт).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-13",
+      "text": "RL-3 custody (T-0025): если live-провод несёт LLM-секрет — он проходит validateSecretHandleShape/redactHandle; grep — сырого секрета нет в console.*/appendAuditEvent/res.json/exception. Если секрет-путь day-1 не активен — assert его отсутствия в dormant-состоянии.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-14",
+      "text": "Tenant-изоляция (T-0013): доступ мотора к договору под SET LOCAL choros.tenant_id/RLS; cross-tenant probe (мотор tenant A не читает договор tenant B) → отказ.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-15",
+      "text": "Демо-данные: демо-договор(ы) с суммой ≥ 5 млн ₽ заведены как фикстура/seed демо-тенанта; навык верифицируется на них, не на реальных клиентских данных.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-16",
+      "text": "tsc --noEmit exit 0; npm test exit 0; npm run fitness exit 0; fitness:db (если затронут) зелёный (NF-7).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0233-agent-runtime-live-precheck.spec.md"
+}
