@@ -32,8 +32,10 @@ import type {
 // ---------------------------------------------------------------------------
 // ТЭЛ threshold (reference-tel §1.4) — ≥ 5M₽ requires legal review.
 // Canonical in src; seed/demo/tel-scenario.ts mirrors it as TEL_LEGAL_THRESHOLD_RUB
-// (both === 5_000_000; the FF-INTAKE-1 check asserts the seed copy matches).
-// src cannot import seed/ (rootDir=src), so the value is declared here too.
+// (both === 5_000_000). src cannot import seed/ (rootDir=src), so the value is
+// declared in both places and kept in sync manually; the boundary tests pin this
+// value independently (4_999_999 / 5_000_000 / 5_500_000), so any drift between
+// the two copies surfaces as a test failure rather than passing silently.
 // ---------------------------------------------------------------------------
 
 export const TEL_LEGAL_THRESHOLD_RUB = 5_000_000 as const;
