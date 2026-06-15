@@ -1,0 +1,25 @@
+{
+  "task_id": "T-0232",
+  "status": "blocked",
+  "branch": "task/T-0232",
+  "pr_url": null,
+  "ci_local": {
+    "build": "pre-existing-803-errors (zero new errors introduced by T-0232; this is a CI-gate-change task with no new TS code; 803 errors existed before this branch)",
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": "green-except-frozen-checks-immutable (expected bootstrap red on FF-FCI1 for edit to T-0146-owned file; all 39 other static checks green; auto-sanction-additive --self-test green)"
+  },
+  "files_changed": [
+    "ci/checks/auto-sanction-additive.sh",
+    "ci/checks/frozen-checks-immutable.sh",
+    "package.json",
+    "docs/design/T-0232.pr-handoff.json"
+  ],
+  "deviations_from_adr": [],
+  "blocked_reason": "Bootstrap founder sanction required for frozen-checks-immutable.sh edit. frozen-checks-immutable.sh (owner T-0146) requires a one-time founder-class sanction line in ci/checks/data/frozen-sanctions.jsonl before the bootstrap edit (FF-FCI13 elif branch) can pass the meta-gate. This is the single --self-bind paradox documented in ADR §2-Q1: the mechanism that introduces auto_additive class cannot self-sanction its own bootstrap edit. Required founder action: append one founder-class sanction line via founder_decide and add to frozen-sanctions.jsonl:\n{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 byte-equivalent; installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}\nAfter this line is appended, frozen-checks-immutable.sh will verify FF-FCI13 (the edit is additive: new elif branch beside existing founder branch; founder path is byte-equivalent) and the branch can be merged.",
+  "bootstrap_sanction_needed": true,
+  "bootstrap_detail": "{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 byte-equivalent; installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}",
+  "friction_events": [],
+  "notes": "Implementation complete. Files: (1) ci/checks/auto-sanction-additive.sh — NEW, T-0232-owned delegate implementing A-1..A-4 additive verification + Vrag attestation validation with --verify, --self-test, and standalone modes; mirrors corpus-append-only/catalog-frozen/arena-sealed idioms. (2) ci/checks/frozen-checks-immutable.sh — ADDITIVE edit: added FF-FCI13 elif branch + 3 helpers (sanction_class, sanction_line + updated comment block); founder path FF-FCI12 byte-equivalent per FR-6/AC-5. (3) package.json — registered auto-sanction-additive.sh and --self-test at end of fitness chain near enemy block. All 13 ACs covered. Single remaining gate: bootstrap founder sanction for the meta-gate edit itself (expected, per ADR §2-Q1)."
+}
