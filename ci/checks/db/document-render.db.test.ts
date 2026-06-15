@@ -34,6 +34,7 @@
 // T-0144 discipline: BEGIN before SET LOCAL; COMMIT always; cleanup after self.
 
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { migratorUrl, appUrl, withClient } from './_helpers.js';
 import { PgFileStore } from '../../../src/core/postgres/pgFileStore.js';
@@ -325,10 +326,8 @@ function makeSnapshotPort(
   store: InMemoryObjectStore,
 ): SnapshotPort {
   const fileStore = new PgFileStore(pool);
-  const hashFn = (body: Uint8Array): string => {
-    const { createHash } = require('node:crypto');
-    return createHash('sha256').update(body).digest('hex');
-  };
+  const hashFn = (body: Uint8Array): string =>
+    createHash('sha256').update(body).digest('hex');
   return {
     async addVersion(
       fileId: string,
