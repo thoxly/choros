@@ -187,30 +187,23 @@ function demoSubject(): ResolveSubject {
  * A live-configured agent_card row for the demo: all three `llm_*` columns
  * non-null ⇒ the motor treats the agent as live-configured and uses the INJECTED
  * DemoStubLlmPort (NOT a real network call). This module CUSTODIES NO SECRET —
- * the demo never holds a real key; the handle column carries only an opaque,
- * fictional vault REFERENCE (like the T-0233 test fixture).
+ * the demo never holds a real key; the `llm_secret_handle` column carries only an
+ * opaque, fictional vault REFERENCE (`vault://demo/llm-key`, like the T-0233 test
+ * fixture). The value never flows to a log/console/error/egress (FF-25-4 intent).
  *
- * The three column names are read from the motor's SELECT list at runtime rather
- * than written as source literals: `demo-run.ts` is NOT a secret-custody site, so
- * it stays OUT of the FF-25-3 dormancy-boundary allow-set (frozen check, owned by
- * T-0025) — we do not need (and must not self-grant) a frozen-sanction for a
- * fake marker. The motor only checks these three are non-null (`llmConfigured`).
+ * Because this is a legitimate (fictional) custody site, `demo-run.ts` is added
+ * to the FF-25-3 dormancy-boundary allow-set via the FF-FCI12 frozen-sanction
+ * channel (additive, D-060 — same pattern as T-0233/T-0236). The literal column
+ * name is written plainly; we do NOT hide it behind a dynamic-key construction.
+ * The motor only checks these three are non-null (`llmConfigured`).
  */
-const DEMO_AGENT_CARD_COLS = [
-  "llm_endpoint",
-  "llm_model",
-  ["llm", "secret", "handle"].join("_"),
-  "autonomy_threshold",
-] as const;
-
 function demoAgentCardRow(): Record<string, unknown> {
-  const [endpointCol, modelCol, handleRefCol, thresholdCol] = DEMO_AGENT_CARD_COLS;
   return {
-    [endpointCol]: "https://demo.local/v1",
-    [modelCol]: "demo-stub",
-    // Fictional opaque reference — never a real secret (NF / FF-25-3 intent).
-    [handleRefCol]: "vault://demo/llm-key",
-    [thresholdCol]: null,
+    llm_endpoint: "https://demo.local/v1",
+    llm_model: "demo-stub",
+    // Fictional opaque reference — never a real secret (NF / FF-25-4 intent).
+    llm_secret_handle: "vault://demo/llm-key",
+    autonomy_threshold: null,
   };
 }
 
