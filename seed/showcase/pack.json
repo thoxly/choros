@@ -198,10 +198,10 @@
   ],
   "process_instances": [
     {
-      "id": "INS-7731", "name": "Согласование счёта поставщика",
-      "procId": "PRC-INV-APPROVE", "status": "running",
-      "node": "n7 · Утверждение платежа", "started": "07.06.2026 14:28:11", "elapsed": "00:06:42",
-      "progress": { "done": 4, "total": 7 }, "execs": ["human", "agent", "service"]
+      "id": "INS-7731", "name": "Согласование заявки на закупку (линейный ТЭЛ · DEMO-1)",
+      "procId": "PRC-TEL-LINEAR", "status": "running",
+      "node": "S3 · Юр-предпроверка", "started": "07.06.2026 14:28:11", "elapsed": "00:06:42",
+      "progress": { "done": 3, "total": 5 }, "execs": ["human", "agent", "service"]
     },
     {
       "id": "INS-7702", "name": "Возврат средств клиенту",
