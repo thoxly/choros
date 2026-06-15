@@ -23,7 +23,11 @@
 присутствует валидная **Враг-аттестация** (машинно-сверяемая ссылка на детерминированный
 корпус Врага + зелёный enemy-сегмент `npm run fitness` на этом коммите). Деструктивный/редуктивный
 thaw, поданный как `auto_additive`, краснит проверку аддитивности → FAIL → откатывается к
-`founder`-классу (D-060 граница). Существующий `founder`-путь (T-0085, T-0227) байт-эквивалентен.
+`founder`-классу (D-060 граница). Существующий `founder`-путь (T-0085, T-0227) **поведенчески
+эквивалентен** (SANCTION [FF-FCI12] байт-идентична; AUDIT [FF-FCI12] аддитивно получает
+`class=founder` согласно AC-7 — машинно-различимые классы; авторизация/exit-code неизменны;
+деструктивные thaw по-прежнему требуют founder). Формулировка «байт-эквивалентен» была
+неточной (R-2 reviewer) — правильная формулировка: «аддитивный + поведенчески эквивалентен».
 
 ---
 
@@ -48,7 +52,7 @@ thaw, поданный как `auto_additive`, краснит проверку �
 **Цена — bootstrap-правка мета-гейта (одноразовый founder-санкционированный thaw).** Чтобы
 мета-гейт начал распознавать класс `auto_additive` и делегировать, в `frozen-checks-immutable.sh`
 надо добавить одну `elif`-ветку (вызов делегата). Это правка ЧУЖОГО frozen-чека (владелец T-0146),
-сама по себе **аддитивная** (новая ветка рядом, founder-путь байт-эквивалентен) — но по `--self-bind`
+сама по себе **аддитивная** (новая ветка рядом, founder-путь поведенчески эквивалентен — SANCTION [FF-FCI12] байт-идентична, AUDIT [FF-FCI12] аддитивно получает `class=founder` per AC-7) — но по `--self-bind`
 парадоксу её НЕ может авто-санкционировать механизм, который она же и вводит. Поэтому: **первая,
 bootstrap-правка `frozen-checks-immutable.sh` санкционируется ОДИН раз `founder`-классом** (строка
 `{"task":"T-0232","file":"ci/checks/frozen-checks-immutable.sh","owner":"T-0146","sanctioned_by":"founder",...}`
@@ -214,7 +218,7 @@ no-op (exit 0), как все frozen-чеки (FF-FCI3/FF-CORPUS3/FF-CAT3): вн
 ### 5.3 Контракт правки мета-гейта `frozen-checks-immutable.sh` (минимальная аддитивная)
 
 В блоке классификации (`elif is_sanctioned`), РЯДОМ с существующей founder-веткой, добавить
-auto-additive-ветку. Founder-путь байт-эквивалентен. Псевдо-дифф (только `+`):
+auto-additive-ветку. Founder-путь поведенчески эквивалентен (SANCTION [FF-FCI12] байт-идентична; AUDIT [FF-FCI12] аддитивно получает `class=founder` per AC-7). Псевдо-дифф (только `+`):
 
 ```diff
    elif is_sanctioned "${f}"; then
@@ -285,7 +289,7 @@ auto-additive-ветку. Founder-путь байт-эквивалентен. П
 | FF-ASA4 | Делегат ОТКЛОНЯЕТ аддитивный thaw БЕЗ валидной Враг-аттестации (precondition Врага обязателен, FR-3). | `bash ci/checks/auto-sanction-additive.sh --self-test` (case D) |
 | FF-ASA5 | На dev/main/non-task ветке или без merge-base делегат и standalone-режим — no-op (fail-open), как frozen-checks-immutable/corpus/catalog (FF-FCI3/FF-CORPUS3). | `bash ci/checks/auto-sanction-additive.sh` на dev (exit 0, INFO skip) |
 | FF-ASA6 | Делегат зарегистрирован в `npm run fitness` (package.json) с `--self-test`; 2-я строка = `^# T-0232[[:space:]]·` (frozen-checks discipline → T-0146 сторожит его). | grep `auto-sanction-additive.sh` в package.json + `sed -n 2p` = `# T-0232 ·` |
-| FF-FCI13 | Мета-гейт распознаёт класс `auto_additive` и ДЕЛЕГИРУЕТ верификацию `auto-sanction-additive.sh`; founder-класс (FF-FCI12) поведенчески неизменён (байт-эквивалентен). | `bash ci/checks/frozen-checks-immutable.sh` (founder-регрессия T-0085/T-0227 зелёная) + новая ветка покрыта hostile-probe |
+| FF-FCI13 | Мета-гейт распознаёт класс `auto_additive` и ДЕЛЕГИРУЕТ верификацию `auto-sanction-additive.sh`; founder-класс (FF-FCI12) поведенчески неизменён (аддитивный + поведенчески эквивалентен; SANCTION байт-идентична, AUDIT аддитивно получает `class=founder` per AC-7). | `bash ci/checks/frozen-checks-immutable.sh` (founder-регрессия T-0085/T-0227 зелёная) + новая ветка покрыта hostile-probe |
 | FF-ASA7 | Деструктивный thaw, поданный как `auto_additive` (нет founder-строки), НЕ проходит мета-гейт (exit 1); тот же thaw с founder-строкой — проходит (FR-5/AC-8). | `frozen-checks-immutable.sh` hostile-probe: синтетика destructive+auto_additive → FAIL; +founder-строка → PASS |
 | FF-ASA8 | `frozen-sanctions.jsonl` append-only: существующие founder-строки (T-0085, T-0227) байт-сохранены; новый формат только аппендится (структурно как corpus-append-only, NF-2/AC-9). | `corpus-append-only`-стиль diff BASE_REF: ни одна существующая jsonl-строка не удалена/мутирована |
 | FF-ASA9 | AUDIT-строка auto-санкции содержит `class=auto_additive` + Враг-ссылку; founder — `class=founder`; классы машинно-различимы (AC-7). | grep AUDIT-вывода мета-гейта на синтетике обоих классов |

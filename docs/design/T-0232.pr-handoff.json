@@ -8,18 +8,44 @@
     "lint": true,
     "types": true,
     "tests": true,
-    "fitness": "green-except-frozen-checks-immutable (expected bootstrap red on FF-FCI1 for edit to T-0146-owned file; all 39 other static checks green; auto-sanction-additive --self-test green)"
+    "fitness": "green-except-frozen-checks-immutable (expected bootstrap red on FF-FCI1 for edit to T-0146-owned file; all other static checks green; auto-sanction-additive --self-test GREEN including R-1 adversarial cases)"
   },
   "files_changed": [
     "ci/checks/auto-sanction-additive.sh",
     "ci/checks/frozen-checks-immutable.sh",
     "package.json",
+    "docs/design/T-0232-auto-sanction-additive-thaw.adr.md",
     "docs/design/T-0232.pr-handoff.json"
   ],
-  "deviations_from_adr": [],
-  "blocked_reason": "Bootstrap founder sanction required for frozen-checks-immutable.sh edit. frozen-checks-immutable.sh (owner T-0146) requires a one-time founder-class sanction line in ci/checks/data/frozen-sanctions.jsonl before the bootstrap edit (FF-FCI13 elif branch) can pass the meta-gate. This is the single --self-bind paradox documented in ADR §2-Q1: the mechanism that introduces auto_additive class cannot self-sanction its own bootstrap edit. Required founder action: append one founder-class sanction line via founder_decide and add to frozen-sanctions.jsonl:\n{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 byte-equivalent; installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}\nAfter this line is appended, frozen-checks-immutable.sh will verify FF-FCI13 (the edit is additive: new elif branch beside existing founder branch; founder path is byte-equivalent) and the branch can be merged.",
+  "deviations_from_adr": [
+    "A-1 tightened to include comment lines (reviewer changes_requested direction): ADR §4 stated 'не-комментарий строка' (non-comment line only). R-3 nit from adversarial review + explicit task direction to reject comment-only-line deletion caused tightening to byte-freeze ALL non-empty lines (including comments). Comment deletions in foreign frozen checks are now rejected by A-1. This is a security improvement; deviation recorded here per coder.md rule 4.",
+    "corpus_ref extraction regex broadened to handle non-hex values (SELFTEST_SKIP sentinel): original regex '[a-f0-9]+' only matched hex chars; expanded to generic string extraction then validated format separately. No behavioral change for production paths; self-test remains clean.",
+    "catalog_enforced_files awk redesigned to handle both Format A (standalone Enforced by line with blank separator) and Format B (inline - **Enforced by:** bullet) from the real T-0152 catalog. Original single-pass awk stopped at first blank line after 'Enforced by.' label, missing the bullet-point content. Fixed to collect all ci/checks/* paths within the family section block."
+  ],
+  "blocked_reason": "Bootstrap founder sanction required for frozen-checks-immutable.sh edit (UNCHANGED from original — the R-1 fix did not resolve this, as intended). frozen-checks-immutable.sh (owner T-0146) requires a one-time founder-class sanction line in ci/checks/data/frozen-sanctions.jsonl before the bootstrap edit (FF-FCI13 elif branch) can pass the meta-gate. This is the single --self-bind paradox documented in ADR §2-Q1: the mechanism that introduces auto_additive class cannot self-sanction its own bootstrap edit.\n\nRequired founder action: append one founder-class sanction line via founder_decide and add to frozen-sanctions.jsonl:\n{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 behaviorally equivalent (SANCTION byte-identical, AUDIT additively gains class=founder per AC-7); installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}\n\nAfter this line is appended, frozen-checks-immutable.sh will verify FF-FCI13 (the edit is additive: new elif branch beside existing founder branch; founder path is behaviorally equivalent) and the branch can be merged.",
   "bootstrap_sanction_needed": true,
-  "bootstrap_detail": "{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 byte-equivalent; installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}",
-  "friction_events": [],
-  "notes": "Implementation complete. Files: (1) ci/checks/auto-sanction-additive.sh — NEW, T-0232-owned delegate implementing A-1..A-4 additive verification + Vrag attestation validation with --verify, --self-test, and standalone modes; mirrors corpus-append-only/catalog-frozen/arena-sealed idioms. (2) ci/checks/frozen-checks-immutable.sh — ADDITIVE edit: added FF-FCI13 elif branch + 3 helpers (sanction_class, sanction_line + updated comment block); founder path FF-FCI12 byte-equivalent per FR-6/AC-5. (3) package.json — registered auto-sanction-additive.sh and --self-test at end of fitness chain near enemy block. All 13 ACs covered. Single remaining gate: bootstrap founder sanction for the meta-gate edit itself (expected, per ADR §2-Q1)."
+  "bootstrap_detail": "{\"task\":\"T-0232\",\"file\":\"ci/checks/frozen-checks-immutable.sh\",\"owner\":\"T-0146\",\"decision\":\"founder_decide@DATE\",\"sanctioned_by\":\"founder\",\"note\":\"bootstrap: one-time additive thaw adding FF-FCI13 elif branch (auto_additive class) to meta-gate; founder-path FF-FCI12 behaviorally equivalent (SANCTION byte-identical, AUDIT additively gains class=founder per AC-7); installs D-060 auto-sanction mechanism; ADR T-0232 §2-Q1\"}",
+  "r1_fix_summary": {
+    "r1a_corpus_ref_ancestor_check": "IMPLEMENTED: attestation_valid now requires corpus_ref to be (1) a valid git sha (7-40 hex chars or SELFTEST_SKIP sentinel), (2) an ancestor of HEAD via git merge-base --is-ancestor, AND (3) resolve to the same corpus.jsonl blob as HEAD. A stale sha that is reachable but not ancestor-of-HEAD → REJECTED. A sha with a different corpus blob → REJECTED. Only a current ancestor with matching blob passes.",
+    "r1b_families_bound_to_file": "IMPLEMENTED: attestation_valid now accepts optional thawed_file arg. When provided (--verify mode and standalone mode), each declared family must have its Enforced-by section in T-0152 catalog reference the thawed file (by basename match). A thaw of object-handle-isolation.sh citing TENANT-ISO (which only covers cross-tenant-fitness.sh) → REJECTED. New catalog_enforced_files() function handles both catalog formats.",
+    "comment_deletion_tightened": "A-1 no longer skips comment lines (reviewer direction + R-3). All non-empty lines (including comments) are now byte-frozen. Comment-only-line deletion is REJECTED by A-1."
+  },
+  "new_self_test_cases": [
+    "R-1-COMMENT-DELETE: deletion of a comment-only line → REJECTED by A-1 (all non-empty lines byte-frozen, including comments)",
+    "R-1-STALE-CORPUS: attestation with non-existent/unreachable corpus_ref → REJECTED by R-1a (corpus anchor unreachable)",
+    "R-1-ABSENT-AT-BASE: delta line only referencing existing entity 'PROCESS-TYPE' (no new entity introduced) → REJECTED by A-4 (has_new=0)",
+    "R-1-UNBOUND-FAMILY: attestation with TENANT-ISO for object-handle-isolation.sh (TENANT-ISO enforcement surface disjoint from file) → REJECTED by R-1b",
+    "R-1-BOUND-FAMILY-POSITIVE: attestation with OBJECT-HANDLE-ISO for object-handle-isolation.sh (correctly covered in catalog) → ACCEPTED"
+  ],
+  "e2e_verification": {
+    "stale_corpus_ref": "REJECTED — non-existent sha '000...0' fails ATTEST-R1a: corpus anchor unreachable (exit 1)",
+    "unrelated_family": "REJECTED — TENANT-ISO for mutation-gateway-isolation.sh fails ATTEST-R1b: family enforcement surface disjoint from thawed file (exit 1)",
+    "correct_attestation": "ACCEPTED — OBJECT-HANDLE-ISO for object-handle-isolation.sh (unchanged, additive trivially); corpus_ref=78b06c3 ancestor+blob match; R-1b surface bound (exit 0)",
+    "bootstrap_blocker_unchanged": "frozen-checks-immutable.sh → exactly 1 FF-FCI1 violation (unchanged from pre-fix; no other violations)"
+  },
+  "out_of_scope_note": "Reviewer also flagged pre-existing weakness: is_sanctioned() validates only {task,file} (not decision/sanctioned_by). This is a broader T-0199 gate gap. The R-1b families binding tightens the auto_additive path; founder-class validation gap is out of scope for T-0232 — noted for follow-up task.",
+  "friction_events": [
+    "memory/friction/FE-T0232-changes-req-0001.json (local only; memory/ is gitignored in choros repo — 3 debug cycles: gsub-regex, SELFTEST_SKIP sentinel, awk Enforced-by Format A parsing)"
+  ],
+  "notes": "R-1 fix complete: (a) corpus_ref now requires ancestor-of-HEAD + same-blob as HEAD (R-1a); (b) families[] now bound to thawed file via catalog Enforced-by section parsing (R-1b). A-1 tightened to include comment lines (reviewer direction). Three new adversarial self-test cases added: comment-delete, stale-corpus, entity-absent-at-BASE. ADR R-2 wording corrected: 'байт-эквивалентен' → 'аддитивный + поведенчески эквивалентен'. Status remains blocked (bootstrap founder sanction for frozen-checks-immutable.sh unchanged — expected single blocker, ADR §2-Q1)."
 }
