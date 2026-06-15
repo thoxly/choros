@@ -129,6 +129,13 @@ else
   BASE_SHA=""
 fi
 
+# Current branch TASK_ID (for sanction-aware THAW checks).
+CURRENT_BRANCH=$(git -C "${PROJECT_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+CURRENT_TASK=""
+if [[ "${CURRENT_BRANCH}" =~ ^task/(T-[0-9]+) ]]; then
+  CURRENT_TASK="${BASH_REMATCH[1]}"
+fi
+
 # T-0033 (E4.3) THAW: grant-resolver.ts is intentionally REMOVED from the frozen
 # set. The spec REQUIRES value-aware masking to be folded into the resolver's ONE
 # projection path (single-projection invariant) — so grant-resolver.ts must be
@@ -139,14 +146,46 @@ fi
 # is preserved (FE-W23-0008; asserted by data-classification-isolation.sh FF-DC17).
 # object-handle.ts and grant-lattice.ts stay byte-frozen — no second authority
 # subsystem, no edit to the frozen Facet/Grant/Operation types.
+#
+# T-0227 (ADR T-0125 §2.2.1/§7) THAW — sanction: founder_decide@2026-06-15, FF-FCI12:
+# object-handle.ts and grant-lattice.ts are ADDITIVE-THAWED on task/T-0227 only.
+# The edit adds `process_instance` ResourceType + ResourceRef kind + a disjoint
+# refToScope branch so fireCardAction's fail-closed guard can deny transition→terminate
+# privilege-escalation before B-8. The frozen Facet/Grant/Operation/Lattice export
+# surface is preserved (asserted by card-action-broad-scope.sh FF-CA-10 and
+# object-handle-isolation.sh FF-A3). This THAW is branch-scoped (task/T-0227 only)
+# and expires on merge to dev — the merged files then become the new byte-frozen base.
 FROZEN_EXPORTS=(
   "src/core/object-handle.ts"
   "src/core/grant-lattice.ts"
 )
 
+# Files exempt from G6-additive on the owning task branch (additive-thaw pattern).
+# Format: "TASK_ID:file" — the check is skipped only when CURRENT_TASK matches.
+THAWED_ON_TASK=(
+  "T-0227:src/core/object-handle.ts"
+  "T-0227:src/core/grant-lattice.ts"
+)
+
 for f in "${FROZEN_EXPORTS[@]}"; do
   full_path="${PROJECT_ROOT}/${f}"
   if [[ ! -f "${full_path}" ]]; then
+    continue
+  fi
+
+  # Check if this file is thawed on the current task branch.
+  IS_THAWED=0
+  if [[ -n "${CURRENT_TASK}" ]]; then
+    for thaw_entry in "${THAWED_ON_TASK[@]}"; do
+      if [[ "${thaw_entry}" == "${CURRENT_TASK}:${f}" ]]; then
+        IS_THAWED=1
+        echo "SANCTION [G6-additive]: ${f} is additive-thawed on ${CURRENT_TASK} (founder_decide@2026-06-15, FF-FCI12)"
+        break
+      fi
+    done
+  fi
+
+  if [[ ${IS_THAWED} -eq 1 ]]; then
     continue
   fi
 

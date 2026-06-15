@@ -200,7 +200,12 @@ export type CardActionDenyReason =
   | "no_effect_grant"
   | "path_not_ready"
   | "unknown_semantics"
-  | "binding_incompatible";
+  | "binding_incompatible"
+  // T-0227 / ADR T-0125 §2.2.1 — a terminate/message whose target is NOT a
+  // process_instance (e.g. a record-targeted terminate) is denied fail-closed:
+  // "right to change a record's status" must NEVER mean "right to kill the
+  // process instance". This closes the transition→terminate privilege escalation.
+  | "target_kind_mismatch";
 
 export type CardActionResult =
   | { readonly ok: true; readonly actionId: string }
@@ -237,6 +242,12 @@ export interface CardActionDeps {
 
 const TYPE_EXECUTED = "card_action.executed" as const;
 const TYPE_DENIED = "card_action.denied" as const;
+// T-0227 / C-2 — emitted when a card action was authorized (passed the PDP) but
+// produced NO real engine effect because its execution path is still a no-op
+// stub (terminate/message before the B-8 engine bridge wires
+// deleteProcessInstance/correlateMessage). Recording `executed` here would lie:
+// nothing executed. `card_action.deferred` is an honest open-vocab audit type.
+const TYPE_DEFERRED = "card_action.deferred" as const;
 
 /**
  * Build the audit subject blob (ADR §2.4): record/instance ref + action id +
@@ -254,11 +265,11 @@ function auditSubject(decl: CardActionDecl, params: CardActionParams): string {
 
 async function emitAudit(
   deps: CardActionDeps,
-  type: typeof TYPE_EXECUTED | typeof TYPE_DENIED,
+  type: typeof TYPE_EXECUTED | typeof TYPE_DENIED | typeof TYPE_DEFERRED,
   actor: string,
   decl: CardActionDecl,
   params: CardActionParams,
-  result: "executed" | "denied",
+  result: "executed" | "denied" | "deferred",
   reason: CardActionDenyReason | null,
   now: number,
 ): Promise<void> {
@@ -332,6 +343,35 @@ export async function fireCardAction(
       now,
     );
     return { ok: false, reason: "unknown_semantics" };
+  }
+
+  // 1b. Target-kind guard (T-0227 / ADR T-0125 §2.2.1) — DEFENSE IN DEPTH,
+  // runs REGARDLESS of bridge readiness and BEFORE any engine call.
+  // terminate/message map onto op=transition over a `process_instance`
+  // ResourceType. They MUST address a process instance — both the declared
+  // target.kind AND the resolved handle's ref.kind must be "process_instance".
+  // A record-targeted terminate/message would otherwise satisfy a record-scoped
+  // (transition, record) grant in the PDP — i.e. "right to change a record's
+  // status == right to kill the process instance" — the escalation T-0125
+  // §2.2.1 explicitly REJECTED. Deny fail-closed: no mutation, no engine call,
+  // one audit_event(denied, target_kind_mismatch). FF-CA-10.
+  if (decl.semantics === "terminate" || decl.semantics === "message") {
+    if (
+      decl.target.kind !== "process_instance" ||
+      decl.target.handle.ref.kind !== "process_instance"
+    ) {
+      await emitAudit(
+        deps,
+        TYPE_DENIED,
+        subject.subjectId,
+        decl,
+        params,
+        "denied",
+        "target_kind_mismatch",
+        now,
+      );
+      return { ok: false, reason: "target_kind_mismatch" };
+    }
   }
 
   // 2. Dormant gate — a dormant path does NOT execute until declared ready.
@@ -415,13 +455,29 @@ export async function fireCardAction(
     }
     case "terminate":
     case "message": {
-      // Unreachable day-1: the dormant gate (step 2) denies these before here.
-      // When B-8 lands, the engine-bridge call goes here (deleteProcessInstance /
-      // correlateMessage) — ONLY via the injected FlowableClient (FF-CA-3).
-      break;
+      // Day-1 NO-OP: this module does not yet hold an engine effect. The dormant
+      // gate (step 2) denies terminate/message until the bridge reports ready;
+      // when a (test/B-8) bridge reports ready we reach here, but the actual
+      // engine call (deleteProcessInstance / correlateMessage via the injected
+      // FlowableClient, FF-CA-3) is NOT wired in this module yet. C-2: because
+      // nothing actually executed, we must NOT emit a success `executed` audit —
+      // emit `card_action.deferred` below and return ok (authorized + accepted).
+      await emitAudit(
+        deps,
+        TYPE_DEFERRED,
+        subject.subjectId,
+        decl,
+        params,
+        "deferred",
+        null,
+        now,
+      );
+      return { ok: true, actionId: decl.id };
     }
   }
 
+  // transition / invoke ran a REAL effect (actor_event append / invoke-effect
+  // verified inside resolveFor) — emit the success `executed` audit (FF-CA-7).
   await emitAudit(
     deps,
     TYPE_EXECUTED,
@@ -449,6 +505,13 @@ function refToActorEventRef(
       return { objectKind: "registry", registryId: ref.registryId };
     case "record":
       return { objectKind: "record", recordId: ref.recordId };
+    case "process_instance":
+      // T-0227 — the transition (actor_event) path only ever runs over a record
+      // target; a process_instance ref here is a wiring bug. Fail closed rather
+      // than fabricate an actor_event object_kind that does not exist (B-8).
+      throw new Error(
+        "refToActorEventRef: process_instance has no actor_event object_kind (T-0227 / B-8)",
+      );
   }
 }
 

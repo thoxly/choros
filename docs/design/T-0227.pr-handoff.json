@@ -1,0 +1,36 @@
+{
+  "task_id": "T-0227",
+  "status": "pr_open",
+  "branch": "task/T-0227",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/card-action-broad-scope.sh",
+    "ci/checks/mutation-gateway-isolation.sh",
+    "package.json",
+    "src/__tests__/card-action.test.ts",
+    "src/core/card-action.ts",
+    "src/core/grant-lattice.ts",
+    "src/core/grant-resolver.ts",
+    "src/core/object-handle.ts"
+  ],
+  "deviations_from_adr": [
+    "mutation-gateway-isolation.sh was amended with a THAW block (THAWED_ON_TASK mechanism, branch-scoped T-0227) — required because G6-additive guards object-handle.ts and grant-lattice.ts against modification vs merge-base; the sanction (FF-FCI12, founder_decide@2026-06-15) explicitly covers this script amendment. The THAW expires on merge to dev."
+  ],
+  "notes": {
+    "rebase": "One conflict in package.json fitness script (dev added implementation-agent-seed + agent-instruction checks; T-0227 added card-action-broad-scope). Resolved by taking dev HEAD fitness script and inserting card-action-broad-scope entries after card-action-isolation.sh.",
+    "frozen_check": "frozen-checks-immutable.sh GREEN (sanction for mutation-gateway-isolation.sh granted via frozen-sanctions.jsonl). mutation-gateway-isolation.sh G6-additive GREEN after adding THAW block (SANCTION+AUDIT lines printed per FF-FCI12). object-handle-isolation GREEN. card-action-broad-scope GREEN + self-test GREEN.",
+    "vitest": "2040 passed / 6 skipped (live-service skips: workerAuth.kc.e2e, flowable-client.integration — expected). 89 test files.",
+    "deferred_to_runner": "fitness:db (Postgres), fitness:kc (Keycloak), fitness:flowable (Flowable) — all require Docker services not available locally.",
+    "head_sha": "4410fedc91bceda669ab7135d42d5796288da99e"
+  },
+  "friction_events": [
+    "memory/friction/FE-T0227-0001-rebase-package-json-conflict.json",
+    "memory/friction/FE-T0227-0002-mutation-gateway-g6-thaw-missing.json"
+  ]
+}
