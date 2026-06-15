@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0236",
+  "branch": "task/T-0236",
+  "base": "dev",
+  "merge_base": "c2d2bbaab89706c32a68aa6566285f650e30d48c",
+  "status": "ready_for_review",
+  "summary": "Restore dev green: additive FF-25-3 allow-set extension for the T-0233 legal-precheck runtime custody sites, authorized via a D-060 mechanism-class frozen-sanction (FF-FCI12) because secret-handle-isolation.sh is owned by T-0025 and protected by the frozen-checks-immutable meta-gate.",
+  "touched_frozen": false,
+  "files": [
+    "ci/checks/secret-handle-isolation.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "docs/specs/T-0236-dev-red-secret-handle-allowset.spec.md",
+    "docs/design/T-0236.adr.md",
+    "docs/design/T-0236.pr-handoff.json"
+  ],
+  "diff_scope": "code change limited to ci/checks/secret-handle-isolation.sh (FF-25-3 ALLOWED_FILES += 2 entries, comment block updated) and one appended line in ci/checks/data/frozen-sanctions.jsonl; the 3 flagged source files were NOT modified",
+  "allow_set_additions": [
+    "src/runtime/legal-precheck/run-precheck.ts",
+    "src/adapters/openai-llm-port.ts"
+  ],
+  "test_sibling_auto_allowed": "src/runtime/legal-precheck/__tests__/run-precheck.test.ts (via existing *.test.ts stem rule)",
+  "sanction": {
+    "channel": "FF-FCI12 (ci/checks/data/frozen-sanctions.jsonl)",
+    "task": "T-0236",
+    "file": "ci/checks/secret-handle-isolation.sh",
+    "owner": "T-0025",
+    "class": "D-060 additive / mechanism (no founder gate required)",
+    "precedent": "T-0233 unpark of agent-instruction-runtime-dormant.sh (same legal-precheck runtime, same additive class)",
+    "audit": "frozen-checks-immutable prints SANCTION + AUDIT lines on the bypass (not silent)"
+  },
+  "commits": [
+    { "sha": "32db14b", "msg": "spec(T-0236): dev-red FF-25-3 escape + machine-checkable AC for restored fitness green" },
+    { "sha": "2855fd9", "msg": "design(T-0236): additive FF-25-3 allow-set extension (D-060 mechanism class, non-frozen-via-FCI12)" },
+    { "sha": "ead8aa6", "msg": "fix(T-0236): extend FF-25-3 allow-set for T-0233 runtime custody — restore dev green" }
+  ],
+  "ci_local": {
+    "secret-handle-isolation.sh": "pass (exit 0, PASS FF-25-3 + all FF-25 checks green)",
+    "frozen-checks-immutable.sh": "pass (exit 0, SANCTION/AUDIT FF-FCI12 granted for T-0236)",
+    "tsc --noEmit": "pass (exit 0)",
+    "eslint src": "pass (exit 0; 0 errors, 2 pre-existing no-console warnings in untouched files bridge-runner.ts / externalTaskBridge.ts)",
+    "npm run build": "pass (exit 0)",
+    "npm run fitness": "pass (exit 0, GREEN to completion — no FAIL lines; headline gate)",
+    "vitest run": "pass (exit 0; 2106 passed, 6 skipped flowable-integration needs-infra, 0 failed)"
+  },
+  "any_other_red_checks_found": "none — after the FF-25-3 fix, the only remaining red was FF-FCI1 (meta-gate ownership), resolved by the FF-FCI12 sanction; full fitness then green to completion",
+  "security_verification": {
+    "every_handle_reference_is_custody_not_leak": true,
+    "evidence": {
+      "src/runtime/legal-precheck/run-precheck.ts": "L74 comment, L79 type field, L88 null-check, L102 SELECT column read — no raw value, no log/error emission",
+      "src/adapters/openai-llm-port.ts": "L15 header comment only",
+      "src/runtime/legal-precheck/__tests__/run-precheck.test.ts": "L69 type field; L424/L474/L519 vault:// handle-reference fixtures (opaque references, not secret values)"
+    },
+    "ff-25-4_no_value_in_logs": "still PASS",
+    "no_over_broad_allow_set": "exactly 2 files added; no third file allow-listed",
+    "ff-25-1-2-5-6-8_weakened": false
+  },
+  "friction": "FE-T0236-0001: this is the cleanup of a D-056 integration-honest-gate escape from run s19 — T-0233 was merged to dev with npm run fitness RED (FF-25-3 unextended), so the full gate was not honestly run to completion before merge. Additionally, the upstream task diagnosis asserted secret-handle-isolation.sh is 'NOT a frozen file (absent from frozen-checks-immutable.sh)'; that is incorrect — frozen-checks-immutable.sh is a meta-gate over ALL ci/checks/*.sh keyed by the ownership header, so a frozen-sanction (FF-FCI12) WAS required. Handled via the D-060 additive/mechanism path mirroring T-0233's own ratified precedent.",
+  "ready_for_review": true
+}
