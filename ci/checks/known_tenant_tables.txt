@@ -40,3 +40,6 @@ file_version
 agent_instruction
 template_def
 template_dep
+doc_page
+doc_ref
+doc_log
