@@ -15,3 +15,4 @@
 # T-0160 appends its own 4 sibling-class rows here at impl time (self-service +
 # audit), per its founder_decide of 2026-06-14.
 {"task":"T-0085","file":"ci/checks/role-criticality-isolation.sh","owner":"T-0040","decision":"founder_decide@2026-06-14","sanctioned_by":"founder","note":"FF-RC6 known_tenant_tables-excludes escape-hatch for legit tenant table registry_schema_history (migration 056); design T-0199"}
+{"task":"T-0227","file":"ci/checks/mutation-gateway-isolation.sh","owner":"T-0028","decision":"founder_decide@2026-06-15","sanctioned_by":"founder","note":"additive-thaw process_instance ResourceType/ResourceRef in object-handle.ts+grant-lattice.ts to close transition-grant->terminate privilege-escalation before B-8 (ADR T-0125 §2.2.1); G6-additive; code verified sound on task/T-0227@8b65f54"}
