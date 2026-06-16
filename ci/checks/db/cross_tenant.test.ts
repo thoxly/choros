@@ -1099,6 +1099,35 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'bundle_commit': {
+      // T-0083 (migration 069) — content-addressed bundle commit; no FK deps beyond tenant_id.
+      // content_hash must be exactly 64 hex chars (SHA-256); use fresh random UUID-derived value.
+      const contentHash = uuid().replace(/-/g, '').padEnd(64, '0').slice(0, 64);
+      const parentHash = '0'.repeat(64);
+      await c.query(
+        `INSERT INTO choros.bundle_commit
+           (tenant_id, bundle_id, content_hash, parent_hash, author, message,
+            committed_at,
+            snapshot_object_schema, snapshot_grants, snapshot_bpmn_process,
+            snapshot_form_code, snapshot_form_json_schema)
+         VALUES ($1, 'ct-bundle', $2, $3, 'ct-tester', '', 0, '', '', '', '', '')
+         ON CONFLICT DO NOTHING`,
+        [tenantId, contentHash, parentHash],
+      );
+      break;
+    }
+    case 'bundle_ref': {
+      // T-0083 (migration 069) — named bundle ref; no FK deps (content_hash not FK-constrained).
+      const contentHash = '0'.repeat(64);
+      await c.query(
+        `INSERT INTO choros.bundle_ref
+           (tenant_id, bundle_id, ref_name, content_hash, updated_at)
+         VALUES ($1, 'ct-bundle', 'HEAD', $2, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, contentHash],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1448,6 +1477,8 @@ const SEEDED_TABLES = new Set<string>([
   'dmn_rule_table',
   'nav_version',
   'catalog_field_spec',
+  'bundle_commit',
+  'bundle_ref',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

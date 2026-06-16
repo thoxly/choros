@@ -1,0 +1,69 @@
+{
+  "task": "T-0083",
+  "epic": "E12.2",
+  "title": "\"Git under the hood\": content-addressed bundle commit + semantic changelog",
+  "status": "ready-for-review",
+  "branch": "task/T-0083-git-under-hood",
+  "migration": "migrations/069_bundle_commit.sql",
+  "new_tenant_tables": ["bundle_commit", "bundle_ref"],
+  "design_note": {
+    "summary": "Pure-core content-addressed commit mechanism for the authoring bundle. The hash function is injected via BundleHashPort (same injected-port pattern as T-0118 KeyedDigest / ResolverDeps). The pure core (bundle-commit.ts) never imports node:crypto; SHA-256 lives in the adapter (bundle-commit-store.ts). Commits chain parent→child exactly like git objects. The semantic changelog (deriveSemanticChangelog → SemanticChange[]) exposes only human-readable member/kind/summary — never raw hashes — per ADR §7 'outward = semantic changelog'.",
+    "hash_seam": "BundleHashPort interface in src/core/bundle-commit.ts (pure); makeSha256Port() factory in src/core/bundle-commit-store.ts (impure, owns node:crypto). Same injected-port pattern as T-0118 makeKeyedDigest + KeyedDigest in keyed-digest.ts. See docs/design/T-0118-hash-oracle.adr.md §2 and §4.1 for the precedent.",
+    "determinism": "canonicalCommitPreimage: length-prefixed concatenation of (parent_hash, author, message, committed_at, snapshot.*). Same field order, same bytes → same hash. Mirror of audit-preimage.ts canonicalPreimage construction (length-prefix framing). GENESIS_PARENT_HASH = '0' * 64 (same convention as GENESIS_PREV_HASH in audit-preimage.ts).",
+    "scope_exclusions": ["promote UI (T-0086/T-0087 tier layer)", "in-flight migration mapping", "changelog diff validator (T-0084)"]
+  },
+  "files_changed": {
+    "new": [
+      "src/core/bundle-commit.ts",
+      "src/core/bundle-commit-store.ts",
+      "migrations/069_bundle_commit.sql",
+      "ci/checks/bundle-commit-isolation.sh",
+      "ci/checks/db/bundle-commit.test.ts",
+      "src/__tests__/bundle-commit.test.ts",
+      "docs/design/T-0083.pr-handoff.json"
+    ],
+    "modified": [
+      "ci/checks/known_tenant_tables.txt",
+      "ci/checks/role-criticality-migration-excludes.txt",
+      "ci/checks/db/cross_tenant.test.ts",
+      "package.json"
+    ]
+  },
+  "seam_file_edits": {
+    "known_tenant_tables_txt": "Appended: bundle_commit, bundle_ref",
+    "role_criticality_migration_excludes_txt": "Appended: 069_bundle_commit # T-0083 — bundle_commit + bundle_ref DDL; owned by bundle-commit-isolation.sh",
+    "cross_tenant_test": "Added seedRowForTable cases for bundle_commit and bundle_ref + added both to SEEDED_TABLES",
+    "package_json_fitness": "Appended: && bash ci/checks/bundle-commit-isolation.sh && bash ci/checks/bundle-commit-isolation.sh --self-test"
+  },
+  "fitness_check": {
+    "path": "ci/checks/bundle-commit-isolation.sh",
+    "self_test": "bash ci/checks/bundle-commit-isolation.sh --self-test → PASS (3 self-tests green)",
+    "invariants": [
+      "FF-BC-1: pure core exports makeCommit + canonicalCommitPreimage + deriveSemanticChangelog",
+      "FF-BC-2: no node:crypto in bundle-commit.ts (pure core); SHA-256 in bundle-commit-store.ts (adapter)",
+      "FF-BC-3: no git binary / child_process dependency",
+      "FF-BC-4: no process.env in pure core",
+      "FF-BC-5: SemanticChange interface exported; deriveSemanticChangelog returns SemanticChange[]",
+      "FF-BC-6: BundleHashPort interface in core; makeSha256Port factory in adapter",
+      "FF-BC-7: migration 069 creates bundle_commit + bundle_ref with FORCE RLS + choros_app GRANTs"
+    ]
+  },
+  "dod_results": {
+    "tsc_noEmit": "CLEAN (0 errors)",
+    "eslint_src": "CLEAN for T-0083 files (4 pre-existing errors in unrelated files, 0 new)",
+    "fitness": {
+      "result": "1 FAIL — scoped-admin-isolation FF-16: known_tenant_tables.txt changed",
+      "artifact": "FE-s24-0001 (documented): scoped-admin-isolation.sh uses git diff HEAD to detect known_tenant_tables.txt changes; triggers on any branch adding new tenant tables. NOT a real violation.",
+      "all_other_checks": "GREEN"
+    },
+    "bundle_commit_isolation_sh": "PASS (all FF-BC-1..FF-BC-7 green)",
+    "bundle_commit_isolation_self_test": "PASS (3 self-tests green)",
+    "vitest_run": "2405 passed | 6 skipped (106 test files) — all green",
+    "fitness_db_setup_template": "PASS — migration 069_bundle_commit applied (62 migrations total)",
+    "fitness_db": "802 tests passed (58 test files) — all green"
+  },
+  "t0118_reuse": {
+    "seam": "BundleHashPort in bundle-commit.ts mirrors KeyedDigest interface in keyed-digest.ts. Pure core calls injected hash fn; impure adapter owns node:crypto. canonicalCommitPreimage uses the same length-prefix framing as audit-preimage.ts canonicalPreimage and keyed-digest.ts canonicalPreimage.",
+    "departure": "T-0118 keyed digest is HMAC-SHA256 (secret-keyed) for masking. T-0083 uses unkeyed SHA-256 for content-addressing — correct for this use case: same bundle bytes should always produce the same address (no secret involved, pure content identity)."
+  }
+}

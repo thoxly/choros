@@ -46,3 +46,5 @@ doc_log
 dmn_rule_table
 nav_version
 catalog_field_spec
+bundle_commit
+bundle_ref
