@@ -21,6 +21,7 @@ import GrantTrailScreen from '../screens/rights/ra-grant-trail.jsx';
 import IntentsScreen from '../screens/rights/ra-intents.jsx';
 import FormsScreen from '../screens/screen-forms.jsx';
 import NotificationsScreen from '../screens/screen-notifications.jsx';
+import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 
 export { Icon };
 
@@ -305,6 +306,8 @@ function AppShell() {
             <Route path="/rights/sod" element={<SoDScreen />} />
             <Route path="/rights/trail" element={<GrantTrailScreen />} />
             <Route path="/forms" element={<FormsScreen theme={theme} />} />
+            {/* T-0096: real bpmn-js editor — /processes/:id/edit */}
+            <Route path="/processes/:id/edit" element={<ProcessEditorScreen />} />
           </Routes>
         </div>
       </main>

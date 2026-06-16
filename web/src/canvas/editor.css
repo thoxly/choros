@@ -142,3 +142,20 @@
 .chs-pp-autonomy .z-auto { background: var(--chs-color-success-soft); color: var(--chs-color-success); }
 .chs-pp-autonomy .z-review { background: var(--chs-color-warning-soft); color: var(--chs-color-warning); }
 .chs-pp-autonomy .z-block { background: var(--chs-color-danger-soft); color: var(--chs-color-danger); }
+
+/* ============================================================================
+   T-0096: REAL bpmn-js container
+   BpmnModelerWrapper mounts into .chs-bpmn-real-container; bpmn-js appends
+   its own .djs-container div inside. We need both to fill the outer frame.
+   ============================================================================ */
+.chs-bpmn-real-container {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+/* bpmn-js appends .bjs-container (wraps .djs-container) — fill outer frame */
+.chs-bpmn-real-container > .bjs-container,
+.chs-bpmn-real-container > .djs-container {
+  width: 100%;
+  height: 100%;
+}
