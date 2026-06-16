@@ -1,0 +1,25 @@
+{
+  "task_id": "T-0079",
+  "status": "done",
+  "blocked_reason": null,
+  "branch": "task/T-0079-modules-nav",
+  "pr_url": "local:task/T-0079-modules-nav",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/core/modules-nav.ts",
+    "src/core/__tests__/modules-nav.test.ts",
+    "migrations/067_modules_nav.sql",
+    "ci/checks/modules-extend-not-replace.sh",
+    "ci/checks/known_tenant_tables.txt",
+    "package.json"
+  ],
+  "deviations_from_adr": [],
+  "friction_events": [],
+  "notes": "T-0079 E11.8 fully implemented. src/core/modules-nav.ts is a pure zero-dep TS module (no pg/fs/http/env) with three cohesive parts: (1) Section→Application→Form/List versioned-config nav hierarchy (NavConfig/NavSection/NavApplication/NavLeaf + validateNavConfig with bounded-reorder guards NC-1..NC-7); (2) core-owned catalog field extend-not-replace guard (CatalogFieldSpec/CatalogChangeKind/classifyCatalogFieldChange — default-DENY on drop/rename/overwrite_standard for 'standard' fields, no escape-hatch per ADR §5, mirrors authoring-redlines.ts T-0078 discipline); (3) users/org Keycloak projection read-only types (UserProjection/OrgUnitRef — no CREATE TABLE, no second user store, derived from KC JWT per tenancy-ADR §6). Migration 067: nav_version (tenant-scoped versioned JSONB nav config) + catalog_field_spec (core-owned field registry, kind=standard|custom) — both with NF-1 single-predicate RLS + FORCE ROW LEVEL SECURITY + GRANT to choros_app. Dev-tenant seed: 14 standard field rows across user/org_unit/counterparty catalogs. Fitness check ci/checks/modules-extend-not-replace.sh: MER-1..10 all PASS; --self-test: all 7 self-tests PASS (catches: module absent, pg import, missing ADR refs, missing exports, missing RLS policy, second user table, missing NAV_MAX_SECTIONS). 34/34 unit tests green. known_tenant_tables.txt additive (+nav_version, +catalog_field_spec). package.json fitness line additive append (+modules-extend-not-replace.sh + --self-test). Migration slot 067 (065 was highest before this task; 066 reserved for sister task per instruction)."
+}

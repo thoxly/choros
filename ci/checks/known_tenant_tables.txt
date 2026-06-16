@@ -43,3 +43,5 @@ template_dep
 doc_page
 doc_ref
 doc_log
+nav_version
+catalog_field_spec
