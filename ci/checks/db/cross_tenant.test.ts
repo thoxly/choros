@@ -1099,6 +1099,21 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'cross_app_ref': {
+      // T-0080 (migration 068) — FK deps: source_registry_id and target_registry_id → registry_def.
+      // KNOWN_TENANT_TABLES order (…, registry_def, …, cross_app_ref) guarantees registry_def is seeded.
+      // Uses the same regId that was seeded for registry_def (stored in seedState).
+      const regId = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.cross_app_ref
+           (tenant_id, id, source_registry_id, target_registry_id, ref_field, label, ref_strength, created_at, updated_at)
+         VALUES ($1, $2, $3, $3, 'counterparty_id', 'Counterparty', 'weak', 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, regId],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1448,6 +1463,7 @@ const SEEDED_TABLES = new Set<string>([
   'dmn_rule_table',
   'nav_version',
   'catalog_field_spec',
+  'cross_app_ref',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
