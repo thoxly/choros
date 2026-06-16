@@ -233,6 +233,11 @@ catalog_enforced_files() {
 attestation_valid() {
   local json_line="$1"
   local thawed_file="${2:-}"   # optional; empty = skip surface-binding check (e.g. self-test)
+  local allow_selftest_skip="${3:-}"   # R2-1: 'true' ONLY from --self-test; honors the
+                                        # SELFTEST_SKIP corpus sentinel. Live callers
+                                        # (--verify, standalone) leave it unset → the
+                                        # sentinel is REJECTED, keeping the R-1a corpus
+                                        # anchor mandatory in production.
   local errs=0
 
   # 1. Must have sanctioned_by:auto_additive
@@ -279,9 +284,10 @@ attestation_valid() {
       # mentions the file being thawed. An attestation citing an unrelated family
       # (whose enforcement surface does not include the thawed file) is invalid.
       if [[ -n "${thawed_file}" ]]; then
-        # Extract basename for matching (catalog uses basename references)
-        local file_basename
-        file_basename="$(basename "${thawed_file}")"
+        # R2-3: match the FULL ci/checks/... path exactly (whole-line), not the
+        # basename as a substring. catalog_enforced_files emits full paths, so a
+        # future foreign check whose basename is a proper substring of a legit
+        # enforced path can no longer falsely satisfy the binding.
         local enforced_files
         enforced_files="$(catalog_enforced_files "${catalog_f}" "${fam}")"
         if [[ -z "${enforced_files}" ]]; then
@@ -290,12 +296,12 @@ attestation_valid() {
           # Fail conservatively: unbound attestation is not content-bound (R-1b).
           echo "FAIL [ATTEST-R1b]: family '${fam}' Enforced-by section could not be parsed from catalog — cannot verify surface binding"
           errs=$((errs + 1))
-        elif ! echo "${enforced_files}" | grep -qF "${file_basename}"; then
-          echo "FAIL [ATTEST-R1b]: family '${fam}' does not cover thawed file '${thawed_file}' (basename '${file_basename}') — attestation not bound to thawed surface (R-1b)"
+        elif ! echo "${enforced_files}" | grep -qxF -- "${thawed_file}"; then
+          echo "FAIL [ATTEST-R1b]: family '${fam}' does not cover thawed file '${thawed_file}' — attestation not bound to thawed surface (R-1b)"
           echo "  Enforced-by files for ${fam}: $(echo "${enforced_files}" | tr '\n' ' ')"
           errs=$((errs + 1))
         else
-          echo "PASS [ATTEST-R1b]: family '${fam}' covers '${file_basename}' in Enforced-by catalog section"
+          echo "PASS [ATTEST-R1b]: family '${fam}' covers '${thawed_file}' in Enforced-by catalog section"
         fi
       fi
     done < <(echo "${families_list}")
@@ -316,8 +322,18 @@ attestation_valid() {
     echo "FAIL [ATTEST]: vrag_attestation.corpus_ref '${corpus_ref}' is not a valid git sha (must be 7-40 hex chars)"
     errs=$((errs + 1))
   elif [[ "${corpus_ref}" == "SELFTEST_SKIP" ]]; then
-    # Special sentinel for --self-test mode (no git available in synthetic fixtures)
-    echo "INFO [ATTEST]: corpus_ref=SELFTEST_SKIP — skipping git checks in self-test mode"
+    # R2-1: the SELFTEST_SKIP sentinel bypasses the ENTIRE corpus anchor (R-1a)
+    # verification. It is permitted ONLY under explicit self-test invocation
+    # (allow_selftest_skip=true). A LIVE sanction line (--verify / standalone)
+    # carrying it must be REJECTED — otherwise a task could author
+    # corpus_ref:"SELFTEST_SKIP" and silently skip the R-1a content-binding,
+    # partially reopening the exact hole R-1a was filed to close.
+    if [[ "${allow_selftest_skip}" == "true" ]]; then
+      echo "INFO [ATTEST]: corpus_ref=SELFTEST_SKIP — skipping git checks in self-test mode"
+    else
+      echo "FAIL [ATTEST-R1a]: corpus_ref=SELFTEST_SKIP sentinel is NOT permitted in a live sanction — a real corpus anchor (sha) is required (R2-1)"
+      errs=$((errs + 1))
+    fi
   else
     # R-1a-i: corpus.jsonl must be reachable at corpus_ref
     if ! git -C "${PROJECT_ROOT}" cat-file -e "${corpus_ref}:${CORPUS_REL}" 2>/dev/null; then
@@ -707,7 +723,9 @@ CATALOG_BOUND_EOF
   export PROJECT_ROOT="${tmp}/fake_root"
 
   # TENANT-ISO does not cover object-handle-isolation.sh → must be REJECTED (R-1b)
-  if attestation_valid "${UNBOUND_FAM_ATTEST}" "ci/checks/object-handle-isolation.sh" >/dev/null 2>&1; then
+  # allow_selftest_skip=true isolates the failure to the family-binding axis
+  # (corpus sentinel accepted) so this case tests R-1b, not R2-1.
+  if attestation_valid "${UNBOUND_FAM_ATTEST}" "ci/checks/object-handle-isolation.sh" true >/dev/null 2>&1; then
     echo "SELF-TEST FAIL [R-1-UNBOUND-FAMILY]: unrelated family TENANT-ISO for object-handle-isolation.sh was NOT rejected (R-1b breach)"
     SELF_ERRS=$((SELF_ERRS + 1))
   else
@@ -717,11 +735,40 @@ CATALOG_BOUND_EOF
   # Positive control: OBJECT-HANDLE-ISO DOES cover object-handle-isolation.sh → must PASS
   BOUND_FAM_ATTEST='{"task":"T-0232","file":"ci/checks/object-handle-isolation.sh","sanctioned_by":"auto_additive","vrag_attestation":{"families":["OBJECT-HANDLE-ISO"],"corpus_ref":"SELFTEST_SKIP","enemy_segment":"enemy.adversarial.test.ts","attested_at":"2026-06-15"}}'
 
-  if attestation_valid "${BOUND_FAM_ATTEST}" "ci/checks/object-handle-isolation.sh" >/dev/null 2>&1; then
+  if attestation_valid "${BOUND_FAM_ATTEST}" "ci/checks/object-handle-isolation.sh" true >/dev/null 2>&1; then
     echo "PASS [R-1-BOUND-FAMILY-POSITIVE]: OBJECT-HANDLE-ISO correctly ACCEPTED for object-handle-isolation.sh (R-1b positive control)"
   else
     echo "SELF-TEST FAIL [R-1-BOUND-FAMILY-POSITIVE]: OBJECT-HANDLE-ISO for object-handle-isolation.sh was rejected — R-1b positive control failed"
     SELF_ERRS=$((SELF_ERRS + 1))
+  fi
+
+  # -------------------------------------------------------------------------
+  # Case K (R2-1): SELFTEST_SKIP corpus sentinel in a LIVE (non-self-test)
+  # sanction must be REJECTED. Same well-formed, family-bound attestation as
+  # the positive control above, but WITHOUT allow_selftest_skip — emulating a
+  # task that authored corpus_ref:"SELFTEST_SKIP" in a real sanction line.
+  # The corpus anchor (R-1a) must NOT be bypassable from production input.
+  # -------------------------------------------------------------------------
+  if attestation_valid "${BOUND_FAM_ATTEST}" "ci/checks/object-handle-isolation.sh" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL [R2-1]: SELFTEST_SKIP sentinel was HONORED in live mode — corpus anchor bypass reopened (R2-1 breach)"
+    SELF_ERRS=$((SELF_ERRS + 1))
+  else
+    echo "PASS [R2-1]: SELFTEST_SKIP corpus sentinel correctly REJECTED in live mode (anchor mandatory outside self-test)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # Case L (R2-3): substring-basename non-collision. Thaw a hypothetical
+  # 'ci/checks/isolation.sh' citing OBJECT-HANDLE-ISO (which enforces
+  # object-handle-isolation.sh). The basename 'isolation.sh' IS a proper
+  # substring of 'object-handle-isolation.sh' — the OLD substring match would
+  # have falsely bound them. Exact whole-path match must REJECT.
+  # -------------------------------------------------------------------------
+  SUBSTR_FAM_ATTEST='{"task":"T-0232","file":"ci/checks/isolation.sh","sanctioned_by":"auto_additive","vrag_attestation":{"families":["OBJECT-HANDLE-ISO"],"corpus_ref":"SELFTEST_SKIP","enemy_segment":"e.ts","attested_at":"2026-06-15"}}'
+  if attestation_valid "${SUBSTR_FAM_ATTEST}" "ci/checks/isolation.sh" true >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL [R2-3]: substring-basename 'isolation.sh' falsely bound to object-handle-isolation.sh (substring-match regression)"
+    SELF_ERRS=$((SELF_ERRS + 1))
+  else
+    echo "PASS [R2-3]: substring-basename non-collision correctly REJECTED (exact full-path family binding)"
   fi
   export PROJECT_ROOT="${ORIG_PROJECT_ROOT_J}"
 
