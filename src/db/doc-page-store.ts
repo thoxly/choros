@@ -16,13 +16,19 @@
 // DocPage — unit of content in the agent-maintained wiki (ADR §2.1)
 // ---------------------------------------------------------------------------
 
-/** Row mirror of choros.doc_page (migration 061). */
+/** Row mirror of choros.doc_page (migrations 061 + 064). */
 export interface DocPage {
   tenantId: string;
   id: string;
   slug: string;
   title: string;
   body: string;
+  /**
+   * One-line summary derived deterministically by REGEN (migration 064, T-0214 P-6).
+   * Null for rows that pre-date migration 064 or were not written by REGEN.
+   * No embedded newline (CHECK doc_page_summary_oneline, max 200 chars).
+   */
+  summary: string | null;
   /** 'system' = common product doc projected per-tenant; 'tenant' = per-tenant doc. */
   scope: 'system' | 'tenant';
   /** Version of system-docs package for scope='system' projections; null for scope='tenant'. */
@@ -34,6 +40,28 @@ export interface DocPage {
   /** Agent that authored this page (nature of task: docs are written by agents). */
   authoredBy: string;
   authoredAt: number;
+  updatedAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// T-0214 · P-6 — DocPageIndexEntry: index shape (no body)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight index entry for doc_page — no body column.
+ * Returned by readDocIndex (T-0214 / P-6).
+ * Load-bearing invariant: this type MUST NOT have a `body` field.
+ * Static guard: ci/checks/doc-summary-no-body-in-index.sh.
+ */
+export interface DocPageIndexEntry {
+  tenantId: string;
+  id: string;
+  slug: string;
+  title: string;
+  /** One-line summary (nullable for pre-064 rows). */
+  summary: string | null;
+  scope: 'system' | 'tenant';
+  stale: boolean;
   updatedAt: number;
 }
 
@@ -104,7 +132,7 @@ export async function readDocPages(
   tenantId: string,
 ): Promise<DocPage[]> {
   const { rows } = await client.query(
-    `SELECT tenant_id, id, slug, title, body, scope, catalog_version, app_id,
+    `SELECT tenant_id, id, slug, title, body, summary, scope, catalog_version, app_id,
             stale, authored_by, authored_at, updated_at
        FROM choros.doc_page
       WHERE tenant_id = $1
@@ -117,6 +145,7 @@ export async function readDocPages(
     slug: r['slug'] as string,
     title: r['title'] as string,
     body: r['body'] as string,
+    summary: r['summary'] as string | null,
     scope: r['scope'] as 'system' | 'tenant',
     catalogVersion: r['catalog_version'] as string | null,
     appId: r['app_id'] as string | null,
@@ -150,6 +179,43 @@ export async function readDocRefs(
     refTarget: r['ref_target'] as Record<string, string>,
     broken: r['broken'] as boolean,
     createdAt: Number(r['created_at']),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// T-0214 · P-6 · §7.1b — readDocIndex (no body column)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a lightweight index of doc_page rows for `tenantId`:
+ * slug / title / summary / scope / stale / updated_at — WITHOUT selecting body.
+ *
+ * Load-bearing invariant (ADR D-4 / T-0214 P-6): this query MUST NOT select
+ * the `body` column. Enforced statically by ci/checks/doc-summary-no-body-in-index.sh.
+ *
+ * @param client   caller-owned connection (choros.tenant_id GUC set, RLS active)
+ * @param tenantId explicit tenantId (belt-and-suspenders)
+ */
+export async function readDocIndex(
+  client: DocStoreClient,
+  tenantId: string,
+): Promise<DocPageIndexEntry[]> {
+  const { rows } = await client.query(
+    `SELECT tenant_id, id, slug, title, summary, scope, stale, updated_at
+       FROM choros.doc_page
+      WHERE tenant_id = $1
+      ORDER BY slug`,
+    [tenantId],
+  );
+  return rows.map((r) => ({
+    tenantId: r['tenant_id'] as string,
+    id: r['id'] as string,
+    slug: r['slug'] as string,
+    title: r['title'] as string,
+    summary: r['summary'] as string | null,
+    scope: r['scope'] as 'system' | 'tenant',
+    stale: r['stale'] as boolean,
+    updatedAt: Number(r['updated_at']),
   }));
 }
 
@@ -189,6 +255,8 @@ export async function upsertDocPage(
     slug: string;
     title: string;
     body: string;
+    /** One-line summary from REGEN (T-0214 · P-6, migration 064). Null-safe for pre-064 callers. */
+    summary?: string | null;
     authoredBy: string;
     authoredAt: number;
     updatedAt: number;
@@ -201,19 +269,25 @@ export async function upsertDocPage(
   //   OR EXCLUDED.title IS DISTINCT FROM doc_page.title
   // → only updates (and bumps updated_at) when content actually changed.
   //
+  // summary co-varies with body (derived from same LiveSnapshot source), so it
+  // is included in EXCLUDED set but not in the change-guard (ADR D-3).
+  //
   // authored_at is preserved on conflict (keeps original creation time).
   // scope is always 'tenant' for REGEN (ADR §5.2).
   // stale is always false for REGEN (ADR §5.2).
   // catalog_version and app_id are NULL (ADR §5.2).
 
+  const summary = page.summary ?? null;
+
   const { rows } = await client.query(
     `INSERT INTO choros.doc_page
-       (tenant_id, id, slug, title, body, scope, catalog_version, app_id,
+       (tenant_id, id, slug, title, body, summary, scope, catalog_version, app_id,
         stale, authored_by, authored_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, 'tenant', NULL, NULL, false, $6, $7, $8)
+     VALUES ($1, $2, $3, $4, $5, $9, 'tenant', NULL, NULL, false, $6, $7, $8)
      ON CONFLICT (tenant_id, slug) DO UPDATE
-       SET title      = EXCLUDED.title,
-           body       = EXCLUDED.body,
+       SET title       = EXCLUDED.title,
+           body        = EXCLUDED.body,
+           summary     = EXCLUDED.summary,
            authored_by = EXCLUDED.authored_by,
            updated_at  = CASE
              WHEN doc_page.body IS DISTINCT FROM EXCLUDED.body
@@ -228,7 +302,7 @@ export async function upsertDocPage(
        (doc_page.updated_at = $8
         AND (xmax <> 0))                                AS was_updated
     `,
-    [tenantId, page.id, page.slug, page.title, page.body, page.authoredBy, page.authoredAt, page.updatedAt],
+    [tenantId, page.id, page.slug, page.title, page.body, page.authoredBy, page.authoredAt, page.updatedAt, summary],
   );
 
   if (rows.length === 0) {

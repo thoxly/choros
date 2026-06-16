@@ -138,6 +138,7 @@ async function runRegen(tenantId: string): Promise<{
         slug: pagePlan.slug,
         title: pagePlan.title,
         body: pagePlan.body,
+        summary: pagePlan.summary,
         authoredBy: pagePlan.authoredBy,
         authoredAt: pagePlan.authoredAt,
         updatedAt: pagePlan.updatedAt,

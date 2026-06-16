@@ -71,6 +71,12 @@ export interface RegenPagePlan {
   slug: string;
   title: string;
   body: string;
+  /**
+   * One-line summary derived deterministically from the same LiveSnapshot
+   * content as body (ADR D-2). No newline; stable across identical snapshot
+   * inputs (no timestamp/uuid). Maps to doc_page.summary (migration 064).
+   */
+  summary: string;
   authoredBy: string;
   authoredAt: number;
   updatedAt: number;
@@ -136,6 +142,11 @@ interface PageSpec {
   slug: string;
   title: string;
   body: string;
+  /**
+   * One-line summary — deterministic from same snapshot content as body (ADR D-2).
+   * No newline; length ≤ 200 chars (matches migration 064 CHECK).
+   */
+  summary: string;
   refs: LintDocRef[];
 }
 
@@ -167,11 +178,12 @@ function buildPageSpecs(live: LiveSnapshot): PageSpec[] {
     const slug = `code/${slugify(module)}`;
     const title = `Code symbols — ${module}`;
     const body = `# Code symbols — ${module}\n\n${sortedSymbols.map((s) => `- \`${s}\``).join('\n')}\n`;
+    const summary = `\`${sortedSymbols.length}\` code symbols in ${module}`;
     const refs: LintDocRef[] = sortedSymbols.map((symbol) => ({
       refKind: 'code_symbol' as const,
       refTarget: { module, symbol },
     }));
-    pages.push({ kind: 'code', slug, title, body, refs });
+    pages.push({ kind: 'code', slug, title, body, summary, refs });
   }
 
   // ---- restEndpoints: one index page ----
@@ -180,13 +192,14 @@ function buildPageSpecs(live: LiveSnapshot): PageSpec[] {
     const slug = 'api/endpoints';
     const title = 'REST endpoints';
     const body = `# REST endpoints\n\n${endpoints.map((e) => `- \`${e}\``).join('\n')}\n`;
+    const summary = `\`${endpoints.length}\` REST endpoints`;
     const refs: LintDocRef[] = endpoints.map((entry) => {
       const spaceIdx = entry.indexOf(' ');
       const method = entry.slice(0, spaceIdx);
       const path = entry.slice(spaceIdx + 1);
       return { refKind: 'rest_endpoint' as const, refTarget: { method, path } };
     });
-    pages.push({ kind: 'api', slug, title, body, refs });
+    pages.push({ kind: 'api', slug, title, body, summary, refs });
   }
 
   // ---- processKeys: one index page ----
@@ -195,11 +208,12 @@ function buildPageSpecs(live: LiveSnapshot): PageSpec[] {
     const slug = 'processes/index';
     const title = 'Process definitions';
     const body = `# Process definitions\n\n${processKeys.map((k) => `- \`${k}\``).join('\n')}\n`;
+    const summary = `\`${processKeys.length}\` process definitions`;
     const refs: LintDocRef[] = processKeys.map((processKey) => ({
       refKind: 'process' as const,
       refTarget: { processKey },
     }));
-    pages.push({ kind: 'processes', slug, title, body, refs });
+    pages.push({ kind: 'processes', slug, title, body, summary, refs });
   }
 
   // ---- schemaFields: one page per registryDefId ----
@@ -217,11 +231,12 @@ function buildPageSpecs(live: LiveSnapshot): PageSpec[] {
     const slug = `schema/${slugify(defId)}`;
     const title = `Schema fields — ${defId}`;
     const body = `# Schema fields — ${defId}\n\n${sortedFields.map((f) => `- \`${f}\``).join('\n')}\n`;
+    const summary = `\`${sortedFields.length}\` schema fields in ${defId}`;
     const refs: LintDocRef[] = sortedFields.map((fieldKey) => ({
       refKind: 'schema_field' as const,
       refTarget: { registryDefId: defId, fieldKey },
     }));
-    pages.push({ kind: 'schema', slug, title, body, refs });
+    pages.push({ kind: 'schema', slug, title, body, summary, refs });
   }
 
   // ---- configKeys: one index page ----
@@ -230,11 +245,12 @@ function buildPageSpecs(live: LiveSnapshot): PageSpec[] {
     const slug = 'config/keys';
     const title = 'Config keys';
     const body = `# Config keys\n\n${configKeys.map((k) => `- \`${k}\``).join('\n')}\n`;
+    const summary = `\`${configKeys.length}\` config keys`;
     const refs: LintDocRef[] = configKeys.map((key) => ({
       refKind: 'config_key' as const,
       refTarget: { key },
     }));
-    pages.push({ kind: 'config', slug, title, body, refs });
+    pages.push({ kind: 'config', slug, title, body, summary, refs });
   }
 
   return pages;
@@ -341,6 +357,7 @@ export function planRegen(
       slug: spec.slug,
       title: spec.title,
       body: spec.body,
+      summary: spec.summary,
       authoredBy: actor,
       authoredAt,
       updatedAt: nowMs,
