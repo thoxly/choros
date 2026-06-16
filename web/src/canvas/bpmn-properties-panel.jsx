@@ -69,9 +69,14 @@ const TASK_TYPES = new Set([
   'bpmn:ManualTask',
 ]);
 
-/* Derive the effective executor type from a businessObject */
+/* Derive the effective executor type from a businessObject.
+   T-0099: reads bo.executorType (moddle registered property, set on importXML)
+   first, then falls back to bo.$attrs['choros:executorType'] (T-0098 legacy). */
 function effectiveExecType(bo) {
   if (!bo) return null;
+  // Primary: registered moddle property (T-0099 round-trip path)
+  if (bo.executorType) return bo.executorType;
+  // Fallback: $attrs path written by T-0098 and by raw XML import
   const explicit = bo.$attrs && bo.$attrs['choros:executorType'];
   if (explicit) return explicit;
   if (bo.$type === 'bpmn:UserTask') return 'human';
@@ -293,7 +298,12 @@ export default function BpmnPropertiesPanel({ modeler }) {
       // Ensure $attrs exists
       if (!bo.$attrs) bo.$attrs = {};
 
-      // Write the attribute — T-0097's execMarkerFor() reads this path
+      // T-0099: write to the registered moddle property so saveXML serialises it
+      // as choros:executorType="..." in the XML (round-trip guarantee).
+      bo.executorType = newType;
+
+      // T-0098 legacy path: also write $attrs so execMarkerFor() works without
+      // relying on the moddle property name.
       bo.$attrs['choros:executorType'] = newType;
 
       // Live recolor: remove old chs-exec-* marker, add new one

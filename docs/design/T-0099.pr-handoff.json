@@ -1,0 +1,105 @@
+{
+  "task": "T-0099",
+  "title": "BPMN save/load XML + diagram validation + choros moddle extension (executorType round-trip)",
+  "branch": "task/T-0099-bpmn-save-load",
+  "date": "2026-06-16",
+  "status": "done",
+
+  "files_changed": [
+    {
+      "path": "web/src/canvas/choros-moddle-extension.js",
+      "action": "new",
+      "purpose": "bpmn-moddle JSON descriptor for the choros namespace. Extends bpmn:Activity with executorType (isAttr:true) so saveXML serialises it as choros:executorType=\"...\" and importXML deserializes it into bo.executorType."
+    },
+    {
+      "path": "web/src/canvas/bpmn-save-load.js",
+      "action": "new",
+      "purpose": "saveDiagram(modeler), loadDiagram(modeler,xml), validateDiagram(modeler), downloadXml(xml,filename), openXmlFilePicker(). No external deps — uses bpmn-js internals + DOMParser + FileReader."
+    },
+    {
+      "path": "web/src/canvas/bpmn-modeler-wrapper.jsx",
+      "action": "modified (additive)",
+      "purpose": "Import ChorosModdleDescriptor and pass moddleExtensions:{choros:ChorosModdleDescriptor} to BpmnModeler constructor. This is the key registration hook."
+    },
+    {
+      "path": "web/src/canvas/bpmn-exec-markers.js",
+      "action": "modified (additive)",
+      "purpose": "execMarkerFor() now reads bo.executorType (moddle registered property, primary) BEFORE bo.$attrs['choros:executorType'] (legacy). Both paths checked for max compatibility."
+    },
+    {
+      "path": "web/src/canvas/bpmn-properties-panel.jsx",
+      "action": "modified (additive)",
+      "purpose": "effectiveExecType() reads bo.executorType first. handleExecTypeChange() writes BOTH bo.executorType AND bo.$attrs['choros:executorType'] — ensures saveXML sees the value via the registered property path."
+    },
+    {
+      "path": "web/src/screens/screen-process-editor.jsx",
+      "action": "modified (rewrite of EditorToolbar + screen)",
+      "purpose": "Toolbar Save/Load/Validate buttons wired to handleSave/handleLoad/handleValidate handlers. ValidationBanner (errors/warnings) and SaveLoadStatusBanner (transient messages, auto-dismiss 4s) added below the toolbar. Dirty tracking via commandStack.changed EventBus event."
+    }
+  ],
+
+  "moddle_extension_descriptor": {
+    "prefix": "choros",
+    "uri": "http://choros.io/bpmn",
+    "extends": "bpmn:Activity",
+    "property": "executorType",
+    "isAttr": true,
+    "type": "String",
+    "registration": "moddleExtensions: { choros: ChorosModdleDescriptor } in BpmnModeler constructor"
+  },
+
+  "round_trip_proof": {
+    "mechanism": "With ChorosModdleDescriptor registered, bpmn-moddle treats executorType as a first-class attribute on bpmn:Activity subtypes (ServiceTask, UserTask, etc.).",
+    "parse_path": "importXML reads choros:executorType=\"agent\" from XML → bo.executorType = 'agent' (registered property, NOT $attrs)",
+    "write_path": "properties panel: bo.executorType = newType AND bo.$attrs['choros:executorType'] = newType (both written for dual-path reads)",
+    "serialize_path": "saveXML: moddle reads bo.executorType via element.get('executorType') → emits choros:executorType=\"agent\" in output XML",
+    "verified_xml_snippet": "<serviceTask id=\"Task_agent\" name=\"AI Step\" choros:executorType=\"agent\" />",
+    "test_command": "node --input-type=module < [inline-proof-script]",
+    "test_result": "ROUND-TRIP PRESERVED: true (task.executorType='agent' → XML contains choros:executorType=\"agent\" → re-parsed task2.executorType='agent')"
+  },
+
+  "save_load_validate": {
+    "save": "EditorToolbar 'Сохранить' → handleSave() → saveDiagram(modeler) → modeler.saveXML({format:true}) → downloadXml(xml, '<id>.bpmn') → sets isDirty=false + shows 4s success banner",
+    "load": "EditorToolbar 'Загрузить' → handleLoad() → openXmlFilePicker() (input[type=file] .bpmn/.xml) → loadDiagram(modeler, xml) → modeler.importXML(xml) + fit-viewport → shows success/warning banner",
+    "validate": "EditorToolbar 'Проверить' → handleValidate() → validateDiagram(modeler) → [saveXML round-trip check, elementRegistry structural checks, DOMParser well-formedness] → ValidationBanner with dismissible errors/warnings"
+  },
+
+  "validation_checks": [
+    "saveXML serialization succeeds (no save error)",
+    "DOMParser XML well-formedness (browser native)",
+    "canvas.getRootElement() is bpmn:Process or bpmn:Collaboration",
+    "at least one bpmn:StartEvent in elementRegistry (error if missing)",
+    "at least one bpmn:EndEvent in elementRegistry (warning if missing)",
+    "tasks with zero incoming AND zero outgoing connections (warning per task)"
+  ],
+
+  "build": {
+    "command": "cd web && npm install && npm run build",
+    "result": "green (chunk warning OK — bpmn-js is 886 kB, expected)",
+    "output": "✓ 454 modules transformed. ✓ built in 1.53s"
+  },
+
+  "linter": {
+    "command": "bash ci/checks/bpmn-linter-isolation.sh",
+    "result": "PASS: bpmn-linter-isolation — all checks green",
+    "checks_passed": [
+      "PASS: no forbidden imports in bpmn-linter.ts or bpmn-xml-parser.ts",
+      "PASS: frozen files (object-handle.ts, grant-lattice.ts, types.ts, jobStore.ts) are unmodified",
+      "PASS: no xml/bpmn runtime dependencies in package.json dependencies"
+    ]
+  },
+
+  "shared_file_edits": {
+    "additive": true,
+    "notes": [
+      "bpmn-exec-markers.js: single added OR-clause in chorosExecType lookup (bo.executorType || ...)",
+      "bpmn-properties-panel.jsx: effectiveExecType reads bo.executorType first; handleExecTypeChange writes bo.executorType in addition to bo.$attrs",
+      "bpmn-modeler-wrapper.jsx: adds import + moddleExtensions in constructor options — no existing logic changed",
+      "screen-process-editor.jsx: EditorToolbar props extended; screen body additive (new state, new banners, handlers)"
+    ]
+  },
+
+  "new_dependencies": "none — bpmn-moddle is already a transitive dependency of bpmn-js@17",
+
+  "blockers": "none"
+}

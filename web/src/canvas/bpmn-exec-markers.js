@@ -57,9 +57,14 @@ export function execMarkerFor(element) {
   const type = bo.$type;
 
   // --- Check Choros extension attribute first (highest priority) -----------
-  // T-0098 (properties panel) will write choros:executorType onto businessObject.
-  // We read it here defensively so the renderer is already wired for that.
+  // T-0099: With the choros moddle extension registered, importXML places
+  //   the value into bo.executorType (the registered property name, no prefix).
+  //   bpmn-moddle may ALSO store it in bo.$attrs['choros:executorType'] as a
+  //   generic attribute — we read both paths for maximum compatibility.
+  // T-0098: The properties panel writes bo.$attrs['choros:executorType'] (legacy).
+  //   It also writes bo.executorType via the moddle path (T-0099).
   const chorosExecType =
+    bo.executorType ||
     (bo.$attrs && bo.$attrs['choros:executorType']) ||
     (bo.extensionElements && _findChorosExecType(bo.extensionElements));
 
