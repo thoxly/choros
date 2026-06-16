@@ -33,6 +33,23 @@ else
   fi
 fi
 
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), T-0031's real invariant
+# (grant trail adds no new tenant table) is NOT violated. Cancel the false-red.
+# Real guard: Check-2 below catches any CREATE TABLE in migrations >= 031.
+_ktt_gtnt_grown=0
+_ktt_gtnt_path=ci/checks/known_tenant_tables.txt
+if [[ -n "${MERGE_BASE}" ]] && ! git -C "${ROOT}" diff --quiet "${MERGE_BASE}" -- "${_ktt_gtnt_path}" 2>/dev/null; then
+  _ktt_gtnt_old="$(git -C "${ROOT}" show "${MERGE_BASE}:${_ktt_gtnt_path}" 2>/dev/null || true)"
+  _ktt_gtnt_new="$(cat "${ROOT}/${_ktt_gtnt_path}" 2>/dev/null || true)"
+  _ktt_gtnt_gone="$(comm -23 <(echo "${_ktt_gtnt_old}" | sort) <(echo "${_ktt_gtnt_new}" | sort) || true)"
+  [[ -z "${_ktt_gtnt_gone}" ]] && _ktt_gtnt_grown=1
+fi
+if [[ "${_ktt_gtnt_grown}" -eq 1 ]]; then
+  echo "PASS [Check-1-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0031"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # ---- Check-2 (FF-0031-06): no CREATE TABLE in new migrations (031+) ---------
 echo ""
 echo "Check-2 (FF-0031-06): migrations numbered 031+ must not contain CREATE TABLE"

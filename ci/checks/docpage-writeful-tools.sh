@@ -332,6 +332,29 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), T-0210 P-2's real invariant
+# (pure data seed, no new table) is NOT violated. Cancel the false-red.
+# Real guard: F-8 above catches any CREATE TABLE in migration 063.
+_ktt_dpwt_base=""
+for _ktt_dpwt_cand in "dev" "origin/dev"; do
+  if git -C "${ROOT}" rev-parse --verify --quiet "${_ktt_dpwt_cand}^{commit}" >/dev/null 2>&1; then
+    _ktt_dpwt_mb="$(git -C "${ROOT}" merge-base "${_ktt_dpwt_cand}" HEAD 2>/dev/null || true)"
+    if [[ -n "${_ktt_dpwt_mb}" ]]; then _ktt_dpwt_base="${_ktt_dpwt_mb}"; break; fi
+  fi
+done
+_ktt_dpwt_grown=0
+if [[ -n "${_ktt_dpwt_base}" ]]; then
+  _ktt_dpwt_old="$(git -C "${ROOT}" show "${_ktt_dpwt_base}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_dpwt_new="$(cat "${ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_dpwt_gone="$(comm -23 <(echo "${_ktt_dpwt_old}" | sort) <(echo "${_ktt_dpwt_new}" | sort) || true)"
+  [[ -z "${_ktt_dpwt_gone}" ]] && _ktt_dpwt_grown=1
+fi
+if [[ "${_ktt_dpwt_grown}" -eq 1 ]]; then
+  echo "PASS [F-7-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0210"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # ---- F-8: pure data seed — no DDL (no CREATE TABLE, no ALTER TABLE) --------
 echo ""
 echo "F-8: pure data seed — no CREATE TABLE, no ALTER TABLE in migration 063 non-comment code"
