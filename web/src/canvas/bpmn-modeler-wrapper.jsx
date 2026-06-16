@@ -34,6 +34,9 @@ import './bpmn-theme.css';
 // T-0097: executor-type marker layer
 import { applyExecMarkers, attachExecMarkerListeners } from './bpmn-exec-markers.js';
 
+// T-0098: custom palette provider (replaces generic task with 3 Choros executor types)
+import ChorosPaletteModule from './bpmn-palette-provider.js';
+
 /* --------------------------------------------------------------------------
    Default diagram: Start → UserTask (human) → ServiceTask (service/agent) →
                     SendTask (external) → End
@@ -125,11 +128,14 @@ const DEFAULT_DIAGRAM_XML = `<?xml version="1.0" encoding="UTF-8"?>
    Props:
      className  — extra CSS class on the container div
      style      — inline style on the container div
+     onReady    — T-0098: callback(modeler) fired after importXML resolves;
+                  lets parent components (e.g. BpmnPropertiesPanel) receive
+                  the modeler instance without polling the ref.
    Ref forwarded value:
      { modeler }  — the BpmnModeler instance (or null before mount)
    -------------------------------------------------------------------------- */
 const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
-  { className = '', style },
+  { className = '', style, onReady },
   ref
 ) {
   const containerRef = useRef(null);
@@ -146,6 +152,8 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
       container: containerRef.current,
       // Keyboard shortcuts disabled for now — no custom binding needed yet
       keyboard: { bindTo: null },
+      // T-0098: inject custom Choros palette (human / agent / service task entries)
+      additionalModules: [ChorosPaletteModule],
     });
 
     modelerRef.current = modeler;
@@ -179,6 +187,11 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
 
         // T-0097: classify every element and apply chs-exec-* marker classes
         applyExecMarkers(modeler);
+
+        // T-0098: notify parent that the modeler is ready (panel can subscribe)
+        if (typeof onReady === 'function') {
+          onReady(modeler);
+        }
       })
       .catch((err) => {
         // Non-fatal: log parse errors but keep the modeler alive

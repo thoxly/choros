@@ -228,6 +228,15 @@ marker circle {
 [class^="bpmn-icon-"]:before,
 [class*=" bpmn-icon-"]:before { color: inherit; }
 
+/* T-0098: Choros executor-typed palette entries — colored accent dot/border */
+.djs-palette .entry.chs-palette-human { color: var(--chs-exec-human) !important; }
+.djs-palette .entry.chs-palette-agent  { color: var(--chs-exec-agent)  !important; }
+.djs-palette .entry.chs-palette-service{ color: var(--chs-exec-service)!important; }
+
+.djs-palette .entry.chs-palette-human:hover  { background: var(--chs-exec-human-soft)   !important; }
+.djs-palette .entry.chs-palette-agent:hover  { background: var(--chs-exec-agent-soft)   !important; }
+.djs-palette .entry.chs-palette-service:hover{ background: var(--chs-exec-service-soft) !important; }
+
 /* ============================================================================
    6. CONTEXT-PAD (контекстное меню узла — плавающие действия)
    ============================================================================ */
@@ -326,6 +335,19 @@ marker circle {
   font-size: var(--chs-text-base) !important;
 }
 .djs-popup-backdrop { background: transparent !important; }
+
+/* T-0098: exec-dot in popup entries (三 executor colours as small circles) */
+.djs-popup__execdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.djs-popup__execdot--human   { background: var(--chs-exec-human); }
+.djs-popup__execdot--agent   { background: var(--chs-exec-agent); }
+.djs-popup__execdot--service { background: var(--chs-exec-service); }
 
 /* ============================================================================
    8. ОВЕРЛЕИ / ТУЛТИПЫ / СООБЩЕНИЯ

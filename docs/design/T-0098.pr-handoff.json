@@ -1,0 +1,92 @@
+{
+  "task_id": "T-0098",
+  "status": "ready",
+  "branch": "task/T-0098-bpmn-palette",
+  "phases_completed": ["BUILD", "PR-HANDOFF"],
+  "ci_local": {
+    "build": "GREEN — vite build ✓ 452 modules, chunk-size warning only (expected/OK per spec)",
+    "bpmn_linter_isolation": "PASS — all 3 checks green (exit 0), pre-existing WARN on root pg dep unchanged",
+    "no_backend_changes": true,
+    "no_db_migrations": true
+  },
+
+  "diagnosis": {
+    "T-0096_wrapper": "BpmnModelerWrapper (bpmn-modeler-wrapper.jsx) instantiates real BpmnModeler, imports DEFAULT_DIAGRAM_XML, exposes modeler via forwardRef. T-0098 adds: (1) ChorosPaletteModule in additionalModules, (2) onReady(modeler) callback fired after importXML resolves.",
+    "T-0097_renderer": "bpmn-exec-markers.js: execMarkerFor(element) reads bo.$attrs['choros:executorType'] first (highest priority), then falls back to $type mapping. applyExecMarkerToElement(modeler, element) clears old chs-exec-* classes and adds the correct one. T-0098 properties panel writes the attribute and calls this function directly for live recolor.",
+    "bpmn_theme_css": "Already contained all .djs-palette, .djs-context-pad, .bio-properties-panel-* rules targeting --chs-* tokens. T-0098 adds: palette executor-colored entries (chs-palette-human/agent/service), popup exec-dot classes (djs-popup__execdot--*). Everything else was pre-existing.",
+    "screen_process_editor": "Had PropertiesPanelStub placeholder. T-0098 replaces it with BpmnPropertiesPanel receiving liveModeler from onReady callback."
+  },
+
+  "files_changed": [
+    "web/src/canvas/bpmn-palette-provider.js  (NEW — ChorosPaletteProvider + ChorosPaletteModule)",
+    "web/src/canvas/bpmn-properties-panel.jsx (NEW — React properties panel: selection listener + executor-type dropdown + live recolor)",
+    "web/src/canvas/bpmn-modeler-wrapper.jsx  (EXTENDED — ChorosPaletteModule in additionalModules, onReady prop + callback)",
+    "web/src/screens/screen-process-editor.jsx(REPLACED — PropertiesPanelStub → BpmnPropertiesPanel with liveModeler state)",
+    "web/src/canvas/bpmn-theme.css            (ADDITIVE — palette colored entry rules + popup exec-dot rules)",
+    "docs/design/T-0098.pr-handoff.json       (this file)"
+  ],
+
+  "web_deps_added": "none — no new npm packages. Properties panel is a custom React component using bpmn-js internal services (eventBus, modeling). ChorosPaletteModule uses bpmn-js DI injection (palette, create, elementFactory, translate) already present in the modeler.",
+
+  "properties_panel_to_recolor_loop": {
+    "step_1": "User clicks an element on the canvas → bpmn-js fires selection.changed event on its EventBus",
+    "step_2": "BpmnPropertiesPanel.useEffect listener: reads event.newSelection[0].businessObject, derives effectiveExecType() from bo.$attrs['choros:executorType'] (explicit) or $type fallback",
+    "step_3": "Panel renders executor-type <select> with current value; also shows element name (editable via modeling.updateLabel) and ID (read-only)",
+    "step_4": "User picks a different executor type in the dropdown → handleExecTypeChange(newType) called",
+    "step_5": "handleExecTypeChange writes bo.$attrs['choros:executorType'] = newType onto the businessObject in place",
+    "step_6": "applyExecMarkerToElement(modeler, element) called — this is T-0097's function: removes all chs-exec-* markers via canvas.removeMarker, then canvas.addMarker(element, 'chs-exec-agent') (or human/service)",
+    "step_7": "bpmn-theme.css rule '.djs-element.chs-exec-agent .djs-visual > :nth-child(1)' fires — element's rect gets stroke=var(--chs-exec-agent) fill=var(--chs-exec-agent-soft) IMMEDIATELY without re-import",
+    "step_8": "EventBus fires element.changed so bpmn-js context-pad / overlays refresh",
+    "attribute_path": "bo.$attrs['choros:executorType'] — same path execMarkerFor() in bpmn-exec-markers.js reads at step 2 (highest priority branch)"
+  },
+
+  "step_type_mapping": {
+    "userTask → human":    "bpmn:UserTask — BPMN $type default, no choros:executorType needed",
+    "serviceTask + agent": "bpmn:ServiceTask with choros:executorType='agent' — set by palette drop (ChorosPaletteProvider pre-stamps $attrs) OR properties panel dropdown",
+    "serviceTask/external":"bpmn:ServiceTask with choros:executorType='service' — also sendTask/scriptTask/etc via $type fallback"
+  },
+
+  "palette_customization": {
+    "module": "ChorosPaletteModule (bpmn-palette-provider.js) injected via BpmnModeler additionalModules",
+    "registration_priority": 1500,
+    "removes": "'create.task' (generic untyped task) — returns null to suppress default provider entry",
+    "adds": [
+      "create.choros-user-task  → bpmn:UserTask,     class chs-palette-human,   group choros-tasks",
+      "create.choros-agent-task → bpmn:ServiceTask + choros:executorType='agent',   chs-palette-agent",
+      "create.choros-service-task → bpmn:ServiceTask + choros:executorType='service', chs-palette-service"
+    ],
+    "drag_drop_exec_attr": "ChorosPaletteProvider.createAction passes { 'choros:executorType': 'agent' } to elementFactory.createShape — bpmn-js stores this in bo.$attrs at shape creation. T-0097 shape.added listener then applies the marker immediately."
+  },
+
+  "context_pad": {
+    "approach": "CSS-only theming (all rules pre-existed in bpmn-theme.css §6). The default ContextPadProvider is left intact — its entries are already themed via .djs-context-pad .entry rules. No custom ContextPadProvider module needed for T-0098 scope.",
+    "styled_entries": "connect, trash, append-task, append-gateway, append-end-event — all pick up --chs-* hover/active colors"
+  },
+
+  "shared_file_edits": {
+    "bpmn-modeler-wrapper.jsx": "ADDITIVE — import added, additionalModules array added, onReady prop added, callback call added inside .then(). No existing logic removed.",
+    "bpmn-theme.css": "ADDITIVE — 12 new CSS rules appended after existing palette section and popup section. No existing rules modified.",
+    "screen-process-editor.jsx": "REPLACEMENT of PropertiesPanelStub function + matching usage. EditorToolbar, layout structure, imports (except removed stub, added BpmnPropertiesPanel) unchanged.",
+    "bpmn-exec-markers.js": "NOT TOUCHED — T-0097 brick reused as-is.",
+    "screen-editor.jsx": "NOT TOUCHED — mock preserved for preview/process-editor.html."
+  },
+
+  "deviations_from_spec": [
+    "bpmn-js-properties-panel npm package NOT added — a custom React panel was built instead. Rationale: (1) the @bpmn-io/properties-panel API requires bpmn-moddle descriptors for custom properties, adding non-trivial setup; (2) the existing bpmn-theme.css already provides all bio-properties-panel-* CSS; (3) a custom panel gives tighter control over the executor-type dropdown and live recolor wiring. The DoD requirement 'If you add bpmn-js-properties-panel + @bpmn-io/properties-panel deps... that's fine' was an option, not a mandate.",
+    "create.task null return to suppress default: bpmn-js v17 merges provider entries by key — returning null removes a lower-priority provider's key. This is the supported override mechanism."
+  ],
+
+  "friction_events": [
+    "FE-T0098-1: web/node_modules absent on fresh worktree — npm install ran before build.",
+    "FE-T0098-2: bpmn-js palette merging uses provider priority (1500 > default 1000) + null-return to suppress keys — verified in PaletteProvider.js source."
+  ],
+
+  "blockers_or_uncertainties": "none",
+  "out_of_scope_deferred": {
+    "T-0099": "BPMN-XML save/load — the modeler's importXML/exportXML path. When T-0099 adds save, it writes choros:executorType as a BPMN extension attribute in the XML (the bo.$attrs value is already set, bpmn-moddle serialises $attrs into the XML namespace automatically).",
+    "agent_llm_fields": "Endpoint/model/budget fields in the properties panel are UI-only stubs (no persistence) — full agent config stored via Org screen, not diagram XML."
+  },
+
+  "pr_handoff_path": "docs/design/T-0098.pr-handoff.json",
+  "ready_for_review": true
+}
