@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0232",
+  "status": "ready",
+  "summary": "Расширить frozen-checks-immutable мета-гейт вторым классом санкции (auto-additive): машинно-проверяемый аддитивный thaw + Враг-аттестация заменяют founder_decide, оркестратор сам аппендит аудируемую строку; деструктивный thaw остаётся founder-only (D-060).",
+  "functional": [
+    "FR-1: мета-гейт принимает bypass чужого frozen-чека для пары {task,file} ЛИБО founder-классом (как сегодня), ЛИБО новым auto-additive-классом; оба печатают SANCTION+AUDIT с явным именем класса.",
+    "FR-2 (крус): для auto-additive мета-гейт доказывает аддитивность КАЖДОГО затронутого файла против BASE_REF по правилу §4; иначе санкция отклонена.",
+    "FR-3: precondition auto-санкции = Враг-аттестация аддитивности (T-0151) + зелёный CI, а не founder_decide-трейс.",
+    "FR-4: после зелёного Врага+CI оркестратор сам аппендит auto-additive-строку (task/file/owner/класс/Враг-ссылку/метку) в frozen-sanctions.jsonl, без awaiting_founder.",
+    "FR-5: деструктивный/редуктивный thaw auto-санкции НЕ получает — только founder_decide; система не имеет пути само-санкционировать его.",
+    "FR-6: существующие founder-строки (T-0085, T-0227) работают без изменений; T-0232 строго аддитивен к мета-гейту.",
+    "FR-7: --self-test доказывает приём аддитивного+аттестованного, отказ деструктивного, отказ аддитивного-без-аттестации, приём founder-класса."
+  ],
+  "non_functional": [
+    "NF-1: аддитивность-верификатор и self-test чистые (git/grep/awk/diff), offline/детерминированные, зелёные и на task-ветке и постфактум на dev (BASE_REF-якорь).",
+    "NF-2: frozen-sanctions.jsonl остаётся append-only; auto- и founder-строки только аппендятся.",
+    "NF-3: никогда не молча — каждый bypass печатает SANCTION+AUDIT.",
+    "NF-4: нет нового auth-root; T-0146 не ослаблен; новая логика владеется T-0232 и регистрируется в npm run fitness с --self-test.",
+    "NF-5: auto-санкционированные правки полностью видимы фаундеру постфактум (AUDIT-лог + jsonl-запись с классом и Враг-ссылкой)."
+  ],
+  "out_of_scope": [
+    "OOS-1: auto-санкция для деструктивного/редуктивного thaw (остаётся founder-only).",
+    "OOS-2: изменение механики Врага (генератор/корпус/арена) — потребляется, не переписывается.",
+    "OOS-3: изменение founder_decide control-plane тула и существующих founder-строк.",
+    "OOS-4: реализация оркестраторского аппенд-степа кодом control-plane (зона architect/orchestrator-контракта).",
+    "OOS-5: семантический доказатель эквивалентности прав — достаточность даёт Враг, не статический анализ.",
+    "OOS-6: деструктивная правка frozen-файла T-0146."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "--self-test: чистый аддитивный thaw (только добавленные строки/сущности) с валидной Враг-аттестацией → auto-additive-санкция ПРИНЯТА (exit 0).", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "--self-test: синтетика 'удалён существующий enum-член/именованная сущность' → аддитивность краснеет → auto-санкция ОТКЛОНЕНА.", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "--self-test: синтетика 'мутирована существующая строка/переопределён существующий член/расширен scope' → ОТКЛОНЕНА.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "--self-test: аддитивный thaw БЕЗ Враг-аттестации → ОТКЛОНЕНА (precondition Врага обязателен, FR-3).", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "--self-test: founder-класс строки (sanctioned_by:founder) по-прежнему ПРИНЯТ без изменения поведения (FR-6).", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "Живой прогон на ветке/диффе T-0227 (аддитивный thaw mutation-gateway-isolation.sh) → auto-additive путь ПРИНЯЛ БЫ его (A-1..A-4 выполнены), демонстрируя класс на каноническом примере.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "AUDIT-строка для auto-санкции содержит маркер класса auto-additive + Враг-ссылку; для founder — founder/founder_decide@DATE; классы машинно-различимы.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "Деструктивный thaw, поданный как auto-additive (нет founder-строки), НЕ проходит мета-гейт (FAIL exit 1); тот же thaw с founder-строкой проходит (FR-5).", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "frozen-sanctions.jsonl остаётся append-only: существующие строки (T-0085, T-0227) не удалены/мутированы; новый формат добавляется только аппендом (структурно как corpus-append-only).", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Новый/расширенный чек зарегистрирован в npm run fitness (package.json) с --self-test; 2-я строка декларирует '# T-0232 · …' (frozen-checks discipline).", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "На dev/main/non-task ветке или без merge-base аддитивность-верификатор — no-op (fail-open), как frozen-checks-immutable/corpus/catalog.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "Существующие founder-санкции (T-0085, T-0227) после T-0232 продолжают пропускать свои правки в полном npm run fitness прогоне (регрессия founder-класса не сломана).", "verifiable_as": "test"},
+    {"id": "AC-13", "text": "npm run fitness (или релевантный сегмент) ЗЕЛЁНЫЙ end-to-end на ветке T-0232 — изменение мета-гейта само проходит все frozen/enemy инварианты.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0232-auto-sanction-additive-thaw.spec.md"
+}

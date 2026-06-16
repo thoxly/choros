@@ -1,0 +1,79 @@
+{
+  "task_id": "T-0232",
+  "verdict": "changes_requested",
+  "reviewer": "reviewer (adversarial, max-rigor — security meta-gate)",
+  "date": "2026-06-15",
+  "ci_seen": {
+    "green": false,
+    "note": "fitness red on EXACTLY one expected item — FF-FCI1 bootstrap-red for the additive edit to ci/checks/frozen-checks-immutable.sh (owner T-0146), which by design requires a one-time founder-class sanction line (ADR §2-Q1, self-bind paradox). Verified by running the real meta-gate: it emits a single FF-FCI1 violation for frozen-checks-immutable.sh and nothing else. auto-sanction-additive.sh --self-test is GREEN (FF-ASA1..FF-ASA5). The new delegate is owned by T-0232 (2nd-line header '# T-0232 ·') so it passes own-check. CI being red is the documented bootstrap blocker, not a coder defect — but per reviewer rule 2 the blocking finding below is the substantive gate."
+  },
+  "adversarial_probes_run": [
+    {"probe": "P1 append-to-line / superstring (modify existing line in place by appending '| EVIL')", "result": "REJECTED by A-1 (grep -qxF is full-line match; the old whole line is gone → FAIL). Core defense holds."},
+    {"probe": "P2 in-place deny→allow value flip on existing line", "result": "REJECTED by A-1 (whole line changed → base line missing at HEAD)."},
+    {"probe": "P3 removed existing entity / deleted line", "result": "REJECTED by A-1 (+ A-2 on extracted entities). Confirmed E2E against real foreign check mutation-gateway-isolation.sh (deleted 16 lines → A-1 FAIL)."},
+    {"probe": "P4 widen via NEW entity (e.g. add line `export const ALLOW_ALL = true;`)", "result": "ACCEPTED by A-1..A-4 — this is the ACKNOWLEDGED structural-only residual (ADR §4 boundary): semantic widening via a new member is caught by Враг, not A-1..A-4. Враг (enemy.adversarial.test.ts) confirmed to run unconditionally under `vitest run` (npm test), so the live gate is backstopped. Not a finding against the impl."},
+    {"probe": "P5/P6 entity-extractor narrowness (ROLE_ADMIN/bypassRls/GATE not captured; comments skipped by A-1)", "result": "Confirmed extractor only captures quoted literals + UPPER-with-dash tokens, and A-1 skips comments. A-2/A-4 are correspondingly weak, BUT A-1 byte-freezes every non-comment line as the real backstop. Comment-only enforcement deletion is silently accepted by A-1 — low real impact for .sh checks (enforcement lives in code lines), noted as nit R-3."},
+    {"probe": "P7 stale / unrelated Враг attestation", "result": "ACCEPTED — see BLOCKING R-1."}
+  ],
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 6,
+      "location": "ci/checks/auto-sanction-additive.sh:236-249 (attestation_valid corpus_ref check) + :204-231 (families check)",
+      "issue": "Враг-attestation is NOT bound to THIS thaw's content — it is a generic, forgeable audit label. Two concrete gaps, both verified by direct probe: (1) STALE corpus_ref: `git cat-file -e <sha>:corpus.jsonl` only tests REACHABILITY of any sha where corpus.jsonl ever existed. A line citing the oldest corpus commit (78b06c3) PASSES. The check never requires corpus_ref to equal the CURRENT corpus blob, nor to be an ancestor of HEAD. This directly contradicts ADR §2-Q2 point 2 ('детерминированный якорь … на момент аттестации … не подделать'). (2) UNBOUND families: any family present in the T-0152 catalog passes, regardless of whether it covers the file being thawed. A thaw of object-handle-isolation.sh citing TENANT-ISO (unrelated surface) PASSES. The delegate never cross-checks families against the thawed file's enforcement surface. Net: the auto_additive jsonl line — which is the founder's post-hoc audit artifact under NF-5 and the entire trust basis of D-060's 'founder reviews retroactively' guarantee — can assert a coverage claim (which families, which corpus) that is false for the actual thawed surface. On the SECURITY META-GATE this audit integrity is load-bearing, not cosmetic. Live exploitation is mitigated (the enemy test must be green on the same commit per D-056), so this is not a full bypass — but it is a real, precise integrity defect in the gate's own attestation contract and an ADR deviation.",
+      "suggestion": "Tighten attestation_valid: (a) require corpus_ref to be an ANCESTOR of HEAD (`git merge-base --is-ancestor <corpus_ref> HEAD`) AND to resolve to the SAME corpus.jsonl blob currently on HEAD (`git rev-parse <corpus_ref>:CORPUS_REL` == `git rev-parse HEAD:CORPUS_REL`), so a stale/foreign anchor is rejected; (b) bind families to the thawed surface — require that each declared family's catalog entry ('Enforced by.' line) references the file being thawed, OR at minimum that the delegate is passed the thawed file and rejects an attestation whose families' enforcement set is disjoint from it. If the architect's position is that the label is intentionally non-binding (security rests solely on the live enemy test), then the ADR §2-Q2 wording ('детерминированный якорь', 'не подделать без зелёного Врага') must be corrected to say so explicitly and the audit-record claim downgraded — silent divergence between stated and actual binding on the security meta-gate is itself the defect."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "ci/checks/frozen-checks-immutable.sh:202 (AUDIT [FF-FCI12]) vs pr-handoff/ADR claim 'FF-FCI12 byte-equivalent'",
+      "issue": "The handoff and ADR repeatedly state the founder path FF-FCI12 is 'byte-equivalent'. The SANCTION line is byte-identical, but the AUDIT line gained ` class=founder` (additive token before branch=). So the OUTPUT is not byte-identical. Behaviorally it IS equivalent — same grant, same exit code, ERRORS unchanged — and the added token is what AC-7 requires (machine-distinguishable classes). The claim is just imprecise.",
+      "suggestion": "Reword the handoff/ADR to 'founder path is behaviorally equivalent; AUDIT line additively gains class=founder per AC-7' instead of 'byte-equivalent'. No code change needed."
+    },
+    {
+      "id": "R-3",
+      "severity": "nit",
+      "axis": 1,
+      "location": "ci/checks/auto-sanction-additive.sh:68-79 (A-1 comment skip) and self-test cases",
+      "issue": "A-1 skips comment lines, so semantic content carried in a comment of a foreign .sh check (e.g. a documented enforcement note) can be removed silently without tripping A-1/A-2. Low real impact (enforcement lives in executable lines, not comments) but the residual is undocumented and the self-test has no case for it. Also: the self-test never exercises the absent-at-BASE_REF branch (delegate :284-296) which grants on attestation alone — it is effectively unreachable through the meta-gate (a file absent at BASE is own-check, not sanction-path), but an untested grant-on-attestation-only path on the security gate deserves a self-test asserting it still requires a VALID attestation.",
+      "suggestion": "Add a self-test case asserting comment-deletion behavior is intentional (or that A-1 ignores it), and a case driving the absent-at-BASE path to confirm it still requires valid attestation. Document the comment-skip residual in ADR §4 alongside the existing structural-vs-semantic boundary."
+    }
+  ],
+  "adversarial_verdict": {
+    "destructive_rejected": true,
+    "destructive_rejected_evidence": "A-1 (grep -qxF whole-line) rejects in-place flip, superstring/append-to-line, and line/entity deletion — verified by self-test (case B,C) AND independent probes (P1,P2,P3) AND E2E against real foreign check mutation-gateway-isolation.sh. No path lets a destructive/reductive thaw pass as auto_additive; it always falls through to ERRORS++ → founder-only.",
+    "independent_reverify": true,
+    "independent_reverify_evidence": "Delegate --verify reads `git show BASE_REF:file` (line 284) and HEAD/worktree, recomputes A-1..A-4 over the two extracted files. It does NOT trust additive_basis or any 'additive' marker; sanctioned_by is used only as a class discriminator to ROUTE to this path. BASE_REF in the meta-gate is the dev/origin-dev merge-base (Step 2, defined before use). D-007 held.",
+    "attestation_bound_to_content": false,
+    "attestation_bound_to_content_evidence": "See R-1: stale corpus_ref accepted; families not cross-checked to the thawed surface. enemy_segment is a free-text non-empty string. The attestation is a label, not a content-binding proof.",
+    "founder_path_byte_equiv": false,
+    "founder_path_byte_equiv_evidence": "SANCTION [FF-FCI12] line byte-identical; AUDIT [FF-FCI12] line additively gains class=founder (R-2). Behaviorally equivalent, additive-only, no authorization/exit-code change — destructive thaws STILL require founder. The 'byte-equivalent' label is overstated but the security-relevant invariant (founder still gates destructive) holds.",
+    "self_test_real": true,
+    "self_test_real_evidence": "FF-ASA1 (additive accept), FF-ASA2 (delete reject via A-1/A-2), FF-ASA3 (mutation reject via A-1), FF-ASA4 (no-attestation + invalid-family reject), AC-5 (founder line not accepted as auto_additive). Reject cases are REAL — independently reproduced the same rejections against synthetic and real foreign-check inputs. Gap: no comment-deletion case, no absent-at-BASE case, no STALE-corpus_ref case (the latter would have caught R-1).",
+    "only_blocker_is_bootstrap": true,
+    "only_blocker_is_bootstrap_evidence": "Real meta-gate run on task/T-0232 emits exactly ONE FF-FCI1 violation (the frozen-checks-immutable.sh edit needing founder bootstrap); every other check incl. the new delegate own-check is green. The CI red is the documented self-bind bootstrap, not a defect. (Independent of R-1, which is a content finding, not the CI blocker.)",
+    "no_forged_founder_row": true,
+    "no_forged_founder_row_evidence": "git diff 66c27da..HEAD on ci/checks/data/frozen-sanctions.jsonl is EMPTY. The file contains only the two pre-existing founder rows (T-0085, T-0227). No bootstrap founder row for frozen-checks-immutable.sh was fabricated — the coder correctly left it for founder_decide and reported status=blocked. Coder did NOT self-green."
+  },
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "FF-ASA1 self-test green; additive accept reproduced"},
+    {"ac": "AC-2", "covered": true, "note": "FF-ASA2; delete reject reproduced + E2E"},
+    {"ac": "AC-3", "covered": true, "note": "FF-ASA3; in-place mutation reject reproduced"},
+    {"ac": "AC-4", "covered": true, "note": "FF-ASA4 no-attestation + invalid-family reject"},
+    {"ac": "AC-5", "covered": true, "note": "founder class not accepted as auto_additive; FF-FCI12 grant preserved"},
+    {"ac": "AC-6", "covered": true, "note": "A-1..A-4 over T-0227 process_instance thaw would PASS (additive) — demonstrated"},
+    {"ac": "AC-7", "covered": true, "note": "AUDIT class=auto_additive vs class=founder machine-distinguishable"},
+    {"ac": "AC-8", "covered": true, "note": "destructive-as-auto_additive → FAIL (E2E); founder line → PASS"},
+    {"ac": "AC-9", "covered": true, "note": "jsonl append-only; T-0085/T-0227 byte-preserved (empty diff)"},
+    {"ac": "AC-10", "covered": true, "note": "registered in package.json fitness + --self-test; 2nd line '# T-0232 ·'"},
+    {"ac": "AC-11", "covered": true, "note": "no-op outside task branch / no merge-base (standalone INFO skip)"},
+    {"ac": "AC-12", "covered": true, "note": "founder regression preserved behaviorally (R-2: additive audit token)"},
+    {"ac": "AC-13", "covered": false, "note": "blocked on bootstrap founder sanction (expected, ADR §2-Q1) — end-to-end green not yet reachable on branch"}
+  ],
+  "role_gap_evidence": [
+    "This task validates the founder's own choice (D-060) to spin out a dedicated adversarial-security reviewer for security-gate changes: the substantive finding R-1 (attestation-content-binding) is exactly the class of issue a generic reviewer rubric under-weights. Evidence for ledgers/role-gaps.md SQ11 — security-meta-gate changes warrant a binding/attestation-integrity checklist axis."
+  ],
+  "summary": "Core security HOLDS: destructive/reductive thaw cannot pass as auto_additive (A-1 whole-line byte-freeze is robust against in-place flip, append-to-line superstring, and deletion — verified by self-test + independent probes + E2E on a real foreign check); the gate re-verifies A-1..A-4 independently over git-show BASE_REF and does NOT trust the marker (D-007 held); founder path still gates destructive thaws; no forged founder bootstrap row (coder honestly reported status=blocked); the single CI red is the documented self-bind bootstrap. ONE blocking finding R-1: the Враг-attestation is NOT bound to the thaw's content — a STALE corpus_ref (any historical sha) and families UNRELATED to the thawed surface both pass, so the founder's post-hoc audit artifact (the trust basis of D-060) can carry a false coverage claim. This is an ADR §2-Q2 deviation, not a live bypass (the enemy test backstops the real gate), but on the security meta-gate the attestation integrity is load-bearing → changes_requested with a small, bounded fix (ancestor+blob-equality on corpus_ref; families⊆catalog-entries-enforcing-this-file). Plus two nits: 'byte-equivalent' founder-path claim is overstated (additive class=founder audit token; behaviorally equivalent), and missing self-test coverage for comment-deletion / stale-corpus / absent-at-BASE paths. TS '803 errors' is a fresh-worktree (no node_modules) artifact — T-0232 adds zero .ts files and cannot introduce TS errors."
+}
