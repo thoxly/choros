@@ -105,12 +105,14 @@ describe('AC-DB-IE-2: default value is false (logical tier mode)', () => {
     await seedTenant(migratorUrl(), tenantId, slug);
 
     await withClient(migratorUrl(), async (c) => {
-      // Set GUC to read the row as the tenant.
+      // SET LOCAL requires an explicit transaction.
+      await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       const result = await c.query<{ physical_isolation_requested: boolean }>(
         `SELECT physical_isolation_requested FROM choros.tenant WHERE id = $1`,
         [tenantId],
       );
+      await c.query('COMMIT');
       expect(result.rows.length).toBe(1);
       expect(result.rows[0]!.physical_isolation_requested).toBe(false);
     });
@@ -175,12 +177,15 @@ describe('AC-DB-IE-4: RLS protects physical_isolation_requested', () => {
     await client.connect();
     try {
       await client.query('SET search_path TO choros;');
+      // SET LOCAL requires an explicit transaction to work as intended.
+      await client.query('BEGIN');
       await client.query(`SET LOCAL choros.tenant_id = '${wrongTenant}'`);
       const result = await client.query(
         `SELECT physical_isolation_requested FROM choros.tenant
          WHERE id = $1`,
         [tenantId],
       );
+      await client.query('COMMIT');
       expect(result.rows.length).toBe(0);
     } finally {
       await client.end();
