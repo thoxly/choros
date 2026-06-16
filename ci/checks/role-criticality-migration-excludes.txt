@@ -34,3 +34,4 @@
 069_bundle_commit             # T-0083 — bundle_commit + bundle_ref DDL; owned by bundle-commit-isolation.sh
 070_record_schema_versioning  # T-0085 — per-record schema versioning (registry_schema_history DDL + triggers); owned by record-schema-compat.sh
 071_inflight_migration        # T-0086 — in-flight migration drain + rollback guard (bundle_version_instance + inflight_mapping_request DDL); owned by inflight-migration-isolation.sh
+072_isolated_env_escalation   # T-0088 — E12.7 on-demand physical isolation config-flip (ADD COLUMN physical_isolation_requested on choros.tenant); owned by isolated-env-isolation.sh
