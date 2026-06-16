@@ -332,6 +332,38 @@ export async function setDocRefs(
 }
 
 /**
+ * Marks a doc_page row stale (or clears the stale flag) WITHOUT touching body/title/refs.
+ * Used by RECONCILE's orphan branch (ADR §2.2 / §7): marks a page stale=true when all
+ * its backing members have vanished from the live system (tombstone — page is kept, not deleted).
+ * Also used to clear stale=false (though upsertDocPage already does that on regenerate).
+ *
+ * UPDATE choros.doc_page SET stale = $3, updated_at = $4 WHERE tenant_id = $1 AND id = $2
+ *
+ * Scoped to ONE page_id; tenant-scoped (RLS + explicit predicate, NF-1).
+ * Runs INSIDE the caller's transaction; never opens its own connection.
+ *
+ * @param client    caller's open transaction (choros.tenant_id GUC set)
+ * @param tenantId  explicit tenantId (belt-and-suspenders, RLS already set)
+ * @param pageId    the specific page to update
+ * @param stale     true = mark stale (orphan); false = clear stale
+ * @param updatedAt epoch-ms timestamp for the update
+ */
+export async function markPageStale(
+  client: DocStoreClient,
+  tenantId: string,
+  pageId: string,
+  stale: boolean,
+  updatedAt: number,
+): Promise<void> {
+  await client.query(
+    `UPDATE choros.doc_page
+        SET stale = $3, updated_at = $4
+      WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, pageId, stale, updatedAt],
+  );
+}
+
+/**
  * Appends a doc_log row (append-only; no upsert — log is history).
  *
  * @param client      caller's open transaction
