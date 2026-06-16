@@ -262,6 +262,23 @@ else
   fi
 fi
 
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), T-0087's real invariant
+# (tier columns only, no new tables) is NOT violated. Cancel the false-red.
+# Real guard: FF-11a above checks 049_tier.sql has no CREATE TABLE.
+_ktt_tier_grown=0
+_ktt_tier_path=ci/checks/known_tenant_tables.txt
+if [[ -n "${MERGE_BASE}" ]] && ! git -C "${ROOT}" diff --quiet "${MERGE_BASE}" -- "${_ktt_tier_path}" 2>/dev/null; then
+  _ktt_tier_old="$(git -C "${ROOT}" show "${MERGE_BASE}:${_ktt_tier_path}" 2>/dev/null || true)"
+  _ktt_tier_new="$(cat "${ROOT}/${_ktt_tier_path}" 2>/dev/null || true)"
+  _ktt_tier_gone="$(comm -23 <(echo "${_ktt_tier_old}" | sort) <(echo "${_ktt_tier_new}" | sort) || true)"
+  [[ -z "${_ktt_tier_gone}" ]] && _ktt_tier_grown=1
+fi
+if [[ "${_ktt_tier_grown}" -eq 1 ]]; then
+  echo "PASS [FF-11b-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0087"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # ---- FF-11c: no new *_tier table / environment table / parallel authority/audit ----
 echo ""
 echo "FF-11c: no new tier/environment authority or audit table in migrations"

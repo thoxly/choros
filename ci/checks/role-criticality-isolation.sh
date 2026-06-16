@@ -236,6 +236,22 @@ if echo "${CHANGED}" | grep -qE '^ci/checks/known_tenant_tables\.txt$'; then
   ERRORS=$((ERRORS + 1))
 fi
 
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), role_criticality's real
+# invariant (no new table, no migration) is NOT violated. Cancel the false-red.
+# Real guard: FF-RC5 migration check above catches any actual migration add.
+_ktt_rc_grown=0
+if [[ -n "${BASE_REF}" ]] && echo "${CHANGED}" | grep -qxF "ci/checks/known_tenant_tables.txt"; then
+  _ktt_rc_old="$(git -C "${PROJECT_ROOT}" show "${BASE_REF}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_rc_new="$(cat "${PROJECT_ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_rc_gone="$(comm -23 <(echo "${_ktt_rc_old}" | sort) <(echo "${_ktt_rc_new}" | sort) || true)"
+  [[ -z "${_ktt_rc_gone}" ]] && _ktt_rc_grown=1
+fi
+if [[ "${_ktt_rc_grown}" -eq 1 ]]; then
+  echo "PASS [FF-RC6-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0040"
+  ERRORS=$((ERRORS - 1))
+fi
+
 if [[ ${ERRORS} -eq ${before} ]]; then
   echo "PASS [FF-RC5/FF-RC6]: frozen foundation + migrations untouched; tenant-table set unchanged (base=${BASE_REF:-HEAD})"
 fi

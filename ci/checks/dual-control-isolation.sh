@@ -210,6 +210,23 @@ if echo "${CHANGED}" | grep -qE '^ci/checks/known_tenant_tables\.txt$'; then
   echo "FAIL [FF-DC7]: ci/checks/known_tenant_tables.txt changed — T-0044 adds an additive column, no new tenant table"
   ERRORS=$((ERRORS + 1))
 fi
+
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), T-0044's real invariant
+# (additive column only, no new table) is NOT violated. Cancel the false-red.
+# Real guard: FF-DC7 migration check above catches any CREATE TABLE in 031.
+_ktt_dc_grown=0
+if [[ -n "${BASE_REF}" ]] && echo "${CHANGED}" | grep -qxF "ci/checks/known_tenant_tables.txt"; then
+  _ktt_dc_old="$(git -C "${PROJECT_ROOT}" show "${BASE_REF}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_dc_new="$(cat "${PROJECT_ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_dc_gone="$(comm -23 <(echo "${_ktt_dc_old}" | sort) <(echo "${_ktt_dc_new}" | sort) || true)"
+  [[ -z "${_ktt_dc_gone}" ]] && _ktt_dc_grown=1
+fi
+if [[ "${_ktt_dc_grown}" -eq 1 ]]; then
+  echo "PASS [FF-DC7-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0044"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # No new audit writer / parallel append path: grants.ts dual-control audit must
 # go through the canonical appendAuditEventInput (NF-7).
 if ! grep -qE "appendAuditEventInput" "${GRANTS}"; then

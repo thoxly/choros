@@ -68,6 +68,15 @@ tenant-несущая таблица — под `FORCE ROW LEVEL SECURITY` с `t
   `effect-resource-isolation.sh`, `data-classification-isolation.sh`,
   `named-binding-isolation.sh`, `object-handle-isolation.sh`,
   `report-page-render-isolation.sh`, `notification-isolation.sh`).
+- **known_tenant_tables реестр-гейты (additive-scope, T-0241):** следующие
+  проверки верифицируют, что их соответствующая фича не добавляет новых
+  tenant-таблиц (вторичная перекрёстная проверка реестра):
+  `ci/checks/role-criticality-isolation.sh`,
+  `ci/checks/docs-author-seed.sh`,
+  `ci/checks/dual-control-isolation.sh`,
+  `ci/checks/docpage-writeful-tools.sh`,
+  `ci/checks/grant-trail-no-new-table.sh`,
+  `ci/checks/tier-isolation.sh`.
 - **Демо/seed cross-tenant:** `ci/checks/demo/no-cross-tenant-org.sh` (live DB),
   `ci/checks/demo/no-hardcoded-tenant.sh`.
 

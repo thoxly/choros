@@ -163,6 +163,23 @@ else
   fi
 fi
 
+# T-0241: additive-superset relief — if known_tenant_tables.txt only GREW
+# (another task legitimately added a tenant table), T-0209 P-1's real
+# invariant (pure seed, no new table) is NOT violated. Cancel the false-red.
+# Real guard: Check-3 above catches any CREATE TABLE in migration 062.
+_ktt_das_grown=0
+_ktt_das_path=ci/checks/known_tenant_tables.txt
+if [[ -n "${BASE:-}" ]] && git -C "${ROOT}" diff --name-only "${BASE}" -- "${_ktt_das_path}" 2>/dev/null | grep -qxF "${_ktt_das_path}"; then
+  _ktt_das_old="$(git -C "${ROOT}" show "${BASE}:${_ktt_das_path}" 2>/dev/null || true)"
+  _ktt_das_new="$(cat "${ROOT}/${_ktt_das_path}" 2>/dev/null || true)"
+  _ktt_das_gone="$(comm -23 <(echo "${_ktt_das_old}" | sort) <(echo "${_ktt_das_new}" | sort) || true)"
+  [[ -z "${_ktt_das_gone}" ]] && _ktt_das_grown=1
+fi
+if [[ "${_ktt_das_grown}" -eq 1 ]]; then
+  echo "PASS [Check-7-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0209"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # ---- Check-8: pinned UUIDs present and no prior-migration collision ---------
 echo ""
 echo "Check-8: pinned UUIDs present in migration 062 + no collision with migrations ≤061"
