@@ -47,3 +47,5 @@ dmn_rule_table
 nav_version
 catalog_field_spec
 cross_app_ref
+bundle_commit
+bundle_ref
