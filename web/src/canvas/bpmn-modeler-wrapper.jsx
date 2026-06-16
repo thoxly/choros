@@ -47,6 +47,7 @@ const DEFAULT_DIAGRAM_XML = `<?xml version="1.0" encoding="UTF-8"?>
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+             xmlns:choros="http://choros.io/bpmn"
              id="Definitions_choros"
              targetNamespace="http://choros.io/bpmn">
   <process id="Process_choros" isExecutable="false">
@@ -57,7 +58,7 @@ const DEFAULT_DIAGRAM_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <incoming>Flow_1</incoming>
       <outgoing>Flow_2</outgoing>
     </userTask>
-    <serviceTask id="Activity_agent" name="Проверить реквизиты">
+    <serviceTask id="Activity_agent" name="Проверить реквизиты" choros:executorType="agent">
       <incoming>Flow_2</incoming>
       <outgoing>Flow_3</outgoing>
     </serviceTask>
@@ -158,6 +159,24 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
       .then(() => {
         // Fit the default diagram into the viewport after import
         modeler.get('canvas').zoom('fit-viewport', 'auto');
+
+        // T-0097 fix: ensure Activity_agent carries choros:executorType="agent"
+        // on its businessObject.$attrs so execMarkerFor() returns 'chs-exec-agent'.
+        // bpmn-moddle may drop unknown-namespace attributes during XML parse
+        // (no registered moddle descriptor for the choros namespace), so we set
+        // the $attrs entry explicitly here as a guaranteed fallback.  The XML
+        // attribute `choros:executorType="agent"` added to the DEFAULT_DIAGRAM_XML
+        // is preserved by bpmn-moddle in $attrs when it encounters an unknown
+        // namespace attribute, but this post-import write is the authoritative path.
+        const elementRegistry = modeler.get('elementRegistry');
+        const agentEl = elementRegistry.get('Activity_agent');
+        if (agentEl && agentEl.businessObject) {
+          if (!agentEl.businessObject.$attrs) {
+            agentEl.businessObject.$attrs = {};
+          }
+          agentEl.businessObject.$attrs['choros:executorType'] = 'agent';
+        }
+
         // T-0097: classify every element and apply chs-exec-* marker classes
         applyExecMarkers(modeler);
       })
