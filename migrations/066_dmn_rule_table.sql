@@ -4,9 +4,14 @@
 -- (src/core/dmn-middle.ts) operates on the in-memory DmnRuleTable shape;
 -- this migration provides the persistence layer for tenant-authored rule tables.
 --
+-- Tenant-table contract (T-0013, verbatim as in 061_doc_page.sql):
+--   tenant_id leading PK, ENABLE+FORCE RLS, default-DENY policy on
+--   current_setting('choros.tenant_id', true)::uuid (USING + WITH CHECK),
+--   choros_app DML GRANT (NOBYPASSRLS role), listed in ci/checks/known_tenant_tables.txt.
+--
 -- Design invariants (NF-1, one predicate per table, default-DENY):
 --   - Every table is scoped to tenant_id (silo isolation via RLS).
---   - RLS policy: ONE USING predicate per operation — tenant_id = current_tenant().
+--   - RLS policy: single USING + WITH CHECK predicate — tenant_id only (NF-1).
 --   - No direct writes from pure core; the DB adapter layer handles CRUD.
 --   - definition JSONB holds the serialized DmnRuleTable (id, name, hitPolicy, rules[]).
 --   - process_def_id links the table to a process definition (nullable → global scope).
@@ -18,9 +23,9 @@
 
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS dmn_rule_table (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+CREATE TABLE IF NOT EXISTS choros.dmn_rule_table (
   tenant_id       UUID        NOT NULL,
+  id              UUID        NOT NULL DEFAULT gen_random_uuid(),
   name            TEXT        NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
   -- Serialised DmnRuleTable (id, name, hitPolicy, rules[]) as defined in
   -- src/core/dmn-middle.ts. Validated by the adapter before insert.
@@ -31,38 +36,39 @@ CREATE TABLE IF NOT EXISTS dmn_rule_table (
   status          TEXT        NOT NULL DEFAULT 'draft'
                               CHECK (status IN ('draft', 'published')),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  PRIMARY KEY (tenant_id, id)
 );
 
 -- Index for fast tenant-scoped lookup by process + status (runtime hot path).
 CREATE INDEX IF NOT EXISTS idx_dmn_rule_table_tenant_process
-  ON dmn_rule_table (tenant_id, process_def_id, status);
+  ON choros.dmn_rule_table (tenant_id, process_def_id, status);
 
 -- ---------------------------------------------------------------------------
--- Row Level Security — NF-1: ONE USING predicate per table, default-DENY.
+-- Row Level Security — NF-1: single USING+WITH CHECK predicate, default-DENY.
+-- current_setting('choros.tenant_id', true)::uuid is the established RLS predicate
+-- used by every tenant table (see 061_doc_page.sql as reference).
 -- ---------------------------------------------------------------------------
 
-ALTER TABLE dmn_rule_table ENABLE ROW LEVEL SECURITY;
+ALTER TABLE choros.dmn_rule_table ENABLE  ROW LEVEL SECURITY;
+ALTER TABLE choros.dmn_rule_table FORCE   ROW LEVEL SECURITY;
 
--- current_tenant() is defined by migration 001 (tenant bootstrap).
--- RLS policy: only rows whose tenant_id matches the session tenant are visible.
--- One predicate per operation (SELECT, INSERT, UPDATE, DELETE) — NF-1.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'choros'
+      AND tablename  = 'dmn_rule_table'
+      AND policyname = 'dmn_rule_table_tenant_isolation'
+  ) THEN
+    CREATE POLICY dmn_rule_table_tenant_isolation ON choros.dmn_rule_table
+      USING     (tenant_id = current_setting('choros.tenant_id', true)::uuid)
+      WITH CHECK (tenant_id = current_setting('choros.tenant_id', true)::uuid);
+  END IF;
+END
+$$;
 
-CREATE POLICY dmn_rule_table_tenant_select
-  ON dmn_rule_table FOR SELECT
-  USING (tenant_id = current_tenant());
-
-CREATE POLICY dmn_rule_table_tenant_insert
-  ON dmn_rule_table FOR INSERT
-  WITH CHECK (tenant_id = current_tenant());
-
-CREATE POLICY dmn_rule_table_tenant_update
-  ON dmn_rule_table FOR UPDATE
-  USING (tenant_id = current_tenant())
-  WITH CHECK (tenant_id = current_tenant());
-
-CREATE POLICY dmn_rule_table_tenant_delete
-  ON dmn_rule_table FOR DELETE
-  USING (tenant_id = current_tenant());
+GRANT SELECT, INSERT, UPDATE, DELETE ON choros.dmn_rule_table TO choros_app;
 
 COMMIT;

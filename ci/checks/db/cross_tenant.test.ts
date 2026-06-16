@@ -1058,6 +1058,21 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'dmn_rule_table': {
+      // T-0075 (migration 066) — no FK deps beyond tenant_id; self-contained.
+      // definition holds a minimal valid DmnRuleTable JSON; process_def_id is nullable.
+      const id = uuid();
+      const name = `ct-dmn-${id.slice(0, 8)}`;
+      const definition = JSON.stringify({ id, name, hitPolicy: 'FIRST', rules: [] });
+      await c.query(
+        `INSERT INTO choros.dmn_rule_table
+           (tenant_id, id, name, definition, process_def_id, status, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, NULL, 'draft', now(), now())
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, name, definition],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1404,6 +1419,7 @@ const SEEDED_TABLES = new Set<string>([
   'doc_page',
   'doc_ref',
   'doc_log',
+  'dmn_rule_table',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

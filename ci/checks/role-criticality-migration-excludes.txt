@@ -28,3 +28,4 @@
 055_fix_mcp_tool_demo_tenant  # T-0161 — delete misplaced 040 demo mcp_tool rows (wrong tenant 00000000-…-001)
 057_agent_instruction         # T-0230 — competence layer DDL (choros.agent_instruction); owned by agent-instruction-*.sh (T-0123 impl)
 059_implementation_agent_seed # T-0207 — implementation-agent seed (role/employee/agent_card/mcp_tool/grant); owned by implementation-agent-seed.sh (B-1)
+066_dmn_rule_table            # T-0075 — dmn_rule_table DDL; owned by dmn-middle-isolation.sh
