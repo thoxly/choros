@@ -32,3 +32,4 @@
 067_modules_nav               # T-0079 — modules nav + catalog_field_spec DDL; owned by modules-extend-not-replace.sh
 068_cross_app_ref             # T-0080 — cross_app_ref DDL; owned by cross-app-refs-isolation.sh
 069_bundle_commit             # T-0083 — bundle_commit + bundle_ref DDL; owned by bundle-commit-isolation.sh
+070_record_schema_versioning  # T-0085 — per-record schema versioning (registry_schema_history DDL + triggers); owned by record-schema-compat.sh
