@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0097",
+  "status": "ready",
+  "branch": "task/T-0097-bpmn-renderer",
+  "phases_completed": ["BUILD", "PR-HANDOFF"],
+  "ci_local": {
+    "build": true,
+    "bpmn_linter_isolation": "PASS (all 3 checks green, WARN on pre-existing pg dep unchanged)",
+    "bundle_grep_addMarker": "5 occurrences in dist/assets/index-C46kqkHO.js",
+    "bundle_grep_chs_exec": "3 class strings present: chs-exec-human, chs-exec-agent, chs-exec-service"
+  },
+  "diagnosis": {
+    "T-0096_wrapper_summary": "BpmnModelerWrapper instantiates a real BpmnModeler in a useEffect, imports DEFAULT_DIAGRAM_XML via importXML(), calls canvas.zoom('fit-viewport') on resolve, exposes modeler via forwardRef. No marker layer was wired.",
+    "css_rules_pre-existing": "bpmn-theme.css §2 already had .djs-element.chs-exec-human/agent/service rules targeting stroke/fill of .djs-visual > :nth-child(1). They were dead until T-0097 applies the marker classes.",
+    "executor_convention_source": "screen-editor.jsx mock + bpmn-theme.css comment block: human=bpmn:UserTask, agent=bpmn:ServiceTask (+ choros:executorType override), service=bpmn:SendTask/ScriptTask/etc."
+  },
+  "files_changed": [
+    "web/src/canvas/bpmn-exec-markers.js (NEW — executor classifier + marker apply helpers)",
+    "web/src/canvas/bpmn-modeler-wrapper.jsx (extended — import bpmn-exec-markers, richer default diagram, wired applyExecMarkers + attachExecMarkerListeners)",
+    "docs/design/T-0097.pr-handoff.json (this file)"
+  ],
+  "executor_class_mapping": {
+    "chs-exec-human": "bpmn:UserTask — OR any element with choros:executorType='human'",
+    "chs-exec-agent": "any element with choros:executorType='agent' (e.g. bpmn:ServiceTask tagged by T-0098 properties panel)",
+    "chs-exec-service": "bpmn:ServiceTask (untagged), bpmn:SendTask, bpmn:ReceiveTask, bpmn:BusinessRuleTask, bpmn:ScriptTask, bpmn:ManualTask — OR choros:executorType='service'",
+    "none": "bpmn:Task (untyped), bpmn:SubProcess, events, gateways, connections → no exec class applied"
+  },
+  "how_markers_are_applied": {
+    "post_importXML": "modeler.importXML(DEFAULT_DIAGRAM_XML).then(() => { ...; applyExecMarkers(modeler); }) — iterates elementRegistry.forEach, calls canvas.removeMarker (idempotent clear) then canvas.addMarker per element",
+    "re_import_hook": "attachExecMarkerListeners registers eventBus.on('import.render.complete', ...) — fires on any future importXML (T-0099 path)",
+    "palette_drop_hook": "eventBus.on('shape.added', ...) — applies marker to newly dropped shapes immediately",
+    "cleanup": "detachMarkerListeners() called in useEffect cleanup before modeler.destroy()"
+  },
+  "default_diagram_updated": {
+    "before_T-0097": "Start → bpmn:Task (untyped) → End  — no exec markers fired",
+    "after_T-0097": "Start → bpmn:UserTask (→chs-exec-human) → bpmn:ServiceTask (→chs-exec-service) → bpmn:SendTask (→chs-exec-service) → End — all three buckets exercised; ServiceTask promoted to chs-exec-agent when T-0098 sets choros:executorType='agent'"
+  },
+  "shared_file_edits": {
+    "bpmn-modeler-wrapper.jsx": "ADDITIVE — import line added at top, applyExecMarkers/attachExecMarkerListeners calls added inside existing useEffect, detach call added to cleanup. No existing logic changed.",
+    "bpmn-theme.css": "NOT TOUCHED — chs-exec-* rules already existed.",
+    "screen-process-editor.jsx": "NOT TOUCHED — no changes needed.",
+    "screen-editor.jsx": "NOT TOUCHED — mock preserved as-is."
+  },
+  "out_of_scope_deferred": {
+    "T-0098": "Palette / context-pad / properties panel — setting choros:executorType on businessObject so ServiceTask gets chs-exec-agent",
+    "T-0099": "BPMN-XML save and load — re-import fires 'import.render.complete' which re-applies markers automatically"
+  },
+  "deviations_from_task_spec": [
+    "Task spec said 'Agent type per product convention — check how the mock distinguished agent vs human vs service'. The mock used exec='agent' on bpmn:ServiceTask (via choros:executorType extension attribute). T-0097 maps bare bpmn:ServiceTask to chs-exec-service (external), not chs-exec-agent, matching D-051/ADR: agent assignment is a user decision set via T-0098 properties panel, not inferred from bpmn:ServiceTask alone.",
+    "Default diagram upgraded from a single untyped bpmn:Task to three typed tasks (UserTask + ServiceTask + SendTask) to prove the renderer fires on the real modeler at load time."
+  ],
+  "friction_events": [
+    "FE-T0097-1: web/node_modules not present on fresh worktree — npm install required before build (same as T-0096).",
+    "FE-T0097-2: bpmn-linter-isolation.sh reads ROOT package.json only for dep check — no issue, bpmn-js is in web/package.json. Pre-existing WARN about pg@^8 unchanged."
+  ],
+  "blockers_or_uncertainties": "none",
+  "pr_handoff_path": "docs/design/T-0097.pr-handoff.json",
+  "ready_for_review": true
+}
