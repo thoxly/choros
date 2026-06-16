@@ -2,8 +2,9 @@
    CHOROS — bpmn-modeler-wrapper.jsx
    T-0096: Embeds the REAL bpmn-js BpmnModeler into a React component.
    T-0097: Wires the executor-type chs-exec-* marker layer (bpmn-exec-markers.js).
+   T-0099: Registers the choros moddle extension (executorType round-trip).
 
-   Scope of this component (T-0096 + T-0097):
+   Scope of this component (T-0096 + T-0097 + T-0099):
      - Instantiate BpmnModeler mounted into a DOM container ref
      - Import a minimal default BPMN diagram (Start → typed tasks → End)
      - Apply the product CSS layer (diagram-js.css, bpmn.css, bpmn-theme.css)
@@ -11,10 +12,12 @@
      - T-0097: After importXML resolves, call applyExecMarkers() to add
        chs-exec-human/agent/service marker classes via canvas.addMarker().
        Attach EventBus listeners for re-import and palette drops.
+     - T-0099: Pass ChorosModdleDescriptor via moddleExtensions so that
+       choros:executorType survives saveXML/importXML round-trips.
 
    Explicitly NOT in scope here:
      - Palette / context-pad / properties customisation → T-0098
-     - BPMN-XML save / load                           → T-0099
+     - BPMN-XML save / load UI                         → T-0099 (screen-process-editor)
 
    The component is a controlled wrapper: it exposes a ref-forwarded
    `modelerRef` so parent screens can access the BpmnModeler instance later.
@@ -36,6 +39,10 @@ import { applyExecMarkers, attachExecMarkerListeners } from './bpmn-exec-markers
 
 // T-0098: custom palette provider (replaces generic task with 3 Choros executor types)
 import ChorosPaletteModule from './bpmn-palette-provider.js';
+
+// T-0099: choros moddle extension — registers choros:executorType as a
+// first-class serializable attribute on bpmn:Activity so saveXML preserves it.
+import ChorosModdleDescriptor from './choros-moddle-extension.js';
 
 /* --------------------------------------------------------------------------
    Default diagram: Start → UserTask (human) → ServiceTask (service/agent) →
@@ -154,6 +161,11 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
       keyboard: { bindTo: null },
       // T-0098: inject custom Choros palette (human / agent / service task entries)
       additionalModules: [ChorosPaletteModule],
+      // T-0099: register choros namespace so saveXML serialises choros:executorType
+      // as a proper XML attribute instead of losing it on round-trip.
+      moddleExtensions: {
+        choros: ChorosModdleDescriptor,
+      },
     });
 
     modelerRef.current = modeler;
