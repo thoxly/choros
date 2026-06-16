@@ -46,3 +46,4 @@ doc_log
 dmn_rule_table
 nav_version
 catalog_field_spec
+cross_app_ref
