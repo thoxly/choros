@@ -83,6 +83,7 @@ function materializePages(plan: RegenPlan, tenantId: string): DocPage[] {
     slug: p.slug,
     title: p.title,
     body: p.body,
+    summary: p.summary,
     scope: 'tenant' as const,
     catalogVersion: null,
     appId: null,
@@ -491,6 +492,7 @@ describe('planRegen — changed page content → action="update"', () => {
       slug: p.slug,
       title: p.title,
       body: 'DIFFERENT BODY CONTENT',  // simulate stale body
+      summary: p.summary,
       scope: 'tenant' as const,
       catalogVersion: null,
       appId: null,

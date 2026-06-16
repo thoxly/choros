@@ -184,12 +184,13 @@ async function main(): Promise<void> {
     };
 
     for (const pagePlan of plan.pages) {
-      // Upsert page.
+      // Upsert page (T-0214: pass summary derived by planRegen).
       const upsertResult = await upsertDocPage(storeClient, args.tenant, {
         id: pagePlan.id,
         slug: pagePlan.slug,
         title: pagePlan.title,
         body: pagePlan.body,
+        summary: pagePlan.summary,
         authoredBy: pagePlan.authoredBy,
         authoredAt: pagePlan.authoredAt,
         updatedAt: pagePlan.updatedAt,
