@@ -4,12 +4,14 @@
 // Assumes migrations have been applied (the db job runs the runner ×2 before this suite).
 //
 // AC-01: role 'config-agent' exists with correct UUID and slug.
-// AC-02: 9 mcp_tool rows with resource_ops @> '[{"resourceType":"authoring_draft"}]'
+// AC-02: 10 mcp_tool rows with resource_ops @> '[{"resourceType":"authoring_draft"}]'
 //         (7 from migration 044 + author_report_page from migration 053 / T-0180
-//          + assemble_bundle from migration 059 / T-0207 B-1).
-// AC-03: all 8 tools have pure_compute=true.
-// AC-04: 9 grant rows with resource_type='authoring_draft' for role config-agent
-//         (7 from migration 044 + 2 from migration 053 / T-0180).
+//          + assemble_bundle from migration 059 / T-0207 B-1
+//          + author_template from migration 060 / T-0235).
+// AC-03: all 10 tools have pure_compute=true.
+// AC-04: 11 grant rows with resource_type='authoring_draft' for role config-agent
+//         (7 from migration 044 + 2 from migration 053 / T-0180
+//          + 2 from migration 060 / T-0235 author_template create+update).
 // AC-05: ZERO grants with resource_type='authoring_published' for role config-agent.
 // AC-09: idempotency — migration already applied; second pass is a no-op (row counts stable).
 // AC-12 (RLS): cross-tenant SELECT for authoring_draft mcp_tool returns 0 rows.
@@ -50,8 +52,8 @@ describe('AC-01: role config-agent exists in dev-silo', () => {
 // AC-02 — 7 mcp_tool rows with authoring_draft resource_ops
 // ---------------------------------------------------------------------------
 
-describe('AC-02: 9 mcp_tool rows with authoring_draft resource_ops', () => {
-  it('exactly 9 mcp_tool rows for dev-tenant with authoring_draft (7 from 044 + author_report_page from 053 + assemble_bundle from 059)', async () => {
+describe('AC-02: 10 mcp_tool rows with authoring_draft resource_ops', () => {
+  it('exactly 10 mcp_tool rows for dev-tenant with authoring_draft (7 from 044 + author_report_page from 053 + assemble_bundle from 059 + author_template from 060)', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT name FROM choros.mcp_tool
@@ -60,7 +62,7 @@ describe('AC-02: 9 mcp_tool rows with authoring_draft resource_ops', () => {
           ORDER BY name`,
         [DEV_TENANT],
       );
-      expect(rows.length, 'expected 9 authoring_draft mcp_tool rows').toBe(9);
+      expect(rows.length, 'expected 10 authoring_draft mcp_tool rows').toBe(10);
       const names = rows.map((r: { name: string }) => r.name).sort();
       expect(names).toContain('emit_form_code');
       expect(names).toContain('edit_jsonschema');
@@ -73,6 +75,8 @@ describe('AC-02: 9 mcp_tool rows with authoring_draft resource_ops', () => {
       expect(names).toContain('author_report_page');
       // T-0207 B-1 addition (migration 059)
       expect(names).toContain('assemble_bundle');
+      // T-0235 / T-0124 §2.9 addition (migration 060)
+      expect(names).toContain('author_template');
     });
   });
 });
@@ -81,7 +85,7 @@ describe('AC-02: 9 mcp_tool rows with authoring_draft resource_ops', () => {
 // AC-03 — pure_compute=true for all 7 tools
 // ---------------------------------------------------------------------------
 
-describe('AC-03: pure_compute=true for all authoring_draft tools (9 total)', () => {
+describe('AC-03: pure_compute=true for all authoring_draft tools (10 total)', () => {
   it('zero rows with pure_compute=false among authoring_draft tools', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
@@ -100,8 +104,8 @@ describe('AC-03: pure_compute=true for all authoring_draft tools (9 total)', () 
 // AC-04 — 7 grant rows for role config-agent with authoring_draft
 // ---------------------------------------------------------------------------
 
-describe('AC-04: 9 grants for role config-agent with authoring_draft', () => {
-  it('exactly 9 grant rows with resource_type=authoring_draft for config-agent role (7 from 044 + 2 from 053)', async () => {
+describe('AC-04: 11 grants for role config-agent with authoring_draft', () => {
+  it('exactly 11 grant rows with resource_type=authoring_draft for config-agent role (7 from 044 + 2 from 053 + 2 from 060)', async () => {
     await withClient(migratorUrl(), async (c) => {
       const { rows } = await c.query(
         `SELECT count(*)::int AS n FROM choros."grant"
@@ -110,7 +114,7 @@ describe('AC-04: 9 grants for role config-agent with authoring_draft', () => {
             AND role_id = $2`,
         [DEV_TENANT, ROLE_CONFIG_AGENT],
       );
-      expect(rows[0].n, 'expected 9 authoring_draft grants for config-agent (7 from mig-044 + 2 from mig-053)').toBe(9);
+      expect(rows[0].n, 'expected 11 authoring_draft grants for config-agent (7 from mig-044 + 2 from mig-053 + 2 from mig-060)').toBe(11);
     });
   });
 });

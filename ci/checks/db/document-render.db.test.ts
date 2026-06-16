@@ -191,10 +191,11 @@ function makeDenyAllResolverDeps() {
  */
 function makeAllowAllResolverDeps(
   rows: Array<{ id: string; registryId: string; data: Record<string, unknown> }>,
+  tenantId: string,
 ) {
   type Grant = import('../../../src/core/grant-lattice.js').Grant;
   const grants: Grant[] = rows.map((row, i) => ({
-    tenantId: 'any',
+    tenantId,
     id: `g-${i}`,
     roleId: 'role-test',
     resourceType: 'record' as const,
@@ -405,7 +406,7 @@ describe.skipIf(skipAll)(
 
         // 1. renderAndFix with "active" data → snapshot stored
         const deps: RenderAndFixDeps = {
-          resolver: makeAllowAllResolverDeps(rowsBefore),
+          resolver: makeAllowAllResolverDeps(rowsBefore, tenantId),
           records: makeRecordStub(rowsBefore),
           templates: makeTemplateStub(tenantId, registryId, templateId),
           snapshot: snapshotPort,
@@ -458,7 +459,7 @@ describe.skipIf(skipAll)(
         // 5. Live render AFTER mutation reflects NEW data (FF-LIVE-NO-CACHE)
         const rowsAfter = [{ id: recordId, registryId, data: { status: 'closed' } }];
         const liveDeps: RenderDeps = {
-          resolver: makeAllowAllResolverDeps(rowsAfter),
+          resolver: makeAllowAllResolverDeps(rowsAfter, tenantId),
           records: makeRecordStub(rowsAfter),
           templates: makeTemplateStub(tenantId, registryId, templateId),
         };
@@ -680,7 +681,7 @@ describe.skipIf(skipAll)(
 
         const rows = [{ id: recordId, registryId, data: { status: 'pending' } }];
         const deps: RenderAndFixDeps = {
-          resolver: makeAllowAllResolverDeps(rows),
+          resolver: makeAllowAllResolverDeps(rows, tenantId),
           records: makeRecordStub(rows),
           templates: makeTemplateStub(tenantId, registryId, templateId),
           audit: sink,

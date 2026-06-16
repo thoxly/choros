@@ -386,7 +386,10 @@ function sanitizeParams(params: RenderParams): Record<string, unknown> {
   if (params.kind === "single") {
     return { kind: "single", recordId: params.recordRef.recordId, registryId: params.recordRef.registryId };
   }
-  return { kind: "registry", registryId: params.registryId, filter: params.filter };
+  // Omit filter when undefined — audit-preimage rejects jsonb keys with undefined values.
+  return params.filter !== undefined
+    ? { kind: "registry", registryId: params.registryId, filter: params.filter }
+    : { kind: "registry", registryId: params.registryId };
 }
 
 // ---------------------------------------------------------------------------
