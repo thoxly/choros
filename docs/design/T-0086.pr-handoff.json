@@ -1,0 +1,94 @@
+{
+  "task": "T-0086",
+  "title": "E12.5 in-flight migration — drain-by-default + forward-only rollback guard (migration 071)",
+  "adr_ref": "docs/design/extensibility-and-authoring.md §7 / §9.6",
+  "migration": "migrations/071_inflight_migration.sql",
+
+  "design_note": "Three ADR decisions are now code: (1) DRAIN-by-default = drainInstance() creates InstanceDrainRecord with state='draining'; no forced migration happens unless explicitly requested. (2) Forward-only rollback guard = guardRollback() is fail-CLOSED: calls the injected RollbackSafePort (which wraps T-0085's fn_check_rollback_safe + the new fn_count_live_instances_above_version), returns allowed=false on any unsafe/uncertain condition. (3) Camunda mapping = on-demand escalation = validateCamundaMapping() always sets requires_human_gate=true; validates wait-state-only + no-type-change constraints. Execution is NOT implemented here — this increment provides the gate, the types, and the enforcement seam.",
+
+  "rollback_guard_binds_T0085": {
+    "how": "RollbackSafePort.isRollbackSafe() wraps fn_check_rollback_safe(tenant_id, registry_id, target_version) from migration 070. Port is injected — pure core never imports pg. guardRollback() calls both isRollbackSafe and countLiveInstancesAboveVersion; either returning unsafe/nonzero causes fail-CLOSED block.",
+    "fail_closed_seam": "If the port throws (DB unreachable, transport error) guardRollback() returns { allowed: false, reason: '..port error..', live_instance_count: 0 }. Default-DENY — any uncertainty = blocked.",
+    "fn_count_live_instances_above_version": "New SQL function in migration 071 (companion to fn_check_rollback_safe): counts draining instances for a bundle, used for actionable error messages."
+  },
+
+  "fitness_check": {
+    "file": "ci/checks/inflight-migration-isolation.sh",
+    "self_test": "bash ci/checks/inflight-migration-isolation.sh --self-test",
+    "full_run": "bash ci/checks/inflight-migration-isolation.sh",
+    "invariants": [
+      "FF-IM-1: module exists",
+      "FF-IM-2: public surface exports (drainInstance, guardRollback, validateCamundaMapping, types, port)",
+      "FF-IM-3: drain-by-default (state='draining' default)",
+      "FF-IM-4: rollback guard fail-CLOSED + async port injection",
+      "FF-IM-5: Camunda mapping = escalation (requires_human_gate=true, wait-state-only, no-type-change)",
+      "FF-IM-6: purity (no process.env/Date.now/Math.random in code lines)",
+      "FF-IM-7: migration 071 correctness (both tables + FORCE RLS + grants + fn)",
+      "FF-IM-8: RollbackSafePort binds T-0085 fn_check_rollback_safe (downstream contract)",
+      "FF-IM-9..11: DB probes (drain state, mapping pending_approval, live count)"
+    ]
+  },
+
+  "new_tables": [
+    {
+      "name": "bundle_version_instance",
+      "migration": "071",
+      "purpose": "Drain-by-default state store: tracks live process instances pinned to a bundle content_hash",
+      "rls": "ENABLE + FORCE, NF-1 single predicate, GRANT SELECT+INSERT+UPDATE to choros_app"
+    },
+    {
+      "name": "inflight_mapping_request",
+      "migration": "071",
+      "purpose": "Camunda-style mapping escalation requests: state machine pending_approval→approved→executed",
+      "rls": "ENABLE + FORCE, NF-1 single predicate, GRANT SELECT+INSERT+UPDATE to choros_app",
+      "db_constraints": "kind CHECK (wait-state kinds only), from_activity_kind=to_activity_kind CHECK, hashes differ CHECK"
+    }
+  ],
+
+  "seam_file_edits": [
+    {
+      "file": "ci/checks/known_tenant_tables.txt",
+      "added": ["bundle_version_instance", "inflight_mapping_request"],
+      "note": "Additive — appended at end"
+    },
+    {
+      "file": "ci/checks/role-criticality-migration-excludes.txt",
+      "added": "071_inflight_migration # T-0086 ...",
+      "note": "Additive — appended at end"
+    },
+    {
+      "file": "ci/checks/db/cross_tenant.test.ts",
+      "added": "seedRowForTable cases + SEEDED_TABLES entries for bundle_version_instance and inflight_mapping_request",
+      "note": "Additive only"
+    },
+    {
+      "file": "package.json fitness line",
+      "added": "bash ci/checks/inflight-migration-isolation.sh && bash ci/checks/inflight-migration-isolation.sh --self-test",
+      "note": "Appended to END of fitness chain"
+    }
+  ],
+
+  "known_tenant_tables_artifact": "FE-s24-0001: scoped-admin-isolation FF-16 fires on branch because known_tenant_tables.txt changed (2 new rows for bundle_version_instance + inflight_mapping_request). This is expected — it guards that migration 026 (scoped-admin) adds no tenant tables, not that known_tenant_tables.txt is never modified. Will be green post-merge to dev when HEAD includes both changes.",
+
+  "dod_tails": {
+    "tsc": "npx tsc --noEmit — clean (no output)",
+    "eslint": "npx eslint src/core/inflight-migration.ts src/core/__tests__/inflight-migration.test.ts — clean (no output)",
+    "fitness": "npm run fitness — all PASS except FE-s24-0001 known_tenant_tables.txt artifact (scoped-admin-isolation FF-16)",
+    "fitness_check_self_test": "bash ci/checks/inflight-migration-isolation.sh --self-test — all 5 ST-* PASS",
+    "vitest": "npx vitest run — 2489 passed (28 new T-0086 tests in inflight-migration.test.ts), 6 skipped",
+    "fitness_db": "npm run fitness:db — 823 passed (0 failed)"
+  },
+
+  "files_changed": [
+    "src/core/inflight-migration.ts",
+    "src/core/__tests__/inflight-migration.test.ts",
+    "migrations/071_inflight_migration.sql",
+    "ci/checks/inflight-migration-isolation.sh",
+    "ci/checks/db/inflight-migration.db.test.ts",
+    "ci/checks/known_tenant_tables.txt",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "ci/checks/db/cross_tenant.test.ts",
+    "package.json",
+    "docs/design/T-0086.pr-handoff.json"
+  ]
+}

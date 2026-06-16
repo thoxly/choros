@@ -50,3 +50,5 @@ cross_app_ref
 bundle_commit
 bundle_ref
 registry_schema_history
+bundle_version_instance
+inflight_mapping_request
