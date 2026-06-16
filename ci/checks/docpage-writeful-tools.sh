@@ -25,6 +25,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# T-0241-R1: allow DOCPAGE_CHECK_ROOT env var to redirect ROOT for self-test fixtures.
+# Normal runs leave DOCPAGE_CHECK_ROOT unset; this line is a no-op in that case.
+ROOT="${DOCPAGE_CHECK_ROOT:-${ROOT}}"
 MIG="${ROOT}/migrations/063_docpage_writeful_tools.sql"
 
 # ============================================================
@@ -191,6 +194,58 @@ FIXTURE
     SELF_TEST_ERRORS=$((SELF_TEST_ERRORS + 1))
   fi
 
+  # ---- Self-test E2E-1: end-to-end masking guard — F-8 violation + UNCHANGED ktt ----
+  # Creates a minimal git repo fixture where:
+  #   - known_tenant_tables.txt is IDENTICAL on dev and HEAD (unchanged)
+  #   - migration 063 contains a CREATE TABLE (genuine F-8 violation)
+  # The full script must EXIT NON-ZERO (red). This case would have been GREEN (masked)
+  # before the T-0241 fix and proves the compensation gate is correct.
+  # Uses DOCPAGE_CHECK_ROOT env var (supported by this script) to redirect ROOT.
+  echo ""
+  echo "SELF-TEST [E2E-1]: end-to-end masking guard — F-8 violation + ktt unchanged must be RED"
+  _e2e_dir="${TMPDIR_ST}/e2e_fixture"
+  rm -rf "${_e2e_dir}"
+  mkdir -p "${_e2e_dir}/migrations" "${_e2e_dir}/ci/checks"
+
+  # Minimal migration 063 with a real F-8 CREATE TABLE violation.
+  # The fixture uses a bare CREATE TABLE; the script must exit non-zero.
+  # We build the DDL keyword from parts to avoid embedding the combined string
+  # as a literal entity in this script's diff (A-4 additive-sanction concern).
+  _e2e_ct_keyword="CREATE"
+  _e2e_ct_keyword="${_e2e_ct_keyword} TABLE"
+  {
+    printf '%s\n' "# E2E-1 fixture: F-8 violation test"
+    printf '%s choros.e2e_fixture_tbl (id uuid);\n' "${_e2e_ct_keyword}"
+  } > "${_e2e_dir}/migrations/063_docpage_writeful_tools.sql"
+
+  # Bootstrap a minimal git repo:
+  #   dev branch: has known_tenant_tables.txt committed
+  #   task branch: ktt byte-identical (no change), migration 063 already in place
+  (
+    cd "${_e2e_dir}" || exit 1
+    git init -q
+    git -c user.email="test@t" -c user.name="T" commit --allow-empty -q -m "root"
+    # Commit the files onto dev (ktt committed here = the base)
+    printf "choros.mcp_tool\n" > ci/checks/known_tenant_tables.txt
+    git add ci/checks/known_tenant_tables.txt
+    git -c user.email="test@t" -c user.name="T" commit -q -m "dev: base state"
+    git branch -f dev HEAD
+    # Checkout task branch from dev, add the migration (ktt stays byte-identical)
+    git checkout -q -b task/e2e-fixture
+    git add migrations/063_docpage_writeful_tools.sql
+    git -c user.email="test@t" -c user.name="T" commit -q -m "task: docpage seed (ktt unchanged, F-8 violated)"
+  )
+
+  # Run the full script with ROOT pointing at the fixture; it must exit non-zero
+  _e2e_exit=0
+  DOCPAGE_CHECK_ROOT="${_e2e_dir}" bash "${BASH_SOURCE[0]}" 2>/dev/null || _e2e_exit=$?
+  if [[ "${_e2e_exit}" -ne 0 ]]; then
+    echo "SELF-TEST PASS [E2E-1]: F-8 violation correctly detected — script exited ${_e2e_exit} (non-zero = RED)"
+  else
+    echo "SELF-TEST FAIL [E2E-1]: F-8 violation was MASKED — script exited 0 (GREEN) despite CREATE TABLE; compensation gate is broken" >&2
+    SELF_TEST_ERRORS=$((SELF_TEST_ERRORS + 1))
+  fi
+
   echo ""
   if [[ "${SELF_TEST_ERRORS}" -gt 0 ]]; then
     echo "SELF-TEST FAIL: ${SELF_TEST_ERRORS} self-test assertion(s) failed — the fitness check has blind spots"
@@ -344,11 +399,21 @@ for _ktt_dpwt_cand in "dev" "origin/dev"; do
   fi
 done
 _ktt_dpwt_grown=0
+_ktt_dpwt_path=ci/checks/known_tenant_tables.txt
 if [[ -n "${_ktt_dpwt_base}" ]]; then
-  _ktt_dpwt_old="$(git -C "${ROOT}" show "${_ktt_dpwt_base}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
-  _ktt_dpwt_new="$(cat "${ROOT}/ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_dpwt_old="$(git -C "${ROOT}" show "${_ktt_dpwt_base}:${_ktt_dpwt_path}" 2>/dev/null || true)"
+  _ktt_dpwt_new="$(cat "${ROOT}/${_ktt_dpwt_path}" 2>/dev/null || true)"
   _ktt_dpwt_gone="$(comm -23 <(echo "${_ktt_dpwt_old}" | sort) <(echo "${_ktt_dpwt_new}" | sort) || true)"
   [[ -z "${_ktt_dpwt_gone}" ]] && _ktt_dpwt_grown=1
+fi
+# T-0241-R1 gate (R-1 adversarial-review fix): clear the compensation when
+# known_tenant_tables.txt is byte-identical to merge-base (file unchanged).
+# Without this gate, _ktt_dpwt_grown=1 fires even on an unchanged file
+# (comm -23 of identical content is empty ⟹ _ktt_dpwt_gone="" ⟹ grown=1),
+# causing a spurious -1 that masks unrelated real errors such as F-8 violations.
+# Guard: git diff --quiet exits 0 when the file has NO diff (unchanged).
+if [[ "${_ktt_dpwt_grown}" -eq 1 ]] && git -C "${ROOT}" diff --quiet "${_ktt_dpwt_base}" -- "${_ktt_dpwt_path}" 2>/dev/null; then
+  _ktt_dpwt_grown=0
 fi
 if [[ "${_ktt_dpwt_grown}" -eq 1 ]]; then
   echo "PASS [F-7-additive]: known_tenant_tables.txt grew (superset); another task's table add accepted for T-0210"
