@@ -1058,6 +1058,32 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'nav_version': {
+      // T-0079 (migration 067) — no FK deps beyond tenant; version >= 0.
+      const version = 0;
+      const config = JSON.stringify({ sections: [] });
+      await c.query(
+        `INSERT INTO choros.nav_version
+           (tenant_id, version, config, created_at)
+         VALUES ($1, $2, $3::jsonb, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, version, config],
+      );
+      break;
+    }
+    case 'catalog_field_spec': {
+      // T-0079 (migration 067) — no FK deps beyond tenant; kind='custom' to avoid
+      // colliding with the 14 seeded standard rows (unique on tenant_id, catalog_name, field_key).
+      const fieldKey = `ct-custom-${tenantId.slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.catalog_field_spec
+           (tenant_id, catalog_name, field_key, label, kind, created_at)
+         VALUES ($1, 'counterparty', $2, 'CT Custom Field', 'custom', 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, fieldKey],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1404,6 +1430,8 @@ const SEEDED_TABLES = new Set<string>([
   'doc_page',
   'doc_ref',
   'doc_log',
+  'nav_version',
+  'catalog_field_spec',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
