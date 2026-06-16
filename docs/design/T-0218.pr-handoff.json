@@ -1,0 +1,69 @@
+{
+  "task_id": "T-0218",
+  "status": "ready",
+  "branch": "task/T-0218",
+  "phases_completed": ["SPEC", "DESIGN/ADR", "EXECUTABLE-SEED+WALKTHROUGH", "PR-HANDOFF"],
+  "domain_choice": "(a) expense/procurement, reframed as simplified linear ТЭЛ",
+  "domain_justification": "Triage is most VIVID here: intake-agent emits instantly-graspable named buckets (category/budget_article/direction) AND computes the routing consequence «money → who must approve» (≥threshold→finance controller, ≥5M₽→legal), which makes the moat moment land. Keeps the demo a true straight-through SUBSET of the ТЭЛ acceptance benchmark (§1.4/§3) rather than a different class — ITSM (b) has a flatter triage, no native money→authority logic, and its timers/SLA (reference-tel §4) pull it out of ТЭЛ.",
+  "one_flow_or_two": "ONE linear flow (two agent acts on one ТЭЛ instance). intake (S2) and legal-precheck (S3) are sequential steps on a single straight-through instance; S3's dealContext input is derived from S2's triage output (amount/kind/direction). Two demos would strip legal-precheck of its natural trigger (the threshold intake computes) and add a second instance — extra load for the same 5 minutes.",
+  "ci_local": {
+    "tsc": true,
+    "eslint": true,
+    "build": true,
+    "fitness_static": true,
+    "vitest": true,
+    "fitness_demo_db": "skipped-needs-infra (Postgres) — seed-apply-smoke / no-cross-tenant-org require a live DB; demo actor-seed apply-path is exercised offline via scripts/demo-tel-walkthrough.ts --dry-run"
+  },
+  "files_changed": {
+    "SPEC": [
+      "docs/specs/T-0218-demo-1-scenario.spec.md",
+      "docs/specs/T-0218.spec.contract.json"
+    ],
+    "DESIGN": [
+      "docs/design/T-0218-demo-1-scenario.adr.md",
+      "docs/design/T-0218.adr.contract.json"
+    ],
+    "SEED+WALKTHROUGH": [
+      "seed/demo/tel-scenario.ts",
+      "seed/demo/tel-scenario.js (compiled, tracked like seed/cli.js/importer.js)",
+      "scripts/demo-tel-walkthrough.ts",
+      "seed/tsconfig.json (added demo/tel-scenario.ts to type-checked files)",
+      "seed/showcase/pack.json (repositioned INS-7731 → linear ТЭЛ instance; count stays 8 — FF-PACK-2)",
+      "docs/demo/T-0218-walkthrough.md",
+      "ci/checks/demo/demo1-scenario-shape.sh (FF-DEMO1-1, self-test)",
+      "package.json (wired FF-DEMO1-1 into fitness + fitness:demo)"
+    ],
+    "PR-HANDOFF": ["docs/design/T-0218.pr-handoff.json"]
+  },
+  "new_fitness_checks": ["FF-DEMO1-1 (ci/checks/demo/demo1-scenario-shape.sh) — static, has # SELF-TEST: + --self-test"],
+  "touched_frozen": false,
+  "agent_slots": {
+    "intake": {
+      "task": "T-0219",
+      "screen": "S2",
+      "consumes": ["subject", "amount", "justification", "requester"],
+      "produces": ["category", "budget_article", "direction", "route"],
+      "reasoning_surface": "answer+metadata out; raw reasoning to audit (D-139)"
+    },
+    "legal_precheck": {
+      "task": "T-0234",
+      "screen": "S3",
+      "trigger": "intake.amount >= 5_000_000 (ТЭЛ §1.4)",
+      "engine": "src/runtime/legal-precheck/run-precheck.ts :: runLegalPrecheck (T-0233, already merged)",
+      "consumes": ["dealContext {amount, kind, direction}", "document"],
+      "produces": ["PrecheckOutcome (proceed | defer-to-human | fail-closed)"]
+    }
+  },
+  "deviations_from_adr": [
+    "ADR §6.1 (display-plane reposition) realized by renaming process_instances INS-7731 to the linear ТЭЛ instance (procId PRC-TEL-LINEAR, node 'S3 · Юр-предпроверка', progress 3/5) — count stays 8, FF-PACK-2 untouched. rights_cards left at 8: role-intake-agent lives only in the additive actor-seed plane (not display) — no 9th card, honoring the no-bloat constraint.",
+    "Demo-deal (≥5M₽) realized as a typed fixture in seed/demo/tel-scenario.ts (DEMO_DEAL / DEMO_DEAL_CONTEXT), aligned with T-0233's DEMO_DEAL_CONTEXT (5.5M); a record-level seed entry would need a record API not in the seed-pack schema day-1 — same call T-0233 made for AC-15."
+  ],
+  "friction_events": [
+    "FE-T0218-1: node_modules absent in the fresh worktree — npm ci required before build/tests (~install once).",
+    "FE-T0218-2: spec_ref playbooks (v1-demo-and-trust-surface.md, demo-stand.md, choros-reference-process-tel.md) live in the demiurge repo / other worktrees, not in the choros worktree — had to read them from sibling worktree paths. Not a blocker, but the design-task spec_ref pointed across repos.",
+    "FE-T0218-3: FF-PACK-2 hard-codes exactly 8/8 in the MAIN fitness chain (not an infra-gated tier) — any showcase display addition reddens dev. Shaped the whole seed strategy (reposition, not add). Flagging as a brittle-by-count contract for future demo extensions."
+  ],
+  "blockers_or_uncertainties": "none — domain choice (a vs b) was delegated and made; ТЭЛ frame + ≥5M threshold already founder-fixed; no founder-only fork. Real LLM live-wire for legal-precheck on prod = deploy-time T-0234, not a blocker here.",
+  "pr_handoff_path": "docs/design/T-0218.pr-handoff.json",
+  "ready_for_review": true
+}

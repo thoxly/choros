@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0101",
+  "status": "ready",
+  "summary": "Security-харднинг пути рендера форм: исполнение form-js происходит в ИЗОЛИРОВАННОМ sandbox-iframe с опаковым origin (sandbox=allow-scripts БЕЗ allow-same-origin — скрипт формы не достаёт DOM/cookie/storage/origin родителя), iframe авто-высотится через postMessage-канал {type:'fjs-height',h}, который родитель ВАЛИДИРУЕТ (e.source===contentWindow И e.origin==='null' И корректная форма И конечная неотрицательная высота, заклампленная в [MIN,MAX]) до ресайза — а не доверяет любому postMessage. Затрагивает FormViewer.jsx, forms.html, form-defs.js; выделяет чистую функцию-приёмник acceptFrameHeight для unit-проверки SI-инвариантов; добавляет статический гейт ci/checks/forms-sandbox-iframe.sh (FF-FORMS2). Серверная валидация форм (FF-FORMS1 / form-validator.ts / forms.ts) НЕ меняется. Byte-frozen НЕ трогается. Аддитивно.",
+  "functional": [
+    "FR-1: Каждый iframe исполнения формы (FormViewer.jsx + оба iframe в web/preview/forms.html) имеет sandbox=allow-scripts БЕЗ allow-same-origin → опаковый origin; скрипт формы не достаёт DOM/cookie/storage/origin родителя.",
+    "FR-2: Авто-высота — форма постит content-height {type:'fjs-height',h}; родитель ресайзит iframe; работает при смене формы/темы.",
+    "FR-3: Origin-валидированный приёмник — родитель принимает height-сообщение ТОЛЬКО при e.source===contentWindow И e.origin==='null' И e.data.type==='fjs-height' И конечной неотрицательной e.data.h; иначе игнор.",
+    "FR-4: Границы высоты — принятая высота клампится в [MIN,MAX]; NaN/Infinity/отрицательное отброшено (анти-DoS на раздувание iframe).",
+    "FR-5: Серверная валидация форм (form-validator.ts/forms.ts/FF-FORMS1) НЕ меняется и остаётся зелёной; нет клиентского доверия.",
+    "FR-6: Новый статический гейт ci/checks/forms-sandbox-iframe.sh (FF-FORMS2) утверждает sandbox-инварианты (allow-scripts без allow-same-origin, origin-валидация, клампинг); имеет --self-test."
+  ],
+  "non_functional": [
+    "NF-1: Аддитивность — фокус на изоляции iframe + авто-высоте; без рефактора несвязанного кода формы.",
+    "NF-2: Не трогать byte-frozen (grant-lattice/object-handle/frozen-checks).",
+    "NF-3: Без XSS/origin-confusion регрессий — не ослаблять sandbox, не доверять postMessage вслепую.",
+    "NF-4: tsc --noEmit exit 0; eslint src exit 0; npm run build exit 0; npm run fitness exit 0; vitest run exit 0."
+  ],
+  "out_of_scope": [
+    "Серверная валидация форм (FF-FORMS1) — не меняется.",
+    "AI-генерация форм / новые поля (Stage-3).",
+    "Полноценный CSP/Trusted-Types движок (отдельный security-эпик).",
+    "HTTP-заголовки/CSP на ответе приложения (отдельная транспортная задача)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "SI-1: ни один form-iframe не содержит allow-same-origin вместе с allow-scripts. FormViewer.jsx использует sandbox=\"allow-scripts\"; оба iframe в forms.html используют sandbox=\"allow-scripts\". FF-FORMS2 грепом ловит любой allow-same-origin на form-iframe → FAIL.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "SI-2: чистая функция-приёмник acceptFrameHeight(msg) принимает height ТОЛЬКО при origin==='null' И source===iframeWindow И type==='fjs-height'; чужой origin / чужой source / иной type → отказ (null). Unit-тест на всех ветках.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-3",
+      "text": "SI-3: acceptFrameHeight клампит h в [MIN,MAX]; NaN/Infinity/отрицательное/строка → отказ (null); h>MAX → MAX; h<MIN → MIN. Unit-тест границ.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-4",
+      "text": "FR-2: при валидном fjs-height-сообщении от своего iframe FormViewer обновляет высоту (через acceptFrameHeight); unit-тест: валидное сообщение → новая высота, невалидное → высота не меняется.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "FR-6: ci/checks/forms-sandbox-iframe.sh зелёный на реальном дереве и его --self-test ловит синтетический allow-same-origin form-iframe и приёмник без origin-валидации (RED как ожидается).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "FR-5/NF-2: forms-schema-binding.sh (FF-FORMS1) остаётся зелёным; src/core/form-validator.ts / src/core/form-schema.ts / src/http/forms.ts не изменены этой задачей; frozen-checks-immutable.sh зелёный (byte-frozen не тронут).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-7",
+      "text": "NF-4: tsc --noEmit exit 0; eslint src exit 0; npm run build exit 0; npm run fitness exit 0; vitest run exit 0.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0101-forms-sandbox-iframe.spec.md"
+}

@@ -1,0 +1,68 @@
+{
+  "task_id": "T-0209",
+  "status": "pr_open",
+  "branch": "task/T-0209-docsauthor-seed",
+  "merge_target": "dev",
+  "base_sha": "d710d6ae68154d2b20e836341b54a7a4dd9bab70",
+  "commits": [
+    {
+      "sha": "dc16495f2775311968048df9b2aed0e1f44265fe",
+      "msg": "feat(T-0209): DocsAuthorAgent seed migration 062 + fitness (P-1 docs-pipeline)"
+    }
+  ],
+  "phases_completed": [
+    "DESIGN/ADR",
+    "BUILD",
+    "PR-HANDOFF"
+  ],
+  "summary": "P-1 of the docs-pipeline: materializes the system DocsAuthorAgent as a first-class employee (role 'docs-author' e0...005 + employee d0...015 + dormant agent_card kc_client_id='agent-docs-author' + CONFIRMED role_assignment f0...004 + exactly 2 grants {doc_page,create} e2...018 and {doc_page,update} e2...019). Pure data seed — no DDL, no new tables, known_tenant_tables.txt unchanged. Grant set is necessary & sufficient for a future doc_page_author tool (P-2): isToolReachable returns true iff both grants present. Promotes seam deferred to SEAM-2/T-0134d/P-9 per ADR §2.",
+  "what_built": {
+    "migration": "migrations/062_docs_author_seed.sql — pure data seed, FK order role→employee→agent_card→role_assignment→grant×2. All 5 INSERTs ON CONFLICT DO NOTHING. No CREATE TABLE. Mirrors 044/059 header + discipline conventions exactly.",
+    "db_test": "ci/checks/db/docs-author-seed.test.ts — 11 AC groups (AC-01 role existence/slug; AC-02 exactly 2 doc_page grants {create,update}; AC-03 no delete; AC-04 no delegable=true; AC-05 no read; AC-06 dormant agent_card; AC-07 CONFIRMED assignment; AC-08 scope consistency; AC-09 idempotency; AC-10 cross-tenant RLS; AC-11 isToolReachable pure unit assertions).",
+    "static_check": "ci/checks/docs-author-seed.sh — 9 checks (file exists; idempotency; no CREATE TABLE; write-boundary create+update/no-delete; doc_page resource_type; frozen-guard; known_tenant_tables unchanged; UUID collision guard; no delegable=true). Executable, wired into fitness chain in package.json.",
+    "package_json": "package.json — appended bash ci/checks/docs-author-seed.sh at tail of fitness chain (after doc-coherence.sh --self-test)."
+  },
+  "files_changed": [
+    "migrations/062_docs_author_seed.sql",
+    "ci/checks/db/docs-author-seed.test.ts",
+    "ci/checks/docs-author-seed.sh",
+    "docs/design/T-0209.pr-handoff.json",
+    "package.json"
+  ],
+  "uuids_used": {
+    "role": "e0000000-0000-0000-0000-000000000005",
+    "employee": "d0000000-0000-0000-0000-000000000015",
+    "role_assignment": "f0000000-0000-0000-0000-000000000004",
+    "grant_create": "e2000000-0000-0000-0000-000000000018",
+    "grant_update": "e2000000-0000-0000-0000-000000000019"
+  },
+  "how_verified": {
+    "static_check": "bash ci/checks/docs-author-seed.sh → exit 0. All 9 checks PASS (file exists; idempotency 5 INSERT / 5 ON CONFLICT; no CREATE TABLE; doc_page create+update/no-delete boundary; doc_page resource_type present; 6 frozen files unmodified; known_tenant_tables.txt unchanged; all 5 pinned UUIDs present in 062 and absent in migrations ≤061; no delegable=true).",
+    "typecheck": "node_modules/.bin/tsc --noEmit → exit 0 (0 errors, covers src/ per tsconfig.json).",
+    "db_test": "compiled-only — no local Postgres. Vitest collected the test file with a fake DATABASE_URL (the file parsed and its imports resolved cleanly); only failed at runtime with Postgres connection error 28000 'role fake does not exist'. DB-tier probes (AC-01..AC-10) run in CI fitness:db job against the pinned postgres:16 service. AC-11 (isToolReachable pure unit assertions) is pure in-memory and will run as part of fitness:db without any DB connection."
+  },
+  "fitness_wired_into": "package.json 'fitness' script (npm run fitness chain). docs-author-seed.sh appended after doc-coherence.sh --self-test. DB test discovered automatically by 'npm run fitness:db' (vitest --dir ci/checks/db --no-file-parallelism) — no explicit registration needed.",
+  "ci_local": {
+    "tsc": true,
+    "static_check": true,
+    "db_test_compile": true,
+    "db_test_live": false
+  },
+  "fitness_added": [
+    "ci/checks/docs-author-seed.sh — 9 static checks (Check-1..Check-9)",
+    "ci/checks/db/docs-author-seed.test.ts — AC-01..AC-11 (10 describe blocks, 17 it() assertions)"
+  ],
+  "frozen_files_touched": false,
+  "known_tenant_tables_touched": false,
+  "deviations_from_design": [
+    "none — all UUIDs, column values, FK order, ON CONFLICT discipline, and fitness checklist items implemented exactly as ADR pins. ResourceType 'doc_page' uses string cast (as ResourceType) in the TS test since the closed TS union does not include doc_page — same pattern as 'authoring_draft' which is also a TEXT DB column outside the TS union. The ADR explicitly notes 'TEXT column, no DB CHECK — same as authoring_draft in 044' confirming this is by design."
+  ],
+  "residual_risks": [
+    "DB-tier probes (AC-01..AC-10) not run locally — they rely on the CI postgres:16 service. Any schema mismatch (e.g. agent_card column name change after migration 062 was written) would only surface in CI.",
+    "budget_policy_id b0...001 reuse from migration 034: acceptable for dormant seed (ADR §8 R-3); dedicated policy is a P-3 concern.",
+    "P-2 (doc_page_author mcp_tool) not yet seeded — grants are dormant-but-correct until P-2 runs. isToolReachable returns no tools today (correct sequencing per ADR §8 R-2 / research §8 critical path).",
+    "Promote-seam (SEAM-2 / T-0134d / P-9) deferred — the author holds no publish-equivalent authority; this is structural absence by design."
+  ],
+  "pr_handoff_path": "docs/design/T-0209.pr-handoff.json",
+  "ready_for_review": true
+}

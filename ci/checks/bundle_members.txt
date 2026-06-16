@@ -14,6 +14,10 @@
 object-schema|choros_table|migrations/004_registry_def.sql|registry_def|record_schema
 grants|choros_table|migrations/008_grant.sql|grant|resource_type
 report_page_dep|choros_table|migrations/052_report_page_dep.sql|report_page_dep|dep_kind
+template_dep|choros_table|migrations/060_template_def.sql|template_dep|dep_kind
+doc_page|choros_table|migrations/061_doc_page.sql|doc_page|scope
+doc_ref|choros_table|migrations/061_doc_page.sql|doc_ref|ref_kind
+doc_log|choros_table|migrations/061_doc_page.sql|doc_log|op
 bpmn-process|external|flowable-engine|deployments-api|—
 form-code|external|deferred|—|—
 form-json-schema|external|deferred|—|—

@@ -1,0 +1,46 @@
+{
+  "task_id": "T-0218",
+  "status": "ready",
+  "summary": "Первая демо Choros = ОДИН линейный ТЭЛ (без циклов/исключений), проходимый незнакомым зрителем за 5 именованных экранов S1 Подача → S2 Триаж → S3 Юр-предпроверка (условный гейт) → S4 Согласование человеком → S5 Аудит-floor. Домен = (a) заявка на расход/закупку в редакции «упрощённый линейный ТЭЛ» (триаж самый яркий: агент классифицирует категорию/статью/направление И вычисляет маршрутное следствие «сумма ≥ порога → кто обязан согласовать»; держит сценарий точным подмножеством ТЭЛ-эталона, а не другим классом как ITSM). Два навыка агента вписываются в РАЗМЕЧЕННЫЕ слоты: T-0219 intake-agent на S2 (классификация + reasoning-trace), T-0234 legal-precheck (живой мотор T-0233 runLegalPrecheck) на S3 как условный гейт при сумме ≥ 5 млн ₽. Это ОДИН линейный поток (два агентских акта на одном инстансе), не две демо. Реализуемая часть DESIGN-задачи = исполнимый demo-seed через importer/публичный API (НЕ прямой PG) + написанный 5-экранный walkthrough; сами навыки = T-0219/T-0234. Несущее ограничение: showcase display-плоскость (8 rights / 8 processes, FF-PACK-2) НЕ раздувается — демо-инстанс ТЭЛ показывается переиспользованием существующей process_instances-строки, агентские слоты — отдельным additive demo-seed.",
+  "functional": [
+    "FR-1: Сценарий = ОДИН линейный ТЭЛ-инстанс из 5 именованных экранов S1..S5, проходимых строго по порядку без ветвлений в демо-проходе.",
+    "FR-2: Реализуется как расширение showcase-механизма через публичные API / importer (НЕ прямой PG). Demo actor-seed (роль/гранты intake-agent) — через applyPack-путь; наполнение инстанса — через скрипт поверх публичного API.",
+    "FR-3: Display-плоскость showcase НЕ раздувается — GET /api/rights → 8 и GET /api/processes → 8 (FF-PACK-2) остаются 8/8; демо-инстанс ТЭЛ = репозиционирование существующей process_instances-строки (INS-7731), не новая строка.",
+    "FR-4: Слот T-0219 (intake-agent) размечен на S2: вход = поля заявки (предмет/сумма/обоснование), выход = категория/бюджетная статья/направление/маршрут + reasoning-trace; контракт в ADR §4.1 и в seed как agent_slot.intake.",
+    "FR-5: Слот T-0234 (legal-precheck) размечен на S3 как условный гейт (срабатывает при сумме ≥ 5 000 000 ₽): вход = dealContext {amount,kind,direction} (сигнатура runLegalPrecheck T-0233), выход = PrecheckOutcome (proceed/defer-to-human/fail-closed); контракт в ADR §4.2 и в seed как agent_slot.legal_precheck.",
+    "FR-6: Moat-момент виден на S3→S4: агент доводит до согласующего шлюза, но структурно НЕ может перейти «Согласовано» — нет гранта approve (PDP-deny, не новый механизм).",
+    "FR-7: reasoning-trace агентских шагов S2/S3 проявлен в проходе (D-139: наружу answer/метаданные, сырой reasoning — в audit); опора на T-0233 FR-6, без нового egress.",
+    "FR-8: Walkthrough docs/demo/T-0218-walkthrough.md — письменный 5-экранный скрипт: на каждый экран кто действует (персона X-Dev-User), что видно, доказательство §0 v1-demo, где слот агента.",
+    "FR-9: Idempotent/lint-clean — demo-seed повторно = no-op (idempotency importer); demo-скрипт типизирован (tsc) + eslint; ноль платных/сетевых LLM-вызовов (агенты dormant — только слоты)."
+  ],
+  "non_functional": [
+    "NF-1: Ни один байт-frozen security-файл не тронут (touched_frozen=false); все записи через importer/публичный API (I-1 T-0140).",
+    "NF-2: dev остаётся зелёным — fitness:seed и fitness:demo (статические) проходят; FF-PACK-2 (8/8) не ломается.",
+    "NF-3: Один источник правды (FF-4) — demo не дублирует org/role/process новой *_SEED-копией вне allow-list.",
+    "NF-4: Слоты агентов — только разметка (контракт вход/выход + место в потоке); никакого кода навыка/live-провода.",
+    "NF-5: Демо-сумма гейта ≥ 5 000 000 ₽ согласована с порогом T-0233 (ТЭЛ §1.4); demo-deal-фикстура совместима с runLegalPrecheck dealContext."
+  ],
+  "out_of_scope": [
+    "Реализация навыков агентов (T-0219 intake, T-0234 legal-precheck) — здесь только СЛОТЫ.",
+    "Циклы доработки / исключения / отказ-ветки ТЭЛ — демо строго линейна.",
+    "Публичный демостенд / деплой (T-0142, founder-gated).",
+    "Сцены B (graceful degradation) и D (бытовые права) v1-demo — отдельные таски; сценарий лишь оставляет им место.",
+    "Новый UI-экран — демо переиспользует существующие 5 экранов слайса (inbox/org/processes/rights/audit + forms)."
+  ],
+  "acceptance_criteria": [
+    { "id": "AC-1", "text": "SPEC + ADR + walkthrough + pr-handoff присутствуют и валидны по контракту (docs/specs/T-0218*, docs/design/T-0218*, docs/demo/T-0218-walkthrough.md).", "verifiable_as": "fitness" },
+    { "id": "AC-2", "text": "fitness:seed зелёный после demo-seed-добавок (pack-schema-valid, pack-refs-resolve, single-source, display-plane-no-write).", "verifiable_as": "fitness" },
+    { "id": "AC-3", "text": "FF-PACK-2 (pack-serve-counts) остаётся 8 rights / 8 processes — demo-сценарий не раздул display-плоскость (FR-3).", "verifiable_as": "fitness" },
+    { "id": "AC-4", "text": "Walkthrough перечисляет ровно 5 именованных экранов S1..S5 В ПОРЯДКЕ, для каждого: персона, что видно, доказательство §0.", "verifiable_as": "fitness" },
+    { "id": "AC-5", "text": "Слот T-0219 специфицирован: имя слота, экран S2, поля вход/выход, reasoning-surface — в ADR §4.1 И в seed как agent_slot.", "verifiable_as": "fitness" },
+    { "id": "AC-6", "text": "Слот T-0234 специфицирован: имя слота, экран S3, сигнатура dealContext {amount,kind,direction} + выход PrecheckOutcome, условие срабатывания ≥ 5 млн ₽ — в ADR §4.2 И в seed.", "verifiable_as": "fitness" },
+    { "id": "AC-7", "text": "Решение «один поток / два» зафиксировано в ADR §3 с обоснованием (ОДИН линейный поток).", "verifiable_as": "doc-review" },
+    { "id": "AC-8", "text": "Moat-шаг S3→S4: агент не может approve; зафиксирован в walkthrough как PDP-deny (не новый механизм).", "verifiable_as": "doc-review" },
+    { "id": "AC-9", "text": "Demo-скрипт типизируется (tsc) и проходит eslint; идемпотентен (повторный прогон — no-op).", "verifiable_as": "fitness" },
+    { "id": "AC-10", "text": "seed-apply-smoke (infra-bound) — demo actor-seed применяется к свежему showcase-тенанту чисто; skipped-needs-infra при отсутствии Postgres; контракт зафиксирован.", "verifiable_as": "fitness:demo:db" },
+    { "id": "AC-11", "text": "Новая статическая fitness-проверка FF-DEMO1-1 имеет # SELF-TEST: и --self-test ветку.", "verifiable_as": "fitness" },
+    { "id": "AC-12", "text": "tsc --noEmit exit 0; eslint src clean; npm run build ok; npm run fitness зелёный (статические); vitest run зелёный.", "verifiable_as": "fitness" }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0218-demo-1-scenario.spec.md"
+}

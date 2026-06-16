@@ -696,6 +696,12 @@ const seedState = {
   recordIdB: '',
   fileIdA: '',
   fileIdB: '',
+  // T-0235 chain: template_def → template_dep (template_dep FKs template_def)
+  templateDefIdA: '',
+  templateDefIdB: '',
+  // T-0238 chain: doc_page → doc_ref / doc_log (both FK doc_page)
+  docPageIdA: '',
+  docPageIdB: '',
 };
 
 /**
@@ -969,6 +975,87 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       // KNOWN_TENANT_TABLES order guarantees the file is seeded before this case.
       const fileId = tenantId === TENANT_A ? seedState.fileIdA : seedState.fileIdB;
       await seedFileVersion(c, tenantId, fileId);
+      break;
+    }
+    case 'template_def': {
+      // T-0235 (migration 060) — FK (tenant_id, registry_id) → registry_def(tenant_id, id).
+      // KNOWN_TENANT_TABLES order (…, registry_def, …, template_def) guarantees
+      // registry_def is already seeded. Store id for downstream template_dep seed.
+      const regId = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.template_def
+           (tenant_id, id, registry_id, format, body, version, tier, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, 'html', '<p>ct-template</p>', 1, 'draft', 'ct-tester', 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, regId],
+      );
+      if (tenantId === TENANT_A) seedState.templateDefIdA = id;
+      else seedState.templateDefIdB = id;
+      break;
+    }
+    case 'template_dep': {
+      // T-0235 (migration 060) — FK (tenant_id, template_id) → template_def(tenant_id, id);
+      // FK (tenant_id, registry_def_id) → registry_def(tenant_id, id).
+      // KNOWN_TENANT_TABLES order (…, template_def, template_dep) guarantees both are seeded.
+      const templateId = tenantId === TENANT_A ? seedState.templateDefIdA : seedState.templateDefIdB;
+      const regId = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      const id = uuid();
+      const fieldKey = `ct-field-${id.slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.template_dep
+           (tenant_id, id, template_id, registry_def_id, field_key, dep_kind, stale, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'read', false, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, templateId, regId, fieldKey],
+      );
+      break;
+    }
+    case 'doc_page': {
+      // T-0238 (migration 061) — app_id nullable; no required FK deps beyond tenant.
+      // Store id for downstream doc_ref / doc_log seeds.
+      const id = uuid();
+      const slug = `ct-doc-${id.slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.doc_page
+           (tenant_id, id, slug, title, body, scope, catalog_version, app_id,
+            stale, authored_by, authored_at, updated_at)
+         VALUES ($1, $2, $3, 'ct-doc-title', 'ct-body', 'tenant', NULL, NULL,
+                 false, 'ct-tester', 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, slug],
+      );
+      if (tenantId === TENANT_A) seedState.docPageIdA = id;
+      else seedState.docPageIdB = id;
+      break;
+    }
+    case 'doc_ref': {
+      // T-0238 (migration 061) — FK (tenant_id, page_id) → doc_page(tenant_id, id) CASCADE.
+      // KNOWN_TENANT_TABLES order (…, doc_page, doc_ref) guarantees doc_page is seeded.
+      const pageId = tenantId === TENANT_A ? seedState.docPageIdA : seedState.docPageIdB;
+      const id = uuid();
+      const refTarget = JSON.stringify({ symbol: `ct-sym-${id.slice(0, 8)}` });
+      await c.query(
+        `INSERT INTO choros.doc_ref
+           (tenant_id, id, page_id, ref_kind, ref_target, broken, created_at)
+         VALUES ($1, $2, $3, 'code_symbol', $4::jsonb, false, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, pageId, refTarget],
+      );
+      break;
+    }
+    case 'doc_log': {
+      // T-0238 (migration 061) — FK (tenant_id, page_id) → doc_page(tenant_id, id) CASCADE.
+      // KNOWN_TENANT_TABLES order (…, doc_page, doc_ref, doc_log) guarantees doc_page is seeded.
+      const pageId = tenantId === TENANT_A ? seedState.docPageIdA : seedState.docPageIdB;
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.doc_log
+           (tenant_id, id, page_id, op, agent_actor, diff_summary, at)
+         VALUES ($1, $2, $3, 'create', 'ct-tester', NULL, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, pageId],
+      );
       break;
     }
     default:
@@ -1312,6 +1399,11 @@ const SEEDED_TABLES = new Set<string>([
   'file',
   'file_version',
   'agent_instruction',
+  'template_def',
+  'template_dep',
+  'doc_page',
+  'doc_ref',
+  'doc_log',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

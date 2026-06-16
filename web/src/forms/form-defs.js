@@ -291,7 +291,9 @@
     // decision → comment required
     "  var dec=d.querySelectorAll('input[name=decision]');var reqStar=d.querySelector('[data-req-when-reject]');",
     "  dec.forEach(function(r){r.addEventListener('change',function(){var need=(d.querySelector('input[name=decision]:checked')||{}).value!=='ok';if(reqStar)reqStar.hidden=!need;});});",
-    // auto height
+    // auto height — постим РОВНО {type,h} (только высота, не секрет). Из опакового
+    // origin ребёнок надёжно не знает origin родителя, поэтому target='*' ; защита
+    // на РОДИТЕЛЕ — он валидирует source+origin+форму (T-0101 acceptFrameHeight).
     "  function postH(){var h=d.documentElement.scrollHeight;parent.postMessage({type:'fjs-height',h:h},'*');}",
     "  if(window.ResizeObserver){new ResizeObserver(postH).observe(d.body);}",
     "  window.addEventListener('load',postH);postH();setTimeout(postH,200);setTimeout(postH,600);",

@@ -20,6 +20,12 @@
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { DEV_USER_HEADER } from "./auth.js";
+import {
+  runDemoLegalPrecheck,
+  demoApproveDenied,
+  buildLegalPrecheckSliceView,
+  type LegalPrecheckSliceView,
+} from "../runtime/legal-precheck/demo-run.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -267,6 +273,139 @@ export function getDefaultAuditInstance(): AuditData {
 }
 
 // ---------------------------------------------------------------------------
+// T-0234 DEMO-3 — INS-TEL-DEMO: the linear ТЭЛ demo instance whose S3 node
+// renders the ACTUAL legal_precheck agent outcome (runLegalPrecheck via the
+// deterministic demo stub port — zero paid LLM) + the moat event (the agent's
+// attempt to approve → PDP-deny). This is an AUDIT instance, NOT a
+// process_instances/rights_cards row, so FF-PACK-2 (8/8) is untouched.
+//
+// Built lazily on first request and memoized: the demo run is async (motor) but
+// deterministic, so the trace is identical every time. D-139: only the safe
+// answer + an OPAQUE reasoning_trace_ref reach the slice — never raw reasoning.
+// ---------------------------------------------------------------------------
+
+export const TEL_DEMO_INSTANCE_ID = "INS-TEL-DEMO";
+
+/** Render the legal-precheck red-flags answer as a compact slice payload string. */
+function redFlagsSummary(view: LegalPrecheckSliceView): string {
+  if (view.kind !== "proceed" || view.redFlags.length === 0) {
+    return view.note ?? "(нет red-flags)";
+  }
+  return view.redFlags.map((f) => `${f.clause} [${f.severity}]`).join("; ");
+}
+
+let telDemoCache: AuditData | null = null;
+
+async function buildTelDemoInstance(): Promise<AuditData> {
+  // Run the legal-precheck agent (S3 actor) deterministically with the stub port.
+  const run = await runDemoLegalPrecheck("live-stub");
+  const view = buildLegalPrecheckSliceView(run.outcome);
+  // Probe the moat: the agent CANNOT approve (PDP-deny).
+  const moat = await demoApproveDenied();
+
+  const data: AuditData = {
+    instance: {
+      process: "Согласование договора (линейный ТЭЛ — демо)",
+      procId: "PRC-TEL-DEMO",
+      id: TEL_DEMO_INSTANCE_ID,
+      status: "waiting",
+      started: "15.06.2026 10:00:00",
+      elapsed: "00:00:03",
+      node: "S3 · Юр-предпроверка → S4 · Согласование",
+      execs: ["human", "agent"],
+      budget: [
+        { label: "Токены инстанса", used: 0, total: 250000, unit: "ткн" },
+        { label: "Стоимость LLM", used: 0, total: 0, unit: "₽", money: true },
+      ],
+    },
+    trace: [
+      {
+        node: "S1",
+        name: "Подача · заявка на закупку услуги",
+        events: [
+          {
+            ts: "10:00:00.100",
+            type: "human",
+            actor: "Орлов (инициатор)",
+            action: "подал заявку",
+            target: "договор оказания услуг · 5 500 000 ₽",
+            tag: "ok",
+          },
+        ],
+      },
+      {
+        node: "S2",
+        name: "Триаж · классификация (слот intake, T-0219)",
+        events: [
+          {
+            ts: "10:00:01.200",
+            type: "agent",
+            actor: "Заявка-агент",
+            action: "классифицировал заявку и вывел маршрут",
+            target: "service_agreement · BUD-14 · сумма ≥ 5 млн → юр-предпроверка",
+            tag: "ok",
+          },
+        ],
+      },
+      {
+        node: "S3",
+        name: "Юр-предпроверка · АГЕНТ (слот legal_precheck, T-0234 / мотор T-0233)",
+        events: [
+          {
+            ts: "10:00:02.000",
+            type: "agent",
+            actor: "Юр-агент (legal_precheck)",
+            action: `провёл юр-предпроверку → ${view.kind}`,
+            target: view.reasoningTraceRef,
+            tag: view.kind === "proceed" ? "ok" : "esc",
+            tool: true,
+            meta: { dur: "—", tok: "0 ткн (stub)", cost: "₽0.00" },
+            payload: {
+              call: `runLegalPrecheck(dealContext=${view.dealSummary})`,
+              out: redFlagsSummary(view),
+            },
+          },
+          {
+            // The MOAT: the agent attempts to approve → PDP-deny. The agent role
+            // has no `approve` grant; approve stays a human card-action (S4).
+            ts: "10:00:02.300",
+            type: "agent",
+            actor: "Юр-агент (legal_precheck)",
+            action: "попытка «Согласовать» → отказ PDP (нет гранта approve)",
+            target: moat.denied ? `PDP-deny: ${moat.reason ?? "no_grant"}` : "(moat broken!)",
+            tag: "esc",
+          },
+        ],
+      },
+      {
+        node: "S4",
+        name: "Согласование · ЧЕЛОВЕК (card-action approve)",
+        events: [
+          {
+            ts: "10:00:03.000",
+            type: "human",
+            actor: "Е. Ларина (финконтролёр)",
+            action: "ожидает решения по согласованию (approve = человек)",
+            target: "card-action approve",
+            tag: null,
+            pending: true,
+          },
+        ],
+      },
+    ],
+  };
+  return data;
+}
+
+/** Lazily build + memoize the deterministic demo ТЭЛ instance. */
+export async function getTelDemoInstance(): Promise<AuditData> {
+  if (telDemoCache === null) {
+    telDemoCache = await buildTelDemoInstance();
+  }
+  return telDemoCache;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -315,7 +454,10 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
 
     let data: AuditData;
     if (instanceId !== null && instanceId !== "") {
-      const found = findAuditData(instanceId);
+      const found =
+        instanceId === TEL_DEMO_INSTANCE_ID
+          ? await getTelDemoInstance()
+          : findAuditData(instanceId);
       if (!found) {
         throw new HttpError(404, "NOT_FOUND", "instance not found");
       }
@@ -338,7 +480,12 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
   // PDP check: operation=read, resource=audit_trace before returning data.
   router.register("GET", "/api/audit/:instanceId", async (_req, res, params) => {
-    const data = findAuditData(params.instanceId as string);
+    const instanceId = params.instanceId as string;
+    // T-0234: the demo ТЭЛ instance is built lazily (async motor run, stub port).
+    const data =
+      instanceId === TEL_DEMO_INSTANCE_ID
+        ? await getTelDemoInstance()
+        : findAuditData(instanceId);
     if (!data) {
       throw new HttpError(404, "NOT_FOUND", "instance not found");
     }
