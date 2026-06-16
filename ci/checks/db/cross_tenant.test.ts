@@ -1157,6 +1157,43 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'bundle_version_instance': {
+      // T-0086 (migration 071) — drain-by-default state store.
+      // No FK deps beyond tenant_id; self-contained.
+      // Uses fresh UUID-derived content_hash to avoid collision between tenants.
+      const contentHash = uuid().replace(/-/g, '').padEnd(64, '0').slice(0, 64);
+      const instanceId  = `ct-bvi-${uuid().slice(0, 8)}`;
+      await c.query(
+        `INSERT INTO choros.bundle_version_instance
+           (tenant_id, process_instance_id, bundle_id, pinned_content_hash, pinned_at, state)
+         VALUES ($1, $2, 'ct-bundle', $3, 0, 'draining')
+         ON CONFLICT DO NOTHING`,
+        [tenantId, instanceId, contentHash],
+      );
+      break;
+    }
+    case 'inflight_mapping_request': {
+      // T-0086 (migration 071) — Camunda-style mapping escalation requests.
+      // No FK deps beyond tenant_id. from/to hashes must differ (64 hex chars each).
+      const fromHash = uuid().replace(/-/g, '').padEnd(64, '0').slice(0, 64);
+      const toHash   = uuid().replace(/-/g, '').padEnd(64, 'f').slice(0, 64);
+      const id       = uuid();
+      await c.query(
+        `INSERT INTO choros.inflight_mapping_request
+           (tenant_id, id, process_instance_id,
+            from_content_hash, to_content_hash,
+            from_activity_id, from_activity_kind,
+            to_activity_id,   to_activity_kind,
+            auto_map_matching_ids, requested_by, requested_at, state)
+         VALUES ($1, $2, $3, $4, $5,
+                 'Task_ReviewContract', 'userTask',
+                 'Task_ReviewContract', 'userTask',
+                 false, 'ct-seed', 0, 'pending_approval')
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, `ct-imr-${uuid().slice(0, 8)}`, fromHash, toHash],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1510,6 +1547,8 @@ const SEEDED_TABLES = new Set<string>([
   'bundle_commit',
   'bundle_ref',
   'registry_schema_history',
+  'bundle_version_instance',
+  'inflight_mapping_request',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
