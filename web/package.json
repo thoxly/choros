@@ -8,6 +8,9 @@
     "preview": "vite preview",
     "lint": "eslint web/src --ext .jsx || true"
   },
+  "dependencies": {
+    "bpmn-js": "^17"
+  },
   "devDependencies": {
     "vite": "^5",
     "@vitejs/plugin-react": "^4",
