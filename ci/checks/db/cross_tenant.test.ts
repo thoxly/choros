@@ -1143,6 +1143,20 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'registry_schema_history': {
+      // T-0085 (migration 070) — per-record schema versioning history.
+      // FK (tenant_id, registry_id) → registry_def(tenant_id, id).
+      // KNOWN_TENANT_TABLES order guarantees registry_def is seeded before registry_schema_history.
+      const regId = tenantId === TENANT_A ? seedState.regIdA : seedState.regIdB;
+      await c.query(
+        `INSERT INTO choros.registry_schema_history
+           (tenant_id, registry_id, schema_version, schema_json, created_at)
+         VALUES ($1, $2, 1, '{}'::jsonb, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, regId],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1495,6 +1509,7 @@ const SEEDED_TABLES = new Set<string>([
   'cross_app_ref',
   'bundle_commit',
   'bundle_ref',
+  'registry_schema_history',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
