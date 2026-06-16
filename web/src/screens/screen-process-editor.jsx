@@ -1,22 +1,27 @@
 /* ============================================================================
    CHOROS — screen-process-editor.jsx
    T-0096: Process editor screen embedding the REAL bpmn-js modeler.
+   T-0098: Properties panel (executor-type selector → live canvas recolor).
 
    This screen replaces the hand-rolled SVG mock in screen-editor.jsx for the
    routed /processes/:id/edit path. The mock (screen-editor.jsx) is preserved
    for reference and for the standalone preview/process-editor.html.
 
    Layout mirrors the mock:
-     toolbar (top) | [canvas — real bpmn-js] | properties panel (right stub)
+     toolbar (top) | [canvas — real bpmn-js] | properties panel (right)
 
-   Properties panel is a structural stub here — full customisation is T-0098.
+   T-0098 adds:
+     - BpmnPropertiesPanel replacing the PropertiesPanelStub
+     - onReady callback from BpmnModelerWrapper to pass the live modeler instance
+       to BpmnPropertiesPanel once importXML has resolved
    ============================================================================ */
 
-import React, { useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import React, { useRef, useState, useCallback } from 'react';
+import { useParams } from 'react-router-dom';
 import { Button, MonoId, StatusChip } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
+import BpmnPropertiesPanel from '../canvas/bpmn-properties-panel.jsx';
 import '../canvas/editor.css';
 
 /* --------------------------------------------------------------------------
@@ -54,37 +59,21 @@ function EditorToolbar({ processName, processId }) {
 }
 
 /* --------------------------------------------------------------------------
-   Properties panel stub (T-0098 will flesh this out)
-   -------------------------------------------------------------------------- */
-function PropertiesPanelStub() {
-  return (
-    <div
-      className="bio-properties-panel-container"
-      style={{ borderLeft: '1px solid var(--chs-color-border)' }}
-    >
-      <div className="bio-properties-panel">
-        <div className="bio-properties-panel-header" style={{ padding: 'var(--chs-space-5)' }}>
-          <span className="bio-properties-panel-header-labels">
-            <span className="bio-properties-panel-header-type" style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-faint)' }}>
-              Выберите элемент диаграммы
-            </span>
-            <span className="bio-properties-panel-header-label" style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-faint)' }}>
-              Панель свойств — T-0098
-            </span>
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* --------------------------------------------------------------------------
    Main screen
    -------------------------------------------------------------------------- */
 export default function ProcessEditorScreen() {
   const { id } = useParams();
-  const navigate = useNavigate();
-  const modelerRef = useRef(null);
+  const modelerWrapperRef = useRef(null);
+
+  // T-0098: hold the live modeler instance in state so BpmnPropertiesPanel
+  // re-renders with the instance as soon as importXML has resolved.
+  const [liveModeler, setLiveModeler] = useState(null);
+
+  // T-0098: onReady is called by BpmnModelerWrapper once importXML resolves.
+  // Stable reference so the modeler wrapper's effect closure captures it.
+  const handleModelerReady = useCallback((modeler) => {
+    setLiveModeler(modeler);
+  }, []);
 
   // Derive a display name from the route id param
   const processName = id
@@ -97,16 +86,17 @@ export default function ProcessEditorScreen() {
       <EditorToolbar processName={processName} processId={processId} />
 
       <div className="chs-editor__body">
-        {/* Left: real bpmn-js canvas */}
+        {/* Left: real bpmn-js canvas (T-0096 + T-0097 palette + T-0098 palette provider) */}
         <div className="chs-canvas-outer">
           <BpmnModelerWrapper
-            ref={modelerRef}
+            ref={modelerWrapperRef}
             style={{ position: 'absolute', inset: 0 }}
+            onReady={handleModelerReady}
           />
         </div>
 
-        {/* Right: properties panel stub */}
-        <PropertiesPanelStub />
+        {/* Right: properties panel (T-0098) — shows EmptyState until element selected */}
+        <BpmnPropertiesPanel modeler={liveModeler} />
       </div>
     </div>
   );
