@@ -1,0 +1,56 @@
+{
+  "task_id": "T-0240",
+  "status": "pr_open",
+  "branch": "task/T-0240-fix-red-dev",
+  "base_sha": "d710d6a",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "ci/checks/db/config-agent-seed.test.ts",
+    "ci/checks/db/cross_tenant.test.ts",
+    "ci/checks/db/document-render.db.test.ts",
+    "src/core/document-render.ts"
+  ],
+  "roots_fixed": [
+    {
+      "root": "config-agent-seed counts",
+      "file": "ci/checks/db/config-agent-seed.test.ts",
+      "verified_legit": "migration 060_template_def.sql (T-0235) additive-only seed: 1 new mcp_tool 'author_template' + 2 new grants (create+update) for config-agent on authoring_draft. ON CONFLICT DO NOTHING, DRAFT-boundary preserved.",
+      "change": "AC-02 toBe(9)→toBe(10) + AC-04 toBe(9)→toBe(11); describe/it/comment strings updated to name author_template (migration 060/T-0235) as the source; AC-03 comment updated to '10 total'"
+    },
+    {
+      "root": "cross_tenant seeders",
+      "file": "ci/checks/db/cross_tenant.test.ts",
+      "tables_added": ["template_def", "template_dep", "doc_page", "doc_ref", "doc_log"],
+      "details": "Added switch cases in seedRowForTable + corresponding entries in SEEDED_TABLES. Added templateDefIdA/B and docPageIdA/B to seedState for FK chain. FK order: template_def (FK registry_def) → template_dep (FK template_def + registry_def); doc_page (nullable app_id, standalone) → doc_ref (FK doc_page) → doc_log (FK doc_page). KNOWN_TENANT_TABLES.txt not touched."
+    },
+    {
+      "root": "document-render filter:undefined audit payload",
+      "file": "src/core/document-render.ts",
+      "change": "sanitizeParams() registry branch: omit 'filter' key when params.filter is undefined. audit-preimage.ts throws on undefined jsonb values (deliberate strictness); fix makes audit payload structurally valid without fabricating data. Byte-stable for present-filter case unchanged.",
+      "additional_fix": "document-render.db.test.ts makeAllowAllResolverDeps: added tenantId param; grants now use actual tenantId instead of 'any'. The tenantId mismatch caused resolveFor to filter out all grants (line 576 g.tenantId !== subject.tenantId), resulting in 0 projected rows and empty snapshot bytes in FF-REPRODUCIBLE. This was the root of the FF-REPRODUCIBLE failure (misdiagnosed in the original task description as purely the filter:undefined bug, but the filter fix only cleared FF-AUDIT-EVERY-RENDER)."
+    }
+  ],
+  "how_verified": {
+    "fitness_db": "Test Files 51 passed (51) / Tests 691 passed (691) — 0 failed",
+    "fitness_db_setup": "npm run fitness:db:setup-template: template choros_test_template_aec44c4a ready (55 migrations applied)",
+    "tsc": "npx tsc --noEmit: 0 errors (no output)",
+    "frozen_checks_immutable": "bash ci/checks/frozen-checks-immutable.sh: EXIT 0 — PASS",
+    "document_render_isolation": "bash ci/checks/document-render-isolation.sh: EXIT 0 — PASS (all FF-* checks green)"
+  },
+  "deviations_from_adr": [
+    "None. All fixes are test-file corrections or the minimal code fix (omit undefined key) in sanitizeParams. No DDL, no schema, no frozen file, no audit-preimage policy change touched."
+  ],
+  "merge_target": "dev",
+  "residual_risks": [
+    "makeAllowAllResolverDeps tenantId fix: the FF-AUDIT-EVERY-RENDER renderAndFix test now also produces non-empty snapshot bytes (it was silently passing with empty bytes before); the audit assertions still hold. Reviewer should confirm this is not masking a real test-theater issue.",
+    "FF-REPRODUCIBLE: the liveResult bytes after mutation now correctly differ from snapshot bytes (expect(liveResult.bytes).not.toEqual(snapBytes) passes). Previously both were empty Uint8Arrays which would compare equal — fix exposes this assertion working for real now.",
+    "Cross-tenant seeds for template_def/template_dep use the shared regIdA/regIdB from beforeAll. If a future test mutates or drops that registry_def, the downstream seeds will fail. Pattern mirrors existing report_page/report_page_dep."
+  ],
+  "scope_notes": "Confirmed: audit-preimage.ts undefined-rejection policy NOT changed. known_tenant_tables.txt NOT changed. No frozen file touched. Changes are additive test corrections + one 2-line code fix in sanitizeParams."
+}
