@@ -1,0 +1,83 @@
+{
+  "task_id": "T-0075",
+  "title": "E11.4 DMN-middle: declarative conditional visibility/validation + business rules without code",
+  "branch": "task/T-0075-dmn-middle",
+  "status": "ready-for-review",
+  "summary": "Implements the Middle layer of the two-floor authoring model (extensibility-and-authoring.md §4). Given a set of DmnRuleTable definitions and the current named-binding field values, the pure evaluator deterministically computes field visibility overrides, requiredness overrides, validation errors, and routing outcomes — zero-LLM, zero-DB, zero-env. Migration 066 adds the dmn_rule_table DB table with RLS for tenant-scoped rule table persistence (draft/published status, human-gated promote).",
+  "files_created": [
+    "src/core/dmn-middle.ts",
+    "src/core/__tests__/dmn-middle.test.ts",
+    "migrations/066_dmn_rule_table.sql",
+    "ci/checks/dmn-middle-isolation.sh",
+    "docs/design/T-0075.pr-handoff.json"
+  ],
+  "files_modified": [
+    "package.json"
+  ],
+  "package_json_change": "ADDITIVE ONLY — appended ' && bash ci/checks/dmn-middle-isolation.sh && bash ci/checks/dmn-middle-isolation.sh --self-test' to the end of the existing 'fitness' script line. No entries removed or reordered.",
+  "migration": {
+    "number": "066",
+    "file": "migrations/066_dmn_rule_table.sql",
+    "type": "additive",
+    "description": "New table dmn_rule_table: id (UUID PK), tenant_id, name, definition (JSONB), process_def_id (nullable), status ('draft'|'published'), timestamps. RLS enabled, 4 policies (SELECT/INSERT/UPDATE/DELETE), one USING predicate each (NF-1). Index on (tenant_id, process_def_id, status)."
+  },
+  "fitness": {
+    "check_name": "dmn-middle-isolation.sh",
+    "checks": [
+      "DMN-1: no forbidden imports (pg/fs/net/http/crypto) and no process.env in core module",
+      "DMN-2: no second authority path (no grant-resolver/grant-lattice/object-handle/data-classification import)",
+      "DMN-3: single evaluate() entry point (no parallel evaluate-like exports)",
+      "DMN-4: no Date.now() / Math.random() (determinism guarantee)",
+      "DMN-5: migration 066_*.sql exists"
+    ],
+    "self_test_result": "PASS — all 6 self-tests green (DMN-1, DMN-1b, DMN-2, DMN-3, DMN-4, DMN-5)",
+    "real_check_result": "PASS — all 5 checks green"
+  },
+  "ci_local": {
+    "tsc_noEmit": true,
+    "eslint_src_new_files": true,
+    "eslint_src_preexisting_errors": "4 pre-existing errors in doc-reconcile.test.ts, doc-regen.test.ts, doc-summary.test.ts (unused vars) — none introduced by T-0075",
+    "build": true,
+    "vitest_dmn_middle": "32/32 tests pass",
+    "fitness_check": true,
+    "fitness_self_test": true
+  },
+  "architecture": {
+    "invariants": [
+      "Pure evaluation: no IO, no DB, no env. Zero-LLM, deterministic.",
+      "No second PDP: evaluator does NOT resolve grants. It receives named-binding field values and returns overrides. The caller (HTTP layer) applies them on top of Floor-1 resolved visibility/requiredness.",
+      "Single evaluate() entry point (DMN-4).",
+      "Carries the named-binding contract: field-key == variable-name (same as form-schema.ts / floor1-editor.ts).",
+      "Does NOT mutate process state directly (carrying the §4 invariant)."
+    ],
+    "types": [
+      "DmnOperator — 10 comparison operators (eq/neq/gt/gte/lt/lte/in/nin/present/absent)",
+      "DmnCondition — field + operator + optional value",
+      "DmnEffect — discriminated union: set_visibility | set_required | add_validation_error | set_routing_outcome",
+      "DmnHitPolicy — FIRST (stop at first match) | COLLECT (accumulate all matches)",
+      "DmnRule — conditions[] (AND) + effects[]",
+      "DmnRuleTable — id + name + hitPolicy + rules[]",
+      "NamedBindings — Record<string, unknown> (current form values)",
+      "DmnEvalResult — visibilityOverrides + requirednessOverrides + validationErrors + routingOutcomes + tablesEvaluated + rulesMatched"
+    ],
+    "helpers_exported": [
+      "evaluate(ruleTables, bindings) — THE single entry point",
+      "mergeVisibility(floor1Visible, dmnResult) — compose DMN overrides with Floor-1 base",
+      "mergeRequiredness(floor1Required, dmnResult) — compose DMN overrides with Floor-1 base"
+    ]
+  },
+  "deferred": [
+    "Authoring UI for DMN tables (visual table editor — later floors)",
+    "Floor-2 code integration with DMN outcomes (gateway variable injection into BPMN)",
+    "HTTP CRUD endpoints for dmn_rule_table rows (DB adapter layer)",
+    "Draft→published promote workflow (human-gated, per §4 governance)",
+    "Cross-table dependency / table ordering UI",
+    "Bundle-coherence check integration (form_binding ↔ dmn_rule_table key sync)"
+  ],
+  "risks": [
+    "COLLECT hit-policy with conflicting effects on same field: last-write-wins is intentional and documented; callers must be aware that rule ordering matters.",
+    "DMN overrides are advisory over Floor-1 — the merge helpers (mergeVisibility/mergeRequiredness) must be called by the HTTP/validation layer; if bypassed, DMN effects are silent.",
+    "Migration 066 adds dmn_rule_table; sister task T-0076 (if it exists) is pre-assigned 067 — no conflict.",
+    "RLS current_tenant() function must exist before 066 runs (defined in migration 001 — satisfied)."
+  ]
+}
