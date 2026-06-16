@@ -1,0 +1,39 @@
+{
+  "task": "T-0084",
+  "epic": "E12.3",
+  "title": "Independent changelog↔diff validator + form/schema-compat gate",
+  "design_note": "Pure-core stateless validator that independently recomputes the bundle diff (without calling deriveSemanticChangelog) and verifies the producer's claimed changelog against it, catching omissions, spurious entries, and kind mismatches. Also validates form_json_schema well-formedness and runs classifySchemaChange for schema-compat (lossy/destructive changes → blocked; soft narrowings → warnings). No migration needed — the validator is a pure function, no persistence.",
+  "files_changed": [
+    {
+      "path": "src/core/changelog-diff-validator.ts",
+      "role": "NEW — pure-core independent validator (zero-dep, no node:crypto, no env/fs/http/pg/Date.now/Math.random)"
+    },
+    {
+      "path": "src/core/__tests__/changelog-diff-validator.test.ts",
+      "role": "NEW — 24 unit tests covering all required scenarios (omission → blocked, lossy schema → blocked, faithful changelog + additive → promote-safe, etc.)"
+    },
+    {
+      "path": "ci/checks/changelog-diff-validator-isolation.sh",
+      "role": "NEW — fitness check (FF-CDV-1..FF-CDV-6) + --self-test"
+    },
+    {
+      "path": "package.json",
+      "role": "UPDATED — appended changelog-diff-validator-isolation.sh && --self-test to the END of the fitness script (additive)"
+    }
+  ],
+  "migration": null,
+  "independent_recompute_anti_tautology": "diffBundleSnapshots() re-implements the diff independently by comparing raw BundleSnapshot string fields directly (Set/Map-based presence+content check). It does NOT import or call deriveSemanticChangelog from bundle-commit.ts. The claimed changelog is then verified against the independently-computed ActualChange[] — any omission, spurious entry, or kind mismatch surfaces as a hard failure. FF-CDV-3 in the fitness check enforces this: grep on code lines must not find any call to deriveSemanticChangelog.",
+  "fitness_check": "ci/checks/changelog-diff-validator-isolation.sh",
+  "fitness_self_test": "bash ci/checks/changelog-diff-validator-isolation.sh --self-test",
+  "dod_tails": {
+    "tsc_noEmit": "clean (exit 0)",
+    "eslint": "clean (exit 0)",
+    "fitness": "green (exit 0) — all FF-CDV-1..FF-CDV-6 pass + self-tests pass",
+    "vitest": "2454 passed | 6 skipped (all pre-existing skips) — 24 new tests included",
+    "fitness_db_setup_template": "green — 63 migrations already applied, template ready",
+    "fitness_db": "805 passed | 58 test files — all green",
+    "known_tenant_tables_artifact": "none — no new migration, no table registered"
+  },
+  "seam_files_edited": [],
+  "pr_handoff_path": "docs/design/T-0084.pr-handoff.json"
+}
