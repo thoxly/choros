@@ -74,6 +74,10 @@ import {
   actorEventPrincipal,
 } from "./actor-event.js";
 import { type SubstitutionSource } from "./substitution.js";
+import {
+  type FieldVisibilityPolicy,
+  roleFieldVisibility,
+} from "./field-visibility.js";
 
 // ---------------------------------------------------------------------------
 // Injected ports (pure static-now; Postgres + RLS DAO in T-0053)
@@ -159,6 +163,20 @@ export interface ResolverDeps {
    * resolveFor behavior is byte-identical when this property is absent.
    */
   substitution?: SubstitutionSource;
+  /**
+   * T-0081 (E11.10) — Per-role field visibility most-restrictive-wins policy.
+   * OPTIONAL: when absent, roleFieldVisibility is a no-op and behavior is
+   * byte-identical to pre-T-0081 (NF-1 backward-compat). When present, the
+   * single PDP applies the most-restrictive intersection post-filter BETWEEN
+   * visibleFields() and projectFields() — no second authority path.
+   *
+   * The policy is assembled by the edge layer from the existing record_schema +
+   * data_classification rows; it is NOT a new store (ADR §4.1, §11).
+   * Additive: does not change the return type; only narrows the projected fields
+   * (eff ⊆ vis, never wider). Fail-closed: a role not conferring a role-scoped
+   * field explicitly causes that field to be hidden (ADR §5).
+   */
+  fieldPolicy?: FieldVisibilityPolicy;
   now?: () => number;
 }
 
@@ -712,23 +730,32 @@ export async function resolveFor(
 
   // 6. Project once (FR-4, AC-5, AC-6) — the ONE projection point.
   const vis = visibleFields(covering, handle.facet, raw);
+  // T-0081: most-restrictive-wins post-filter (E11.10). Applied AFTER the
+  // T-0021 union-floor (vis) and BEFORE projectFields so the physical key
+  // absence happens in the single authority boundary. When deps.fieldPolicy is
+  // absent this is a no-op and eff === vis (NF-1 byte-identical, ADR §5.1).
+  // The call only narrows: eff ⊆ vis — it can never widen field access.
+  // visibleFields() union semantics are UNCHANGED (T-0021 floor preserved).
+  const { effectiveVisible: eff } = deps.fieldPolicy !== undefined
+    ? roleFieldVisibility(covering, vis, deps.fieldPolicy)
+    : { effectiveVisible: vis };
   // T-0033: build the value-aware MaskContext IFF a ClassificationSource is
   // injected. Classification is read AFTER a covering grant is found (never for
   // a record we have no grant for). A present, classified facet whose version
   // has no rows fails closed inside maskFields (max mask), never widened.
   const maskCtx = buildMaskContext(deps, handle, covering);
-  const fields = projectFields(raw, vis, maskCtx);
+  const fields = projectFields(raw, eff, maskCtx);
   // T-0136 trace: emit masking step on the allow path.
   if (traceOut !== undefined) {
     const governed = maskCtx !== undefined ? maskCtx.governed : false;
     // Compute which fields received a non-raw transform (masked/hashed/redacted/dropped).
-    // We compare vis (fields the grant allows) against the actual projected fields to
-    // find those that were transformed or dropped by masking. This is admin-only info
-    // (the HTTP layer strips maskedFields for self-query — anti-oracle AC-8).
+    // We compare eff (fields after T-0081 most-restrictive post-filter + T-0021 floor)
+    // against the actual projected fields to find those transformed or dropped by masking.
+    // This is admin-only info (the HTTP layer strips maskedFields for self-query — AC-8).
     const maskedFields: string[] = [];
-    for (const f of vis) {
-      // A field is "masked" if it was visible but is absent in the projected output
-      // (dropped by masking), or its value differs from the raw value.
+    for (const f of eff) {
+      // A field is "masked" if it was in eff but is absent in the projected output
+      // (dropped by classification masking), or its value differs from the raw value.
       if (!(f in fields) || fields[f] !== (raw as Record<string, unknown>)[f]) {
         maskedFields.push(f);
       }
