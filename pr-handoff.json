@@ -1,34 +1,31 @@
 {
-  "task_id": "T-0035",
-  "status": "blocked",
-  "blocked_reason": "sibling-frozen expected-red: role-criticality-isolation.sh, dual-control-isolation.sh, grant-trail-no-new-table.sh — orchestrator to verify at MERGE",
-  "branch": "task/T-0035-substitutions",
-  "pr_url": "local:task/T-0035-substitutions",
+  "task_id": "T-0242",
+  "status": "pr_open",
+  "branch": "task/T-0242",
   "ci_local": {
     "build": true,
-    "lint": true,
+    "lint": false,
     "types": true,
     "tests": true,
-    "fitness": false
+    "fitness": true
   },
   "files_changed": [
-    "migrations/036_substitution_rule.sql",
-    "src/core/substitution.ts",
-    "src/__tests__/substitution.test.ts",
-    "src/core/grant-resolver.ts",
-    "ci/checks/substitution-isolation.sh",
-    "ci/checks/known_tenant_tables.txt",
-    "ci/checks/db/grant-editor.test.ts",
-    "ci/checks/db/cross_tenant.test.ts",
-    "package.json",
-    "docs/design/T-0035-substitutions.adr.md",
-    "docs/design/T-0035.adr.contract.json",
-    "docs/specs/T-0035-substitutions.spec.md",
-    "docs/specs/T-0035.spec.contract.json"
+    "src/vendor/issuance.ts",
+    "src/vendor/file-license-store.ts",
+    "src/cli/issue-key.ts",
+    "src/__tests__/issuance.test.ts",
+    "ci/checks/vendor-private-not-committed.sh",
+    "ci/checks/vendor-priv-not-in-client-circuit.sh",
+    "ci/checks/issuance-zero-dep.sh",
+    "ci/checks/issuance-store-not-tenant-table.sh",
+    "package.json"
   ],
   "deviations_from_adr": [
-    "Seed UUID prefix changed from spec's 'g0000000' (invalid hex, not a valid UUID) to '5b000000' — the spec used 'g' as a namespace letter mnemonic but UUIDs require hex digits (0-9,a-f). The live-DDL verified seed row carries the corrected UUID '5b000000-0000-0000-0000-000000000001'."
+    "ADR FF-T242-2 intent is 'private key FILE READ only in CLI' (NF-2 §1.4); but a bare createPrivateKey() check would also flag issuance.ts where createPrivateKey is legitimately used to convert a PEM *argument* to a key object for signing (no file I/O). FF-T242-2 updated to check readFileSync+priv context to match actual ADR intent rather than bare createPrivateKey.",
+    "ADR FF-T242-1 comment-exclusion extended to also skip .md files (ADR/spec docs describe PEM markers as text) and printf/echo fixture lines in existing CI self-tests. ADR anticipates this: 'исключение own ADR/spec строк, где токен встречается как пример'."
   ],
-  "friction_events": ["FE-2026-W24-0015"],
-  "notes": "B-1 verified: src/core/keyed-digest.ts exists, byte-equal dev (sha diff = empty). diff grant-resolver.ts vs dev = exactly 2 additive T-0035 lines: +import { type SubstitutionSource } from './substitution.js' and +substitution?: SubstitutionSource field on ResolverDeps. T-0118 buildMaskContext wiring (keyedDigest, resourceType, tenantId) fully intact. B-2 verified: ci/checks/role-criticality-isolation.sh, ci/checks/dual-control-isolation.sh, ci/checks/grant-trail-no-new-table.sh — diff vs dev = 0 bytes (byte-equal dev). B-3 verified: known_tenant_tables.txt = 29 lines (28 dev + substitution_rule in position 29). grant-editor.test.ts count = 29, toContain('substitution_rule') added alongside toContain('instance_budget') etc. Expected red checks (sibling-frozen, by design): role-criticality-isolation.sh (sees mig 036 + grant-resolver.ts + known_tenant_tables.txt in diff), dual-control-isolation.sh (same), grant-trail-no-new-table.sh (sees mig 036). These are expected-red by design (pattern T-0118), green after merge to dev. Own gate: substitution-isolation.sh FF-SUB1..FF-SUB6 all PASS. DB tests: schema.test.ts ACT_* (pre-existing Flowable), genesis-owner-seed.test.ts count (T-0144) — both pre-existing expected-red. cross_tenant.test.ts: seedSubstitutionRule case added, now passing."
+  "blocked_reason": null,
+  "friction_events": [
+    "lint:pre-existing — 4 @typescript-eslint/no-unused-vars errors in src/core/__tests__/doc-reconcile.test.ts, doc-regen.test.ts, doc-summary.test.ts existed on dev before this task; my new files (issuance.ts, file-license-store.ts, issue-key.ts, issuance.test.ts) are lint-clean (verified with npx eslint on those files: exit 0)"
+  ]
 }
