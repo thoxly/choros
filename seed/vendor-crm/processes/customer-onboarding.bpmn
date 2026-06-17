@@ -71,16 +71,21 @@
       </documentation>
     </userTask>
 
-    <!-- ServiceTask: Уведомить (T-0120 notification) -->
+    <!-- ServiceTask: Уведомить (T-0120 notification stub) -->
+    <!-- T-0246 bugfix: http-task requestMethod/requestUrl must be in extensionElements.
+         The notification step is a stub (no real endpoint in dev — R-4 spec out-of-scope).
+         Using external-task (same pattern as choros-smoke.bpmn20.xml) so the process
+         deploys and starts cleanly. A real worker or http-task can be wired in B-11/Stage-2.
+         Minimal deviation from T-0244 (operational artifact fix, not a contract-seam change). -->
     <serviceTask id="task-notify"
                  name="Уведомить об успешном онбординге"
-                 flowable:type="http"
-                 flowable:requestMethod="POST"
-                 flowable:requestUrl="${notificationEndpoint}">
+                 flowable:type="external"
+                 flowable:topic="customer-onboarding-notify">
       <documentation>
         Internal notification to founder (T-0120). Уведомление о завершении
         онбординга отправляется внутри системы. Внешнее уведомление клиенту —
-        вне MVP (R-4 spec). В dev-среде notificationEndpoint = заглушка.
+        вне MVP (R-4 spec). В dev-среде используется external-task (stub).
+        Реальный HTTP endpoint подключается в Stage-2 через extensionElements.
       </documentation>
     </serviceTask>
 
