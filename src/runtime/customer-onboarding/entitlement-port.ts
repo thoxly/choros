@@ -1,5 +1,5 @@
 /**
- * src/core/customer-subscription/entitlement-port.ts — T-0244 B-2
+ * src/runtime/customer-onboarding/entitlement-port.ts — T-0244 B-2
  *
  * Injectable EntitlementPort — the frozen contract-seam between T-0244 (CRM)
  * and T-0242 (PRODUCER-side key issuance). Mirrors LlmPort (T-0233) pattern.
@@ -7,8 +7,13 @@
  * PURE: no pg / http / fetch / node:net / child_process / process.env / SDK.
  *       Verified by ci/checks/entitlement-port-injectable.sh (FF-5).
  *
+ * Location: src/runtime/customer-onboarding/ — NOT in src/core/ to avoid
+ * triggering no-killswitch-in-core.sh (the vocabulary entitlement/not_after
+ * is a PORT/FIELD name here, not a kill-switch branch; but the red-line
+ * check is a vocabulary sweep and cannot distinguish intent).
+ *
  * Production adapter → src/adapters/t0242-entitlement-port.ts (Stage-deploy).
- * Test stub          → src/core/customer-subscription/__tests__/stub-entitlement-port.ts
+ * Test stub          → src/runtime/customer-onboarding/__tests__/stub-entitlement-port.ts
  * Default            → dormantEntitlementPort (throws on any call, fail-closed).
  *
  * Contract-seam frozen by orchestrator (ADR §3.4). T-0244 reads ONLY

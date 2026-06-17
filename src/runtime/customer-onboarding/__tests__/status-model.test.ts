@@ -1,5 +1,5 @@
 /**
- * src/core/customer-subscription/__tests__/status-model.test.ts — T-0244
+ * src/runtime/customer-onboarding/__tests__/status-model.test.ts — T-0244
  *
  * Unit tests for the customer-subscription record_schema and status-machine.
  * FF-1 (schema validates), FF-2 (status enum), FF-3 (transitions correct).
@@ -18,7 +18,7 @@ import {
   isAllowedTransition,
   isCustomerStatus,
   type CustomerStatus,
-} from "../status-model.js";
+} from "../../../core/customer-subscription/status-model.js";
 
 // ---------------------------------------------------------------------------
 // Load record_schema JSON (resolved relative to this test file)
@@ -26,6 +26,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SCHEMA_PATH = join(__dirname, "../../../../seed/vendor-crm/customer-subscription.schema.json");
+// Note: path is relative from src/runtime/customer-onboarding/__tests__/ → ../../../../ = repo root
 const schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8"));
 
 // AJV instance (no ajv-formats – we do format checks separately)

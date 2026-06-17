@@ -123,35 +123,6 @@ while IFS= read -r -d '' TARGET; do
   fi
 done < <(find "$CORE_DIR" -name '*.ts' -not -name '*.tmp.ts' -print0)
 
-# T-0244-FF-7-RELIEF: src/core/customer-subscription/ is a PURE TYPE/PORT zone owned by
-# T-0244 (ADR §3.4). EntitlementPort and "not_after" in that zone are PORT/FIELD NAMES,
-# not kill-switch branches. RELIEF: re-sweep excluding that zone; if re-sweep is clean,
-# reset FAIL. Sanctioned in data/frozen-sanctions.jsonl (T-0244, auto_additive, D-060).
-T0244_EXEMPT_ZONE="${CORE_DIR}/customer-subscription"
-T0244_RELIEF_FAIL=0
-if [ "$FAIL" -ne 0 ] && [ -d "${T0244_EXEMPT_ZONE}" ]; then
-  while IFS= read -r -d '' T244_F; do
-    case "${T244_F}" in
-      "${T0244_EXEMPT_ZONE}/"*) continue ;;
-    esac
-    # Inline non-comment filter (avoids reusing existing code_lines symbol — A-4 new entity).
-    T244_LINES="$(grep -vE '^[[:space:]]*(//|[*]|/[*])' "${T244_F}" 2>/dev/null || true)"
-    [ -z "${T244_LINES}" ] && continue
-    if echo "${T244_LINES}" | grep -qiE "${TOKEN_RE}"; then
-      T0244_RELIEF_FAIL=1
-      break
-    fi
-    if echo "${T244_LINES}" | grep -qE "${IMPORT_RE}"; then
-      T0244_RELIEF_FAIL=1
-      break
-    fi
-  done < <(find "${CORE_DIR}" -name '*.ts' -not -name '*.tmp.ts' -print0)
-  if [ "${T0244_RELIEF_FAIL}" -eq 0 ]; then
-    echo "RELIEF [T-0244-FF-7]: customer-subscription/ zone is pure port-types (ADR T-0244 §3.4); relief granted"
-    FAIL=0
-  fi
-fi
-
 if [ "$FAIL" -ne 0 ]; then
   echo "FAIL: no-killswitch-in-core — RED-LINE violated (core sees activation key state)"
   exit 1

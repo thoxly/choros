@@ -36,7 +36,7 @@ import {
   type IssueEntitlementInput,
   dormantEntitlementPort,
   EntitlementDormantError,
-} from "../../core/customer-subscription/entitlement-port.js";
+} from "./entitlement-port.js";
 import {
   type CustomerStatus,
   isAllowedTransition,

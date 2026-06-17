@@ -1,5 +1,5 @@
 /**
- * src/core/customer-subscription/__tests__/stub-entitlement-port.ts — T-0244
+ * src/runtime/customer-onboarding/__tests__/stub-entitlement-port.ts — T-0244
  *
  * Deterministic test stub for EntitlementPort. Zero network, zero SDK.
  * Used in vitest integration tests for runIssueKey (FF-6).

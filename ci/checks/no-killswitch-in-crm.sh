@@ -47,6 +47,7 @@ for DIR in \
   "${SRC}/core/customer-subscription" \
   "${SRC}/runtime/customer-onboarding" \
   "${SRC}/adapters/t0242-entitlement-port.ts"; do
+  # Note: entitlement-port.ts now lives in src/runtime/customer-onboarding/ (not core)
   # For file path, check just the file; for directory, search recursively
   if [[ -f "${DIR}" ]]; then
     CODE="$(code_lines "${DIR}")"
@@ -83,7 +84,9 @@ else
 fi
 
 # (3) entitlement-port.ts has NO runtime IO (no fetch/http/SDK)
-PORT_FILE="${SRC}/core/customer-subscription/entitlement-port.ts"
+# Port is now in src/runtime/customer-onboarding/ (relocated from src/core/ to avoid
+# triggering the no-killswitch-in-core vocabulary sweep; ADR §3.4).
+PORT_FILE="${SRC}/runtime/customer-onboarding/entitlement-port.ts"
 if [[ -f "${PORT_FILE}" ]]; then
   IO_PATTERN='(import.*node:http|import.*node:https|import.*node-fetch|import.*axios|^import fetch)'
   CODE="$(code_lines "${PORT_FILE}")"

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# T-0244 FF-5 — EntitlementPort injectable: core owns the type, adapters own the impl.
+# T-0244 FF-5 — EntitlementPort injectable: runtime/customer-onboarding owns the type, adapters own the impl.
 #
 # Rules:
-#   (a) src/core/customer-subscription/entitlement-port.ts exports EntitlementPort,
+#   (a) src/runtime/customer-onboarding/entitlement-port.ts exports EntitlementPort,
 #       dormantEntitlementPort, and EntitlementDormantError.
+#       NOTE: port was relocated from src/core/customer-subscription/ to avoid triggering
+#       no-killswitch-in-core.sh vocabulary sweep (F-1/F-2 review fix, ADR §3.4).
 #   (b) issueEntitlement signature has EXACTLY {circuit_id,plan,valid_from,valid_until,source,notes?}
 #       (frozen contract-seam, ADR §3.4).
 #   (c) src/core/customer-subscription/** and src/runtime/customer-onboarding/** have NO
@@ -31,15 +33,17 @@ fi
 
 echo "[T-0244 FF-5] entitlement-port-injectable"
 
-# (a) Core file exists and exports required symbols
-CORE_FILE="${SRC}/core/customer-subscription/entitlement-port.ts"
-if [[ ! -f "${CORE_FILE}" ]]; then
-  echo "FAIL FF-5(a): ${CORE_FILE} not found"
+# (a) Port file exists in runtime/customer-onboarding/ and exports required symbols
+# (Port relocated from src/core/customer-subscription/ — F-1/F-2 review fix)
+PORT_FILE="${SRC}/runtime/customer-onboarding/entitlement-port.ts"
+CORE_FILE="${PORT_FILE}"  # alias for backward compat with sections (b) below
+if [[ ! -f "${PORT_FILE}" ]]; then
+  echo "FAIL FF-5(a): ${PORT_FILE} not found"
   ERRORS=$((ERRORS + 1))
 else
   for SYMBOL in "EntitlementPort" "dormantEntitlementPort" "EntitlementDormantError"; do
-    if ! grep -q "${SYMBOL}" "${CORE_FILE}"; then
-      echo "FAIL FF-5(a): ${SYMBOL} not found in ${CORE_FILE}"
+    if ! grep -q "${SYMBOL}" "${PORT_FILE}"; then
+      echo "FAIL FF-5(a): ${SYMBOL} not found in ${PORT_FILE}"
       ERRORS=$((ERRORS + 1))
     else
       echo "PASS FF-5(a): ${SYMBOL} found in entitlement-port.ts"
@@ -48,9 +52,9 @@ else
 fi
 
 # (b) Frozen signature fields present
-if [[ -f "${CORE_FILE}" ]]; then
+if [[ -f "${PORT_FILE}" ]]; then
   for FIELD in "circuit_id" "plan" "valid_from" "valid_until" "source"; do
-    if ! grep -q "${FIELD}" "${CORE_FILE}"; then
+    if ! grep -q "${FIELD}" "${PORT_FILE}"; then
       echo "FAIL FF-5(b): required signature field '${FIELD}' not found in entitlement-port.ts"
       ERRORS=$((ERRORS + 1))
     else

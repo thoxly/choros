@@ -1,5 +1,5 @@
 /**
- * src/core/customer-subscription/__tests__/issue-key.test.ts — T-0244
+ * src/runtime/customer-onboarding/__tests__/issue-key.test.ts — T-0244
  *
  * Integration tests for runIssueKey (FF-5, FF-6, AC-7, AC-8, AC-9, AC-11).
  */
@@ -7,14 +7,14 @@
 import { describe, it, expect } from "vitest";
 import { randomUUID } from "node:crypto";
 import { InMemoryAuditWriter, inMemoryTx } from "../../../db/audit-writer.js";
-import { makeInMemoryActorEventStore } from "../../actor-event-store.js";
+import { makeInMemoryActorEventStore } from "../../../core/actor-event-store.js";
 import { makeStubEntitlementPort } from "./stub-entitlement-port.js";
 import { EntitlementDormantError, dormantEntitlementPort } from "../entitlement-port.js";
-import { runIssueKey, type IssueKeyDeps } from "../../../runtime/customer-onboarding/issue-key.js";
-import type { ResolverDeps } from "../../grant-resolver.js";
-import type { Grant } from "../../grant-lattice.js";
-import type { ResourceRef, ResolveSubject } from "../../object-handle.js";
-import { makeHandle } from "../../object-handle.js";
+import { runIssueKey, type IssueKeyDeps } from "../issue-key.js";
+import type { ResolverDeps } from "../../../core/grant-resolver.js";
+import type { Grant } from "../../../core/grant-lattice.js";
+import type { ResourceRef, ResolveSubject } from "../../../core/object-handle.js";
+import { makeHandle } from "../../../core/object-handle.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -299,5 +299,122 @@ describe("AC-9: PDP deny → step blocked", () => {
     });
     const events = auditWriter.rows(TENANT_ID);
     expect(events.find((e) => e.type === "card_action.denied")).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-8 (enhanced): error path — explicit no-side-effects assertion
+// ---------------------------------------------------------------------------
+describe("AC-8 (no-side-effects on error path)", () => {
+  it("on port_error: actorEventWriter receives NO transition events", async () => {
+    // The actor-event store must NOT receive any events on the error path —
+    // the step stays open (AC-8) with zero side-effects on key fields.
+    const actorEventWriter = makeInMemoryActorEventStore(TENANT_ID);
+    const stub = makeStubEntitlementPort({ error: new Error("port down") });
+    const deps = makeTestDeps({ entitlement: stub, actorEventWriter });
+    const tx = inMemoryTx(TENANT_ID);
+    const result = await runIssueKey(tx, deps, {
+      tenantId: TENANT_ID,
+      recordHandle: makeRecordHandle(),
+      subject: SUBJECT,
+      circuitId: "cid-no-side-effects",
+      nowMs: 4000,
+    });
+    // Step stays open.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("port_error");
+    // No transition actor_event was written — no-side-effects proven structurally.
+    const storeEvents = actorEventWriter.snapshot();
+    expect(storeEvents).toHaveLength(0);
+  });
+
+  it("on pdp_denied: actorEventWriter receives NO transition events", async () => {
+    const actorEventWriter = makeInMemoryActorEventStore(TENANT_ID);
+    const deps = makeTestDeps({ resolverDeps: makeDenyDeps(), actorEventWriter });
+    const tx = inMemoryTx(TENANT_ID);
+    const result = await runIssueKey(tx, deps, {
+      tenantId: TENANT_ID,
+      recordHandle: makeRecordHandle(),
+      subject: SUBJECT,
+      circuitId: "cid-deny-no-side",
+      nowMs: 5000,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("pdp_denied");
+    // No transition event written — denied before any side-effect.
+    const storeEvents = actorEventWriter.snapshot();
+    expect(storeEvents).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-9: field-mask enforcement — system-only fields blocked for vendor-admin
+// ---------------------------------------------------------------------------
+import {
+  checkWriteMask,
+  SYSTEM_ONLY_FIELDS,
+} from "../field-mask-guard.js";
+
+describe("AC-9: field-mask enforcement — system-only fields write-blocked", () => {
+  it("vendor-admin write-facet excluding circuit_id → denied when writing circuit_id", () => {
+    // Grant write-facet for vendor-admin: all normal fields, but NOT circuit_id/activation_key_issued_at
+    const vendorAdminWriteFacet = [
+      "company_name",
+      "contact_name",
+      "contact_email",
+      "plan",
+      "not_after",
+      "status",
+      "notes",
+    ];
+    // Attacker tries to directly write circuit_id
+    const result = checkWriteMask(vendorAdminWriteFacet, ["company_name", "circuit_id"]);
+    expect(result.denied).toBe(true);
+    if (result.denied) {
+      expect(result.reason).toBe("system_field_write_blocked");
+      expect(result.blockedFields).toContain("circuit_id");
+    }
+  });
+
+  it("vendor-admin write-facet excluding activation_key_issued_at → denied when writing it", () => {
+    const vendorAdminWriteFacet = ["company_name", "contact_name"];
+    const result = checkWriteMask(vendorAdminWriteFacet, ["activation_key_issued_at"]);
+    expect(result.denied).toBe(true);
+    if (result.denied) {
+      expect(result.blockedFields).toContain("activation_key_issued_at");
+    }
+  });
+
+  it("vendor-admin writing only allowed fields → permitted", () => {
+    const vendorAdminWriteFacet = ["company_name", "contact_name", "plan"];
+    const result = checkWriteMask(vendorAdminWriteFacet, ["company_name", "plan"]);
+    expect(result.denied).toBe(false);
+  });
+
+  it("system actor (undefined writeFacet) writing circuit_id → permitted", () => {
+    // System actor has no write-mask restriction (whole-resource write).
+    const result = checkWriteMask(undefined, ["circuit_id", "activation_key_issued_at"]);
+    expect(result.denied).toBe(false);
+  });
+
+  it("SYSTEM_ONLY_FIELDS contains exactly the two protected fields", () => {
+    expect(SYSTEM_ONLY_FIELDS.has("circuit_id")).toBe(true);
+    expect(SYSTEM_ONLY_FIELDS.has("activation_key_issued_at")).toBe(true);
+    expect(SYSTEM_ONLY_FIELDS.has("company_name")).toBe(false);
+  });
+
+  it("both system-only fields blocked simultaneously when write attempted", () => {
+    const vendorAdminWriteFacet = ["company_name"];
+    const result = checkWriteMask(vendorAdminWriteFacet, [
+      "company_name",
+      "circuit_id",
+      "activation_key_issued_at",
+    ]);
+    expect(result.denied).toBe(true);
+    if (result.denied) {
+      expect(result.blockedFields).toContain("circuit_id");
+      expect(result.blockedFields).toContain("activation_key_issued_at");
+      expect(result.blockedFields).toHaveLength(2);
+    }
   });
 });

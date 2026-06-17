@@ -22,7 +22,7 @@ import type {
   EntitlementPort,
   IssueEntitlementInput,
   LicenseRecord,
-} from "../core/customer-subscription/entitlement-port.js";
+} from "../runtime/customer-onboarding/entitlement-port.js";
 
 /**
  * Stage-deploy production adapter for EntitlementPort.
