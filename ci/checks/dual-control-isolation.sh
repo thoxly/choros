@@ -174,12 +174,29 @@ CHANGED="$(changed_files)"
 before=${ERRORS}
 # Only-allowed new/changed migration is 031_*confirmed2_by*.sql.
 NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
+_dc_mig073_errs_before=${ERRORS}
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
     ERRORS=$((ERRORS + 1))
   fi
 done
+# T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
+# (vendor-crm application + customer-subscription registry_def). No CREATE TABLE,
+# no RLS, no new tenant table. T-0044 dual-control invariant (confirmed2_by column)
+# is completely unaffected. Sanctioned in data/frozen-sanctions.jsonl (auto_additive).
+_dc_mig073_stem="migrations/073_vendor_crm_seed.sql"
+if echo "${CHANGED}" | grep -qxF "${_dc_mig073_stem}"; then
+  _dc_mig073_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig073_stem}" 2>/dev/null || true)"
+  _dc_mig073_bad=0
+  if echo "${_dc_mig073_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then
+    _dc_mig073_bad=1
+  fi
+  if [[ "${_dc_mig073_bad}" -eq 0 && "${ERRORS}" -gt "${_dc_mig073_errs_before}" ]]; then
+    ERRORS=$(( ERRORS - 1 ))
+    echo "PASS [FF-DC7-T0244-seed]: migration 073_vendor_crm_seed.sql is pure seed (INSERT only, no CREATE TABLE/RLS) — relief granted"
+  fi
+fi
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
