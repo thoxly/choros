@@ -55,32 +55,38 @@ describe("customer-subscription record_schema (FF-1, AC-2)", () => {
   });
 
   it("rejects record missing company_name", () => {
-    const { company_name: _, ...r } = VALID_RECORD;
+    const { company_name: _cn, ...r } = VALID_RECORD;
+    void _cn;
     expect(validate(r)).toBe(false);
   });
 
   it("rejects record missing contact_name", () => {
-    const { contact_name: _, ...r } = VALID_RECORD;
+    const { contact_name: _ctname, ...r } = VALID_RECORD;
+    void _ctname;
     expect(validate(r)).toBe(false);
   });
 
   it("rejects record missing contact_email", () => {
-    const { contact_email: _, ...r } = VALID_RECORD;
+    const { contact_email: _ctemail, ...r } = VALID_RECORD;
+    void _ctemail;
     expect(validate(r)).toBe(false);
   });
 
   it("rejects record missing plan", () => {
-    const { plan: _, ...r } = VALID_RECORD;
+    const { plan: _plan, ...r } = VALID_RECORD;
+    void _plan;
     expect(validate(r)).toBe(false);
   });
 
   it("rejects record missing not_after", () => {
-    const { not_after: _, ...r } = VALID_RECORD;
+    const { not_after: _na, ...r } = VALID_RECORD;
+    void _na;
     expect(validate(r)).toBe(false);
   });
 
   it("rejects record missing status", () => {
-    const { status: _, ...r } = VALID_RECORD;
+    const { status: _st, ...r } = VALID_RECORD;
+    void _st;
     expect(validate(r)).toBe(false);
   });
 
