@@ -27,7 +27,6 @@
 import { randomUUID } from "node:crypto";
 
 import type { PgClientLike, AuditWriter } from "../../db/audit-writer.js";
-import type { AuditEventInput } from "../../core/audit-grant-encoder.js";
 import type { ResolverDeps } from "../../core/grant-resolver.js";
 import { resolveFor } from "../../core/grant-resolver.js";
 import type { ObjectHandle, ResolveSubject } from "../../core/object-handle.js";
