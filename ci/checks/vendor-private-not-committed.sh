@@ -14,8 +14,9 @@
 # Exclusions:
 # 1. Comment-line exclusion: lines whose first non-whitespace chars are #, //, *, /* are
 #    excluded — documenting the red-line is allowed.
-# 2. .md files are excluded — Markdown docs (ADR/spec) may mention PEM markers as
-#    text description; this is documentation, not committed key material.
+# 2. T-0242 design/spec .md files are excluded — the ADR and spec may mention PEM
+#    markers as text description; this is documentation, not committed key material.
+#    Other .md files are NOT excluded — a real key in any other .md would be a leak.
 # 3. printf/echo lines that create test fixtures in CI checks are excluded — they
 #    contain the marker as a string argument, not actual key material.
 #
@@ -52,12 +53,12 @@ if [ "${1:-}" = "--self-test" ]; then
 
   # Self-test 1: planted file with PEM marker → must be CAUGHT.
   TMP_PEM="$TMP_DIR/test.pem"
-  # Use cat heredoc to avoid printf treating '-----' as options.
-  cat > "$TMP_PEM" <<'PEMEOF'
------BEGIN PRIVATE KEY-----
-MFICAQAwBQYDK2VwBCIEIFakeKeyDataForTestingPurposesOnly=
------END PRIVATE KEY-----
-PEMEOF
+  # Build the PEM marker via concatenation so the literal string never appears
+  # in this script file (which is itself git-tracked and would be caught by the
+  # real-run grep if the literal appeared here).
+  printf -- '-----BEGIN %s-----\n' 'PRIVATE KEY' > "$TMP_PEM"
+  printf 'MFICAQAwBQYDK2VwBCIEIFakeKeyDataForTestingPurposesOnly=\n' >> "$TMP_PEM"
+  printf -- '-----END %s-----\n' 'PRIVATE KEY' >> "$TMP_PEM"
   if ! code_lines "$TMP_PEM" | grep -qE "$MARKER_RE"; then
     echo "SELF-TEST 1 FAIL: planted PEM marker NOT detected — check is broken (exit 2)"
     exit 2
@@ -85,8 +86,12 @@ fi
 FAIL=0
 while IFS= read -r tracked_file; do
   [ -f "$REPO_ROOT/$tracked_file" ] || continue
-  # Skip .md files — documentation may describe PEM markers as text examples.
-  case "$tracked_file" in *.md) continue ;; esac
+  # Skip only T-0242 design/spec .md files — those may describe PEM markers as text
+  # examples. All other .md files are checked (a key in any other .md = real leak).
+  case "$tracked_file" in
+    docs/design/T-0242-*.adr.md) continue ;;
+    docs/specs/T-0242-*.spec.md) continue ;;
+  esac
   if code_lines "$REPO_ROOT/$tracked_file" | grep -qE "$MARKER_RE"; then
     echo "FAIL [FF-T242-1]: private-key PEM marker found in tracked file: $tracked_file"
     code_lines "$REPO_ROOT/$tracked_file" | grep -nE "$MARKER_RE" || true

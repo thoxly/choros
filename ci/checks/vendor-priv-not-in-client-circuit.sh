@@ -96,20 +96,43 @@ for check_dir in "$REPO_ROOT/src/http" "$REPO_ROOT/src/core"; do
   done < <(find "$check_dir" -name '*.ts' -print0 2>/dev/null)
 done
 
-# (c) Private-key FILE READ (readFileSync) only in src/cli/issue-key.ts.
+# (c) Private-key FILE READ — two patterns, either triggers a FAIL:
+#   (c1) readFileSync near priv/private-key context — only allowed in src/cli/issue-key.ts.
+#   (c2) readFileSync of a *.pem path (e.g. readFileSync('key.pem')) anywhere outside
+#        src/cli/issue-key.ts, regardless of variable name.
 # The CLI is the ONLY place that reads the private key from disk (NF-2 / ADR §1.4).
 # Note: createPrivateKey() from a PEM argument is permitted in issuance.ts (signKey)
 # because the private key is passed in as an argument, not read from file there.
-PRIV_READ_RE='readFileSync'
 while IFS= read -r -d '' f; do
   # Exclude the authorised file.
   if [ "$f" = "$REPO_ROOT/src/cli/issue-key.ts" ]; then continue; fi
   case "$(basename "$f")" in *.tmp.ts) continue ;; esac
-  # Only fail if readFileSync appears near priv/private-key context
-  # (to avoid false positives from other readFileSync uses).
+  # (c1) readFileSync near priv/private-key context.
   if code_lines "$f" | grep -qE 'readFileSync.*[Pp]riv|[Pp]riv.*readFileSync'; then
     echo "FAIL [FF-T242-2]: private-key readFileSync found outside src/cli/issue-key.ts: $f"
     code_lines "$f" | grep -nE 'readFileSync.*[Pp]riv|[Pp]riv.*readFileSync' || true
+    FAIL=1
+  fi
+  # (c2) readFileSync of any *.pem file path.
+  if code_lines "$f" | grep -qE "readFileSync[^;]*['\"][^'\"]*\\.pem['\"]"; then
+    echo "FAIL [FF-T242-2]: readFileSync of .pem file found outside src/cli/issue-key.ts: $f"
+    code_lines "$f" | grep -nE "readFileSync[^;]*['\"][^'\"]*\\.pem['\"]" || true
+    FAIL=1
+  fi
+done < <(find "$REPO_ROOT/src" -name '*.ts' -print0 2>/dev/null)
+
+# (d) createPrivateKey() must not appear outside src/vendor/issuance.ts and src/cli/.
+# Authorised: issuance.ts (constructs the key object from a PEM arg for signing),
+#             src/cli/ (issue-key.ts passes the PEM string in).
+while IFS= read -r -d '' f; do
+  case "$f" in
+    "$REPO_ROOT/src/vendor/issuance.ts") continue ;;
+    "$REPO_ROOT"/src/cli/*) continue ;;
+  esac
+  case "$(basename "$f")" in *.tmp.ts) continue ;; esac
+  if code_lines "$f" | grep -qE 'createPrivateKey[[:space:]]*\('; then
+    echo "FAIL [FF-T242-2]: createPrivateKey() found outside vendor/issuance.ts or src/cli/: $f"
+    code_lines "$f" | grep -nE 'createPrivateKey[[:space:]]*\(' || true
     FAIL=1
   fi
 done < <(find "$REPO_ROOT/src" -name '*.ts' -print0 2>/dev/null)
