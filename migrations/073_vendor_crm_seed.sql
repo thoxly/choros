@@ -14,7 +14,8 @@
 --   059_*, 062_*): ONE-DIRECTIONAL genesis, idempotent, no app-layer mock.
 --
 -- ADDITIVE & IDEMPOTENT:
---   INSERT ... ON CONFLICT (tenant_id, slug) DO NOTHING
+--   application:   INSERT ... ON CONFLICT (tenant_id, slug) DO NOTHING
+--   registry_def:  INSERT ... ON CONFLICT (tenant_id, application_id, slug) DO NOTHING
 --   Re-running is a no-op; no data is lost.
 --   Runs as choros_migrator (BYPASSRLS) — literal tenant_id, no GUC required
 --   (same pattern as 044_*, 056_*, 059_*).
@@ -111,4 +112,4 @@ VALUES
     }'::jsonb,
    true,
    0, 0)
-ON CONFLICT (tenant_id, slug) DO NOTHING;
+ON CONFLICT (tenant_id, application_id, slug) DO NOTHING;
