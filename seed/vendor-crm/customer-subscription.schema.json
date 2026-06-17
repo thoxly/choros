@@ -1,0 +1,71 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "customer-subscription",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_name",
+    "contact_name",
+    "contact_email",
+    "plan",
+    "not_after",
+    "status"
+  ],
+  "properties": {
+    "company_name": {
+      "type": "string",
+      "title": "Наименование компании",
+      "description": "Наименование компании-клиента"
+    },
+    "contact_name": {
+      "type": "string",
+      "title": "Контактное лицо",
+      "description": "Имя контактного лица"
+    },
+    "contact_email": {
+      "type": "string",
+      "format": "email",
+      "title": "E-mail контакта",
+      "description": "Электронная почта контактного лица"
+    },
+    "plan": {
+      "type": "string",
+      "enum": ["pilot", "standard", "enterprise"],
+      "title": "Тарифный план"
+    },
+    "not_after": {
+      "type": "string",
+      "format": "date",
+      "title": "Дата окончания подписки",
+      "description": "YYYY-MM-DD — дата окончания действия подписки"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "trial", "active", "expired", "custom", "archived"],
+      "title": "Статус",
+      "default": "draft",
+      "description": "Статус подписки (управляется status-машиной)"
+    },
+    "circuit_id": {
+      "type": "string",
+      "title": "ID контура",
+      "description": "Заполняется ТОЛЬКО шагом 'Выпустить ключ' (системный актор)"
+    },
+    "activation_key_issued_at": {
+      "type": "string",
+      "format": "date-time",
+      "title": "Метка выпуска ключа",
+      "description": "ISO-8601, заполняется ТОЛЬКО шагом 'Выпустить ключ'"
+    },
+    "custom_terms": {
+      "type": "string",
+      "title": "Индивидуальные условия",
+      "description": "Текстовое поле без автоматизации (NF-6)"
+    },
+    "notes": {
+      "type": "string",
+      "title": "Заметки",
+      "description": "Произвольные заметки фаундера"
+    }
+  }
+}

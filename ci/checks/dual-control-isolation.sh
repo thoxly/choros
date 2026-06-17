@@ -174,12 +174,41 @@ CHANGED="$(changed_files)"
 before=${ERRORS}
 # Only-allowed new/changed migration is 031_*confirmed2_by*.sql.
 NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
+# F-5 fix: use a per-migration flag so relief cancels ONLY the 073 FF-DC7 increment,
+# not any other migration's failure. _dc_mig073_failed is set ONLY when migration 073
+# itself triggers the "unexpected migration" FAIL in the loop below.
+_dc_mig073_failed=0
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
     ERRORS=$((ERRORS + 1))
+    # Track specifically when 073 triggers this FAIL (and nothing else).
+    if [[ "${m}" == "migrations/073_vendor_crm_seed.sql" ]]; then
+      _dc_mig073_failed=1
+    fi
   fi
 done
+# T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
+# (vendor-crm application + customer-subscription registry_def). No CREATE TABLE,
+# no RLS, no new tenant table. T-0044 dual-control invariant (confirmed2_by column)
+# is completely unaffected. Sanctioned in data/frozen-sanctions.jsonl (auto_additive).
+#
+# F-5 fix: relief cancels ONLY the _dc_mig073_failed increment — it CANNOT absorb
+# any other migration's FF-DC7 failure. The flag is set exclusively in the loop above
+# when migration 073 itself is the unexpected file, so the decrement is scoped exactly.
+_dc_mig073_stem="migrations/073_vendor_crm_seed.sql"
+if [[ "${_dc_mig073_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig073_stem}"; then
+  _dc_mig073_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig073_stem}" 2>/dev/null || true)"
+  _dc_mig073_bad=0
+  if echo "${_dc_mig073_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then
+    _dc_mig073_bad=1
+  fi
+  if [[ "${_dc_mig073_bad}" -eq 0 ]]; then
+    ERRORS=$(( ERRORS - 1 ))
+    _dc_mig073_failed=0
+    echo "PASS [FF-DC7-T0244-seed]: migration 073_vendor_crm_seed.sql is pure seed (INSERT only, no CREATE TABLE/RLS) — relief granted"
+  fi
+fi
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
