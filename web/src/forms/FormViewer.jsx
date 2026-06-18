@@ -168,7 +168,7 @@ function FormViewer({ formKey, theme, onSubmit }) {
         className="chs-form-viewer"
         title={formKey === 'purchase' ? 'Заявка на закупку' : 'Согласование закупки'}
         srcDoc={srcdoc}
-        sandbox="allow-scripts"
+        sandbox="allow-scripts allow-forms"
         style={{ height: height + 'px' }}
         aria-label={formKey === 'purchase' ? 'Форма заявки на закупку' : 'Форма согласования закупки'}
       />
