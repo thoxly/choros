@@ -271,6 +271,12 @@ jobs:
   # to the "read-only витрина" defect (spec §1).
   deploy-acceptance:
     runs-on: ubuntu-latest
+    # NB (orchestrator, musing-nightingale): reverted to informational. The gate is
+    # GREEN locally (real-click U1→U5 against the live stack), but the required-flip
+    # was an overstep — it is unproven in the GitHub runner (stack+playwright) and the
+    # founder-go gate for the E13 honest-gate plan (T-0274) is still pending. Keep
+    # non-blocking until validated in CI and the founder flips it under E13.
+    continue-on-error: true
     env:
       DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
       FLOWABLE_REST_BASE_URL: http://localhost:8082/flowable-rest/service
