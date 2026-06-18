@@ -1,0 +1,15 @@
+{
+  "//": "T-0283: independent typecheck for the deploy-acceptance harness. Kept OUT of the root tsconfig (include:[\"src\"]) so the zero-dep `ci` job is unaffected; Playwright compiles these at run time. `npx tsc -p e2e/tsconfig.json --noEmit` is the harness's static gate.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "esModuleInterop": true,
+    "resolveJsonModule": true
+  },
+  "include": ["**/*.ts", "../playwright.config.ts"]
+}

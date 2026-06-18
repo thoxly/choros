@@ -250,3 +250,53 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose stop keycloak postgres
+
+  # T-0283 · deploy-acceptance — the ТЭЛ U1→U5 browser click-through gate (ADR
+  # T-0278 §E / §2.4 / §G). Proves the deployed product is CLICKABLE (not a
+  # read-only витрина): a real browser drives the SAME built web/dist a user sees,
+  # against a live Postgres + Flowable, through start → form → claim → approve →
+  # done, and fails honestly if any step is not clickable (FF-3/4/5/6, AC-7/8/10).
+  #
+  # INTRODUCED NON-BLOCKING (ADR §2.5 / §G variant (а)): continue-on-error: true.
+  # It is INFORMATIONAL while the wiring stabilizes — it may be red without blocking
+  # the merge of A/B/C/D/E, so dev never sees a red REQUIRED gate (D-056). A separate
+  # final task (T-0278-G) flips it to required ONLY AFTER acceptance:tel is green on
+  # the full wiring — so at the moment it becomes required it is already green.
+  deploy-acceptance:
+    runs-on: ubuntu-latest
+    continue-on-error: true   # informational until T-0278-G flips it to required (§G)
+    env:
+      DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
+      FLOWABLE_REST_BASE_URL: http://localhost:8082/flowable-rest/service
+      FLOWABLE_PORT: "8082"
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      DEMO_TENANT_SLUG: dev
+      ACCEPTANCE_PORT: "3100"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix web ci
+      # Reuse the stack-up pattern of the `stack`/`flowable` jobs: bring up the real
+      # Postgres + Flowable (no mocks — NF1/FF-3), then run choros migrations so the
+      # `dev` tenant (e-orlov/e-larina) and audit schema exist.
+      - name: Start Postgres + Flowable via compose
+        run: docker compose up -d --wait postgres flowable
+        timeout-minutes: 10
+      - name: Wait for Flowable readiness
+        run: bash ci/checks/flowable/wait-ready.sh
+      - name: Run choros migrations (seed dev tenant + audit schema)
+        run: node migrations/run.mjs
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      # acceptance:tel: build web/dist + tsc, launch the choros server from THIS
+      # checkout pointed at the live stack, deterministic bootstrap, then the
+      # Playwright U1→U5 click-through (happy + fail-honest negative).
+      - name: Deploy-acceptance ТЭЛ click-through (acceptance:tel)
+        run: npm run acceptance:tel
+      - name: Stop services
+        if: always()
+        run: docker compose stop flowable postgres
