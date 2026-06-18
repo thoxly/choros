@@ -70,7 +70,7 @@ export const journey: Journey = {
     // T-0260 wired nav-config.js status fields into NavItem in shell.jsx:
     //   status === "demo" → <span class="chs-navitem__demo">демо</span>
     //   status === "soon" → <span class="chs-navitem__soon">скоро</span>
-    // The nav-config has: org=demo, forms=demo, budgets=soon.
+    // The nav-config has: forms=demo, budgets=soon (org flipped to live in T-0269).
     // A missing badge means the honest-nav feature is broken.
     {
       name: "S2 · at least one «демо» badge is visible in the sidebar nav (honest-nav live)",
@@ -83,14 +83,15 @@ export const journey: Journey = {
       target: { css: ".chs-navitem__soon", first: true },
     },
     {
-      // Specifically assert the «Оргструктура» nav item carries its demo badge
-      // (nav-config.js: { id: "org", status: "demo" }). The NavItem renders the span
-      // as a sibling to the label span inside the same button.
-      name: "S2 · «Оргструктура» nav item has the «демо» badge (nav-config status=demo)",
+      // Specifically assert the «Формы задач» nav item carries its demo badge
+      // (nav-config.js: { id: "forms", status: "demo" }). This is a developer-sandbox
+      // screen and is stable as demo — it is not on the path to flipping live soon.
+      // «Оргструктура» was here before but correctly flipped to live in T-0269.
+      name: "S2 · «Формы задач» nav item has the «демо» badge (nav-config status=demo)",
       action: "expectVisible",
       target: {
         css: ".chs-navitem__demo",
-        within: { css: 'button.chs-navitem[title="Оргструктура (демо)"]' },
+        within: { css: 'button.chs-navitem[title="Формы задач (демо)"]' },
       },
     },
     {
