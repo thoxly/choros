@@ -258,13 +258,19 @@ jobs:
   # done, and fails honestly if any step is not clickable (FF-3/4/5/6, AC-7/8/10).
   #
   # INTRODUCED NON-BLOCKING (ADR §2.5 / §G variant (а)): continue-on-error: true.
-  # It is INFORMATIONAL while the wiring stabilizes — it may be red without blocking
-  # the merge of A/B/C/D/E, so dev never sees a red REQUIRED gate (D-056). A separate
-  # final task (T-0278-G) flips it to required ONLY AFTER acceptance:tel is green on
-  # the full wiring — so at the moment it becomes required it is already green.
+  # It WAS INFORMATIONAL while the wiring stabilized — it could be red without
+  # blocking the merge of A/B/C/D/E, so dev never saw a red REQUIRED gate (D-056).
+  #
+  # FLIPPED TO REQUIRED (T-0284, §G): the full U1→U5 ТЭЛ click-through is now GREEN
+  # on the merged wiring with REAL mouse clicks against the live stack (start 201 →
+  # form submit 200 + persisted recordId → role-pool inbox task → claim 200 → «Мне»
+  # tab «Согласовать» card-action → approve 200 {status:"done"}); the fail-honest
+  # negatives stay red-on-violation. The chicken-and-egg is closed (D-056): the gate
+  # is green at the moment it becomes blocking, so removing continue-on-error cannot
+  # red-line dev. A non-clickable product now fails the merge — exactly the antidote
+  # to the "read-only витрина" defect (spec §1).
   deploy-acceptance:
     runs-on: ubuntu-latest
-    continue-on-error: true   # informational until T-0278-G flips it to required (§G)
     env:
       DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
       FLOWABLE_REST_BASE_URL: http://localhost:8082/flowable-rest/service

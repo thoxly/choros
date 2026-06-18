@@ -5,9 +5,12 @@
  * `npm run acceptance:tel` — the deploy-acceptance gate runner. Drives the U1→U5
  * ТЭЛ click-through against the REAL stack (NO mocks, FF-3 / NF1 / D-056):
  *
- *   1. Build web/dist (vite build) if absent — the gate must drive the SAME built
- *      artifact a user sees (NF1), not the vite dev server.
- *   2. Compile the TS server (tsc) if dist/ is absent.
+ *   1. FORCE-rebuild web/dist (vite build) — the gate must drive the SAME built
+ *      artifact a user sees (NF1), not the vite dev server, and NOT a stale dist
+ *      from a previous (pre-merge) checkout. Stale dist gave a false green in a
+ *      prior T-0284 attempt; we therefore `rm -rf` the artifacts first so the gate
+ *      runs exactly the merged code. Set ACCEPTANCE_NO_BUILD=1 to reuse artifacts.
+ *   2. FORCE-recompile the TS server (tsc) for the same reason.
  *   3. Launch the choros server from THIS checkout on ACCEPTANCE_PORT (default 3100),
  *      pointed at the live Postgres + Flowable, with DEMO_TENANT_SLUG=dev so the
  *      login picker + resolveActorTenant resolve to the `dev` tenant whose id
@@ -22,7 +25,7 @@
  *   FLOWABLE_REST_APP_ADMIN_PASSWORD, ACCEPTANCE_NO_BUILD (skip web/tsc build).
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -62,16 +65,18 @@ async function waitForServer(url, timeoutMs = 30_000) {
 }
 
 async function main() {
-  // 1+2. Build artifacts (skippable when already built).
+  // 1+2. FORCE-rebuild artifacts so the gate drives exactly the current (merged)
+  // code. A stale web/dist or dist/ from a prior checkout previously produced a
+  // false green; we therefore wipe both before rebuilding. ACCEPTANCE_NO_BUILD=1
+  // opts out (e.g. when the caller has just built and wants to reuse artifacts).
   if (!process.env.ACCEPTANCE_NO_BUILD) {
-    if (!existsSync(resolve(ROOT, "web/dist/index.html"))) {
-      console.log("[acceptance:tel] building web/dist (vite build)…");
-      run("npm", ["--prefix", "web", "run", "build"]);
-    }
-    if (!existsSync(resolve(ROOT, "dist/index.js"))) {
-      console.log("[acceptance:tel] compiling server (tsc)…");
-      run("npx", ["tsc"]);
-    }
+    console.log("[acceptance:tel] force-rebuild: rm -rf web/dist dist…");
+    rmSync(resolve(ROOT, "web/dist"), { recursive: true, force: true });
+    rmSync(resolve(ROOT, "dist"), { recursive: true, force: true });
+    console.log("[acceptance:tel] building web/dist (vite build)…");
+    run("npm", ["--prefix", "web", "run", "build"]);
+    console.log("[acceptance:tel] compiling server (tsc)…");
+    run("npx", ["tsc"]);
   }
 
   // 3. Launch the worktree server pointed at the live stack.

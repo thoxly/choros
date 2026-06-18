@@ -173,10 +173,14 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
 
     // ──────────────────────────────────────────────── U4 · Approve (card-action)
     // The approve transition (AC-5) by a REAL mouse click on the «Согласовать»
-    // button. After the claim, screen-inbox.jsx re-fetches and renders the primary
-    // «Согласовать» button for this claimed, own, role-approver task (T-0287). The
-    // button POSTs /api/inbox/:id/action {approve} → 200 { status: "done" }. The row
-    // is addressed to the approver — find it by the live instance and click approve.
+    // button. After the claim, the task leaves the POOL (server clears item.pool on
+    // claim — inbox.ts inTab/pool) and lands on the «Мне» tab (item.mine === true).
+    // screen-inbox.jsx renders the primary «Согласовать» button only for a claimed,
+    // own, role-approver task (T-0287: isTaken && t.mine && role-approver) — which is
+    // exactly the «Мне» view. So switch to «Мне» before locating the approve action.
+    // The button POSTs /api/inbox/:id/action {approve} → 200 { status: "done" }.
+    const mineTab = page.getByRole("button", { name: /^Мне/ });
+    await mineTab.click();
     const claimedRow = page
       .locator(`tr:has(:text("${instanceId}"))`)
       .filter({ has: page.getByRole("button", { name: "Согласовать" }) })
