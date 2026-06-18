@@ -17,6 +17,10 @@ import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { loadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
+import {
+  listInstanceProjections,
+  type InstanceProjection,
+} from "./process-projection.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -156,6 +160,40 @@ function findProcessInstance(instanceId: string): ProcessInstance | null {
 }
 
 // ---------------------------------------------------------------------------
+// T-0282 (ADR §2.3) — read-only merge of started-instance projections over the
+// pack/seed display data. A started ТЭЛ instance becomes visible in the list
+// (AC-1) and reaches `done` after approve (AC-6). The projection itself lives in
+// process-projection.ts (which carries pg) — this file stays display-plane-pure
+// (it imports the projection module, never pg / src/db/* directly; FF-DISPLAY-4 /
+// FF-7-3 grep this file's own imports).
+// ---------------------------------------------------------------------------
+
+/** Map an InstanceProjection to the ProcessInstance wire shape. */
+function projectionToInstance(p: InstanceProjection): ProcessInstance {
+  const started = new Date(p.startedAt).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  // Linear ТЭЛ progress: waiting at U4 ⇒ 2/3 nodes done; done ⇒ 3/3.
+  const progress = p.status === "done" ? { done: 3, total: 3 } : { done: 2, total: 3 };
+  return {
+    id: p.inst,
+    name: "Канонический линейный ТЭЛ",
+    procId: p.procKey,
+    status: p.status === "running" ? "running" : p.status, // running|waiting|done
+    node: p.step,
+    started,
+    elapsed: "—",
+    progress,
+    execs: ["human", "agent"],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -175,11 +213,36 @@ export function registerProcessesRoutes(
     router.register("POST", "/api/processes/start", makeStartInstanceHandler(startDeps));
   }
 
-  // GET /api/processes — return full process instances list
-  router.register("GET", "/api/processes", async (_req, res) => {
+  // GET /api/processes — return full process instances list. When start-deps are
+  // present (DB-backed), merge the started-instance projections (T-0282 §2.3) over
+  // the pack/seed display rows so a started ТЭЛ instance is visible (AC-1) and shows
+  // `done` after approve (AC-6). Tenant-scoped via the injected resolver; degrades
+  // gracefully to display-only on any projection error (read-only path).
+  router.register("GET", "/api/processes", async (req, res) => {
+    const base = findProcessInstances();
+    let merged = base;
+
+    if (startDeps) {
+      let devUserId = req.headers["x-dev-user"];
+      if (Array.isArray(devUserId)) devUserId = devUserId[0];
+      if (typeof devUserId === "string" && devUserId) {
+        try {
+          const tenantId = await startDeps.resolveActorTenant(devUserId);
+          const projections = await listInstanceProjections(startDeps.pool, tenantId);
+          const seen = new Set(base.map((i) => i.id));
+          const extra = projections
+            .filter((p) => !seen.has(p.inst))
+            .map(projectionToInstance);
+          merged = [...base, ...extra];
+        } catch {
+          merged = base; // read-only projection — never fail the display GET.
+        }
+      }
+    }
+
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ instances: findProcessInstances() }));
+    res.end(JSON.stringify({ instances: merged }));
   });
 
   // GET /api/processes/:id — return specific instance or 404

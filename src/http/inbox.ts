@@ -26,12 +26,18 @@
  * write to a DB user_task_claim table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
-import { HttpError, type Router } from "./router.js";
+import pg from "pg";
+import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
+import {
+  appendTaskApproved,
+  findWaitingInstanceTask,
+  listInstanceInboxTasks,
+} from "./process-projection.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,8 +133,13 @@ const INBOX_SEED: SeedItem[] = [
 const USER_ROLES: Record<string, string[]> = {
   "e-kravtsova": ["fin-ctrl"], // Контролёр расчётов
   "e-mironov": ["fin-appr"], // Согласующий счетов
-  "e-larina": ["fin-cfo", "fin-appr"], // Финансовый директор + согласование
-  "e-orlov": ["cs-l1"],
+  // T-0282: e-larina is the canonical ТЭЛ approver (BPMN task-approve
+  // candidateGroups="role-approver"); she holds role-approver so the U4 approval
+  // pool task is claimable + approvable by her (ADR T-0278 §2.1/§2.3, S4 persona).
+  "e-larina": ["fin-cfo", "fin-appr", "role-approver"], // Финансовый директор + согласование
+  // T-0282: e-orlov is the canonical ТЭЛ initiator (BPMN task-submit
+  // candidateGroups="role-initiator"; ADR §2.1, S1 persona).
+  "e-orlov": ["cs-l1", "role-initiator"],
   "e-savina": ["cs-l1"],
   "e-petrov": ["cs-l2"],
   "e-belov": ["plat-int"],
@@ -153,6 +164,54 @@ interface ClaimRecord {
 }
 
 const CLAIMED: Map<string, ClaimRecord> = new Map();
+
+// ---------------------------------------------------------------------------
+// T-0282 — inbox write-deps for the card-action approve route (ADR §2.3).
+//
+// The approve action needs a tenant-scoped pg tx to append the task.approved
+// audit event (engine→screen projection advance). Injected from the composition
+// root (server.ts) ALONGSIDE the existing claim path — absent ⇒ the approve route
+// is not registered (no-DB / memory-mode keeps the seed-only inbox unchanged,
+// exactly like the start-route's startDeps gating in processes.ts).
+// ---------------------------------------------------------------------------
+
+export interface InboxWriteDeps {
+  pool: pg.Pool;
+  /** Resolve the tenant the actor (dev-user slug) belongs to. */
+  resolveActorTenant: (actorSlug: string) => Promise<string>;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Run fn inside a tenant-scoped tx (SET LOCAL choros.tenant_id + FORCE RLS),
+ * mirroring process-start.ts/process-defs.ts. The task.approved append runs here
+ * so the projection advance is atomic + tenant-isolated.
+ */
+async function withTenantTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  if (!UUID_RE.test(tenantId)) {
+    throw new HttpError(400, "VALIDATION", "tenantId must be a valid UUID");
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Tenant resolution — DB path resolves the actor's tenant from the slug;
@@ -310,11 +369,65 @@ async function findInboxItems(
     deferItems = [];
   }
 
-  // Merge: seed items first (existing demo data), then defer projections.
-  // Dedup by id in case a seed task and a defer row have the same id (defensive).
+  // T-0282 (§2.3): project the WAITING user-tasks of started ТЭЛ instances into
+  // the inbox, addressed to the ROLE (candidateGroups → role), NOT to a person
+  // (AC-3). Same audit-event-backed read-projection track as the defer merge above
+  // — additive, read-only, degrades gracefully (a started instance's approval task
+  // appears as a pool task; once approved its instance is `done` and the task drops).
+  let instanceItems: InboxItem[] = [];
+  try {
+    const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId);
+    instanceItems = instanceTasks.map((row) => {
+      const slaMin = 240; // default headroom for an approval task (no per-task SLA yet).
+      const claim = CLAIMED.get(row.id);
+      const deadline = nowMs + slaMin * 60_000;
+
+      const base: InboxItem = {
+        id: row.id,
+        status: "waiting",
+        name: row.name,
+        step: row.step,
+        inst: row.inst,
+        role: row.role,
+        execType: "human",
+        pool: true,
+        sla: { min: slaMin, left: slaMin },
+        due: new Date(row.occurredAt + slaMin * 60_000).toLocaleString("ru-RU", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        deadline,
+      };
+
+      if (claim) {
+        const mine =
+          devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+        return {
+          ...base,
+          pool: false,
+          execType: "human" as const,
+          execName: claim.claimedBy,
+          claimedBy: claim.claimedBy,
+          claimedAt: claim.claimedAt,
+          mine,
+        };
+      }
+      return base;
+    });
+  } catch {
+    // Read-projection: degrade gracefully to no instance tasks (never a write path).
+    instanceItems = [];
+  }
+
+  // Merge: seed items first (existing demo data), then defer projections, then
+  // started-instance projections. Dedup by id (defensive — distinct id spaces).
   const seenIds = new Set(seedResults.map((i) => i.id));
-  const deduped = deferItems.filter((i) => !seenIds.has(i.id));
-  return [...seedResults, ...deduped];
+  const dedupedDefer = deferItems.filter((i) => !seenIds.has(i.id));
+  for (const i of dedupedDefer) seenIds.add(i.id);
+  const dedupedInstance = instanceItems.filter((i) => !seenIds.has(i.id));
+  return [...seedResults, ...dedupedDefer, ...dedupedInstance];
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +479,14 @@ function parseQuery(url: string | undefined): URLSearchParams {
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerInboxRoutes(router: Router, _store?: JobStore): void {
+export function registerInboxRoutes(
+  router: Router,
+  _store?: JobStore,
+  // T-0282 (ADR §2.3): when the composition root supplies the write-deps
+  // (pool + actor→tenant resolver), register POST /api/inbox/:id/action (approve).
+  // Absent ⇒ read + claim only (no-DB/memory-mode unchanged).
+  writeDeps?: InboxWriteDeps,
+): void {
   // GET /api/inbox[?tab=all|mine|pool|esc][&exec=agent|human|service][&sort=sla]
   //
   // - tenant-scoped to the actor (foreign-tenant tasks never returned)
@@ -452,7 +572,15 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
         taskRole = deferTask.role;
         taskIsPool = true; // defer tasks are always pool tasks (AC-6)
       } else {
-        throw new HttpError(404, "NOT_FOUND", "task not found");
+        // T-0282: also check started-instance projection (the U4 approval pool
+        // task). Like defer tasks, instance tasks are always pool tasks (AC-3/AC-4).
+        const instanceTask = await findWaitingInstanceTask(getOrgPool(), tenantId, taskId);
+        if (instanceTask) {
+          taskRole = instanceTask.role;
+          taskIsPool = true;
+        } else {
+          throw new HttpError(404, "NOT_FOUND", "task not found");
+        }
       }
     } else if (!seedTask) {
       throw new HttpError(404, "NOT_FOUND", "task not found");
@@ -496,6 +624,88 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ item }));
   });
+
+  // -------------------------------------------------------------------------
+  // POST /api/inbox/:id/action — card-action on a waiting instance user-task
+  // (T-0282 / ADR §2.3 / AC-5). Body: { action: "approve" }.
+  //
+  // The narrow approve card-action: it verifies the actor holds the `approve`
+  // grant (role-eligibility — the actor holds the ROLE the task is addressed to,
+  // the same deny-by-default invariant the claim path uses), writes ONE
+  // task.approved audit_event via the canonical writer, and the projection
+  // advances the instance to `done`. It is NOT a broad mutator: it only acts on a
+  // waiting instance user-task it can resolve, and reaches NO engine transport of
+  // its own — the audit write is the projection's source of truth (ADR §2.3).
+  //
+  // Registered only when writeDeps are present (DB-backed). Absent ⇒ 404.
+  //
+  // Authz / preconditions:
+  //   - x-dev-user required: 401 UNAUTHENTICATED
+  //   - body.action must be "approve": 400 VALIDATION
+  //   - task must be a waiting instance task in the actor's tenant: 404 NOT_FOUND
+  //   - actor must hold the role the task is addressed to (approve grant): 403 NOT_ELIGIBLE
+  // Success: 200 { instanceId, status: "done", action: "approve" }
+  if (writeDeps) {
+    const { pool, resolveActorTenant: resolveActorTenantDep } = writeDeps;
+
+    router.register("POST", "/api/inbox/:id/action", async (req, res, params) => {
+      let devUserId = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(devUserId)) devUserId = devUserId[0];
+      if (!devUserId || typeof devUserId !== "string") {
+        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      }
+      const actor = devUserId;
+
+      // Body validation — only the approve action is supported (AC-5; narrow scope).
+      const rawBody = await readJsonBody(req);
+      if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+        throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+      }
+      const action = (rawBody as Record<string, unknown>)["action"];
+      if (action !== "approve") {
+        throw new HttpError(400, "VALIDATION", "action must be 'approve'");
+      }
+
+      const taskId = params["id"] as string;
+      const tenantId = await resolveActorTenantDep(actor);
+
+      // The task must be a WAITING instance user-task in the actor's tenant.
+      const task = await findWaitingInstanceTask(pool, tenantId, taskId);
+      if (!task) {
+        throw new HttpError(404, "NOT_FOUND", "no waiting instance task with this id");
+      }
+
+      // approve-grant check (deny-by-default): the actor must hold the role the task
+      // is addressed to. An actor without role-membership cannot approve (the moat:
+      // e.g. an agent-slot holding no role-approver is denied here, structurally).
+      const myRoles = rolesForUser(actor);
+      if (!myRoles.includes(task.role)) {
+        throw new HttpError(
+          403,
+          "NOT_ELIGIBLE",
+          "actor does not hold the approve grant for this task",
+        );
+      }
+
+      // Append the task.approved event inside a tenant-scoped tx (RLS) → projection
+      // advances the instance to `done`. Single audit write via the canonical writer.
+      await withTenantTx(pool, tenantId, async (client) => {
+        await appendTaskApproved(client as unknown as import("../db/audit-writer.js").PgClientLike, {
+          taskId,
+          instanceId: task.inst,
+          procKey: task.procKey,
+          actor,
+          nowMs: Date.now(),
+        });
+      });
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({ instanceId: task.inst, status: "done", action: "approve" }),
+      );
+    });
+  }
 }
 
 /**
