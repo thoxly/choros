@@ -163,10 +163,6 @@ function isPlan(r: ReconcilePlan | ReconcileError): r is ReconcilePlan {
   return !('error' in r);
 }
 
-function isError(r: ReconcilePlan | ReconcileError): r is ReconcileError {
-  return 'error' in r && r.error === true;
-}
-
 // ---------------------------------------------------------------------------
 // F-7c — clean lint input → empty plan (idempotent clean-wiki)
 // ---------------------------------------------------------------------------

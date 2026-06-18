@@ -22,7 +22,6 @@ import {
   slugify,
   type RegenPlan,
   type RegenError,
-  type RegenPagePlan,
 } from '../doc-regen.js';
 import { checkDocRefs } from '../doc-ref-lint.js';
 import type { LiveSnapshot } from '../doc-ref-lint.js';
@@ -112,9 +111,6 @@ function materializeRefs(plan: RegenPlan, tenantId: string): DocRef[] {
 // Type guard helpers
 function isPlan(r: RegenPlan | RegenError): r is RegenPlan {
   return !('error' in r);
-}
-function isError(r: RegenPlan | RegenError): r is RegenError {
-  return 'error' in r && r.error === true;
 }
 
 // ---------------------------------------------------------------------------

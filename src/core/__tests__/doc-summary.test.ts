@@ -58,7 +58,6 @@ function singleModuleSnapshot(): LiveSnapshot {
 
 const ACTOR = 'docs-author';
 const NOW = 1_700_000_000_000;
-const TENANT = 'aaaaaaaa-0000-0000-0000-000000000001';
 
 function planOrThrow(live: LiveSnapshot): RegenPlan {
   const result = planRegen(live, [], [], NOW, ACTOR);
