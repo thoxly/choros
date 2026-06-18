@@ -298,6 +298,34 @@
     "  if(window.ResizeObserver){new ResizeObserver(postH).observe(d.body);}",
     "  window.addEventListener('load',postH);postH();setTimeout(postH,200);setTimeout(postH,600);",
     "  d.addEventListener('input',postH);d.addEventListener('click',function(){setTimeout(postH,140);});",
+    // submit channel — on form submit collect all data-field values and post
+    // {type:'fjs-submit', value:{fieldKey:value}} to the parent. Mirrors the
+    // fjs-height channel: target='*' (opaque origin), parent validates source+origin.
+    // The parent (FormViewer.jsx) uses acceptFrameSubmit() for source+origin+shape gate.
+    "  d.querySelectorAll('form').forEach(function(form){",
+    "    form.addEventListener('submit',function(e){",
+    "      e.preventDefault();",
+    "      var value={};",
+    "      d.querySelectorAll('[data-field]').forEach(function(f){",
+    "        var key=f.getAttribute('data-field');",
+    "        var selVal=f.querySelector('.fjs-select-value');",
+    "        if(selVal){value[key]=selVal.textContent.trim();return;}",
+    "        var radio=f.querySelector('input[type=radio]:checked');",
+    "        if(radio){value[key]=radio.value||radio.closest('label').querySelector('span').textContent.trim();return;}",
+    "        if(f.classList.contains('fjs-form-field-checklist')){",
+    "          var vals=[];f.querySelectorAll('input[type=checkbox]:checked').forEach(function(c){vals.push(c.closest('label').querySelector('span').textContent.trim());});",
+    "          value[key]=vals;return;",
+    "        }",
+    "        var chk=f.querySelector('input[type=checkbox].fjs-checkbox');",
+    "        if(chk){value[key]=chk.checked;return;}",
+    "        var ta=f.querySelector('textarea');",
+    "        if(ta){value[key]=ta.value;return;}",
+    "        var inp=f.querySelector('input');",
+    "        if(inp){value[key]=inp.value;}",
+    "      });",
+    "      parent.postMessage({type:'fjs-submit',value:value},'*');",
+    "    });",
+    "  });",
     "})();"
   ].join("\n");
 
