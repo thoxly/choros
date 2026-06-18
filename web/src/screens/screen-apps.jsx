@@ -23,6 +23,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, MonoId, Mono, StatusChip } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
@@ -201,6 +202,7 @@ function CreateAppModal({ open, onClose, onCreated }) {
 }
 
 function AppsScreen() {
+  const navigate = useNavigate();
   const [apps, setApps] = useState(null);     // null = loading, [] = empty, [...] = list
   const [error, setError] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -273,6 +275,7 @@ function AppsScreen() {
                 <col style={{ width: "180px" }} />
                 <col style={{ width: "120px" }} />
                 <col style={{ width: "160px" }} />
+                <col style={{ width: "140px" }} />
               </colgroup>
               <thead>
                 <tr>
@@ -280,6 +283,7 @@ function AppsScreen() {
                   <th>Слаг</th>
                   <th>Статус</th>
                   <th>Создано</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -302,6 +306,12 @@ function AppsScreen() {
                       <Mono style={{ fontSize: "var(--chs-text-xs)", color: "var(--chs-color-text-muted)" }}>
                         {fmtTs(app.created_at)}
                       </Mono>
+                    </td>
+                    <td>
+                      {/* T-0266: jump into the field-constructor for this app */}
+                      <Button variant="secondary" size="sm" onClick={() => navigate(`/app-schema/${app.id}`)}>
+                        Настроить поля
+                      </Button>
                     </td>
                   </tr>
                 ))}
