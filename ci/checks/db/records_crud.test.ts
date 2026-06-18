@@ -33,9 +33,22 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
 import pg from 'pg';
-import { appUrl, migratorUrl, withClient, TENANT_A, TENANT_B, uuid } from './_helpers.js';
+import { appUrl, migratorUrl, withClient, uuid } from './_helpers.js';
 import { Router } from '../../../src/http/router.js';
 import { registerRecordRoutes } from '../../../src/http/records.js';
+
+// ---------------------------------------------------------------------------
+// Fresh random tenant UUIDs — never reuse the shared TENANT_A/TENANT_B constants
+// from _helpers.ts.  audit_head has immutable rows; if cross_tenant.test.ts (or
+// any other file) already inserted a head for the well-known UUIDs with a
+// 1-byte dummy hash, the genesis-seed in PgAuditWriter is skipped (ON CONFLICT
+// DO NOTHING) and the first audit append in this test will crash on a
+// prev_hash buffer-length check.  Fresh UUIDs guarantee a clean head per run.
+// Pattern mirrored from ci/checks/db/audit-writer.chain.test.ts and
+// ci/checks/db/deferred-inbox.test.ts.
+// ---------------------------------------------------------------------------
+let TENANT_A: string;
+let TENANT_B: string;
 
 // ---------------------------------------------------------------------------
 // requireDb — skip cleanly if no DATABASE_URL
@@ -206,6 +219,12 @@ async function stubResolveActorTenant(slug: string): Promise<string> {
 
 beforeAll(async () => {
   if (!hasDb) return;
+
+  // Generate fresh tenant UUIDs so this file never collides with the shared
+  // TENANT_A/TENANT_B UUIDs that cross_tenant.test.ts seeds with a 1-byte
+  // dummy audit_head row (which would corrupt the audit chain for our tests).
+  TENANT_A = uuid();
+  TENANT_B = uuid();
 
   // App-role pool (NOBYPASSRLS) — cross-tenant denial enforced by the DB policy.
   appPool = new pg.Pool({ connectionString: appUrl() });
