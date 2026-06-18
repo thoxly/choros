@@ -15,7 +15,7 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
-import { loadShowcasePack } from "./pack-serve.js";
+import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
 import {
   listInstanceProjections,
@@ -145,18 +145,28 @@ function hasDb(): boolean {
 // Data accessors — pack-file-serve path when DATABASE_URL set, else PROCESSES_SEED
 // ---------------------------------------------------------------------------
 
-function findProcessInstances(): ProcessInstance[] {
+/** Sentinel returned when the pack file is absent in the deployed container. */
+export const PACK_ABSENT_SENTINEL = null;
+
+function findProcessInstances(): ProcessInstance[] | null {
   if (hasDb()) {
     // T-0141: serve from single source (pack file) when DB-backed mode active.
     // process_instances pack shape = ProcessInstance type (T-0140 ADR §3.10).
-    const pack = loadShowcasePack();
+    // T-0259: tryLoadShowcasePack returns null when the pack file is absent
+    // (container deployment); callers degrade to graceful-empty (never 500).
+    const pack = tryLoadShowcasePack();
+    if (pack === null) {
+      return PACK_ABSENT_SENTINEL;
+    }
     return pack.process_instances as ProcessInstance[];
   }
   return PROCESSES_SEED;
 }
 
 function findProcessInstance(instanceId: string): ProcessInstance | null {
-  return findProcessInstances().find((p) => p.id === instanceId) || null;
+  const instances = findProcessInstances();
+  if (instances === null) return null;
+  return instances.find((p) => p.id === instanceId) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +229,18 @@ export function registerProcessesRoutes(
   // `done` after approve (AC-6). Tenant-scoped via the injected resolver; degrades
   // gracefully to display-only on any projection error (read-only path).
   router.register("GET", "/api/processes", async (req, res) => {
+    // T-0259: base may be null when DATABASE_URL is set but the pack file is
+    // absent (container without seed dir). Degrade to graceful-empty so the
+    // endpoint never 500s. The `demo: true` marker lets the frontend distinguish
+    // "no data yet" from an error.
     const base = findProcessInstances();
+    if (base === null) {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ instances: [], demo: true }));
+      return;
+    }
+
     let merged = base;
 
     if (startDeps) {
