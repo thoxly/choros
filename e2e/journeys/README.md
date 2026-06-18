@@ -76,6 +76,16 @@ created id; later steps reference it as `{{instanceId}}`. A `pollApi` with
 `captureAs: "taskId"` captures an async-projected id. Referencing an un-captured slot
 **throws** (fail-honest — no silent run with an empty id).
 
+### `{{nonce}}` — a per-run unique token (built-in)
+
+The bag is pre-seeded with **`{{nonce}}`** before the first step: a unique
+lowercase base36 token (valid as a slug fragment). Use it for re-run-safe unique
+identifiers in a create-journey — e.g. `value: "acc-{{nonce}}"` for an application
+slug — so a `UNIQUE (tenant_id, slug)` row never `409`s on a repeat run. This keeps
+journeys idempotent **without** a destructive bootstrap (the acceptance bootstrap is
+read-only by construction — `ci/checks/acceptance/seed-idempotent.sh` forbids
+`TRUNCATE`/`DELETE` there).
+
 ## Running
 
 - `npm run acceptance` — declarative journeys (every `*.journey.ts`) + the

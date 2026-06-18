@@ -235,11 +235,30 @@ async function runStep(page: Page, step: Step, bag: Bag): Promise<Bag> {
 }
 
 /**
+ * A per-run unique token, seeded into the bag as {{nonce}} BEFORE the first step.
+ * This lets a create-journey use re-run-safe unique slugs/keys ("app-{{nonce}}")
+ * WITHOUT a destructive bootstrap (the acceptance bootstrap is read-only +
+ * idempotent by construction, ci/checks/acceptance/seed-idempotent.sh forbids
+ * TRUNCATE/DELETE there). A UNIQUE (tenant_id, slug) row therefore never 409s on a
+ * repeat run. Lowercase base36 so it is a valid slug fragment (^[a-z0-9-]+$). It is
+ * a normal capture slot — a journey may still override it via its own capture.
+ */
+function freshNonce(): string {
+  const t = Date.now().toString(36);
+  const r = Math.floor(Math.random() * 36 ** 4)
+    .toString(36)
+    .padStart(4, "0");
+  return `${t}${r}`;
+}
+
+/**
  * Run a whole journey against the deployed product. Each step is a hard assertion;
  * a captured value (e.g. instanceId) threads forward via {{slot}} interpolation.
+ * The bag starts pre-seeded with {{nonce}} (a per-run unique token) so a create
+ * journey can author re-run-safe unique slugs without a destructive bootstrap.
  */
 export async function runJourney(page: Page, journey: Journey): Promise<void> {
-  let bag: Bag = {};
+  let bag: Bag = { nonce: freshNonce() };
   for (const step of journey.steps) {
     bag = await runStep(page, step, bag);
   }
