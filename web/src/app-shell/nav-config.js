@@ -22,6 +22,14 @@
 /** @type {NavGroup[]} */
 export const NAV = [
   {
+    group: "Конструктор",
+    items: [
+      // Приложения: GET /api/applications (live), POST /api/applications (live) — T-0262/T-0265.
+      // Первый реальный create-экран продукта (E13): список + работающая «Создать приложение».
+      { id: "apps", label: "Приложения", icon: "apps", screen: true, status: "live" },
+    ],
+  },
+  {
     group: "Оркестрация",
     items: [
       // Инбокс: GET /api/inbox (live), POST /api/inbox/:id/claim (live), POST /api/inbox/:id/action (live)
