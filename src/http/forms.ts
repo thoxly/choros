@@ -2,12 +2,15 @@
  * src/http/forms.ts
  *
  * T-0102 · E9: Form submission with SERVER-SIDE field validation.
+ * T-0251 · E9: PERSIST submitted record on success (in-memory mode).
  *
  * Registers:
  *   POST /api/forms/:formId/submit
  *     Body: the submitted field values (a JSON object).
- *     → 200 { ok: true, formId, value }   — value is the SANITIZED payload
+ *     → 200 { ok: true, formId, value, recordId }
+ *                                            value = SANITIZED payload
  *                                            (only schema-declared fields).
+ *                                            recordId = the persisted record's id.
  *       400 VALIDATION                     — envelope carries field-level errors
  *                                            in `error.fields` (FieldError[]).
  *       401 UNAUTHENTICATED                — missing x-dev-user (dev auth mode).
@@ -22,16 +25,50 @@
  *   - missing required, wrong type, over-length, out-of-range, disallowed enum,
  *     and unknown/extra forged fields are all rejected here;
  *   - on success only the SANITIZED value (schema-declared fields, validated
- *     types) is echoed/persisted — a forged extra key never survives.
+ *     types) is persisted — a forged extra key never reaches storage.
+ *
+ * Record store design (T-0251):
+ *   In-process in-memory store (mirrors the CLAIMED map in inbox.ts). Each
+ *   successful form submit creates a NEW record — including approval-step submits
+ *   (approval decision is a separate immutable record; it does NOT mutate the
+ *   original purchase record). This keeps the linear ТЭЛ demo simple: every
+ *   submit is an append, the records are never updated by this path.
  *
  * Zero external dependencies beyond node:http types + router.ts + the pure core.
  * Auth via the x-dev-user convention (same as inbox.ts / binding.ts). The schema
- * lookup is in-process and pure, so no DB is required for validation.
+ * lookup is in-process and pure, so no DB is required for validation or storage.
  */
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import { validateFormSubmission, type FieldError } from "../core/form-validator.js";
 import { getFormDef } from "../core/form-schema.js";
+import { randomUUID } from "node:crypto";
+
+// ---------------------------------------------------------------------------
+// In-memory record store (T-0251)
+// Maps recordId → stored form record. Process-lifetime only — survives across
+// requests in a running server (mirrors the CLAIMED map in inbox.ts pattern).
+// A real implementation would write to a DB records table; the in-process
+// contract is identical (same HTTP shape, same error codes).
+// ---------------------------------------------------------------------------
+
+interface FormRecord {
+  recordId: string;
+  formId: string;
+  submittedBy: string;
+  submittedAt: number;
+  schema_version: number;
+  data: Record<string, unknown>;
+}
+
+const RECORDS: Map<string, FormRecord> = new Map();
+
+/**
+ * Current schema version for new records.
+ * Version 1 = initial record shape (all form fields as validated by form-validator).
+ * Increment when the stored shape changes incompatibly (T-0085 ADR §3.5).
+ */
+const CURRENT_SCHEMA_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Error envelope (extends the router's {error:{code,message}} with field errors)
@@ -82,11 +119,47 @@ export function registerFormsRoutes(router: Router): void {
       return;
     }
 
-    // Success: echo ONLY the sanitized value (schema-declared, validated fields).
-    // A real impl would complete the User Task / persist result.value here; the
-    // contract (sanitized, server-validated payload) is identical.
+    // Persist the sanitized value as a new record (T-0251).
+    // Each submit is an append — approval-step submits create a NEW record rather
+    // than mutating the purchase record (simplest model for the linear ТЭЛ demo).
+    const recordId = randomUUID();
+    const record: FormRecord = {
+      recordId,
+      formId,
+      submittedBy: devUserId,
+      submittedAt: Date.now(),
+      schema_version: CURRENT_SCHEMA_VERSION,
+      data: result.value as Record<string, unknown>,
+    };
+    RECORDS.set(recordId, record);
+
+    // Response contract (frozen): { ok, formId, value, recordId }
+    // value = sanitized payload (schema-declared, validated fields only).
+    // recordId = the id of the persisted record (additive — clients that ignore
+    // it remain compatible).
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ ok: true, formId, value: result.value }));
+    res.end(JSON.stringify({ ok: true, formId, value: result.value, recordId }));
   });
+}
+
+// ---------------------------------------------------------------------------
+// Test seams (T-0251)
+// Not called from production code. Mirror the inbox.ts pattern.
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve a stored record by id. Returns undefined if not found.
+ * Used by e2e tests to assert persistence without a real DB.
+ */
+export function _getRecordForTests(recordId: string): FormRecord | undefined {
+  return RECORDS.get(recordId);
+}
+
+/**
+ * Reset in-memory record store between tests.
+ * Not called from production code.
+ */
+export function _resetRecordStoreForTests(): void {
+  RECORDS.clear();
 }
