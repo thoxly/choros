@@ -1,15 +1,22 @@
 /**
  * src/http/processes.ts
  *
- * Read-API for process instances (GET /api/processes).
+ * Read-API for process instances (GET /api/processes) + the start-instance
+ * write-route (POST /api/processes/start, T-0280 / ADR T-0278 §B).
+ *
  * In-memory seed data with process instance list matching screen-processes.jsx shape.
  * T-0141: when DATABASE_URL is set, serves process_instances from showcase pack file
  * (pack-serve.ts). PROCESSES_SEED remains as no-DB fallback (I-2 / spec §4.5).
- * Zero pg / src/db/* imports (FF-DISPLAY-4).
+ *
+ * Zero pg / src/db/* imports in THIS file (FF-DISPLAY-4): the read GETs are the
+ * display plane. The POST start-route's pg/RLS/engine logic lives in the dedicated
+ * src/http/process-start.ts (ADR §3 extract-module sanction); this file only wires
+ * the handler in when the composition root supplies a pool + FlowableClient.
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { loadShowcasePack } from "./pack-serve.js";
+import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -154,8 +161,20 @@ function findProcessInstance(instanceId: string): ProcessInstance | null {
 
 export function registerProcessesRoutes(
   router: Router,
-  _store?: JobStore
+  _store?: JobStore,
+  // T-0280 (ADR §B): when the composition root supplies the start-instance deps
+  // (pool + FlowableClient + actor→tenant resolver), register the write-route.
+  // Absent ⇒ GET-only display plane (E2E/no-DB/no-engine path stays unchanged).
+  startDeps?: StartInstanceDeps,
 ): void {
+  // POST /api/processes/start — start-instance write-route (T-0280, FROZEN §2.2).
+  // Registered BEFORE GET /api/processes/:id so the literal '/start' segment is not
+  // captured by the ':id' pattern. Tenant-scoped (withTenantTx + RLS); the pg/engine
+  // logic lives in process-start.ts (FF-DISPLAY-4 keeps THIS file display-plane-pure).
+  if (startDeps) {
+    router.register("POST", "/api/processes/start", makeStartInstanceHandler(startDeps));
+  }
+
   // GET /api/processes — return full process instances list
   router.register("GET", "/api/processes", async (_req, res) => {
     res.statusCode = 200;

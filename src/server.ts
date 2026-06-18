@@ -38,6 +38,7 @@ import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
+import { getOrgPool, resolveActorTenant } from "./db/org.js";
 
 const { Pool } = pg;
 
@@ -254,8 +255,38 @@ function buildRouter(
     registerRightsIntentRoutes(router, grantsPool);
   }
 
-  // Register processes endpoints
-  registerProcessesRoutes(router, store as JobStore);
+  // FlowableClient for engine write-paths (start-instance + process-def publish).
+  // Composed here from env at call time — NO env reads in core (NF-1). Shared by
+  // the processes start-route (T-0280) and process-defs publish (T-0252) so the
+  // engine binding is allocated once. null when grantsPool or password is absent.
+  const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  const flowableClient =
+    grantsPool && flowablePassword
+      ? makeFlowableClient({
+          baseUrl:
+            process.env["FLOWABLE_REST_BASE_URL"] ??
+            "http://flowable:8082/flowable-rest/service",
+          adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+          adminPassword: flowablePassword,
+        })
+      : null;
+
+  // Register processes endpoints. The GET display plane is always registered; the
+  // POST /api/processes/start write-route (T-0280, FROZEN ADR §2.2) is wired only
+  // when a pool + FlowableClient are available — tenant-scoped via withTenantTx+RLS,
+  // actor→tenant membership resolved from the dev-user slug (AC-9 cross-tenant deny).
+  registerProcessesRoutes(
+    router,
+    store as JobStore,
+    grantsPool && flowableClient
+      ? {
+          pool: grantsPool,
+          flowable: flowableClient,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
 
   // Register grant trail endpoints (T-0031)
   registerGrantTrailRoutes(router);
@@ -316,18 +347,10 @@ function buildRouter(
   registerVendorActivationRoutes(router);
 
   // Register process-definition CRUD + publish routes (T-0252 E8 C2).
-  // Requires grantsPool (same tenant RLS pattern). FlowableClient is composed here
-  // from env at call time — NO env reads in core (NF-1).
-  if (grantsPool) {
-    const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
-    if (flowablePassword) {
-      const flowableClient = makeFlowableClient({
-        baseUrl: process.env["FLOWABLE_REST_BASE_URL"] ?? "http://flowable:8082/flowable-rest/service",
-        adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
-        adminPassword: flowablePassword,
-      });
-      registerProcessDefsRoutes(router, grantsPool, flowableClient);
-    }
+  // Requires grantsPool (same tenant RLS pattern) + the shared FlowableClient
+  // composed above from env (NO env reads in core — NF-1).
+  if (grantsPool && flowableClient) {
+    registerProcessDefsRoutes(router, grantsPool, flowableClient);
   }
 
   // Set static file handler as fallback for everything else
