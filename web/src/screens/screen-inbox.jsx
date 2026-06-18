@@ -115,6 +115,8 @@ function InboxScreen() {
   const [error, setError] = useState(null);
   // T-0138: per-task claim inflight tracking (taskId → true)
   const [claiming, setClaiming] = useState(() => ({}));
+  // T-0287: per-task approve inflight tracking (taskId → true)
+  const [approving, setApproving] = useState(() => ({}));
 
   // T-0093: tabs/filters/sort are applied SERVER-SIDE. The query mirrors the API:
   // ?tab=...&exec=...&sort=sla. The server returns the filtered `items` plus full
@@ -160,6 +162,31 @@ function InboxScreen() {
       alert(e.message);
     } finally {
       setClaiming((s) => ({ ...s, [taskId]: false }));
+    }
+  };
+
+  // T-0287: approve a claimed instance task via POST /api/inbox/:id/action {action:'approve'}
+  const approveTask = async (taskId) => {
+    if (approving[taskId]) return; // inflight guard
+    setApproving((s) => ({ ...s, [taskId]: true }));
+    try {
+      const res = await fetch(`/api/inbox/${taskId}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ action: 'approve' }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const code = body?.error?.code ?? `HTTP ${res.status}`;
+        throw new Error(`Ошибка: ${code}`);
+      }
+      // Task approved → instance done; re-fetch to drop the task from the list.
+      await load();
+    } catch (e) {
+      // eslint-disable-next-line no-alert
+      alert(e.message);
+    } finally {
+      setApproving((s) => ({ ...s, [taskId]: false }));
     }
   };
 
@@ -271,6 +298,10 @@ function InboxScreen() {
                       {inPool ? (
                         <Button variant="secondary" size="sm" disabled={!!claiming[t.id]} onClick={() => claimTask(t.id)}>
                           {claiming[t.id] ? '…' : 'Взять'}
+                        </Button>
+                      ) : isTaken && t.mine && t.role === 'role-approver' ? (
+                        <Button variant="primary" size="sm" disabled={!!approving[t.id]} onClick={() => approveTask(t.id)}>
+                          {approving[t.id] ? '…' : 'Согласовать'}
                         </Button>
                       ) : isTaken ? (
                         <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
