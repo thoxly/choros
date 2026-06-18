@@ -462,7 +462,65 @@ export function withAuth(handler: RouteHandler): RouteHandler {
 // Route registration
 // ---------------------------------------------------------------------------
 
+/**
+ * Public (non-secret) auth configuration surface for the browser SPA (T-0258).
+ *
+ * The frontend must learn, at runtime, (a) which auth mode the server is in and
+ * (b) — in keycloak mode — the public OIDC parameters needed to start the
+ * Authorization-Code + PKCE login flow. ALL of these are public values that are
+ * shipped to every browser anyway by any OIDC SPA (issuer URL, realm, public
+ * clientId). No client secret is ever returned here — the browser uses PKCE, so
+ * the SPA client is a *public* Keycloak client with no secret.
+ *
+ * Shape:
+ *   dev:      { "mode": "dev" }
+ *   keycloak: { "mode": "keycloak",
+ *               "keycloak": { "url": "<base>", "realm": "<realm>",
+ *                             "clientId": "<public-spa-client>",
+ *                             "audience": "<api-audience>" } }
+ *
+ * Browser clientId comes from KEYCLOAK_WEB_CLIENT_ID (default "choros-web" — the
+ * public PKCE SPA client provisioned in config/keycloak/realm-choros.json).
+ * The base URL prefers KEYCLOAK_PUBLIC_URL (browser-reachable origin) and falls
+ * back to KEYCLOAK_URL (which may be a compose-internal hostname); see env docs.
+ */
+export interface PublicAuthConfig {
+  mode: "dev" | "keycloak";
+  keycloak?: {
+    url: string;
+    realm: string;
+    clientId: string;
+    audience: string;
+  };
+}
+
+/** Builds the public auth config from env. Pure w.r.t. the request. */
+export function buildPublicAuthConfig(): PublicAuthConfig {
+  const mode = getAuthMode();
+  if (mode !== "keycloak") {
+    return { mode: "dev" };
+  }
+  // Browser-reachable base URL: KEYCLOAK_PUBLIC_URL is the browser-facing origin
+  // (e.g. https://auth.example.com); KEYCLOAK_URL may be a compose-internal host
+  // (e.g. http://keycloak:8180) used only by the server-side JWKS fetch.
+  const url =
+    process.env["KEYCLOAK_PUBLIC_URL"] ?? process.env["KEYCLOAK_URL"] ?? "";
+  const realm = process.env["KEYCLOAK_REALM"] ?? "choros";
+  const clientId = process.env["KEYCLOAK_WEB_CLIENT_ID"] ?? "choros-web";
+  const audience = process.env["KEYCLOAK_AUDIENCE"] ?? "choros-api";
+  return { mode, keycloak: { url, realm, clientId, audience } };
+}
+
 export function registerAuthRoutes(router: Router, _store?: JobStore): void {
+  // GET /api/auth-config — public, non-secret auth config for the browser SPA.
+  // Tells the frontend which auth mode is active and (in keycloak mode) the
+  // public OIDC parameters needed to start the PKCE login flow (T-0258).
+  router.register("GET", "/api/auth-config", async (_req, res) => {
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(buildPublicAuthConfig()));
+  });
+
   // GET /api/users — return list of selectable users (humans only)
   router.register("GET", "/api/users", async (_req, res) => {
     const users = await listSelectableUsers();

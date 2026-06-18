@@ -8,6 +8,8 @@ import { useNavigate, useLocation, Routes, Route } from 'react-router-dom';
 import { Button } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
+import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
+import * as kc from './keycloak-auth.js';
 import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
@@ -207,10 +209,45 @@ function RightsSubTabs() {
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "dark");
   const [rightsFocus, setRightsFocus] = useState(null);
-  const [devUser, setDevUserState] = useState(() => getDevUser());
   const [launchOpen, setLaunchOpen] = useState(false);
+  // Auth bootstrap (T-0258): authReady gates the first render until we know the
+  // mode; authConfig holds it; currentUser is the active identity (dev-user in
+  // dev mode, keycloak user in keycloak mode). authError surfaces login errors.
+  const [authReady, setAuthReady] = useState(false);
+  const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authError, setAuthError] = useState(null);
   const location = useLocation();
   const navigate = useNavigate();
+
+  // One-shot auth bootstrap: learn the mode, then in keycloak mode process any
+  // OIDC redirect callback and adopt an existing session; in dev mode adopt the
+  // stored dev-user. Fail-safe to dev on config errors (see loadAuthConfig).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cfg = await loadAuthConfig();
+      if (cancelled) return;
+      setAuthConfig(cfg);
+      if (isKeycloakMode(cfg)) {
+        try {
+          const fromCallback = await kc.handleRedirectCallback(cfg.keycloak);
+          if (cancelled) return;
+          setCurrentUser(fromCallback || kc.getKeycloakUser());
+        } catch (err) {
+          if (cancelled) return;
+          setAuthError(err && err.message ? err.message : 'Ошибка входа');
+          setCurrentUser(kc.isAuthenticated() ? kc.getKeycloakUser() : null);
+        }
+      } else {
+        setCurrentUser(getDevUser());
+      }
+      if (!cancelled) setAuthReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Derive current screen from pathname
   const pathParts = location.pathname.split('/').filter(Boolean);
@@ -227,20 +264,44 @@ function AppShell() {
     navigate('/rights');
   };
 
+  const keycloak = isKeycloakMode(authConfig);
+
+  // Dev-mode login: persist the picked dev-user. Keycloak-mode login: kick off
+  // the OIDC redirect (the page navigates away; nothing else to do here).
   const handleLogin = (user) => {
+    if (keycloak) {
+      setAuthError(null);
+      kc.login(authConfig.keycloak);
+      return;
+    }
     setDevUser(user);
-    setDevUserState(user);
+    setCurrentUser(user);
   };
 
   const handleLogout = () => {
+    if (keycloak) {
+      kc.logout(authConfig.keycloak); // clears session + redirects to KC logout
+      return;
+    }
     clearDevUser();
-    setDevUserState(null);
+    setCurrentUser(null);
   };
 
-  // Gate: if not logged in, show login screen
-  if (!devUser) {
-    return <LoginScreen onLogin={handleLogin} />;
+  // Wait until we know the auth mode before deciding what to render.
+  if (!authReady) {
+    return (
+      <div className="chs-login-screen">
+        <div className="chs-login-loading"><p>Загрузка…</p></div>
+      </div>
+    );
   }
+
+  // Gate: if not logged in, show the mode-appropriate login screen.
+  if (!currentUser) {
+    return <LoginScreen onLogin={handleLogin} keycloak={keycloak} error={authError} />;
+  }
+
+  const devUser = currentUser;
 
   return (
     <div className="chs-shell">

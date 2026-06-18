@@ -1,19 +1,29 @@
 /**
  * web/src/screens/screen-login.jsx
  *
- * Dev login picker: fetches selectable users from /api/users and renders
- * a clean list for the user to choose from. No password, just pick a user.
+ * Login screen, mode-aware (T-0258):
+ *   - keycloak mode → a single "Sign in" button that starts the real OIDC
+ *     redirect login (onLogin() with no argument kicks off the redirect).
+ *   - dev mode (default) → the legacy dev-user picker: fetch /api/users and
+ *     let the user pick an identity (no password). Unchanged behaviour.
+ *
+ * Props:
+ *   onLogin(user?) — dev mode passes the picked user; keycloak mode calls with
+ *                    no argument to start the redirect.
+ *   keycloak       — true when the server is in keycloak auth mode.
+ *   error          — optional login-error message to surface (keycloak).
  */
 
 import React, { useState, useEffect } from 'react';
 import { Button } from '../components/components.jsx';
 
-function LoginScreen({ onLogin }) {
+function LoginScreen({ onLogin, keycloak = false, error: externalError = null }) {
   const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!keycloak);
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    if (keycloak) return; // keycloak mode: no user list to fetch
     const fetchUsers = async () => {
       try {
         const response = await fetch('/api/users');
@@ -59,6 +69,33 @@ function LoginScreen({ onLogin }) {
   const handleSelectUser = (user) => {
     onLogin(user);
   };
+
+  // ----- Keycloak mode: a single sign-in button that starts the OIDC redirect.
+  if (keycloak) {
+    return (
+      <div className="chs-login-screen">
+        <div className="chs-login-container">
+          <div className="chs-login-header">
+            <h1 className="chs-login-title">Demiurge · Choros</h1>
+            <p className="chs-login-subtitle">вход</p>
+            <p className="chs-login-hint">Вход через корпоративную учётную запись (Keycloak).</p>
+          </div>
+
+          {externalError && (
+            <div className="chs-login-error">
+              <p>{externalError}</p>
+            </div>
+          )}
+
+          <div className="chs-login-users">
+            <Button variant="primary" onClick={() => onLogin()}>
+              Войти
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="chs-login-screen">

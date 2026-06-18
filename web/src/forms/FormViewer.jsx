@@ -33,11 +33,11 @@ import './form-defs.js';
 // И корректной формы — и возвращают null при любом нарушении.
 import { acceptFrameHeight, acceptFrameSubmit, FRAME_MIN_HEIGHT } from './frame-height.js';
 
-const MIN_HEIGHT = FRAME_MIN_HEIGHT;
+// T-0258: auth headers come from the shared mode-aware helper (X-Dev-User in
+// dev mode, Authorization: Bearer in keycloak mode) — no hardcoded dev stub.
+import { authHeaders } from '../app-shell/dev-auth.js';
 
-// x-dev-user header для dev-auth (mirrors src/http/auth.ts DEV_USER_HEADER).
-const DEV_USER_HEADER = 'x-dev-user';
-const DEV_USER_ID = 'demo-user';
+const MIN_HEIGHT = FRAME_MIN_HEIGHT;
 
 /**
  * Собирает полный srcdoc для sandbox-iframe одной формы.
@@ -112,7 +112,7 @@ function FormViewer({ formKey, theme, onSubmit }) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          [DEV_USER_HEADER]: DEV_USER_ID,
+          ...authHeaders(),
         },
         body: JSON.stringify(value),
       });
