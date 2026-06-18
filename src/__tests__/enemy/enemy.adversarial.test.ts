@@ -37,15 +37,28 @@ import { loadCorpus } from "./corpus.js";
 const ENEMY_FUZZ_KEY = 0xe9e0154; // fixed 32-bit constant ("E9E" ~ enemy, 0154 = task)
 const PER_FAMILY = 24;
 
+// The full family roster the deterministic Enemy probes (4 original + 6 T-0253).
+const ALL_FAMILIES = [
+  "TENANT-ISO",
+  "PDP-DENY",
+  "GRANT-ESCALATION",
+  "DEV-AUTH-PROD",
+  // ── T-0253 additive families ──
+  "PRECHECK-DEFAULT",
+  "REASONING-EGRESS",
+  "FIELD-MASK",
+  "STATUS-TRANSITION",
+  "DORMANT-GATE",
+  "PDP-DENY-MATRIX",
+] as const;
+
 describe("ВРАГ (T-0154): deterministic generated fuzz — system must HOLD", () => {
   const cases = generateCases(ENEMY_FUZZ_KEY, PER_FAMILY);
 
   it(`generates a non-trivial, balanced case stream (${PER_FAMILY}/family)`, () => {
-    expect(cases.length).toBe(PER_FAMILY * 4);
+    expect(cases.length).toBe(PER_FAMILY * ALL_FAMILIES.length);
     const families = new Set(cases.map((c) => c.family));
-    expect(families).toEqual(
-      new Set(["TENANT-ISO", "PDP-DENY", "GRANT-ESCALATION", "DEV-AUTH-PROD"]),
-    );
+    expect(families).toEqual(new Set(ALL_FAMILIES));
   });
 
   it("REAL surfaces hold against EVERY generated adversarial case (no findings)", async () => {
@@ -62,12 +75,7 @@ describe("ВРАГ (T-0154): deterministic generated fuzz — system must HOLD",
   });
 
   // Per-family breakdown so a regression points at the exact invariant family.
-  for (const family of [
-    "TENANT-ISO",
-    "PDP-DENY",
-    "GRANT-ESCALATION",
-    "DEV-AUTH-PROD",
-  ] as const) {
+  for (const family of ALL_FAMILIES) {
     it(`family ${family}: REAL surface holds for all generated cases`, async () => {
       const fam = cases.filter((c) => c.family === family);
       expect(fam.length).toBeGreaterThan(0);
@@ -99,12 +107,7 @@ describe("ВРАГ (T-0154): append-only corpus replay — permanent regression"
 
   it("corpus covers each invariant family that the Enemy probes", () => {
     const families = new Set(corpus.map((c) => c.family));
-    for (const f of [
-      "TENANT-ISO",
-      "PDP-DENY",
-      "GRANT-ESCALATION",
-      "DEV-AUTH-PROD",
-    ] as const) {
+    for (const f of ALL_FAMILIES) {
       expect(families.has(f)).toBe(true);
     }
   });
@@ -125,12 +128,7 @@ describe("ВРАГ (T-0154): SELF-TEST — the Enemy MUST be able to bite", () =
   });
 
   it("self-test catches each invariant family's violation individually", async () => {
-    for (const family of [
-      "TENANT-ISO",
-      "PDP-DENY",
-      "GRANT-ESCALATION",
-      "DEV-AUTH-PROD",
-    ] as const) {
+    for (const family of ALL_FAMILIES) {
       const fam = cases.filter((c) => c.family === family);
       const findings = await runEnemy(fam, brokenSurfaces);
       if (findings.length === 0) {
