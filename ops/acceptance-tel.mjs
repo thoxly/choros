@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 /**
- * ops/acceptance-tel.mjs — T-0283 (ADR T-0278 §E / §2.4).
+ * ops/acceptance-tel.mjs — T-0283 (ADR T-0278 §E / §2.4); generalized T-0257.
  *
- * `npm run acceptance:tel` — the deploy-acceptance gate runner. Drives the U1→U5
- * ТЭЛ click-through against the REAL stack (NO mocks, FF-3 / NF1 / D-056):
+ * The deploy-acceptance GATE wiring (force-rebuild web/dist + tsc, launch the server,
+ * idempotent bootstrap, run playwright, teardown). This is SEPARATE from the journey
+ * RUNNER (e2e/journeys/runner.ts): the gate stands up the real stack, the runner
+ * executes declarative journeys (e2e/journeys/*.journey.ts) against it. Two entry
+ * scripts share this one gate (they differ only in which specs playwright runs, via
+ * env that passes through `...process.env` to the playwright child):
+ *   • `npm run acceptance:tel` — ACCEPTANCE_JOURNEYS=skip → the legacy imperative
+ *      ТЭЛ U1→U5 spec + the fail-honest negative spec (exact back-compat).
+ *   • `npm run acceptance` — ACCEPTANCE_LEGACY_TEL=skip → the declarative journeys
+ *      (e2e/journeys.e2e.ts, every *.journey.ts) + the fail-honest negative spec.
+ *
+ * Either way it drives the U1→U5 click-through against the REAL stack
+ * (NO mocks, FF-3 / NF1 / D-056):
  *
  *   1. FORCE-rebuild web/dist (vite build) — the gate must drive the SAME built
  *      artifact a user sees (NF1), not the vite dev server, and NOT a stale dist
