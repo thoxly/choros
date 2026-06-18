@@ -320,23 +320,22 @@ export const realPrecheckEgress = async (
   return { egress: JSON.stringify(outcome) };
 };
 
-// ── 3. FIELD-MASK — REAL checkWriteMask with canonicalising normalisation ──
+// ── 3. FIELD-MASK — REAL checkWriteMask hardened against case/ws/alias bypass ──
 
 /**
- * The REAL system-only field guard. The call-site is responsible for NORMALISING
- * the wire field name to its canonical column before consulting checkWriteMask;
- * we apply that same normalisation here (lowercase, trim, kebab→snake) so a cased/
- * aliased/whitespace variant resolves to its canonical system-only field. Then the
- * GENUINE checkWriteMask decides. (A mask that allow-lists by raw substring — the
- * broken self-test — lets a variant escape; the real path canonicalises first.)
+ * The REAL system-only field guard. T-0255 HARDENING: the raw wire field names
+ * (cased / whitespace-padded / kebab-aliased variants of a system-only field) are
+ * handed to checkWriteMask UNCHANGED — no test-side normalisation. The bypass is
+ * now closed INSIDE the live predicate (checkWriteMask canonicalises both the
+ * grant facet and the requested fields before the membership test), so this
+ * surface proves the LIVE predicate denies the variant, not a test-local
+ * reimplementation. (The broken self-test surface still allow-lists by raw
+ * substring, so a variant escapes it — the Враг bites on the planted bug.)
  */
-function canonicaliseFieldName(raw: string): string {
-  return raw.trim().toLowerCase().replace(/-/g, "_");
-}
-
 export const realFieldMask = (input: FieldMaskProbeInput): Promise<FieldMaskObservation> => {
-  const normalised = input.requestedFields.map(canonicaliseFieldName);
-  const result = checkWriteMask(input.writeFacet, normalised);
+  // Pass the ADVERSARIAL RAW variant straight to the live predicate: the guard
+  // itself must canonicalise & block — that is the invariant under attack.
+  const result = checkWriteMask(input.writeFacet, input.requestedFields);
   return Promise.resolve({ denied: result.denied });
 };
 
