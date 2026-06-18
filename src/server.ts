@@ -20,6 +20,7 @@ import { registerSecretHandleRoutes } from "./http/secret-handle.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
+import { registerAgentListRoutes } from "./http/agents-list.js";
 import { registerBindingRoutes } from "./http/binding.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
@@ -311,6 +312,13 @@ function buildRouter(
   if (grantsPool) {
     const kcPort = makeHttpKeycloakAdminPort();
     registerAgentRoutes(router, grantsPool, kcPort);
+    // GET /api/agents (list) + GET /api/agents/:id (T-0271 — additive, withAuth,
+    // tenant-scoped via resolveActorTenant; metadata only, no secrets).
+    registerAgentListRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // Register named-binding endpoints (T-0072 E11.1 — additive)

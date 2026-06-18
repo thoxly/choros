@@ -86,12 +86,21 @@ echo "Check FF-25-3: llm_secret_handle must appear only in the explicit custody 
 # The value never egresses (FF-25-4 green). Additive allow-set entry, same class
 # as the T-0233/T-0236 runtime-custody extension; frozen-sanction appended for
 # this task in ci/checks/data/frozen-sanctions.jsonl (FF-FCI12, D-060).
+# T-0271 AMENDMENT (read-list custody site): GET /api/agents reads the
+# llm_secret_handle column REFERENCE only to compute a boolean `llm_bound`
+# (handle IS NOT NULL) for the agents screen — the raw value is NEVER selected
+# into the response, logged, or audited (serializeAgent emits llm_bound:bool, not
+# the handle). Same legitimate column-reference custody class as the T-0233
+# run-precheck.ts dormancy null-check. Additive allow-set entry; auto_additive
+# frozen-sanction (family NO-SECRET, bound to this surface in the T-0152 catalog)
+# appended in ci/checks/data/frozen-sanctions.jsonl (FF-FCI13, D-060).
 ALLOWED_FILES=(
   "src/http/secret-handle.ts"
   "src/core/secret-handle-validator.ts"
   "src/db/agent-provision.ts"
   "src/core/agent-hire.ts"
   "src/http/agents.ts"
+  "src/http/agents-list.ts"
   "src/http/grant-propose.ts"
   "src/runtime/legal-precheck/run-precheck.ts"
   "src/adapters/openai-llm-port.ts"
