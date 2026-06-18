@@ -321,7 +321,7 @@
     "        var ta=f.querySelector('textarea');",
     "        if(ta){value[key]=ta.value;return;}",
     "        var inp=f.querySelector('input');",
-    "        if(inp){value[key]=inp.value;}",
+    "        if(inp){value[key]=f.classList.contains('fjs-form-field-number')?num(inp.value):inp.value;}",
     "      });",
     "      parent.postMessage({type:'fjs-submit',value:value},'*');",
     "    });",
