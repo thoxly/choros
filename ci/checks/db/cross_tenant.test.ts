@@ -1194,6 +1194,21 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'process_definition': {
+      // T-0252 (migration 074) — BPMN process definition store.
+      // No FK deps beyond tenant_id. status must be 'draft' or 'published'.
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.process_definition
+           (tenant_id, id, process_key, name, bpmn_xml, version, status,
+            deployment_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, `ct-procdef-${uuid().slice(0, 8)}`,
+         'CT Seed Process', '<definitions/>'],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1549,6 +1564,7 @@ const SEEDED_TABLES = new Set<string>([
   'registry_schema_history',
   'bundle_version_instance',
   'inflight_mapping_request',
+  'process_definition',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
