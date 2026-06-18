@@ -42,6 +42,10 @@ export const NAV = [
       { id: "org",       label: "Оргструктура",  icon: "org",                screen: true, status: "live" },
       // Процессы: GET /api/processes (live), POST /api/processes/start (live)
       { id: "processes", label: "Процессы",       icon: "process", count: 7, screen: true, status: "live" },
+      // Агенты (T-0271): GET /api/agents (live, метаданные без секретов), POST
+      // /api/agents/hire (live), POST /api/agents/:id/secret-handle (live — привязка
+      // LLM через секрет-хэндл). Список + создание + привязка LLM — живые → live.
+      { id: "agents",    label: "Агенты",          icon: "org",                screen: true, status: "live" },
     ],
   },
   {

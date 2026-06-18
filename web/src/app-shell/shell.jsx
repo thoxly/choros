@@ -28,6 +28,7 @@ import IntentsScreen from '../screens/rights/ra-intents.jsx';
 import FormsScreen from '../screens/screen-forms.jsx';
 import NotificationsScreen from '../screens/screen-notifications.jsx';
 import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
+import AgentsScreen from '../screens/screen-agents.jsx';
 
 export { Icon };
 
@@ -49,6 +50,7 @@ const SCREEN_META = {
   inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
   org:   { crumb: ["Оркестрация", "Оргструктура"] },
   processes: { crumb: ["Оркестрация", "Процессы"] },
+  agents: { crumb: ["Оркестрация", "Агенты"] },
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит инстанса"] },
   rights: { crumb: ["Доступ", "Права и доступ"] },
@@ -361,6 +363,8 @@ function AppShell() {
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
             <Route path="/processes" element={<ProcessesScreen launchOpen={launchOpen} onLaunchClose={() => setLaunchOpen(false)} />} />
+            {/* T-0271: agents list + hire + LLM secret-handle bind */}
+            <Route path="/agents" element={<AgentsScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
