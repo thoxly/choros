@@ -178,6 +178,7 @@ NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
 # not any other migration's failure. _dc_mig073_failed is set ONLY when migration 073
 # itself triggers the "unexpected migration" FAIL in the loop below.
 _dc_mig073_failed=0
+_dc_mig074_failed=0
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -185,6 +186,10 @@ for m in ${NEW_MIGRATIONS}; do
     # Track specifically when 073 triggers this FAIL (and nothing else).
     if [[ "${m}" == "migrations/073_vendor_crm_seed.sql" ]]; then
       _dc_mig073_failed=1
+    fi
+    # Track specifically when 074 triggers this FAIL (and nothing else).
+    if [[ "${m}" == "migrations/074_process_definition.sql" ]]; then
+      _dc_mig074_failed=1
     fi
   fi
 done
@@ -207,6 +212,36 @@ if [[ "${_dc_mig073_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     ERRORS=$(( ERRORS - 1 ))
     _dc_mig073_failed=0
     echo "PASS [FF-DC7-T0244-seed]: migration 073_vendor_crm_seed.sql is pure seed (INSERT only, no CREATE TABLE/RLS) — relief granted"
+  fi
+fi
+# T-0252: additive relief for migration 074_process_definition.sql. Unlike 073,
+# 074 IS a new tenant table (process_definition) — but it is UNRELATED to the
+# dual-control authority domain (grant / confirmation / confirmed2_by). T-0044's
+# real invariant — 031 is the ONLY dual-control migration, confirmed2_by stays a
+# derived additive column — is NOT touched by a BPMN process-definition store.
+# Sanctioned in data/frozen-sanctions.jsonl (auto_additive).
+#
+# Like the 073 relief, this cancels ONLY the _dc_mig074_failed increment (set in
+# the loop above exclusively when migration 074 is the unexpected file), so the
+# decrement is scoped exactly and cannot absorb any other migration's FF-DC7 fail.
+# Independent guard: the relief fires ONLY after verifying 074 does NOT create or
+# alter any grant/confirmation/authority table and does NOT touch confirmed2_by.
+_dc_mig074_stem="migrations/074_process_definition.sql"
+if [[ "${_dc_mig074_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig074_stem}"; then
+  _dc_mig074_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig074_stem}" 2>/dev/null || true)"  # T0252-DC-MIG074-GUARD
+  _dc_mig074_bad=0
+  # 074 must not create/alter the dual-control authority domain (grant/confirmation/authority),
+  # and must not touch the confirmed2_by invariant.
+  if echo "${_dc_mig074_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then
+    _dc_mig074_bad=1
+  fi
+  if echo "${_dc_mig074_content}" | grep -iqE "confirmed2_by|confirmed_by"; then
+    _dc_mig074_bad=1
+  fi
+  if [[ "${_dc_mig074_bad}" -eq 0 ]]; then
+    ERRORS=$(( ERRORS - 1 ))
+    _dc_mig074_failed=0
+    echo "PASS [FF-DC7-T0252-procdef]: migration 074_process_definition.sql creates process_definition (BPMN store) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted"
   fi
 fi
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.

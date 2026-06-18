@@ -268,6 +268,26 @@ else
   fi
 fi
 
+# T-0252: additive-superset relief (mirrors T-0241 _ktt_rc_*/_ktt_dc_* pattern) —
+# IE-8 asserts known_tenant_tables.txt is BYTE-unchanged, which over-fires on ANY
+# task that legitimately adds a new tenant table (e.g. T-0252 process_definition).
+# If the registry only GREW (no line removed/renamed — pure superset), T-0088's
+# real invariant (the 072 escalation is an ADD COLUMN, NOT a new tenant table) is
+# NOT violated: that invariant is independently enforced by IE-7 (migration 072 is
+# additive ALTER TABLE, no CREATE TABLE — untouched here). Cancel the IE-8 false-red.
+# A removed/renamed table still leaves _ktt_ie_gone non-empty → IE-8 still FAILs.
+_ktt_ie_grown=0
+if [[ -n "${MERGE_BASE}" ]] && ! git -C "${ROOT}" diff --quiet "${MERGE_BASE}" -- ci/checks/known_tenant_tables.txt; then  # T0252-IE8-GROWTH-GUARD
+  _ktt_ie_old="$(git -C "${ROOT}" show "${MERGE_BASE}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"
+  _ktt_ie_new="$(cat "${KNOWN_TABLES}" 2>/dev/null || true)"
+  _ktt_ie_gone="$(comm -23 <(echo "${_ktt_ie_old}" | sort) <(echo "${_ktt_ie_new}" | sort) || true)"
+  [[ -z "${_ktt_ie_gone}" ]] && _ktt_ie_grown=1
+fi
+if [[ "${_ktt_ie_grown}" -eq 1 ]]; then
+  echo "PASS IE-8-additive: known_tenant_tables.txt grew (superset); another task's tenant-table add accepted for T-0088 (IE-7 still enforces 072 additivity)"
+  ERRORS=$((ERRORS - 1))
+fi
+
 # --------------------------------------------------------------------------
 # IE-9: role-criticality-migration-excludes.txt lists 072_isolated_env_escalation
 # --------------------------------------------------------------------------

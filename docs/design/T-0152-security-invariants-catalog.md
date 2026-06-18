@@ -76,7 +76,11 @@ tenant-несущая таблица — под `FORCE ROW LEVEL SECURITY` с `t
   `ci/checks/dual-control-isolation.sh`,
   `ci/checks/docpage-writeful-tools.sh`,
   `ci/checks/grant-trail-no-new-table.sh`,
-  `ci/checks/tier-isolation.sh`.
+  `ci/checks/tier-isolation.sh`,
+  `ci/checks/isolated-env-isolation.sh` (T-0252: IE-8 verifies the 072 escalation
+  is an additive ADD COLUMN, not a new tenant table),
+  `ci/checks/defer-no-new-table.sh` (T-0252: Check-1/Check-2 verify the T-0221
+  defer-inbox feature adds no new tenant table / migration).
 - **Демо/seed cross-tenant:** `ci/checks/demo/no-cross-tenant-org.sh` (live DB),
   `ci/checks/demo/no-hardcoded-tenant.sh`.
 
