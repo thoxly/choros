@@ -148,9 +148,9 @@
     '<div class="fjs-form-field fjs-form-field-radio" data-field="method">' +
     '<label class="fjs-form-field-label">Способ закупки</label>' +
     '<div class="fjs-radio-group" data-inline="true">' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" checked><span>Прямая</span></label>' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method"><span>Тендер</span></label>' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method"><span>Рамочный</span></label>' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Прямая" checked><span>Прямая</span></label>' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Тендер"><span>Тендер</span></label>' +
+    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Рамочный"><span>Рамочный</span></label>' +
     "</div></div></div>" +
     "</div>" +
 
