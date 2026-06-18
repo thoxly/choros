@@ -9,7 +9,7 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
-import { loadShowcasePack } from "./pack-serve.js";
+import { tryLoadShowcasePack } from "./pack-serve.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,11 +157,20 @@ function hasDb(): boolean {
 // Data accessors — pack-file-serve path when DATABASE_URL set, else RIGHTS_SEED
 // ---------------------------------------------------------------------------
 
-function findRightsData(): Role[] {
+/**
+ * findRightsData — returns null when DATABASE_URL is set but the pack file is
+ * absent (T-0259: container without seed dir). Callers must degrade gracefully.
+ */
+function findRightsData(): Role[] | null {
   if (hasDb()) {
     // T-0141: serve from single source (pack file) when DB-backed mode active.
     // Map rights_cards[].role_slug → Role.id for backwards-compat with frozen e2e.
-    const pack = loadShowcasePack();
+    // T-0259: tryLoadShowcasePack returns null when the pack file is absent;
+    // the caller returns graceful-empty so the endpoint never 500s.
+    const pack = tryLoadShowcasePack();
+    if (pack === null) {
+      return null;
+    }
     return pack.rights_cards.map((card) => ({
       id: card.role_slug,
       name: card.name,
@@ -176,7 +185,9 @@ function findRightsData(): Role[] {
 }
 
 function findRole(roleId: string): Role | null {
-  return findRightsData().find((r) => r.id === roleId) || null;
+  const roles = findRightsData();
+  if (roles === null) return null;
+  return roles.find((r) => r.id === roleId) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,11 +195,18 @@ function findRole(roleId: string): Role | null {
 // ---------------------------------------------------------------------------
 
 export function registerRightsRoutes(router: Router, _store?: JobStore): void {
-  // GET /api/rights — return full roles list
+  // GET /api/rights — return full roles list.
+  // T-0259: when DATABASE_URL is set but the pack file is absent (container
+  // without seed dir), findRightsData() returns null. Degrade to graceful-empty
+  // with `demo: true` so the endpoint never returns 500.
   router.register("GET", "/api/rights", async (_req, res) => {
     const roles = findRightsData();
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
+    if (roles === null) {
+      res.end(JSON.stringify({ roles: [], demo: true }));
+      return;
+    }
     res.end(JSON.stringify({ roles }));
   });
 

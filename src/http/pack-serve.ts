@@ -75,6 +75,29 @@ export function resolvePackDir(): string {
   }
 }
 
+/**
+ * tryLoadShowcasePack — returns null if the pack file is absent or unreadable.
+ * Use this in callers that must NOT 500 when the file is missing (e.g. in the
+ * deployed container where the seed directory is not shipped).
+ */
+export function tryLoadShowcasePack(): ShowcasePack | null {
+  if (_cachedPack !== null) {
+    return _cachedPack;
+  }
+  const packDir = resolvePackDir();
+  const packPath = join(packDir, "showcase", "pack.json");
+  try {
+    const raw = readFileSync(packPath, "utf-8");
+    _cachedPack = JSON.parse(raw) as ShowcasePack;
+    return _cachedPack;
+  } catch {
+    // File absent (container deployment without seed dir, or CHOROS_PACK_DIR
+    // pointing at a missing location). Return null so callers can degrade
+    // gracefully instead of propagating a 500 (T-0259).
+    return null;
+  }
+}
+
 export function loadShowcasePack(): ShowcasePack {
   if (_cachedPack !== null) {
     return _cachedPack;
