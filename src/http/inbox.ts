@@ -31,6 +31,7 @@ import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
+import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,6 +75,12 @@ type InboxItem = {
    */
   claimedBy?: string;
   claimedAt?: number;
+  /**
+   * T-0221 (AC-5): reason for deferral, present only on defer-to-human tasks.
+   * Additive optional field — not present on seed tasks. Never contains raw reasoning
+   * (D-139 / FF-9: reasoning_trace_ref stays in audit payload, not surfaced here).
+   */
+  doubt_reason?: string;
 };
 
 /** Internal seed shape — carries tenant + role for addressing; tenant is stripped on the wire. */
@@ -178,6 +185,10 @@ function toWire(item: SeedItem): InboxItem {
  * Materialize the actor's inbox view: tenant-scoped, with claim state + `mine`
  * applied. Does NOT apply tab/filter — that is layered on top so the tab counts
  * can be computed from the same base list.
+ *
+ * T-0221: when hasDb(), defer projections from audit_event are merged additively
+ * into the list. When !hasDb(), only INBOX_SEED is used (preserving existing
+ * behaviour for memory-mode tests, FF-11).
  */
 async function findInboxItems(
   devUserId?: string | null,
@@ -207,7 +218,7 @@ async function findInboxItems(
     }
   }
 
-  return tenantItems.map((seed) => {
+  const seedResults: InboxItem[] = tenantItems.map((seed) => {
     const item = toWire(seed);
     const claim = CLAIMED.get(item.id);
 
@@ -239,6 +250,71 @@ async function findInboxItems(
 
     return { ...item, mine };
   });
+
+  // T-0221 (§5.4): merge defer projections from audit_event when DB is available.
+  // !hasDb() → only seed (preserves memory-mode test behaviour, FF-11).
+  if (!hasDb()) {
+    return seedResults;
+  }
+
+  let deferItems: InboxItem[] = [];
+  try {
+    const deferRows = await listDeferredInboxTasks(getOrgPool(), tenantId);
+    deferItems = deferRows.map((row) => {
+      // SLA: if slaMinutes set, use it; otherwise default to 60 min.
+      const slaMin = row.slaMinutes ?? 60;
+      const claim = CLAIMED.get(row.id);
+      const deadline = nowMs + slaMin * 60_000;
+
+      const base: InboxItem = {
+        id: row.id,
+        status: "waiting",
+        name: row.name,
+        step: row.step,
+        inst: row.inst,
+        role: row.role,
+        execType: "agent",
+        execName: row.execName,
+        pool: true,
+        sla: { min: slaMin, left: slaMin },
+        due: new Date(row.occurredAt + slaMin * 60_000).toLocaleString("ru-RU", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        deadline,
+        // T-0221 AC-5 / FF-9: doubt_reason from payload, never reasoning_trace_ref.
+        doubt_reason: row.doubtReason,
+      };
+
+      if (claim) {
+        const mine =
+          devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
+        return {
+          ...base,
+          pool: false,
+          execType: "human" as const,
+          execName: claim.claimedBy,
+          claimedBy: claim.claimedBy,
+          claimedAt: claim.claimedAt,
+          mine,
+        };
+      }
+
+      return base;
+    });
+  } catch {
+    // If defer projection fails, fall back gracefully to seed-only.
+    // This is a read-projection, not a write path — safe to degrade.
+    deferItems = [];
+  }
+
+  // Merge: seed items first (existing demo data), then defer projections.
+  // Dedup by id in case a seed task and a defer row have the same id (defensive).
+  const seenIds = new Set(seedResults.map((i) => i.id));
+  const deduped = deferItems.filter((i) => !seenIds.has(i.id));
+  return [...seedResults, ...deduped];
 }
 
 // ---------------------------------------------------------------------------
@@ -361,8 +437,24 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
     const tenantId = await resolveTenant(devUserId);
 
     // Task must exist AND be visible in the actor's tenant.
-    const task = INBOX_SEED.find((t) => t.id === taskId && t.tenant === tenantId);
-    if (!task) {
+    // T-0221: also check defer projections from audit_event when DB is available.
+    const seedTask = INBOX_SEED.find((t) => t.id === taskId && t.tenant === tenantId);
+
+    // For defer tasks from DB: look up in the merged inbox list.
+    let taskRole: string | undefined = seedTask?.role;
+    let taskIsPool: boolean = seedTask?.pool ?? false;
+
+    if (!seedTask && hasDb()) {
+      // Defer task: check if it's in the audit-floor projection.
+      const deferRows = await listDeferredInboxTasks(getOrgPool(), tenantId);
+      const deferTask = deferRows.find((r) => r.id === taskId);
+      if (deferTask) {
+        taskRole = deferTask.role;
+        taskIsPool = true; // defer tasks are always pool tasks (AC-6)
+      } else {
+        throw new HttpError(404, "NOT_FOUND", "task not found");
+      }
+    } else if (!seedTask) {
       throw new HttpError(404, "NOT_FOUND", "task not found");
     }
 
@@ -382,7 +474,7 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
     }
 
     // Task must be pooled (not assigned to a specific person)
-    if (!task.pool) {
+    if (!taskIsPool) {
       throw new HttpError(409, "NOT_POOL_TASK", "task is not a pool task and cannot be claimed");
     }
 
@@ -390,7 +482,7 @@ export function registerInboxRoutes(router: Router, _store?: JobStore): void {
     // Empty role set (unknown dev-user) is permitted in the dev fixture so the
     // pre-existing T-0138 claimant flow keeps working.
     const myRoles = rolesForUser(devUserId);
-    if (myRoles.length > 0 && !myRoles.includes(task.role)) {
+    if (myRoles.length > 0 && taskRole !== undefined && !myRoles.includes(taskRole)) {
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
 

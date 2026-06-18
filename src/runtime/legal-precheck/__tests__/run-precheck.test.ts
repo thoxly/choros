@@ -410,6 +410,10 @@ describe("runLegalPrecheck orchestrator", () => {
     const deferOutcome = outcome as { inboxTaskRef: string };
     expect(typeof deferOutcome.inboxTaskRef).toBe("string");
     expect(deferOutcome.inboxTaskRef.length).toBeGreaterThan(0);
+
+    // T-0221 FF-3: inbox_task_id == audit_event.id (self-referential back-link).
+    expect(payload?.["inbox_task_id"]).toBe(rows[0]?.id);
+    expect(payload?.["inbox_task_id"]).toBe(deferOutcome.inboxTaskRef);
   });
 
   // AC-2: stub port, demo contract ≥5M₽ → structured red-flags answer.
@@ -555,6 +559,11 @@ describe("runLegalPrecheck orchestrator", () => {
 
     // inboxTaskRef = the audit event id.
     expect(deferOutcome.inboxTaskRef).toBe(rows[0]?.id);
+
+    // T-0221 FF-3: inbox_task_id == audit_event.id (self-referential back-link).
+    const payload2 = rows[0]?.payload as Record<string, unknown>;
+    expect(payload2?.["inbox_task_id"]).toBe(rows[0]?.id);
+    expect(payload2?.["inbox_task_id"]).toBe(deferOutcome.inboxTaskRef);
   });
 
   // dormantLlmPort throws LlmDormantError (AC-4/FF-LP-3).

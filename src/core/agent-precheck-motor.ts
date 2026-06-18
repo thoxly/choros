@@ -47,7 +47,12 @@ export type PrecheckOutcome =
       readonly signal: "threshold" | "model" | "ambiguity" | "dormant";
       /**
        * ID of the `agent.deferred` audit event — the canonical day-1 DB-backed
-       * record (§5.3 ADR: no task-table on day-1; audit-floor IS the seam).
+       * record (audit-floor IS the seam, D-061 ratified no-new-table).
+       *
+       * T-0221: == audit_event.id == payload.inbox_task_id (self-referential back-link,
+       * minted BEFORE append so the reference is stable and exact). The defer record
+       * lives on choros.audit_event (open-vocab type='agent.deferred'); there is NO
+       * separate task table. Read-projection: src/db/deferred-inbox-store.ts.
        */
       readonly inboxTaskRef: string;
     }

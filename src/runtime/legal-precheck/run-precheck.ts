@@ -41,6 +41,7 @@ import {
   classifyOutcome,
   CONFIDENCE_FLOOR,
 } from "../../core/agent-precheck-motor.js";
+import { planDeferTask } from "../../core/defer-inbox-producer.js";
 
 // Re-export types for consumers (invoke.ts dispatch stub).
 export type { PrecheckOutcome };
@@ -131,18 +132,30 @@ function blockedAuditEvent(
   };
 }
 
+/**
+ * Build a deferred audit event for the given plan + task id.
+ *
+ * T-0221: taskId is minted BEFORE the call and passed in — so the self-referential
+ * back-link inbox_task_id == audit_event.id is established atomically in one INSERT.
+ * payload fields added by T-0221:
+ *   inbox_task_id   — self-id (== the audit_event.id) for AC-5 back-link (FF-3)
+ *   defer_role      — from PrecheckArgs.deferRole (for role-addressing, T-0093)
+ *   defer_sla_minutes — from PrecheckArgs.deferSlaMinutes (for SLA display)
+ *   defer_name      — human-readable task name from planDeferTask
+ */
 function deferredAuditEvent(
+  taskId: string,
   agentEmployeeId: string,
   doubtReason: string,
   signal: string,
   reasoningTraceRef: string | null,
   nowMs: number,
+  extra?: { deferRole?: string; deferSlaMinutes?: number; deferName?: string },
 ): { id: string; input: AuditEventInput } {
-  const id = randomUUID();
   return {
-    id,
+    id: taskId,
     input: {
-      id,
+      id: taskId,
       type: "agent.deferred",
       actor: agentEmployeeId,
       subject: `agent:${agentEmployeeId}`,
@@ -152,10 +165,15 @@ function deferredAuditEvent(
       confirmed_by: null,
       // reasoning_trace_ref is the audit-internal reference to the masked reasoning.
       // doubt_reason surfaces to the human reviewer (no raw reasoning here).
+      // inbox_task_id = self-id (== id) so the back-link is stable (T-0221 AC-5, FF-3).
       payload: {
         doubt_reason: doubtReason,
         signal,
         reasoning_trace_ref: reasoningTraceRef,
+        inbox_task_id: taskId,
+        defer_role: extra?.deferRole ?? null,
+        defer_sla_minutes: extra?.deferSlaMinutes ?? null,
+        defer_name: extra?.deferName ?? null,
       },
       occurred_at: nowMs,
     },
@@ -207,9 +225,20 @@ export async function runLegalPrecheck(
     readonly subject: ResolveSubject;
     readonly dealContext: { amount: number; kind: string; direction: string };
     readonly nowMs: number;
+    /**
+     * T-0221: Role to address the defer inbox task to (for role-addressing T-0093).
+     * Optional day-1; defaults to a safe fallback in the DAO projection.
+     */
+    readonly deferRole?: string;
+    /**
+     * T-0221: SLA in minutes for the defer inbox task. Optional.
+     */
+    readonly deferSlaMinutes?: number;
   },
 ): Promise<PrecheckOutcome> {
   const { tenantId, agentEmployeeId, documentHandle, subject, dealContext, nowMs } = args;
+  const deferRole = args.deferRole;
+  const deferSlaMinutes = args.deferSlaMinutes;
 
   // -----------------------------------------------------------------------
   // Step 1: PDP — resolveFor (T-0021, single authority, AC-7).
@@ -259,19 +288,34 @@ export async function runLegalPrecheck(
 
   if (instr == null) {
     // defer-to-human: missing instruction → "dormant" signal (ADR §4 missing-instruction).
-    const { id: deferAuditId, input: deferInput } = deferredAuditEvent(
+    // T-0221: planDeferTask + mint taskId first so inbox_task_id == audit_event.id (FF-3).
+    const missingInstrOutcome: Extract<PrecheckOutcome, { kind: "defer-to-human" }> = {
+      kind: "defer-to-human",
+      signal: "dormant",
+      doubtReason: "no published instruction for agent",
+      inboxTaskRef: "pending", // replaced by taskId below
+    };
+    const missingInstrPlan = planDeferTask(missingInstrOutcome, {
+      role: deferRole ?? "fin-ctrl",
       agentEmployeeId,
-      "no published instruction for agent",
+      slaMinutes: deferSlaMinutes,
+    });
+    const missingInstrTaskId = randomUUID();
+    const { input: deferInput } = deferredAuditEvent(
+      missingInstrTaskId,
+      agentEmployeeId,
+      missingInstrPlan.doubtReason,
       "dormant",
       null,
       nowMs,
+      { deferRole: missingInstrPlan.role, deferSlaMinutes: missingInstrPlan.slaMinutes, deferName: missingInstrPlan.name },
     );
     await deps.auditWriter.appendAuditEvent(tx, deferInput);
     return {
       kind: "defer-to-human",
       signal: "dormant",
-      doubtReason: "no published instruction for agent",
-      inboxTaskRef: deferAuditId,
+      doubtReason: missingInstrPlan.doubtReason,
+      inboxTaskRef: missingInstrTaskId,
     };
   }
 
@@ -314,19 +358,34 @@ export async function runLegalPrecheck(
   if (!llmOutcome.ok) {
     if (llmOutcome.dormant) {
       // defer-to-human for dormant (day-1 default=defer, not fail-closed).
-      const { id: deferAuditId, input: deferInput } = deferredAuditEvent(
+      // T-0221: planDeferTask + mint taskId first so inbox_task_id == audit_event.id (FF-3).
+      const dormantOutcome: Extract<PrecheckOutcome, { kind: "defer-to-human" }> = {
+        kind: "defer-to-human",
+        signal: "dormant",
+        doubtReason: "llm runtime dormant — inference not available",
+        inboxTaskRef: "pending",
+      };
+      const dormantPlan = planDeferTask(dormantOutcome, {
+        role: deferRole ?? "fin-ctrl",
         agentEmployeeId,
-        "llm runtime dormant — inference not available",
+        slaMinutes: deferSlaMinutes,
+      });
+      const dormantTaskId = randomUUID();
+      const { input: deferInput } = deferredAuditEvent(
+        dormantTaskId,
+        agentEmployeeId,
+        dormantPlan.doubtReason,
         "dormant",
         null,
         nowMs,
+        { deferRole: dormantPlan.role, deferSlaMinutes: dormantPlan.slaMinutes, deferName: dormantPlan.name },
       );
       await deps.auditWriter.appendAuditEvent(tx, deferInput);
       return {
         kind: "defer-to-human",
         signal: "dormant",
-        doubtReason: "llm runtime dormant — inference not available",
-        inboxTaskRef: deferAuditId,
+        doubtReason: dormantPlan.doubtReason,
+        inboxTaskRef: dormantTaskId,
       };
     }
     // LLM error/timeout/egress → fail-closed signals.
@@ -385,20 +444,28 @@ export async function runLegalPrecheck(
   }
 
   if (tentative.kind === "defer-to-human") {
-    // Determine reasoning_trace_ref: not applicable here (call failed or low-conf).
-    const { id: deferAuditId, input: deferInput } = deferredAuditEvent(
+    // T-0221: planDeferTask + mint taskId first so inbox_task_id == audit_event.id (FF-3).
+    const tentativePlan = planDeferTask(tentative, {
+      role: deferRole ?? "fin-ctrl",
       agentEmployeeId,
-      tentative.doubtReason !== "pending" ? tentative.doubtReason : "unknown doubt reason",
+      slaMinutes: deferSlaMinutes,
+    });
+    const tentativeTaskId = randomUUID();
+    const { input: deferInput } = deferredAuditEvent(
+      tentativeTaskId,
+      agentEmployeeId,
+      tentativePlan.doubtReason,
       tentative.signal,
       null,
       nowMs,
+      { deferRole: tentativePlan.role, deferSlaMinutes: tentativePlan.slaMinutes, deferName: tentativePlan.name },
     );
     await deps.auditWriter.appendAuditEvent(tx, deferInput);
     return {
       kind: "defer-to-human",
       signal: tentative.signal,
-      doubtReason: tentative.doubtReason !== "pending" ? tentative.doubtReason : "unknown",
-      inboxTaskRef: deferAuditId,
+      doubtReason: tentativePlan.doubtReason,
+      inboxTaskRef: tentativeTaskId,
     };
   }
 
