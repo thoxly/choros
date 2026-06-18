@@ -39,6 +39,8 @@ import pg from "pg";
 import { HttpError, readJsonBody, type RouteHandler } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import { appendProcessStarted } from "./process-projection.js";
+import type { PgClientLike } from "../db/audit-writer.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -166,10 +168,33 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
 
     // 5. Engine call inside the tenant-scoped transaction (RLS via SET LOCAL).
     //    withTenantTx validates the UUID shape (→ 400) before opening the tx.
-    const startResult = await withTenantTx(pool, tenantId, async () => {
-      // The start runs under SET LOCAL choros.tenant_id (FORCE RLS). Task D's §2.3
-      // projection write (process.started → audit_event) hangs off this same seam.
-      return flowable.startInstance(processKey, variables);
+    //
+    //    T-0282 (ADR §2.3 — seam B↔D, owned by D): the start CONSCIOUSLY did not
+    //    emit a projection event in B; D dotyaguet that emission here. After a
+    //    successful engine start, append the `process.started` audit_event in the
+    //    SAME tenant-scoped tx (so the projection write is atomic with the start and
+    //    RLS-isolated). This makes the instance visible on the same processes/inbox
+    //    screens (audit_event-backed projection, NOT a live-Flowable query). The
+    //    FROZEN REST response shape (§2.2) is unchanged — only a projection write is
+    //    added. The append is best-effort within the tx: an engine start with no
+    //    projection write is still a real instance, so a projection failure must NOT
+    //    turn a created instance into a 502 — it degrades to "started but unprojected"
+    //    rather than rolling back the (already engine-side) start.
+    const startResult = await withTenantTx(pool, tenantId, async (client) => {
+      const result = await flowable.startInstance(processKey, variables);
+      if (result.ok) {
+        try {
+          await appendProcessStarted(client as unknown as PgClientLike, {
+            instanceId: result.instanceId,
+            procKey: processKey,
+            actor,
+            nowMs: Date.now(),
+          });
+        } catch {
+          // Projection is additive; never fail the start on a projection write error.
+        }
+      }
+      return result;
     });
 
     if (!startResult.ok) {

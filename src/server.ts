@@ -217,8 +217,22 @@ function buildRouter(
   // Register org structure endpoints
   registerOrgRoutes(router, store as JobStore);
 
-  // Register inbox endpoints
-  registerInboxRoutes(router, store as JobStore);
+  // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
+  // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)
+  // alongside the existing claim path — tenant-scoped, actor→tenant resolved from
+  // the dev-user slug (the same resolver the start-route uses). Absent ⇒ read +
+  // claim only (memory-mode unchanged).
+  registerInboxRoutes(
+    router,
+    store as JobStore,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
 
   // Register form-submission endpoints (T-0102). Server-side field validation;
   // schema lookup is pure/in-process so no DATABASE_URL is required.
