@@ -36,6 +36,8 @@ import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
+import { registerProcessDefsRoutes } from "./http/process-defs.js";
+import { makeFlowableClient } from "./core/flowable-client.js";
 
 const { Pool } = pg;
 
@@ -312,6 +314,21 @@ function buildRouter(
   // always 200 (reporting is not gating); vendor-service calls return 402/403 when the
   // subscription does not grant the service. Core/user endpoints never read the key.
   registerVendorActivationRoutes(router);
+
+  // Register process-definition CRUD + publish routes (T-0252 E8 C2).
+  // Requires grantsPool (same tenant RLS pattern). FlowableClient is composed here
+  // from env at call time — NO env reads in core (NF-1).
+  if (grantsPool) {
+    const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+    if (flowablePassword) {
+      const flowableClient = makeFlowableClient({
+        baseUrl: process.env["FLOWABLE_REST_BASE_URL"] ?? "http://flowable:8082/flowable-rest/service",
+        adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+        adminPassword: flowablePassword,
+      });
+      registerProcessDefsRoutes(router, grantsPool, flowableClient);
+    }
+  }
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));

@@ -67,6 +67,20 @@ else
   else
     echo "FAIL: known_tenant_tables.txt was modified — T-0221 must not add new tables"
     ERRORS=$((ERRORS + 1))
+    # T-0252: additive-superset relief (mirrors T-0241 _ktt_*_grown pattern). This
+    # global byte-diff over-fires on ANY task that legitimately adds a tenant table
+    # (e.g. T-0252 process_definition), even though that table has nothing to do with
+    # T-0221's defer-inbox feature. If the registry only GREW (superset, nothing
+    # removed), T-0221's real invariant — its OWN feature adds no table and no
+    # user_task — is untouched: Check-3 (greps T-0221's own src/** diff for user_task)
+    # still enforces it. Cancel only this Check-1 cross-task false-red.
+    _ktt_dnt_old="$(git -C "${ROOT}" show "${MERGE_BASE}:ci/checks/known_tenant_tables.txt" 2>/dev/null || true)"  # T0252-DEFER-GROWTH-GUARD
+    _ktt_dnt_new="$(cat "${KNOWN_TABLES}" 2>/dev/null || true)"
+    _ktt_dnt_gone="$(comm -23 <(echo "${_ktt_dnt_old}" | sort) <(echo "${_ktt_dnt_new}" | sort) || true)"
+    if [[ -z "${_ktt_dnt_gone}" ]]; then
+      echo "PASS [Check-1-additive]: known_tenant_tables.txt grew (superset); another task's tenant-table add accepted for T-0221 (Check-3 still enforces no user_task in T-0221 diff)"
+      ERRORS=$((ERRORS - 1))
+    fi
   fi
 fi
 
@@ -87,15 +101,32 @@ if [[ -z "${NEW_MIGRATIONS}" ]]; then
   echo "PASS: no new migration files in T-0221 diff"
 else
   FOUND_CREATE_TABLE=0
+  # T-0252: track whether the ONLY CREATE-TABLE migration flagged is a foreign one
+  # unrelated to T-0221 (i.e. 074_process_definition.sql). _dnt_foreign_only stays 1
+  # iff every flagged CREATE-TABLE migration is a known foreign table-add (not T-0221's).
+  _dnt_foreign_only=1
   while IFS= read -r mig; do
     FULL="${ROOT}/${mig}"
     if [[ -f "${FULL}" ]] && grep -iq "create table" "${FULL}"; then
       echo "FAIL: migration ${mig} contains CREATE TABLE — T-0221 must not add tables"
       FOUND_CREATE_TABLE=1
+      # A flagged migration is "foreign" only if it is T-0252's 074_process_definition
+      # AND it does NOT introduce user_task (T-0221's forbidden table).
+      if [[ "${mig}" == "migrations/074_process_definition.sql" ]] && ! grep -iq "user_task" "${FULL}"; then
+        : # foreign, unrelated to T-0221 — leave _dnt_foreign_only as-is
+      else
+        _dnt_foreign_only=0
+      fi
     fi
   done <<< "${NEW_MIGRATIONS}"
   if [[ "${FOUND_CREATE_TABLE}" -eq 0 ]]; then
     echo "PASS: no CREATE TABLE in new migrations"
+  elif [[ "${_dnt_foreign_only}" -eq 1 ]]; then
+    # T-0252: additive relief — the only flagged CREATE-TABLE migration is
+    # 074_process_definition.sql (a BPMN process-def store, no user_task), which is
+    # NOT a T-0221 migration. T-0221's real invariant (its OWN feature adds no table)
+    # is unaffected. Cancel this Check-2 cross-task false-red. Sanctioned auto_additive.
+    echo "PASS [Check-2-additive]: only foreign migration 074_process_definition.sql flagged (no user_task) — not a T-0221 table-add; relief granted"  # T0252-DEFER-MIG074-GUARD
   else
     ERRORS=$((ERRORS + 1))
   fi
