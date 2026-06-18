@@ -583,7 +583,7 @@ function ExecutorDetail({ data, onOpenRights, subjectSlug }) {
             </div>
           </div>
           <div className="chs-detail__headactions">
-            <Button variant="ghost" size="sm">Журнал</Button>
+            <Button variant="ghost" size="sm" disabled title="Журнал событий исполнителя — следующий слой (API ещё не подключён)">Журнал</Button>
             <Button variant="secondary" size="sm" onClick={() => onOpenRights && onOpenRights(primaryRole)}
               glyph={<Icon name="rights" className="chs-btn__glyph" />}>Права и доступ</Button>
           </div>
