@@ -57,7 +57,7 @@ export interface Locator {
 }
 
 /** ARIA roles the journeys use (kept narrow on purpose — extend when needed). */
-export type RoleName = "button" | "dialog" | "link" | "textbox" | "heading";
+export type RoleName = "button" | "dialog" | "link" | "textbox" | "heading" | "checkbox";
 
 /** An HTTP write/read the step waits for, with a captured field + status assert. */
 export interface AwaitResponse {
