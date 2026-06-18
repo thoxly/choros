@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   validateRecordAgainstSchema,
+  validateRecordSchemaDefinition,
   type SchemaHistoryMap,
   type ValidationResult,
 } from '../core/record-schema-validator.js';
@@ -188,6 +189,49 @@ describe('record-schema-validator', () => {
 
     const result = validateRecordAgainstSchema(record, schemaHistory);
     expect(result.valid).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // T-0263: validateRecordSchemaDefinition — field-schema authoring guard
+  // -------------------------------------------------------------------------
+
+  it('T-0263 def: a well-formed field-schema is accepted', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        name: { type: 'string', title: 'Name' },
+        amount: { type: 'number' },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    };
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('T-0263 def: an empty object schema is accepted', () => {
+    const result = validateRecordSchemaDefinition({});
+    expect(result.valid).toBe(true);
+  });
+
+  it('T-0263 def: an unknown field `type` is rejected (AJV strict)', () => {
+    const schema = { type: 'object', properties: { foo: { type: 'bogus-type' } } };
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it('T-0263 def: a non-array `required` is rejected', () => {
+    const schema = { type: 'object', required: 'name' };
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(false);
+  });
+
+  it('T-0263 def: null / array / non-object inputs are rejected', () => {
+    expect(validateRecordSchemaDefinition(null).valid).toBe(false);
+    expect(validateRecordSchemaDefinition([]).valid).toBe(false);
+    expect(validateRecordSchemaDefinition('schema').valid).toBe(false);
   });
 
   it('AC-7 additional properties: validation respects additionalProperties constraint', () => {

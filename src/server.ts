@@ -329,9 +329,22 @@ function buildRouter(
     });
   }
 
-  // Register registry_def schema-change API (T-0177 T-0121c).
-  // Uses lazy pool (same pattern as artifacts.ts) — no grantsPool required at wiring.
-  registerRegistryDefRoutes(router);
+  // Register registry_def schema-change API (T-0177 T-0121c) + create/list/get
+  // (T-0263 E13). PUT/PATCH use the lazy pool (artifacts.ts pattern); the T-0263
+  // create/list/get routes are deps-gated on grantsPool + resolveActorTenant (same
+  // tenant-resolution as applications) and register only when grantsPool exists.
+  registerRegistryDefRoutes(
+    router,
+    undefined,
+    undefined,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
 
   // Register artifact tier-promote endpoint (T-0087 E12.6).
   registerArtifactRoutes(router);

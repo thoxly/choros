@@ -1,9 +1,26 @@
 /**
- * src/http/registry-defs.ts — T-0177 · T-0121c · T-0191: registry_def schema-change API.
+ * src/http/registry-defs.ts — T-0177 · T-0121c · T-0191 · T-0263: registry_def API.
  *
  * Registers:
  *   PUT   /api/registry-defs/:id   → updateRegistryDefSchema (schema-change guard)
  *   PATCH /api/registry-defs/:id   → updateRegistryDefSchema (same handler)
+ *   POST  /api/registry-defs       → createRegistryDef        (T-0263, deps-gated)
+ *   GET   /api/registry-defs       → listRegistryDefs         (T-0263, deps-gated)
+ *   GET   /api/registry-defs/:id   → getRegistryDef           (T-0263, deps-gated)
+ *
+ * T-0263 (create/list/get) registers only when CRUD deps { pool, resolveActorTenant }
+ * are supplied (honest-degrade, mirrors applications.ts) — those routes resolve the
+ * actor's REAL tenant from the dev-user slug (NEVER from the body) and run inside
+ * withTenantTx under FORCE RLS. The pre-existing PUT/PATCH schema-change path is
+ * UNCHANGED: it still uses the lazy pool + DEV_TENANT_ID (T-0177).
+ *
+ * VERSIONING (migration 070_record_schema_versioning.sql): record_schema_version is
+ * managed entirely by DB triggers — CREATE seeds version 1 (column DEFAULT 1); any
+ * UPDATE whose record_schema IS DISTINCT FROM the old value auto-increments the
+ * version (trigger registry_def_schema_version_increment) and appends a row to
+ * registry_schema_history (trigger registry_def_schema_version_audit). The existing
+ * PUT/PATCH schema-change path therefore already produces versioned history with no
+ * app-level version code; CREATE/GET simply seed and surface record_schema_version.
  *
  * Contract (ADR T-0121 §5 / spec T-0177 / spec T-0191):
  *   Body: { record_schema?: unknown, force?: boolean }
@@ -33,7 +50,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
@@ -42,6 +59,7 @@ import {
   type AffectedDep,
   type JsonSchemaForClassify,
 } from "../core/schema-change-classifier.js";
+import { validateRecordSchemaDefinition } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { loadAdminContext } from "../db/org.js";
 
@@ -51,6 +69,12 @@ import { loadAdminContext } from "../db/org.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// slug: lowercase alphanumerics + dashes, 1..64 chars. Same convention as
+// applications.ts (T-0262) — a registry_def slug is the URL-shaped identifier
+// under (tenant_id, application_id, slug) (migration 004 UNIQUE). display_name
+// carries the free-text label.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // Startup-time validation of DEV_TENANT_ID (same pattern as artifacts.ts R-4).
 const _rawDevTenantId =
@@ -151,6 +175,22 @@ async function defaultCheckDestructiveGrant(
 const defaultRegistryDefAuthzDeps: RegistryDefAuthzDeps = {
   checkDestructiveGrant: defaultCheckDestructiveGrant,
 };
+
+// ---------------------------------------------------------------------------
+// RegistryDefCrudDeps — injected deps for the T-0263 create/list/get routes.
+//
+// Mirrors ApplicationRoutesDeps (applications.ts): the composition root supplies
+// { pool, resolveActorTenant }. When absent the create/list/get routes are NOT
+// registered (no-DB honest degrade). The actor's REAL tenant is resolved from the
+// dev-user slug via resolveActorTenant — NEVER from the request body.
+// ---------------------------------------------------------------------------
+
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+export interface RegistryDefCrudDeps {
+  pool: pg.Pool;
+  resolveActorTenant: ActorTenantResolver;
+}
 
 // ---------------------------------------------------------------------------
 // UUID helper
@@ -505,6 +545,275 @@ async function updateSchemaInTx(args: {
 }
 
 // ---------------------------------------------------------------------------
+// T-0263 — create/list/get over registry_def (migration 004 + 070 versioning)
+// ---------------------------------------------------------------------------
+
+interface RegistryDefCrudRow {
+  id: string;
+  application_id: string;
+  slug: string;
+  display_name: string;
+  description: string | null;
+  record_schema: unknown;
+  record_schema_version: number;
+  is_system: boolean;
+  created_at: string | number; // bigint comes back as a string from node-postgres
+  updated_at: string | number;
+}
+
+// record_schema_version (migration 070) included so the API surfaces the
+// trigger-managed version; is_system (migration 004) surfaces whether the row is
+// a built-in. created_at/updated_at are epoch-ms bigints.
+const REG_DEF_SELECT_COLS =
+  "id, application_id, slug, display_name, description, record_schema, " +
+  "record_schema_version, is_system, created_at, updated_at";
+
+function serializeRegistryDef(row: RegistryDefCrudRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    application_id: row.application_id,
+    slug: row.slug,
+    display_name: row.display_name,
+    description: row.description,
+    record_schema: row.record_schema,
+    record_schema_version: Number(row.record_schema_version),
+    is_system: row.is_system,
+    created_at: Number(row.created_at),
+    updated_at: Number(row.updated_at),
+  };
+}
+
+async function createRegistryDef(args: {
+  pool: pg.Pool;
+  tenantId: string;
+  applicationId: string;
+  slug: string;
+  displayName: string;
+  description: string | null;
+  recordSchema: unknown;
+  nowMs: number;
+}): Promise<RegistryDefCrudRow> {
+  const { pool, tenantId, applicationId, slug, displayName, description, recordSchema, nowMs } = args;
+  const id = randomUUID();
+  return withTenantTx(pool, tenantId, async (client) => {
+    try {
+      // record_schema_version is left to the column DEFAULT 1 (migration 070) —
+      // a freshly created registry_def starts at version 1; subsequent record_schema
+      // UPDATEs bump it via the increment trigger.
+      const res = await client.query<RegistryDefCrudRow>(
+        `INSERT INTO choros.registry_def
+           (tenant_id, id, application_id, slug, display_name, description,
+            record_schema, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)
+         RETURNING ${REG_DEF_SELECT_COLS}`,
+        [
+          tenantId,
+          id,
+          applicationId,
+          slug,
+          displayName,
+          description,
+          JSON.stringify(recordSchema),
+          nowMs,
+        ],
+      );
+      return res.rows[0]!;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      // 23505 = unique_violation → (tenant_id, application_id, slug) taken (migration 004).
+      if (code === "23505") {
+        throw new HttpError(
+          409,
+          "CONFLICT",
+          `registry_def slug '${slug}' already exists for this application`,
+        );
+      }
+      // 23503 = foreign_key_violation → application_id not in this tenant (FK to application).
+      if (code === "23503") {
+        throw new HttpError(
+          404,
+          "NOT_FOUND",
+          `application '${applicationId}' not found in this tenant`,
+        );
+      }
+      throw err;
+    }
+  });
+}
+
+async function listRegistryDefs(
+  pool: pg.Pool,
+  tenantId: string,
+  applicationId: string | null,
+): Promise<RegistryDefCrudRow[]> {
+  return withTenantTx(pool, tenantId, async (client) => {
+    if (applicationId !== null) {
+      const res = await client.query<RegistryDefCrudRow>(
+        `SELECT ${REG_DEF_SELECT_COLS}
+           FROM choros.registry_def
+          WHERE tenant_id = $1 AND application_id = $2
+          ORDER BY created_at DESC, slug ASC`,
+        [tenantId, applicationId],
+      );
+      return res.rows;
+    }
+    const res = await client.query<RegistryDefCrudRow>(
+      `SELECT ${REG_DEF_SELECT_COLS}
+         FROM choros.registry_def
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC, slug ASC`,
+      [tenantId],
+    );
+    return res.rows;
+  });
+}
+
+async function getRegistryDef(
+  pool: pg.Pool,
+  tenantId: string,
+  id: string,
+): Promise<RegistryDefCrudRow | null> {
+  return withTenantTx(pool, tenantId, async (client) => {
+    const res = await client.query<RegistryDefCrudRow>(
+      `SELECT ${REG_DEF_SELECT_COLS}
+         FROM choros.registry_def
+        WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, id],
+    );
+    return res.rows[0] ?? null;
+  });
+}
+
+/**
+ * Register the T-0263 create/list/get routes on the same router/module as the
+ * PUT/PATCH schema-change path. Called from registerRegistryDefRoutes when CRUD
+ * deps are supplied (deps-gated, mirrors registerApplicationRoutes honest-degrade).
+ */
+function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps): void {
+  const { pool, resolveActorTenant } = deps;
+
+  // POST /api/registry-defs — create a registry_def for an application (tenant-scoped).
+  router.register("POST", "/api/registry-defs", async (req: IncomingMessage, res: ServerResponse) => {
+    const actor = await extractActor(req);
+
+    const rawBody = await readJsonBody(req);
+    if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+      throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+    }
+    const body = rawBody as Record<string, unknown>;
+
+    const applicationId = body["application_id"];
+    if (typeof applicationId !== "string" || !UUID_RE.test(applicationId)) {
+      throw new HttpError(400, "VALIDATION", "application_id must be a valid UUID");
+    }
+
+    const slug = body["slug"];
+    if (typeof slug !== "string" || !SLUG_RE.test(slug)) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        "slug must be a lowercase alphanumeric/dash string (1-64 chars)",
+      );
+    }
+
+    const displayName = body["display_name"];
+    if (typeof displayName !== "string" || displayName.trim().length === 0) {
+      throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
+    }
+    if (displayName.length > 256) {
+      throw new HttpError(400, "VALIDATION", "display_name must be at most 256 chars");
+    }
+
+    let description: string | null = null;
+    if ("description" in body && body["description"] !== null && body["description"] !== undefined) {
+      if (typeof body["description"] !== "string") {
+        throw new HttpError(400, "VALIDATION", "description must be a string or null");
+      }
+      description = body["description"];
+    }
+
+    const recordSchema = body["record_schema"];
+    // Validate the field-schema definition via the record-schema-validator (AJV strict).
+    // The registry_def's record_schema is the application's record field-schema:
+    //   properties = field map (each field has a `type`), required = required-field list.
+    const validation = validateRecordSchemaDefinition(recordSchema);
+    if (!validation.valid) {
+      throw new HttpError(
+        400,
+        "VALIDATION",
+        `invalid record_schema: ${validation.errors.join("; ")}`,
+      );
+    }
+
+    const tenantId = await resolveActorTenant(actor);
+    const row = await createRegistryDef({
+      pool,
+      tenantId,
+      applicationId,
+      slug,
+      displayName,
+      description,
+      recordSchema,
+      nowMs: Date.now(),
+    });
+
+    res.statusCode = 201;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(serializeRegistryDef(row)));
+  });
+
+  // GET /api/registry-defs — list the caller-tenant's registry_defs,
+  // optionally filtered by ?application_id=.
+  router.register("GET", "/api/registry-defs", async (req: IncomingMessage, res: ServerResponse) => {
+    const actor = await extractActor(req);
+
+    // Parse ?application_id= filter from the request URL.
+    let applicationId: string | null = null;
+    const rawUrl = req.url ?? "";
+    const qIdx = rawUrl.indexOf("?");
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(rawUrl.slice(qIdx + 1));
+      const appParam = params.get("application_id");
+      if (appParam !== null) {
+        if (!UUID_RE.test(appParam)) {
+          throw new HttpError(400, "VALIDATION", "application_id query param must be a valid UUID");
+        }
+        applicationId = appParam;
+      }
+    }
+
+    const tenantId = await resolveActorTenant(actor);
+    const rows = await listRegistryDefs(pool, tenantId, applicationId);
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ registry_defs: rows.map(serializeRegistryDef) }));
+  });
+
+  // GET /api/registry-defs/:id — get one (404 if not in the caller's tenant).
+  router.register(
+    "GET",
+    "/api/registry-defs/:id",
+    async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+      const id = params["id"] ?? "";
+      assertUuidShape(id, "registry_def id");
+
+      const actor = await extractActor(req);
+      const tenantId = await resolveActorTenant(actor);
+      const row = await getRegistryDef(pool, tenantId, id);
+      if (row === null) {
+        // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
+        throw new HttpError(404, "NOT_FOUND", "registry_def not found");
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(serializeRegistryDef(row)));
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -520,11 +829,16 @@ async function updateSchemaInTx(args: {
  *               Default: production loadAdminContext gate (genesis-owner short-circuit +
  *               adminGrants check for mgmt_object:schema_destructive/apply).
  *               Override in tests to supply a fake without a live DB.
+ * @param crudDeps - Injectable { pool, resolveActorTenant } for the T-0263 create/
+ *               list/get routes. When omitted those routes are NOT registered
+ *               (no-DB honest degrade, mirrors registerApplicationRoutes). The
+ *               PUT/PATCH schema-change path is unaffected either way.
  */
 export function registerRegistryDefRoutes(
   router: Router,
   _poolHint?: pg.Pool,
   deps: RegistryDefAuthzDeps = defaultRegistryDefAuthzDeps,
+  crudDeps?: RegistryDefCrudDeps,
 ): void {
   const handler = async (
     req: IncomingMessage,
@@ -628,4 +942,11 @@ export function registerRegistryDefRoutes(
 
   router.register("PUT", "/api/registry-defs/:id", handler);
   router.register("PATCH", "/api/registry-defs/:id", handler);
+
+  // T-0263 — create/list/get routes register only when CRUD deps are supplied
+  // (honest-degrade). Wired on the SAME module/router so server.ts is unchanged
+  // beyond the one optional arg added to this registration call.
+  if (crudDeps) {
+    registerRegistryDefCrudRoutes(router, crudDeps);
+  }
 }
