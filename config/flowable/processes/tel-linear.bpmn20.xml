@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tel-linear.bpmn20.xml — T-0279 §A (ADR T-0278 §2.1)
+  Canonical linear ТЭЛ process definition for deploy-acceptance gate.
+
+  Design constraints (ADR §2.1, NF O3):
+  - LINEAR only: no gateway branching, no cycles, no refuse-branches.
+  - Structure: startEvent → userTask «Подача заявки» → serviceTask «Триаж» (external)
+               → userTask «Согласование» → endEvent «Завершено»
+  - userTask «Подача заявки»:  candidateGroups="role-initiator"  (e-orlov, U1/U2)
+  - serviceTask «Триаж»:       external topic="tel-intake"        (a-intake, U3, DORMANT/DETERMINISTIC, ZERO LLM)
+  - userTask «Согласование»:   candidateGroups="role-approver"   (e-larina, U4)
+  - Roles from seed/demo/tel-scenario.ts:
+      initiator = e-orlov (role-initiator)
+      approver  = e-larina (role-approver / fin-ctrl)
+      intake    = a-intake (role-intake-agent, agent_card DORMANT, llm_* NULL)
+
+  Process key: telLinear  (camelCase per Flowable convention, like chorosSmoke)
+  Deploy path: via deployBpmn REST (same as choros-smoke / customer-onboarding).
+               NOT filesystem auto-deploy; NOT in seed-pack.
+-->
+<definitions
+  xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:flowable="http://flowable.org/bpmn"
+  targetNamespace="http://choros.io/tel"
+  xsi:schemaLocation="http://www.omg.org/spec/BPMN/20100524/MODEL
+    http://www.omg.org/spec/BPMN/2.0/20100501/BPMN20.xsd">
+
+  <process id="telLinear" name="Канонический линейный ТЭЛ" isExecutable="true">
+
+    <!-- Start -->
+    <startEvent id="start" name="Начало"/>
+
+    <!-- UserTask 1: Подача заявки (инициатор, U1/U2) -->
+    <userTask id="task-submit"
+              name="Подача заявки"
+              flowable:candidateGroups="role-initiator">
+      <documentation>
+        Инициатор (e-orlov, role-initiator) заполняет форму заявки:
+        предмет, сумма (5.5M₽), обоснование. Серверная валидация через
+        POST /api/forms/:formId/submit (E9). После submit: запись в record,
+        процесс переходит к шагу Триажа.
+        Соответствует шагам S1+S2 сценария tel-scenario.ts / U1+U2 ADR §2.1.
+      </documentation>
+    </userTask>
+
+    <!-- ServiceTask: Триаж (внешняя задача, topic=tel-intake, DORMANT/DETERMINISTIC) -->
+    <serviceTask id="task-triage"
+                 name="Триаж"
+                 flowable:type="external"
+                 flowable:topic="tel-intake">
+      <documentation>
+        Агентский шаг (a-intake, role-intake-agent). External task, topic=tel-intake.
+        agent_card DORMANT (llm_* NULL) — ZERO платных LLM (ADR NF3/O5, AC-10).
+        На day-1 проходит детерминированно через fetchAndLock/completeTask
+        (тот же bridge-механизм, что в choros-smoke). Не блокирует переход к U4.
+        Соответствует шагу S3 (intake slot) сценария tel-scenario.ts / U3 ADR §2.1.
+      </documentation>
+    </serviceTask>
+
+    <!-- UserTask 2: Согласование (согласующий, U4) -->
+    <userTask id="task-approve"
+              name="Согласование"
+              flowable:candidateGroups="role-approver">
+      <documentation>
+        Согласующий (e-larina, role-approver / fin-ctrl) берёт задачу из пула
+        (claim POST /api/inbox/:id/claim) и совершает card-action «Согласовать»
+        (transition + грант approve + audit_event).
+        Соответствует шагу S4 сценария tel-scenario.ts / U4 ADR §2.1.
+      </documentation>
+    </userTask>
+
+    <!-- End -->
+    <endEvent id="end" name="Завершено"/>
+
+    <!-- Sequence flows (linear, no branches) -->
+    <sequenceFlow id="sf-start-submit"   sourceRef="start"        targetRef="task-submit"/>
+    <sequenceFlow id="sf-submit-triage"  sourceRef="task-submit"  targetRef="task-triage"/>
+    <sequenceFlow id="sf-triage-approve" sourceRef="task-triage"  targetRef="task-approve"/>
+    <sequenceFlow id="sf-approve-end"    sourceRef="task-approve" targetRef="end"/>
+
+  </process>
+
+</definitions>
