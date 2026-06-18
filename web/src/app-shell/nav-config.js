@@ -34,8 +34,12 @@ export const NAV = [
     items: [
       // Инбокс: GET /api/inbox (live), POST /api/inbox/:id/claim (live), POST /api/inbox/:id/action (live)
       { id: "inbox",     label: "Инбокс задач", icon: "inbox",   count: 18, screen: true, status: "live" },
-      // Оргструктура: дерево GET /api/org live, но панель деталей — EXEC_DETAIL static mock.
-      { id: "org",       label: "Оргструктура",  icon: "org",                screen: true, status: "demo" },
+      // Оргструктура (T-0269): дерево GET /api/org + РЕАЛЬНЫЙ CRUD над существующими
+      // эндпойнтами — POST /api/{departments,positions,employees,roles}, POST
+      // /api/role-assignments, DELETE /api/{…}/:id (genesis-owner gate). UUID для записи
+      // берутся из GET /api/org/tenant-state. Карточка исполнителя ещё иллюстративна
+      // (честно помечена), но дерево + создание/удаление/назначение — живые → live.
+      { id: "org",       label: "Оргструктура",  icon: "org",                screen: true, status: "live" },
       // Процессы: GET /api/processes (live), POST /api/processes/start (live)
       { id: "processes", label: "Процессы",       icon: "process", count: 7, screen: true, status: "live" },
     ],
