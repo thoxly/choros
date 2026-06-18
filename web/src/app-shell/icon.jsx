@@ -27,6 +27,7 @@ function Icon({ name, className }) {
       {name === "rights" && (<><path {...p} d="M8 1.8l5 1.7v4.1c0 3-2.1 5.1-5 6.4-2.9-1.3-5-3.4-5-6.4V3.5z" /><circle {...p} cx="8" cy="7" r="1.3" /><path {...p} d="M8 8.3v2.1" /></>)}
       {name === "forms" && (<><rect {...p} x="3" y="2" width="10" height="12" rx="1" /><path {...p} d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" /></>)}
       {name === "bell" && (<><path {...p} d="M4 6.5a4 4 0 018 0c0 3 1 4 1.5 5h-11C3 10.5 4 9.5 4 6.5z" /><path {...p} d="M6.5 13a1.5 1.5 0 003 0" /></>)}
+      {name === "apps" && (<><rect {...p} x="2" y="2" width="5" height="5" rx="1" /><rect {...p} x="9" y="2" width="5" height="5" rx="1" /><rect {...p} x="2" y="9" width="5" height="5" rx="1" /><rect {...p} x="9" y="9" width="5" height="5" rx="1" /></>)}
     </svg>
   );
 }
