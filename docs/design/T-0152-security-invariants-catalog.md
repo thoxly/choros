@@ -334,6 +334,67 @@ gate-order до выдачи; identity невидима слою прав.
 
 ---
 
+## 7.6 T-0253 · ВРАГ — 6 in-process adversarial-семей (STRICTLY ADDITIVE)
+
+Шесть новых семей, которые детерминированный Враг (T-0154) теперь фаззит
+**в процессе** (seeded LCG, без DB/часов/сети) против НАСТОЯЩИХ Choros-предикатов,
+закрывая gap'ы §2/§5/§6/§7.3. Все они аддитивны: Враг становится только сильнее
+(ни один существующий предикат/self-test/frozen-check не ослаблен). Каждая семья
+несёт свой broken-surface self-test (Враг обязан укусить) и ≥1 вечный
+corpus-кейс (`src/__tests__/enemy/corpus/corpus.jsonl`, append-only).
+
+### 7.6.1 PRECHECK-DEFAULT — classifyOutcome не «proceed» при сомнении
+- **Инвариант:** `classifyOutcome` (`src/core/agent-precheck-motor.ts`) возвращает
+  `proceed` ТОЛЬКО когда ВСЕ гейты зелёные (INV-DEFAULT: fail-closed > defer >
+  proceed никогда не схлопывается в proceed при сомнении).
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья
+  PRECHECK-DEFAULT), `ci/checks/precheck-no-reasoning-egress.sh`. **Покрытие: STRONG**
+  (fuzz + broken self-test = классификатор, который «proceed» при сомнении).
+
+### 7.6.2 REASONING-EGRESS — reasoning не утекает наружу (D-139)
+- **Инвариант:** для любого `LlmResult` с reasoning-текстом возвращаемый
+  `PrecheckOutcome` из `src/runtime/legal-precheck/run-precheck.ts` НЕ содержит
+  ни одной подстроки reasoning (reasoning только как opaque `reasoning_trace_ref`).
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья
+  REASONING-EGRESS), `ci/checks/precheck-no-reasoning-egress.sh`. **Покрытие: STRONG**
+  (inject LlmPort-stub + substring-scan; broken self-test = egress, утекающий reasoning).
+
+### 7.6.3 FIELD-MASK — системные поля не пишутся vendor-admin'ом
+- **Инвариант:** любой casing/whitespace/alias/duplicate-вариант `circuit_id` или
+  `activation_key_issued_at`, разрешающийся в system-only поле, отклоняется
+  `checkWriteMask` (`src/runtime/customer-onboarding/field-mask-guard.ts`,
+  `SYSTEM_ONLY_FIELDS`).
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья FIELD-MASK),
+  `ci/checks/field-mask-hookpoint.sh`. **Покрытие: STRONG** (fuzz-варианты +
+  broken self-test = маска, разрешающая по substring).
+
+### 7.6.4 STATUS-TRANSITION — замороженная таблица переходов; archived терминален
+- **Инвариант:** `isAllowedTransition`/`CUSTOMER_TRANSITIONS`
+  (`src/core/customer-subscription/status-model.ts`) совпадает с замороженной
+  таблицей на ВСЕХ парах from×to; `archived→*` всегда false.
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья
+  STATUS-TRANSITION), `ci/checks/no-killswitch-in-crm.sh`. **Покрытие: STRONG**
+  (полный from×to + broken self-test = таблица, переоткрывающая archived).
+
+### 7.6.5 DORMANT-GATE — liveEnabled=false выбирает dormant-порт
+- **Инвариант:** `runIssueKey` (`src/runtime/customer-onboarding/issue-key.ts`) с
+  LIVE-успешным entitlement-адаптером, но `liveEnabled=false`, ВЫБИРАЕТ dormant-порт
+  (нет live-issuance; audit=`customer.key_issue_failed`, никогда `key_issued`).
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья
+  DORMANT-GATE), `ci/checks/entitlement-gates-vendor-only.sh`. **Покрытие: STRONG**
+  (inject ports + in-memory audit; broken self-test = gate, чтущий live при dormant).
+
+### 7.6.6 PDP-DENY-MATRIX — deny-матрица + denyAll-дефолт (Gap-4)
+- **Инвариант:** для каждой ячейки subject×resource×op без покрывающего гранта PDP
+  (`resolveFor`) отдаёт `no_grant`; композиционный дефолт-резолвер identity-равен
+  `denyAllResolver` (`src/core/object-handle.ts`) — нет allow-by-default подмены.
+- **Enforced by:** `src/__tests__/enemy/enemy.adversarial.test.ts` (семья
+  PDP-DENY-MATRIX), `ci/checks/single-resolver.sh`,
+  `ci/checks/grant-resolver-isolation.sh`. **Покрытие: STRONG** (exhaustive deny-matrix
+  + root-identity; broken self-test = allow-by-default матрица + не-denyAll дефолт).
+
+---
+
 ## 8. Сводная таблица покрытия
 
 | # | Семья | Static | Runtime | Adversarial-кейс | Покрытие | Главный gap → задача Врага |
