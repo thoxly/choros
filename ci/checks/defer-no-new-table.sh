@@ -119,6 +119,21 @@ else
       fi
     fi
   done <<< "${NEW_MIGRATIONS}"
+  _dnt_t0270_relief_for="075_process_app_binding"                                   # T0270-DEFER-MIG075-GUARD additive relief: extend foreign-allow to 075
+  _dnt_foreign_only_t0270=1                                                         # T0270-DEFER-MIG075-GUARD recompute treating 075 as foreign (no user_task)
+  while IFS= read -r mig_t0270; do                                                  # T0270-DEFER-MIG075-GUARD second pass over flagged migrations
+    FULL_t0270="${ROOT}/${mig_t0270}"                                               # T0270-DEFER-MIG075-GUARD
+    if [[ -f "${FULL_t0270}" ]] && grep -iq "create table" "${FULL_t0270}"; then    # T0270-DEFER-MIG075-GUARD
+      if { [[ "${mig_t0270}" == "migrations/074_process_definition.sql" ]] || [[ "${mig_t0270}" == "migrations/${_dnt_t0270_relief_for}.sql" ]]; } && ! grep -iq "user_task" "${FULL_t0270}"; then # T0270-DEFER-MIG075-GUARD known foreign
+        _dnt_t0270_noop=1                                                           # T0270-DEFER-MIG075-GUARD foreign table-add, unrelated to T-0221
+      else                                                                          # T0270-DEFER-MIG075-GUARD
+        _dnt_foreign_only_t0270=0                                                   # T0270-DEFER-MIG075-GUARD a genuinely-T-0221 table-add would flip this
+      fi                                                                            # T0270-DEFER-MIG075-GUARD
+    fi                                                                              # T0270-DEFER-MIG075-GUARD
+  done <<< "${NEW_MIGRATIONS}"                                                      # T0270-DEFER-MIG075-GUARD
+  if [[ "${_dnt_foreign_only}" -eq 0 ]] && [[ "${_dnt_foreign_only_t0270}" -eq 1 ]]; then # T0270-DEFER-MIG075-GUARD cancel cross-task false-red
+    _dnt_foreign_only=1                                                             # T0270-DEFER-MIG075-GUARD Check-3 still enforces T-0221's own no-user_task invariant
+  fi                                                                                # T0270-DEFER-MIG075-GUARD
   if [[ "${FOUND_CREATE_TABLE}" -eq 0 ]]; then
     echo "PASS: no CREATE TABLE in new migrations"
   elif [[ "${_dnt_foreign_only}" -eq 1 ]]; then

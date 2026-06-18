@@ -22,6 +22,7 @@ import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerAgentListRoutes } from "./http/agents-list.js";
 import { registerBindingRoutes } from "./http/binding.js";
+import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
@@ -324,6 +325,19 @@ function buildRouter(
   // Register named-binding endpoints (T-0072 E11.1 — additive)
   if (grantsPool) {
     registerBindingRoutes(router, grantsPool);
+  }
+
+  // Register the REAL process catalog + process↔application binding (T-0270 E13).
+  // GET /api/process-catalog (real defs from process_definition 074 + real instances
+  // from the audit-backed projection), GET/POST /api/process-app-bindings. All
+  // withAuth-wrapped + tenant-scoped via resolveActorTenant (same deps shape as the
+  // applications/agents-list APIs). Deps-gated on grantsPool — no-DB honest degrade.
+  if (grantsPool) {
+    registerProcessCatalogRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // Register applications create/list/get API (T-0262 E13 — first write-surface
