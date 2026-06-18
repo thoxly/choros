@@ -53,7 +53,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import {
   classifySchemaChange,
   type AffectedDep,
@@ -693,7 +693,9 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
   const { pool, resolveActorTenant } = deps;
 
   // POST /api/registry-defs — create a registry_def for an application (tenant-scoped).
-  router.register("POST", "/api/registry-defs", async (req: IncomingMessage, res: ServerResponse) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/registry-defs", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req);
 
     const rawBody = await readJsonBody(req);
@@ -760,11 +762,11 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(serializeRegistryDef(row)));
-  });
+  }));
 
   // GET /api/registry-defs — list the caller-tenant's registry_defs,
   // optionally filtered by ?application_id=.
-  router.register("GET", "/api/registry-defs", async (req: IncomingMessage, res: ServerResponse) => {
+  router.register("GET", "/api/registry-defs", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req);
 
     // Parse ?application_id= filter from the request URL.
@@ -788,13 +790,13 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ registry_defs: rows.map(serializeRegistryDef) }));
-  });
+  }));
 
   // GET /api/registry-defs/:id — get one (404 if not in the caller's tenant).
   router.register(
     "GET",
     "/api/registry-defs/:id",
-    async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
       const id = params["id"] ?? "";
       assertUuidShape(id, "registry_def id");
 
@@ -809,7 +811,7 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeRegistryDef(row)));
-    },
+    }),
   );
 }
 
@@ -940,8 +942,11 @@ export function registerRegistryDefRoutes(
     res.end(JSON.stringify(responseBody));
   };
 
-  router.register("PUT", "/api/registry-defs/:id", handler);
-  router.register("PATCH", "/api/registry-defs/:id", handler);
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  const guardedHandler = withAuth(handler);
+  router.register("PUT", "/api/registry-defs/:id", guardedHandler);
+  router.register("PATCH", "/api/registry-defs/:id", guardedHandler);
 
   // T-0263 — create/list/get routes register only when CRUD deps are supplied
   // (honest-degrade). Wired on the SAME module/router so server.ts is unchanged

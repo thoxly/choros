@@ -63,7 +63,7 @@ import {
 import { DICT_PRESETS, type GrantPreset, type GrantPresetAtom } from "./grants.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -241,7 +241,9 @@ export function registerRightsIntentRoutes(router: Router, pool: pg.Pool): void 
 // ===========================================================================
 
 function registerHire(router: Router, pool: pg.Pool): void {
-  router.register("POST", "/api/rights/intents/hire", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/rights/intents/hire", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -432,7 +434,7 @@ function registerHire(router: Router, pool: pg.Pool): void {
         ...(critical ? { second_approver_required: true } : {}),
       }),
     );
-  });
+  }));
 }
 
 // ===========================================================================
@@ -446,7 +448,9 @@ function registerHire(router: Router, pool: pg.Pool): void {
 // ===========================================================================
 
 function registerFire(router: Router, pool: pg.Pool): void {
-  router.register("POST", "/api/rights/intents/fire", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/rights/intents/fire", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -554,7 +558,7 @@ function registerFire(router: Router, pool: pg.Pool): void {
         reassign_required: true,
       }),
     );
-  });
+  }));
 }
 
 // ===========================================================================
@@ -568,7 +572,9 @@ function registerFire(router: Router, pool: pg.Pool): void {
 // ===========================================================================
 
 function registerSubstitute(router: Router, pool: pg.Pool): void {
-  router.register("POST", "/api/rights/intents/substitute", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/rights/intents/substitute", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -774,7 +780,7 @@ function registerSubstitute(router: Router, pool: pg.Pool): void {
         valid_until: validUntil,
       }),
     );
-  });
+  }));
 }
 
 // ===========================================================================
@@ -789,7 +795,9 @@ function registerSubstitute(router: Router, pool: pg.Pool): void {
 // ===========================================================================
 
 function registerUrgentRevoke(router: Router, pool: pg.Pool): void {
-  router.register("POST", "/api/rights/intents/urgent-revoke", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/rights/intents/urgent-revoke", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -868,7 +876,7 @@ function registerUrgentRevoke(router: Router, pool: pg.Pool): void {
         halt_active_run: principalKind === "agent",
       }),
     );
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------

@@ -18,11 +18,8 @@ import { Button, Field, KitIcon } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 
-const ACTOR_ID = 'e-owner'; // dev-silo genesis owner (confirmed by seed)
-
 // Dev tenant UUID — the silo every org row is scoped to (server DEV_TENANT_ID).
-// Same constant screen-org.jsx uses; the tenant-state read is genesis-owner gated
-// and ACTOR_ID above IS that owner, so the directory fetch passes the same gate.
+// Same constant screen-org.jsx uses; the tenant-state read is genesis-owner gated.
 const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
 
 /* ----------------------------------------------------------------------------
@@ -87,11 +84,13 @@ function OrgPicker({ label, value, onChange, options, placeholder = '— выб�
   );
 }
 
-async function postIntent(path, body, actorId = ACTOR_ID) {
+async function postIntent(path, body) {
   try {
+    // Mode-aware auth (dev → X-Dev-User from the picked dev identity; keycloak →
+    // Authorization: Bearer — the actor then comes from the validated token).
     const resp = await fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-dev-user': actorId },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));

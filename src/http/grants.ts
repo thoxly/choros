@@ -54,7 +54,7 @@ import {
 import { loadAdminContext } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -674,7 +674,9 @@ export function registerDictionariesRoute(router: Router): void {
 export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
   // ---------- POST /api/grants (FR-1 / FR-2 / FR-6 / AC-01..06) -----------
-  router.register("POST", "/api/grants", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/grants", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -951,10 +953,12 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
           : {}),
       }),
     );
-  });
+  }));
 
   // ---------- POST /api/grants/:id/revoke (FR-3 / AC-07/08/13) -------------
-  router.register("POST", "/api/grants/:id/revoke", async (req, res, params) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/grants/:id/revoke", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -1007,10 +1011,12 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: grantId }));
-  });
+  }));
 
   // ---------- POST /api/role-assignments (FR-4 / AC-09/10) -----------------
-  router.register("POST", "/api/role-assignments", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/role-assignments", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -1163,13 +1169,15 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
           : {}),
       }),
     );
-  });
+  }));
 
   // ---------- POST /api/role-assignments/:id/revoke (FR-5 / AC-11) ---------
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register(
     "POST",
     "/api/role-assignments/:id/revoke",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const actorId = extractActor(req);
       const tenantId = DEV_TENANT_ID;
       const nowMs = Date.now();
@@ -1216,7 +1224,7 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ id: raId }));
-    },
+    }),
   );
 }
 

@@ -11,7 +11,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field, KitIcon } from '../components/components.jsx';
-import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
+import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
   buildBindingPayload,
@@ -54,13 +54,13 @@ function LaunchModal({ open, onClose, onLaunched }) {
     setLaunching(true);
     setResult(null);
     try {
-      const user = getDevUser();
-      const actor = user?.id ?? "";
+      // Mode-aware auth headers (dev → X-Dev-User; keycloak → Authorization: Bearer);
+      // the FROZEN start contract still carries the x-tenant-id tenant scope.
       const res = await fetch('/api/processes/start', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-dev-user': actor,
+          ...authHeaders(),
           'x-tenant-id': DEV_TENANT_ID,
         },
         body: JSON.stringify({ processKey: PROCESS_KEY }),
