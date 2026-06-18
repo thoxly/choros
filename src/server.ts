@@ -23,6 +23,7 @@ import { registerAgentRoutes } from "./http/agents.js";
 import { registerBindingRoutes } from "./http/binding.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
+import { registerApplicationRoutes } from "./http/applications.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
@@ -314,6 +315,18 @@ function buildRouter(
   // Register named-binding endpoints (T-0072 E11.1 — additive)
   if (grantsPool) {
     registerBindingRoutes(router, grantsPool);
+  }
+
+  // Register applications create/list/get API (T-0262 E13 — first write-surface
+  // over a config primitive; the root fix for "no create buttons"). Tenant-scoped
+  // via withTenantTx + RLS; the actor's tenant is resolved from the dev-user slug.
+  // Siblings T-0263 (registry_def) and T-0264 (record) add their own blocks below.
+  if (grantsPool) {
+    registerApplicationRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // Register registry_def schema-change API (T-0177 T-0121c).
