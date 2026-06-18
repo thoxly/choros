@@ -50,6 +50,16 @@
  * INSIDE the same withTenantTx — so a caller ROLLBACK undoes the row AND the audit
  * entry atomically (T-0016 / T-0068 hash-chain).
  *
+ * FIELD-MASK WRITE GUARD (T-0246 §2.3 / AC-10 / FF-10 / B-11 hook-point): before any
+ * record-data field is written, the create/update services call checkWriteMask(
+ * grantWriteFacet, requestedFields) — the pure predicate in field-mask-guard.ts —
+ * where requestedFields = the keys of the incoming `data`. A system-only field
+ * (circuit_id, activation_key_issued_at) requested by a caller whose write facet does
+ * NOT confer it is BLOCKED: a card_action.denied audit event is appended in-tx and the
+ * route returns HTTP 403 (FIELD_WRITE_FORBIDDEN); the data row is not written. The
+ * caller's write facet is resolved via the OPTIONAL resolveWriteFacet dep — see
+ * WriteFacetResolver for the honest-degrade (whole-resource `undefined`) default.
+ *
  * DEPS INJECTION (mirrors applications.ts / registry-defs.ts): the composition root
  * supplies { pool, resolveActorTenant }. When absent (no DATABASE_URL) the routes are
  * NOT registered — same honest-degrade contract as the other DB-backed write APIs.
@@ -71,6 +81,7 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
 import { validateRecordAgainstSchema } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -96,9 +107,50 @@ function assertUuidShape(value: string, label: string): void {
  */
 export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
+/**
+ * Resolve the caller's FIELD WRITE-MASK for a given record — the field-name
+ * allow-list its covering write-grant confers (T-0246 §2.3 / AC-10 / B-11).
+ *
+ * Return contract (mirrors grant-resolver.grantFacetFields / checkWriteMask's
+ * `writeFacet` parameter):
+ *   - `undefined` ⇒ WHOLE-RESOURCE write (system-actor / unrestricted grant):
+ *     every field is writable → checkWriteMask never denies.
+ *   - `string[]`  ⇒ a RESTRICTED facet: the named fields are the only ones the
+ *     caller may write; a requested system-only field absent from this set is
+ *     blocked (HTTP 403 + card_action.denied).
+ *
+ * HONEST-DEGRADE (ADR §4.3 optional-PDP-port discipline): this resolver is
+ * OPTIONAL on RecordRoutesDeps. When the composition root has not yet wired the
+ * grant→write-facet lookup (the current bootstrap state — field-grant
+ * provisioning for record-data is a later increment), it is absent and the
+ * write path degrades to the whole-resource (`undefined`) facet: the field-mask
+ * guard is STILL on the write path and STILL runs checkWriteMask on every write,
+ * but is permissive until a restricting facet is supplied. The guard bites the
+ * moment a vendor-admin facet is injected — exactly the B-11 hook-point the
+ * field-mask-guard.ts / FF-10 contract mandates.
+ *
+ * @param actorSlug the caller identity (dev-user slug / OIDC sub)
+ * @param tenantId  the caller's resolved tenant
+ * @param recordId  the record being written (the grant scope subject)
+ */
+export type WriteFacetResolver = (
+  actorSlug: string,
+  tenantId: string,
+  recordId: string,
+) => Promise<string[] | undefined>;
+
 export interface RecordRoutesDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
+  /**
+   * OPTIONAL field write-mask resolver (T-0246 §2.3 / AC-10 / B-11 hook-point).
+   * When omitted, every write degrades to a whole-resource facet (`undefined`)
+   * — see {@link WriteFacetResolver}. When supplied, the returned allow-list is
+   * fed to checkWriteMask before any record-data field write, denying writes of
+   * system-only fields (circuit_id, activation_key_issued_at) the caller's grant
+   * does not confer.
+   */
+  resolveWriteFacet?: WriteFacetResolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,8 +351,106 @@ function assertDataValid(data: unknown, reg: GoverningRegistryDef): void {
 }
 
 // ---------------------------------------------------------------------------
+// Field-mask write guard (T-0246 §2.3 / AC-10 / FF-10 / B-11 hook-point)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sentinel result of the field-mask write guard. `denied=true` carries the
+ * blocked wire field names so the route can shape a 403 body and so the audit
+ * trail (already appended inside the tx) records exactly what the caller sent.
+ */
+type WriteMaskGuardResult =
+  | { denied: false }
+  | { denied: true; blockedFields: string[] };
+
+/**
+ * Enforce the field write-mask on a record-data write (PUT, and POST for
+ * consistency) BEFORE the row is written — the B-11 hook-point FF-10 mandates.
+ *
+ * Flow (ADR T-0246 §2.3 / field-mask-guard.ts "Integration with B-11"):
+ *   1. The requested field set = the keys of the incoming `data` object.
+ *   2. checkWriteMask(grantWriteFacet, requestedFields) — the pure predicate
+ *      (field-mask-guard.ts): a requested system-only field (circuit_id,
+ *      activation_key_issued_at) absent from the caller's write facet is blocked.
+ *   3. On denial → append ONE card_action.denied audit event INSIDE the same tx
+ *      (so the denial is on the hash-chain and commits even though the data row
+ *      is not written) and return the sentinel. The route maps it to HTTP 403.
+ *
+ * `grantWriteFacet === undefined` (no restricting facet resolved — system-actor
+ * / honest-degrade path) ⇒ checkWriteMask never denies ⇒ this is a no-op.
+ *
+ * Runs against an already-tenant-scoped client (inside withTenantTx + RLS).
+ */
+async function enforceWriteMask(
+  client: pg.PoolClient,
+  args: {
+    grantWriteFacet: string[] | undefined;
+    data: unknown;
+    recordId: string;
+    reg: GoverningRegistryDef;
+    actor: string;
+    op: "create" | "update";
+    nowMs: number;
+  },
+): Promise<WriteMaskGuardResult> {
+  const { grantWriteFacet, data, recordId, reg, actor, op, nowMs } = args;
+
+  // The requested field set = the keys of the incoming data object. `assertDataValid`
+  // has already guaranteed `data` is a non-null, non-array object at the call sites.
+  const requestedFields =
+    data !== null && typeof data === "object" && !Array.isArray(data)
+      ? Object.keys(data as Record<string, unknown>)
+      : [];
+
+  const verdict = checkWriteMask(grantWriteFacet, requestedFields);
+  if (!verdict.denied) {
+    return { denied: false };
+  }
+
+  // Append ONE card_action.denied audit event in-tx (the canonical denial event;
+  // mirrors issue-key.ts). The tx still COMMITs this denial event even though the
+  // record row is NOT written — the route throws 403 after the service returns.
+  const writer = makePgAuditWriter();
+  await writer.appendAuditEvent(client as unknown as PgClientLike, {
+    id: randomUUID(),
+    type: "card_action.denied",
+    actor,
+    subject: recordId,
+    scope: {
+      resource: "record",
+      op,
+      registry_def_id: reg.id,
+      application_id: reg.application_id,
+    },
+    via: "records-api",
+    proposed_by: null,
+    confirmed_by: null,
+    payload: {
+      reason: verdict.reason,
+      record_id: recordId,
+      blocked_fields: verdict.blockedFields,
+      registry_def_id: reg.id,
+      application_id: reg.application_id,
+    },
+    occurred_at: nowMs,
+  });
+
+  return { denied: true, blockedFields: verdict.blockedFields };
+}
+
+// ---------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a write service. A `{ denied: true }` outcome means the field-mask
+ * guard blocked the write (system-only field absent from the caller's facet);
+ * the denial audit event has already been committed in-tx and the route maps
+ * this to HTTP 403. `{ row }` is the success path.
+ */
+type WriteOutcome =
+  | { denied: true; blockedFields: string[] }
+  | { denied: false; row: RecordJoinedRow };
 
 async function createRecord(args: {
   pool: pg.Pool;
@@ -309,9 +459,10 @@ async function createRecord(args: {
   registryDefId: string | null;
   data: unknown;
   actor: string;
+  grantWriteFacet: string[] | undefined;
   nowMs: number;
-}): Promise<RecordJoinedRow> {
-  const { pool, tenantId, applicationId, registryDefId, data, actor, nowMs } = args;
+}): Promise<WriteOutcome> {
+  const { pool, tenantId, applicationId, registryDefId, data, actor, grantWriteFacet, nowMs } = args;
   const id = randomUUID();
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Resolve the governing registry_def (404/409 paths inside).
@@ -324,6 +475,22 @@ async function createRecord(args: {
 
     // 2. Validate data against the governing schema (400 on mismatch).
     assertDataValid(data, reg);
+
+    // 2b. FIELD-MASK WRITE GUARD (FF-10 / AC-10): before writing any field, check
+    // the requested field set against the caller's write facet. A system-only
+    // field absent from the facet → denial audited in-tx + 403 (no row written).
+    const guard = await enforceWriteMask(client, {
+      grantWriteFacet,
+      data,
+      recordId: id,
+      reg,
+      actor,
+      op: "create",
+      nowMs,
+    });
+    if (guard.denied) {
+      return { denied: true, blockedFields: guard.blockedFields };
+    }
 
     // 3. Insert the record (tenant-scoped under RLS).
     await client.query(
@@ -362,7 +529,7 @@ async function createRecord(args: {
         WHERE r.tenant_id = $1 AND r.id = $2`,
       [tenantId, id],
     );
-    return res.rows[0]!;
+    return { denied: false, row: res.rows[0]! };
   });
 }
 
@@ -414,15 +581,19 @@ async function getRecord(
   });
 }
 
+/** updateRecord outcome: not-found (404), field-mask denied (403), or success. */
+type UpdateOutcome = { notFound: true } | WriteOutcome;
+
 async function updateRecord(args: {
   pool: pg.Pool;
   tenantId: string;
   id: string;
   data: unknown;
   actor: string;
+  grantWriteFacet: string[] | undefined;
   nowMs: number;
-}): Promise<RecordJoinedRow | null> {
-  const { pool, tenantId, id, data, actor, nowMs } = args;
+}): Promise<UpdateOutcome> {
+  const { pool, tenantId, id, data, actor, grantWriteFacet, nowMs } = args;
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Lock and read the existing record (tenant-scoped; FOR UPDATE).
     const cur = await client.query<{ registry_id: string }>(
@@ -434,13 +605,30 @@ async function updateRecord(args: {
     );
     if (cur.rows.length === 0) {
       // Not in the caller's tenant (RLS-filtered) OR does not exist → caller maps to 404.
-      return null;
+      return { notFound: true };
     }
     const registryId = cur.rows[0]!.registry_id;
 
     // 2. Re-validate the new data against the governing registry_def schema.
     const reg = await loadRegistryDefById(client, tenantId, registryId);
     assertDataValid(data, reg);
+
+    // 2b. FIELD-MASK WRITE GUARD (FF-10 / AC-10 / B-11): before any field write,
+    // check the requested field set (keys of incoming data) against the caller's
+    // write facet. A system-only field (circuit_id, activation_key_issued_at)
+    // absent from the facet → denial audited in-tx + 403; the row is NOT updated.
+    const guard = await enforceWriteMask(client, {
+      grantWriteFacet,
+      data,
+      recordId: id,
+      reg,
+      actor,
+      op: "update",
+      nowMs,
+    });
+    if (guard.denied) {
+      return { denied: true, blockedFields: guard.blockedFields };
+    }
 
     // 3. Apply the update.
     await client.query(
@@ -480,7 +668,7 @@ async function updateRecord(args: {
         WHERE r.tenant_id = $1 AND r.id = $2`,
       [tenantId, id],
     );
-    return res.rows[0] ?? null;
+    return { denied: false, row: res.rows[0]! };
   });
 }
 
@@ -520,7 +708,29 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet } = deps;
+
+  // Resolve the caller's field write-mask for a record (FF-10 / AC-10 hook-point).
+  // Honest-degrade: when no resolveWriteFacet is wired (current bootstrap), every
+  // write uses the whole-resource facet (`undefined`) — checkWriteMask never denies,
+  // but the guard is STILL on the write path and bites once a facet is injected.
+  async function writeFacetFor(
+    actorSlug: string,
+    tenantId: string,
+    recordId: string,
+  ): Promise<string[] | undefined> {
+    if (!resolveWriteFacet) return undefined;
+    return resolveWriteFacet(actorSlug, tenantId, recordId);
+  }
+
+  // Shape an HTTP 403 from a field-mask denial (the denial is already audited in-tx).
+  function denialError(blockedFields: string[]): HttpError {
+    return new HttpError(
+      403,
+      "FIELD_WRITE_FORBIDDEN",
+      `write of system-only field(s) not permitted by your grant: ${blockedFields.join(", ")}`,
+    );
+  }
 
   // POST /api/records — create one record in the caller's tenant, validated against
   // the governing registry_def's record_schema.
@@ -556,19 +766,26 @@ export function registerRecordRoutes(
     const data = body["data"];
 
     const tenantId = await resolveActorTenant(actor);
-    const row = await createRecord({
+    // Field write-mask for the create (the record id does not exist yet, so the
+    // facet is resolved at the application/registry scope — empty recordId).
+    const grantWriteFacet = await writeFacetFor(actor, tenantId, "");
+    const outcome = await createRecord({
       pool,
       tenantId,
       applicationId,
       registryDefId,
       data,
       actor,
+      grantWriteFacet,
       nowMs: Date.now(),
     });
+    if (outcome.denied) {
+      throw denialError(outcome.blockedFields);
+    }
 
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(serializeRecord(row)));
+    res.end(JSON.stringify(serializeRecord(outcome.row)));
   });
 
   // GET /api/records — list the caller-tenant's records, optionally filtered by
@@ -631,21 +848,28 @@ export function registerRecordRoutes(
       const data = body["data"];
 
       const tenantId = await resolveActorTenant(actor);
-      const row = await updateRecord({
+      // Resolve the caller's field write-mask for THIS record (FF-10 / AC-10).
+      const grantWriteFacet = await writeFacetFor(actor, tenantId, id);
+      const outcome = await updateRecord({
         pool,
         tenantId,
         id,
         data,
         actor,
+        grantWriteFacet,
         nowMs: Date.now(),
       });
-      if (row === null) {
+      if ("notFound" in outcome) {
         throw new HttpError(404, "NOT_FOUND", "record not found");
+      }
+      if (outcome.denied) {
+        // Field-mask guard blocked a system-only field write (already audited in-tx).
+        throw denialError(outcome.blockedFields);
       }
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(serializeRecord(row)));
+      res.end(JSON.stringify(serializeRecord(outcome.row)));
     },
   );
 }
