@@ -1,5 +1,6 @@
 /**
- * e2e/tel-linear.e2e.ts — T-0283 (ADR T-0278 §E / §2.4, AC-1..AC-6, FF-3).
+ * e2e/tel-linear.e2e.ts — T-0283 (introduce) / T-0284 (real-click finalize).
+ * (ADR T-0278 §E / §2.4 / §G, AC-1..AC-6, FF-3).
  *
  * The deploy-acceptance HAPPY click-through: a browser walks the canonical linear
  * ТЭЛ U1→U5 against the REAL stack (built web/dist + live HTTP + Postgres + Flowable
@@ -12,22 +13,22 @@
  * instance reach done — by interacting with the SAME artifact a user sees.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * KNOWN UI GAP (surfaced, not hidden): U4-approve has NO clickable card-action.
- *   The approve route POST /api/inbox/:id/action {approve} exists (task D), but
- *   web/src/screens/screen-inbox.jsx renders NO «Согласовать» button — after a
- *   claim the action cell is a static «взято» tag + a no-op «Открыть» ghost button.
- *   So the approve transition (U4→U5) is NOT reachable by a mouse click today.
- *   This spec performs the approve via the BROWSER's own fetch (page.evaluate, in
- *   the SPA origin, carrying the approver's x-dev-user) so the rest of the
- *   click-through (start, form, pool-visibility, claim, done-projection) can be
- *   proven end-to-end against the live stack — and the missing affordance is
- *   asserted explicitly by the negative spec (tel-linear-negative.e2e.ts, AC-8).
- *   The orchestrator should file a follow-up to add the «Согласовать» button so
- *   the ENTIRE path is mouse-clickable. (tester-rule 1: a real defect → reported,
- *   not patched.)
+ * T-0284 — CHICKEN-AND-EGG CLOSED (ADR §2.5 / §G): every step is now a REAL mouse
+ * click. The two affordances that were missing when T-0283 introduced this gate as
+ * informational are now built and exercised through the UI:
+ *   • U2 (form submit): web/src/forms/FormViewer.jsx now mounts the sandbox-iframe
+ *     with sandbox="allow-scripts allow-forms" (T-0286), so the native form submit
+ *     fires → sandbox postMessage → parent fetch /api/forms/purchase/submit. The
+ *     spec clicks the real «Отправить на согласование» button and waits for the
+ *     200 + the success panel (.chs-form-result--success).
+ *   • U4 (approve): web/src/screens/screen-inbox.jsx now renders a primary
+ *     «Согласовать» button for a claimed, role-approver, own task (T-0287). The
+ *     spec clicks it and waits for the 200 { status: "done" }.
+ * No in-browser fetch shims remain on the click-through — the gate is now full
+ * proof of mouse-clickability end-to-end, and CI flips it to required (D-056).
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type FrameLocator } from "@playwright/test";
 
 // dev tenant uuid — matches the UI LaunchModal hardcoded x-tenant-id
 // (web/src/screens/screen-processes.jsx) and the `dev` tenant id (migration 013).
@@ -100,72 +101,49 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
     await expect(startedRow).toContainText("Канонический линейный ТЭЛ");
 
     // ───────────────────────────────────────────────────────────── U2 · Подача
-    // Initiator fills + submits the purchase form (E9). The FormViewer runs inside a
-    // sandbox-iframe and POSTs /api/forms/purchase/submit; assert the 200 + recordId
-    // (server-side validation passed, record persisted) (AC-2).
+    // Initiator fills + submits the purchase form (E9) by a REAL mouse click on the
+    // form's «Отправить на согласование» button. The FormViewer runs inside a
+    // sandbox-iframe with allow-forms (T-0286), so the native submit fires →
+    // sandbox postMessage → parent fetch /api/forms/purchase/submit; assert the 200
+    // + recordId (server-side validation passed, record persisted) (AC-2) AND the
+    // in-UI success panel (.chs-form-result--success) — proof the click landed.
     await page.goto("/forms");
-    const frame = page.frameLocator("iframe.chs-form-viewer");
+    const frame: FrameLocator = page.frameLocator("iframe.chs-form-viewer");
     // The purchase form (FormViewer sandbox-iframe) ships valid defaults for all
     // three required schema fields (supplier «ООО «Вектор»», subject, budget
-    // «ИТ-инфраструктура · CAPEX»; form-defs.js). The user fills the subject (real
+    // «ИТ-инфраструктура · CAPEX»; form-defs.js). The user types the subject (real
     // typing into the live form), then clicks «Отправить на согласование».
     const subjectInput = frame.locator('[data-field="subject"] input.fjs-input').first();
     await expect(subjectInput, "AC-2: purchase form renders in the iframe").toBeVisible();
     await subjectInput.fill("Договор оказания услуг по разработке ПО (годовой)");
 
-    // ─────────────────────────────────────────────────────── KNOWN UI GAP (U2)
-    // The FormViewer iframe is sandbox="allow-scripts" WITHOUT "allow-forms"
-    // (web/src/forms/FormViewer.jsx). In a REAL browser the engine BLOCKS the
-    // native form submission ("Blocked form submission … the 'allow-forms'
-    // permission is not set"), so the sandbox script's submit→postMessage→parent
-    // fetch chain NEVER fires — the «Отправить на согласование» button is not
-    // functionally clickable in the deployed product. This spec detects the block
-    // (the POST does not fire on click) and then performs the SAME submit the
-    // FormViewer would (POST /api/forms/purchase/submit with the form's default
-    // payload) so the rest of the click-through can be proven. The orchestrator
-    // should file a fix to add "allow-forms" to the FormViewer sandbox. (tester-
-    // rule 1: a real defect → reported, not patched.)
-    const submitFiredViaClick = await Promise.race([
-      page
-        .waitForResponse(
-          (r) =>
-            r.url().includes("/api/forms/purchase/submit") &&
-            r.request().method() === "POST",
-          { timeout: 4000 },
-        )
-        .then(() => true)
-        .catch(() => false),
-      frame
-        .getByRole("button", { name: "Отправить на согласование" })
-        .click()
-        .then(() => false),
+    // REAL click on the in-iframe submit button. With allow-forms the native submit
+    // is no longer blocked: the sandbox script's submit handler (form-defs.js) runs,
+    // collects the field values, and postMessages {type:'fjs-submit', value} to the
+    // parent FormViewer, which POSTs /api/forms/purchase/submit. Wait for that POST.
+    const submitBtn = frame.getByRole("button", { name: "Отправить на согласование" });
+    await expect(submitBtn, "AC-2: form submit button is clickable").toBeVisible();
+    const [formResp] = await Promise.all([
+      page.waitForResponse(
+        (r) =>
+          r.url().includes("/api/forms/purchase/submit") &&
+          r.request().method() === "POST",
+      ),
+      submitBtn.click(),
     ]);
-
-    // Issue the submit the FormViewer would have, with the purchase form's default
-    // payload (all schema-required fields present) — through the SPA origin.
-    const formResult = await page.evaluate(async () => {
-      const res = await fetch("/api/forms/purchase/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-dev-user": "demo-user" },
-        body: JSON.stringify({
-          supplier: "ООО «Вектор»",
-          subject: "Договор оказания услуг по разработке ПО (годовой)",
-          budget: "ИТ-инфраструктура · CAPEX",
-        }),
-      });
-      return { status: res.status, body: await res.json().catch(() => null) };
-    });
-    expect(formResult.status, "AC-2: form submit must return 200").toBe(200);
-    const formBody = formResult.body as { ok: boolean; recordId?: string };
+    expect(formResp.status(), "AC-2: form submit must return 200").toBe(200);
+    // Frozen response contract (src/http/forms.ts): { ok, formId, value, recordId }
+    // — recordId is top-level (the persisted record's id), value is the sanitized
+    // payload. Assert both: server-side validation passed AND a record persisted.
+    const formBody = (await formResp.json()) as { ok: boolean; recordId?: string };
     expect(formBody.ok, "AC-2: server-side validation passed").toBe(true);
     expect(formBody.recordId, "AC-2: a record was persisted").toBeTruthy();
-    // Surface the gap in the report without failing the click-through here.
-    if (!submitFiredViaClick) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[U2 GAP] purchase form submit click did NOT POST — FormViewer iframe lacks sandbox 'allow-forms' (web/src/forms/FormViewer.jsx).",
-      );
-    }
+    // The success panel renders in the parent SPA after the 200 — the user-visible
+    // confirmation that the click submitted the form (FormViewer success state).
+    await expect(
+      page.locator(".chs-form-result--success"),
+      "AC-2: success panel visible after real submit click",
+    ).toContainText("Форма отправлена");
 
     // ──────────────────────────────────────────────────────── U3→U4 · Инбокс/пул
     // Switch to the approver. The U4 approval task is addressed to the ROLE
@@ -193,25 +171,36 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
     ]);
     expect(claimResp.status(), "AC-4: claim must return 200").toBe(200);
 
-    // ───────────────────────────────────────────────────── U4 · Approve (card-action)
-    // The approve transition (AC-5). NO clickable «Согласовать» button exists today
-    // (see KNOWN UI GAP above), so the decision is issued via the browser's own fetch
-    // in the SPA origin carrying the approver identity — still the REAL live route +
-    // tenant-scoped audit projection. Assert 200 { status: "done" }.
-    const approveStatus = await page.evaluate(
-      async ({ tid, actor }: { tid: string; actor: string }) => {
-        const res = await fetch(`/api/inbox/${tid}/action`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-dev-user": actor },
-          body: JSON.stringify({ action: "approve" }),
-        });
-        return { status: res.status, body: await res.json().catch(() => null) };
-      },
-      { tid: taskId, actor: APPROVER.id },
-    );
-    expect(approveStatus.status, "AC-5: approve card-action must return 200").toBe(200);
+    // ──────────────────────────────────────────────── U4 · Approve (card-action)
+    // The approve transition (AC-5) by a REAL mouse click on the «Согласовать»
+    // button. After the claim, the task leaves the POOL (server clears item.pool on
+    // claim — inbox.ts inTab/pool) and lands on the «Мне» tab (item.mine === true).
+    // screen-inbox.jsx renders the primary «Согласовать» button only for a claimed,
+    // own, role-approver task (T-0287: isTaken && t.mine && role-approver) — which is
+    // exactly the «Мне» view. So switch to «Мне» before locating the approve action.
+    // The button POSTs /api/inbox/:id/action {approve} → 200 { status: "done" }.
+    const mineTab = page.getByRole("button", { name: /^Мне/ });
+    await mineTab.click();
+    const claimedRow = page
+      .locator(`tr:has(:text("${instanceId}"))`)
+      .filter({ has: page.getByRole("button", { name: "Согласовать" }) })
+      .first();
+    const approveBtn = claimedRow.getByRole("button", { name: "Согласовать" });
+    await expect(
+      approveBtn,
+      "AC-5: «Согласовать» card-action visible after claim",
+    ).toBeVisible();
+    const [approveResp] = await Promise.all([
+      page.waitForResponse(
+        (r) =>
+          r.url().includes(`/api/inbox/${taskId}/action`) &&
+          r.request().method() === "POST",
+      ),
+      approveBtn.click(),
+    ]);
+    expect(approveResp.status(), "AC-5: approve card-action must return 200").toBe(200);
     expect(
-      (approveStatus.body as { status?: string } | null)?.status,
+      ((await approveResp.json()) as { status?: string } | null)?.status,
       "AC-5: approve advances the instance to done",
     ).toBe("done");
 
