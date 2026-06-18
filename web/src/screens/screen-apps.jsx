@@ -275,7 +275,7 @@ function AppsScreen() {
                 <col style={{ width: "180px" }} />
                 <col style={{ width: "120px" }} />
                 <col style={{ width: "160px" }} />
-                <col style={{ width: "140px" }} />
+                <col style={{ width: "220px" }} />
               </colgroup>
               <thead>
                 <tr>
@@ -307,10 +307,14 @@ function AppsScreen() {
                         {fmtTs(app.created_at)}
                       </Mono>
                     </td>
-                    <td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
                       {/* T-0266: jump into the field-constructor for this app */}
                       <Button variant="secondary" size="sm" onClick={() => navigate(`/app-schema/${app.id}`)}>
                         Настроить поля
+                      </Button>
+                      {/* T-0267: jump into the records list + create-record form */}
+                      <Button variant="ghost" size="sm" onClick={() => navigate(`/app-records/${app.id}`)}>
+                        Записи
                       </Button>
                     </td>
                   </tr>

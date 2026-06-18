@@ -15,6 +15,7 @@ import OrgScreen from '../screens/screen-org.jsx';
 import ProcessesScreen from '../screens/screen-processes.jsx';
 import AppsScreen from '../screens/screen-apps.jsx';
 import AppSchemaScreen from '../screens/screen-app-schema.jsx';
+import AppRecordsScreen from '../screens/screen-app-records.jsx';
 import AuditScreen from '../screens/screen-audit.jsx';
 import RightsScreen from '../screens/rights/screen-rights.jsx';
 import RoleEditorScreen from '../screens/rights/ra-role-editor.jsx';
@@ -42,6 +43,7 @@ const RIGHTS_TABS = [
 const SCREEN_META = {
   apps:  { crumb: ["Конструктор", "Приложения"] },
   "app-schema": { crumb: ["Конструктор", "Поля приложения"] },
+  "app-records": { crumb: ["Конструктор", "Записи приложения"] },
   inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
   org:   { crumb: ["Оркестрация", "Оргструктура"] },
   processes: { crumb: ["Оркестрация", "Процессы"] },
@@ -293,6 +295,8 @@ function AppShell() {
             <Route path="/apps" element={<AppsScreen />} />
             {/* T-0266: application field-constructor (registry_def editor) */}
             <Route path="/app-schema/:appId" element={<AppSchemaScreen />} />
+            {/* T-0267: application records list + schema-driven create-record form */}
+            <Route path="/app-records/:appId" element={<AppRecordsScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
             <Route path="/processes" element={<ProcessesScreen launchOpen={launchOpen} onLaunchClose={() => setLaunchOpen(false)} />} />
