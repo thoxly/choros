@@ -141,22 +141,32 @@ async function downloadAuditLog() {
   }
 }
 
-function Topbar({ screen, theme, setTheme }) {
+function Topbar({ screen, theme, setTheme, onLaunchProcess }) {
   const crumb = SCREEN_META[screen]?.crumb || [];
+  const navigate = useNavigate();
   const right =
     screen === "inbox" ? (
-      // T-0138: «Новая задача» requires a running Flowable instance to start a
-      // process. No start-instance HTTP route exists in day-1. Button is disabled
-      // with a tooltip explaining the prerequisite. Forward obligation: when
-      // POST /api/processes/start is implemented this button opens a launch modal.
+      // T-0281: «Новая задача» — enabled, navigates to /processes where the
+      // launch modal lives (POST /api/processes/start, frozen contract §2.2).
       <Button
         variant="primary"
         size="sm"
         glyph={<Icon name="plus" className="chs-btn__glyph" />}
-        disabled
-        title="Создание задачи требует подключения к Flowable (будет доступно в следующей итерации)"
+        onClick={() => navigate('/processes')}
+        title="Запустить процесс"
       >
         Новая задача
+      </Button>
+    ) : screen === "processes" ? (
+      // T-0281: «Запустить процесс» button in topbar on processes screen.
+      <Button
+        variant="primary"
+        size="sm"
+        glyph={<Icon name="plus" className="chs-btn__glyph" />}
+        onClick={onLaunchProcess}
+        title="Запустить процесс"
+      >
+        Запустить процесс
       </Button>
     ) : screen === "org" ? (
       <Button variant="secondary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Исполнитель</Button>
@@ -215,6 +225,7 @@ function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "dark");
   const [rightsFocus, setRightsFocus] = useState(null);
   const [devUser, setDevUserState] = useState(() => getDevUser());
+  const [launchOpen, setLaunchOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -289,14 +300,14 @@ function AppShell() {
       </aside>
 
       <main className="chs-main">
-        <Topbar screen={screen} theme={theme} setTheme={setTheme} />
+        <Topbar screen={screen} theme={theme} setTheme={setTheme} onLaunchProcess={() => setLaunchOpen(true)} />
         {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
             <Route path="/" element={<InboxScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
-            <Route path="/processes" element={<ProcessesScreen />} />
+            <Route path="/processes" element={<ProcessesScreen launchOpen={launchOpen} onLaunchClose={() => setLaunchOpen(false)} />} />
             <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/audit" element={<AuditScreen />} />
             <Route path="/rights" element={<RightsScreen initialRole={rightsFocus} />} />
