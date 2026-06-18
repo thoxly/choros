@@ -53,6 +53,15 @@ async function loginAs(page: Page, user: { id: string; name: string }): Promise<
 }
 
 test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () => {
+  // T-0257: this imperative happy spec is now MIRRORED by the declarative
+  // e2e/journeys/tel-linear.journey.ts (run by e2e/journeys.e2e.ts). It is kept as
+  // the load-bearing fail-honest reference the acceptance fitness checks grep
+  // (toBe(201)/toBe(200), the AC-1..AC-6 wording). To avoid double-running the same
+  // U1→U5 flow when the declarative path drives it, set ACCEPTANCE_LEGACY_TEL=skip.
+  test.skip(
+    process.env["ACCEPTANCE_LEGACY_TEL"] === "skip",
+    "legacy imperative ТЭЛ happy spec skipped (declarative journey drives U1→U5)",
+  );
   test("initiator launches → form → approver claims+approves → instance done", async ({
     page,
   }) => {
