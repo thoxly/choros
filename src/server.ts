@@ -24,6 +24,7 @@ import { registerBindingRoutes } from "./http/binding.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
+import { registerRecordRoutes } from "./http/records.js";
 import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
@@ -323,6 +324,19 @@ function buildRouter(
   // Siblings T-0263 (registry_def) and T-0264 (record) add their own blocks below.
   if (grantsPool) {
     registerApplicationRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register record create/list/get/update API (T-0264 E13 — the DATA-row write
+  // surface; sibling of applications/registry_def). Records are validated against
+  // their governing registry_def's record_schema, tenant-scoped via withTenantTx +
+  // RLS (policy record_tenant_isolation), and create/update each write an audit
+  // event (hash-chain). Same deps + tenant-resolution as applications.
+  if (grantsPool) {
+    registerRecordRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
