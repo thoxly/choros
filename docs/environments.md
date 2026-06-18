@@ -124,6 +124,25 @@ Realm `choros` выдаёт токены со следующими свойст�
 | `dev` (по умолчанию) | Хедер `x-dev-user` активен; JWT не требуется. Все существующие тесты проходят без изменений. |
 | `keycloak` | Хедер `x-dev-user` отключён; сервер ожидает Bearer JWT. Требует живой Keycloak с realm. Реализует T-0060. |
 
+#### Фронтенд: как браузер узнаёт режим (T-0258)
+
+Браузерный SPA узнаёт активный режим и публичные OIDC-параметры через **`GET /api/auth-config`**
+(публичный, non-secret endpoint; секрет клиента НИКОГДА не отдаётся — браузер использует PKCE).
+
+```jsonc
+// dev:
+{ "mode": "dev" }
+// keycloak:
+{ "mode": "keycloak",
+  "keycloak": { "url": "<KEYCLOAK_PUBLIC_URL>", "realm": "<KEYCLOAK_REALM>",
+                "clientId": "<KEYCLOAK_WEB_CLIENT_ID>", "audience": "<KEYCLOAK_AUDIENCE>" } }
+```
+
+В `keycloak`-режиме фронт запускает Authorization Code + PKCE против публичного клиента
+`choros-web` (см. `config/keycloak/realm-choros.json`); полученный токен несёт `aud=choros-api`
+и `actor_type`, которые валидирует серверный JWT-гард (T-0060). В `dev`-режиме остаётся
+dev-user-picker с хедером `x-dev-user`.
+
 ---
 
 ## 7. choros-app — переменные окружения (T-0061, E0.6)
@@ -142,6 +161,8 @@ Dev-значения ниже — **DEV ONLY**; prod-значения инжек
 | `KEYCLOAK_AUDIENCE` | `choros-api` | **T-0060** Ожидаемая аудитория JWT (`aud` claim). Зафиксирована T-0054 §4.1. |
 | `JWKS_CACHE_TTL_MS` | `300000` | **T-0060** TTL in-memory JWKS-кэша (мс). Горячий кэш — нулевой сетевой хоп (NF-3). |
 | `KEYCLOAK_JWKS_URI` | — | **T-0060** Опциональный override URI JWKS; по умолчанию резолвится через OIDC discovery. |
+| `KEYCLOAK_PUBLIC_URL` | `http://localhost:8180` | **T-0258** Browser-reachable Keycloak origin, отдаётся фронту через `GET /api/auth-config` (НЕ compose-внутренний `keycloak`-хост). Fallback на `KEYCLOAK_URL`. В prod = реальный внешний auth-origin. Публичное (non-secret) значение. |
+| `KEYCLOAK_WEB_CLIENT_ID` | `choros-web` | **T-0258** Публичный PKCE SPA-клиент для браузера (`config/keycloak/realm-choros.json`). Отдаётся фронту через `/api/auth-config`. Публичный клиент без секрета — браузер использует Authorization Code + PKCE. |
 | `NODE_ENV` | `development` | Режим Node (`development` / `production`); prod overlay устанавливает `production` |
 | `PORT` | `3000` | Внутренний порт приложения (EXPOSE 3000 в Dockerfile) |
 | `APP_PORT` | `3000` | Хост-порт маппинга (`${APP_PORT:-3000}:3000`); не конфликтует с 55432/8180/9000/8082 |
