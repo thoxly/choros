@@ -37,3 +37,4 @@
 072_isolated_env_escalation   # T-0088 — E12.7 on-demand physical isolation config-flip (ADD COLUMN physical_isolation_requested on choros.tenant); owned by isolated-env-isolation.sh
 073_vendor_crm_seed           # T-0244 — vendor-crm application + customer-subscription registry seed (is_system app + registry_def INSERT only); owned by vendor-crm-seed-idempotent.sh
 074_process_definition        # T-0252 — E8 BPMN publish path: process_definition tenant table DDL; owned by process-defs route module
+075_process_app_binding       # T-0270 — E13 process↔application binding: process_app_binding tenant table DDL; owned by process-catalog route module

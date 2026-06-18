@@ -53,3 +53,4 @@ registry_schema_history
 bundle_version_instance
 inflight_mapping_request
 process_definition
+process_app_binding

@@ -1209,6 +1209,20 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'process_app_binding': {
+      // T-0270 (migration 075) — process↔application visibility binding.
+      // application_id is a LOGICAL ref; KNOWN_TENANT_TABLES order (…, application, …,
+      // process_app_binding) guarantees the application is already seeded.
+      const appId = tenantId === TENANT_A ? seedState.appIdA : seedState.appIdB;
+      await c.query(
+        `INSERT INTO choros.process_app_binding
+           (tenant_id, id, process_key, application_id, form_key, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NULL, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, uuid(), `ct-proc-${uuid().slice(0, 8)}`, appId],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1565,6 +1579,7 @@ const SEEDED_TABLES = new Set<string>([
   'bundle_version_instance',
   'inflight_mapping_request',
   'process_definition',
+  'process_app_binding',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
