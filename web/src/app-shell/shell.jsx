@@ -8,6 +8,7 @@ import { useNavigate, useLocation, Routes, Route } from 'react-router-dom';
 import { Button } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
+import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
@@ -26,44 +27,15 @@ import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 export { Icon };
 
 const RIGHTS_TABS = [
-  { id: "overview", label: "Обзор ролей", path: "/rights" },
-  { id: "intents",  label: "Бытовые операции", path: "/rights/intents" },
-  { id: "editor",   label: "Редактор роли", path: "/rights/editor" },
-  { id: "criticality", label: "Критичность", path: "/rights/criticality" },
-  { id: "sod",      label: "SoD", path: "/rights/sod" },
-  { id: "trail",    label: "Журнал", path: "/rights/trail" },
+  { id: "overview",    label: "Обзор ролей",       path: "/rights",              status: "live" },
+  { id: "intents",     label: "Бытовые операции",  path: "/rights/intents",      status: "live" },
+  { id: "editor",      label: "Редактор роли",      path: "/rights/editor",       status: "demo" },
+  { id: "criticality", label: "Критичность",        path: "/rights/criticality",  status: "demo" },
+  { id: "sod",         label: "SoD",                path: "/rights/sod",          status: "demo" },
+  { id: "trail",       label: "Журнал",             path: "/rights/trail",        status: "live" },
 ];
 
-const NAV = [
-  {
-    group: "Оркестрация",
-    items: [
-      { id: "inbox", label: "Инбокс задач", icon: "inbox", count: 18, screen: true },
-      { id: "org", label: "Оргструктура", icon: "org", screen: true },
-      { id: "processes", label: "Процессы", icon: "process", count: 7, screen: true },
-    ],
-  },
-  {
-    group: "Наблюдаемость",
-    items: [
-      { id: "notifications", label: "Уведомления", icon: "bell", screen: true },
-      { id: "audit", label: "Аудит инстанса", icon: "audit", screen: true },
-      { id: "budgets", label: "Бюджеты", icon: "budget", soon: true },
-    ],
-  },
-  {
-    group: "Доступ",
-    items: [
-      { id: "rights", label: "Права и доступ", icon: "rights", count: 8, screen: true },
-    ],
-  },
-  {
-    group: "Разработка",
-    items: [
-      { id: "forms", label: "Формы задач", icon: "forms", screen: true },
-    ],
-  },
-];
+// NAV is imported from ./nav-config.js
 
 const SCREEN_META = {
   inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
@@ -90,20 +62,23 @@ function ThemeToggle({ theme, setTheme }) {
 
 function NavItem({ item, active }) {
   const navigate = useNavigate();
-  const disabled = item.soon || !item.screen;
-  const clickable = !!item.screen;
+  const status = effectiveStatus(item);
+  const isSoon = status === "soon";
+  const clickable = !!item.screen && !isSoon;
+  const titleAttr = isSoon ? "Скоро" : status === "demo" ? `${item.label} (демо)` : item.label;
   return (
     <button
       className="chs-navitem"
       aria-current={active ? "true" : undefined}
       disabled={!clickable}
       onClick={() => clickable && navigate('/' + item.id)}
-      title={item.soon ? "Скоро" : item.label}
+      title={titleAttr}
     >
       <Icon name={item.icon} className="chs-navitem__icon" />
       <span className="chs-navitem__label">{item.label}</span>
-      {item.count != null && <span className="chs-navitem__count">{item.count}</span>}
-      {item.soon && <span className="chs-navitem__soon">скоро</span>}
+      {item.count != null && status === "live" && <span className="chs-navitem__count">{item.count}</span>}
+      {status === "demo" && <span className="chs-navitem__demo">демо</span>}
+      {isSoon && <span className="chs-navitem__soon">скоро</span>}
     </button>
   );
 }
@@ -213,8 +188,10 @@ function RightsSubTabs() {
           aria-selected={active === t.id}
           onClick={() => navigate(t.path)}
           data-screen-label={t.label}
+          title={t.status === "demo" ? `${t.label} (демо — mock-данные)` : t.label}
         >
           {t.label}
+          {t.status === "demo" && <span className="chs-subtab__demo">демо</span>}
         </button>
       ))}
     </div>
@@ -277,14 +254,18 @@ function AppShell() {
         </div>
 
         <div className="chs-nav__scroll">
-          {NAV.map((grp) => (
-            <div className="chs-nav__group" key={grp.group}>
-              <div className="chs-nav__grouplabel">{grp.group}</div>
-              {grp.items.map((item) => (
-                <NavItem key={item.id} item={item} active={screen === item.id} />
-              ))}
-            </div>
-          ))}
+          {NAV.map((grp) => {
+            const items = visibleItems(grp);
+            if (items.length === 0) return null;
+            return (
+              <div className="chs-nav__group" key={grp.group}>
+                <div className="chs-nav__grouplabel">{grp.group}</div>
+                {items.map((item) => (
+                  <NavItem key={item.id} item={item} active={screen === item.id} />
+                ))}
+              </div>
+            );
+          })}
         </div>
 
         <div className="chs-nav__foot">

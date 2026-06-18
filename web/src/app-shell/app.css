@@ -90,6 +90,19 @@
   font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs);
   color: var(--chs-color-text-faint); letter-spacing: var(--chs-tracking-wide);
 }
+.chs-navitem__demo {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs);
+  color: var(--chs-color-warning, #d97706); letter-spacing: var(--chs-tracking-wide);
+  background: color-mix(in srgb, var(--chs-color-warning, #d97706) 12%, transparent);
+  border-radius: var(--chs-radius-1); padding: 1px var(--chs-space-2); line-height: 14px;
+}
+/* Demo badge used in sub-tabs (rights panel) */
+.chs-subtab__demo {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs);
+  color: var(--chs-color-warning, #d97706);
+  background: color-mix(in srgb, var(--chs-color-warning, #d97706) 12%, transparent);
+  border-radius: var(--chs-radius-1); padding: 1px var(--chs-space-2); margin-left: var(--chs-space-2); line-height: 14px;
+}
 
 .chs-nav__foot {
   flex: none; border-top: 1px solid var(--chs-color-border-faint);
