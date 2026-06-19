@@ -50,8 +50,10 @@
   background: var(--chs-color-surface); box-shadow: var(--chs-shadow-1); overflow: hidden;
 }
 .chs-zoom button { border: none; background: transparent; color: var(--chs-color-text-muted); width: 30px; cursor: pointer; font-size: var(--chs-text-lg); display: flex; align-items: center; justify-content: center; }
-.chs-zoom button:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
-.chs-zoom__val { display: flex; align-items: center; justify-content: center; min-width: 48px; padding: 0 var(--chs-space-4); font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); border-left: 1px solid var(--chs-color-border); border-right: 1px solid var(--chs-color-border); }
+.chs-zoom button:hover:not(:disabled) { background: var(--chs-color-hover); color: var(--chs-color-text); }
+.chs-zoom button:disabled { opacity: 0.5; cursor: not-allowed; }
+/* зум-значение — кликабельная кнопка «вписать в экран» с разделителями */
+.chs-zoom button.chs-zoom__val { width: auto; min-width: 48px; padding: 0 var(--chs-space-4); font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); border-left: 1px solid var(--chs-color-border); border-right: 1px solid var(--chs-color-border); }
 
 /* ============================================================================
    ПАЛИТРА (.djs-palette) — вертикальная, одна колонка, слева сверху

@@ -51,10 +51,15 @@
    т.к. renderer задаёт stroke/fill как презентационные атрибуты/di-цвета).
    ============================================================================ */
 
-/* Несущая фигура шага/события/шлюза */
+/* Несущая фигура шага/события/шлюза.
+   T-0323: подложка — surface (0.990 light / 0.245 dark), НЕ surface-2: на тёплом
+   фоне канваса (--chs-color-bg ≈0.965) surface-2 (≈0.945) почти сливался — фигура
+   читалась как безрамочная. surface даёт явный контраст подложка↔фон в ОБЕИХ темах,
+   обводка border-strong усилена до 1.5px ради чёткой границы шага. */
 .djs-visual > :nth-child(1) {
-  fill: var(--chs-color-surface-2) !important;
+  fill: var(--chs-color-surface) !important;
   stroke: var(--chs-color-border-strong) !important;
+  stroke-width: 1.5px !important;
 }
 
 /* Текст внутри фигур */
@@ -365,7 +370,12 @@ marker circle {
 .djs-tooltip-error { border-color: var(--chs-color-danger) !important; }
 
 /* ============================================================================
-   9. ПАНЕЛЬ СВОЙСТВ (@bpmn-io/properties-panel + bpmn-js-properties-panel)
+   9. ПАНЕЛЬ СВОЙСТВ (hand-rolled bpmn-properties-panel.jsx)
+   T-0323: правила приведены к классам, которые реально эмитит наша рукописная
+   панель (bpmn-properties-panel.jsx). Удалены rules под официальный
+   @bpmn-io/properties-panel, который не установлен (numberfield/textarea/
+   feel-editor/list/collapsible/add-remove-entry/dot и его CSS-переменные) —
+   они были мёртвым кодом.
    ============================================================================ */
 .bio-properties-panel-container {
   border-left: 1px solid var(--chs-color-border) !important;
@@ -376,8 +386,6 @@ marker circle {
   color: var(--chs-color-text) !important;
   font-family: var(--chs-font-sans) !important;
   font-size: var(--chs-text-base) !important;
-  --bio-properties-panel-background-color: var(--chs-color-surface);
-  --bio-properties-panel-text-color: var(--chs-color-text);
 }
 
 /* Шапка панели — иконка типа + имя + тип элемента */
@@ -426,9 +434,6 @@ marker circle {
 }
 .bio-properties-panel-arrow svg,
 .bio-properties-panel-arrow { color: var(--chs-color-text-faint) !important; fill: var(--chs-color-text-faint) !important; }
-.bio-properties-panel-group-header-buttons .bio-properties-panel-dot {
-  background: var(--chs-color-accent) !important;
-}
 
 /* Тело группы */
 .bio-properties-panel-group-entries {
@@ -447,13 +452,10 @@ marker circle {
   margin-bottom: var(--chs-space-3) !important;
 }
 
-/* Поля ввода / селекты / textarea */
+/* Поля ввода / селекты */
 .bio-properties-panel-input,
 .bio-properties-panel-textfield input,
-.bio-properties-panel-numberfield input,
-.bio-properties-panel-textarea textarea,
-.bio-properties-panel-select select,
-.bio-properties-panel-feel-editor-container {
+.bio-properties-panel-select select {
   background: var(--chs-color-bg) !important;
   border: 1px solid var(--chs-color-border-strong) !important;
   border-radius: var(--chs-radius-2) !important;
@@ -482,23 +484,6 @@ marker circle {
   color: var(--chs-color-text-faint) !important;
   line-height: var(--chs-leading-snug) !important;
 }
-
-/* Списки (например, гранты роли / эскалации) */
-.bio-properties-panel-list .bio-properties-panel-collapsible-entry {
-  border: 1px solid var(--chs-color-border) !important;
-  border-radius: var(--chs-radius-2) !important;
-  background: var(--chs-color-surface-2) !important;
-  margin-bottom: var(--chs-space-3) !important;
-}
-.bio-properties-panel-collapsible-entry-header { color: var(--chs-color-text) !important; }
-.bio-properties-panel-add-entry {
-  color: var(--chs-color-accent) !important;
-  background: transparent !important;
-  border-radius: var(--chs-radius-2) !important;
-}
-.bio-properties-panel-add-entry:hover { background: var(--chs-color-accent-soft) !important; }
-.bio-properties-panel-remove-entry { color: var(--chs-color-text-faint) !important; }
-.bio-properties-panel-remove-entry:hover { color: var(--chs-color-danger) !important; }
 
 /* Скролл-контейнер панели */
 .bio-properties-panel-scroll-container { background: var(--chs-color-surface) !important; }

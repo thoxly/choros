@@ -4,9 +4,11 @@
    T-0098: Properties panel (executor-type selector → live canvas recolor).
    T-0099: Save / Load / Validate wiring + validation error display.
 
-   This screen replaces the hand-rolled SVG mock in screen-editor.jsx for the
-   routed /processes/:id/edit path. The mock (screen-editor.jsx) is preserved
-   for reference and for the standalone preview/process-editor.html.
+   T-0323: entry points (from screen-processes.jsx) + toolbar wiring (undo/redo
+   via commandStack, bottom-right zoom widget via canvas.zoom) + Publish disabled
+   with «скоро» until T-0324. The legacy hand-rolled SVG mock (former
+   canvas/screen-editor.jsx) was deleted — this is the only process editor for the
+   routed /processes/:id/edit path.
 
    Layout mirrors the mock:
      toolbar (top) | [canvas — real bpmn-js] | properties panel (right)
@@ -26,7 +28,7 @@
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Button, MonoId, StatusChip, KitIcon } from '../components/components.jsx';
+import { Button, MonoId, StatusChip, KitIcon, Tooltip } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
 import BpmnPropertiesPanel from '../canvas/bpmn-properties-panel.jsx';
@@ -59,7 +61,7 @@ function ValidationBanner({ result, onDismiss }) {
           gap: 'var(--chs-space-5)',
           padding: 'var(--chs-space-4) var(--chs-space-7)',
           background: 'var(--chs-color-success-soft)',
-          borderBottom: '1px solid var(--chs-color-success-border, var(--chs-color-border))',
+          borderBottom: '1px solid var(--chs-color-success)',
           fontSize: 'var(--chs-text-sm)',
           color: 'var(--chs-color-success)',
           flexShrink: 0,
@@ -171,6 +173,10 @@ function EditorToolbar({
   processId,
   isDirty,
   isBusy,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   onSave,
   onLoad,
   onValidate,
@@ -187,11 +193,30 @@ function EditorToolbar({
         <MonoId>v1 · черновик</MonoId>
       </div>
       <div className="chs-edtoolbar__sep" />
+      {/* T-0323: Undo/Redo wired to the bpmn-js commandStack. Disabled (not a
+          silent no-op) when there is nothing to undo/redo — principle §4. */}
       <div className="chs-edtoolbar__group">
-        <button className="chs-iconbtn" title="Отменить" aria-label="Undo">
+        <button
+          type="button"
+          className="chs-iconbtn"
+          title="Отменить"
+          aria-label="Отменить"
+          onClick={onUndo}
+          disabled={!canUndo}
+          aria-disabled={!canUndo || undefined}
+          style={{ transform: 'scaleX(-1)' }}
+        >
           <Icon name="chevron" />
         </button>
-        <button className="chs-iconbtn" title="Повторить" style={{ transform: 'scaleX(-1)' }} aria-label="Redo">
+        <button
+          type="button"
+          className="chs-iconbtn"
+          title="Повторить"
+          aria-label="Повторить"
+          onClick={onRedo}
+          disabled={!canRedo}
+          aria-disabled={!canRedo || undefined}
+        >
           <Icon name="chevron" />
         </button>
       </div>
@@ -237,10 +262,14 @@ function EditorToolbar({
         Сохранить
       </Button>
 
-      {/* Publish — future T-0xxx */}
-      <Button variant="primary" size="sm" disabled={isBusy}>
-        Опубликовать
-      </Button>
+      {/* Publish — backend wiring lands in a follow-up (T-0324). Until then the
+          control is disabled with a «скоро» hint rather than left as a silent
+          no-op enabled button (principle §4 affordance rule, gate G3). */}
+      <Tooltip label="Скоро">
+        <Button variant="primary" size="sm" disabled>
+          Опубликовать
+        </Button>
+      </Tooltip>
     </div>
   );
 }
@@ -268,20 +297,96 @@ export default function ProcessEditorScreen() {
   // T-0099: transient save/load status message
   const [statusMsg, setStatusMsg] = useState(null);   // { text: string, isError: bool }
 
+  // T-0323: undo/redo availability, reflected from the bpmn-js commandStack so
+  // the toolbar buttons are enabled only when there is history to walk.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  // T-0323: current canvas zoom (1 = 100%), shown + driven by the zoom widget.
+  const [zoomLevel, setZoomLevel] = useState(1);
+
   // T-0098: onReady is called by BpmnModelerWrapper once importXML resolves.
   // Stable reference so the modeler wrapper's effect closure captures it.
   const handleModelerReady = useCallback((modeler) => {
     setLiveModeler(modeler);
     setIsDirty(false);
 
-    // T-0099: listen for any diagram changes to set the dirty flag
+    // T-0099 + T-0323: listen for diagram changes — set the dirty flag and
+    // refresh undo/redo availability from the commandStack.
     try {
       const eventBus = modeler.get('eventBus');
-      eventBus.on('commandStack.changed', () => setIsDirty(true));
+      const commandStack = modeler.get('commandStack');
+      const syncHistory = () => {
+        setIsDirty(true);
+        setCanUndo(commandStack.canUndo());
+        setCanRedo(commandStack.canRedo());
+      };
+      eventBus.on('commandStack.changed', syncHistory);
+      // Initial state (no history yet on a fresh import).
+      setCanUndo(commandStack.canUndo());
+      setCanRedo(commandStack.canRedo());
     } catch (_) {
-      // Non-fatal if eventBus is not available
+      // Non-fatal if eventBus/commandStack is not available
+    }
+
+    // T-0323: track zoom so the widget value stays in sync with canvas gestures.
+    try {
+      const canvas = modeler.get('canvas');
+      setZoomLevel(canvas.zoom());
+      const eventBus = modeler.get('eventBus');
+      eventBus.on('canvas.viewbox.changed', () => setZoomLevel(canvas.zoom()));
+    } catch (_) {
+      // Non-fatal if canvas is not available
     }
   }, []);
+
+  /* ------------------------------------------------------------------
+     T-0323: Undo / Redo — drive the bpmn-js commandStack directly.
+     ------------------------------------------------------------------ */
+  const handleUndo = useCallback(() => {
+    if (!liveModeler) return;
+    try {
+      const cs = liveModeler.get('commandStack');
+      if (cs.canUndo()) cs.undo();
+    } catch (_) { /* non-fatal */ }
+  }, [liveModeler]);
+
+  const handleRedo = useCallback(() => {
+    if (!liveModeler) return;
+    try {
+      const cs = liveModeler.get('commandStack');
+      if (cs.canRedo()) cs.redo();
+    } catch (_) { /* non-fatal */ }
+  }, [liveModeler]);
+
+  /* ------------------------------------------------------------------
+     T-0323: Zoom widget — canvas.zoom() in / out / reset + fit-viewport.
+     ------------------------------------------------------------------ */
+  const ZOOM_STEP = 0.2;
+  const ZOOM_MIN = 0.2;
+  const ZOOM_MAX = 4;
+
+  const applyZoom = useCallback((next) => {
+    if (!liveModeler) return;
+    try {
+      const canvas = liveModeler.get('canvas');
+      const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next));
+      canvas.zoom(clamped);
+      setZoomLevel(canvas.zoom());
+    } catch (_) { /* non-fatal */ }
+  }, [liveModeler]);
+
+  const handleZoomIn = useCallback(() => applyZoom(zoomLevel + ZOOM_STEP), [applyZoom, zoomLevel]);
+  const handleZoomOut = useCallback(() => applyZoom(zoomLevel - ZOOM_STEP), [applyZoom, zoomLevel]);
+
+  const handleZoomFit = useCallback(() => {
+    if (!liveModeler) return;
+    try {
+      const canvas = liveModeler.get('canvas');
+      canvas.zoom('fit-viewport', 'auto');
+      setZoomLevel(canvas.zoom());
+    } catch (_) { /* non-fatal */ }
+  }, [liveModeler]);
 
   /* ------------------------------------------------------------------
      T-0099: Save handler
@@ -370,6 +475,10 @@ export default function ProcessEditorScreen() {
         processId={processId}
         isDirty={isDirty}
         isBusy={isBusy}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         onSave={handleSave}
         onLoad={handleLoad}
         onValidate={handleValidate}
@@ -396,6 +505,28 @@ export default function ProcessEditorScreen() {
             style={{ position: 'absolute', inset: 0 }}
             onReady={handleModelerReady}
           />
+
+          {/* T-0323: bottom-right zoom widget — wired to canvas.zoom().
+              .chs-zoom skin already lives in editor.css; glyphs are typographic
+              −/+ sized by .chs-zoom button (not emoji — principle §2). */}
+          <div className="chs-zoom" role="group" aria-label="Масштаб">
+            <button type="button" onClick={handleZoomOut} title="Уменьшить" aria-label="Уменьшить масштаб" disabled={!liveModeler}>
+              <span aria-hidden="true">&minus;</span>
+            </button>
+            <button
+              type="button"
+              className="chs-zoom__val"
+              onClick={handleZoomFit}
+              title="Вписать в экран"
+              aria-label="Вписать в экран"
+              disabled={!liveModeler}
+            >
+              {Math.round(zoomLevel * 100)}%
+            </button>
+            <button type="button" onClick={handleZoomIn} title="Увеличить" aria-label="Увеличить масштаб" disabled={!liveModeler}>
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
         </div>
 
         {/* Right: properties panel (T-0098) — shows EmptyState until element selected */}
