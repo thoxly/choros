@@ -36,7 +36,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -422,6 +422,8 @@ function AppRecordsScreen() {
                 <tr>
                   {columns.map((c) => <th key={c.key}>{c.label}</th>)}
                   <th>Создано</th>
+                  {/* T-0295: detail view link column */}
+                  <th style={{ width: '64px' }} />
                 </tr>
               </thead>
               <tbody>
@@ -439,6 +441,20 @@ function AppRecordsScreen() {
                         <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
                           {fmtTs(rec.created_at)}
                         </Mono>
+                      </td>
+                      {/* T-0295: open detail view for this record */}
+                      <td style={{ textAlign: 'right' }}>
+                        <Link
+                          to={`/apps/${appId}/records/${rec.id}`}
+                          style={{
+                            fontSize: 'var(--chs-text-xs, 12px)',
+                            color: 'var(--chs-color-accent, #6366f1)',
+                            textDecoration: 'none',
+                          }}
+                          title="Открыть запись"
+                        >
+                          Открыть
+                        </Link>
                       </td>
                     </tr>
                   );

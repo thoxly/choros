@@ -29,6 +29,7 @@ import FormsScreen from '../screens/screen-forms.jsx';
 import NotificationsScreen from '../screens/screen-notifications.jsx';
 import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 import AgentsScreen from '../screens/screen-agents.jsx';
+import RecordDetailScreen from '../screens/screen-record-detail.jsx';
 
 export { Icon };
 
@@ -360,6 +361,8 @@ function AppShell() {
             <Route path="/app-schema/:appId" element={<AppSchemaScreen />} />
             {/* T-0267: application records list + schema-driven create-record form */}
             <Route path="/app-records/:appId" element={<AppRecordsScreen />} />
+            {/* T-0295: record detail view (read-only) */}
+            <Route path="/apps/:appId/records/:id" element={<RecordDetailScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
             <Route path="/processes" element={<ProcessesScreen launchOpen={launchOpen} onLaunchClose={() => setLaunchOpen(false)} />} />
