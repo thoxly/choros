@@ -873,6 +873,8 @@ export function registerInboxRoutes(
 
       // Append the task.approved event inside a tenant-scoped tx (RLS) → projection
       // advances the instance to `done`. Single audit write via the canonical writer.
+      // T-0332: pass tenantId so appendTaskApproved can embed the canonical
+      // TransitionPayload with the correct tenant scope.
       await withTenantTx(pool, tenantId, async (client) => {
         await appendTaskApproved(client as unknown as import("../db/audit-writer.js").PgClientLike, {
           taskId,
@@ -880,6 +882,7 @@ export function registerInboxRoutes(
           procKey: task.procKey,
           actor,
           nowMs: Date.now(),
+          tenantId,
         });
       });
 

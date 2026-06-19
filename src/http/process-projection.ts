@@ -38,6 +38,11 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
+import {
+  buildTransitionPayload,
+  TRANSITION_PAYLOAD_KEY,
+  projectActorType,
+} from "../core/transition-payload.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -196,6 +201,14 @@ export async function appendProcessStarted(
  * (ADR §2.3 / AC-5 / AC-6). Runs inside the caller's tenant-scoped tx so the audit
  * write is atomic with the decision. `taskId` is the approved inbox task id (==
  * the process.started event id); `instanceId` is the Flowable instance it advances.
+ *
+ * T-0332 (E15-S0b): embeds the canonical TransitionPayload under
+ * TRANSITION_PAYLOAD_KEY in the payload. actor_type = "human" (the approve path
+ * is always a human user-task; projectActorType("human", "user-task") = "human").
+ * duration_ms = null — this path does not track wall-clock task duration yet;
+ * T-0335 fills it for the engine completeTask path in S1.
+ * tenantId is optional for backward compat; when absent, the TransitionPayload
+ * tenant_id is set to "" (metrics queries filter by tenant independently).
  */
 export async function appendTaskApproved(
   tx: PgClientLike,
@@ -205,8 +218,19 @@ export async function appendTaskApproved(
     readonly procKey: string;
     readonly actor: string;
     readonly nowMs: number;
+    /**
+     * T-0332: tenant id for the canonical TransitionPayload.
+     * Pass the resolved tenantId (already available at the call-site in inbox.ts).
+     * Optional for backward-compat; defaults to "" if not supplied.
+     */
+    readonly tenantId?: string;
   },
 ): Promise<void> {
+  // T-0332: actor_type for human approve path is always "human" (user-task channel).
+  // projectActorType is imported from transition-payload.ts which re-exports it from
+  // lifecycle-audit.ts — single derivation source, no parallel logic.
+  const actorType = projectActorType("human", "user-task"); // = "human"
+
   const input: AuditEventInput = {
     id: randomUUID(),
     type: TASK_APPROVED_TYPE,
@@ -224,6 +248,19 @@ export async function appendTaskApproved(
       transition: "approve",
       // The post-transition target node (linear ТЭЛ: approve → end → done).
       to_status: "done",
+      // T-0332: canonical TransitionPayload — same shape as the engine path,
+      // form-neutral. duration_ms = null (not available here; T-0335 fills in S1).
+      [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
+        tenantId: args.tenantId ?? "",
+        instanceId: args.instanceId,
+        processKey: args.procKey,
+        activity: TASK_APPROVED_TYPE,
+        actor: args.actor,
+        actorType,
+        ts: args.nowMs,
+        durationMs: null, // T-0335 fills via completeTask outbox in S1
+        verdict: "approve",
+      }),
     },
     occurred_at: args.nowMs,
   };

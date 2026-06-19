@@ -6,6 +6,11 @@
  * a distinguishable actorType ∈ {human, agent, service} carried hash-covered in the
  * payload. IO-free, by the audit-grant-encoder.ts template.
  *
+ * T-0332 (E15-S0b): emits the canonical TransitionPayload (transition-payload.ts)
+ * under the TRANSITION_PAYLOAD_KEY inside audit_event.payload when tenantId +
+ * processKey are supplied — making the §4 metrics queries form-neutral. See the
+ * `transition` optional field on LifecycleAuditInput.
+ *
  * DESIGN INVARIANTS (ADR §5 / FF-11):
  *  - No import from pg/http/https/net/fetch/child_process. IO-free.
  *  - AuditEventInput is imported from audit-grant-encoder.ts (T-0031) — NOT
@@ -19,6 +24,7 @@ import type { AuditEventInput } from "./audit-grant-encoder.js";
 import type { OutboxRow } from "./outboxTypes.js";
 import type { OnDispatched } from "./outboxDispatcher.js";
 import type { AuditWriter, PgClientLike } from "../db/audit-writer.js";
+import { buildTransitionPayload, TRANSITION_PAYLOAD_KEY } from "./transition-payload.js";
 
 // ---------------------------------------------------------------------------
 // ActorType + projection (FR-2 / §4.5). The discrimination axis is employee.kind
@@ -48,6 +54,29 @@ export function projectActorType(
 // LifecycleAuditInput → AuditEventInput (ADR §4.4).
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0332 (E15-S0b): optional transition context carried by engine-path events so
+ * `encodeLifecycleAuditEvent` can embed the canonical TransitionPayload under
+ * TRANSITION_PAYLOAD_KEY. When present, ALL fields must be supplied by the caller
+ * (makeAuditOnDispatched extracts them from the outbox row + resolved actor).
+ *
+ * `duration_ms` is null here because the engine path does not have wall-clock
+ * duration at dispatch time — T-0335 fills it via the completeTask outbox in S1.
+ */
+export interface LifecycleTransitionContext {
+  readonly tenantId: string;
+  readonly processKey: string;
+  /** null when the outbox row did not carry an instanceId. */
+  readonly instanceId: string | null;
+  /** BPMN activity / step name or event type used as the activity label. */
+  readonly activity: string;
+  /**
+   * Duration in ms if available at call-site; null otherwise.
+   * T-0335 fills this for the completeTask outbox path (S1).
+   */
+  readonly durationMs: number | null;
+}
+
 export type LifecycleAuditInput =
   | {
       kind: "instance.started";
@@ -56,6 +85,8 @@ export type LifecycleAuditInput =
       actor: string;
       actorType: ActorType;
       via?: string | null;
+      /** T-0332: optional transition context for TransitionPayload emission. */
+      transition?: LifecycleTransitionContext;
     }
   | {
       kind: "task.completed";
@@ -65,6 +96,8 @@ export type LifecycleAuditInput =
       actorType: ActorType;
       via?: string | null;
       detail?: Record<string, unknown>;
+      /** T-0332: optional transition context for TransitionPayload emission. */
+      transition?: LifecycleTransitionContext;
     }
   | {
       kind: "task.failed";
@@ -74,6 +107,8 @@ export type LifecycleAuditInput =
       actorType: ActorType;
       via?: string | null;
       errorMessage?: string;
+      /** T-0332: optional transition context for TransitionPayload emission. */
+      transition?: LifecycleTransitionContext;
     };
 
 /** Default channel per lifecycle kind (ADR §4.4 mapping). */
@@ -85,6 +120,12 @@ function defaultVia(e: LifecycleAuditInput): string {
  * Pure encoder: lifecycle event → AuditEventInput. `nowMs` supplied by caller
  * (Date.now() at call-site); `idOverride` for deterministic tests — exactly the
  * encodeGrantAuditEvent contract. The actorType is placed in payload, hash-covered.
+ *
+ * T-0332 (E15-S0b): when `e.transition` is present, embeds the canonical
+ * TransitionPayload under TRANSITION_PAYLOAD_KEY inside the payload. This makes
+ * §4 metric queries form-neutral: they can read `payload->>'transition_payload'`
+ * regardless of which emit path produced the row.
+ * `duration_ms` is null for all engine-path events until T-0335 fills it in S1.
  */
 export function encodeLifecycleAuditEvent(
   e: LifecycleAuditInput,
@@ -99,6 +140,20 @@ export function encodeLifecycleAuditEvent(
       instanceId: e.instanceId,
       processKey: e.processKey,
     };
+    // T-0332: embed canonical transition payload when context is provided.
+    if (e.transition) {
+      payload[TRANSITION_PAYLOAD_KEY] = buildTransitionPayload({
+        tenantId: e.transition.tenantId,
+        instanceId: e.transition.instanceId,
+        processKey: e.transition.processKey,
+        activity: e.transition.activity,
+        actor: e.actor,
+        actorType: e.actorType,
+        ts: nowMs,
+        durationMs: e.transition.durationMs, // null — T-0335 fills via outbox (S1)
+        verdict: "start",
+      });
+    }
     return {
       id: idOverride ?? randomUUID(),
       type: "instance.started",
@@ -125,6 +180,23 @@ export function encodeLifecycleAuditEvent(
   }
   if (e.kind === "task.completed" && e.detail !== undefined) {
     payload["detail"] = e.detail;
+  }
+
+  // T-0332: embed canonical transition payload when context is provided.
+  // verdict: "complete" for task.completed, "fail" for task.failed.
+  // duration_ms: null here — T-0335 fills it via the completeTask outbox in S1.
+  if (e.transition) {
+    payload[TRANSITION_PAYLOAD_KEY] = buildTransitionPayload({
+      tenantId: e.transition.tenantId,
+      instanceId: e.transition.instanceId,
+      processKey: e.transition.processKey,
+      activity: e.transition.activity,
+      actor: e.actor,
+      actorType: e.actorType,
+      ts: nowMs,
+      durationMs: e.transition.durationMs, // null — T-0335 fills via outbox (S1)
+      verdict: e.kind === "task.completed" ? "complete" : "fail",
+    });
   }
 
   return {
@@ -185,6 +257,25 @@ export function makeAuditOnDispatched(deps: AuditOnDispatchedDeps): OnDispatched
         ? (row.payload["instanceId"] as string)
         : null;
 
+    // T-0332 (E15-S0b): build the transition context for the canonical
+    // TransitionPayload. processKey is best-effort from the outbox payload; falls
+    // back to empty string when absent (prevents the field from being missing).
+    // activity = the event type (e.g. "task_completed") — BPMN-level granularity is
+    // not available at this outbox dispatch point (T-0335/S1 adds per-step detail).
+    // duration_ms = null — T-0335 fills it via the completeTask outbox in S1.
+    const processKey =
+      typeof row.payload["processKey"] === "string"
+        ? (row.payload["processKey"] as string)
+        : "";
+
+    const transition: LifecycleTransitionContext = {
+      tenantId: row.tenantId,
+      processKey,
+      instanceId,
+      activity: row.eventType,
+      durationMs: null, // T-0335 fills via outbox (S1)
+    };
+
     const input: LifecycleAuditInput =
       kind === "task.completed"
         ? {
@@ -193,6 +284,7 @@ export function makeAuditOnDispatched(deps: AuditOnDispatchedDeps): OnDispatched
             jobId: row.aggregateId,
             actor,
             actorType,
+            transition,
           }
         : {
             kind: "task.failed",
@@ -200,6 +292,7 @@ export function makeAuditOnDispatched(deps: AuditOnDispatchedDeps): OnDispatched
             jobId: row.aggregateId,
             actor,
             actorType,
+            transition,
             ...(typeof row.payload["error"] === "string"
               ? { errorMessage: row.payload["error"] as string }
               : {}),
