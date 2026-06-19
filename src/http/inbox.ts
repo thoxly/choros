@@ -159,6 +159,12 @@ const USER_ROLES: Record<string, string[]> = {
  *
  * Fallback path (hasDb() === false): the existing in-memory USER_ROLES fixture,
  * which preserves all existing memory-mode test behaviour (FF-11).
+ *
+ * Fail-closed (NF-3): when DATABASE_URL is set, any DB error propagates to the
+ * caller rather than silently degrading to the in-memory fixture. Authority call
+ * sites (claim, approve) MUST see this propagation so the router's INTERNAL:500
+ * envelope is returned instead of evaluating grants against stale fixture data.
+ * The no-DB path (hasDb() === false) keeps the fixture fallback as before.
  */
 async function resolveRolesForActor(
   actor?: string | null,
@@ -167,12 +173,10 @@ async function resolveRolesForActor(
 ): Promise<string[]> {
   if (!actor) return [];
   if (hasDb()) {
-    try {
-      return await getRoleSlugsForActor(getOrgPool(), tenantId, actor, nowMs);
-    } catch {
-      // DB error → degrade to in-memory fixture (same no-DB behaviour, never hard-fail).
-      return USER_ROLES[actor] ?? [];
-    }
+    // No try/catch: DB errors propagate to the caller (fail-closed, NF-3).
+    // A fixture fallback here would let a transient DB error silently grant
+    // access to actors whose live DB grants have been revoked.
+    return await getRoleSlugsForActor(getOrgPool(), tenantId, actor, nowMs);
   }
   return USER_ROLES[actor] ?? [];
 }
@@ -535,8 +539,9 @@ export function registerInboxRoutes(
 
     const base = await findInboxItems(actor);
     // T-0331 (S0a): resolve role slugs from live DB (falls back to in-memory fixture
-    // when !hasDb()). tenantId from resolveTenant mirrors the same source used by
-    // findInboxItems so role-check and task-list are always co-scoped to the same tenant.
+    // when !hasDb()); DB errors propagate as 500 (fail-closed, NF-3). tenantId from
+    // resolveTenant mirrors the same source used by findInboxItems so role-check and
+    // task-list are always co-scoped to the same tenant.
     const inboxTenantId = await resolveTenant(actor);
     const myRoles = await resolveRolesForActor(actor, inboxTenantId);
 

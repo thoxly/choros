@@ -281,3 +281,64 @@ describe("makeDbGrantSource (T-0331 S0a — GrantSource interface)", () => {
     expect(grants).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// R-1 fail-closed propagation tests (T-0331 S0a review finding)
+//
+// Proves that getRoleSlugsForActor propagates DB errors rather than swallowing
+// them. Since resolveRolesForActor (inbox.ts) delegates directly to
+// getRoleSlugsForActor with no try/catch when hasDb() is true, this is the
+// canonical proof that authority gates (claim, approve) will receive a thrown
+// error — not a fixture/[] fallback — when the DB fails.
+// ---------------------------------------------------------------------------
+
+/** Build a pool whose query always throws with the given error. */
+function makeThrowingPool(err: Error): import("pg").Pool {
+  const fakeClient = {
+    query: async (_text: unknown, _values?: unknown[]) => {
+      throw err;
+    },
+    release: () => {},
+  } as unknown as import("pg").PoolClient;
+
+  return {
+    connect: async () => fakeClient,
+  } as unknown as import("pg").Pool;
+}
+
+describe("getRoleSlugsForActor — fail-closed DB error propagation (R-1, T-0331)", () => {
+  const NOW = 10000;
+
+  it("propagates a DB connection error rather than returning [] or fixture roles", async () => {
+    const dbErr = new Error("simulated DB connection failure");
+    const pool = makeThrowingPool(dbErr);
+
+    // Must reject — no swallowing, no fixture fallback.
+    await expect(
+      getRoleSlugsForActor(pool, TENANT_ID, "e-kravtsova", NOW),
+    ).rejects.toThrow("simulated DB connection failure");
+  });
+
+  it("propagates a query timeout error (actor unknown but DB still throws)", async () => {
+    const dbErr = new Error("query timed out");
+    const pool = makeThrowingPool(dbErr);
+
+    // Even for an actor that would have no rows — a DB-level throw must propagate.
+    await expect(
+      getRoleSlugsForActor(pool, TENANT_ID, "e-nobody", NOW),
+    ).rejects.toThrow("query timed out");
+  });
+});
+
+describe("getGrantsForSubject — fail-closed DB error propagation (R-1, T-0331)", () => {
+  const NOW = 10000;
+
+  it("propagates a DB error rather than returning []", async () => {
+    const dbErr = new Error("simulated network failure");
+    const pool = makeThrowingPool(dbErr);
+
+    await expect(
+      getGrantsForSubject(pool, TENANT_ID, "e-kravtsova", NOW),
+    ).rejects.toThrow("simulated network failure");
+  });
+});
