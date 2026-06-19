@@ -74,20 +74,23 @@ export function slugifyOrgName(orgName: string): string {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-class ValidationError extends Error {
-  readonly code = "VALIDATION";
-  constructor(message: string) {
-    super(message);
-    this.name = "ValidationError";
-  }
-}
-
 export class RegisterError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
     super(message);
     this.code = code;
     this.name = "RegisterError";
+  }
+}
+
+/**
+ * ValidationError extends RegisterError so the HTTP route's `instanceof RegisterError`
+ * guard catches it and emits 400 VALIDATION (ADR §4 / AC-9 / R-1 fix).
+ */
+class ValidationError extends RegisterError {
+  constructor(message: string) {
+    super("VALIDATION", message);
+    this.name = "ValidationError";
   }
 }
 
@@ -189,30 +192,30 @@ export async function registerTenant(
 
     // 3b. Insert role (slug='tenant-owner', per-tenant)
     await client.query(
-      `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at)
-       VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', $3)`,
+      `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
+       VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', $3, $3)`,
       [tenantId, roleId, ts],
     );
 
     // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL)
     await client.query(
-      `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at)
-       VALUES ($1, $2, $3, 'human', $4, NULL, $5)`,
+      `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+       VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
       [tenantId, employeeId, kcUserId, req.email, ts],
     );
 
     // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)
     await client.query(
       `INSERT INTO choros.role_assignment
-         (tenant_id, id, employee_id, role_id, org_scope, confirmed_by, source, created_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'registration', $7)`,
+         (tenant_id, id, employee_id, role_id, org_scope, granted_by, confirmed_by, source, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)`,
       [
         tenantId,
         assignmentId,
         employeeId,
         roleId,
         JSON.stringify({ kind: "set", members: [] }),
-        employeeId,  // self-bootstrap: employee confirms their own owner assignment
+        employeeId,  // self-bootstrap: both granted_by and confirmed_by are the genesis owner employee
         ts,
       ],
     );

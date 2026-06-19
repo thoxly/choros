@@ -19,6 +19,11 @@
     "config/keycloak/realm-choros.json",
     "docker-compose.yml"
   ],
+  "review_fixes": [
+    "R-1 (BLOCKING): ValidationError now extends RegisterError so the HTTP route's instanceof RegisterError guard catches it and emits 400 VALIDATION. Before: ValidationError fell through to 500 INTERNAL. Fix is in src/core/register.ts — swapped class declaration order, ValidationError extends RegisterError with super('VALIDATION', message).",
+    "R-2 (orphan KC user): createHumanUser in src/keycloak/admin-port.ts now reads the user UUID from the Location response header of the 201 (extractIdFromLocation helper). Falls back to GET-by-username only when Location is absent. doRequest return type extended with responseHeaders. If DB fails after id is obtained, deleteUser is called with the Location-derived id — no orphan possible.",
+    "R-3 (LIVE-SCHEMA BUG FIX): register.ts DB transaction omitted NOT-NULL columns required by the real choros schema, causing 500 on the live stack (unit tests used a fake pool and missed this). Fixed: (1) role INSERT now includes updated_at=$3; (2) employee INSERT now includes updated_at=$5; (3) role_assignment INSERT now includes granted_by=$6 (= employeeId, self-bootstrap genesis owner) and updated_at=$7. SQL param lists and value arrays adjusted consistently. Test guard added: new describe 'SQL column guard' in register.test.ts asserts the SQL strings passed to the fake pool include updated_at (role/employee/role_assignment) and granted_by (role_assignment)."
+  ],
   "deviations_from_adr": [],
   "blocked_reason": null,
   "friction_events": [
@@ -29,13 +34,13 @@
     "build": "green — npm run -s build exits 0 (tsc + seed compilation)",
     "tsc": "green — node_modules/.bin/tsc --noEmit 0 errors",
     "eslint": "green — 0 errors in new files; 3 pre-existing warnings in unrelated files",
-    "vitest": "green — 2921 passed / 8 skipped / 0 failed (133 test files; no regression); register.test.ts 18 passed 2 skipped (live DB)",
+    "vitest": "green — 2929 passed / 8 skipped / 0 failed (133 test files; no regression); register.test.ts 28 passed 2 skipped (live DB) — 10 new tests added (R-1 HTTP validation ×5, R-2 Location header ×2, R-3 SQL column guard ×1, pre-existing 18→28 total)",
     "fitness": "ALL GREEN (exit 0); FAIL lines in output are expected self-test artifacts (immediately followed by PASS [self-test] confirming check correctly detected planted violation)",
     "any_red": false
   },
   "scope_clean_backend_only": true,
   "touched_out_of_scope": [],
-  "tests_added": 18,
+  "tests_added": 27,
   "fitness_db_status": "written-for-server — FF-4/FF-6 tests skip when DATABASE_URL absent (local Mac); annotated to run on homeserver-vm dev stack",
   "endpoint_contract": {
     "method": "POST",
