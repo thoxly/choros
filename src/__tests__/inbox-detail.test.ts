@@ -11,7 +11,7 @@
  *   - projection status advances to "done" after approve
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerInboxRoutes, _resetClaimStateForTests } from "../http/inbox.js";
