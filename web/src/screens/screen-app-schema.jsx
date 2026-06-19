@@ -21,11 +21,17 @@
    record_schema собирается чистым модулем apps-schema.js (buildRecordSchema) —
    единственный источник истины формы соответствует серверному AJV-валидатору.
    Авторизация — devHeaders() (X-Dev-User), как у остальных экранов.
+
+   OBLIK (T-0302): конструктор полей потребляет KIT — поля через <Field>/.chs-input
+   (видимый ввод в ОБЕИХ темах через реальные --chs-color-* токены, без
+   несуществующих --chs-bg-primary/--chs-border). Ноль хардкода цвета (G6).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { Button, MonoId, StatusChip } from '../components/components.jsx';
+import {
+  Button, MonoId, StatusChip, Field, EmptyState, ErrorState, LoadingState, KitIcon,
+} from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
 import {
@@ -37,16 +43,17 @@ import {
   blankField,
 } from './apps-schema.js';
 
-const inputStyle = (invalid) => ({
-  width: '100%', boxSizing: 'border-box',
-  padding: '7px 9px',
-  background: 'var(--chs-bg-primary, #14151a)',
-  border: `1px solid ${invalid ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-border, #30333d)'}`,
-  borderRadius: '6px', color: 'inherit',
-  fontSize: 'var(--chs-text-sm, 13px)', fontFamily: 'inherit',
-});
-const errStyle = { display: 'block', marginTop: '3px', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-danger, #e53e3e)' };
-const labelTxt = { fontSize: 'var(--chs-text-xs, 12px)', fontWeight: 500, color: 'var(--chs-color-text-muted, #888)' };
+// .chs-input carries a FIXED control height; textareas/selects need it relaxed.
+const textareaStyle = {
+  height: 'auto', minHeight: '60px',
+  paddingTop: 'var(--chs-space-2)', paddingBottom: 'var(--chs-space-2)',
+  resize: 'vertical',
+};
+const errStyle = {
+  display: 'block', marginTop: 'var(--chs-space-2)',
+  fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)',
+};
+const inputCls = (invalid) => `chs-input ${invalid ? 'chs-input--invalid' : ''}`;
 
 /**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
@@ -72,20 +79,18 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
     <tr>
       <td style={{ verticalAlign: 'top' }}>
         <input
-          className="chs-input chs-input--mono"
-          style={inputStyle(Boolean(errors.key))}
+          className={`${inputCls(Boolean(errors.key))} chs-input--mono`}
           value={field.key}
           onChange={(e) => set({ key: e.target.value })}
           placeholder="field_key"
           aria-label="Ключ поля"
-          aria-invalid={Boolean(errors.key)}
+          aria-invalid={Boolean(errors.key) || undefined}
         />
         {errors.key && <span style={errStyle}>{errors.key}</span>}
       </td>
       <td style={{ verticalAlign: 'top' }}>
         <select
-          className="chs-input"
-          style={inputStyle(Boolean(errors.type))}
+          className={inputCls(Boolean(errors.type))}
           value={field.type}
           onChange={(e) => set({ type: e.target.value })}
           aria-label="Тип поля"
@@ -97,23 +102,18 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
         {errors.type && <span style={errStyle}>{errors.type}</span>}
         {/* T-0294: options input for select type */}
         {field.type === 'select' && (
-          <div style={{ marginTop: '6px' }}>
-            <span style={{ ...errStyle, display: 'block', marginTop: 0, marginBottom: '3px', color: 'var(--chs-color-text-muted, #888)' }}>
+          <div style={{ marginTop: 'var(--chs-space-3)' }}>
+            <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
               Варианты (по одному на строку):
             </span>
             <textarea
-              className="chs-input"
-              style={{
-                ...inputStyle(Boolean(errors.options)),
-                resize: 'vertical',
-                minHeight: '60px',
-                fontFamily: 'inherit',
-              }}
+              className={inputCls(Boolean(errors.options))}
+              style={textareaStyle}
               value={optionsText}
               onChange={(e) => setOptionsFromText(e.target.value)}
               placeholder={'вариант_1\nвариант_2\nвариант_3'}
               aria-label="Варианты select"
-              aria-invalid={Boolean(errors.options)}
+              aria-invalid={Boolean(errors.options) || undefined}
               rows={3}
             />
             {errors.options && <span style={errStyle}>{errors.options}</span>}
@@ -122,13 +122,12 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
       </td>
       <td style={{ verticalAlign: 'top' }}>
         <input
-          className="chs-input"
-          style={inputStyle(Boolean(errors.title))}
+          className={inputCls(Boolean(errors.title))}
           value={field.title}
           onChange={(e) => set({ title: e.target.value })}
           placeholder="Название (опц.)"
           aria-label="Название поля"
-          aria-invalid={Boolean(errors.title)}
+          aria-invalid={Boolean(errors.title) || undefined}
         />
         {errors.title && <span style={errStyle}>{errors.title}</span>}
       </td>
@@ -146,7 +145,9 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
         <Button type="button" variant="ghost" size="sm" disabled={index === count - 1}
           onClick={() => onMove(index, index + 1)} title="Вниз" aria-label="Переместить вниз">↓</Button>
         <Button type="button" variant="ghost" size="sm"
-          onClick={() => onRemove(index)} title="Удалить" aria-label="Удалить поле">✕</Button>
+          onClick={() => onRemove(index)} title="Удалить" aria-label="Удалить поле">
+          <KitIcon name="close" />
+        </Button>
       </td>
     </tr>
   );
@@ -257,40 +258,37 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
 
   return (
     <form onSubmit={handleSubmit} style={{
-      border: '1px solid var(--chs-border, #30333d)', borderRadius: '8px',
-      padding: '20px 22px', marginBottom: '18px',
-      background: 'var(--chs-bg-secondary, #1e2028)',
+      border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-4)',
+      padding: 'var(--chs-space-7) var(--chs-space-8)', marginBottom: 'var(--chs-space-7)',
+      background: 'var(--chs-color-surface)',
     }}>
-      <h3 style={{ margin: '0 0 14px 0', fontSize: 'var(--chs-text-md, 15px)', fontWeight: 600 }}>
+      <h3 style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-md)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>
         {isEdit ? `Поля реестра «${editingDef.display_name}»` : 'Новый реестр приложения'}
       </h3>
 
       {!isEdit && (
-        <div style={{ display: 'flex', gap: '14px', marginBottom: '16px' }}>
-          <label style={{ flex: 1 }}>
-            <span style={labelTxt}>Слаг реестра</span>
-            <input
-              className="chs-input chs-input--mono"
-              style={inputStyle(Boolean(metaErrs.slug))}
+        <div style={{ display: 'flex', gap: 'var(--chs-space-6)', marginBottom: 'var(--chs-space-6)' }}>
+          <div style={{ flex: 1 }}>
+            <Field
+              label="Слаг реестра"
+              mono
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
               placeholder="my-registry"
-              aria-invalid={Boolean(metaErrs.slug)}
+              invalid={Boolean(metaErrs.slug)}
             />
             {metaErrs.slug && <span style={errStyle}>{metaErrs.slug}</span>}
-          </label>
-          <label style={{ flex: 1 }}>
-            <span style={labelTxt}>Название реестра</span>
-            <input
-              className="chs-input"
-              style={inputStyle(Boolean(metaErrs.display_name))}
+          </div>
+          <div style={{ flex: 1 }}>
+            <Field
+              label="Название реестра"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Мой реестр"
-              aria-invalid={Boolean(metaErrs.display_name)}
+              invalid={Boolean(metaErrs.display_name)}
             />
             {metaErrs.display_name && <span style={errStyle}>{metaErrs.display_name}</span>}
-          </label>
+          </div>
         </div>
       )}
 
@@ -328,23 +326,24 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
       </table>
 
       {fields.length === 0 && (
-        <p style={{ margin: '10px 0', color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)' }}>
+        <p style={{ margin: 'var(--chs-space-5) 0', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
           Пока нет полей. Добавьте первое.
         </p>
       )}
 
-      <div style={{ marginTop: '10px' }}>
-        <Button type="button" variant="ghost" size="sm" onClick={addField}>+ Добавить поле</Button>
+      <div style={{ marginTop: 'var(--chs-space-5)' }}>
+        <Button type="button" variant="ghost" size="sm" glyph={<KitIcon name="plus" />} onClick={addField}>Добавить поле</Button>
       </div>
 
-      {formErr && <div style={{ ...errStyle, marginTop: '10px', fontSize: 'var(--chs-text-sm, 13px)' }}>{formErr}</div>}
+      {formErr && <div style={{ ...errStyle, marginTop: 'var(--chs-space-5)', fontSize: 'var(--chs-text-sm)' }}>{formErr}</div>}
 
       {submitErr && (
-        <div style={{
-          marginTop: '14px', padding: '10px 14px',
-          background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-          border: '1px solid var(--chs-color-danger, #e53e3e)',
-          borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+        <div role="alert" style={{
+          marginTop: 'var(--chs-space-6)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+          background: 'var(--chs-color-danger-soft)',
+          border: '1px solid var(--chs-color-danger)',
+          borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+          color: 'var(--chs-color-text)',
         }}>
           {submitErr}
         </div>
@@ -352,18 +351,19 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
 
       {warnings && (
         <div style={{
-          marginTop: '14px', padding: '10px 14px',
-          background: 'var(--chs-bg-warning-subtle, rgba(214,158,46,0.12))',
-          border: '1px solid var(--chs-color-warning, #d69e2e)',
-          borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+          marginTop: 'var(--chs-space-6)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+          background: 'var(--chs-color-warning-soft)',
+          border: '1px solid var(--chs-color-warning)',
+          borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+          color: 'var(--chs-color-text)',
         }}>
           Сохранено. Затронуты зависимые отчёты ({warnings.length}) — проверьте их.
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '18px' }}>
+      <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end', marginTop: 'var(--chs-space-7)' }}>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Отмена</Button>
-        <Button type="submit" variant="primary" size="sm" disabled={submitting}>
+        <Button type="submit" variant="primary" size="sm" loading={submitting}>
           {submitting ? 'Сохранение…' : isEdit ? 'Сохранить поля' : 'Создать реестр'}
         </Button>
       </div>
@@ -420,21 +420,21 @@ function AppSchemaScreen() {
     <div className="chs-inbox">
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        padding: 'var(--chs-space-3, 12px) var(--chs-space-4, 16px)',
-        borderBottom: '1px solid var(--chs-border, #30333d)',
+        padding: 'var(--chs-space-5) var(--chs-space-6)',
+        borderBottom: '1px solid var(--chs-color-border)',
       }}>
-        <span style={{ fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
+        <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Поля приложения {app ? `«${app.display_name}»` : ''}
           {defs !== null ? ` · реестров: ${list.length}` : ''}
         </span>
         {editing === undefined && (
-          <Button variant="primary" size="sm" onClick={() => setEditing(null)}>
+          <Button variant="primary" size="sm" glyph={<KitIcon name="plus" />} onClick={() => setEditing(null)}>
             Новый реестр
           </Button>
         )}
       </div>
 
-      <div className="chs-inbox__scroll" style={{ padding: 'var(--chs-space-4, 16px)' }}>
+      <div className="chs-inbox__scroll" style={{ padding: 'var(--chs-space-6)' }}>
         {editing !== undefined ? (
           <FieldEditor
             applicationId={appId}
@@ -445,19 +445,18 @@ function AppSchemaScreen() {
         ) : null}
 
         {error ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-            <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить реестры: {error}</p>
-            <Button onClick={load}>Повторить</Button>
-          </div>
+          <ErrorState message={`Не удалось загрузить реестры: ${error}`} onRetry={load} />
         ) : defs === null ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Загрузка реестров…</div>
+          <LoadingState label="Загрузка реестров…" />
         ) : editing === undefined && list.length === 0 ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-            <p style={{ marginBottom: 'var(--chs-space-3)', color: 'var(--chs-color-text-muted, #888)' }}>
-              У приложения пока нет реестров. Создайте первый и определите его поля.
-            </p>
-            <Button variant="primary" onClick={() => setEditing(null)}>Новый реестр</Button>
-          </div>
+          <EmptyState
+            icon={<KitIcon name="inbox" size={28} />}
+            title="У приложения пока нет реестров"
+            description="Создайте первый и определите его поля."
+            action={
+              <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setEditing(null)}>Новый реестр</Button>
+            }
+          />
         ) : list.length > 0 ? (
           <table className="chs-itable">
             <colgroup>

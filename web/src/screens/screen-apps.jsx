@@ -16,27 +16,40 @@
 
    Авторизация — через devHeaders() (X-Dev-User), как у остальных экранов.
 
-   «Разделы»: в бэкенде НЕТ отдельной таблицы section — разделы = группировка
-   реестров/отчётов под приложением (registry_def.application_id), владелец T-0263.
-   Поэтому НИ ОДНОЙ мёртвой кнопки «Создать раздел» здесь нет — только то, что
-   реально проваливается в API. Это и есть честность, ради которой строится E13.
+   OBLIK (T-0302): экран потребляет KIT — модалка через <Modal>, поля через
+   <Field> (видимый ввод в ОБЕИХ темах: фон/текст/граница из реальных
+   --chs-color-* токенов, без несуществующих --chs-bg-primary/--chs-border).
+   Ноль хардкода цвета (UX-гейт G6).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Mono, StatusChip } from '../components/components.jsx';
+import {
+  Button, MonoId, Mono, StatusChip, Modal, Field, Popover,
+  EmptyState, ErrorState, LoadingState, KitIcon,
+} from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
 
 // tier → StatusChip status (chip is purely visual; tier values are 'draft'|'published').
 const TIER_CHIP = { draft: "waiting", published: "done" };
 
+// Anything at/below this is a seed/unset created_at, not a real date. Render a
+// dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
+const EPOCH_FLOOR_MS = 24 * 60 * 60 * 1000; // ~1970-01-02
+
 function fmtTs(ms) {
-  if (typeof ms !== "number" || !Number.isFinite(ms)) return "—";
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < EPOCH_FLOOR_MS) return "—";
   const d = new Date(ms);
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+// Inline-error line shown under a Field (token-only colors; layout via tokens).
+const fieldErrStyle = {
+  display: 'block', marginTop: 'var(--chs-space-2)',
+  fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)',
+};
 
 /**
  * CreateAppModal — форма создания приложения.
@@ -97,107 +110,120 @@ function CreateAppModal({ open, onClose, onCreated }) {
     }
   }, [slug, displayName, description, reset, onCreated]);
 
-  if (!open) return null;
-
-  const inputStyle = (invalid) => ({
-    width: '100%', boxSizing: 'border-box',
-    padding: '8px 10px', marginTop: '4px',
-    background: 'var(--chs-bg-primary, #14151a)',
-    border: `1px solid ${invalid ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-border, #30333d)'}`,
-    borderRadius: '6px', color: 'inherit',
-    fontSize: 'var(--chs-text-sm, 13px)', fontFamily: 'inherit',
-  });
-  const errStyle = { display: 'block', marginTop: '4px', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-danger, #e53e3e)' };
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Создать приложение"
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) handleClose(); }}
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Создать приложение"
+      footer={
+        <>
+          <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
+          <Button type="submit" form="create-app-form" variant="primary" size="sm" loading={submitting}>
+            {submitting ? 'Создание…' : 'Создать'}
+          </Button>
+        </>
+      }
     >
-      <form
-        onSubmit={handleSubmit}
-        style={{
-          background: 'var(--chs-bg-secondary, #1e2028)',
-          border: '1px solid var(--chs-border, #30333d)',
-          borderRadius: '8px', padding: '28px 32px',
-          minWidth: '400px', maxWidth: '520px',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-        }}
-      >
-        <h2 style={{ margin: '0 0 4px 0', fontSize: 'var(--chs-text-lg, 16px)', fontWeight: 600 }}>
-          Создать приложение
-        </h2>
-        <p style={{ margin: '0 0 20px 0', fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
+      <form id="create-app-form" onSubmit={handleSubmit}>
+        <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Новое приложение конструктора. Создаётся в статусе «черновик».
         </p>
 
-        <label style={{ display: 'block', marginBottom: '14px' }}>
-          <span style={{ fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 }}>Слаг</span>
-          <input
-            className="chs-input chs-input--mono"
-            style={inputStyle(Boolean(fieldErrors.slug))}
+        <div style={{ marginBottom: 'var(--chs-space-6)' }}>
+          <Field
+            label="Слаг"
+            mono
             value={slug}
             onChange={(e) => setSlug(e.target.value)}
             placeholder="my-app"
             autoFocus
-            aria-invalid={Boolean(fieldErrors.slug)}
+            invalid={Boolean(fieldErrors.slug)}
+            hint={fieldErrors.slug ? undefined : 'строчные латинские, цифры, дефис · 1–64'}
           />
-          {fieldErrors.slug
-            ? <span style={errStyle}>{fieldErrors.slug}</span>
-            : <span style={{ ...errStyle, color: 'var(--chs-color-text-faint, #666)' }}>строчные латинские, цифры, дефис · 1–64</span>}
-        </label>
+          {fieldErrors.slug && <span style={fieldErrStyle}>{fieldErrors.slug}</span>}
+        </div>
 
-        <label style={{ display: 'block', marginBottom: '14px' }}>
-          <span style={{ fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 }}>Название</span>
-          <input
-            className="chs-input"
-            style={inputStyle(Boolean(fieldErrors.display_name))}
+        <div style={{ marginBottom: 'var(--chs-space-6)' }}>
+          <Field
+            label="Название"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
             placeholder="Моё приложение"
-            aria-invalid={Boolean(fieldErrors.display_name)}
+            invalid={Boolean(fieldErrors.display_name)}
           />
-          {fieldErrors.display_name && <span style={errStyle}>{fieldErrors.display_name}</span>}
-        </label>
+          {fieldErrors.display_name && <span style={fieldErrStyle}>{fieldErrors.display_name}</span>}
+        </div>
 
-        <label style={{ display: 'block', marginBottom: '18px' }}>
-          <span style={{ fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 }}>Описание <span style={{ color: 'var(--chs-color-text-faint, #666)' }}>(опц.)</span></span>
+        <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+          <label className="chs-label" htmlFor="create-app-desc">Описание (опц.)</label>
           <textarea
-            className="chs-input"
-            style={{ ...inputStyle(Boolean(fieldErrors.description)), minHeight: '64px', resize: 'vertical' }}
+            id="create-app-desc"
+            className={`chs-input ${fieldErrors.description ? 'chs-input--invalid' : ''}`}
+            style={{ height: 'auto', minHeight: '64px', paddingTop: 'var(--chs-space-3)', paddingBottom: 'var(--chs-space-3)', resize: 'vertical' }}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="Для чего это приложение"
+            aria-invalid={Boolean(fieldErrors.description) || undefined}
           />
-          {fieldErrors.description && <span style={errStyle}>{fieldErrors.description}</span>}
-        </label>
+          {fieldErrors.description && <span style={fieldErrStyle}>{fieldErrors.description}</span>}
+        </div>
 
         {submitErr && (
-          <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-            border: '1px solid var(--chs-color-danger, #e53e3e)',
-            borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+          <div role="alert" style={{
+            marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+            background: 'var(--chs-color-danger-soft)',
+            border: '1px solid var(--chs-color-danger)',
+            borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
           }}>
             {submitErr}
           </div>
         )}
-
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-          <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
-          <Button type="submit" variant="primary" size="sm" disabled={submitting}>
-            {submitting ? 'Создание…' : 'Создать'}
-          </Button>
-        </div>
       </form>
-    </div>
+    </Modal>
+  );
+}
+
+// Per-row actions: keep BOTH "Настроить поля" and "Записи" reachable without
+// horizontal scroll (audit #2) via a "…" Popover menu anchored to the row.
+function AppActions({ app, navigate }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover
+      open={open}
+      onClose={() => setOpen(false)}
+      placement="bottom"
+      align="end"
+      trigger={
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={`Действия · ${app.display_name}`}
+          onClick={() => setOpen((v) => !v)}
+        >
+          …
+        </Button>
+      }
+    >
+      <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '160px' }}>
+        <Button
+          variant="ghost" size="sm" role="menuitem"
+          style={{ justifyContent: 'flex-start', width: '100%' }}
+          onClick={() => { setOpen(false); navigate(`/app-schema/${app.id}`); }}
+        >
+          Настроить поля
+        </Button>
+        <Button
+          variant="ghost" size="sm" role="menuitem"
+          style={{ justifyContent: 'flex-start', width: '100%' }}
+          onClick={() => { setOpen(false); navigate(`/app-records/${app.id}`); }}
+        >
+          Записи
+        </Button>
+      </div>
+    </Popover>
   );
 }
 
@@ -240,34 +266,33 @@ function AppsScreen() {
       <div className="chs-inbox">
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: 'var(--chs-space-3, 12px) var(--chs-space-4, 16px)',
-          borderBottom: '1px solid var(--chs-border, #30333d)',
+          padding: 'var(--chs-space-5) var(--chs-space-6)',
+          borderBottom: '1px solid var(--chs-color-border)',
         }}>
-          <span style={{ fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
+          <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
             Приложения тенанта{apps !== null ? ` · ${list.length}` : ''}
           </span>
-          <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
+          <Button variant="primary" size="sm" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>
             Создать приложение
           </Button>
         </div>
 
         <div className="chs-inbox__scroll">
           {error ? (
-            <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-              <p style={{ marginBottom: "var(--chs-space-3)" }}>Не удалось загрузить приложения: {error}</p>
-              <Button onClick={load}>Повторить</Button>
-            </div>
+            <ErrorState message={`Не удалось загрузить приложения: ${error}`} onRetry={load} />
           ) : apps === null ? (
-            <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-              Загрузка приложений…
-            </div>
+            <LoadingState label="Загрузка приложений…" />
           ) : list.length === 0 ? (
-            <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-              <p style={{ marginBottom: "var(--chs-space-3)", color: "var(--chs-color-text-muted, #888)" }}>
-                Пока нет ни одного приложения. Создайте первое — это центр конструктора.
-              </p>
-              <Button variant="primary" onClick={() => setCreateOpen(true)}>Создать приложение</Button>
-            </div>
+            <EmptyState
+              icon={<KitIcon name="inbox" size={28} />}
+              title="Пока нет ни одного приложения"
+              description="Создайте первое — это центр конструктора."
+              action={
+                <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>
+                  Создать приложение
+                </Button>
+              }
+            />
           ) : (
             <table className="chs-itable">
               <colgroup>
@@ -275,7 +300,7 @@ function AppsScreen() {
                 <col style={{ width: "180px" }} />
                 <col style={{ width: "120px" }} />
                 <col style={{ width: "160px" }} />
-                <col style={{ width: "220px" }} />
+                <col style={{ width: "56px" }} />
               </colgroup>
               <thead>
                 <tr>
@@ -290,7 +315,7 @@ function AppsScreen() {
                 {list.map((app) => (
                   <tr
                     key={app.id}
-                    style={app.id === highlightId ? { background: 'var(--chs-bg-success-subtle, rgba(56,161,105,0.12))' } : undefined}
+                    style={app.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
                   >
                     <td>
                       <div className="chs-task">
@@ -307,15 +332,9 @@ function AppsScreen() {
                         {fmtTs(app.created_at)}
                       </Mono>
                     </td>
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      {/* T-0266: jump into the field-constructor for this app */}
-                      <Button variant="secondary" size="sm" onClick={() => navigate(`/app-schema/${app.id}`)}>
-                        Настроить поля
-                      </Button>
-                      {/* T-0267: jump into the records list + create-record form */}
-                      <Button variant="ghost" size="sm" onClick={() => navigate(`/app-records/${app.id}`)}>
-                        Записи
-                      </Button>
+                    <td style={{ textAlign: 'right' }}>
+                      {/* T-0266/T-0267 actions: field-constructor + records, behind a "…" menu */}
+                      <AppActions app={app} navigate={navigate} />
                     </td>
                   </tr>
                 ))}
