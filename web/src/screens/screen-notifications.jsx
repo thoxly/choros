@@ -15,7 +15,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button } from '../components/components.jsx';
+import { Button, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 
@@ -130,14 +130,11 @@ function CenterTab() {
 
       <div className="chs-notif__scroll">
         {error ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-            <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить уведомления: {error}</p>
-            <Button onClick={load}>Повторить</Button>
-          </div>
+          <ErrorState message={`Не удалось загрузить уведомления: ${error}`} onRetry={load} />
         ) : items === null ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Загрузка уведомлений…</div>
+          <LoadingState label="Загрузка уведомлений…" />
         ) : items.length === 0 ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Нет уведомлений</div>
+          <EmptyState title="Нет уведомлений" description="Здесь появятся события по вашим задачам, апрувам и SLA." />
         ) : (
           <ul className="chs-notif__list">
             {items.map((n) => (
@@ -218,12 +215,9 @@ function SettingsTab() {
     <div className="chs-notif">
       <div className="chs-notif__scroll" style={{ padding: 'var(--chs-space-4)' }}>
         {error ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-            <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить настройки: {error}</p>
-            <Button onClick={load}>Повторить</Button>
-          </div>
+          <ErrorState message={`Не удалось загрузить настройки: ${error}`} onRetry={load} />
         ) : prefs === null ? (
-          <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Загрузка настроек…</div>
+          <LoadingState label="Загрузка настроек…" />
         ) : (
           <table className="chs-itable">
             <thead>

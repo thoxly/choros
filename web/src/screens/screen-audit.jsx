@@ -7,7 +7,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { ExecGlyph, MonoId, Mono, StatusChip, BudgetMeter, EXEC_META } from '../components/components.jsx';
+import { ExecGlyph, MonoId, Mono, StatusChip, BudgetMeter, EXEC_META, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 
 
@@ -77,12 +77,7 @@ function AuditScreen() {
   if (error) {
     return (
       <div className="chs-audit-screen">
-        <div style={{ padding: '20px', color: 'var(--chs-color-error, #d32f2f)' }}>
-          Не удалось загрузить аудит: {error}
-          <button onClick={load} style={{ marginLeft: '10px', padding: '5px 10px' }}>
-            Повторить
-          </button>
-        </div>
+        <ErrorState message={`Не удалось загрузить аудит: ${error}`} onRetry={load} />
       </div>
     );
   }
@@ -91,7 +86,7 @@ function AuditScreen() {
   if (data === null) {
     return (
       <div className="chs-audit-screen">
-        <div style={{ padding: '20px' }}>Загрузка аудита…</div>
+        <LoadingState label="Загрузка аудита…" />
       </div>
     );
   }
@@ -100,7 +95,7 @@ function AuditScreen() {
   if (!data.trace || data.trace.length === 0) {
     return (
       <div className="chs-audit-screen">
-        <div style={{ padding: '20px' }}>Нет событий</div>
+        <EmptyState title="Нет событий" description="Для этого инстанса процесса ещё не записано ни одного события аудита." />
       </div>
     );
   }
