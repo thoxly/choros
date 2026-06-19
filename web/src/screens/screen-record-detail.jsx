@@ -46,6 +46,27 @@ const valueStyle = {
   wordBreak: 'break-word',
 };
 
+// 2-column detail layout (audit #11): the old maxWidth:640 cap wasted ~40-50%
+// of desktop width. Per principles §5 (use the width on wide B2B screens), the
+// record fields take the flexible left column (≈2/3) and metadata sits in a
+// right sidebar (≈1/3). minmax(0,…) lets long field values wrap instead of
+// overflowing; the sidebar floor keeps it from collapsing too thin.
+const detailGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 2fr) minmax(220px, 1fr)',
+  gap: 'var(--chs-space-7) var(--chs-space-9)',
+  alignItems: 'start',
+};
+
+// Metadata sidebar: a contained surface so it reads as secondary chrome, not a
+// second field list. Token-only colors (G6).
+const metaSidebarStyle = {
+  border: '1px solid var(--chs-color-border)',
+  borderRadius: 'var(--chs-radius-4)',
+  background: 'var(--chs-color-surface)',
+  padding: 'var(--chs-space-3) var(--chs-space-6)',
+};
+
 function RecordDetailScreen() {
   const { appId, id } = useParams();
   const navigate = useNavigate();
@@ -130,64 +151,62 @@ function RecordDetailScreen() {
           />
         )}
 
-        {/* Detail view */}
+        {/* Detail view — 2-column layout (principles §5: use the width).
+            Left = the record's fields (the content); right = metadata sidebar.
+            Collapses to a single column on narrow viewports. */}
         {record && !error && (
-          <div style={{ maxWidth: '640px' }}>
-            {/* Meta header */}
-            <div style={{ marginBottom: 'var(--chs-space-8)' }}>
-              <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                {record.id}
-              </Mono>
-            </div>
+          <div style={detailGridStyle}>
+            {/* Fields column */}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ marginBottom: 'var(--chs-space-6)' }}>
+                <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                  {record.id}
+                </Mono>
+              </div>
 
-            {/* Schema-driven field list */}
-            {formFields.length === 0 ? (
-              <div style={{ marginBottom: 'var(--chs-space-8)' }}>
-                {/* Fallback: no schema / empty schema — render raw data keys */}
-                {Object.keys(data).length === 0 ? (
-                  <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-                    Запись не содержит полей.
-                  </p>
-                ) : (
-                  Object.entries(data).map(([key, val]) => (
-                    <div key={key} style={fieldRowStyle}>
-                      <span style={labelStyle}>{key}</span>
+              {/* Schema-driven field list */}
+              {formFields.length === 0 ? (
+                <div>
+                  {/* Fallback: no schema / empty schema — render raw data keys */}
+                  {Object.keys(data).length === 0 ? (
+                    <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+                      Запись не содержит полей.
+                    </p>
+                  ) : (
+                    Object.entries(data).map(([key, val]) => (
+                      <div key={key} style={fieldRowStyle}>
+                        <span style={labelStyle}>{key}</span>
+                        <span style={valueStyle}>
+                          {val === null || val === undefined
+                            ? '—'
+                            : typeof val === 'boolean'
+                              ? (val ? 'Да' : 'Нет')
+                              : typeof val === 'object'
+                                ? JSON.stringify(val)
+                                : String(val)}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : (
+                <div>
+                  {formFields.map((f) => (
+                    <div key={f.key} style={fieldRowStyle}>
+                      <span style={labelStyle}>{f.label}</span>
                       <span style={valueStyle}>
-                        {val === null || val === undefined
+                        {data[f.key] === undefined || data[f.key] === null
                           ? '—'
-                          : typeof val === 'boolean'
-                            ? (val ? 'Да' : 'Нет')
-                            : typeof val === 'object'
-                              ? JSON.stringify(val)
-                              : String(val)}
+                          : formatCellValue(data[f.key], f.type)}
                       </span>
                     </div>
-                  ))
-                )}
-              </div>
-            ) : (
-              <div style={{ marginBottom: 'var(--chs-space-8)' }}>
-                {formFields.map((f) => (
-                  <div key={f.key} style={fieldRowStyle}>
-                    <span style={labelStyle}>{f.label}</span>
-                    <span style={valueStyle}>
-                      {data[f.key] === undefined || data[f.key] === null
-                        ? '—'
-                        : formatCellValue(data[f.key], f.type)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+                  ))}
+                </div>
+              )}
+            </div>
 
-            {/* Metadata footer */}
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: 'var(--chs-space-5) var(--chs-space-8)',
-              paddingTop: 'var(--chs-space-6)',
-              borderTop: '1px solid var(--chs-color-border)',
-            }}>
+            {/* Metadata sidebar */}
+            <aside style={metaSidebarStyle} aria-label="Метаданные записи">
               <div style={fieldRowStyle}>
                 <span style={labelStyle}>Создано</span>
                 <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
@@ -208,13 +227,13 @@ function RecordDetailScreen() {
                   </Mono>
                 </div>
               )}
-              <div style={fieldRowStyle}>
+              <div style={{ ...fieldRowStyle, borderBottom: 'none' }}>
                 <span style={labelStyle}>Версия схемы</span>
                 <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
                   {record.record_schema_version}
                 </Mono>
               </div>
-            </div>
+            </aside>
           </div>
         )}
       </div>
