@@ -92,6 +92,19 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
               Войти
             </Button>
           </div>
+
+          <div className="chs-login-register">
+            <p className="chs-login-register-prompt">
+              Нет учётной записи?{' '}
+              <a
+                className="chs-login-register-link"
+                href="/register"
+                onClick={(e) => { e.preventDefault(); window.history.pushState({}, '', '/register'); window.dispatchEvent(new PopStateEvent('popstate')); }}
+              >
+                Создать организацию
+              </a>
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -204,6 +217,33 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
 
         .chs-login-users {
           margin-bottom: var(--chs-space-7);
+        }
+
+        .chs-login-register {
+          margin-top: var(--chs-space-6);
+          text-align: center;
+        }
+
+        .chs-login-register-prompt {
+          margin: 0;
+          font-size: var(--chs-text-sm);
+          color: var(--chs-color-text-muted);
+        }
+
+        .chs-login-register-link {
+          color: var(--chs-color-accent);
+          text-decoration: none;
+          font-weight: var(--chs-weight-medium);
+        }
+
+        .chs-login-register-link:hover {
+          text-decoration: underline;
+        }
+
+        .chs-login-register-link:focus-visible {
+          outline: 2px solid var(--chs-color-focus-ring);
+          outline-offset: 2px;
+          border-radius: var(--chs-radius-1);
         }
 
         .chs-login-list {

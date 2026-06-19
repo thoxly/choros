@@ -12,6 +12,7 @@ import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
 import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
+import RegisterScreen from '../screens/screen-register.jsx';
 import OverviewScreen from '../screens/screen-overview.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
@@ -563,7 +564,16 @@ function AppShell() {
   }
 
   // Gate: if not logged in, show the mode-appropriate login screen.
+  // /register is a public pre-auth route — serve it before the login gate.
   if (!currentUser) {
+    if (window.location.pathname === '/register') {
+      return (
+        <RegisterScreen
+          onLogin={() => { kc.login(authConfig.keycloak); }}
+          keycloakConfig={authConfig.keycloak || null}
+        />
+      );
+    }
     return <LoginScreen onLogin={handleLogin} keycloak={keycloak} error={authError} />;
   }
 

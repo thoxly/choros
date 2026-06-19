@@ -156,6 +156,11 @@ services:
       #   KEYCLOAK_WEB_CLIENT_ID — public PKCE SPA client (config/keycloak/realm-choros.json).
       KEYCLOAK_PUBLIC_URL:    ${KEYCLOAK_PUBLIC_URL:-http://localhost:${KEYCLOAK_PORT:-8180}}
       KEYCLOAK_WEB_CLIENT_ID: ${KEYCLOAK_WEB_CLIENT_ID:-choros-web}
+      # T-0342: registrar service-account creds for POST /api/register (human user creation).
+      # KEYCLOAK_BASE_URL must be compose-internal so the app container can reach KC.
+      KEYCLOAK_BASE_URL:          ${KEYCLOAK_BASE_URL:-http://keycloak:8180}
+      KC_REGISTRAR_CLIENT_ID:     ${KC_REGISTRAR_CLIENT_ID:-choros-registrar}
+      KC_REGISTRAR_CLIENT_SECRET: ${KC_REGISTRAR_CLIENT_SECRET:-choros-registrar-dev-secret}
       NODE_ENV:         ${NODE_ENV:-development}
       PORT:             ${PORT:-3000}
     ports:
