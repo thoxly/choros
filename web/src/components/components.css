@@ -237,13 +237,13 @@
 .chs-overlay {
   position: fixed;
   inset: 0;
-  z-index: var(--chs-z-overlay, 1000);
+  z-index: var(--chs-z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: var(--chs-space-8);
-  /* затемнение строится из семантического overlay-токена, НЕ хардкод rgba */
-  background: color-mix(in oklch, var(--chs-color-text) 42%, transparent);
+  /* затемнение = выделенный per-theme scrim-токен (затемняет в ОБЕИХ темах) */
+  background: var(--chs-color-scrim);
   animation: chs-overlay-in 120ms ease;
 }
 .chs-overlay--drawer { padding: 0; }
@@ -381,7 +381,7 @@
 .chs-popover-root { position: relative; display: inline-flex; }
 .chs-popover {
   position: absolute;
-  z-index: var(--chs-z-popover, 1100);
+  z-index: var(--chs-z-popover);
   min-width: 180px;
   background: var(--chs-color-surface);
   border: 1px solid var(--chs-color-border);
@@ -410,7 +410,7 @@
 .chs-tooltip__trigger:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 2px; }
 .chs-tooltip__bubble {
   position: absolute;
-  z-index: var(--chs-z-tooltip, 1200);
+  z-index: var(--chs-z-tooltip);
   pointer-events: none;
   opacity: 0;
   transform: translateY(2px);
@@ -453,7 +453,7 @@
 /* ---------------- Toast ---------------- */
 .chs-toast-viewport {
   position: fixed;
-  z-index: var(--chs-z-toast, 1300);
+  z-index: var(--chs-z-toast);
   display: flex;
   flex-direction: column;
   gap: var(--chs-space-4);
