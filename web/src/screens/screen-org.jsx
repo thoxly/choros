@@ -10,7 +10,11 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Modal, RoleAssignment, ReservationMeter, BudgetMeter } from '../components/components.jsx';
+import {
+  ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Select, Modal, ConfirmDialog,
+  RoleAssignment, ReservationMeter, BudgetMeter,
+  EmptyState, LoadingState, ErrorState, ToastViewport, useToasts, KitIcon,
+} from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import {
@@ -129,9 +133,10 @@ const EXEC_DETAIL = {
 
 /**
  * OrgFormField — one controlled field. kind: "text" | "slug" | "select".
- * text/slug render the kit <Field> (label↔input wired, aria-invalid, hint/error
- * via aria-describedby). select renders a kit-classed native <select> (the kit
- * has no Select primitive; .chs-input carries the same tokenised surface).
+ * All three render via the kit: text/slug → <Field> (label↔input wired,
+ * aria-invalid, hint/error via aria-describedby); select → <Select> (token
+ * select with the same label/validation/density contract). No hand-rolled
+ * input/label/select markup — consistent surface in both themes.
  */
 function OrgFormField({ field, value, onChange, error }) {
   const invalid = Boolean(error);
@@ -139,27 +144,21 @@ function OrgFormField({ field, value, onChange, error }) {
     <>{field.label}{field.optional ? <span className="chs-org__optional"> (опц.)</span> : null}</>
   );
   if (field.kind === 'select') {
-    const selId = `org-fld-${field.key}`;
-    const descId = (error || field.hint) ? `${selId}-hint` : undefined;
     return (
-      <div className="chs-field chs-org__modalfield">
-        <label className="chs-label" htmlFor={selId}>{labelNode}</label>
-        <select
-          id={selId}
-          className={`chs-input ${invalid ? 'chs-input--invalid' : ''}`}
+      <div className="chs-org__modalfield">
+        <Select
+          label={labelNode}
+          options={field.options || []}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          aria-invalid={invalid || undefined}
-          aria-describedby={descId}
+          invalid={invalid}
+          hint={error || field.hint || undefined}
         >
           <option value="">{field.placeholder || '— выберите —'}</option>
           {(field.options || []).map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
-        </select>
-        {error
-          ? <span id={descId} className="chs-hint chs-hint--invalid">{error}</span>
-          : field.hint ? <span id={descId} className="chs-hint">{field.hint}</span> : null}
+        </Select>
       </div>
     );
   }
@@ -354,10 +353,10 @@ function TreeRow({ depth, type, kind, label, count, vacancy, open, selected, onT
           className="chs-trow__del"
           title="Удалить"
           aria-label="Удалить"
-          style={{ marginLeft: 'auto', padding: '0 6px', color: 'var(--chs-color-text-faint, #666)', cursor: 'pointer', fontSize: '13px' }}
+          style={{ marginLeft: 'auto', padding: '0 var(--chs-space-2)', color: 'var(--chs-color-text-faint)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); onDelete(); } }}
-        >×</span>
+        ><KitIcon name="close" size={14} /></span>
       )}
     </button>
   );
@@ -410,7 +409,7 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
         <span>Оргструктура</span>
       </div>
       {canWrite ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '8px 10px', borderBottom: '1px solid var(--chs-border, #30333d)' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--chs-space-2)', padding: 'var(--chs-space-3) var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)' }}>
           <Button variant="primary" size="sm" onClick={() => onCreate('department')}>+ Подразделение</Button>
           <Button variant="secondary" size="sm" onClick={() => onCreate('position')}>+ Должность</Button>
           <Button variant="secondary" size="sm" onClick={() => onCreate('employee')}>+ Сотрудник</Button>
@@ -418,7 +417,7 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
           <Button variant="secondary" size="sm" onClick={() => onCreate('assignment')}>Назначить роль</Button>
         </div>
       ) : (
-        <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--chs-border, #30333d)', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-text-muted, #888)' }}>
+        <div style={{ padding: 'var(--chs-space-3) var(--chs-space-4)', borderBottom: '1px solid var(--chs-color-border)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
           Создание/удаление доступно владельцу тенанта (genesis owner). Войдите как владелец, чтобы редактировать оргструктуру.
         </div>
       )}
@@ -482,20 +481,16 @@ function ExplainPanel({ subjectSlug }) {
         <span className="chs-section2__aux">за mgmt-грантом · без раскрытия чужих прав</span>
       </div>
       <div style={{ display: "flex", gap: "var(--chs-space-3)", flexWrap: "wrap", alignItems: "flex-end" }}>
-        <label className="chs-field" style={{ flex: "1 1 14ch" }}>
-          <span className="chs-label">Ресурс</span>
-          <input className="chs-input chs-input--mono" value={resourceType} onChange={(e) => setResourceType(e.target.value)} />
-        </label>
-        <label className="chs-field">
-          <span className="chs-label">Операция</span>
-          <select className="chs-input" value={operation} onChange={(e) => setOperation(e.target.value)}>
-            {["read", "create", "update", "delete"].map((op) => <option key={op} value={op}>{op}</option>)}
-          </select>
-        </label>
-        <label className="chs-field">
-          <span className="chs-label">ID записи (опц.)</span>
-          <input className="chs-input chs-input--mono" value={recordId} onChange={(e) => setRecordId(e.target.value)} placeholder="—" />
-        </label>
+        <div style={{ flex: "1 1 14ch" }}>
+          <Field label="Ресурс" mono value={resourceType} onChange={(e) => setResourceType(e.target.value)} />
+        </div>
+        <Select
+          label="Операция"
+          options={["read", "create", "update", "delete"]}
+          value={operation}
+          onChange={(e) => setOperation(e.target.value)}
+        />
+        <Field label="ID записи (опц.)" mono value={recordId} onChange={(e) => setRecordId(e.target.value)} placeholder="—" />
         <Button variant="secondary" size="sm" disabled={result === "loading"} onClick={run}>
           {result === "loading" ? "Трасса…" : "Объяснить"}
         </Button>
@@ -503,16 +498,16 @@ function ExplainPanel({ subjectSlug }) {
       {result && result !== "loading" && (
         <div style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
           {result.forbidden ? (
-            <span style={{ color: "var(--chs-color-danger, red)" }}>
+            <span style={{ color: "var(--chs-color-danger)" }}>
               403 — нет mgmt-гранта на просмотр прав этого субъекта: подробности скрыты, нет прав на просмотр.
             </span>
           ) : result.error ? (
-            <span style={{ color: "var(--chs-color-danger, red)" }}>Ошибка: {result.error}</span>
+            <span style={{ color: "var(--chs-color-danger)" }}>Ошибка: {result.error}</span>
           ) : (
             <>
               <div>
                 Вердикт:{" "}
-                <b style={{ color: result.verdict === "allow" ? "var(--chs-color-success, green)" : "var(--chs-color-danger, red)" }}>
+                <b style={{ color: result.verdict === "allow" ? "var(--chs-color-success)" : "var(--chs-color-danger)" }}>
                   {result.verdict === "allow" ? "ДОСТУП" : "ОТКАЗ"}
                 </b>
                 {result.reason && <> · <Mono>{result.reason}</Mono></>}
@@ -544,10 +539,10 @@ function ExecutorDetail({ data, onOpenRights, subjectSlug }) {
         {/* HONESTY (T-0269): this rich executor card is illustrative — /api/org exposes
             only the tree; per-executor LLM/budget/autonomy detail is a future slice. */}
         <div style={{
-          margin: '0 0 12px 0', padding: '8px 12px',
-          background: 'var(--chs-bg-warning-subtle, rgba(214,158,46,0.12))',
-          border: '1px solid var(--chs-border, #30333d)', borderRadius: '6px',
-          fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-text-muted, #888)',
+          margin: '0 0 var(--chs-space-4) 0', padding: 'var(--chs-space-3) var(--chs-space-4)',
+          background: 'var(--chs-color-warning-soft)',
+          border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-3)',
+          fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)',
         }}>
           Карточка исполнителя — иллюстративные данные. Реальны: дерево, создание/удаление и назначение ролей (слева).
         </div>
@@ -716,7 +711,7 @@ function PlainExecutorDetail({ slug, onOpenRights }) {
               glyph={<Icon name="rights" className="chs-btn__glyph" />}>Права и доступ</Button>
           </div>
         </div>
-        <p style={{ padding: 'var(--chs-space-4)', color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)' }}>
+        <p style={{ padding: 'var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
           Подробная карточка (модель, бюджет, автономия) для этого исполнителя ещё не подключена к API.
           Назначить роль и управлять оргструктурой можно слева; назначения ролей применяются реально.
         </p>
@@ -735,8 +730,10 @@ function OrgScreen({ onOpenRights }) {
   const [state, setState] = useState(null);
   const [canWrite, setCanWrite] = useState(false);
   const [modalKind, setModalKind] = useState(null); // 'department'|'position'|… or null
-  const [toast, setToast] = useState(null);
-  const [actionErr, setActionErr] = useState(null);
+  // pendingDelete: { kind, uuid, label } while the kit ConfirmDialog is open, or null.
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const { toasts, push, dismiss } = useToasts();
 
   const actorId = (getDevUser() || {}).id || '';
 
@@ -786,14 +783,20 @@ function OrgScreen({ onOpenRights }) {
 
   const handleCreated = useCallback((created) => {
     setModalKind(null);
-    setToast(`Создано · ${created?.slug || created?.id || 'ok'}`);
+    push({ tone: 'success', message: `Создано · ${created?.slug || created?.id || 'ok'}` });
     reload();
-    setTimeout(() => setToast(null), 3500);
-  }, [reload]);
+  }, [reload, push]);
 
-  const handleDelete = useCallback(async (kind, uuid, label) => {
-    setActionErr(null);
-    if (typeof window !== 'undefined' && !window.confirm(`Удалить ${ENTITY_LABEL[kind]} «${label}»?`)) return;
+  // Open the kit ConfirmDialog (principles §4: deletion is a dangerous action = modal),
+  // never the native window.confirm. The actual DELETE runs in confirmDelete on confirm.
+  const requestDelete = useCallback((kind, uuid, label) => {
+    setPendingDelete({ kind, uuid, label });
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    const { kind, uuid, label } = pendingDelete;
+    setDeleting(true);
     const path = { department: 'departments', position: 'positions', employee: 'employees', role: 'roles' }[kind];
     try {
       const res = await fetch(`/api/${path}/${uuid}`, {
@@ -802,19 +805,23 @@ function OrgScreen({ onOpenRights }) {
         body: JSON.stringify({ tenant_id: DEV_TENANT_ID }),
       });
       if (res.ok) {
-        setToast(`Удалено · ${label}`);
+        push({ tone: 'success', message: `Удалено · ${label}` });
         if (selected) setSelected(null);
         reload();
-        setTimeout(() => setToast(null), 3500);
+        setPendingDelete(null);
         return;
       }
       let parsed = null;
       try { parsed = await res.json(); } catch { /* ignore */ }
-      setActionErr(mapOrgError(res.status, parsed, ENTITY_LABEL[kind]).message);
+      push({ tone: 'error', message: mapOrgError(res.status, parsed, ENTITY_LABEL[kind]).message });
+      setPendingDelete(null);
     } catch (e) {
-      setActionErr(String(e?.message || e));
+      push({ tone: 'error', message: String(e?.message || e) });
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
     }
-  }, [reload, selected]);
+  }, [pendingDelete, reload, selected, push]);
 
   const data = selected ? EXEC_DETAIL[selected] : null;
 
@@ -826,24 +833,22 @@ function OrgScreen({ onOpenRights }) {
         onClose={() => setModalKind(null)}
         onCreated={handleCreated}
       />
-      {(toast || actionErr) && (
-        <div style={{
-          position: 'fixed', bottom: '20px', left: '50%', transform: 'translateX(-50%)', zIndex: 1100,
-          padding: '10px 16px', borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-          background: actionErr ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-bg-secondary, #1e2028)',
-          border: '1px solid var(--chs-border, #30333d)', color: actionErr ? '#fff' : 'inherit',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-        }}>{actionErr || toast}</div>
-      )}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        tone="danger"
+        title="Удалить?"
+        message={pendingDelete ? `Удалить ${ENTITY_LABEL[pendingDelete.kind]} «${pendingDelete.label}»? Действие необратимо.` : ''}
+        confirmLabel="Удалить"
+        cancelLabel="Отмена"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onClose={() => { if (!deleting) setPendingDelete(null); }}
+      />
+      <ToastViewport toasts={toasts} dismiss={dismiss} position="bottom-right" />
       {error ? (
-        <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-          <p style={{ marginBottom: "var(--chs-space-3)" }}>Ошибка загрузки оргструктуры: {error}</p>
-          <Button onClick={reload}>Повторить</Button>
-        </div>
+        <ErrorState message={`Ошибка загрузки оргструктуры: ${error}`} onRetry={reload} />
       ) : departments === null ? (
-        <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-          Загрузка оргструктуры…
-        </div>
+        <LoadingState label="Загрузка оргструктуры…" />
       ) : (
         <>
           <OrgTree
@@ -853,7 +858,7 @@ function OrgScreen({ onOpenRights }) {
             canWrite={canWrite}
             idMaps={idMaps}
             onCreate={(kind) => setModalKind(kind)}
-            onDelete={handleDelete}
+            onDelete={requestDelete}
           />
           {data
             ? <ExecutorDetail data={data} onOpenRights={onOpenRights} subjectSlug={selected} />
@@ -861,11 +866,19 @@ function OrgScreen({ onOpenRights }) {
               ? <PlainExecutorDetail slug={selected} onOpenRights={onOpenRights} />
               : (
                 <div className="chs-org__detail">
-                  <div style={{ padding: 'var(--chs-space-5)', color: 'var(--chs-color-text-muted, #888)', textAlign: 'center' }}>
-                    {departments.length === 0
-                      ? 'Оргструктура пуста. Создайте первое подразделение слева.'
-                      : 'Выберите исполнителя в дереве слева.'}
-                  </div>
+                  {departments.length === 0 ? (
+                    <EmptyState
+                      title="Оргструктура пуста"
+                      description={canWrite
+                        ? 'Создайте первое подразделение слева.'
+                        : 'Подразделений ещё нет. Создание доступно владельцу тенанта.'}
+                    />
+                  ) : (
+                    <EmptyState
+                      title="Исполнитель не выбран"
+                      description="Выберите исполнителя в дереве слева, чтобы увидеть карточку."
+                    />
+                  )}
                 </div>
               )}
         </>
