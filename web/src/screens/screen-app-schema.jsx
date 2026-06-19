@@ -28,7 +28,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, StatusChip, Field, EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
@@ -55,6 +55,29 @@ const errStyle = {
 };
 const inputCls = (invalid) => `chs-input ${invalid ? 'chs-input--invalid' : ''}`;
 
+// Field-editor row layout. The earlier version put <input>/<select> inside
+// .chs-itable <td> cells, which fights the dense 34px row contract (controls are
+// 30px tall but the option-textarea blows the cell height out). The editor is a
+// FORM, not a data table — render it as a CSS grid instead: one aligned grid row
+// per field (key · type · title · required · reorder), with the select-options
+// textarea and inline errors flowing into a full-width sub-row below.
+const editorGridCols = 'minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.6fr) auto auto';
+const fieldRowGrid = {
+  display: 'grid',
+  gridTemplateColumns: editorGridCols,
+  gap: 'var(--chs-space-4)',
+  alignItems: 'center',
+  padding: 'var(--chs-space-3) 0',
+  borderBottom: '1px solid var(--chs-color-border)',
+};
+const colHeadStyle = {
+  fontSize: 'var(--chs-text-xs)',
+  fontWeight: 'var(--chs-weight-semibold)',
+  color: 'var(--chs-color-text-muted)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+};
+
 /**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
@@ -75,71 +98,51 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
     set({ options: text.split('\n') });
   };
 
+  const hasSubRow = field.type === 'select'
+    || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title) || Boolean(errors.options);
+
   return (
-    <tr>
-      <td style={{ verticalAlign: 'top' }}>
-        <input
-          className={`${inputCls(Boolean(errors.key))} chs-input--mono`}
-          value={field.key}
-          onChange={(e) => set({ key: e.target.value })}
-          placeholder="field_key"
-          aria-label="Ключ поля"
-          aria-invalid={Boolean(errors.key) || undefined}
-        />
-        {errors.key && <span style={errStyle}>{errors.key}</span>}
-      </td>
-      <td style={{ verticalAlign: 'top' }}>
-        <select
-          className={inputCls(Boolean(errors.type))}
-          value={field.type}
-          onChange={(e) => set({ type: e.target.value })}
-          aria-label="Тип поля"
-        >
-          {FIELD_TYPES.map((t) => (
-            <option key={t.value} value={t.value}>{t.label}</option>
-          ))}
-        </select>
-        {errors.type && <span style={errStyle}>{errors.type}</span>}
-        {/* T-0294: options input for select type */}
-        {field.type === 'select' && (
-          <div style={{ marginTop: 'var(--chs-space-3)' }}>
-            <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-              Варианты (по одному на строку):
-            </span>
-            <textarea
-              className={inputCls(Boolean(errors.options))}
-              style={textareaStyle}
-              value={optionsText}
-              onChange={(e) => setOptionsFromText(e.target.value)}
-              placeholder={'вариант_1\nвариант_2\nвариант_3'}
-              aria-label="Варианты select"
-              aria-invalid={Boolean(errors.options) || undefined}
-              rows={3}
-            />
-            {errors.options && <span style={errStyle}>{errors.options}</span>}
-          </div>
-        )}
-      </td>
-      <td style={{ verticalAlign: 'top' }}>
-        <input
-          className={inputCls(Boolean(errors.title))}
-          value={field.title}
-          onChange={(e) => set({ title: e.target.value })}
-          placeholder="Название (опц.)"
-          aria-label="Название поля"
-          aria-invalid={Boolean(errors.title) || undefined}
-        />
-        {errors.title && <span style={errStyle}>{errors.title}</span>}
-      </td>
-      <td style={{ verticalAlign: 'top', textAlign: 'center' }}>
+    <div role="group" aria-label={`Поле ${index + 1}`} style={fieldRowGrid}>
+      {/* key */}
+      <input
+        className={`${inputCls(Boolean(errors.key))} chs-input--mono`}
+        value={field.key}
+        onChange={(e) => set({ key: e.target.value })}
+        placeholder="field_key"
+        aria-label="Ключ поля"
+        aria-invalid={Boolean(errors.key) || undefined}
+      />
+      {/* type */}
+      <select
+        className={inputCls(Boolean(errors.type))}
+        value={field.type}
+        onChange={(e) => set({ type: e.target.value })}
+        aria-label="Тип поля"
+      >
+        {FIELD_TYPES.map((t) => (
+          <option key={t.value} value={t.value}>{t.label}</option>
+        ))}
+      </select>
+      {/* title */}
+      <input
+        className={inputCls(Boolean(errors.title))}
+        value={field.title}
+        onChange={(e) => set({ title: e.target.value })}
+        placeholder="Название (опц.)"
+        aria-label="Название поля"
+        aria-invalid={Boolean(errors.title) || undefined}
+      />
+      {/* required */}
+      <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
         <input
           type="checkbox"
           checked={Boolean(field.required)}
           onChange={(e) => set({ required: e.target.checked })}
           aria-label="Обязательное поле"
         />
-      </td>
-      <td style={{ verticalAlign: 'top', whiteSpace: 'nowrap' }}>
+      </label>
+      {/* reorder / remove */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', whiteSpace: 'nowrap' }}>
         <Button type="button" variant="ghost" size="sm" disabled={index === 0}
           onClick={() => onMove(index, index - 1)} title="Вверх" aria-label="Переместить вверх">↑</Button>
         <Button type="button" variant="ghost" size="sm" disabled={index === count - 1}
@@ -148,8 +151,37 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
           onClick={() => onRemove(index)} title="Удалить" aria-label="Удалить поле">
           <KitIcon name="close" />
         </Button>
-      </td>
-    </tr>
+      </div>
+
+      {/* Full-width sub-row: per-field errors + the select-options editor.
+          Spans all grid columns so controls above keep the dense single-line row. */}
+      {hasSubRow && (
+        <div style={{ gridColumn: '1 / -1', marginTop: 'var(--chs-space-2)' }}>
+          {errors.key && <span style={errStyle}>Ключ: {errors.key}</span>}
+          {errors.type && <span style={errStyle}>Тип: {errors.type}</span>}
+          {errors.title && <span style={errStyle}>Название: {errors.title}</span>}
+          {/* T-0294: options input for select type */}
+          {field.type === 'select' && (
+            <div style={{ marginTop: 'var(--chs-space-3)', maxWidth: '420px' }}>
+              <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                Варианты (по одному на строку):
+              </span>
+              <textarea
+                className={inputCls(Boolean(errors.options))}
+                style={textareaStyle}
+                value={optionsText}
+                onChange={(e) => setOptionsFromText(e.target.value)}
+                placeholder={'вариант_1\nвариант_2\nвариант_3'}
+                aria-label="Варианты select"
+                aria-invalid={Boolean(errors.options) || undefined}
+                rows={3}
+              />
+              {errors.options && <span style={errStyle}>{errors.options}</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -263,14 +295,14 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
       background: 'var(--chs-color-surface)',
     }}>
       <h3 style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-md)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>
-        {isEdit ? `Поля реестра «${editingDef.display_name}»` : 'Новый реестр приложения'}
+        {isEdit ? `Набор полей «${editingDef.display_name}»` : 'Новый набор полей'}
       </h3>
 
       {!isEdit && (
         <div style={{ display: 'flex', gap: 'var(--chs-space-6)', marginBottom: 'var(--chs-space-6)' }}>
           <div style={{ flex: 1 }}>
             <Field
-              label="Слаг реестра"
+              label="Слаг набора полей"
               mono
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
@@ -281,10 +313,10 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
           </div>
           <div style={{ flex: 1 }}>
             <Field
-              label="Название реестра"
+              label="Название набора полей"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Мой реестр"
+              placeholder="Мой набор полей"
               invalid={Boolean(metaErrs.display_name)}
             />
             {metaErrs.display_name && <span style={errStyle}>{metaErrs.display_name}</span>}
@@ -292,24 +324,19 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
         </div>
       )}
 
-      <table className="chs-itable" style={{ width: '100%' }}>
-        <colgroup>
-          <col style={{ width: '26%' }} />
-          <col style={{ width: '18%' }} />
-          <col style={{ width: 'auto' }} />
-          <col style={{ width: '80px' }} />
-          <col style={{ width: '120px' }} />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>Ключ</th>
-            <th>Тип</th>
-            <th>Название</th>
-            <th style={{ textAlign: 'center' }}>Обяз.</th>
-            <th>Порядок</th>
-          </tr>
-        </thead>
-        <tbody>
+      {fields.length > 0 && (
+        <div role="table" aria-label="Поля набора">
+          {/* Column header (grid, aligned with each FieldRow's columns). */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: editorGridCols, gap: 'var(--chs-space-4)',
+            padding: '0 0 var(--chs-space-3) 0', borderBottom: '1px solid var(--chs-color-border)',
+          }}>
+            <span style={colHeadStyle}>Ключ</span>
+            <span style={colHeadStyle}>Тип</span>
+            <span style={colHeadStyle}>Название</span>
+            <span style={{ ...colHeadStyle, textAlign: 'center' }}>Обяз.</span>
+            <span style={{ ...colHeadStyle, textAlign: 'right' }}>Порядок</span>
+          </div>
           {fields.map((f, i) => (
             <FieldRow
               key={i}
@@ -322,8 +349,8 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               onRemove={removeField}
             />
           ))}
-        </tbody>
-      </table>
+        </div>
+      )}
 
       {fields.length === 0 && (
         <p style={{ margin: 'var(--chs-space-5) 0', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
@@ -364,7 +391,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
       <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end', marginTop: 'var(--chs-space-7)' }}>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>Отмена</Button>
         <Button type="submit" variant="primary" size="sm" loading={submitting}>
-          {submitting ? 'Сохранение…' : isEdit ? 'Сохранить поля' : 'Создать реестр'}
+          {submitting ? 'Сохранение…' : isEdit ? 'Сохранить поля' : 'Создать набор'}
         </Button>
       </div>
     </form>
@@ -373,6 +400,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
 
 function AppSchemaScreen() {
   const { appId } = useParams();
+  const navigate = useNavigate();
   const [defs, setDefs] = useState(null);   // null = loading, [] = none, [...] = list
   const [error, setError] = useState(null);
   const [app, setApp] = useState(null);     // resolved application meta (for crumb/title)
@@ -419,17 +447,23 @@ function AppSchemaScreen() {
   return (
     <div className="chs-inbox">
       <div style={{
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--chs-space-5)',
         padding: 'var(--chs-space-5) var(--chs-space-6)',
         borderBottom: '1px solid var(--chs-color-border)',
       }}>
-        <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-          Поля приложения {app ? `«${app.display_name}»` : ''}
-          {defs !== null ? ` · реестров: ${list.length}` : ''}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)', minWidth: 0 }}>
+          {/* Up-navigation: a non-sidebar exit back to the applications list. */}
+          <Button variant="ghost" size="sm" onClick={() => navigate('/apps')}>
+            ← к приложениям
+          </Button>
+          <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Поля приложения {app ? `«${app.display_name}»` : ''}
+            {defs !== null ? ` · наборов полей: ${list.length}` : ''}
+          </span>
+        </div>
         {editing === undefined && (
           <Button variant="primary" size="sm" glyph={<KitIcon name="plus" />} onClick={() => setEditing(null)}>
-            Новый реестр
+            Новый набор полей
           </Button>
         )}
       </div>
@@ -444,17 +478,19 @@ function AppSchemaScreen() {
           />
         ) : null}
 
-        {error ? (
-          <ErrorState message={`Не удалось загрузить реестры: ${error}`} onRetry={load} />
+        {/* While the inline editor is open, hide the list / empty-state below so
+            the editor doesn't compete with a stale list (task #3). */}
+        {editing !== undefined ? null : error ? (
+          <ErrorState message={`Не удалось загрузить наборы полей: ${error}`} onRetry={load} />
         ) : defs === null ? (
-          <LoadingState label="Загрузка реестров…" />
-        ) : editing === undefined && list.length === 0 ? (
+          <LoadingState label="Загрузка наборов полей…" />
+        ) : list.length === 0 ? (
           <EmptyState
             icon={<KitIcon name="inbox" size={28} />}
-            title="У приложения пока нет реестров"
+            title="У приложения пока нет наборов полей"
             description="Создайте первый и определите его поля."
             action={
-              <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setEditing(null)}>Новый реестр</Button>
+              <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setEditing(null)}>Новый набор полей</Button>
             }
           />
         ) : list.length > 0 ? (
@@ -468,7 +504,7 @@ function AppSchemaScreen() {
             </colgroup>
             <thead>
               <tr>
-                <th>Реестр</th>
+                <th>Набор полей</th>
                 <th>Слаг</th>
                 <th>Полей</th>
                 <th>Версия</th>
