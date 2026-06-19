@@ -5,7 +5,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, OpChip, DerivedChip } from '../../components/components.jsx';
+import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { devHeaders } from '../../app-shell/dev-auth.js';
 
@@ -74,29 +74,24 @@ function RightsScreen({ initialRole }) {
   // Render: error → loading → empty → content
   if (error) {
     return (
-      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-        <div style={{ textAlign: 'center' }}>
-          <p style={{ marginBottom: '1rem', color: 'var(--chs-color-text-error, #d32f2f)' }}>
-            Ошибка загрузки ролей: {error}
-          </p>
-          <Button onClick={load}>Повторить</Button>
-        </div>
+      <div className="chs-rights">
+        <ErrorState message={`Не удалось загрузить роли: ${error}`} onRetry={load} />
       </div>
     );
   }
 
   if (roles === null) {
     return (
-      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-        <p>Загрузка ролей…</p>
+      <div className="chs-rights">
+        <LoadingState label="Загрузка ролей…" />
       </div>
     );
   }
 
   if (roles.length === 0) {
     return (
-      <div className="chs-rights" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-        <p>Нет ролей</p>
+      <div className="chs-rights">
+        <EmptyState title="Нет ролей" description="В этом тенанте ещё не определено ни одной роли доступа." />
       </div>
     );
   }
