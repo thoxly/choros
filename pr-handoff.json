@@ -1,7 +1,7 @@
 {
-  "task_id": "T-0341",
+  "task_id": "T-0342",
   "status": "pr_open",
-  "branch": "task/T-0341",
+  "branch": "task/T-0342",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -10,26 +10,59 @@
     "fitness": true
   },
   "files_changed": [
-    "web/src/app-shell/keycloak-auth.js",
-    "web/src/app-shell/keycloak-auth.test.js"
+    "src/keycloak/admin-port.ts",
+    "src/keycloak/fake-user-port.ts",
+    "src/core/register.ts",
+    "src/http/register.ts",
+    "src/server.ts",
+    "src/__tests__/register.test.ts",
+    "config/keycloak/realm-choros.json",
+    "docker-compose.yml"
   ],
   "deviations_from_adr": [],
   "blocked_reason": null,
-  "friction_events": [],
+  "friction_events": [
+    "FE-T0342-1: worktree has no node_modules symlink — ran npm install to get vitest/tsc/eslint binaries; consistent with choros-ci-db-gotchas.md isolation pattern",
+    "FE-T0342-2: global tsc reports pre-existing errors (module not found for pg/node:* — pre-existing in all existing files); node_modules/.bin/tsc --noEmit is clean for all files including ours"
+  ],
   "gate_results": {
-    "build": "green — npm run -s build exits 0 (tsc + seed/tsconfig.json)",
-    "tsc": "green — tsc --noEmit 0 errors (covers src/**/*.ts only; web/*.js not in tsconfig by design)",
-    "eslint": "green — eslint src exits 0 errors (3 pre-existing warnings in untouched files)",
-    "vitest_server": "green — 2903 passed / 6 skipped (132 test files; no regression)",
-    "vitest_web_keycloak": "green — 22/22 keycloak-auth.test.js (12 pre-existing + 10 new T-0341 tests)",
-    "vitest_web_all": "green for 6 of 8 web test files; 2 pre-existing failures (apps-schema.test.js, records-form.test.js) fail with 'Cannot find module ./core' in ajv — confirmed identical failure with our changes stashed; unrelated to T-0341",
-    "fitness": "ALL GREEN (exit 0). The 4 'FAIL' lines in fitness output are self-test artifacts (each immediately followed by PASS [self-test] confirming the check correctly detected a planted violation). No frozen file touched.",
+    "build": "green — npm run -s build exits 0 (tsc + seed compilation)",
+    "tsc": "green — node_modules/.bin/tsc --noEmit 0 errors",
+    "eslint": "green — 0 errors in new files; 3 pre-existing warnings in unrelated files",
+    "vitest": "green — 2921 passed / 8 skipped / 0 failed (133 test files; no regression); register.test.ts 18 passed 2 skipped (live DB)",
+    "fitness": "ALL GREEN (exit 0); FAIL lines in output are expected self-test artifacts (immediately followed by PASS [self-test] confirming check correctly detected planted violation)",
     "any_red": false
   },
-  "scope_clean": true,
+  "scope_clean_backend_only": true,
   "touched_out_of_scope": [],
-  "tests_added": 10,
-  "native_vs_fallback_identical": true,
-  "fallback_approach": "Detection: globalThis.crypto?.subtle?.digest truthy check before invoking native. Fallback: self-contained FIPS 180-4 SHA-256 (sha256Fallback) operating on UTF-8 bytes of the verifier, returning Uint8Array(32). Output passed through the same base64UrlEncode helper — byte-identical to the native path. Function stays async; callers unchanged.",
-  "notes_for_reviewer": "The sha256Fallback is a self-contained ~80-line FIPS 180-4 SHA-256 implementation using only JS bitwise ops and Uint32Array — zero external deps, zero imports. Correctness is proved three ways: (1) selection-logic test: with crypto.subtle set to undefined, generatePkcePair() does not throw and returns a valid pair; then native crypto.subtle is restored to hash the same verifier bytes — the two challenges must match. (2) NIST vector: sha256('abc') native hash confirmed == ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad. (3) Round-trip over 4 sample verifiers: native and fallback produce identical code_challenge for the same verifier. The 2 pre-existing web test failures (apps-schema, records-form) are ajv resolution failures unrelated to this task — confirmed by stashing our changes and re-running."
+  "tests_added": 18,
+  "fitness_db_status": "written-for-server — FF-4/FF-6 tests skip when DATABASE_URL absent (local Mac); annotated to run on homeserver-vm dev stack",
+  "endpoint_contract": {
+    "method": "POST",
+    "path": "/api/register",
+    "public": true,
+    "no_auth": true,
+    "request_body": { "orgName": "string (1..120)", "email": "string (valid email)", "password": "string (>=8)" },
+    "success_201": { "tenantId": "uuid", "tenantSlug": "string", "userId": "uuid (KC sub)", "email": "string" },
+    "error_envelope": { "error": { "code": "string", "message": "string" } },
+    "errors": {
+      "400": "VALIDATION",
+      "409": "EMAIL_TAKEN | ORG_TAKEN",
+      "503": "AUTH_UNAVAILABLE (KC registrar unreachable or KC_REGISTRAR_CLIENT_SECRET missing)",
+      "500": "INTERNAL (DB failure after KC create — compensation attempted)"
+    }
+  },
+  "signatures_unchanged": true,
+  "realm_registrar_added": true,
+  "compose_env_added": true,
+  "compensation_tested": true,
+  "kc_user_port": "makeHttpKeycloakUserPort(cfg?) in src/keycloak/admin-port.ts. Uses choros-registrar client_credentials at KEYCLOAK_BASE_URL/realms/choros/protocol/openid-connect/token. POST /admin/realms/choros/users with username=email, emailVerified:true, attributes.actor_type:['human'], credentials:[{type:'password',value,temporary:false}]. GET by username&exact=true to resolve userId. deleteUser does DELETE /admin/realms/choros/users/:id best-effort (swallows all errors).",
+  "notes_for_reviewer": "BACKEND ONLY — web/ untouched per scope. SPA coder to implement RegisterScreen + shell.jsx wiring (ADR §6/§7). Key invariant: employee.slug=kcSub in new tenant ensures resolveActorTenant auto-resolves the logged-in user to their fresh tenant (ADR Q1 — no hot-path change needed). owner-membership: role tenant-owner + confirmed role_assignment with org_scope=set([]) — sufficient for create-app/record (tenant-scoped), insufficient for org-structure management (per-tenant genesis-grant follow-up per ADR §10). Infra blocker for live e2e: founder must deploy dev with updated realm-import so choros-registrar gets manage-users grant; then KC_REGISTRAR_CLIENT_SECRET env is wired. Until then POST /api/register returns 503 (honest-degrade).",
+  "spa_coder_handoff": {
+    "endpoint": "POST /api/register (public, 201 → {tenantId, tenantSlug, userId, email})",
+    "after_201": "call kc.login(authConfig.keycloak) to start PKCE flow — user gets redirected to KC login, authenticates with their new password, KC JWT issued, app resolves their new tenant automatically",
+    "error_handling": "409 EMAIL_TAKEN, 409 ORG_TAKEN, 503 AUTH_UNAVAILABLE (show friendly message), 400 VALIDATION (show field error)",
+    "pre_auth_gate": "shell.jsx:566 pre-auth gate must branch on window.location.pathname==='/register' before rendering LoginScreen",
+    "ux_checks": ["FF-UX-1 contrast >=WCAG AA both themes", "FF-UX-2 Loading+Error states", "FF-UX-3 no inline colors — use kit/tokens"]
+  }
 }
