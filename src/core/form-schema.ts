@@ -2,6 +2,22 @@
  * T-0102 · E9: Form schema — machine-readable validation contract for the two
  * MVP User-Task forms ("заявка на закупку" / "согласование").
  *
+ * T-0337 · E15-S4: Forms-from-schema.
+ *   FieldType is now defined in src/core/field-type-dictionary.ts (the unified
+ *   type dictionary shared across schema↔binding↔form). This module re-exports
+ *   it so all existing callers (form-validator.ts, forms.ts, tests) continue to
+ *   import from "form-schema.js" without change — backward-compatible.
+ *
+ *   The two hardcoded FormDef objects (PURCHASE, APPROVAL) remain here as the
+ *   pinned bootstrap definitions for the ТЭЛ demo forms, which predated the
+ *   registry_def API. Their FieldDef[] is the single server-side source of truth
+ *   for the forms-schema-binding CI check (FF-FORMS1-2 / forms-schema-binding.sh).
+ *
+ *   NEW forms whose schema is authored via the registry_def API use
+ *   deriveFormDefFromSchema() (src/core/form-schema-derive.ts) to derive an
+ *   equivalent FormDef from registry_def.record_schema at runtime — no
+ *   separately-maintained hardcoded entry is needed.
+ *
  * SINGLE SOURCE OF TRUTH for SERVER-SIDE field validation. The visual layer
  * (web/src/forms/form-defs.js — form-js HTML rendered inside the sandbox-iframe)
  * is NOT machine-readable (it is HTML strings), so the rules cannot be imported
@@ -23,16 +39,18 @@
  */
 
 // ---------------------------------------------------------------------------
-// Field-type vocabulary (pinned). Each maps to a form-js widget in form-defs.js.
+// Field-type vocabulary — UNIFIED (T-0337 E15-S4)
+//
+// FieldType is defined ONCE in field-type-dictionary.ts and re-exported here
+// for backward compatibility. All callers import from "form-schema.js" and
+// continue to work unchanged.
 // ---------------------------------------------------------------------------
 
-export type FieldType =
-  | "text" // single-line text input  (.fjs-form-field-textfield)
-  | "textarea" // multi-line text          (.fjs-form-field-textarea)
-  | "number" // numeric input            (.fjs-form-field-number)
-  | "date" // dd.MM.yyyy text input    (.fjs-form-field-datetime)
-  | "enum" // select / radio           (.fjs-form-field-select / -radio)
-  | "boolean"; // checkbox                 (.fjs-form-field-checkbox)
+import type { FieldType as _FieldType } from "./field-type-dictionary.js";
+export type { FieldType } from "./field-type-dictionary.js";
+// Re-alias for use in this file's interface definitions (TS requires the name to
+// be in scope when referenced, even if it's also re-exported from this module).
+type FieldType = _FieldType;
 
 /**
  * One field's validation contract. `required` here is the BASE requiredness;
