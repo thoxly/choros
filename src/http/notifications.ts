@@ -24,7 +24,7 @@ import {
   deserializeCursor,
 } from "../core/postgres/pgNotificationStore.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +73,8 @@ async function withTenantTx<T>(
 // ---------------------------------------------------------------------------
 
 function extractActor(req: import("node:http").IncomingMessage): string {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) return ctx.sub;
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -101,7 +103,7 @@ export function registerNotificationRoutes(
   // -------------------------------------------------------------------------
   // GET /api/notifications  — own notification listing, keyset-paginated
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/notifications", async (req, res) => {
+  router.register("GET", "/api/notifications", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
 
@@ -137,13 +139,13 @@ export function registerNotificationRoutes(
       notifications: result.rows,
       nextCursor: result.nextCursor ? serializeCursor(result.nextCursor) : null,
     }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/notifications/unread-count  — badge: COUNT by partial index
   // NOTE: registered BEFORE /:id/read to prevent router matching 'unread-count' as :id
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/notifications/unread-count", async (req, res) => {
+  router.register("GET", "/api/notifications/unread-count", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
 
@@ -154,12 +156,12 @@ export function registerNotificationRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ count }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/notifications/:id/read  — mark single notification as read
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/notifications/:id/read", async (req, res, params) => {
+  router.register("POST", "/api/notifications/:id/read", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
 
@@ -186,12 +188,12 @@ export function registerNotificationRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // PATCH /api/notifications  — batch mark-read
   // -------------------------------------------------------------------------
-  router.register("PATCH", "/api/notifications", async (req, res) => {
+  router.register("PATCH", "/api/notifications", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
 
@@ -221,5 +223,5 @@ export function registerNotificationRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ updated }));
-  });
+  }));
 }

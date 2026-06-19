@@ -30,7 +30,7 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
@@ -498,10 +498,17 @@ export function registerInboxRoutes(
   //
   // Backward compatible: with NO query params, returns the full tenant list under
   // `items` (legacy shape) plus the additive `counts` object.
-  router.register("GET", "/api/inbox", async (req, res) => {
-    let devUserId = req.headers[DEV_USER_HEADER];
-    if (Array.isArray(devUserId)) devUserId = devUserId[0];
-    const actor = typeof devUserId === "string" ? devUserId : null;
+  router.register("GET", "/api/inbox", withAuth(async (req, res) => {
+    // Mode-aware actor resolution (T-0327).
+    const authCtx = getAuthContext(req);
+    let actor: string | null;
+    if (authCtx !== undefined) {
+      actor = authCtx.sub;
+    } else {
+      let devUserId = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(devUserId)) devUserId = devUserId[0];
+      actor = typeof devUserId === "string" ? devUserId : null;
+    }
 
     const base = await findInboxItems(actor);
     const myRoles = rolesForUser(actor);
@@ -531,7 +538,7 @@ export function registerInboxRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items, counts, tab }));
-  });
+  }));
 
   // GET /api/inbox/:id — task detail (T-0272).
   //
@@ -544,13 +551,20 @@ export function registerInboxRoutes(
   //   - projection (optional): { inst, procKey, status, step, startedAt } — present only for
   //     instance-backed tasks (tasks whose id is the inbox_task_id of a process.started event).
   // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND
-  router.register("GET", "/api/inbox/:id", async (req, res, params) => {
-    let devUserId = req.headers[DEV_USER_HEADER];
-    if (Array.isArray(devUserId)) devUserId = devUserId[0];
-    if (!devUserId || typeof devUserId !== "string") {
-      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  router.register("GET", "/api/inbox/:id", withAuth(async (req, res, params) => {
+    // Mode-aware actor resolution (T-0327).
+    const authCtx = getAuthContext(req);
+    let actor: string;
+    if (authCtx !== undefined) {
+      actor = authCtx.sub;
+    } else {
+      let devUserId = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(devUserId)) devUserId = devUserId[0];
+      if (!devUserId || typeof devUserId !== "string") {
+        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      }
+      actor = devUserId;
     }
-    const actor = devUserId;
     const taskId = params["id"] as string;
 
     // Find the item in the actor's tenant inbox.
@@ -648,7 +662,7 @@ export function registerInboxRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ item, projection: projection ?? null }));
-  });
+  }));
 
   // POST /api/inbox/:id/claim — claim a pool task (T-0138 write-path).
   //
@@ -665,11 +679,19 @@ export function registerInboxRoutes(
   // Idempotency: re-claiming own task → 200 (no-op, SAME claim record — claimedAt
   //   is preserved, NOT advanced — so «когда взято» is stable across re-claims).
   // Claiming another user's claimed task → 409 ALREADY_CLAIMED.
-  router.register("POST", "/api/inbox/:id/claim", async (req, res, params) => {
-    let devUserId = req.headers[DEV_USER_HEADER];
-    if (Array.isArray(devUserId)) devUserId = devUserId[0];
-    if (!devUserId || typeof devUserId !== "string") {
-      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  router.register("POST", "/api/inbox/:id/claim", withAuth(async (req, res, params) => {
+    // Mode-aware actor resolution (T-0327).
+    const authCtx = getAuthContext(req);
+    let devUserId: string;
+    if (authCtx !== undefined) {
+      devUserId = authCtx.sub;
+    } else {
+      let h = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(h)) h = h[0];
+      if (!h || typeof h !== "string") {
+        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      }
+      devUserId = h;
     }
 
     const taskId = params["id"] as string;
@@ -742,7 +764,7 @@ export function registerInboxRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ item }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/inbox/:id/action — card-action on a waiting instance user-task
@@ -767,13 +789,20 @@ export function registerInboxRoutes(
   if (writeDeps) {
     const { pool, resolveActorTenant: resolveActorTenantDep } = writeDeps;
 
-    router.register("POST", "/api/inbox/:id/action", async (req, res, params) => {
-      let devUserId = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUserId)) devUserId = devUserId[0];
-      if (!devUserId || typeof devUserId !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+    router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
+      // Mode-aware actor resolution (T-0327).
+      const authCtx = getAuthContext(req);
+      let actor: string;
+      if (authCtx !== undefined) {
+        actor = authCtx.sub;
+      } else {
+        let devUserId = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(devUserId)) devUserId = devUserId[0];
+        if (!devUserId || typeof devUserId !== "string") {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+        actor = devUserId;
       }
-      const actor = devUserId;
 
       // Body validation — only the approve action is supported (AC-5; narrow scope).
       const rawBody = await readJsonBody(req);
@@ -823,7 +852,7 @@ export function registerInboxRoutes(
       res.end(
         JSON.stringify({ instanceId: task.inst, status: "done", action: "approve" }),
       );
-    });
+    }));
   }
 }
 

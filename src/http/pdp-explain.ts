@@ -58,7 +58,7 @@ import {
 import { loadAdminContext } from "../db/org.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -326,6 +326,8 @@ function parseExplainBody(body: unknown): ExplainBody {
 // ---------------------------------------------------------------------------
 
 function extractCaller(req: IncomingMessage): string {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) return ctx.sub;
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -401,7 +403,7 @@ async function checkExplainAuthz(
  * Those ops return 422 EXPLAIN_OP_UNSUPPORTED (honest scope declaration).
  */
 export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): void {
-  router.register("POST", "/api/pdp/explain", async (req, res) => {
+  router.register("POST", "/api/pdp/explain", withAuth(async (req, res) => {
     // R-7: 503 when no DB pool is available.
     if (pool === null) {
       throw new HttpError(503, "NO_DATABASE", "DATABASE_URL not set; explain requires live grant data");
@@ -532,5 +534,5 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ verdict, reason, steps: responseSteps }));
-  });
+  }));
 }
