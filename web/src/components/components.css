@@ -135,6 +135,32 @@
 .chs-input--invalid { border-color: var(--chs-color-danger); }
 .chs-input--invalid:focus { box-shadow: 0 0 0 3px var(--chs-color-danger-soft); }
 
+/* ---------------- Select (нативный, токен-стилизованный) ---------------- */
+/* Гасим нативную стрелку (appearance:none) и рисуем свою KitIcon-шеврон, чтобы
+   контрол выглядел одинаково в обеих темах. Фон/текст/граница — те же токены,
+   что у .chs-input, поэтому select читаем и в светлой, и в тёмной. */
+.chs-select-wrap { position: relative; display: flex; }
+.chs-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  /* место под собственную стрелку справа */
+  padding-right: var(--chs-space-9);
+  cursor: pointer;
+}
+.chs-select::-ms-expand { display: none; }
+.chs-select__arrow {
+  position: absolute;
+  top: 50%;
+  right: var(--chs-space-5);
+  transform: translateY(-50%);
+  width: 14px; height: 14px;
+  color: var(--chs-color-text-muted);
+  pointer-events: none;
+}
+.chs-select:disabled { opacity: 0.45; cursor: not-allowed; }
+.chs-select:disabled + .chs-select__arrow { opacity: 0.45; }
+
 /* ---------------- BudgetMeter ---------------- */
 .chs-budget { display: flex; flex-direction: column; gap: var(--chs-space-2); min-width: 120px; }
 .chs-budget__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--chs-space-4); }
@@ -178,9 +204,13 @@
 .chs-audit__body { color: var(--chs-color-text-muted); }
 .chs-audit__body b { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
 
-/* ---------------- DenseTable ---------------- */
-.chs-table { width: 100%; border-collapse: collapse; font-size: var(--chs-text-base); }
-.chs-table thead th {
+/* ---------------- DenseTable (canonical) ----------------
+   ЕДИНСТВЕННЫЙ источник истины для плотных таблиц. `.chs-itable` (исторически
+   в app-shell/app.css, потребляется 6+ экранами) — алиас этого же блока: оба
+   класса делят селекторный список, чтобы не было расходящегося дубля.
+   Шапка sticky (top:0, z-index над строками); ряды — высота --chs-row-h. */
+.chs-table, .chs-itable { width: 100%; border-collapse: collapse; font-size: var(--chs-text-base); }
+.chs-table thead th, .chs-itable thead th {
   text-align: left;
   font-size: var(--chs-text-2xs);
   font-weight: var(--chs-weight-semibold);
@@ -191,17 +221,23 @@
   height: 30px;
   border-bottom: 1px solid var(--chs-color-border);
   background: var(--chs-color-surface-2);
-  position: sticky; top: 0;
+  position: sticky; top: 0; z-index: 2;
+  white-space: nowrap;
 }
-.chs-table tbody td {
+.chs-table tbody td, .chs-itable tbody td {
   padding: 0 var(--chs-space-6);
   height: var(--chs-row-h);
   border-bottom: 1px solid var(--chs-color-border-faint);
   color: var(--chs-color-text);
   vertical-align: middle;
 }
-.chs-table tbody tr:hover td { background: var(--chs-color-hover); }
-.chs-table td.chs-num, .chs-table th.chs-num { text-align: right; font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chs-table tbody tr:hover td, .chs-itable tbody tr:hover td { background: var(--chs-color-hover); }
+.chs-table tbody tr[data-taken="true"] td, .chs-itable tbody tr[data-taken="true"] td { opacity: 0.55; }
+.chs-table td.chs-num, .chs-table th.chs-num,
+.chs-itable td.chs-num, .chs-itable th.chs-num { text-align: right; font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Выравнивающие модификаторы ячеек (исторически на .chs-itable, теперь общие). */
+.chs-table td.chs-r, .chs-itable td.chs-r { text-align: right; }
+.chs-table td.chs-c, .chs-itable td.chs-c { text-align: center; }
 
 /* ---------------- Surface / panel (для витрины) ---------------- */
 .chs-panel {
