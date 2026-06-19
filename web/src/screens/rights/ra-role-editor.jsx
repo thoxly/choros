@@ -463,12 +463,12 @@ function RoleEditorScreen() {
             {submitResult && submitResult !== "loading" && (
               <div className="chs-submit-result" style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
                 {submitResult.success > 0 && (
-                  <span style={{ color: "var(--chs-color-success, green)" }}>
+                  <span style={{ color: "var(--chs-color-success)" }}>
                     ✓ {submitResult.success} грант(ов) применено
                   </span>
                 )}
                 {submitResult.errors.length > 0 && submitResult.errors.map((e, i) => (
-                  <div key={i} style={{ color: "var(--chs-color-danger, red)", marginTop: "var(--chs-space-1)" }}>
+                  <div key={i} style={{ color: "var(--chs-color-danger)", marginTop: "var(--chs-space-1)" }}>
                     ✕ {e.uri} [{e.op}]: {e.reason}
                   </div>
                 ))}
@@ -484,7 +484,7 @@ function RoleEditorScreen() {
                   {pendingConfirms.length} грант(ов) в статусе <code>semi-confirmed</code> — критичное расширение.
                   Войдите как второй администратор и подтвердите.
                   <div style={{ marginTop: "var(--chs-space-3)", display: "flex", alignItems: "center", gap: "var(--chs-space-3)", flexWrap: "wrap" }}>
-                    <label style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-secondary)" }}>
+                    <label style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-muted)" }}>
                       Второй аппрувер (X-Dev-User):
                       <input
                         className="chs-input chs-input--mono"
@@ -504,8 +504,8 @@ function RoleEditorScreen() {
                     </Button>
                     {confirmResult && confirmResult !== "loading" && (
                       confirmResult.ok
-                        ? <span style={{ color: "var(--chs-color-success, green)" }}>✓ подтверждено — гранты активны</span>
-                        : <span style={{ color: "var(--chs-color-danger, red)" }}>✕ {confirmResult.reason}</span>
+                        ? <span style={{ color: "var(--chs-color-success)" }}>✓ подтверждено — гранты активны</span>
+                        : <span style={{ color: "var(--chs-color-danger)" }}>✕ {confirmResult.reason}</span>
                     )}
                   </div>
                 </div>
@@ -602,7 +602,7 @@ function RoleEditorScreen() {
                   // Error / 503 sentinel row from propose().
                   if (p._error) {
                     return (
-                      <div key={i} className="chs-prop chs-prop--error" style={{ color: "var(--chs-color-danger, red)", padding: "var(--chs-space-3)" }}>
+                      <div key={i} className="chs-prop chs-prop--error" style={{ color: "var(--chs-color-danger)", padding: "var(--chs-space-3)" }}>
                         {p._error}
                       </div>
                     );

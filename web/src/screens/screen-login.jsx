@@ -15,7 +15,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Button } from '../components/components.jsx';
+import { Button, ErrorState, LoadingState, EmptyState } from '../components/components.jsx';
 
 function LoginScreen({ onLogin, keycloak = false, error: externalError = null }) {
   const [users, setUsers] = useState([]);
@@ -83,7 +83,7 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
 
           {externalError && (
             <div className="chs-login-error">
-              <p>{externalError}</p>
+              <ErrorState title="Ошибка входа" message={externalError} />
             </div>
           )}
 
@@ -108,16 +108,17 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
 
         {loading && (
           <div className="chs-login-loading">
-            <p>Загрузка…</p>
+            <LoadingState label="Загрузка…" />
           </div>
         )}
 
         {error && !loading && (
           <div className="chs-login-error">
-            <p>{error}</p>
-            <Button variant="secondary" size="sm" onClick={handleRetry}>
-              Повторить
-            </Button>
+            <ErrorState
+              title="Не удалось загрузить пользователей"
+              message={error}
+              onRetry={handleRetry}
+            />
           </div>
         )}
 
@@ -141,7 +142,7 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
 
         {!loading && !error && users.length === 0 && (
           <div className="chs-login-empty">
-            <p>Нет доступных пользователей</p>
+            <EmptyState title="Нет доступных пользователей" />
           </div>
         )}
       </div>
@@ -152,69 +153,57 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
           align-items: center;
           justify-content: center;
           min-height: 100vh;
-          background: var(--chs-bg-primary);
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          color: var(--chs-text-primary);
+          background: var(--chs-color-bg);
+          font-family: var(--chs-font-sans);
+          color: var(--chs-color-text);
         }
 
         .chs-login-container {
           width: 100%;
           max-width: 400px;
-          padding: 40px 20px;
+          padding: var(--chs-space-10) var(--chs-space-7);
         }
 
         .chs-login-header {
           text-align: center;
-          margin-bottom: 40px;
+          margin-bottom: var(--chs-space-10);
         }
 
         .chs-login-title {
-          margin: 0 0 8px 0;
-          font-size: 28px;
-          font-weight: 600;
-          letter-spacing: -0.5px;
+          margin: 0 0 var(--chs-space-4) 0;
+          font-size: var(--chs-text-2xl);
+          font-weight: var(--chs-weight-semibold);
+          letter-spacing: var(--chs-tracking-tight);
+          color: var(--chs-color-text);
         }
 
         .chs-login-subtitle {
-          margin: 0 0 16px 0;
-          font-size: 14px;
-          color: var(--chs-text-secondary);
+          margin: 0 0 var(--chs-space-6) 0;
+          font-size: var(--chs-text-md);
+          color: var(--chs-color-text-muted);
         }
 
         .chs-login-hint {
           margin: 0;
-          font-size: 13px;
-          color: var(--chs-text-tertiary);
-          line-height: 1.5;
+          font-size: var(--chs-text-base);
+          color: var(--chs-color-text-faint);
+          line-height: var(--chs-leading-normal);
         }
 
         .chs-login-loading {
-          text-align: center;
-          padding: 40px 20px;
-          color: var(--chs-text-secondary);
+          padding: var(--chs-space-9) var(--chs-space-7);
         }
 
         .chs-login-error {
-          text-align: center;
-          padding: 20px;
-          background: var(--chs-bg-warning, rgba(255, 193, 7, 0.1));
-          border-radius: 4px;
-          margin-bottom: 20px;
-        }
-
-        .chs-login-error p {
-          margin: 0 0 12px 0;
-          font-size: 14px;
+          margin-bottom: var(--chs-space-7);
         }
 
         .chs-login-empty {
-          text-align: center;
-          padding: 40px 20px;
-          color: var(--chs-text-secondary);
+          padding: var(--chs-space-9) var(--chs-space-7);
         }
 
         .chs-login-users {
-          margin-bottom: 20px;
+          margin-bottom: var(--chs-space-7);
         }
 
         .chs-login-list {
@@ -223,7 +212,7 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
           padding: 0;
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: var(--chs-space-4);
         }
 
         .chs-login-item {
@@ -233,36 +222,36 @@ function LoginScreen({ onLogin, keycloak = false, error: externalError = null })
 
         .chs-login-user-btn {
           width: 100%;
-          padding: 12px 16px;
-          background: var(--chs-bg-secondary);
-          border: 1px solid var(--chs-border);
-          border-radius: 4px;
+          padding: var(--chs-space-5) var(--chs-space-6);
+          background: var(--chs-color-surface);
+          border: 1px solid var(--chs-color-border);
+          border-radius: var(--chs-radius-2);
           cursor: pointer;
           text-align: left;
           transition: all 0.15s ease;
           font-family: inherit;
-          color: inherit;
+          color: var(--chs-color-text);
         }
 
         .chs-login-user-btn:hover {
-          background: var(--chs-bg-tertiary);
-          border-color: var(--chs-primary);
+          background: var(--chs-color-surface-2);
+          border-color: var(--chs-color-accent);
         }
 
         .chs-login-user-btn:active {
-          background: var(--chs-primary);
-          color: var(--chs-bg-primary);
+          background: var(--chs-color-accent);
+          color: var(--chs-color-accent-fg);
         }
 
         .chs-login-user-name {
-          font-weight: 500;
-          font-size: 14px;
-          margin-bottom: 4px;
+          font-weight: var(--chs-weight-medium);
+          font-size: var(--chs-text-md);
+          margin-bottom: var(--chs-space-2);
         }
 
         .chs-login-user-position {
-          font-size: 12px;
-          color: var(--chs-text-secondary);
+          font-size: var(--chs-text-sm);
+          color: var(--chs-color-text-muted);
         }
       `}</style>
     </div>
