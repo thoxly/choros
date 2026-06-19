@@ -4,15 +4,15 @@
  * T-0102 · E9: Form submission with SERVER-SIDE field validation.
  * T-0251 · E9: PERSIST submitted record on success (in-memory mode — now with
  *              real-DB path wired in T-0337 [E15-S4]).
+ * T-0336 · E15-S2: In-memory RECORDS Map REMOVED (doctrine §3.3 fix — state
+ *              lost on restart must not be treated as source of truth).
  * T-0337 · E15-S4: Forms-from-schema.
- *   - The in-memory RECORDS Map is the fallback store (used when no DB pool
- *     is injected, i.e. "memory" mode for tests). When a FormStoreDeps is
- *     provided at registration (composition root: DATABASE_URL present), submit
- *     persists the record via the real DB record store (records.ts createRecord /
- *     the S1 applier path) in a tenant-scoped tx.
- *   - FormStoreDeps carries the FormPersistPort — a minimal port the form submit
- *     route calls to persist. The composition root (server.ts) wires the real
- *     createRecord function here; the in-memory fallback wires a RECORDS Map shim.
+ *   - FormPersistPort / FormStoreDeps injected at registration time.
+ *   - When a pool is present (DATABASE_URL), server.ts wires the real DB
+ *     persister (makeFormRecordPersister → choros.record in a tenant-scoped tx).
+ *   - When no deps are injected (memory mode / tests without a live DB), the
+ *     memoryPersist no-op is used: it mints a UUID for the response contract
+ *     but does NOT build an authoritative in-memory Map (T-0336 doctrine §3.3).
  *   - The submit response contract is UNCHANGED: { ok, formId, value, recordId }.
  *
  * Registers:
@@ -52,13 +52,18 @@ import { randomUUID } from "node:crypto";
 // FormPersistPort — the minimal persistence contract (T-0337 E15-S4)
 //
 // Injected at registration time. The composition root wires either:
-//   - the real DB path: createRecord from records.ts (pool + resolveActorTenant)
-//   - the in-memory fallback (RECORDS Map): used when no pool is available
+//   - the real DB path: makeFormRecordPersister (pool + resolveActorTenant),
+//     which persists to choros.record in a tenant-scoped tx.
+//   - the no-op memory fallback (memoryPersist below): used when no pool is
+//     available. Mints a recordId for the response contract but does NOT store
+//     it in an authoritative in-process Map (T-0336 doctrine §3.3 — lost-on-
+//     restart state must not be treated as source of truth).
 //
 // This port is intentionally minimal — it only needs to:
-//   1. Persist the validated record data under the actor's tenant
-//   2. Return a stable recordId
-//   3. Not touch the HTTP request/response (that stays in the route handler)
+//   1. Persist the validated record data under the actor's tenant (DB path)
+//      OR acknowledge with a synthetic id (no-DB path).
+//   2. Return a stable recordId.
+//   3. Not touch the HTTP request/response (that stays in the route handler).
 // ---------------------------------------------------------------------------
 
 /**
@@ -79,7 +84,7 @@ export type FormPersistPort = (
 
 /**
  * Optional deps injected by the composition root (server.ts) when a DB pool
- * is available. When absent, the route uses the in-memory RECORDS Map fallback.
+ * is available. When absent, the route uses the no-op memory fallback.
  */
 export interface FormStoreDeps {
   /** Real DB persistence — wired when DATABASE_URL is present. */
@@ -87,13 +92,20 @@ export interface FormStoreDeps {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory record store (T-0251 / T-0337 fallback)
-// Maps recordId → stored form record. Process-lifetime only — survives across
-// requests in a running server. Used when no FormStoreDeps is injected (memory
-// mode or tests without a live DB). The real DB path (FormStoreDeps.persist)
-// bypasses this map entirely.
+// T-0336 (E15-S2): In-memory RECORDS Map REMOVED.
+//
+// Record reads/writes go through the real DB record store (src/http/records.ts)
+// or the S1 applier (T-0335), NOT an in-process mirror.
+//
+// The form submit handler produces a `recordId` (UUID) for the response contract.
+// In DB mode (pool present), persistence goes through FormPersistPort → choros.record.
+// In no-DB / memory mode, the no-op memoryPersist below mints a UUID for the
+// response shape without building a persistent authoritative Map.
+//
+// See also: claim-projection.ts for the analogous CLAIMED Map removal.
 // ---------------------------------------------------------------------------
 
+/** FormRecord shape (kept for test-seam type compatibility, not for in-memory storage). */
 interface FormRecord {
   recordId: string;
   formId: string;
@@ -103,8 +115,6 @@ interface FormRecord {
   data: Record<string, unknown>;
 }
 
-const RECORDS: Map<string, FormRecord> = new Map();
-
 /**
  * Current schema version for new records.
  * Version 1 = initial record shape (all form fields as validated by form-validator).
@@ -112,23 +122,26 @@ const RECORDS: Map<string, FormRecord> = new Map();
  */
 const CURRENT_SCHEMA_VERSION = 1;
 
-// In-memory persist implementation (fallback when no pool is available).
+/**
+ * No-op memory-mode persist (T-0337 / T-0336 doctrine reconciliation).
+ *
+ * Used when no DB pool is injected (tests, no DATABASE_URL). Mints a UUID so
+ * the response contract { ok, formId, value, recordId } is satisfied, but does
+ * NOT insert into any authoritative in-process Map — consistent with T-0336's
+ * doctrine §3.3 (lost-on-restart state must not be treated as source of truth).
+ *
+ * Tests that need to assert record persistence after a form submit should use
+ * DB-backed fitness tests (ci/checks/db/records_crud.test.ts).
+ */
 function memoryPersist(
-  actorSlug: string,
-  formId: string,
-  data: Record<string, unknown>,
+  _actorSlug: string,
+  _formId: string,
+  _data: Record<string, unknown>,
 ): Promise<string> {
-  const recordId = randomUUID();
-  const record: FormRecord = {
-    recordId,
-    formId,
-    submittedBy: actorSlug,
-    submittedAt: Date.now(),
-    schema_version: CURRENT_SCHEMA_VERSION,
-    data,
-  };
-  RECORDS.set(recordId, record);
-  return Promise.resolve(recordId);
+  // No authoritative Map — T-0336 doctrine §3.3.
+  // Mint a recordId for the response contract only.
+  void (CURRENT_SCHEMA_VERSION satisfies number); // keep const referenced
+  return Promise.resolve(randomUUID());
 }
 
 // ---------------------------------------------------------------------------
@@ -156,29 +169,31 @@ function sendValidationErrors(res: import("node:http").ServerResponse, fields: F
  * Register the form submit endpoint.
  *
  * @param router  - the HTTP router
- * @param deps    - optional: when present, the real DB persist port is used;
- *                  when absent (undefined), falls back to the in-memory RECORDS Map.
- *                  Tests call `createServer(undefined, undefined, "memory")` which
- *                  omits deps → in-memory fallback → tests stay green without DB.
+ * @param deps    - optional: when present, the real DB persist port is used
+ *                  (form submit writes to choros.record in a tenant-scoped tx).
+ *                  When absent (undefined), falls back to the no-op memoryPersist
+ *                  (mints a UUID, no authoritative in-process store — T-0336 §3.3).
+ *                  Tests call createServer without deps → memory fallback → green
+ *                  without DB.
  */
 export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void {
-  // Resolve the persist function: real DB or in-memory fallback.
+  // Resolve the persist function: real DB or no-op memory fallback.
   const persist: FormPersistPort = deps?.persist ?? memoryPersist;
 
   // POST /api/forms/:formId/submit
   router.register("POST", "/api/forms/:formId/submit", withAuth(async (req, res, params) => {
     // Authn: mode-aware (T-0327) — keycloak → JWT sub; dev → x-dev-user.
     const authCtx = getAuthContext(req);
-    let devUserId: string;
+    let actorSlug: string;
     if (authCtx !== undefined) {
-      devUserId = authCtx.sub;
+      actorSlug = authCtx.sub;
     } else {
       let h = req.headers[DEV_USER_HEADER];
       if (Array.isArray(h)) h = h[0];
       if (!h || typeof h !== "string") {
         throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
       }
-      devUserId = h;
+      actorSlug = h;
     }
 
     const formId = params["formId"] as string;
@@ -200,11 +215,12 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
     }
 
     // Persist the sanitized value (T-0251 / T-0337).
-    // When deps.persist is the real DB path (T-0337), this writes to the entity
-    // store in a tenant-scoped tx with audit event (records.ts createRecord pattern).
-    // When no deps are injected (memory mode), the in-memory RECORDS Map is used.
+    // DB mode (deps.persist wired): writes to choros.record in a tenant-scoped tx
+    //   with audit event (makeFormRecordPersister in server.ts).
+    // No-DB mode (no deps): memoryPersist mints a UUID for the response contract
+    //   without an authoritative in-process Map (T-0336 doctrine §3.3).
     const sanitizedData = result.value as Record<string, unknown>;
-    const recordId = await persist(devUserId, formId, sanitizedData);
+    const recordId = await persist(actorSlug, formId, sanitizedData);
 
     // Response contract (frozen): { ok, formId, value, recordId }
     // value = sanitized payload (schema-declared, validated fields only).
@@ -217,25 +233,33 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
 }
 
 // ---------------------------------------------------------------------------
-// Test seams (T-0251)
-// Not called from production code. Mirror the inbox.ts pattern.
-// These operate on the in-memory RECORDS Map (the fallback used in tests).
-// When the real DB persist is wired, these seams see no entries (the DB has them).
+// Test seams (T-0251 → T-0336 migration)
+// Not called from production code.
 // ---------------------------------------------------------------------------
 
 /**
- * Retrieve a stored record by id. Returns undefined if not found.
- * Used by e2e tests to assert persistence without a real DB.
- * Only covers in-memory store entries (memory mode / fallback).
+ * T-0336 (E15-S2): _getRecordForTests returns undefined.
+ *
+ * The in-memory RECORDS Map has been removed. Record persistence goes through
+ * the real DB record store (src/http/records.ts) / the S1 applier (T-0335).
+ * Tests that need to assert record persistence should use DB-backed fitness tests
+ * (ci/checks/db/records_crud.test.ts) rather than the in-process seam.
+ *
+ * Preserved for import compatibility. Returns undefined always.
+ * @deprecated Use DB-backed record store for persistence assertions.
  */
-export function _getRecordForTests(recordId: string): FormRecord | undefined {
-  return RECORDS.get(recordId);
+export function _getRecordForTests(_recordId: string): FormRecord | undefined {
+  // No-op: RECORDS Map removed (T-0336). Use DB-backed records for persistence.
+  return undefined;
 }
 
 /**
- * Reset in-memory record store between tests.
- * Not called from production code.
+ * T-0336 (E15-S2): _resetRecordStoreForTests is a no-op.
+ *
+ * The in-memory RECORDS Map has been removed. No store to reset.
+ * Preserved for import compatibility.
+ * @deprecated No in-process record store to reset.
  */
 export function _resetRecordStoreForTests(): void {
-  RECORDS.clear();
+  // No-op: RECORDS Map removed (T-0336).
 }

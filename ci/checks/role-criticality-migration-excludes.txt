@@ -38,3 +38,6 @@
 073_vendor_crm_seed           # T-0244 — vendor-crm application + customer-subscription registry seed (is_system app + registry_def INSERT only); owned by vendor-crm-seed-idempotent.sh
 074_process_definition        # T-0252 — E8 BPMN publish path: process_definition tenant table DDL; owned by process-defs route module
 075_process_app_binding       # T-0270 — E13 process↔application binding: process_app_binding tenant table DDL; owned by process-catalog route module
+076_soglasovanie_registry_seed # T-0335 — Согласование registry_def seed (pure INSERT seed, no CREATE TABLE); owned by step-applier.ts
+077_tel_roles_seed            # T-0336 — TEL role seed (INSERT role/grant rows, no CREATE TABLE); owned by claim-projection.ts
+078_user_task_claim           # T-0338 — E15-S2-claim: user_task_claim TOCTOU-safe DB lock primitive (FORCE RLS); owned by claim-projection.ts

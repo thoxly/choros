@@ -27,9 +27,9 @@
  *      FS-9  derived FormDef works with validateFormSubmission (form-validator round-trip)
  *      FS-10 single source: purchase registry_def JSON Schema → FieldDef matches form-schema PURCHASE
  *
- *   3. Submit persists via real store (not RECORDS Map) — in-memory fallback tested via
- *      the existing forms-submit.e2e.test.ts; here we verify the FormPersistPort wiring:
- *      SP-1  registerFormsRoutes without deps → memoryPersist fallback (_getRecordForTests hit)
+ *   3. Submit persists via real store — FormPersistPort wiring:
+ *      SP-1  registerFormsRoutes without deps → memoryPersist no-op (response OK, no Map)
+ *            T-0336 doctrine §3.3: _getRecordForTests returns undefined (no authoritative Map).
  *      SP-2  registerFormsRoutes WITH deps → deps.persist is called (not memoryPersist)
  *
  * DATABASE_URL-free: pure unit tests — no pg.Pool, no live DB, no env reads.
@@ -384,10 +384,12 @@ describe("form-schema-derive: single source verification", () => {
 // ---------------------------------------------------------------------------
 
 describe("forms.ts: FormPersistPort wiring", () => {
-  it("SP-1: no FormStoreDeps → in-memory RECORDS Map fallback is active", async () => {
+  it("SP-1: no FormStoreDeps → memoryPersist no-op: response OK, no authoritative Map (T-0336 §3.3)", async () => {
     // The existing forms-submit.e2e.test.ts covers the full AC-10 path (memory mode).
-    // Here we verify the fallback contract at the unit level: _getRecordForTests() sees
-    // the record, confirming the in-memory Map was written (not a DB call).
+    // Here we verify the fallback contract at the unit level under T-0336 doctrine §3.3:
+    //   - The HTTP response is still { ok: true, formId, value, recordId } (contract unchanged).
+    //   - _getRecordForTests returns undefined because memoryPersist does NOT write to an
+    //     authoritative in-process Map — lost-on-restart state must not be source of truth.
     const { _getRecordForTests, _resetRecordStoreForTests } = await import("../http/forms.js");
     const { createServer } = await import("../server.js");
     const http = await import("node:http");
@@ -422,16 +424,20 @@ describe("forms.ts: FormPersistPort wiring", () => {
 
     await new Promise<void>((r) => server.close(() => r()));
 
+    // Response contract preserved: { ok, formId, value, recordId } shape unchanged.
     expect(res.status).toBe(200);
     const data = JSON.parse(res.body) as { ok: boolean; recordId: string };
     expect(data.ok).toBe(true);
     expect(typeof data.recordId).toBe("string");
+    expect(data.recordId.length).toBeGreaterThan(0);
 
-    // In-memory fallback: the record MUST be in the RECORDS Map.
+    // T-0336 doctrine §3.3: no authoritative in-process Map.
+    // memoryPersist mints a UUID for the response contract only — it does NOT store
+    // it in RECORDS. _getRecordForTests is a no-op that always returns undefined.
+    // DB-mode persistence is handled by makeFormRecordPersister (wired in server.ts
+    // when DATABASE_URL is present). This is consistent with the CLAIMED Map removal.
     const stored = _getRecordForTests(data.recordId);
-    expect(stored).toBeDefined();
-    expect(stored?.submittedBy).toBe("alice");
-    expect(stored?.formId).toBe("purchase");
+    expect(stored).toBeUndefined();
 
     _resetRecordStoreForTests();
   }, 10000 /* allow 10s for server startup */);

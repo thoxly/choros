@@ -248,8 +248,9 @@ function buildRouter(
   // Server-side field validation is pure/in-process (no DATABASE_URL required).
   // When grantsPool is available, the real DB persist port is wired (T-0337):
   // form submit writes to choros.record in a tenant-scoped tx + audit event.
-  // Without grantsPool (memory mode / tests), the in-memory RECORDS Map fallback
-  // is used — the test suite passes registerFormsRoutes with no deps.
+  // Without grantsPool (memory mode / tests), the no-op memoryPersist fallback
+  // is used — mints a UUID for the response contract but no authoritative Map
+  // (T-0336 doctrine §3.3). Tests pass registerFormsRoutes with no deps.
   registerFormsRoutes(
     router,
     grantsPool

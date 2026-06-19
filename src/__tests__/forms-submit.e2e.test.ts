@@ -1,11 +1,19 @@
 /**
  * T-0102: E2E tests for POST /api/forms/:formId/submit.
  * T-0251: Extended to assert server-side persistence of submitted records.
+ * T-0336 (E15-S2): The in-memory RECORDS Map has been removed. Record persistence
+ * goes through the real DB record store (src/http/records.ts); in no-DB/memory mode
+ * _getRecordForTests() always returns undefined (no in-process store).
+ *
+ * As a result, AC-10 (record persistence assertion) is updated to reflect honest
+ * no-DB behavior: the recordId is still returned in the response (contract unchanged),
+ * but the record is NOT retrievable via _getRecordForTests(). DB-backed persistence
+ * is tested in ci/checks/db/records_crud.test.ts.
  *
  * Drives the real HTTP server (createServer) and asserts the "server distrusts
  * client" contract end-to-end: forged payloads are rejected with a 400
  * VALIDATION envelope carrying field-level errors; valid payloads return 200 with
- * a SANITIZED value (no forged keys survive) and a persisted record.
+ * a SANITIZED value (no forged keys survive) and a recordId.
  *
  *   AC-1: 401 when x-dev-user header is absent
  *   AC-2: 404 UNKNOWN_FORM for an unregistered form id
@@ -16,7 +24,7 @@
  *   AC-7: 400 VALIDATION for disallowed enum value
  *   AC-8: 400 VALIDATION for unknown/extra forged field
  *   AC-9: response never echoes a forged extra field
- *   AC-10: valid submit persists a retrievable record (T-0251)
+ *   AC-10: valid submit returns a recordId (no-DB: record not persisted in-process)
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import * as http from "node:http";
@@ -157,29 +165,24 @@ describe("Forms submit E2E — server-side validation (T-0102)", () => {
   });
 
   // AC-10 — T-0251: valid submit persists a retrievable record server-side
-  it("persists a retrievable record on valid submit", async () => {
+  // AC-10 (T-0251 → T-0336): valid submit returns a recordId in the response.
+  // T-0336 (E15-S2): The in-memory RECORDS Map has been removed. _getRecordForTests()
+  // always returns undefined in no-DB mode. The response contract (ok, formId, value,
+  // recordId) is unchanged — persistence assertions require DB (ci/checks/db/).
+  it("returns a recordId on valid submit (no-DB: in-process record not persisted)", async () => {
     const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify(validPurchase()));
     expect(r.statusCode).toBe(200);
 
     const data = JSON.parse(r.body) as { ok: boolean; formId: string; value: Record<string, unknown>; recordId: string };
     expect(data.ok).toBe(true);
 
-    // Response must include a recordId string.
+    // Response must include a recordId string (contract unchanged from T-0251).
     expect(typeof data.recordId).toBe("string");
     expect(data.recordId.length).toBeGreaterThan(0);
 
-    // The record must be retrievable from the in-process store by that id.
+    // T-0336: RECORDS Map removed — _getRecordForTests() returns undefined in no-DB mode.
+    // DB-backed record persistence is tested in ci/checks/db/records_crud.test.ts.
     const stored = _getRecordForTests(data.recordId);
-    expect(stored).toBeDefined();
-    expect(stored!.formId).toBe("purchase");
-    expect(stored!.submittedBy).toBe("e-kravtsova");
-    expect(stored!.schema_version).toBe(1);
-
-    // Stored data must match the sanitized value (not the raw client payload).
-    expect(stored!.data.supplier).toBe("ООО «Вектор»");
-    expect(stored!.data.qty).toBe(4);
-
-    // Stored data must not contain any fields outside the schema.
-    expect(Object.prototype.hasOwnProperty.call(stored!.data, "isAdmin")).toBe(false);
+    expect(stored).toBeUndefined();
   });
 });
