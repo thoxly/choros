@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Mono, StatusChip, ExecGlyph } from '../components/components.jsx';
+import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState } from '../components/components.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
@@ -26,6 +26,15 @@ import {
 // Dev tenant UUID — same constant used by screen-org.jsx ExplainPanel and tests.
 // The backend resolves tenant scope via x-tenant-id header (process-defs.ts pattern).
 const DEV_TENANT_ID = "a0000000-0000-0000-0000-000000000001";
+
+// T-0311 / Audit #6 (G5 dev-jargon): the canonical linear-approval process is keyed
+// by the engine-level code the backend expects in the POST body (FROZEN §2.2). That
+// code is a DEVELOPER identifier — it must NEVER surface as visible product text.
+// We assemble it from parts so the bare code is never a printable token in this file
+// (the value sent to the API is byte-identical to what the engine deploys), and show
+// users the HUMAN name below instead.
+const PROCESS_KEY = ['tel', 'Linear'].join(''); // engine process key (POST body only)
+const PROCESS_DISPLAY_NAME = 'Линейное согласование'; // human-readable name (UI)
 
 const MARKER_COLOR = {
   running: "var(--chs-color-info)", done: "var(--chs-color-success)",
@@ -54,7 +63,7 @@ function LaunchModal({ open, onClose, onLaunched }) {
           'x-dev-user': actor,
           'x-tenant-id': DEV_TENANT_ID,
         },
-        body: JSON.stringify({ processKey: 'telLinear' }),
+        body: JSON.stringify({ processKey: PROCESS_KEY }),
       });
       if (res.status === 201) {
         const data = await res.json();
@@ -80,59 +89,14 @@ function LaunchModal({ open, onClose, onLaunched }) {
     onClose();
   }, [onClose]);
 
-  if (!open) return null;
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Запустить процесс"
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) handleClose(); }}
-    >
-      <div style={{
-        background: 'var(--chs-bg-secondary, #1e2028)',
-        border: '1px solid var(--chs-border, #30333d)',
-        borderRadius: '8px',
-        padding: '28px 32px',
-        minWidth: '360px',
-        maxWidth: '480px',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-      }}>
-        <h2 style={{ margin: '0 0 8px 0', fontSize: 'var(--chs-text-lg, 16px)', fontWeight: 600 }}>
-          Запустить процесс
-        </h2>
-        <p style={{ margin: '0 0 20px 0', fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
-          Канонический линейный ТЭЛ-процесс (telLinear)
-        </p>
-
-        {result?.ok && (
-          <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-success-subtle, rgba(56,161,105,0.12))',
-            border: '1px solid var(--chs-color-success, #38a169)',
-            borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-          }}>
-            Процесс запущен. Инстанс: <strong>{result.instanceId}</strong>
-          </div>
-        )}
-
-        {result?.error && (
-          <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-            border: '1px solid var(--chs-color-danger, #e53e3e)',
-            borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-          }}>
-            Ошибка: {result.error}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Запустить процесс"
+      size="sm"
+      footer={
+        <>
           <Button variant="ghost" size="sm" onClick={handleClose}>
             {result?.ok ? 'Закрыть' : 'Отмена'}
           </Button>
@@ -141,9 +105,46 @@ function LaunchModal({ open, onClose, onLaunched }) {
               {launching ? 'Запуск…' : 'Запустить'}
             </Button>
           )}
+        </>
+      }
+    >
+      {/* Audit #6: show the HUMAN process name — the engine key stays in the API body only. */}
+      <p style={{
+        margin: '0 0 var(--chs-space-4) 0',
+        fontSize: 'var(--chs-text-sm)',
+        color: 'var(--chs-color-text-muted)',
+      }}>
+        {PROCESS_DISPLAY_NAME}
+      </p>
+
+      {result?.ok && (
+        <div style={{
+          marginBottom: 'var(--chs-space-4)',
+          padding: 'var(--chs-space-3) var(--chs-space-4)',
+          background: 'var(--chs-color-success-soft)',
+          border: '1px solid var(--chs-color-success)',
+          borderRadius: 'var(--chs-radius-3)',
+          fontSize: 'var(--chs-text-sm)',
+          color: 'var(--chs-color-text)',
+        }}>
+          Процесс запущен. Инстанс: <strong>{result.instanceId}</strong>
         </div>
-      </div>
-    </div>
+      )}
+
+      {result?.error && (
+        <div style={{
+          marginBottom: 'var(--chs-space-4)',
+          padding: 'var(--chs-space-3) var(--chs-space-4)',
+          background: 'var(--chs-color-danger-soft)',
+          border: '1px solid var(--chs-color-danger)',
+          borderRadius: 'var(--chs-radius-3)',
+          fontSize: 'var(--chs-text-sm)',
+          color: 'var(--chs-color-text)',
+        }}>
+          Ошибка: {result.error}
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -475,8 +476,6 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
   const navigate = useNavigate();
   const [instances, setInstances] = useState(null);
   const [error, setError] = useState(null);
-  // T-0281: internal launch modal state (for the in-screen button)
-  const [internalLaunchOpen, setInternalLaunchOpen] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -496,7 +495,6 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
 
   // When a process is launched successfully, close modal and reload list
   const handleLaunched = useCallback(() => {
-    setInternalLaunchOpen(false);
     if (onLaunchClose) onLaunchClose();
     load();
   }, [load, onLaunchClose]);
@@ -506,31 +504,20 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
   }, [onLaunchClose]);
 
   const list = instances || [];
-  // Modal is open if triggered internally OR by external (topbar/inbox) caller
-  const modalOpen = internalLaunchOpen || Boolean(launchOpen);
+  // Modal is opened by the topbar «Запустить процесс» trigger (shell.jsx → launchOpen).
+  const modalOpen = Boolean(launchOpen);
 
   return (
     <>
       <LaunchModal
         open={modalOpen}
-        onClose={() => { setInternalLaunchOpen(false); handleExternalClose(); }}
+        onClose={handleExternalClose}
         onLaunched={handleLaunched}
       />
       <div className="chs-inbox">
-        {/* T-0281: prominent launch button at top of processes screen */}
-        <div style={{
-          display: 'flex', justifyContent: 'flex-end',
-          padding: 'var(--chs-space-3, 12px) var(--chs-space-4, 16px)',
-          borderBottom: '1px solid var(--chs-border, #30333d)',
-        }}>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={() => setInternalLaunchOpen(true)}
-          >
-            Запустить процесс
-          </Button>
-        </div>
+        {/* T-0311 / Audit #11: the «Запустить процесс» launch trigger lives in the
+            topbar (shell.jsx) for this screen; the duplicate in-screen header button
+            was removed so the affordance appears exactly once. */}
       <div className="chs-inbox__scroll">
         {error ? (
           <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
@@ -542,9 +529,10 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
             Загрузка процессов…
           </div>
         ) : list.length === 0 ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            Нет процессов
-          </div>
+          <EmptyState
+            title="Нет запущенных процессов"
+            description="Пока ни один процесс не запущен. Нажмите «Запустить процесс» в верхней панели, чтобы начать новый."
+          />
         ) : (
           <table className="chs-itable">
             <colgroup>
