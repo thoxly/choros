@@ -6,7 +6,10 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, MonoId, Mono, ExecutorBadge, StatusChip } from '../components/components.jsx';
+import {
+  Button, MonoId, Mono, ExecutorBadge, StatusChip,
+  Drawer, EmptyState, LoadingState, ErrorState,
+} from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
 
@@ -179,193 +182,136 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
 
   if (!taskId) return null;
 
+  // Tokenized inline styles — kept in this single in-scope screen file (no new CSS
+  // file / app-shell edit). Every value references a --chs-* token; ZERO hardcoded
+  // color/spacing (gate G6). The kit Drawer owns surface/scrim/shadow/border.
+  const S = {
+    section: { marginBottom: 'var(--chs-space-8)' },
+    title: {
+      margin: '0 0 var(--chs-space-5)', fontSize: 'var(--chs-text-xs)',
+      fontWeight: 'var(--chs-weight-semibold)', letterSpacing: 'var(--chs-tracking-wide)',
+      textTransform: 'uppercase', color: 'var(--chs-color-text-faint)',
+    },
+    grid: {
+      display: 'grid', gridTemplateColumns: '100px 1fr',
+      rowGap: 'var(--chs-space-4)', columnGap: 'var(--chs-space-5)',
+      alignItems: 'center', fontSize: 'var(--chs-text-sm)',
+    },
+    key: { color: 'var(--chs-color-text-muted)' },
+    val: { color: 'var(--chs-color-text)', fontWeight: 'var(--chs-weight-medium)' },
+    muted: { color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-xs)' },
+    notice: {
+      marginBottom: 'var(--chs-space-6)', padding: 'var(--chs-space-5) var(--chs-space-6)',
+      border: '1px solid transparent', borderRadius: 'var(--chs-radius-3)',
+      fontSize: 'var(--chs-text-sm)', lineHeight: 'var(--chs-leading-normal)',
+    },
+    noticeSuccess: { background: 'var(--chs-color-success-soft)', borderColor: 'var(--chs-color-success)', color: 'var(--chs-color-text)' },
+    noticeError: { background: 'var(--chs-color-danger-soft)', borderColor: 'var(--chs-color-danger)', color: 'var(--chs-color-text)' },
+    noticeTitle: { fontWeight: 'var(--chs-weight-semibold)', marginBottom: 'var(--chs-space-2)' },
+    noticeBody: { color: 'var(--chs-color-text-muted)' },
+  };
+
+  // Footer: complete-step action (or a single Close once the step is done).
+  // Built outside the JSX tree so the kit Drawer owns the overlay/scrim, focus-trap,
+  // Esc and scroll-lock — no hand-rolled fixed-inset modal (gate G6) and no hardcoded color.
+  let footer = null;
+  if (outcome) {
+    footer = <Button variant="secondary" size="sm" onClick={onClose}>Закрыть</Button>;
+  } else if (detail) {
+    footer = (
+      <>
+        <Button variant="ghost" size="sm" onClick={onClose}>Закрыть</Button>
+        {/* Show complete-step only when the task is still actionable (not done/failed) */}
+        {detail.item.status !== 'done' && detail.item.status !== 'failed' && (
+          <Button variant="primary" size="sm" disabled={completing} onClick={handleComplete}>
+            {completing ? 'Выполнение…' : 'Выполнить шаг'}
+          </Button>
+        )}
+      </>
+    );
+  }
+
   return (
-    <div
-      style={{
-        position: 'fixed', inset: 0, zIndex: 900,
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
-        pointerEvents: 'none',
-      }}
-    >
-      {/* Backdrop */}
-      <div
-        style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-          pointerEvents: 'auto',
-        }}
-        onClick={onClose}
-        aria-label="Закрыть задачу"
-      />
-      {/* Slide-in panel */}
-      <div
-        role="complementary"
-        aria-label="Детали задачи"
-        style={{
-          position: 'relative', zIndex: 901, pointerEvents: 'auto',
-          width: '420px', maxWidth: '90vw', height: '100vh',
-          background: 'var(--chs-bg-secondary, #1e2028)',
-          borderLeft: '1px solid var(--chs-border, #30333d)',
-          display: 'flex', flexDirection: 'column',
-          boxShadow: '-4px 0 24px rgba(0,0,0,0.3)',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Header */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '16px 20px',
-          borderBottom: '1px solid var(--chs-border, #30333d)',
-          flexShrink: 0,
-        }}>
-          <h2 style={{ margin: 0, fontSize: 'var(--chs-text-md, 14px)', fontWeight: 600 }}>
-            Задача
-          </h2>
-          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Закрыть">✕</Button>
-        </div>
+    <Drawer open={!!taskId} onClose={onClose} title="Задача" side="right" footer={footer}>
+      {loading ? (
+        <LoadingState label="Загрузка задачи…" />
+      ) : fetchError ? (
+        <ErrorState message={`Не удалось загрузить: ${fetchError}`} onRetry={loadDetail} />
+      ) : detail ? (
+        <>
+          {/* Task info */}
+          <section style={S.section}>
+            <h3 style={S.title}>Задача</h3>
+            <div style={S.grid}>
+              <span style={S.key}>Название</span>
+              <span style={S.val}>{detail.item.name}</span>
 
-        {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-          {loading ? (
-            <div style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm, 13px)' }}>
-              Загрузка…
+              <span style={S.key}>Шаг</span>
+              <Mono>{detail.item.step}</Mono>
+
+              <span style={S.key}>Инстанс</span>
+              <MonoId>{detail.item.inst}</MonoId>
+
+              <span style={S.key}>Исполнитель</span>
+              <ExecutorBadge type={detail.item.execType || 'human'} name={detail.item.execName} />
+
+              <span style={S.key}>Статус</span>
+              <StatusChip status={detail.item.status} />
+
+              {detail.item.due && (
+                <>
+                  <span style={S.key}>Дедлайн</span>
+                  <Mono>{detail.item.due}</Mono>
+                </>
+              )}
             </div>
-          ) : fetchError ? (
-            <div>
-              <div style={{
-                marginBottom: '12px', padding: '10px 14px',
-                background: 'rgba(229,62,62,0.12)', border: '1px solid var(--chs-color-danger, #e53e3e)',
-                borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-              }}>
-                Не удалось загрузить: {fetchError}
+          </section>
+
+          {/* Process/instance projection (if available) */}
+          {detail.projection && (
+            <section style={S.section}>
+              <h3 style={S.title}>Процесс</h3>
+              <div style={S.grid}>
+                <span style={S.key}>Инстанс</span>
+                <MonoId>{detail.projection.inst}</MonoId>
+
+                <span style={S.key}>Процесс</span>
+                <Mono>{detail.projection.procKey}</Mono>
+
+                <span style={S.key}>Текущий шаг</span>
+                <span style={S.val}>{detail.projection.step}</span>
+
+                <span style={S.key}>Состояние</span>
+                <StatusChip status={detail.projection.status} label={STATUS_LABEL[detail.projection.status]} />
+
+                <span style={S.key}>Запущен</span>
+                <Mono style={S.muted}>
+                  {new Date(detail.projection.startedAt).toLocaleString('ru-RU')}
+                </Mono>
               </div>
-              <Button variant="secondary" size="sm" onClick={loadDetail}>Повторить</Button>
+            </section>
+          )}
+
+          {/* Outcome: shown after step completion */}
+          {outcome && (
+            <div style={{ ...S.notice, ...S.noticeSuccess }}>
+              <div style={S.noticeTitle}>Шаг выполнен</div>
+              <div style={S.noticeBody}>
+                Процесс <strong>{outcome.instanceId}</strong> перешёл в состояние{' '}
+                <strong>{STATUS_LABEL[outcome.status] ?? outcome.status}</strong>.
+              </div>
             </div>
-          ) : detail ? (
-            <>
-              {/* Task info */}
-              <section style={{ marginBottom: '20px' }}>
-                <h3 style={{ margin: '0 0 12px 0', fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 600, color: 'var(--chs-color-text-muted, #888)' }}>
-                  ЗАДАЧА
-                </h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', rowGap: '8px', fontSize: 'var(--chs-text-sm, 13px)' }}>
-                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Название</span>
-                  <span style={{ fontWeight: 500 }}>{detail.item.name}</span>
+          )}
 
-                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Шаг</span>
-                  <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.item.step}</Mono>
-
-                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Инстанс</span>
-                  <MonoId>{detail.item.inst}</MonoId>
-
-                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Исполнитель</span>
-                  <ExecutorBadge type={detail.item.execType || 'human'} name={detail.item.execName} />
-
-                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Статус</span>
-                  <StatusChip status={detail.item.status} />
-
-                  {detail.item.due && (
-                    <>
-                      <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Дедлайн</span>
-                      <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.item.due}</Mono>
-                    </>
-                  )}
-                </div>
-              </section>
-
-              {/* Process/instance projection (if available) */}
-              {detail.projection && (
-                <section style={{ marginBottom: '20px' }}>
-                  <h3 style={{ margin: '0 0 12px 0', fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 600, color: 'var(--chs-color-text-muted, #888)' }}>
-                    ПРОЦЕСС
-                  </h3>
-                  <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', rowGap: '8px', fontSize: 'var(--chs-text-sm, 13px)' }}>
-                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Инстанс</span>
-                    <MonoId>{detail.projection.inst}</MonoId>
-
-                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Процесс</span>
-                    <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.projection.procKey}</Mono>
-
-                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Текущий шаг</span>
-                    <span>{detail.projection.step}</span>
-
-                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Состояние</span>
-                    <StatusChip status={detail.projection.status} label={STATUS_LABEL[detail.projection.status]} />
-
-                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Запущен</span>
-                    <Mono style={{ fontSize: 'var(--chs-text-xs, 11px)', color: 'var(--chs-color-text-muted, #888)' }}>
-                      {new Date(detail.projection.startedAt).toLocaleString('ru-RU')}
-                    </Mono>
-                  </div>
-                </section>
-              )}
-
-              {/* Outcome: shown after step completion */}
-              {outcome && (
-                <section style={{ marginBottom: '20px' }}>
-                  <div style={{
-                    padding: '12px 16px',
-                    background: 'rgba(56,161,105,0.12)',
-                    border: '1px solid var(--chs-color-success, #38a169)',
-                    borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-                  }}>
-                    <div style={{ fontWeight: 600, marginBottom: '4px' }}>Шаг выполнен</div>
-                    <div style={{ color: 'var(--chs-color-text-muted, #888)' }}>
-                      Процесс <strong>{outcome.instanceId}</strong> перешёл в состояние{' '}
-                      <strong>{STATUS_LABEL[outcome.status] ?? outcome.status}</strong>.
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {/* Action error */}
-              {actionError && (
-                <div style={{
-                  marginBottom: '12px', padding: '10px 14px',
-                  background: 'rgba(229,62,62,0.12)', border: '1px solid var(--chs-color-danger, #e53e3e)',
-                  borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-                }}>
-                  {actionError}
-                </div>
-              )}
-            </>
-          ) : null}
-        </div>
-
-        {/* Footer: complete-step action */}
-        {detail && !outcome && (
-          <div style={{
-            padding: '16px 20px',
-            borderTop: '1px solid var(--chs-border, #30333d)',
-            flexShrink: 0,
-            display: 'flex', gap: '8px', justifyContent: 'flex-end',
-          }}>
-            <Button variant="ghost" size="sm" onClick={onClose}>Закрыть</Button>
-            {/* Show complete-step only when the task is still actionable (not done/failed) */}
-            {detail.item.status !== 'done' && detail.item.status !== 'failed' && (
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={completing}
-                onClick={handleComplete}
-              >
-                {completing ? 'Выполнение…' : 'Выполнить шаг'}
-              </Button>
-            )}
-          </div>
-        )}
-
-        {outcome && (
-          <div style={{
-            padding: '16px 20px',
-            borderTop: '1px solid var(--chs-border, #30333d)',
-            flexShrink: 0,
-            display: 'flex', justifyContent: 'flex-end',
-          }}>
-            <Button variant="secondary" size="sm" onClick={onClose}>Закрыть</Button>
-          </div>
-        )}
-      </div>
-    </div>
+          {/* Action error */}
+          {actionError && (
+            <div style={{ ...S.notice, ...S.noticeError }}>
+              {actionError}
+            </div>
+          )}
+        </>
+      ) : null}
+    </Drawer>
   );
 }
 
@@ -501,18 +447,19 @@ function InboxScreen() {
 
       <div className="chs-inbox__scroll">
         {error ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            <p style={{ marginBottom: "var(--chs-space-3)" }}>Не удалось загрузить задачи: {error}</p>
-            <Button onClick={load}>Повторить</Button>
-          </div>
+          <ErrorState
+            title="Не удалось загрузить задачи"
+            message={error}
+            onRetry={load}
+          />
         ) : items === null ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            Загрузка задач…
-          </div>
+          <LoadingState label="Загрузка задач…" />
         ) : items.length === 0 ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            Нет задач
-          </div>
+          <EmptyState
+            icon={<Icon name="inbox" />}
+            title="Задач нет"
+            description="Новые задачи появятся здесь, как только процессы их создадут."
+          />
         ) : (
           <table className="chs-itable">
             <colgroup>
