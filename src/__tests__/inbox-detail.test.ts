@@ -15,7 +15,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerInboxRoutes, _resetClaimStateForTests } from "../http/inbox.js";
-import { appendProcessStarted } from "../http/process-projection.js";
+import { appendProcessStarted, appendTaskApproved } from "../http/process-projection.js";
 import type { InboxWriteDeps } from "../http/inbox.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 
@@ -119,15 +119,20 @@ async function httpReq(
   method: string,
   url: string,
   headers: Record<string, string> = {},
+  body?: unknown,
 ): Promise<{ status: number; json: unknown }> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
+    const buf = body !== undefined ? Buffer.from(JSON.stringify(body)) : undefined;
     const opts: http.RequestOptions = {
       hostname: parsed.hostname,
       port: parseInt(parsed.port, 10),
       path: parsed.pathname + parsed.search,
       method,
-      headers,
+      headers: {
+        ...headers,
+        ...(buf ? { "Content-Type": "application/json", "Content-Length": String(buf.length) } : {}),
+      },
     };
     const req = http.request(opts, (res) => {
       let data = "";
@@ -138,6 +143,7 @@ async function httpReq(
       });
     });
     req.on("error", reject);
+    if (buf) req.write(buf);
     req.end();
   });
 }
@@ -244,5 +250,83 @@ describe("GET /api/inbox/:id — task detail (T-0272)", () => {
       expect(typeof body.projection["step"]).toBe("string");
       expect(typeof body.projection["startedAt"]).toBe("number");
     }
+  });
+
+  /**
+   * Regression: two instances in the same tenant, both approved.
+   * Before the fix, the done-branch used `projections.find(p => p.status === "done")`
+   * which returned the FIRST done projection for any approved taskId — wrong.
+   * After the fix it uses `p.inboxTaskId === taskId` — the correct correlation.
+   *
+   * Scenario:
+   *   1. Seed task A (instance flw-regression-A) — approve it.
+   *   2. Seed task B (instance flw-regression-B) — approve it.
+   *   3. GET /api/inbox/:idB → projection.inst MUST be flw-regression-B, NOT flw-regression-A.
+   */
+  it("done-projection is correlated by taskId, not first-done-wins (regression: two instances)", async () => {
+    db = new FakeDb();
+    const pool = makeFakePool(db);
+
+    // Helper: seed one instance task and immediately approve it.
+    async function seedAndApprove(instanceId: string): Promise<string> {
+      const client = await pool.connect();
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL choros.tenant_id = '${TENANT_ID}'`);
+      await client.query("SET LOCAL search_path TO choros");
+      const taskId = await appendProcessStarted(client as unknown as PgClientLike, {
+        instanceId,
+        procKey: "telLinear",
+        actor: "e-orlov",
+        nowMs: Date.now(),
+      });
+      await client.query("COMMIT");
+      client.release();
+
+      // Now approve via a fresh client (simulates the approve route's withTenantTx).
+      const client2 = await pool.connect();
+      await client2.query("BEGIN");
+      await client2.query(`SET LOCAL choros.tenant_id = '${TENANT_ID}'`);
+      await client2.query("SET LOCAL search_path TO choros");
+      await appendTaskApproved(client2 as unknown as PgClientLike, {
+        taskId,
+        instanceId,
+        procKey: "telLinear",
+        actor: DEV_USER,
+        nowMs: Date.now() + 1,
+      });
+      await client2.query("COMMIT");
+      client2.release();
+
+      return taskId;
+    }
+
+    // Approve task A first so it becomes the "first done" in the projection list.
+    const taskIdA = await seedAndApprove("flw-regression-A");
+    // Approve task B second.
+    const taskIdB = await seedAndApprove("flw-regression-B");
+
+    await start(makeDeps(db));
+
+    // Fetch detail for task B. Under the old first-done-wins bug this would return
+    // flw-regression-A's projection (the first done entry). After the fix it must
+    // return flw-regression-B's projection.
+    const r = await httpReq("GET", `${base}/api/inbox/${taskIdB}`, { "x-dev-user": DEV_USER });
+    expect(r.status).toBe(200);
+    const body = r.json as { item: Record<string, unknown>; projection: Record<string, unknown> | null };
+
+    // The projection must be present and must match task B's instance, not task A's.
+    expect(body.projection).not.toBeNull();
+    expect(body.projection!["inst"]).toBe("flw-regression-B"); // NOT flw-regression-A
+    expect(body.projection!["status"]).toBe("done");
+    expect(body.projection!["inboxTaskId"]).toBe(taskIdB);
+
+    // Also verify task A still maps correctly (sanity check).
+    const rA = await httpReq("GET", `${base}/api/inbox/${taskIdA}`, { "x-dev-user": DEV_USER });
+    expect(rA.status).toBe(200);
+    const bodyA = rA.json as { item: Record<string, unknown>; projection: Record<string, unknown> | null };
+    expect(bodyA.projection).not.toBeNull();
+    expect(bodyA.projection!["inst"]).toBe("flw-regression-A");
+    expect(bodyA.projection!["status"]).toBe("done");
+    expect(bodyA.projection!["inboxTaskId"]).toBe(taskIdA);
   });
 });

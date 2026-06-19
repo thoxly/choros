@@ -34,6 +34,7 @@ import { DEV_USER_HEADER } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
+  APPROVE_TASK_NAME,
   appendTaskApproved,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
@@ -568,8 +569,8 @@ export function registerInboxRoutes(
         const tenantId = await writeDeps.resolveActorTenant(actor);
         instanceTaskForDetail = await findWaitingInstanceTask(writeDeps.pool, tenantId, taskId);
         if (instanceTaskForDetail) {
-          // Synthesize a minimal InboxItem from the instance task so the detail returns
-          // the same shape regardless of how the task was found.
+          // Still waiting — synthesize a minimal InboxItem from the live instance task so
+          // the detail returns the same shape regardless of how the task was found.
           item = {
             id: instanceTaskForDetail.id,
             status: "waiting" as const,
@@ -578,10 +579,31 @@ export function registerInboxRoutes(
             inst: instanceTaskForDetail.inst,
             role: instanceTaskForDetail.role,
             pool: true,
-            sla: { min: 60, left: 60 }, // default SLA for instance tasks (no seed SLA data)
+            sla: { min: 60, left: 60 }, // default SLA for instance tasks (no per-task SLA yet)
             due: "",
             execType: "human" as const,
           } as unknown as InboxItem;
+        } else {
+          // Task is not waiting — may already be approved/done. Check the projection track
+          // so we can still serve the detail view for recently completed tasks.
+          // This covers the case where listInstanceInboxTasks drops approved tasks but the
+          // UI still wants to show the outcome (e.g. "Завершено") after the approve action.
+          const doneProj = (await listInstanceProjections(writeDeps.pool, tenantId))
+            .find((p) => p.inboxTaskId === taskId && p.status === "done");
+          if (doneProj) {
+            item = {
+              id: taskId,
+              status: "done" as const,
+              name: APPROVE_TASK_NAME,
+              step: doneProj.step,
+              inst: doneProj.inst,
+              role: doneProj.role,
+              pool: false,
+              sla: { min: 60, left: 0 },
+              due: "",
+              execType: "human" as const,
+            } as unknown as InboxItem;
+          }
         }
       } catch {
         // Degrade gracefully.
@@ -611,11 +633,12 @@ export function registerInboxRoutes(
           // Still waiting — find its projection.
           projection = projections.find((p) => p.inst === waitingTask.inst);
         } else {
-          // May be done — a done projection's inbox_task_id is the process.started event id,
-          // which equals this task id. listInstanceProjections folds started+approved: the
-          // done one's startedAt-event id IS the task id. We find it by matching the inst
-          // if we can resolve it from projections.
-          projection = projections.find((p) => p.status === "done");
+          // May be done — a done projection's inboxTaskId equals the process.started
+          // event id, which IS the taskId for instance-backed tasks (self-referential
+          // back-link set in appendProcessStarted). Correlate by inboxTaskId so that in
+          // a tenant with >1 completed process we return the right instance result, not
+          // the first-done-wins arbitrary match (bug: p.status === "done" alone).
+          projection = projections.find((p) => p.inboxTaskId === taskId);
         }
       } catch {
         // Degrade gracefully — projection is optional, never fail the detail fetch.

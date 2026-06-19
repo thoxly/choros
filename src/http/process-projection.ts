@@ -84,6 +84,13 @@ export interface InstanceProjection {
   readonly status: InstanceStatus;
   /** Epoch-ms the instance was started. */
   readonly startedAt: number;
+  /**
+   * The inbox task id that corresponds to this projection — equal to the
+   * process.started audit_event.id (the self-referential inbox_task_id).
+   * Used by the detail route to correlate a done projection to the requested
+   * taskId instead of returning the first-done-wins arbitrary match.
+   */
+  readonly inboxTaskId: string;
 }
 
 /** The waiting user-task surfaced to inbox, addressed to a ROLE (not a person). */
@@ -331,6 +338,9 @@ export async function listInstanceProjections(
       step: done ? "Завершено" : step,
       status: done ? "done" : "waiting",
       startedAt: row.occurred_at,
+      // row.id == process.started event id == inbox_task_id (self-referential back-link).
+      // Surfaces on the projection so callers can correlate by taskId without a separate lookup.
+      inboxTaskId: row.id,
     };
   });
 }
