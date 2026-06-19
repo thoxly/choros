@@ -41,6 +41,11 @@ import {
   listInstanceInboxTasks,
   listInstanceProjections,
 } from "./process-projection.js";
+import {
+  applyStepResult,
+  readStepClass,
+  type OutboxEnqueuePort,
+} from "../db/step-applier.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -208,6 +213,14 @@ export interface InboxWriteDeps {
   pool: pg.Pool;
   /** Resolve the tenant the actor (dev-user slug) belongs to. */
   resolveActorTenant: (actorSlug: string) => Promise<string>;
+  /**
+   * T-0335 (E15-S1b): outbox store for the step-applier (enqueueInTx the
+   * `step_applied` row inside the approve tx). When absent, the approve route
+   * still appends task.approved but the entity-applier seam is NOT engaged
+   * (honest-degrade: no `step_applied` outbox, no «Согласование» record). Present
+   * ⇒ the applier runs in the same tx and the fail-closed contract holds.
+   */
+  outboxStore?: OutboxEnqueuePort;
 }
 
 const UUID_RE =
@@ -821,7 +834,7 @@ export function registerInboxRoutes(
   //   - actor must hold the role the task is addressed to (approve grant): 403 NOT_ELIGIBLE
   // Success: 200 { instanceId, status: "done", action: "approve" }
   if (writeDeps) {
-    const { pool, resolveActorTenant: resolveActorTenantDep } = writeDeps;
+    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore } = writeDeps;
 
     router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
       // Mode-aware actor resolution (T-0327).
@@ -871,19 +884,51 @@ export function registerInboxRoutes(
         );
       }
 
-      // Append the task.approved event inside a tenant-scoped tx (RLS) → projection
-      // advances the instance to `done`. Single audit write via the canonical writer.
-      // T-0332: pass tenantId so appendTaskApproved can embed the canonical
-      // TransitionPayload with the correct tenant scope.
+      // F2 (T-0335): compute the wall-clock task duration ONCE here, in the approve
+      // handler. occurredAt = the process.started occurred_at (when the task became
+      // available); nowMs = the approve instant. Threaded into appendTaskApproved
+      // (transition_payload.duration_ms) AND the step_applied outbox payload below.
+      const nowMs = Date.now();
+      const durationMs = Math.max(0, nowMs - task.occurredAt);
+
+      // The atomic approve unit (ONE tenant-scoped tx, RLS):
+      //   task.approved audit (projection → `done`)
+      //   ⊕ applyStepResult (A: «Согласование» record + record.create audit + step_applied outbox)
+      // A caller ROLLBACK (any throw, e.g. the applier's fail-closed FF-G3 path)
+      // undoes BOTH — zero records AND zero approve events (T-0335 fitness).
       await withTenantTx(pool, tenantId, async (client) => {
         await appendTaskApproved(client as unknown as import("../db/audit-writer.js").PgClientLike, {
           taskId,
           instanceId: task.inst,
           procKey: task.procKey,
           actor,
-          nowMs: Date.now(),
+          nowMs,
+          durationMs, // T-0335: real duration (was hard-coded null in T-0332)
           tenantId,
         });
+
+        // T-0335 applier seam: engage ONLY when the outbox store is wired (the
+        // entity-write path). Absent ⇒ honest-degrade to approve-audit-only.
+        if (outboxStore) {
+          // F1 step-class from form_binding (default-to-A; B → skipped/deferred).
+          const stepClass = await readStepClass(client, tenantId, task.procKey);
+          await applyStepResult(client, {
+            tenantId,
+            instanceId: task.inst,
+            procKey: task.procKey,
+            activity: task.step,
+            actor,
+            taskId,
+            stepClass,
+            // The approve card-action carries no form body today; the «Согласование»
+            // record records the decision provenance. Future form-backed approves
+            // thread their submitted data here.
+            formData: { decision: "approve", approved_by: actor },
+            durationMs,
+            nowMs,
+            outboxStore,
+          });
+        }
       });
 
       res.statusCode = 200;

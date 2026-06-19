@@ -235,6 +235,10 @@ function buildRouter(
           pool: grantsPool,
           resolveActorTenant: (actorSlug: string) =>
             resolveActorTenant(getOrgPool(), actorSlug),
+          // T-0335 (E15-S1b): thread the outbox store so the approve route's
+          // step-applier can enqueue the `step_applied` row in the approve tx.
+          // Absent (memory-mode) ⇒ applier seam not engaged (honest-degrade).
+          outboxStore,
         }
       : undefined,
   );

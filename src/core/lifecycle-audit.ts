@@ -268,12 +268,21 @@ export function makeAuditOnDispatched(deps: AuditOnDispatchedDeps): OnDispatched
         ? (row.payload["processKey"] as string)
         : "";
 
+    // T-0335 (E15-S1b/F2): read the wall-clock duration from the outbox row payload
+    // when the producer carried it (the completeTask/step path enqueues
+    // `duration_ms`). Falls back to null for legacy rows that did not record a
+    // duration — the metric query treats null as "duration not tracked".
+    const durationMs =
+      typeof row.payload["duration_ms"] === "number"
+        ? (row.payload["duration_ms"] as number)
+        : null;
+
     const transition: LifecycleTransitionContext = {
       tenantId: row.tenantId,
       processKey,
       instanceId,
       activity: row.eventType,
-      durationMs: null, // T-0335 fills via outbox (S1)
+      durationMs, // T-0335: from outbox payload (S1), null when absent
     };
 
     const input: LifecycleAuditInput =
