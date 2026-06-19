@@ -48,6 +48,7 @@ import {
   type OutboxEnqueuePort,
 } from "../db/step-applier.js";
 import {
+  AlreadyClaimedError,
   appendTaskClaimed,
   insertClaimLock,
   loadClaimsFromAudit,
@@ -873,7 +874,11 @@ export function registerInboxRoutes(
       try {
         await withTenantTx(getOrgPool(), tenantId, async (client) => {
           const txClient = client as unknown as import("../db/audit-writer.js").PgClientLike;
-          // Step (a): DB lock — partial-unique constraint closes TOCTOU window.
+          // Step (a): DB lock — conditional-upsert RETURNING closes TOCTOU window.
+          // insertClaimLock throws AlreadyClaimedError when 0 rows are returned
+          // (a different actor holds a live 'claimed' lock).  If it throws, the tx
+          // rolls back here and appendTaskClaimed is NEVER reached — the loser leaves
+          // no audit trace.
           await insertClaimLock(txClient, {
             taskId,
             claimedBy: devUserId,
@@ -882,6 +887,7 @@ export function registerInboxRoutes(
             tenantId,
           });
           // Step (b): Audit event — source of truth for claim-state.
+          // Only reached when insertClaimLock won the lock (returned ≥1 row).
           await appendTaskClaimed(txClient, {
             taskId,
             actor: devUserId,
@@ -892,11 +898,17 @@ export function registerInboxRoutes(
           });
         });
       } catch (err: unknown) {
-        // Unique-constraint violation on user_task_claim partial-unique index:
-        // concurrent claim beat us to it — map to 409 ALREADY_CLAIMED.
+        // Primary rejection path: insertClaimLock detected a 0-row RETURNING result
+        // (different actor holds a live 'claimed' lock) → 409 ALREADY_CLAIMED.
+        if (err instanceof AlreadyClaimedError) {
+          throw new HttpError(409, "ALREADY_CLAIMED", "task already claimed by another actor");
+        }
+        // Defense-in-depth: raw unique-constraint violation (23505) from the DB.
+        // This is theoretically unreachable with the conditional-upsert logic, but
+        // kept as a safety net in case of unexpected constraint behavior.
         const pgErr = err as Record<string, unknown>;
         if (typeof pgErr["code"] === "string" && pgErr["code"] === "23505") {
-          throw new HttpError(409, "ALREADY_CLAIMED", "task already claimed by another user");
+          throw new HttpError(409, "ALREADY_CLAIMED", "task already claimed by another actor");
         }
         throw err; // any other DB error → 500 (fail-closed)
       }

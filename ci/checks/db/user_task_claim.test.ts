@@ -27,6 +27,7 @@ import pg from "pg";
 import { appUrl } from "./_helpers.js";
 import type { PgClientLike } from "../../../src/db/audit-writer.js";
 import {
+  AlreadyClaimedError,
   insertClaimLock,
   appendTaskClaimed,
   loadClaimsFromAudit,
@@ -136,11 +137,18 @@ describe("T-0338 AC-lock — insertClaimLock + appendTaskClaimed in one tx", () 
 });
 
 // ---------------------------------------------------------------------------
-// AC-concurrent: second INSERT with state='claimed' hits partial-unique → 23505
+// AC-concurrent: second INSERT by different actor is rejected via AlreadyClaimedError
+//
+// Root cause of the old bug: PK (tenant_id, task_id) covers all rows; the
+// partial-unique index (same columns WHERE state='claimed') is redundant and
+// can never fire.  The old DO UPDATE WHERE claimed_by=EXCLUDED silently no-oped
+// (0 rows updated, no error) for a different actor → second actor silently won.
+//
+// The fix: conditional-upsert RETURNING claimed_by.  0 rows → AlreadyClaimedError.
 // ---------------------------------------------------------------------------
 
-describe("T-0338 AC-concurrent — second claim hits partial-unique constraint", () => {
-  it("concurrent second INSERT on state='claimed' fails with code 23505; first claim intact", async () => {
+describe("T-0338 AC-concurrent — different-actor claim is rejected; first claim wins", () => {
+  it("second different-actor claim throws AlreadyClaimedError; lock and audit show ONLY first actor", async () => {
     if (!requireDb()) return;
 
     const tenantId = freshTenant();
@@ -157,16 +165,22 @@ describe("T-0338 AC-concurrent — second claim hits partial-unique constraint",
       await appendTaskClaimed(tx, { taskId, actor: firstActor, actorKind: "human", tenantId, role, nowMs: t1 });
     });
 
-    // Second actor tries to claim — must hit the partial-unique index (23505)
+    // Second (different) actor tries to claim — must be rejected with AlreadyClaimedError.
+    // insertClaimLock returns 0 rows (DO UPDATE WHERE predicate is FALSE for different actor
+    // with state='claimed') → throws AlreadyClaimedError → tx rolls back.
+    // appendTaskClaimed is NEVER reached (loser leaves no audit trace).
     const err = await withTenantTxExpectError(tenantId, async (tx) => {
       await insertClaimLock(tx, { taskId, claimedBy: secondActor, claimedAt: t2, role, tenantId });
+      // If insertClaimLock did NOT throw, appendTaskClaimed would run.
+      // We assert this line is unreachable by checking audit below.
       await appendTaskClaimed(tx, { taskId, actor: secondActor, actorKind: "human", tenantId, role, nowMs: t2 });
     });
 
-    // Postgres unique-violation code = 23505
-    expect(err["code"]).toBe("23505");
+    // The error must be AlreadyClaimedError — NOT a raw 23505.
+    expect(err).toBeInstanceOf(AlreadyClaimedError);
+    expect((err as AlreadyClaimedError).kind).toBe("AlreadyClaimedError");
 
-    // First claim still intact (tx rolled back atomically)
+    // Lock row: first actor still holds the claim (tx rolled back atomically).
     const lockRow = await withTenantTx(tenantId, async (tx) => {
       const raw = tx as unknown as pg.Client;
       const res = await raw.query<{ claimed_by: string; state: string }>(
@@ -177,6 +191,18 @@ describe("T-0338 AC-concurrent — second claim hits partial-unique constraint",
     });
     expect(lockRow.claimed_by).toBe(firstActor); // first claim wins
     expect(lockRow.state).toBe("claimed");
+
+    // Audit projection: ONLY the first actor's task.claimed event exists.
+    // The loser left NO trace in audit_event (appendTaskClaimed never ran).
+    const pool = new pg.Pool({ connectionString: appUrl(), max: 2 });
+    try {
+      const claimMap = await loadClaimsFromAudit(pool, tenantId);
+      const claim = claimMap.get(taskId);
+      expect(claim).toBeDefined();
+      expect(claim!.claimedBy).toBe(firstActor); // loser left no trace
+    } finally {
+      await pool.end();
+    }
   });
 });
 
@@ -336,5 +362,58 @@ describe("T-0338 AC-rebuildable — lock table is rebuildable from audit_event",
     } finally {
       await pool.end();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-released: a task released (state='released') can be re-claimed by ANY actor
+// ---------------------------------------------------------------------------
+
+describe("T-0338 AC-released — re-claim after release succeeds for any actor", () => {
+  it("after state set to 'released', a different actor can win the claim lock", async () => {
+    if (!requireDb()) return;
+
+    const tenantId = freshTenant();
+    const taskId = crypto.randomUUID();
+    const firstActor = "e-sokolov";
+    const secondActor = "e-kravtsova";
+    const role = "fin-ctrl";
+    const t1 = Date.now();
+    const t2 = t1 + 100;
+    const t3 = t1 + 200;
+
+    // First actor claims
+    await withTenantTx(tenantId, async (tx) => {
+      await insertClaimLock(tx, { taskId, claimedBy: firstActor, claimedAt: t1, role, tenantId });
+      await appendTaskClaimed(tx, { taskId, actor: firstActor, actorKind: "human", tenantId, role, nowMs: t1 });
+    });
+
+    // Simulate release: set state='released' directly (release path is out of scope here,
+    // but the OR state='released' clause must let any actor win after release).
+    await withTenantTx(tenantId, async (tx) => {
+      const raw = tx as unknown as pg.Client;
+      await raw.query(
+        `UPDATE choros.user_task_claim SET state = 'released', claimed_at = $1 WHERE task_id = $2`,
+        [t2, taskId],
+      );
+    });
+
+    // Second actor claims the released task — must succeed (no AlreadyClaimedError)
+    await withTenantTx(tenantId, async (tx) => {
+      await insertClaimLock(tx, { taskId, claimedBy: secondActor, claimedAt: t3, role, tenantId });
+      await appendTaskClaimed(tx, { taskId, actor: secondActor, actorKind: "human", tenantId, role, nowMs: t3 });
+    });
+
+    // Lock row now shows second actor as the new claimant
+    const lockRow = await withTenantTx(tenantId, async (tx) => {
+      const raw = tx as unknown as pg.Client;
+      const res = await raw.query<{ claimed_by: string; state: string }>(
+        `SELECT claimed_by, state FROM choros.user_task_claim WHERE task_id = $1`,
+        [taskId],
+      );
+      return res.rows[0];
+    });
+    expect(lockRow.claimed_by).toBe(secondActor);
+    expect(lockRow.state).toBe("claimed");
   });
 });

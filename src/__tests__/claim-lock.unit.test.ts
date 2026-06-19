@@ -3,22 +3,23 @@
  * and the claim-tx atomicity invariants.
  *
  * These tests run in-process (no live DB). They use a mock PgClientLike to verify:
- *   1. insertClaimLock issues the correct INSERT SQL with the partial-unique constraint.
+ *   1. insertClaimLock issues the correct INSERT SQL with RETURNING clause.
  *   2. The grant-check + insertClaimLock + appendTaskClaimed happen in ONE tx
  *      (mocked withTenantTx: one BEGIN, one COMMIT, no orphan partial-state).
- *   3. A unique-constraint error (code 23505) from insertClaimLock is mapped to
- *      409 ALREADY_CLAIMED (fail-closed).
+ *   3. When the mock returns 0 rows (different actor holds 'claimed' lock),
+ *      insertClaimLock throws AlreadyClaimedError — NOT a raw 23505.
  *   4. The lock table is a projection (NOT the source of truth): the audit event
  *      is emitted alongside the lock INSERT, not instead of it.
- *   5. Second concurrent INSERT for same (tenant_id, task_id) with state='claimed'
- *      fails (simulated by mock returning a 23505 error).
+ *   5. A 23505 DB error still propagates (defense-in-depth, should be unreachable
+ *      with conditional-upsert but kept as safety net in the route layer).
+ *   6. When mock returns 1 row (winner), insertClaimLock resolves without error.
  *
- * Live-DB behavior (actual partial-unique constraint, FORCE RLS, atomic rollback)
+ * Live-DB behavior (actual TOCTOU serialisation, FORCE RLS, atomic rollback)
  * is covered in ci/checks/db/user_task_claim.test.ts.
  */
 
 import { describe, it, expect } from "vitest";
-import { insertClaimLock } from "../http/claim-projection.js";
+import { insertClaimLock, AlreadyClaimedError } from "../http/claim-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 
 // ---------------------------------------------------------------------------
@@ -36,18 +37,26 @@ function makeMockTx(overrides?: { queryImpl?: (sql: string, params?: unknown[]) 
       if (overrides?.queryImpl) {
         return overrides.queryImpl(sql, params);
       }
-      return { rows: [] };
+      // Default: return 1 row (simulates "winner" — INSERT or DO UPDATE succeeded).
+      return { rows: [{ claimed_by: "default-actor" }] };
     },
   };
   return { tx, calls };
 }
 
+/** Mock that simulates "different actor holds live claim" → 0 rows returned. */
+function makeMockTxZeroRows(): { tx: PgClientLike; calls: Array<{ sql: string; params: unknown[] }> } {
+  return makeMockTx({
+    queryImpl: async () => ({ rows: [] }),
+  });
+}
+
 // ---------------------------------------------------------------------------
-// Test 1: insertClaimLock issues the correct INSERT SQL
+// Test 1: insertClaimLock issues the correct INSERT SQL with RETURNING
 // ---------------------------------------------------------------------------
 
 describe("T-0338 insertClaimLock — SQL shape", () => {
-  it("issues INSERT INTO choros.user_task_claim with correct parameters", async () => {
+  it("issues INSERT INTO choros.user_task_claim with RETURNING claimed_by", async () => {
     const { tx, calls } = makeMockTx();
     const tenantId = "a0000000-0000-0000-0000-000000000001";
     const taskId = "b0000000-0000-0000-0000-000000000002";
@@ -66,7 +75,9 @@ describe("T-0338 insertClaimLock — SQL shape", () => {
     // Must have ON CONFLICT for idempotency
     expect(call.sql).toMatch(/ON CONFLICT/i);
     // State must be 'claimed'
-    expect(call.sql).toMatch(/claimed/i);
+    expect(call.sql).toMatch(/'claimed'/i);
+    // Must have RETURNING clause (the 0-row detection mechanism)
+    expect(call.sql).toMatch(/RETURNING/i);
     // Parameters must include all required fields
     expect(call.params).toContain(tenantId);
     expect(call.params).toContain(taskId);
@@ -99,17 +110,12 @@ describe("T-0338 insertClaimLock — no internal tx management", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 3: 23505 from insertClaimLock simulates the TOCTOU-safe lock rejection
+// Test 3a: 0-row RETURNING → AlreadyClaimedError (primary rejection path)
 // ---------------------------------------------------------------------------
 
-describe("T-0338 insertClaimLock — concurrent claim simulated via 23505", () => {
-  it("propagates code=23505 when DB rejects the second INSERT (partial-unique violation)", async () => {
-    const uniqueError = Object.assign(new Error("duplicate key"), { code: "23505" });
-    const { tx } = makeMockTx({
-      queryImpl: async () => {
-        throw uniqueError;
-      },
-    });
+describe("T-0338 insertClaimLock — 0-row RETURNING throws AlreadyClaimedError", () => {
+  it("throws AlreadyClaimedError when mock returns 0 rows (different actor holds lock)", async () => {
+    const { tx } = makeMockTxZeroRows();
 
     let caught: unknown;
     try {
@@ -125,7 +131,64 @@ describe("T-0338 insertClaimLock — concurrent claim simulated via 23505", () =
     }
 
     expect(caught).toBeDefined();
+    expect(caught).toBeInstanceOf(AlreadyClaimedError);
+    expect((caught as AlreadyClaimedError).kind).toBe("AlreadyClaimedError");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 3b: 23505 from DB still propagates (defense-in-depth, unreachable
+//           in practice with conditional-upsert but checked in route layer)
+// ---------------------------------------------------------------------------
+
+describe("T-0338 insertClaimLock — raw 23505 still propagates from DB", () => {
+  it("re-throws raw pg error code=23505 when DB raises it unexpectedly", async () => {
+    const uniqueError = Object.assign(new Error("duplicate key"), { code: "23505" });
+    const { tx } = makeMockTx({
+      queryImpl: async () => {
+        throw uniqueError;
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await insertClaimLock(tx, {
+        taskId: "t2b",
+        claimedBy: "e-kravtsova",
+        claimedAt: Date.now(),
+        role: "fin-ctrl",
+        tenantId: "00000000-0000-0000-0000-000000000002",
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeDefined();
+    // A raw DB error is NOT AlreadyClaimedError — it propagates unchanged so the
+    // route-level defense-in-depth catch can handle it.
+    expect(caught).not.toBeInstanceOf(AlreadyClaimedError);
     expect((caught as Record<string, unknown>)["code"]).toBe("23505");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 3c: 1-row RETURNING → no error thrown (winner path)
+// ---------------------------------------------------------------------------
+
+describe("T-0338 insertClaimLock — 1-row RETURNING resolves without error", () => {
+  it("resolves successfully when mock returns 1 row (claim won)", async () => {
+    // Default mock returns 1 row (winner)
+    const { tx } = makeMockTx();
+
+    await expect(
+      insertClaimLock(tx, {
+        taskId: "t2c",
+        claimedBy: "e-sokolov",
+        claimedAt: Date.now(),
+        role: "fin-ctrl",
+        tenantId: "00000000-0000-0000-0000-000000000002",
+      }),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -147,12 +210,15 @@ describe("T-0338 insertClaimLock — projection property (additive, no DELETE)",
     const sqls = calls.map((c) => c.sql.trim().toUpperCase());
     // Must not DELETE
     expect(sqls.some((s) => s.startsWith("DELETE"))).toBe(false);
-    // ON CONFLICT ... DO UPDATE is permitted (idempotent re-claim same actor)
-    // but must never UPDATE rows of a DIFFERENT actor
+    // ON CONFLICT ... DO UPDATE is permitted (idempotent re-claim same actor /
+    // re-claim of released task) but must never overwrite a different actor's
+    // live 'claimed' lock (that is guarded by the WHERE predicate returning 0 rows).
     const insertSql = sqls.find((s) => s.startsWith("INSERT"));
     expect(insertSql).toBeDefined();
     // The WHERE clause on the DO UPDATE must reference claimed_by (same-actor guard)
     expect(calls[0]?.sql).toMatch(/WHERE.*claimed_by/i);
+    // Must also include 'released' guard to allow re-claim after release
+    expect(calls[0]?.sql).toMatch(/released/i);
   });
 });
 
