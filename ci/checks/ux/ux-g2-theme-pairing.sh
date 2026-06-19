@@ -42,6 +42,9 @@ has_dark_block() {
 # :root block (between ':root {' and its closing '}'), proving light semantics
 # are the default. Uses awk to track the :root block boundary so a --chs-color-bg
 # that only lives under [data-theme="dark"] does NOT satisfy the assertion.
+# ASSUMES a flat, un-nested :root { … } block: the boundary is the first '}'
+# after ':root {'. CSS nesting inside :root would close the block early here;
+# the token sources this guards are flat, so that is fine.
 root_has_light_bg() {
   awk '
     /^[[:space:]]*:root[[:space:]]*\{/ { in_root=1; next }

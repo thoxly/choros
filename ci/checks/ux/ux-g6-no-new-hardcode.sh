@@ -27,9 +27,13 @@
 # fail (exit 1) on any newly-added hardcode — the future honest-gate flip
 # (D-056), enabled once the screens are migrated to the kit.
 #
-# SELF-TEST (--self-test): synthesizes a fake unified-diff '+' line carrying
-# rgba(0,0,0,0.55) and asserts the detector flags it (and that a tokenized
-# var(--chs-…) line is NOT flagged); exit 0 on success, 2 if broken.
+# SELF-TEST (--self-test): synthesizes a fake unified-diff exercising BOTH
+# detector paths — a '+' line carrying rgba(0,0,0,0.55), a '+' line carrying a
+# bare hex #3366ff, and a hand-rolled fixed-inset rgba overlay — and asserts
+# each is flagged, while a tokenized var(--chs-…) line and the '+++' header are
+# NOT. (The hex path is asserted explicitly because a non-portable `\b` regex
+# would make it silently dead on bash 3.2 — see PORTABILITY above.) Exit 0 on
+# success, 2 if broken.
 #
 # EXIT CODES: 0 clean / informational · 1 violation (only with --required) · 2 self-test broken
 set -euo pipefail
@@ -42,7 +46,17 @@ ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 # NOT flag CSS-var fallbacks like var(--chs-…, #888) here? — yes we DO flag the
 # literal hex even inside a fallback, because the kit/token layer (excluded
 # scope) is where fallbacks belong; screens should reference the token only.
-HARDCODE_RE='rgba\(|#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?\b'
+# (So `var(--chs-color-text, #888)` IS flagged — a fallback hex in screens scope
+# is still a hardcode; it lives in the excluded design/components layer instead.)
+#
+# PORTABILITY: the hex half uses an explicit trailing boundary
+# `([^0-9a-fA-F]|$)` rather than the PCRE `\b` word-boundary. macOS /bin/bash
+# 3.2 (the local `npm run fitness` env) runs POSIX-ERE in `[[ =~ ]]` and does
+# NOT support `\b` — with `\b` the entire hex branch silently never matched
+# locally (it only "worked" on CI ubuntu bash 5), a mac/CI divergence. The
+# explicit boundary matches #rgb / #rrggbb on BOTH bash 3.2 and 5 while still
+# rejecting partials like `#1234` / `#12` and anchors like `href="#section"`.
+HARDCODE_RE='rgba\(|#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([^0-9a-fA-F]|$)'
 
 # Hand-rolled overlay scrim: an added line that positions a fixed/absolute
 # full-bleed layer AND paints an rgba background — the inline-modal smell.
@@ -71,15 +85,25 @@ classify_added_lines() {
 if [[ "${1:-}" == "--self-test" ]]; then
   echo "[T-0298] ux-g6-no-new-hardcode: --self-test"
 
-  # A synthetic unified-diff fragment: one new rgba overlay line, one tokenized
-  # line (must pass), and the '+++' header (must be ignored).
-  fake_diff=$'+++ b/web/src/screens/screen-x.jsx\n+        background: \'rgba(0,0,0,0.55)\',\n+        color: var(--chs-color-text),\n+        position: \'fixed\', inset: 0, background: \'rgba(0,0,0,0.4)\','
+  # A synthetic unified-diff fragment exercising BOTH detector paths:
+  #   - one new rgba() hardcode line,
+  #   - one new bare-hex (#3366ff) hardcode line — the path a non-portable `\b`
+  #     regex would leave silently dead on bash 3.2,
+  #   - one tokenized var(--chs-…) line (must pass),
+  #   - one hand-rolled fixed-inset rgba overlay line,
+  #   - the '+++' header (must be ignored).
+  fake_diff=$'+++ b/web/src/screens/screen-x.jsx\n+        background: \'rgba(0,0,0,0.55)\',\n+        color: \'#3366ff\',\n+        color: var(--chs-color-text),\n+        position: \'fixed\', inset: 0, background: \'rgba(0,0,0,0.4)\','
   out="$(printf '%s\n' "${fake_diff}" | classify_added_lines)"
 
-  if ! grep -q $'hardcoded-color\t' <<<"${out}"; then
+  if ! grep -qE $'hardcoded-color\t.*rgba\\(' <<<"${out}"; then
     echo "SELF-TEST FAIL: detector missed an added rgba() hardcode"; exit 2
   fi
   echo "  [OK] detected newly-added rgba() hardcode"
+
+  if ! grep -qE $'hardcoded-color\t.*#3366ff' <<<"${out}"; then
+    echo "SELF-TEST FAIL: detector missed an added bare-hex (#3366ff) hardcode (bash-3.2 \\b dead-regex regression)"; exit 2
+  fi
+  echo "  [OK] detected newly-added bare-hex (#3366ff) hardcode"
 
   if ! grep -q $'inline-overlay-modal\t' <<<"${out}"; then
     echo "SELF-TEST FAIL: detector missed a hand-rolled fixed-inset rgba overlay"; exit 2
