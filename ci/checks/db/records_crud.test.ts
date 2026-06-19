@@ -598,3 +598,76 @@ describe('records API — create/list/get/update (T-0264)', () => {
     expect(listBody.records.some((r) => r['id'] === bRecId)).toBe(false);
   }));
 });
+
+// ---------------------------------------------------------------------------
+// T-0295: GET /api/records/:id enriched detail shape — record_schema + created_by
+// ---------------------------------------------------------------------------
+
+describe('records API — enriched detail GET /api/records/:id (T-0295)', () => {
+  it('GET /api/records/:id returns enriched shape: record_schema + created_by', requireDb(async () => {
+    // Create a record via POST so we can verify the enriched GET shape.
+    const created = await makeRequest(
+      baseUrl,
+      'POST',
+      '/api/records',
+      { application_id: appAId, registry_def_id: regAId, data: { name: 'Detail-test', amount: 7 } },
+      { 'x-dev-user': 'actor-a' },
+    );
+    expect(created.statusCode).toBe(201);
+    const createdBody = JSON.parse(created.body) as Record<string, unknown>;
+    const id = createdBody['id'] as string;
+    recordCleanup.push({ tenantId: TENANT_A, id });
+
+    // GET the enriched detail.
+    const got = await makeRequest(baseUrl, 'GET', `/api/records/${id}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(got.statusCode).toBe(200);
+    const body = JSON.parse(got.body) as Record<string, unknown>;
+
+    // Base fields must be present.
+    expect(body['id']).toBe(id);
+    expect(body['application_id']).toBe(appAId);
+    expect(body['registry_def_id']).toBe(regAId);
+    expect(typeof body['record_schema_version']).toBe('number');
+    expect(body['data']).toEqual({ name: 'Detail-test', amount: 7 });
+    expect(typeof body['created_at']).toBe('number');
+    expect(typeof body['updated_at']).toBe('number');
+
+    // T-0295 enriched fields: record_schema must be the governing registry_def schema.
+    expect(body['record_schema']).not.toBeNull();
+    expect(body['record_schema']).not.toBeUndefined();
+    const schema = body['record_schema'] as Record<string, unknown>;
+    expect(schema['type']).toBe('object');
+    expect(typeof schema['properties']).toBe('object');
+
+    // created_by must be the actor slug that created the record.
+    expect(body['created_by']).toBe('actor-a');
+  }));
+
+  it('GET /api/records/:id returns 404 for a non-existent record', requireDb(async () => {
+    // A random UUID that was never created in any tenant.
+    const missingId = '00000000-dead-beef-cafe-000000000001';
+    const got = await makeRequest(baseUrl, 'GET', `/api/records/${missingId}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(got.statusCode).toBe(404);
+    const body = JSON.parse(got.body) as { error: { code: string } };
+    expect(body.error?.code).toBe('NOT_FOUND');
+  }));
+
+  it('GET /api/records/:id returns 404 for a record in another tenant', requireDb(async () => {
+    // Seed a record in TENANT_B, then try to GET it as actor-a (TENANT_A).
+    let bRecId = '';
+    await withClient(migratorUrl(), async (c) => {
+      bRecId = await seedRecordDirect(c, TENANT_B, regBId, { name: 'B-detail-target' });
+    });
+    recordCleanup.push({ tenantId: TENANT_B, id: bRecId });
+
+    // actor-a (TENANT_A) cannot see TENANT_B's record → 404 (RLS-enforced).
+    const got = await makeRequest(baseUrl, 'GET', `/api/records/${bRecId}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(got.statusCode).toBe(404);
+  }));
+});
