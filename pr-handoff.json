@@ -1,31 +1,33 @@
 {
-  "task_id": "T-0242",
+  "task_id": "T-0327",
   "status": "pr_open",
-  "branch": "task/T-0242",
+  "branch": "task/T-0327",
   "ci_local": {
     "build": true,
-    "lint": false,
+    "lint": true,
     "types": true,
     "tests": true,
     "fitness": true
   },
   "files_changed": [
-    "src/vendor/issuance.ts",
-    "src/vendor/file-license-store.ts",
-    "src/cli/issue-key.ts",
-    "src/__tests__/issuance.test.ts",
-    "ci/checks/vendor-private-not-committed.sh",
-    "ci/checks/vendor-priv-not-in-client-circuit.sh",
-    "ci/checks/issuance-zero-dep.sh",
-    "ci/checks/issuance-store-not-tenant-table.sh",
-    "package.json"
+    "src/http/seed-write.ts",
+    "src/http/org.ts",
+    "src/http/forms.ts",
+    "src/http/inbox.ts",
+    "src/http/notifications.ts",
+    "src/http/notification-prefs.ts",
+    "src/http/pdp-explain.ts",
+    "src/http/audit.ts",
+    "src/http/grant-trail.ts",
+    "web/src/screens/rights/ra-intents.jsx",
+    "src/__tests__/spaAuthSiblings.test.ts"
   ],
-  "deviations_from_adr": [
-    "ADR FF-T242-2 intent is 'private key FILE READ only in CLI' (NF-2 §1.4); but a bare createPrivateKey() check would also flag issuance.ts where createPrivateKey is legitimately used to convert a PEM *argument* to a key object for signing (no file I/O). FF-T242-2 updated to check readFileSync+priv context to match actual ADR intent rather than bare createPrivateKey.",
-    "ADR FF-T242-1 comment-exclusion extended to also skip .md files (ADR/spec docs describe PEM markers as text) and printf/echo fixture lines in existing CI self-tests. ADR anticipates this: 'исключение own ADR/spec строк, где токен встречается как пример'."
-  ],
+  "deviations_from_adr": [],
   "blocked_reason": null,
-  "friction_events": [
-    "lint:pre-existing — 4 @typescript-eslint/no-unused-vars errors in src/core/__tests__/doc-reconcile.test.ts, doc-regen.test.ts, doc-summary.test.ts existed on dev before this task; my new files (issuance.ts, file-license-store.ts, issue-key.ts, issuance.test.ts) are lint-clean (verified with npx eslint on those files: exit 0)"
-  ]
+  "friction_events": [],
+  "routes_wrapped_count": 31,
+  "any_frozen_red": false,
+  "scope_clean": true,
+  "touched_out_of_scope": [],
+  "tests_added": 63
 }
