@@ -40,8 +40,8 @@ const NEUTRALS = [
 
 function PaletteSection() {
   return (
-    <Section num="01" title="Палитра" desc="графит + один сигнал + три исполнителя">
-      <div className="chs-subhead">Нейтральная база — графит / уголь</div>
+    <Section num="01" title="Палитра" desc="тёплая нейтраль + кобальт + три исполнителя">
+      <div className="chs-subhead">Нейтральная база — тёплая бумага / камень</div>
       <div className="chs-swatch-row">
         {NEUTRALS.map(([n, v]) => (
           <Swatch key={v} name={n} varName={v} color={`var(${v})`} />
@@ -311,8 +311,11 @@ function PrimitivesSection() {
 }
 
 /* ---------- App ---------- */
+/* Превью брендбука («тёплая нейтраль + кобальт»). Светлая — основная тема
+   (default), тёмная — равноправная; обе превьюшатся переключателем. Тот же флип,
+   что в design/tokens.css: :root = светлая, [data-theme="dark"] = тёмная. */
 function App() {
-  const [theme, setTheme] = useState("dark");
+  const [theme, setTheme] = useState("light");
   React.useEffect(() => { document.documentElement.setAttribute("data-theme", theme); }, [theme]);
   return (
     <div className="chs-app">
@@ -320,11 +323,11 @@ function App() {
         <div className="chs-brand">
           <span className="chs-logo" />
           <span className="chs-brand__name">Choros</span>
-          <span className="chs-brand__tag">design-system / foundation v0.1</span>
+          <span className="chs-brand__tag">brandbook preview · тёплая нейтраль + кобальт</span>
         </div>
         <div className="chs-theme-toggle" role="group" aria-label="Тема">
-          <button aria-pressed={theme==="dark"} onClick={()=>setTheme("dark")}>Тёмная</button>
           <button aria-pressed={theme==="light"} onClick={()=>setTheme("light")}>Светлая</button>
+          <button aria-pressed={theme==="dark"} onClick={()=>setTheme("dark")}>Тёмная</button>
         </div>
       </header>
 
@@ -332,9 +335,11 @@ function App() {
         <div className="chs-intro">
           <h1>Фундамент дизайн-системы</h1>
           <p>
-            Базовый слой для процессной платформы, где человек, ИИ-агент и микросервис — равноправные исполнители
-            под одним control plane и единым аудит-логом. Токены, типошкала и доменные примитивы, которые наследуют
-            остальные проекты. Инженерная плотность, резкие грани, моноширинный для всего машинного.
+            Превью брендбука: базовый слой для процессной платформы, где человек, ИИ-агент и микросервис —
+            равноправные исполнители под одним control plane и единым аудит-логом. Токены, типошкала и доменные
+            примитивы, которые наследуют остальные экраны. Тёплая бумажная нейтраль, единственный кобальтовый
+            сигнал на действии и фокусе, инженерная плотность, моноширинный для всего машинного. Светлая тема —
+            основная; обе выверены по контрасту ≥ WCAG AA.
           </p>
         </div>
 
@@ -344,7 +349,7 @@ function App() {
         <PrimitivesSection />
 
         <footer className="chs-foot">
-          <span>CHOROS · chs-* tokens · :root + [data-theme=light]</span>
+          <span>CHOROS · chs-* tokens · :root (светлая) + [data-theme=dark]</span>
           <span>Golos Text · JetBrains Mono</span>
         </footer>
       </div>

@@ -13,7 +13,11 @@
 
    Props:
    - formKey:  'purchase' | 'approval'  — ключ из CHOROS_FORMS
-   - theme:    'dark' | 'light'         — data-theme на <html> внутри iframe
+   - theme:    'dark' | 'light'         — data-theme на <html> внутри iframe;
+               НЕОБЯЗАТЕЛЕН: если не передан, форма НАСЛЕДУЕТ активную тему
+               приложения (data-theme на <html>), а при её отсутствии — светлую
+               (основную). Это чинит корень бага аудита #1: раньше форма дефолтила
+               в тёмное и при светлом приложении рендерила нечитаемый ввод.
    - onSubmit: optional callback(result) — вызывается после успешного ответа сервера
                  result = { ok: true, formId, value } | { ok: false, fields: FieldError[] }
    ============================================================================ */
@@ -40,14 +44,28 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 const MIN_HEIGHT = FRAME_MIN_HEIGHT;
 
 /**
+ * Активная тема приложения с <html data-theme> (фолбэк — светлая, ОСНОВНАЯ).
+ * Источник истины для наследования темы формой, когда проп theme не передан.
+ * @returns {'light' | 'dark'}
+ */
+function appTheme() {
+  if (typeof document === 'undefined') return 'light';
+  const t = document.documentElement.getAttribute('data-theme');
+  return t === 'dark' ? 'dark' : 'light';
+}
+
+/**
  * Собирает полный srcdoc для sandbox-iframe одной формы.
  * @param {string} formHtml  — HTML-строка формы из CHOROS_FORMS
- * @param {string} theme     — 'dark' | 'light'
+ * @param {string} theme     — 'dark' | 'light'; если невалиден — наследует тему
+ *                             приложения (appTheme), а не дефолтит в тёмное.
  * @param {string} css       — содержимое form-theme.css (строка)
  * @param {string} script    — CHOROS_SANDBOX_SCRIPT (строка)
  */
 function buildSrcdoc(formHtml, theme, css, script) {
-  const safeTheme = ['dark', 'light'].includes(theme) ? theme : 'dark';
+  // НЕ дефолтим в 'dark': непереданная/невалидная тема → активная тема приложения
+  // (светлая основная при отсутствии атрибута). Корень бага аудита #1.
+  const safeTheme = ['dark', 'light'].includes(theme) ? theme : appTheme();
   return `<!DOCTYPE html>
 <html lang="ru" data-theme="${safeTheme}">
 <head>
@@ -67,6 +85,22 @@ function buildSrcdoc(formHtml, theme, css, script) {
 function FormViewer({ formKey, theme, onSubmit }) {
   const iframeRef = useRef(null);
   const [height, setHeight] = useState(MIN_HEIGHT);
+
+  // Тема, которую реально отдаём форме: явный проп → иначе наследуем активную
+  // тему приложения (<html data-theme>, светлая основная по умолчанию).
+  // appThemeState следит за сменой темы приложения, пока форма открыта, чтобы
+  // iframe пере-рендерился в новую тему (а не застрял в стартовой).
+  const [appThemeState, setAppThemeState] = useState(() => appTheme());
+  useEffect(() => {
+    if (theme || typeof MutationObserver === 'undefined') return undefined;
+    const obs = new MutationObserver(() => setAppThemeState(appTheme()));
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => obs.disconnect();
+  }, [theme]);
+  const effectiveTheme = theme || appThemeState;
 
   // Submit state: idle | pending | success | validation_error | network_error
   const [submitState, setSubmitState] = useState('idle');
@@ -145,13 +179,14 @@ function FormViewer({ formKey, theme, onSubmit }) {
     }
   }
 
-  // Строим srcdoc при смене формы или темы
+  // Строим srcdoc при смене формы или темы. Тема НАСЛЕДУЕТСЯ от приложения
+  // (effectiveTheme), а не дефолтит в 'dark' — корень бага аудита #1.
   const srcdoc = React.useMemo(() => {
     const forms = window.CHOROS_FORMS;
     const script = window.CHOROS_SANDBOX_SCRIPT;
     if (!forms || !forms[formKey]) return '';
-    return buildSrcdoc(forms[formKey], theme || 'dark', formThemeCss, script || '');
-  }, [formKey, theme]);
+    return buildSrcdoc(forms[formKey], effectiveTheme, formThemeCss, script || '');
+  }, [formKey, effectiveTheme]);
 
   // Сброс высоты + submit state при смене формы
   useEffect(() => {
