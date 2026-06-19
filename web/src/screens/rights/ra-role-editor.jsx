@@ -6,6 +6,8 @@
 import React, { useState } from 'react';
 import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
+import { authHeaders } from '../../app-shell/dev-auth.js';
+import { isKeycloakMode, getAuthConfig } from '../../app-shell/auth-mode.js';
 import {
   ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI, PRESETS,
   axesFromGrants, CriticalityBadge, ScopeToken, ProvenanceTag, SectionHead, Segmented,
@@ -178,11 +180,12 @@ function mapOp(op) {
  * Returns { ok: true, id, state } or { ok: false, reason }.
  * state = "confirmed" | "semi-confirmed"
  */
-async function postGrant(atom, actorId) {
+async function postGrant(atom) {
   try {
+    // Mode-aware auth (dev → X-Dev-User from the picked identity; keycloak → Bearer).
     const resp = await fetch("/api/grants", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-dev-user": actorId },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(atom),
     });
     if (resp.status === 201) {
@@ -202,9 +205,17 @@ async function postGrant(atom, actorId) {
  */
 async function postSecondConfirm(changeRef, actorId) {
   try {
+    // Dual-control: the second confirm must come from a DIFFERENT authenticator
+    // than the first. In dev mode we express that by overriding X-Dev-User with the
+    // second-admin slug (`actorId`); in keycloak mode the second admin would be a
+    // distinct logged-in session, so we send the current session's Bearer (authHeaders).
+    const headers = { "Content-Type": "application/json", ...authHeaders() };
+    if (!isKeycloakMode(getAuthConfig())) {
+      headers["X-Dev-User"] = actorId;
+    }
     const resp = await fetch("/api/grants", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-dev-user": actorId },
+      headers,
       body: JSON.stringify({ phase: "confirm2", change_ref: changeRef }),
     });
     if (resp.ok) {
@@ -302,7 +313,7 @@ function RoleEditorScreen() {
           granted_by: ACTOR_ID,
           delegable: true,
         };
-        const result = await postGrant(atom, ACTOR_ID);
+        const result = await postGrant(atom);
         if (result.ok) {
           successCount++;
           if (result.state === "semi-confirmed") {
@@ -326,7 +337,8 @@ function RoleEditorScreen() {
     try {
       const resp = await fetch("/api/grants/propose", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-dev-user": ACTOR_ID },
+        // Mode-aware auth (dev → X-Dev-User from the picked identity; keycloak → Bearer).
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ text: llmText, role_id: EDITOR_ROLE_ID }),
       });
       if (resp.status === 503) {
@@ -404,7 +416,7 @@ function RoleEditorScreen() {
       proposed_by: proposalAgentId, // UUID from proposal response (AC-15)
       delegable: true,
     };
-    const result = await postGrant(atom, ACTOR_ID);
+    const result = await postGrant(atom);
     if (result.ok && result.state === "semi-confirmed") {
       setPendingConfirms((prev) => [...prev, { changeRef: result.id, uri: p.uri, op: p.ops[0] || "read" }]);
     }

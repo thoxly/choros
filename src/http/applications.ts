@@ -43,7 +43,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -236,7 +236,10 @@ export function registerApplicationRoutes(
   const { pool, resolveActorTenant } = deps;
 
   // POST /api/applications — create one application in the caller's tenant.
-  router.register("POST", "/api/applications", async (req: IncomingMessage, res: ServerResponse) => {
+  // withAuth: in keycloak mode a valid Bearer JWT is REQUIRED (401 otherwise) and
+  // the actor comes from the validated token (extractActor reads getAuthContext);
+  // in dev mode withAuth is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/applications", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = extractActor(req);
 
     const rawBody = await readJsonBody(req);
@@ -283,10 +286,10 @@ export function registerApplicationRoutes(
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(serializeApplication(row)));
-  });
+  }));
 
   // GET /api/applications — list the caller-tenant's applications.
-  router.register("GET", "/api/applications", async (req: IncomingMessage, res: ServerResponse) => {
+  router.register("GET", "/api/applications", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = extractActor(req);
     const tenantId = await resolveActorTenant(actor);
     const rows = await listApplications(pool, tenantId);
@@ -294,13 +297,13 @@ export function registerApplicationRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ applications: rows.map(serializeApplication) }));
-  });
+  }));
 
   // GET /api/applications/:id — get one application (404 if not in caller's tenant).
   router.register(
     "GET",
     "/api/applications/:id",
-    async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
       const id = params["id"] ?? "";
       assertUuidShape(id, "application id");
 
@@ -315,6 +318,6 @@ export function registerApplicationRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeApplication(row)));
-    },
+    }),
   );
 }

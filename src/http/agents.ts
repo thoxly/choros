@@ -33,7 +33,7 @@ import {
 import { insertAgentRows, AgentConflictError } from "../db/agent-provision.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, withAuth } from "./auth.js";
 import type { ScopeElement } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
@@ -157,7 +157,9 @@ export function registerAgentRoutes(
 ): void {
 
   // ---- POST /api/agents/hire ----------------------------------------------
-  router.register("POST", "/api/agents/hire", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/agents/hire", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
@@ -308,5 +310,5 @@ export function registerAgentRoutes(
         kc_client_id: kcResult.clientId,
       }),
     );
-  });
+  }));
 }

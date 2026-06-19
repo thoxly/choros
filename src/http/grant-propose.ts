@@ -23,7 +23,7 @@ import { parseScopeElement } from "./grants.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, withAuth } from "./auth.js";
 import type { ScopeElement } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,9 @@ export function registerGrantProposeRoute(
   pool: pg.Pool,
   deps: GrantProposeDeps = defaultDeps,
 ): void {
-  router.register("POST", "/api/grants/propose", async (req, res) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/grants/propose", withAuth(async (req, res) => {
     let actorId: string;
     {
       let devUser = req.headers[DEV_USER_HEADER];
@@ -422,5 +424,5 @@ export function registerGrantProposeRoute(
         proposed: result.proposed,
       } satisfies GrantProposeResponse),
     );
-  });
+  }));
 }

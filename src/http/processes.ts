@@ -14,6 +14,7 @@
  * the handler in when the composition root supplies a pool + FlowableClient.
  */
 import { HttpError, type Router } from "./router.js";
+import { withAuth } from "./auth.js";
 import { JobStore } from "../core/jobStore.js";
 import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
@@ -220,7 +221,11 @@ export function registerProcessesRoutes(
   // captured by the ':id' pattern. Tenant-scoped (withTenantTx + RLS); the pg/engine
   // logic lives in process-start.ts (FF-DISPLAY-4 keeps THIS file display-plane-pure).
   if (startDeps) {
-    router.register("POST", "/api/processes/start", makeStartInstanceHandler(startDeps));
+    // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+    // bypass); dev mode is a no-op pass-through and the x-dev-user / x-tenant-id FROZEN
+    // contract (§2.2) is unchanged. The display-plane GETs below stay unguarded (public
+    // read), matching the existing read-API posture.
+    router.register("POST", "/api/processes/start", withAuth(makeStartInstanceHandler(startDeps)));
   }
 
   // GET /api/processes — return full process instances list. When start-deps are

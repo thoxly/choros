@@ -78,7 +78,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { validateRecordAgainstSchema } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.js";
@@ -763,7 +763,9 @@ export function registerRecordRoutes(
 
   // POST /api/records — create one record in the caller's tenant, validated against
   // the governing registry_def's record_schema.
-  router.register("POST", "/api/records", async (req: IncomingMessage, res: ServerResponse) => {
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = extractActor(req);
 
     const rawBody = await readJsonBody(req);
@@ -815,11 +817,11 @@ export function registerRecordRoutes(
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(serializeRecord(outcome.row)));
-  });
+  }));
 
   // GET /api/records — list the caller-tenant's records, optionally filtered by
   // ?application_id= and/or ?registry_def_id=.
-  router.register("GET", "/api/records", async (req: IncomingMessage, res: ServerResponse) => {
+  router.register("GET", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = extractActor(req);
     const applicationId = parseUuidQueryParam(req, "application_id");
     const registryDefId = parseUuidQueryParam(req, "registry_def_id");
@@ -830,7 +832,7 @@ export function registerRecordRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ records: rows.map(serializeRecord) }));
-  });
+  }));
 
   // GET /api/records/:id — get one record enriched for the detail screen
   // (T-0295): includes record_schema + created_by in addition to the base
@@ -838,7 +840,7 @@ export function registerRecordRoutes(
   router.register(
     "GET",
     "/api/records/:id",
-    async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
       const id = params["id"] ?? "";
       assertUuidShape(id, "record id");
 
@@ -853,7 +855,7 @@ export function registerRecordRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeRecordDetail(row)));
-    },
+    }),
   );
 
   // PUT /api/records/:id — update a record's data (re-validated; audited; 404 if not
@@ -861,7 +863,7 @@ export function registerRecordRoutes(
   router.register(
     "PUT",
     "/api/records/:id",
-    async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
       const id = params["id"] ?? "";
       assertUuidShape(id, "record id");
 
@@ -901,6 +903,6 @@ export function registerRecordRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeRecord(outcome.row)));
-    },
+    }),
   );
 }
