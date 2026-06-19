@@ -205,10 +205,14 @@ export async function appendProcessStarted(
  * T-0332 (E15-S0b): embeds the canonical TransitionPayload under
  * TRANSITION_PAYLOAD_KEY in the payload. actor_type = "human" (the approve path
  * is always a human user-task; projectActorType("human", "user-task") = "human").
- * duration_ms = null — this path does not track wall-clock task duration yet;
- * T-0335 fills it for the engine completeTask path in S1.
  * tenantId is optional for backward compat; when absent, the TransitionPayload
  * tenant_id is set to "" (metrics queries filter by tenant independently).
+ *
+ * T-0335 (E15-S1b): `durationMs` is now threaded in from the approve handler
+ * (nowMs - task.occurredAt) instead of being hard-coded null. Optional for
+ * backward-compat (callers without a duration pass nothing → null, preserving the
+ * T-0332 contract); the approve route always supplies it now so the
+ * transition_payload.duration_ms is a positive int.
  */
 export async function appendTaskApproved(
   tx: PgClientLike,
@@ -224,6 +228,12 @@ export async function appendTaskApproved(
      * Optional for backward-compat; defaults to "" if not supplied.
      */
     readonly tenantId?: string;
+    /**
+     * T-0335: wall-clock task duration in ms, computed once in the approve handler
+     * (nowMs - process.started occurred_at). Optional for backward-compat — absent
+     * ⇒ null (the pre-T-0335 behaviour).
+     */
+    readonly durationMs?: number | null;
   },
 ): Promise<void> {
   // T-0332: actor_type for human approve path is always "human" (user-task channel).
@@ -258,7 +268,9 @@ export async function appendTaskApproved(
         actor: args.actor,
         actorType,
         ts: args.nowMs,
-        durationMs: null, // T-0335 fills via completeTask outbox in S1
+        // T-0335: real wall-clock duration threaded from the approve handler
+        // (nowMs - task.occurredAt). Defaults to null for legacy callers.
+        durationMs: args.durationMs ?? null,
         verdict: "approve",
       }),
     },

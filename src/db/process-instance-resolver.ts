@@ -185,7 +185,61 @@ export async function resolveInstanceTarget(
     };
   }
 
-  return withTenant(pool, tenantId, async (client) => {
+  return withTenant(pool, tenantId, (client) =>
+    resolveInstanceTargetReads(client, tenantId, instanceId),
+  );
+}
+
+/**
+ * T-0335 [E15-S1b] — ON-CLIENT overload of resolveInstanceTarget.
+ *
+ * Runs the SAME 3 RLS-gated reads on a caller-supplied client that is ALREADY
+ * inside an open tenant-scoped tx (the inbox approve tx: BEGIN + SET LOCAL
+ * choros.tenant_id + FORCE RLS). This lets the applier's resolution share the
+ * approve transaction so the resolve-read and the record-write are atomic — a
+ * caller ROLLBACK undoes both, exactly like createRecord/appendProcessStarted
+ * run on the caller's open client.
+ *
+ * The caller MUST have already validated tenantId (UUID) and set the GUC; this
+ * overload does NOT open/commit a tx of its own. Invalid input still degrades to
+ * an `unresolved` result (no throw) so the applier branches honestly.
+ *
+ * NEVER throws on "not found" paths — same contract as resolveInstanceTarget.
+ */
+export async function resolveInstanceTargetOnClient(
+  client: pg.PoolClient,
+  tenantId: string,
+  instanceId: string,
+): Promise<InstanceTargetResult> {
+  if (!isUuid(tenantId)) {
+    return {
+      kind: "unresolved",
+      reason: "invalid_input",
+      detail: `tenantId is not a valid UUID: ${JSON.stringify(tenantId)}`,
+    };
+  }
+  if (!instanceId || instanceId.trim().length === 0) {
+    return {
+      kind: "unresolved",
+      reason: "invalid_input",
+      detail: `instanceId must be a non-empty string`,
+    };
+  }
+  return resolveInstanceTargetReads(client, tenantId, instanceId);
+}
+
+/**
+ * The shared 3-read body, run against an already-tenant-scoped client (whether
+ * opened by withTenant above, or supplied by the caller's approve tx). Extracted
+ * so resolveInstanceTarget (own-tx) and resolveInstanceTargetOnClient (caller-tx)
+ * issue byte-identical SQL with one source of truth.
+ */
+async function resolveInstanceTargetReads(
+  client: pg.PoolClient,
+  tenantId: string,
+  instanceId: string,
+): Promise<InstanceTargetResult> {
+  {
     // Step 1: resolve proc_key from the process.started audit event.
     //
     // The process.started event payload carries { inst, proc_key, ... }
@@ -301,5 +355,5 @@ export async function resolveInstanceTarget(
       registryDisplayName: reg.display_name,
       tenantId,
     };
-  });
+  }
 }
