@@ -27,11 +27,23 @@
 /**
  * @typedef {'live' | 'demo' | 'soon'} NavStatus
  * @typedef {{ id: string, label: string, icon: string, screen?: boolean, soon?: boolean, hidden?: boolean, status: NavStatus, count?: number }} NavItem
- * @typedef {{ group: string, items: NavItem[] }} NavGroup
+ * @typedef {{ group: string, items: NavItem[], home?: boolean }} NavGroup
  */
 
 /** @type {NavGroup[]} */
 export const NAV = [
+  {
+    // T-0326: домашний раздел «Обзор» — точка входа над группами. Это НЕ группа
+    // в смысле §«заголовок без выбора = шум»: помечен `home: true`, шелл рисует
+    // его как одиночный пункт БЕЗ заголовка-ярлыка (см. shell.jsx nav-рендер).
+    group: "Обзор",
+    home: true,
+    items: [
+      // Обзор: домашний дашборд. Живые счётчики тянет сам экран из live-API
+      // (applications / inbox / processes) — в nav счётчик не дублируем (T-0307 #5).
+      { id: "overview", label: "Обзор", icon: "apps", screen: true, status: "live" },
+    ],
+  },
   {
     group: "Конструктор",
     items: [

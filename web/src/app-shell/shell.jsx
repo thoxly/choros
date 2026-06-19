@@ -12,6 +12,7 @@ import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
 import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
+import OverviewScreen from '../screens/screen-overview.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
 import ProcessesScreen from '../screens/screen-processes.jsx';
@@ -49,6 +50,7 @@ const RIGHTS_TABS = [
 // BASE crumb; the dynamic builder below extends it for deep, param-aware routes
 // (app field-editor, records, record detail) by injecting entity names.
 const SCREEN_META = {
+  overview: { crumb: ["Обзор"] },
   apps:  { crumb: ["Конструктор", "Приложения"] },
   "app-schema": { crumb: ["Конструктор", "Приложения"] },
   "app-records": { crumb: ["Конструктор", "Приложения"] },
@@ -97,7 +99,7 @@ function shortId(id) {
  */
 function buildCrumbs(pathname, entities) {
   const parts = pathname.split('/').filter(Boolean);
-  const root = parts[0] || 'apps';
+  const root = parts[0] || 'overview';
   const appName = (appId) => entities[`app:${appId}`] || shortId(appId);
 
   // Constructor deep routes: /app-schema/:appId, /app-records/:appId,
@@ -132,12 +134,12 @@ function buildCrumbs(pathname, entities) {
     ];
   }
 
-  // Default: static [group, leaf] from SCREEN_META for top-level screens. The
-  // group segment is not itself a route, so it stays non-clickable; the leaf is
-  // current. Unknown routes fall back to the Конструктор / Приложения home.
-  const meta = SCREEN_META[root] || SCREEN_META.apps;
-  const [group, leaf] = meta.crumb;
-  return [{ label: group }, { label: leaf }];
+  // Default: static crumb from SCREEN_META for top-level screens. A single-
+  // segment crumb (home «Обзор») renders one current segment; a [group, leaf]
+  // crumb renders a non-clickable group + current leaf. Unknown routes fall back
+  // to the Обзор home.
+  const meta = SCREEN_META[root] || SCREEN_META.overview;
+  return meta.crumb.map((label) => ({ label }));
 }
 
 function ThemeToggle({ theme, setTheme }) {
@@ -466,11 +468,12 @@ function AppShell() {
     };
   }, []);
 
-  // Derive current screen from pathname. T-0307 (audit §1): the app now lands on
-  // the Конструктор / Приложения section (where a new user builds), not someone
-  // else's operational «Инбокс задач» — so the empty-path fallback is "apps".
+  // Derive current screen from pathname. T-0326: the app now lands on the
+  // orienting «Обзор» home, so the empty-path fallback is "overview" (the «/»
+  // route redirects there anyway; this just keeps the active-nav highlight and
+  // crumb honest during the redirect tick).
   const pathParts = location.pathname.split('/').filter(Boolean);
-  const screen = pathParts[0] || "apps";
+  const screen = pathParts[0] || "overview";
 
   // T-0317: which application id (if any) the current route is about. Deep
   // constructor routes carry it as the first param (/app-schema/:appId,
@@ -602,7 +605,9 @@ function AppShell() {
             if (items.length === 0) return null;
             return (
               <div className="chs-nav__group" key={grp.group}>
-                <div className="chs-nav__grouplabel">{grp.group}</div>
+                {/* T-0326: home group («Обзор») renders as a single top item
+                    without a group label — a header over one choice is noise. */}
+                {!grp.home && <div className="chs-nav__grouplabel">{grp.group}</div>}
                 {items.map((item) => (
                   <NavItem key={item.id} item={item} active={screen === item.id} />
                 ))}
@@ -628,8 +633,10 @@ function AppShell() {
         {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
-            {/* T-0307 (audit §1): default landing → Конструктор / Приложения. */}
-            <Route path="/" element={<Navigate to="/apps" replace />} />
+            {/* T-0326: default landing → «Обзор» (orienting home), not the bare
+                /apps list. /apps stays reachable from the tile CTA + nav. */}
+            <Route path="/" element={<Navigate to="/overview" replace />} />
+            <Route path="/overview" element={<OverviewScreen />} />
             <Route path="/apps" element={<AppsScreen />} />
             {/* T-0266: application field-constructor (registry_def editor) */}
             <Route path="/app-schema/:appId" element={<AppSchemaScreen />} />
