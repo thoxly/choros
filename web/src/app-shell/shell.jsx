@@ -3,8 +3,8 @@
    Оболочка: левая навигация, топбар, переключатель тем, роутинг.
    ============================================================================ */
 
-import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useContext, useMemo, useCallback } from 'react';
+import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-router-dom';
 import { Button, Modal, Tooltip } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
@@ -44,19 +44,101 @@ const RIGHTS_TABS = [
 
 // NAV is imported from ./nav-config.js
 
+// SCREEN_META (T-0317): static [group, leaf] crumb per top-level screen. Group
+// labels track the re-sectioned IA in nav-config.js (4 разделов). This is the
+// BASE crumb; the dynamic builder below extends it for deep, param-aware routes
+// (app field-editor, records, record detail) by injecting entity names.
 const SCREEN_META = {
   apps:  { crumb: ["Конструктор", "Приложения"] },
-  "app-schema": { crumb: ["Конструктор", "Поля приложения"] },
-  "app-records": { crumb: ["Конструктор", "Записи приложения"] },
-  inbox: { crumb: ["Оркестрация", "Инбокс задач"] },
-  org:   { crumb: ["Оркестрация", "Оргструктура"] },
-  processes: { crumb: ["Оркестрация", "Процессы"] },
-  agents: { crumb: ["Оркестрация", "Агенты"] },
+  "app-schema": { crumb: ["Конструктор", "Приложения"] },
+  "app-records": { crumb: ["Конструктор", "Приложения"] },
+  inbox: { crumb: ["Работа", "Мои задачи"] },
+  org:   { crumb: ["Исполнители и доступ", "Оргструктура"] },
+  processes: { crumb: ["Работа", "Процессы"] },
+  agents: { crumb: ["Исполнители и доступ", "Агенты"] },
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
-  audit: { crumb: ["Наблюдаемость", "Аудит инстанса"] },
-  rights: { crumb: ["Доступ", "Права и доступ"] },
-  forms:  { crumb: ["Разработка", "Формы задач"] },
+  audit: { crumb: ["Наблюдаемость", "Аудит"] },
+  rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
+  forms:  { crumb: ["Конструктор", "Формы задач"] },
 };
+
+/**
+ * T-0317: lightweight crumb context. Deep routes (/app-schema/:appId,
+ * /app-records/:appId, /apps/:appId/records/:id) need an entity's human name
+ * (e.g. application display_name) that only the screen has fetched. Rather than
+ * lift every fetch into the shell, a screen calls `setCrumbEntity('app:'+id, name)`
+ * once it resolves the name; the breadcrumb builder reads it. If a screen hasn't
+ * registered a name yet, the builder falls back to a short id — the crumb stays
+ * correct (right group, clickable parents), just less pretty for a tick.
+ *
+ * @typedef {{ entities: Record<string,string>, setCrumbEntity: (key: string, label: string) => void }} CrumbCtx
+ */
+const CrumbContext = React.createContext(/** @type {CrumbCtx} */ ({ entities: {}, setCrumbEntity: () => {} }));
+
+/** Shorten a raw id for a fallback crumb (no name yet): keep it readable. */
+function shortId(id) {
+  if (!id) return '';
+  return id.length > 10 ? id.slice(0, 8) + '…' : id;
+}
+
+/**
+ * T-0317: build clickable, param-aware breadcrumb segments for the current route.
+ * Returns `[{ label, path? }]` — segments with a `path` render as up-nav links;
+ * the last (current) segment never links. Deep routes inject entity names from
+ * the crumb context (application display_name, record id).
+ *
+ * Fixes the record-detail bug: `/apps/:appId/records/:id` previously fell back to
+ * the bare «Приложения» crumb (pathParts[0] === "apps" → SCREEN_META.apps). It now
+ * reads «Конструктор / Приложения / «<app>» / Данные / Запись <id>».
+ *
+ * @param {string} pathname
+ * @param {Record<string,string>} entities  resolved entity labels by key
+ * @returns {{ label: string, path?: string }[]}
+ */
+function buildCrumbs(pathname, entities) {
+  const parts = pathname.split('/').filter(Boolean);
+  const root = parts[0] || 'apps';
+  const appName = (appId) => entities[`app:${appId}`] || shortId(appId);
+
+  // Constructor deep routes: /app-schema/:appId, /app-records/:appId,
+  // /apps/:appId/records/:id — all hang under Конструктор / Приложения / «<app>».
+  if (root === 'app-schema' && parts[1]) {
+    const appId = parts[1];
+    return [
+      { label: 'Конструктор' },
+      { label: 'Приложения', path: '/apps' },
+      { label: `«${appName(appId)}»`, path: `/app-records/${appId}` },
+      { label: 'Поля' },
+    ];
+  }
+  if (root === 'app-records' && parts[1]) {
+    const appId = parts[1];
+    return [
+      { label: 'Конструктор' },
+      { label: 'Приложения', path: '/apps' },
+      { label: `«${appName(appId)}»` },
+      { label: 'Данные' },
+    ];
+  }
+  if (root === 'apps' && parts[1] && parts[2] === 'records' && parts[3]) {
+    const appId = parts[1];
+    const recId = parts[3];
+    return [
+      { label: 'Конструктор' },
+      { label: 'Приложения', path: '/apps' },
+      { label: `«${appName(appId)}»`, path: `/app-records/${appId}` },
+      { label: 'Данные', path: `/app-records/${appId}` },
+      { label: `Запись ${shortId(recId)}` },
+    ];
+  }
+
+  // Default: static [group, leaf] from SCREEN_META for top-level screens. The
+  // group segment is not itself a route, so it stays non-clickable; the leaf is
+  // current. Unknown routes fall back to the Конструктор / Приложения home.
+  const meta = SCREEN_META[root] || SCREEN_META.apps;
+  const [group, leaf] = meta.crumb;
+  return [{ label: group }, { label: leaf }];
+}
 
 function ThemeToggle({ theme, setTheme }) {
   return (
@@ -139,8 +221,10 @@ async function downloadAuditLog() {
   }
 }
 
-function Topbar({ screen, theme, setTheme, onLaunchProcess }) {
-  const crumb = SCREEN_META[screen]?.crumb || [];
+function Topbar({ screen, pathname, theme, setTheme, onLaunchProcess }) {
+  const { entities } = useContext(CrumbContext);
+  // T-0317: dynamic, param-aware crumbs (entity names injected, parents linkable).
+  const crumb = buildCrumbs(pathname, entities);
   const navigate = useNavigate();
   const right =
     screen === "inbox" ? (
@@ -177,13 +261,28 @@ function Topbar({ screen, theme, setTheme, onLaunchProcess }) {
   return (
     <header className="chs-topbar">
       <div className="chs-topbar__left">
-        <nav className="chs-crumbs">
-          {crumb.map((seg, i) => (
-            <React.Fragment key={i}>
-              {i > 0 && <span className="chs-crumbs__sep">/</span>}
-              <span className={`chs-crumbs__seg ${i === crumb.length - 1 ? "chs-crumbs__seg--cur" : ""}`}>{seg}</span>
-            </React.Fragment>
-          ))}
+        <nav className="chs-crumbs" aria-label="Хлебные крошки">
+          {crumb.map((seg, i) => {
+            const isLast = i === crumb.length - 1;
+            return (
+              <React.Fragment key={i}>
+                {i > 0 && <span className="chs-crumbs__sep" aria-hidden="true">/</span>}
+                {seg.path && !isLast ? (
+                  // Parent segment → clickable up-nav (real route, kit link styling).
+                  <Link className="chs-crumbs__seg chs-crumbs__seg--link" to={seg.path}>
+                    {seg.label}
+                  </Link>
+                ) : (
+                  <span
+                    className={`chs-crumbs__seg ${isLast ? "chs-crumbs__seg--cur" : ""}`}
+                    aria-current={isLast ? "page" : undefined}
+                  >
+                    {seg.label}
+                  </span>
+                )}
+              </React.Fragment>
+            );
+          })}
         </nav>
       </div>
       <div className="chs-topbar__right">
@@ -324,6 +423,17 @@ function AppShell() {
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
+  // T-0317: resolved crumb entity labels (e.g. app:<id> → display_name), filled
+  // by screens via useCrumbEntity once they fetch the name. Stable setter so the
+  // registering effect doesn't re-run; idempotent to avoid render loops.
+  const [crumbEntities, setCrumbEntities] = useState({});
+  const setCrumbEntity = useCallback((key, label) => {
+    setCrumbEntities((prev) => (prev[key] === label ? prev : { ...prev, [key]: label }));
+  }, []);
+  const crumbCtx = useMemo(
+    () => ({ entities: crumbEntities, setCrumbEntity }),
+    [crumbEntities, setCrumbEntity],
+  );
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -361,6 +471,36 @@ function AppShell() {
   // else's operational «Инбокс задач» — so the empty-path fallback is "apps".
   const pathParts = location.pathname.split('/').filter(Boolean);
   const screen = pathParts[0] || "apps";
+
+  // T-0317: which application id (if any) the current route is about. Deep
+  // constructor routes carry it as the first param (/app-schema/:appId,
+  // /app-records/:appId, /apps/:appId/records/:id) so the crumb can name it.
+  const crumbAppId =
+    (screen === "app-schema" || screen === "app-records") ? pathParts[1] :
+    (screen === "apps" && pathParts[2] === "records") ? pathParts[1] :
+    null;
+
+  // Resolve the application display_name for the breadcrumb. Screens are out of
+  // shell scope (and record-detail never fetches the app at all), so the shell
+  // does the lookup itself: one cheap GET /api/applications, cached in the crumb
+  // context. Best-effort — a failure just leaves the short-id fallback crumb.
+  useEffect(() => {
+    if (!currentUser || !crumbAppId) return;
+    if (crumbEntities[`app:${crumbAppId}`]) return; // already resolved
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/applications', { headers: devHeaders() });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const found = (data.applications || []).find((a) => a.id === crumbAppId);
+        if (found && found.display_name && !cancelled) {
+          setCrumbEntity(`app:${crumbAppId}`, found.display_name);
+        }
+      } catch { /* crumb name is cosmetic — keep the id fallback */ }
+    })();
+    return () => { cancelled = true; };
+  }, [currentUser, crumbAppId, crumbEntities, setCrumbEntity]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -427,6 +567,7 @@ function AppShell() {
   const devUser = currentUser;
 
   return (
+    <CrumbContext.Provider value={crumbCtx}>
     <div className="chs-shell">
       <aside className="chs-nav">
         <div className="chs-nav__brand">
@@ -483,7 +624,7 @@ function AppShell() {
       </aside>
 
       <main className="chs-main">
-        <Topbar screen={screen} theme={theme} setTheme={setTheme} onLaunchProcess={() => setLaunchOpen(true)} />
+        <Topbar screen={screen} pathname={location.pathname} theme={theme} setTheme={setTheme} onLaunchProcess={() => setLaunchOpen(true)} />
         {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
@@ -516,6 +657,7 @@ function AppShell() {
         </div>
       </main>
     </div>
+    </CrumbContext.Provider>
   );
 }
 
