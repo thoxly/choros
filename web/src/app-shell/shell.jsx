@@ -210,7 +210,7 @@ function RightsSubTabs() {
 }
 
 function AppShell() {
-  const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "dark");
+  const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "light");
   const [rightsFocus, setRightsFocus] = useState(null);
   const [launchOpen, setLaunchOpen] = useState(false);
   // Auth bootstrap (T-0258): authReady gates the first render until we know the

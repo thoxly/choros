@@ -1,14 +1,20 @@
 /* ============================================================================
-   CHOROS — form-theme.css
+   CHOROS — form-theme.css  ·  РЕ-СКИН v1 (брендбук «тёплая нейтраль + кобальт»)
    Тема для форм form-js (.fjs-*), исполняемых в ИЗОЛИРОВАННОМ sandbox-iframe.
 
    ВНУТРЬ iframe ничего не наследуется снаружи → этот файл САМОДОСТАТОЧЕН:
-   он сам объявляет все нужные --chs-* токены (тёмная :root + светлая [data-theme]),
-   подключает шрифты и переопределяет классы form-js.
+   он сам объявляет все нужные --chs-* токены и переопределяет классы form-js.
+   Значения токенов — синхронная копия design/tokens.css (тот же брендбук, тот же
+   флип): СВЕТЛАЯ семантика в :root (ОСНОВНАЯ, дефолт), тёмная — в [data-theme="dark"].
+
+   Пропагация темы (OBLIK Phase 0): FormViewer.jsx ставит data-theme на <html>
+   документа формы, наследуя АКТИВНУЮ тему приложения. Если тема не пробросилась —
+   форма падает в читаемую светлую основу (:root), а НЕ в нечитаемое тёмное
+   (корень бага аудита #1: «тёмный текст на тёмном, ввод не виден»).
 
    Подключение внутри sandbox-документа:
-     <link rel="stylesheet" href="choros-app/form-theme.css">
-     <html data-theme="dark|light">  ← тема выбирается на корне документа формы
+     <style> … этот файл … </style>
+     <html data-theme="light|dark">  ← тема = активная тема приложения
 
    Все значения — только через --chs-* (chs = CHoroS). Никаких хардкодов.
    ============================================================================ */
@@ -19,35 +25,36 @@
    1. ТОКЕНЫ  (самодостаточная копия — форма живёт в опаковом origin)
    ============================================================================ */
 :root {
-  /* --- сырая нейтральная шкала (графит, cool-neutral, низкая хрома) --- */
-  --chs-neutral-0:    oklch(0.992 0.001 265);
-  --chs-neutral-50:   oklch(0.972 0.002 265);
-  --chs-neutral-100:  oklch(0.944 0.003 265);
-  --chs-neutral-200:  oklch(0.905 0.004 265);
-  --chs-neutral-300:  oklch(0.855 0.005 265);
-  --chs-neutral-400:  oklch(0.715 0.006 265);
-  --chs-neutral-500:  oklch(0.585 0.007 265);
-  --chs-neutral-600:  oklch(0.475 0.007 265);
-  --chs-neutral-700:  oklch(0.375 0.007 265);
-  --chs-neutral-750:  oklch(0.318 0.007 265);
-  --chs-neutral-800:  oklch(0.272 0.006 265);
-  --chs-neutral-850:  oklch(0.228 0.006 265);
-  --chs-neutral-900:  oklch(0.193 0.005 265);
-  --chs-neutral-950:  oklch(0.158 0.005 265);
-  --chs-neutral-1000: oklch(0.125 0.004 265);
+  /* --- сырая нейтральная шкала (тёплая бумага/камень, hue ~80, низкая хрома) --- */
+  --chs-neutral-0:    oklch(0.990 0.004 85);
+  --chs-neutral-50:   oklch(0.965 0.008 85);
+  --chs-neutral-100:  oklch(0.945 0.006 85);
+  --chs-neutral-200:  oklch(0.900 0.006 80);
+  --chs-neutral-300:  oklch(0.820 0.008 80);
+  --chs-neutral-400:  oklch(0.720 0.008 80);
+  --chs-neutral-450:  oklch(0.640 0.010 70);
+  --chs-neutral-500:  oklch(0.560 0.008 80);
+  --chs-neutral-600:  oklch(0.500 0.012 65);
+  --chs-neutral-700:  oklch(0.430 0.009 75);
+  --chs-neutral-750:  oklch(0.330 0.008 75);
+  --chs-neutral-800:  oklch(0.285 0.008 75);
+  --chs-neutral-850:  oklch(0.245 0.007 75);
+  --chs-neutral-900:  oklch(0.205 0.006 75);
+  --chs-neutral-950:  oklch(0.175 0.006 75);
+  --chs-neutral-1000: oklch(0.150 0.006 75);
 
-  /* --- сырые хроматические тона --- */
-  --chs-blue-400:   oklch(0.700 0.130 250);
-  --chs-blue-500:   oklch(0.620 0.155 250);
-  --chs-blue-600:   oklch(0.540 0.150 250);
-  --chs-amber-400:  oklch(0.800 0.110 70);
-  --chs-amber-500:  oklch(0.760 0.130 70);
-  --chs-violet-400: oklch(0.700 0.150 305);
-  --chs-violet-500: oklch(0.640 0.170 305);
-  --chs-teal-400:   oklch(0.760 0.105 175);
-  --chs-teal-500:   oklch(0.700 0.115 175);
-  --chs-green-500:  oklch(0.700 0.140 150);
-  --chs-red-500:    oklch(0.630 0.190 25);
+  /* --- сырые хроматические тона (акцент = кобальт) --- */
+  --chs-blue-400:   oklch(0.720 0.140 256);
+  --chs-blue-500:   oklch(0.660 0.150 256);
+  --chs-blue-600:   oklch(0.500 0.150 256);
+  --chs-amber-400:  oklch(0.760 0.130 75);
+  --chs-amber-500:  oklch(0.620 0.160 60);
+  --chs-violet-400: oklch(0.680 0.160 295);
+  --chs-violet-500: oklch(0.560 0.180 295);
+  --chs-teal-400:   oklch(0.700 0.100 197);
+  --chs-teal-500:   oklch(0.600 0.100 195);
+  --chs-green-500:  oklch(0.700 0.140 152);
+  --chs-red-500:    oklch(0.660 0.190 27);
 
   /* --- типографика --- */
   --chs-font-sans: "Golos Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -57,15 +64,15 @@
   --chs-text-sm:   12px;
   --chs-text-base: 13px;
   --chs-text-md:   14px;
-  --chs-text-lg:   16px;
+  --chs-text-lg:   15px;
   --chs-weight-regular:  400;
   --chs-weight-medium:   500;
   --chs-weight-semibold: 600;
   --chs-weight-bold:     700;
-  --chs-tracking-wide:   0.04em;
+  --chs-tracking-wide:   0.10em;
   --chs-tracking-mono:   0.01em;
   --chs-leading-snug:    1.3;
-  --chs-leading-normal:  1.5;
+  --chs-leading-normal:  1.45;
 
   /* --- отступы (шаг 2/4px, плотно) --- */
   --chs-space-1:  2px;
@@ -78,7 +85,7 @@
   --chs-space-8:  24px;
   --chs-space-9:  32px;
 
-  /* --- радиусы (резкие грани) --- */
+  /* --- радиусы (брендбук: chip 2 / control 4 / panel 6) --- */
   --chs-radius-1:    2px;
   --chs-radius-2:    4px;
   --chs-radius-3:    6px;
@@ -89,107 +96,107 @@
   --chs-control-h-sm: 24px;
   --chs-row-h-sm:     30px;
 
-  /* --- тени (минимум) --- */
-  --chs-shadow-1: 0 1px 2px rgba(0,0,0,0.40);
-  --chs-shadow-2: 0 6px 20px -6px rgba(0,0,0,0.55);
+  /* ===== СЕМАНТИКА — СВЕТЛАЯ (ОСНОВНАЯ; дефолт; точные значения брендбука) ===== */
+  --chs-color-bg:            oklch(0.965 0.008 85);
+  --chs-color-surface:       oklch(0.990 0.004 85);
+  --chs-color-surface-2:     oklch(0.945 0.006 85);
+  --chs-color-surface-raised:oklch(0.990 0.004 85);
+  --chs-color-overlay:       oklch(0.990 0.004 85);
 
-  /* ===== СЕМАНТИКА — ТЁМНАЯ (по умолчанию) ===== */
-  --chs-color-bg:            var(--chs-neutral-1000);
-  --chs-color-surface:       var(--chs-neutral-950);
-  --chs-color-surface-2:     var(--chs-neutral-900);
-  --chs-color-surface-raised:var(--chs-neutral-850);
-  --chs-color-overlay:       var(--chs-neutral-850);
+  --chs-color-border:        oklch(0.900 0.006 80);
+  --chs-color-border-strong: oklch(0.820 0.008 80);
+  --chs-color-border-faint:  oklch(0.930 0.005 80);
 
-  --chs-color-border:        var(--chs-neutral-800);
-  --chs-color-border-strong: var(--chs-neutral-700);
-  --chs-color-border-faint:  var(--chs-neutral-900);
+  --chs-color-text:          oklch(0.260 0.012 70);   /* 14.1:1 */
+  --chs-color-text-muted:    oklch(0.500 0.012 65);   /* 5.4:1  */
+  --chs-color-text-faint:    oklch(0.640 0.010 70);   /* 3.0:1† */
+  --chs-color-text-inverse:  oklch(0.990 0.004 85);
 
-  --chs-color-text:          var(--chs-neutral-100);
-  --chs-color-text-muted:    var(--chs-neutral-400);
-  --chs-color-text-faint:    var(--chs-neutral-500);
-  --chs-color-text-inverse:  var(--chs-neutral-1000);
+  --chs-color-hover:         color-mix(in oklch, oklch(0.260 0.012 70) 5%, transparent);
+  --chs-color-active:        color-mix(in oklch, oklch(0.260 0.012 70) 9%, transparent);
 
-  --chs-color-hover:         color-mix(in oklch, var(--chs-neutral-0) 6%, transparent);
-  --chs-color-active:        color-mix(in oklch, var(--chs-neutral-0) 10%, transparent);
-
-  --chs-color-accent:        var(--chs-blue-500);
-  --chs-color-accent-hover:  var(--chs-blue-400);
-  --chs-color-accent-fg:     var(--chs-neutral-0);
-  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-blue-500) 16%, transparent);
-  --chs-color-accent-border: color-mix(in oklch, var(--chs-blue-500) 45%, transparent);
-  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-blue-400) 60%, transparent);
+  --chs-color-accent:        oklch(0.500 0.150 256);  /* 5.5:1 */
+  --chs-color-accent-hover:  oklch(0.440 0.160 256);
+  --chs-color-accent-fg:     oklch(1 0 0);            /* 6.0:1 на accent */
+  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-color-accent) 12%, transparent);
+  --chs-color-accent-border: color-mix(in oklch, var(--chs-color-accent) 35%, transparent);
+  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-color-accent) 55%, transparent);
 
   /* три исполнителя — сквозной цвето-код */
-  --chs-exec-human:          var(--chs-amber-400);
-  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-amber-500) 15%, transparent);
-  --chs-exec-human-border:   color-mix(in oklch, var(--chs-amber-500) 42%, transparent);
-  --chs-exec-agent:          var(--chs-violet-400);
-  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-violet-500) 17%, transparent);
-  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-violet-500) 45%, transparent);
-  --chs-exec-service:        var(--chs-teal-400);
-  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-teal-500) 15%, transparent);
-  --chs-exec-service-border: color-mix(in oklch, var(--chs-teal-500) 42%, transparent);
+  --chs-exec-human:          oklch(0.620 0.160 60);
+  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-exec-human) 16%, transparent);
+  --chs-exec-human-border:   color-mix(in oklch, var(--chs-exec-human) 40%, transparent);
+  --chs-exec-agent:          oklch(0.560 0.180 295);
+  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-exec-agent) 14%, transparent);
+  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-exec-agent) 40%, transparent);
+  --chs-exec-service:        oklch(0.600 0.100 195);
+  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-exec-service) 16%, transparent);
+  --chs-exec-service-border: color-mix(in oklch, var(--chs-exec-service) 40%, transparent);
 
-  --chs-color-success:       var(--chs-green-500);
-  --chs-color-success-soft:  color-mix(in oklch, var(--chs-green-500) 15%, transparent);
-  --chs-color-warning:       var(--chs-amber-500);
-  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-amber-500) 15%, transparent);
-  --chs-color-danger:        var(--chs-red-500);
-  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-red-500) 16%, transparent);
-  --chs-color-info:          var(--chs-blue-400);
-  --chs-color-neutral-soft:  color-mix(in oklch, var(--chs-neutral-0) 8%, transparent);
-  --chs-color-track:         var(--chs-neutral-800);
+  --chs-color-success:       oklch(0.550 0.130 150);
+  --chs-color-success-soft:  color-mix(in oklch, var(--chs-color-success) 16%, transparent);
+  --chs-color-warning:       oklch(0.720 0.130 80);
+  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-color-warning) 22%, transparent);
+  --chs-color-danger:        oklch(0.550 0.200 27);
+  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-color-danger) 14%, transparent);
+  --chs-color-info:          oklch(0.550 0.130 245);
+  --chs-color-neutral-soft:  color-mix(in oklch, oklch(0.260 0.012 70) 7%, transparent);
+  --chs-color-track:         oklch(0.900 0.006 80);
+
+  /* --- тени (сдержанные; тёплые на светлой) --- */
+  --chs-shadow-1: 0 1px 2px rgb(40 36 28 / 0.06);
+  --chs-shadow-2: 0 2px 6px rgb(40 36 28 / 0.12);
 }
 
-/* ===== СЕМАНТИКА — СВЕТЛАЯ ===== */
-[data-theme="light"] {
-  --chs-color-bg:            var(--chs-neutral-100);
-  --chs-color-surface:       var(--chs-neutral-0);
-  --chs-color-surface-2:     var(--chs-neutral-50);
-  --chs-color-surface-raised:var(--chs-neutral-0);
-  --chs-color-overlay:       var(--chs-neutral-0);
+/* ===== СЕМАНТИКА — ТЁМНАЯ (равноправная) ===== */
+[data-theme="dark"] {
+  --chs-color-bg:            oklch(0.205 0.006 75);
+  --chs-color-surface:       oklch(0.245 0.007 75);
+  --chs-color-surface-2:     oklch(0.285 0.008 75);
+  --chs-color-surface-raised:oklch(0.285 0.008 75);
+  --chs-color-overlay:       oklch(0.285 0.008 75);
 
-  --chs-color-border:        var(--chs-neutral-200);
-  --chs-color-border-strong: var(--chs-neutral-300);
-  --chs-color-border-faint:  var(--chs-neutral-100);
+  --chs-color-border:        oklch(0.330 0.008 75);
+  --chs-color-border-strong: oklch(0.430 0.009 75);
+  --chs-color-border-faint:  oklch(0.270 0.008 75);
 
-  --chs-color-text:          var(--chs-neutral-900);
-  --chs-color-text-muted:    var(--chs-neutral-600);
-  --chs-color-text-faint:    var(--chs-neutral-500);
-  --chs-color-text-inverse:  var(--chs-neutral-0);
+  --chs-color-text:          oklch(0.940 0.005 80);   /* 15.0:1 */
+  --chs-color-text-muted:    oklch(0.720 0.008 80);   /* 7.2:1  */
+  --chs-color-text-faint:    oklch(0.560 0.008 80);   /* 3.8:1† */
+  --chs-color-text-inverse:  oklch(0.205 0.006 75);
 
-  --chs-color-hover:         color-mix(in oklch, var(--chs-neutral-1000) 5%, transparent);
-  --chs-color-active:        color-mix(in oklch, var(--chs-neutral-1000) 9%, transparent);
+  --chs-color-hover:         color-mix(in oklch, oklch(0.940 0.005 80) 6%, transparent);
+  --chs-color-active:        color-mix(in oklch, oklch(0.940 0.005 80) 10%, transparent);
 
-  --chs-color-accent:        var(--chs-blue-600);
-  --chs-color-accent-hover:  var(--chs-blue-500);
-  --chs-color-accent-fg:     var(--chs-neutral-0);
-  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-blue-500) 12%, transparent);
-  --chs-color-accent-border: color-mix(in oklch, var(--chs-blue-600) 35%, transparent);
-  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-blue-500) 50%, transparent);
+  --chs-color-accent:        oklch(0.660 0.150 256);  /* 5.7:1 */
+  --chs-color-accent-hover:  oklch(0.720 0.140 256);
+  --chs-color-accent-fg:     oklch(0.180 0.030 256);  /* 6.0:1 на accent */
+  --chs-color-accent-soft:   color-mix(in oklch, var(--chs-color-accent) 18%, transparent);
+  --chs-color-accent-border: color-mix(in oklch, var(--chs-color-accent) 45%, transparent);
+  --chs-color-focus-ring:    color-mix(in oklch, var(--chs-color-accent) 60%, transparent);
 
-  --chs-exec-human:          oklch(0.620 0.130 65);
-  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-amber-500) 22%, transparent);
-  --chs-exec-human-border:   color-mix(in oklch, oklch(0.620 0.130 65) 40%, transparent);
-  --chs-exec-agent:          var(--chs-violet-500);
-  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-violet-500) 16%, transparent);
-  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-violet-500) 40%, transparent);
-  --chs-exec-service:        oklch(0.560 0.110 175);
-  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-teal-500) 20%, transparent);
-  --chs-exec-service-border: color-mix(in oklch, oklch(0.560 0.110 175) 40%, transparent);
+  --chs-exec-human:          oklch(0.760 0.130 75);
+  --chs-exec-human-soft:     color-mix(in oklch, var(--chs-exec-human) 18%, transparent);
+  --chs-exec-human-border:   color-mix(in oklch, var(--chs-exec-human) 42%, transparent);
+  --chs-exec-agent:          oklch(0.680 0.160 295);
+  --chs-exec-agent-soft:     color-mix(in oklch, var(--chs-exec-agent) 20%, transparent);
+  --chs-exec-agent-border:   color-mix(in oklch, var(--chs-exec-agent) 45%, transparent);
+  --chs-exec-service:        oklch(0.700 0.100 197);
+  --chs-exec-service-soft:   color-mix(in oklch, var(--chs-exec-service) 20%, transparent);
+  --chs-exec-service-border: color-mix(in oklch, var(--chs-exec-service) 42%, transparent);
 
-  --chs-color-success:       oklch(0.580 0.140 150);
-  --chs-color-success-soft:  color-mix(in oklch, var(--chs-green-500) 18%, transparent);
-  --chs-color-warning:       oklch(0.620 0.130 65);
-  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-amber-500) 24%, transparent);
-  --chs-color-danger:        oklch(0.560 0.180 25);
-  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-red-500) 16%, transparent);
-  --chs-color-info:          var(--chs-blue-600);
-  --chs-color-neutral-soft:  color-mix(in oklch, var(--chs-neutral-1000) 7%, transparent);
-  --chs-color-track:         var(--chs-neutral-200);
+  --chs-color-success:       oklch(0.700 0.140 152);
+  --chs-color-success-soft:  color-mix(in oklch, var(--chs-color-success) 18%, transparent);
+  --chs-color-warning:       oklch(0.780 0.130 82);
+  --chs-color-warning-soft:  color-mix(in oklch, var(--chs-color-warning) 18%, transparent);
+  --chs-color-danger:        oklch(0.660 0.190 27);
+  --chs-color-danger-soft:   color-mix(in oklch, var(--chs-color-danger) 18%, transparent);
+  --chs-color-info:          oklch(0.680 0.130 245);
+  --chs-color-neutral-soft:  color-mix(in oklch, oklch(0.940 0.005 80) 8%, transparent);
+  --chs-color-track:         oklch(0.330 0.008 75);
 
-  --chs-shadow-1: 0 1px 2px rgba(16,18,24,0.10);
-  --chs-shadow-2: 0 8px 24px -8px rgba(16,18,24,0.18);
+  --chs-shadow-1: 0 1px 2px rgb(0 0 0 / 0.40);
+  --chs-shadow-2: 0 2px 6px rgb(0 0 0 / 0.50);
 }
 
 /* ============================================================================
