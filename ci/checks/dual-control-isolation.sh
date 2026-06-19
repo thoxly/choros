@@ -180,6 +180,7 @@ NEW_MIGRATIONS="$(echo "${CHANGED}" | grep -E '^migrations/.*\.sql$' || true)"
 _dc_mig073_failed=0
 _dc_mig074_failed=0
 _dc_mig075_failed=0
+_dc_mig078_failed=0                                                                # T0338-DC-MIG078-GUARD track when 078 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -196,6 +197,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/075_process_app_binding.sql" ]]; then
       _dc_mig075_failed=1
     fi
+    # Track specifically when 078 triggers this FAIL (and nothing else).     # T0338-DC-MIG078-GUARD
+    if [[ "${m}" == "migrations/078_user_task_claim.sql" ]]; then             # T0338-DC-MIG078-GUARD
+      _dc_mig078_failed=1                                                     # T0338-DC-MIG078-GUARD
+    fi                                                                        # T0338-DC-MIG078-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -279,6 +284,26 @@ if [[ "${_dc_mig075_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0270-procappbind]: migration 075_process_app_binding.sql creates process_app_binding (process↔application store) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted"
   fi
 fi
+# T-0338: additive relief for migration 078_user_task_claim.sql.          # T0338-DC-MIG078-GUARD
+# 078 IS a new tenant table (user_task_claim — human claim-lock primitive) # T0338-DC-MIG078-GUARD
+# but is UNRELATED to the dual-control authority domain.                    # T0338-DC-MIG078-GUARD
+# Same class as T-0252/T-0270 migration-074/075 reliefs (auto_additive).  # T0338-DC-MIG078-GUARD
+_dc_mig078_stem="migrations/078_user_task_claim.sql"                       # T0338-DC-MIG078-GUARD
+if [[ "${_dc_mig078_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig078_stem}"; then # T0338-DC-MIG078-GUARD
+  _dc_mig078_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig078_stem}" 2>/dev/null || true)"  # T0338-DC-MIG078-GUARD
+  _dc_mig078_bad=0                                                          # T0338-DC-MIG078-GUARD
+  if echo "${_dc_mig078_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0338-DC-MIG078-GUARD
+    _dc_mig078_bad=1                                                        # T0338-DC-MIG078-GUARD touches authority domain
+  fi                                                                        # T0338-DC-MIG078-GUARD
+  if echo "${_dc_mig078_content}" | grep -iqE "confirmed2_by|confirmed_by"; then # T0338-DC-MIG078-GUARD
+    _dc_mig078_bad=1                                                        # T0338-DC-MIG078-GUARD touches confirmed2_by invariant
+  fi                                                                        # T0338-DC-MIG078-GUARD
+  if [[ "${_dc_mig078_bad}" -eq 0 ]]; then                                 # T0338-DC-MIG078-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                # T0338-DC-MIG078-GUARD cancel false-red
+    _dc_mig078_failed=0                                                     # T0338-DC-MIG078-GUARD
+    echo "PASS [FF-DC7-T0338-usertaskclaim]: migration 078_user_task_claim.sql creates user_task_claim (human claim-lock) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0338-DC-MIG078-GUARD
+  fi                                                                        # T0338-DC-MIG078-GUARD
+fi                                                                          # T0338-DC-MIG078-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

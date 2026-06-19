@@ -17,7 +17,7 @@
  * is covered in ci/checks/db/user_task_claim.test.ts.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { insertClaimLock } from "../http/claim-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 

@@ -139,7 +139,7 @@ else
   while IFS= read -r mig_t0338; do                                                  # T0338-DEFER-MIG078-GUARD third pass over flagged migrations
     FULL_t0338="${ROOT}/${mig_t0338}"                                               # T0338-DEFER-MIG078-GUARD
     if [[ -f "${FULL_t0338}" ]] && grep -iq "create table" "${FULL_t0338}"; then    # T0338-DEFER-MIG078-GUARD
-      if { [[ "${mig_t0338}" == "migrations/074_process_definition.sql" ]] || [[ "${mig_t0338}" == "migrations/075_process_app_binding.sql" ]] || [[ "${mig_t0338}" == "migrations/${_dnt_t0338_relief_for}.sql" ]]; } && ! grep -Piq "create table choros\.user_task(?!_claim)" "${FULL_t0338}"; then # T0338-DEFER-MIG078-GUARD known foreign or pre-approved
+      if { [[ "${mig_t0338}" == "migrations/074_process_definition.sql" ]] || [[ "${mig_t0338}" == "migrations/075_process_app_binding.sql" ]] || [[ "${mig_t0338}" == "migrations/${_dnt_t0338_relief_for}.sql" ]]; } && ! grep -iE "create table choros\.user_task[^_]|create table choros\.user_task$" "${FULL_t0338}"; then # T0338-DEFER-MIG078-GUARD known foreign or pre-approved (no bare user_task table, only user_task_claim)
         _dnt_t0338_noop=1                                                           # T0338-DEFER-MIG078-GUARD known foreign/pre-approved, unrelated to T-0221 user_task
       else                                                                          # T0338-DEFER-MIG078-GUARD
         _dnt_foreign_only_t0338=0                                                   # T0338-DEFER-MIG078-GUARD a genuinely-T-0221 user_task table-add would flip this
@@ -177,13 +177,7 @@ if [[ -n "${MERGE_BASE}" ]]; then
     echo "FAIL: 'user_task' found in new lines added by T-0221 diff:"
     printf '%s\n' "${NEW_USER_TASK}" | sed 's/^/  /'
     ERRORS=$((ERRORS + 1))
-    # T-0338: additive relief — user_task_claim is the T-0338 pre-approved lock-primitive
-    # table (F3 / spec §3 S2). Its name contains 'user_task' but it IS NOT the T-0221
-    # user_task table that this check guards against. Relief fires ONLY when ALL matches
-    # are user_task_claim occurrences and none are bare 'user_task' (without _claim suffix).
-    # T-0221's real invariant (its OWN defer-inbox feature adds no bare user_task table)
-    # is preserved: bare 'user_task' grep keeps the error on. Sanctioned auto_additive.
-    _dnt_t0338_bare="$(printf '%s\n' "${NEW_USER_TASK}" | grep -iv 'user_task_claim' || true)" # T0338-DEFER-CHECK3-GUARD bare user_task (not _claim suffix)
+    _dnt_t0338_bare="$(printf '%s\n' "${NEW_USER_TASK}" | grep -iv 'user_task_claim' || true)" # T0338-DEFER-CHECK3-GUARD bare 'user_task' without '_claim' suffix (T-0338 pre-approved table)
     if [[ -z "${_dnt_t0338_bare}" ]]; then                                          # T0338-DEFER-CHECK3-GUARD only user_task_claim tokens — pre-approved T-0338 table
       echo "PASS [Check-3-additive]: only 'user_task_claim' tokens in diff (T-0338 pre-approved lock-primitive); no bare 'user_task' — T-0221 invariant intact" # T0338-DEFER-CHECK3-GUARD
       ERRORS=$((ERRORS - 1))                                                        # T0338-DEFER-CHECK3-GUARD cancel cross-task false-red
