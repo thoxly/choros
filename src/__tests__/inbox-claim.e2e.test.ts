@@ -4,7 +4,7 @@
  * T-0336 (E15-S2): The in-memory CLAIMED Map has been removed. Claim-state is now
  * projected from the audit_event track (task.claimed events). In no-DB / memory mode
  * (used by these tests), claim-state is NOT persisted — the TOCTOU-safe concurrent-
- * claim primitive (user_task_claim table) is deferred to T-0338.
+ * claim-lock primitive is deferred to T-0338.
  *
  * As a result, the no-DB tests reflect honest behavior:
  *   - Claims still return 200 (AuthN/AuthZ gates work).
@@ -128,7 +128,7 @@ describe("Inbox claim write-path E2E (T-0138)", () => {
 
   // AC-5: concurrent claim — ALREADY_CLAIMED detection deferred to T-0338 (DB-only)
   // T-0336: In no-DB mode, concurrent claim returns 200 for both actors (no protection).
-  // The user_task_claim partial-unique primitive is in T-0338. DB-mode claim tests
+  // The deferred DB claim-lock primitive is in T-0338. DB-mode claim tests
   // are in ci/checks/db/*.
   it("concurrent claim by second user returns 200 in no-DB mode (ALREADY_CLAIMED needs T-0338)", async () => {
     // First user claims

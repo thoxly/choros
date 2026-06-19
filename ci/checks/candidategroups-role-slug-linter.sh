@@ -34,7 +34,61 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# PROJECT_ROOT may be overridden by the caller (e.g. --self-test fixture dirs).
+# If not set in the environment, derive from SCRIPT_DIR (normal production path).
+: "${PROJECT_ROOT:="$(cd "${SCRIPT_DIR}/../.." && pwd)"}"
+
+# ---------------------------------------------------------------------------
+# Self-test mode — verifies the linter's own detector logic with synthetic fixtures.
+# Known-bad fixture (unknown role) must produce non-zero exit; known-good must pass.
+# ---------------------------------------------------------------------------
+if [[ "${1:-}" == "--self-test" ]]; then
+  echo "[candidategroups-role-slug-linter] --self-test"
+
+  # Self-test helper: run the linter against temporary project-root-like dirs.
+  TMPDIR_ST="$(mktemp -d)"
+  trap 'rm -rf "${TMPDIR_ST}"' EXIT
+
+  # ---- known-bad fixture: BPMN with an unknown role slug ----
+  BAD_DIR="${TMPDIR_ST}/bad"
+  mkdir -p "${BAD_DIR}/config/processes" "${BAD_DIR}/migrations"
+  cat > "${BAD_DIR}/config/processes/test.bpmn" <<'BPMN'
+<userTask id="t1" candidateGroups="no-such-role-xyz"/>
+BPMN
+  # Migration with a DIFFERENT role (not matching)
+  cat > "${BAD_DIR}/migrations/001_roles.sql" <<'SQL'
+INSERT INTO choros.role (slug) VALUES ('fin-ctrl');
+SQL
+
+  # Run the linter on the bad fixture — must exit non-zero.
+  if PROJECT_ROOT="${BAD_DIR}" bash "${SCRIPT_DIR}/candidategroups-role-slug-linter.sh" > /dev/null 2>&1; then
+    echo "FAIL self-test: linter passed on a known-bad fixture (should have failed)"
+    exit 1
+  else
+    echo "PASS self-test: linter correctly rejected an unknown candidateGroups slug"
+  fi
+
+  # ---- known-good fixture: BPMN with a slug that IS in the migration seed ----
+  GOOD_DIR="${TMPDIR_ST}/good"
+  mkdir -p "${GOOD_DIR}/config/processes" "${GOOD_DIR}/migrations"
+  cat > "${GOOD_DIR}/config/processes/test.bpmn" <<'BPMN'
+<userTask id="t1" candidateGroups="fin-ctrl"/>
+BPMN
+  cat > "${GOOD_DIR}/migrations/001_roles.sql" <<'SQL'
+INSERT INTO choros.role (slug) VALUES ('fin-ctrl');
+SQL
+
+  # Run the linter on the good fixture — must exit zero.
+  if ! PROJECT_ROOT="${GOOD_DIR}" bash "${SCRIPT_DIR}/candidategroups-role-slug-linter.sh" > /dev/null 2>&1; then
+    echo "FAIL self-test: linter failed on a known-good fixture (should have passed)"
+    exit 1
+  else
+    echo "PASS self-test: linter correctly accepted a known-good candidateGroups slug"
+  fi
+
+  echo "PASS self-test: all candidategroups-role-slug-linter detectors functional"
+  exit 0
+fi
 
 ERRORS=0
 WARNINGS=0
@@ -71,16 +125,28 @@ MIGRATION_DIR="${PROJECT_ROOT}/migrations"
 ROLE_SLUGS=()
 
 if [[ -d "${MIGRATION_DIR}" ]]; then
-  # Extract single-quoted values that appear to be role slugs from SQL migration
-  # files. Strategy: grep lines containing 'role' or 'slug', then extract all
-  # single-quoted tokens that look like slugs ([a-z][a-z0-9-]+).
-  # Uses sed for portability (macOS BSD grep lacks -P/PCRE).
+  # Extract role slugs from INSERT INTO choros.role statements in migration SQL files.
+  #
+  # R-4 NOTE (informational heuristic): this extraction is a purely textual grep of
+  # migration files, NOT SQL execution.  Strategy: scan every migration for files that
+  # contain "INSERT INTO choros.role" (the canonical seed form), then extract every
+  # single-quoted token matching the slug pattern ([a-z][a-z0-9-]+) from those files.
+  # This correctly handles both single-row and multi-line VALUES forms because we grep
+  # the ENTIRE FILE content when the file has a matching INSERT statement.
+  # Full tenant-aware validation requires a live DB (ci/checks/db/*).
+  # False-negative risk: if a migration seeds a role via a non-standard form (e.g. DO
+  # $$ … $$), add the slug to an explicit INSERT INTO choros.role statement or normalise
+  # the seed style.
   while IFS= read -r slug; do
     [[ -n "${slug}" ]] && ROLE_SLUGS+=("${slug}")
   done < <(
-    grep -rh "role\|slug" "${MIGRATION_DIR}"/*.sql 2>/dev/null \
-      | sed -E "s/'([a-z][a-z0-9-]+)'/\n\1\n/g" \
-      | grep -E "^[a-z][a-z0-9-]+$" \
+    while IFS= read -r f; do
+      if grep -qiF "INSERT INTO choros.role" "${f}" 2>/dev/null; then
+        sed -E "s/'([a-z][a-z0-9-]+)'/\n\1\n/g" "${f}" \
+          | grep -E "^[a-z][a-z0-9-]+$" \
+          || true
+      fi
+    done < <(find "${MIGRATION_DIR}" -maxdepth 1 -name "*.sql" -type f 2>/dev/null | sort) \
       | sort -u
   )
 fi

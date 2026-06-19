@@ -19,8 +19,8 @@
  *    default to "human" (conservative, accurate for the human-pool path).
  *
  * CONCURRENT-CLAIM NOTE (T-0338 gap):
- *  The `task.claimed` audit event is append-only; without the `user_task_claim`
- *  partial-unique DB primitive (T-0338) there is a TOCTOU window between the
+ *  The `task.claimed` audit event is append-only; without the deferred DB lock
+ *  primitive (T-0338) there is a TOCTOU window between the
  *  read-check (loadClaimsFromAudit) and the emit (appendTaskClaimed). Until
  *  T-0338 adds the DB lock, concurrent claims from two users may both succeed.
  *  This is an accepted, tracked risk (spec §3 / T-0338 prerequisite).

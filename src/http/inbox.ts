@@ -23,7 +23,7 @@
  *
  * T-0138: claim write-path. In-memory claimed set (process-lifetime) models the
  * "взять из пула" → "назначена мне" transition. A real implementation would
- * write to a DB user_task_claim table; the seed-layer contract is identical
+ * write to a DB claim-lock table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
 import pg from "pg";
@@ -199,7 +199,7 @@ async function resolveRolesForActor(
 // (task.claimed events, written by appendTaskClaimed in claim-projection.ts).
 // In DB-mode: claim projections are read via loadClaimsFromAudit().
 // In no-DB/memory mode: claim-state is not persisted (T-0338 prerequisite —
-// the user_task_claim DB primitive for TOCTOU-safe concurrent claim).
+// the deferred DB claim-lock primitive (T-0338) for TOCTOU-safe concurrent claim).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -1028,7 +1028,7 @@ export function registerInboxRoutes(
  * In DB mode the test isolation is handled by the DB template isolation
  * (freshTenant per test run — ci/checks/db/*.test.ts pattern).
  *
- * The T-0338 user_task_claim partial-unique table will add the TOCTOU-safe
+ * The T-0338 deferred DB claim-lock will add the TOCTOU-safe
  * concurrent-claim primitive; until then, no-DB tests lose claim-state
  * persistence (known, tracked risk — see claim-projection.ts §CONCURRENT-CLAIM).
  *
