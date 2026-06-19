@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState } from 'react';
-import { ExecutorBadge, Mono, Button } from '../../components/components.jsx';
+import { ExecutorBadge, Mono, Button, KitIcon } from '../../components/components.jsx';
 import { SOD_RULES, SectionHead } from './ra-data.jsx';
 
 /* субъект и его текущие роли */
@@ -76,7 +76,7 @@ function SoDScreen() {
                 <div key={c.rule.id} className="chs-conflict__body">
                   <div className="chs-conflict__pair">
                     <span className="chs-conflict__role">{candidate}</span>
-                    <span className="chs-conflict__x">✕</span>
+                    <span className="chs-conflict__x"><KitIcon name="close" /></span>
                     <span className="chs-conflict__role">{c.with}</span>
                   </div>
                   <div className="chs-conflict__why">{c.rule.rationale} «{c.with}» уже назначена этому исполнителю.</div>
@@ -101,7 +101,7 @@ function SoDScreen() {
                 <div key={c.rule.id} className="chs-conflict__body">
                   <div className="chs-conflict__pair">
                     <span className="chs-conflict__role">{candidate}</span>
-                    <span className="chs-conflict__x">✕</span>
+                    <span className="chs-conflict__x"><KitIcon name="close" /></span>
                     <span className="chs-conflict__role">{c.with}</span>
                   </div>
                   <div className="chs-conflict__why">{c.rule.rationale}</div>

@@ -9,6 +9,7 @@
    ============================================================================ */
 
 import React, { useState, useCallback } from 'react';
+import { KitIcon } from '../components/components.jsx';
 import FormViewer from '../forms/FormViewer.jsx';
 
 const FORM_TABS = [
@@ -24,7 +25,7 @@ function FormsScreen({ theme }) {
 
   const handleSubmit = useCallback((result) => {
     if (result.ok) {
-      setLastSubmit({ ok: true, label: 'Отправлено ✓' });
+      setLastSubmit({ ok: true, label: 'Отправлено' });
     } else if (result.fields) {
       const count = result.fields.length;
       setLastSubmit({ ok: false, label: `Ошибки: ${count} поле(й)` });
@@ -53,7 +54,7 @@ function FormsScreen({ theme }) {
         <span className="chs-forms-screen__hint">
           {lastSubmit ? (
             <span className={lastSubmit.ok ? 'chs-forms-screen__hint--ok' : 'chs-forms-screen__hint--err'}>
-              {lastSubmit.label}
+              {lastSubmit.ok && <KitIcon name="success" />}{lastSubmit.ok ? ' ' : ''}{lastSubmit.label}
             </span>
           ) : (
             'Форма исполняется в изолированном sandbox-iframe'

@@ -25,6 +25,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 // Импорт CSS-темы как строки (Vite: суффикс ?inline)
+import { KitIcon } from '../components/components.jsx';
 import formThemeCss from './form-theme.css?inline';
 
 // Подключаем form-defs — регистрирует window.CHOROS_FORMS, window.CHOROS_SANDBOX_SCRIPT
@@ -215,7 +216,7 @@ function FormViewer({ formKey, theme, onSubmit }) {
       )}
       {submitState === 'success' && submitResult && (
         <div className="chs-form-result chs-form-result--success" role="status" aria-live="polite">
-          <span className="chs-form-result__icon" aria-hidden="true">✓</span>
+          <span className="chs-form-result__icon" aria-hidden="true"><KitIcon name="success" /></span>
           <span>
             Форма отправлена.
             {submitResult.value && submitResult.value.recordId

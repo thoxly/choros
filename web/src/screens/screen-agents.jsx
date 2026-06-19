@@ -20,7 +20,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip } from '../components/components.jsx';
+import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -40,12 +40,8 @@ const LLM_PROVIDERS = [
 ];
 
 // ---- Token-only styles (OBLIK: consume --chs-* only, no hardcoded color) -----
-// The <select> elements reuse the kit .chs-input class for theming; these inline
-// rules carry only layout (spacing/size), never raw color literals.
-const errStyle = { display: 'block', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' };
-const hintStyle = { ...errStyle, color: 'var(--chs-color-text-faint)' };
-const labelStyle = { display: 'block', marginBottom: 'var(--chs-space-5)' };
-const labelSpan = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-medium)' };
+// Form fields use the kit <Field>/<Select> primitives (label↔control binding,
+// invalid state, hint, both-theme color) — no hand-rolled label/input styling.
 const bannerErrStyle = {
   marginBottom: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
   background: 'var(--chs-color-danger-soft)', border: '1px solid var(--chs-color-danger)',
@@ -57,10 +53,8 @@ const cardStyle = {
   background: 'var(--chs-color-surface)', border: '1px solid var(--chs-color-border)',
   borderRadius: 'var(--chs-radius-3)', color: 'var(--chs-color-text)',
 };
-// Kit input/select theming: .chs-input owns all color (both themes, WCAG AA);
-// .chs-input--invalid adds the danger border. width:100% via inline layout.
-const selectCls = (invalid) => `chs-input ${invalid ? 'chs-input--invalid' : ''}`;
-const fieldInputStyle = { width: '100%', boxSizing: 'border-box', marginTop: 'var(--chs-space-2)' };
+// Stack spacing between kit fields inside a modal form (layout only, no color).
+const fieldGap = { display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-6)' };
 
 /* ---------------------------------------------------------------------------
    Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
@@ -137,34 +131,47 @@ function HireModal({ positions, onClose, onDone }) {
           LLM привязывается отдельным шагом после создания.
         </p>
 
-        <label style={labelStyle}>
-          <span style={labelSpan}>Слаг</span>
-          <input className={selectCls(fieldErrors.slug)} style={fieldInputStyle} value={values.slug} onChange={set('slug')} placeholder="recon-bot" aria-invalid={!!fieldErrors.slug} autoFocus />
-          {fieldErrors.slug ? <span style={errStyle}>{fieldErrors.slug}</span>
-            : <span style={hintStyle}>строчные латинские, цифры, дефис · 1–64</span>}
-        </label>
+        <div style={fieldGap}>
+          <Field
+            label="Слаг"
+            value={values.slug}
+            onChange={set('slug')}
+            placeholder="recon-bot"
+            invalid={!!fieldErrors.slug}
+            hint={fieldErrors.slug || 'строчные латинские, цифры, дефис · 1–64'}
+            autoFocus
+          />
 
-        <label style={labelStyle}>
-          <span style={labelSpan}>Отображаемое имя</span>
-          <input className={selectCls(fieldErrors.display_name)} style={fieldInputStyle} value={values.display_name} onChange={set('display_name')} placeholder="Сверка-агент" aria-invalid={!!fieldErrors.display_name} />
-          {fieldErrors.display_name && <span style={errStyle}>{fieldErrors.display_name}</span>}
-        </label>
+          <Field
+            label="Отображаемое имя"
+            value={values.display_name}
+            onChange={set('display_name')}
+            placeholder="Сверка-агент"
+            invalid={!!fieldErrors.display_name}
+            hint={fieldErrors.display_name || undefined}
+          />
 
-        <label style={labelStyle}>
-          <span style={labelSpan}>Должность</span>
-          <select className={selectCls(fieldErrors.position_id)} style={fieldInputStyle} value={values.position_id} onChange={set('position_id')} aria-invalid={!!fieldErrors.position_id}>
+          <Select
+            label="Должность"
+            value={values.position_id}
+            onChange={set('position_id')}
+            invalid={!!fieldErrors.position_id}
+            hint={
+              fieldErrors.position_id
+                ? fieldErrors.position_id
+                : positions.length === 0
+                  ? 'Должности не загружены (нужны права владельца тенанта). Создайте должность в «Оргструктуре».'
+                  : undefined
+            }
+          >
             <option value="">— выберите должность —</option>
             {positions.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
-          {fieldErrors.position_id ? <span style={errStyle}>{fieldErrors.position_id}</span>
-            : positions.length === 0
-              ? <span style={hintStyle}>Должности не загружены (нужны права владельца тенанта). Создайте должность в «Оргструктуре».</span>
-              : null}
-        </label>
+          </Select>
+        </div>
 
         {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
 
-        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end', marginTop: 'var(--chs-space-7)' }}>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
           <Button type="submit" variant="primary" size="sm" disabled={submitting} loading={submitting}>
             {submitting ? 'Подключаю…' : 'Подключить'}
@@ -220,34 +227,41 @@ function BindModal({ agent, onClose, onDone }) {
           <strong> а не сам ключ</strong>. Сервер хранит только хэндл и никогда не показывает значение обратно.
         </p>
 
-        <label style={labelStyle}>
-          <span style={labelSpan}>Провайдер</span>
-          <select className={selectCls(fieldErrors.provider)} style={fieldInputStyle} value={values.provider} onChange={set('provider')} aria-invalid={!!fieldErrors.provider} autoFocus>
+        <div style={fieldGap}>
+          <Select
+            label="Провайдер"
+            value={values.provider}
+            onChange={set('provider')}
+            invalid={!!fieldErrors.provider}
+            hint={fieldErrors.provider || undefined}
+            autoFocus
+          >
             <option value="">— выберите провайдера —</option>
             {LLM_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-          </select>
-          {fieldErrors.provider && <span style={errStyle}>{fieldErrors.provider}</span>}
-        </label>
+          </Select>
 
-        <label style={labelStyle}>
-          <span style={labelSpan}>Модель <span style={{ color: 'var(--chs-color-text-faint)' }}>(опц.)</span></span>
-          <input className={selectCls(false)} style={fieldInputStyle} value={values.model} onChange={set('model')} placeholder="claude-sonnet-4" />
-        </label>
-
-        <label style={labelStyle}>
-          <span style={labelSpan}>Ссылка-хэндл на секрет ключа</span>
-          <input
-            type="password" autoComplete="off"
-            className={selectCls(fieldErrors.handle)} style={fieldInputStyle}
-            value={values.handle} onChange={set('handle')}
-            placeholder="vault://secret/llm/recon" aria-invalid={!!fieldErrors.handle}
+          <Field
+            label="Модель (опц.)"
+            value={values.model}
+            onChange={set('model')}
+            placeholder="claude-sonnet-4"
           />
-          {fieldErrors.handle && <span style={errStyle}>{fieldErrors.handle}</span>}
-        </label>
+
+          <Field
+            label="Ссылка-хэндл на секрет ключа"
+            type="password"
+            autoComplete="off"
+            value={values.handle}
+            onChange={set('handle')}
+            placeholder="vault://secret/llm/recon"
+            invalid={!!fieldErrors.handle}
+            hint={fieldErrors.handle || undefined}
+          />
+        </div>
 
         {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
 
-        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end', marginTop: 'var(--chs-space-7)' }}>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
           <Button type="submit" variant="primary" size="sm" disabled={submitting} loading={submitting}>
             {submitting ? 'Привязываю…' : 'Привязать'}
@@ -302,7 +316,7 @@ export default function AgentsScreen() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--chs-space-6)', gap: 'var(--chs-space-6)' }}>
-        <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', margin: 0, maxWidth: 640 }}>
+        <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', margin: 0, maxWidth: '88ch' }}>
           Агенты тенанта. Каждый подключён к должности в оргструктуре и оттуда берёт задачи.
           LLM привязывается через ссылку-хэндл на секрет — сырой ключ в системе не хранится.
         </p>

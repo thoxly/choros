@@ -14,7 +14,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useId } from 'react';
-import { Button, Field } from '../../components/components.jsx';
+import { Button, Field, KitIcon } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 
 const ACTOR_ID = 'e-owner'; // dev-silo genesis owner (confirmed by seed)
@@ -106,14 +106,14 @@ function ResultBanner({ result }) {
   if (result.ok) {
     return (
       <div className="chs-intent__result chs-intent__result--ok" style={{ color: 'var(--chs-color-success, green)', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}>
-        ✓ {result.message || 'Готово'}
+        <KitIcon name="success" /> {result.message || 'Готово'}
         {result.data && <pre className="chs-intent__json" style={{ marginTop: 'var(--chs-space-2)' }}>{JSON.stringify(result.data, null, 2)}</pre>}
       </div>
     );
   }
   return (
     <div className="chs-intent__result chs-intent__result--err" style={{ color: 'var(--chs-color-danger, red)', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}>
-      ✕ {result.reason}
+      <KitIcon name="close" /> {result.reason}
     </div>
   );
 }
