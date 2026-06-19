@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { ExecutorBadge, ExecGlyph, Mono, Button } from '../../components/components.jsx';
+import { ExecutorBadge, ExecGlyph, Mono, Button, KitIcon } from '../../components/components.jsx';
 import { CriticalityBadge, AxisList, SectionHead, Segmented, CRIT_AXES, critLevel } from './ra-data.jsx';
 
 /* Два сценария запроса на изменение прав */
@@ -183,8 +183,8 @@ function CriticalityScreen() {
                     <button type="button" className="chs-approver__reject" onClick={() => setAt(i, "rejected")}>Отклонить</button>
                     <button type="button" className="chs-approver__approve" onClick={() => setAt(i, "approved")}>Подтвердить</button>
                   </>}
-                  {states[i] === "approved" && <span className="chs-approver__state chs-approver__state--ok">✓ подтвердил</span>}
-                  {states[i] === "rejected" && <span className="chs-approver__state chs-approver__state--no">✕ отклонил</span>}
+                  {states[i] === "approved" && <span className="chs-approver__state chs-approver__state--ok"><KitIcon name="success" /> подтвердил</span>}
+                  {states[i] === "rejected" && <span className="chs-approver__state chs-approver__state--no"><KitIcon name="close" /> отклонил</span>}
                 </div>
               </div>
             ))}

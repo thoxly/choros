@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { ExecutorBadge, MonoId, Mono, OpChip, Button } from '../../components/components.jsx';
+import { ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
 
 const ACTION_META = {
@@ -172,7 +172,7 @@ function GrantTrailScreen() {
                 <span className="chs-trailcell chs-trailcell--prov">
                   <ProvenanceTag by={r.proposed} />
                   <span className="chs-trailconfirm">
-                    {r.confirmed.length > 1 ? "✓✓ " : "✓ "}
+                    <KitIcon name="success" />{r.confirmed.length > 1 ? <KitIcon name="success" /> : null}{" "}
                     {r.confirmed.join(", ")}
                   </span>
                 </span>

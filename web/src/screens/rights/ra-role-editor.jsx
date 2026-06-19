@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState } from 'react';
-import { Mono, Button, OpChip } from '../../components/components.jsx';
+import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import {
   ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI, PRESETS,
@@ -141,7 +141,7 @@ function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
           {summary.length ? summary.map((s, i) => <ScopeToken key={i} kind={i === 0 ? "node" : "tag"}>{s}</ScopeToken>) : <span className="chs-gedit__scopeempty">задать охват</span>}
           <span className="chs-gedit__scopecaret">{open ? "закрыть" : "▾"}</span>
         </button>
-        <button type="button" className="chs-gedit__del" onClick={() => onRemove(idx)} title="Удалить грант">✕</button>
+        <button type="button" className="chs-gedit__del" onClick={() => onRemove(idx)} title="Удалить грант" aria-label="Удалить грант"><KitIcon name="close" /></button>
       </div>
       {open && <ScopePicker grant={g} onChange={(ng) => onChange(idx, ng)} onClose={() => onOpen(-1)} />}
     </div>
@@ -464,12 +464,12 @@ function RoleEditorScreen() {
               <div className="chs-submit-result" style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
                 {submitResult.success > 0 && (
                   <span style={{ color: "var(--chs-color-success)" }}>
-                    ✓ {submitResult.success} грант(ов) применено
+                    <KitIcon name="success" /> {submitResult.success} грант(ов) применено
                   </span>
                 )}
                 {submitResult.errors.length > 0 && submitResult.errors.map((e, i) => (
                   <div key={i} style={{ color: "var(--chs-color-danger)", marginTop: "var(--chs-space-1)" }}>
-                    ✕ {e.uri} [{e.op}]: {e.reason}
+                    <KitIcon name="close" /> {e.uri} [{e.op}]: {e.reason}
                   </div>
                 ))}
               </div>
@@ -504,8 +504,8 @@ function RoleEditorScreen() {
                     </Button>
                     {confirmResult && confirmResult !== "loading" && (
                       confirmResult.ok
-                        ? <span style={{ color: "var(--chs-color-success)" }}>✓ подтверждено — гранты активны</span>
-                        : <span style={{ color: "var(--chs-color-danger)" }}>✕ {confirmResult.reason}</span>
+                        ? <span style={{ color: "var(--chs-color-success)" }}><KitIcon name="success" /> подтверждено — гранты активны</span>
+                        : <span style={{ color: "var(--chs-color-danger)" }}><KitIcon name="close" /> {confirmResult.reason}</span>
                     )}
                   </div>
                 </div>
@@ -623,8 +623,8 @@ function RoleEditorScreen() {
                           <button type="button" className="chs-prop__reject" onClick={() => setProposal(i, "rejected")}>Отклонить</button>
                           <button type="button" className="chs-prop__confirm" onClick={() => confirmProposed(i)}>Подтвердить грант</button>
                         </>}
-                        {p.status === "confirmed" && <span className="chs-prop__state chs-prop__state--ok">✓ подтверждено · confirmed_by М. Соколов</span>}
-                        {p.status === "rejected" && <span className="chs-prop__state chs-prop__state--no">✕ отклонено</span>}
+                        {p.status === "confirmed" && <span className="chs-prop__state chs-prop__state--ok"><KitIcon name="success" /> подтверждено · confirmed_by М. Соколов</span>}
+                        {p.status === "rejected" && <span className="chs-prop__state chs-prop__state--no"><KitIcon name="close" /> отклонено</span>}
                       </div>
                     </div>
                   );
