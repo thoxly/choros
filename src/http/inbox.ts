@@ -49,6 +49,7 @@ import {
 } from "../db/step-applier.js";
 import {
   appendTaskClaimed,
+  insertClaimLock,
   loadClaimsFromAudit,
   type ClaimState,
 } from "./claim-projection.js";
@@ -198,8 +199,8 @@ async function resolveRolesForActor(
 // Claim-state is now sourced from the append-only `audit_event` track
 // (task.claimed events, written by appendTaskClaimed in claim-projection.ts).
 // In DB-mode: claim projections are read via loadClaimsFromAudit().
-// In no-DB/memory mode: claim-state is not persisted (T-0338 prerequisite —
-// the deferred DB claim-lock primitive (T-0338) for TOCTOU-safe concurrent claim).
+// In no-DB/memory mode: claim-state is not persisted (T-0338 claim-lock primitive
+// requires DB — user_task_claim table, migration 078).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -845,10 +846,18 @@ export function registerInboxRoutes(
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
 
-    // T-0336 (E15-S2): Emit task.claimed audit event (source of truth for claim-state).
+    // T-0338 (E15-S2-claim): Emit task.claimed audit event + insert DB claim-lock.
     // actor_type derived from PDP employee.kind (not from engine kind — spec §5).
-    // In DB-mode: appendTaskClaimed runs inside a tenant-scoped tx via withTenantTx.
-    // In no-DB mode: skip emission (no audit backend; T-0338 gap applies).
+    //
+    // ONE tenant-RLS tx does ALL three (grant-check already ran above, fail-closed):
+    //   (a) insertClaimLock — INSERT into user_task_claim (migration 078).
+    //       The partial-unique (tenant_id, task_id) WHERE state='claimed' is the
+    //       HARD DB LOCK: a concurrent second claim hits the unique constraint and the
+    //       tx rolls back → error is caught and mapped to 409 ALREADY_CLAIMED.
+    //   (b) appendTaskClaimed — task.claimed audit event (source of truth, §4.1).
+    // Atomicity: if either step fails the whole tx rolls back — no half-state.
+    //
+    // In no-DB mode: skip (no audit backend, no claim-lock table).
     if (hasDb()) {
       // Resolve actor_type from employee.kind (PDP source — T-0336 §5).
       // Unknown actor defaults to "human" (accurate for human pool-task claim path).
@@ -861,16 +870,36 @@ export function registerInboxRoutes(
         // for actor_type (it's telemetry); fail-closed is on the authz gate above, not here.
       }
 
-      await withTenantTx(getOrgPool(), tenantId, async (client) => {
-        await appendTaskClaimed(client as unknown as import("../db/audit-writer.js").PgClientLike, {
-          taskId,
-          actor: devUserId,
-          actorKind,
-          tenantId,
-          role: taskRole ?? "",
-          nowMs,
+      try {
+        await withTenantTx(getOrgPool(), tenantId, async (client) => {
+          const txClient = client as unknown as import("../db/audit-writer.js").PgClientLike;
+          // Step (a): DB lock — partial-unique constraint closes TOCTOU window.
+          await insertClaimLock(txClient, {
+            taskId,
+            claimedBy: devUserId,
+            claimedAt: nowMs,
+            role: taskRole ?? "",
+            tenantId,
+          });
+          // Step (b): Audit event — source of truth for claim-state.
+          await appendTaskClaimed(txClient, {
+            taskId,
+            actor: devUserId,
+            actorKind,
+            tenantId,
+            role: taskRole ?? "",
+            nowMs,
+          });
         });
-      });
+      } catch (err: unknown) {
+        // Unique-constraint violation on user_task_claim partial-unique index:
+        // concurrent claim beat us to it — map to 409 ALREADY_CLAIMED.
+        const pgErr = err as Record<string, unknown>;
+        if (typeof pgErr["code"] === "string" && pgErr["code"] === "23505") {
+          throw new HttpError(409, "ALREADY_CLAIMED", "task already claimed by another user");
+        }
+        throw err; // any other DB error → 500 (fail-closed)
+      }
 
       // Re-load claim-state after emission so the response reflects the new claim.
       claimStateMap = await loadClaimsFromAudit(getOrgPool(), tenantId);
