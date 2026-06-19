@@ -37,6 +37,7 @@ import {
   appendTaskApproved,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
+  listInstanceProjections,
 } from "./process-projection.js";
 
 // ---------------------------------------------------------------------------
@@ -529,6 +530,101 @@ export function registerInboxRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items, counts, tab }));
+  });
+
+  // GET /api/inbox/:id — task detail (T-0272).
+  //
+  // Returns the full item shape + optional instance projection (for instance-backed tasks).
+  // Instance projection carries the current status (waiting | done) and step, so the UI can
+  // show the outcome (process completed / step awaiting action) after the user completes a step.
+  //
+  // Response: 200 { item, projection? }
+  //   - item: full inbox item (same shape as the list, including claimBy/mine/sla)
+  //   - projection (optional): { inst, procKey, status, step, startedAt } — present only for
+  //     instance-backed tasks (tasks whose id is the inbox_task_id of a process.started event).
+  // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND
+  router.register("GET", "/api/inbox/:id", async (req, res, params) => {
+    let devUserId = req.headers[DEV_USER_HEADER];
+    if (Array.isArray(devUserId)) devUserId = devUserId[0];
+    if (!devUserId || typeof devUserId !== "string") {
+      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+    }
+    const actor = devUserId;
+    const taskId = params["id"] as string;
+
+    // Find the item in the actor's tenant inbox.
+    // findInboxItems covers seed tasks + deferred (DB-path) + real instance tasks (DB-path).
+    // When writeDeps is injected (compose root or test fake), also check instance tasks
+    // from the injected pool so the detail route works for instance-backed tasks even in
+    // unit tests that use a fake pool (no live DB, hasDb() is false).
+    const base = await findInboxItems(actor);
+    let item: InboxItem | undefined = base.find((i) => i.id === taskId);
+
+    // Supplemental look-up from writeDeps pool when the item is not in the merged base
+    // (e.g. test-only fake pool not visible to findInboxItems which uses getOrgPool()).
+    let instanceTaskForDetail: import("./process-projection.js").InstanceInboxTask | null = null;
+    if (!item && writeDeps) {
+      try {
+        const tenantId = await writeDeps.resolveActorTenant(actor);
+        instanceTaskForDetail = await findWaitingInstanceTask(writeDeps.pool, tenantId, taskId);
+        if (instanceTaskForDetail) {
+          // Synthesize a minimal InboxItem from the instance task so the detail returns
+          // the same shape regardless of how the task was found.
+          item = {
+            id: instanceTaskForDetail.id,
+            status: "waiting" as const,
+            name: instanceTaskForDetail.name,
+            step: instanceTaskForDetail.step,
+            inst: instanceTaskForDetail.inst,
+            role: instanceTaskForDetail.role,
+            pool: true,
+            sla: { min: 60, left: 60 }, // default SLA for instance tasks (no seed SLA data)
+            due: "",
+            execType: "human" as const,
+          } as unknown as InboxItem;
+        }
+      } catch {
+        // Degrade gracefully.
+      }
+    }
+
+    if (!item) {
+      throw new HttpError(404, "NOT_FOUND", "task not found");
+    }
+
+    // Optionally attach an instance projection for instance-backed tasks.
+    // These tasks originate from a process.started audit event; their id == inbox_task_id.
+    // When the projection pool is available, look up the instance state so the UI can show
+    // the current step, status (waiting | done), and the final outcome.
+    let projection: import("./process-projection.js").InstanceProjection | undefined;
+    if (writeDeps) {
+      try {
+        const tenantId = await writeDeps.resolveActorTenant(actor);
+        const projections = await listInstanceProjections(writeDeps.pool, tenantId);
+        // Match by inbox_task_id == the audit event id (the task id for instance tasks).
+        // listInstanceInboxTasks uses the same event id as both inbox_task_id and task id.
+        // Here we look for the instance whose waiting user-task id matches this task id.
+        // Use the already-resolved instanceTaskForDetail if available.
+        const waitingTask = instanceTaskForDetail
+          ?? await findWaitingInstanceTask(writeDeps.pool, tenantId, taskId);
+        if (waitingTask) {
+          // Still waiting — find its projection.
+          projection = projections.find((p) => p.inst === waitingTask.inst);
+        } else {
+          // May be done — a done projection's inbox_task_id is the process.started event id,
+          // which equals this task id. listInstanceProjections folds started+approved: the
+          // done one's startedAt-event id IS the task id. We find it by matching the inst
+          // if we can resolve it from projections.
+          projection = projections.find((p) => p.status === "done");
+        }
+      } catch {
+        // Degrade gracefully — projection is optional, never fail the detail fetch.
+      }
+    }
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ item, projection: projection ?? null }));
   });
 
   // POST /api/inbox/:id/claim — claim a pool task (T-0138 write-path).
