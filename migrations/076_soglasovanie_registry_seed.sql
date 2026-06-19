@@ -9,7 +9,7 @@
 --        applyStepResult (T-0335 step-applier.ts) appends new records into each time
 --        a purchase-approval step is completed (A-class step, ADR F1).
 --
---   NO DDL — zero CREATE TABLE. Rides the existing T-0014 tables:
+--   NO DDL — zero table creation. Rides the existing T-0014 tables:
 --     application → registry_def (migrations 003/004/005).
 --   ci/checks/known_tenant_tables.txt is NOT changed.
 --
