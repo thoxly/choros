@@ -35,6 +35,7 @@ import { Router } from "../http/router.js";
 import { registerRegisterRoutes } from "../http/register.js";
 import { registerTenant, slugifyOrgName } from "../core/register.js";
 import { InMemoryKeycloakUserPort } from "../keycloak/fake-user-port.js";
+import type { KeycloakUserPort, KcHumanUserSpec } from "../keycloak/admin-port.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -323,6 +324,217 @@ describe("HTTP error mapping", () => {
     expect(resp.status).toBe(503);
     const body = JSON.parse(resp.body) as { error: { code: string } };
     expect(body.error.code).toBe("AUTH_UNAVAILABLE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-1 fix: HTTP-level validation → 400 VALIDATION (not 500 INTERNAL)
+// These tests hit the actual HTTP layer so they catch the ValidationError→500 regression.
+// ---------------------------------------------------------------------------
+
+describe("R-1 — HTTP POST /api/register validation returns 400 VALIDATION (not 500)", () => {
+  it("empty orgName → 400 with code VALIDATION", async () => {
+    kcPort.reset();
+    const resp = await makeRequest(server, "POST", "/api/register", {
+      orgName: "",
+      email: "user@example.com",
+      password: "password123",
+    });
+    expect(resp.status).toBe(400);
+    const body = JSON.parse(resp.body) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("blank orgName (whitespace only) → 400 with code VALIDATION", async () => {
+    kcPort.reset();
+    const resp = await makeRequest(server, "POST", "/api/register", {
+      orgName: "   ",
+      email: "user@example.com",
+      password: "password123",
+    });
+    expect(resp.status).toBe(400);
+    const body = JSON.parse(resp.body) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("malformed email → 400 with code VALIDATION", async () => {
+    kcPort.reset();
+    const resp = await makeRequest(server, "POST", "/api/register", {
+      orgName: "Good Org",
+      email: "not-an-email-address",
+      password: "password123",
+    });
+    expect(resp.status).toBe(400);
+    const body = JSON.parse(resp.body) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("password shorter than 8 chars → 400 with code VALIDATION", async () => {
+    kcPort.reset();
+    const resp = await makeRequest(server, "POST", "/api/register", {
+      orgName: "Good Org",
+      email: "user@example.com",
+      password: "short",
+    });
+    expect(resp.status).toBe(400);
+    const body = JSON.parse(resp.body) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("validation error is in {error:{code,message}} envelope", async () => {
+    kcPort.reset();
+    const resp = await makeRequest(server, "POST", "/api/register", {
+      orgName: "",
+      email: "user@example.com",
+      password: "password123",
+    });
+    expect(resp.status).toBe(400);
+    const body = JSON.parse(resp.body) as { error: { code: string; message: string } };
+    expect(body.error).toBeDefined();
+    expect(typeof body.error.code).toBe("string");
+    expect(typeof body.error.message).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R-2 fix: createHumanUser resolves userId from Location header (no extra GET)
+// ---------------------------------------------------------------------------
+
+describe("R-2 — createHumanUser: userId from Location header; compensation still works if id was obtained", () => {
+  it("resolves userId from Location header on 201 (no GET-by-username fallback needed)", async () => {
+    // A port that simulates a 201 with a known user id from Location
+    const LOCATION_USER_ID = "aaaabbbb-cccc-dddd-eeee-ffffffffffff";
+    let capturedSpec: KcHumanUserSpec | null = null;
+    let createCallCount = 0;
+
+    const locationPort: KeycloakUserPort = {
+      async createHumanUser(spec: KcHumanUserSpec) {
+        capturedSpec = spec;
+        createCallCount++;
+        return { userId: LOCATION_USER_ID };
+      },
+      async deleteUser(_userId: string) {
+        // no-op for this test (no DB failure path)
+      },
+    };
+
+    const routerL = new Router();
+    const poolL = makeFakePool();
+    registerRegisterRoutes(routerL, { pool: poolL, kc: locationPort });
+    const srvL = http.createServer(routerL.dispatch.bind(routerL));
+    await new Promise<void>((resolve) => srvL.listen(0, "127.0.0.1", () => resolve()));
+
+    try {
+      const resp = await makeRequest(srvL, "POST", "/api/register", {
+        orgName: "LocationOrg",
+        email: "loc@example.com",
+        password: "password123",
+      });
+
+      // Should succeed (201) — the port returned a userId from the Location path
+      expect(resp.status).toBe(201);
+      expect(createCallCount).toBe(1);
+      // capturedSpec is set inside createHumanUser before the request resolves
+      const cs = capturedSpec as unknown as KcHumanUserSpec;
+      expect(cs.actorType).toBe("human");
+      expect(cs.email).toBe("loc@example.com");
+
+      // The response userId must match what the port returned
+      const body = JSON.parse(resp.body) as { userId: string };
+      expect(body.userId).toBe(LOCATION_USER_ID);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srvL.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  });
+
+  it("if id was obtained from Location but DB fails, deleteUser is still called with that id", async () => {
+    const LOCATION_USER_ID = "11112222-3333-4444-5555-666677778888";
+    let deleteCalledWithId: string | null = null;
+
+    const locationPort: KeycloakUserPort = {
+      async createHumanUser(_spec: KcHumanUserSpec) {
+        return { userId: LOCATION_USER_ID };
+      },
+      async deleteUser(userId: string) {
+        deleteCalledWithId = userId;
+      },
+    };
+
+    // Pool that fails on INSERT into tenant — triggers compensation
+    const poolFail = makeFakePool({ failOnInsert: "choros.tenant" });
+    const routerL = new Router();
+    registerRegisterRoutes(routerL, { pool: poolFail, kc: locationPort });
+    const srvL = http.createServer(routerL.dispatch.bind(routerL));
+    await new Promise<void>((resolve) => srvL.listen(0, "127.0.0.1", () => resolve()));
+
+    try {
+      const resp = await makeRequest(srvL, "POST", "/api/register", {
+        orgName: "CompOrg",
+        email: "comp@example.com",
+        password: "password123",
+      });
+
+      // DB failed → 500
+      expect(resp.status).toBe(500);
+      // deleteUser MUST have been called with the id obtained from Location (compensation)
+      expect(deleteCalledWithId).toBe(LOCATION_USER_ID);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        srvL.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SQL column guard: updated_at + granted_by present in INSERTs (DB NOT-NULL guard)
+// These assertions would have caught the live-schema 500 before this fix.
+// ---------------------------------------------------------------------------
+
+describe("SQL column guard — updated_at and granted_by in INSERT statements", () => {
+  it("role INSERT includes updated_at column", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    // Capturing fake that records all queries sent to the pool
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool2: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    await registerTenant(
+      { pool: capturingPool2, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "GuardOrg", email: "guard@test.com", password: "password123" },
+    );
+
+    const roleInsert = capturedQueries.find(
+      (q) => q.text.includes("INSERT") && q.text.includes("choros.role") && !q.text.includes("role_assignment"),
+    );
+    expect(roleInsert).toBeDefined();
+    expect(roleInsert!.text).toContain("updated_at");
+
+    const employeeInsert = capturedQueries.find(
+      (q) => q.text.includes("INSERT") && q.text.includes("choros.employee"),
+    );
+    expect(employeeInsert).toBeDefined();
+    expect(employeeInsert!.text).toContain("updated_at");
+
+    const assignmentInsert = capturedQueries.find(
+      (q) => q.text.includes("INSERT") && q.text.includes("role_assignment"),
+    );
+    expect(assignmentInsert).toBeDefined();
+    expect(assignmentInsert!.text).toContain("updated_at");
+    expect(assignmentInsert!.text).toContain("granted_by");
   });
 });
 
