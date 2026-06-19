@@ -26,6 +26,7 @@ function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
       {name === "retry"     && (<><path {...p} d="M13 8a5 5 0 1 1-1.5-3.55" /><path {...p} d="M13 2.5V5h-2.5" /></>)}
       {name === "inbox"     && (<><path {...p} d="M2 4.5h12v7H2z" /><path {...p} d="M2 9.5h3l1 1.5h4l1-1.5h3" /></>)}
       {name === "plus"      && (<path {...p} d="M8 3v10M3 8h10" />)}
+      {name === "chevron-down" && (<path {...p} d="M3.5 6l4.5 4 4.5-4" />)}
     </svg>
   );
 }
@@ -559,11 +560,81 @@ function ToastViewport({ toasts = [], dismiss, position = "bottom-right" }) {
   );
 }
 
+/* ----------------------------- ConfirmDialog ----------------------------- */
+/* Тонкая обёртка над <Modal size="sm"> для подтверждения действия — заменяет
+   нативный window.confirm. Footer = Отмена (ghost) + Подтвердить (вариант по
+   tone: danger→danger, default→primary). a11y (фокус-ловушка/Esc/scroll-lock)
+   наследуется от Modal. principles.md §4 (опасное действие = модал). */
+function ConfirmDialog({
+  open, title, message,
+  confirmLabel = "Подтвердить", cancelLabel = "Отмена",
+  tone = "danger", onConfirm, onClose, loading = false,
+}) {
+  const confirmVariant = tone === "danger" ? "danger" : "primary";
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="sm"
+      title={title}
+      footer={<>
+        <Button variant="ghost" onClick={onClose} disabled={loading}>{cancelLabel}</Button>
+        <Button variant={confirmVariant} onClick={onConfirm} loading={loading}>{confirmLabel}</Button>
+      </>}
+    >
+      {message}
+    </Modal>
+  );
+}
+
+/* -------------------------------- Select --------------------------------- */
+/* Токен-стилизованный нативный <select> с привязкой label↔select (htmlFor/id),
+   aria-invalid на ошибке, hint как aria-describedby. Читаем в ОБЕИХ темах
+   (фон/текст/стрелка — токены). Нативный листбокс (без кастом-рендера): доступен
+   с клавиатуры и экранным ридером из коробки. options: [{value,label,disabled}]
+   ИЛИ строки; children рендерятся как есть, если переданы вместо options. */
+function Select({
+  label, options, value, onChange, invalid = false, hint,
+  placeholder, id, className = "", children, ...rest
+}) {
+  const autoId = useId();
+  const selectId = id || `chs-select-${autoId}`;
+  const hintId = hint ? `${selectId}-hint` : undefined;
+  const opts = (options || []).map((o) =>
+    typeof o === "object" && o !== null ? o : { value: o, label: String(o) }
+  );
+  return (
+    <div className="chs-field">
+      {label && <label className="chs-label" htmlFor={selectId}>{label}</label>}
+      <div className="chs-select-wrap">
+        <select
+          id={selectId}
+          className={`chs-input chs-select ${invalid ? "chs-input--invalid" : ""} ${className}`}
+          value={value}
+          onChange={onChange}
+          aria-invalid={invalid || undefined}
+          aria-describedby={hintId}
+          {...rest}
+        >
+          {placeholder != null && <option value="" disabled>{placeholder}</option>}
+          {children != null
+            ? children
+            : opts.map((o) => (
+                <option key={String(o.value)} value={o.value} disabled={o.disabled}>{o.label}</option>
+              ))}
+        </select>
+        <KitIcon name="chevron-down" className="chs-select__arrow" />
+      </div>
+      {hint && <span id={hintId} className={`chs-hint ${invalid ? "chs-hint--invalid" : ""}`}>{hint}</span>}
+    </div>
+  );
+}
+
 export {
-  ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field,
+  ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,
-  Modal, Drawer, EmptyState, LoadingState, Skeleton, ErrorState,
+  Modal, Drawer, ConfirmDialog, EmptyState, LoadingState, Skeleton, ErrorState,
   Popover, Tooltip, Toast, ToastViewport, useToasts,
 };

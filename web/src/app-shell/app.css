@@ -336,19 +336,10 @@
 .chs-inbox__filter svg { width: 12px; height: 12px; }
 
 .chs-inbox__scroll { flex: 1; min-height: 0; overflow: auto; }
-.chs-itable { width: 100%; border-collapse: collapse; }
-.chs-itable thead th {
-  position: sticky; top: 0; z-index: 2; text-align: left;
-  font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold);
-  letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; color: var(--chs-color-text-faint);
-  height: 30px; padding: 0 var(--chs-space-6); border-bottom: 1px solid var(--chs-color-border);
-  background: var(--chs-color-surface-2); white-space: nowrap;
-}
-.chs-itable tbody td { height: var(--chs-row-h); padding: 0 var(--chs-space-6); border-bottom: 1px solid var(--chs-color-border-faint); vertical-align: middle; color: var(--chs-color-text); }
-.chs-itable tbody tr:hover td { background: var(--chs-color-hover); }
-.chs-itable tbody tr[data-taken="true"] td { opacity: 0.55; }
-.chs-itable td.chs-r { text-align: right; }
-.chs-itable td.chs-c { text-align: center; }
+/* `.chs-itable` — КАНОНИЧЕСКИЕ правила плотной таблицы живут ОДНИМ источником в
+   components.css (селектор `.chs-table, .chs-itable`, плюс модификаторы
+   .chs-num/.chs-r/.chs-c и tr[data-taken]). Здесь дубля больше нет — экраны,
+   потребляющие класс `.chs-itable`, рендерят те же стили из kit-слоя. */
 
 .chs-task { display: flex; align-items: center; gap: var(--chs-space-5); min-width: 0; }
 .chs-task__marker { width: 6px; height: 6px; border-radius: var(--chs-radius-full); flex: none; }

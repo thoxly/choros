@@ -29,6 +29,23 @@ function Swatch({ name, varName, color, dark }) {
   );
 }
 
+/* контролируемый Select для витрины */
+function SelectDemo() {
+  const [v, setV] = useState("agent");
+  return (
+    <Select
+      label="Тип исполнителя"
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      options={[
+        { value: "human", label: "Человек" },
+        { value: "agent", label: "Агент" },
+        { value: "service", label: "Сервис" },
+      ]}
+    />
+  );
+}
+
 /* ---------- Палитра ---------- */
 const NEUTRALS = [
   ["1000","--chs-neutral-1000"],["950","--chs-neutral-950"],["900","--chs-neutral-900"],
@@ -258,12 +275,22 @@ function PrimitivesSection() {
         </div>
 
         <div className="chs-card">
-          <span className="chs-card__label">Поля ввода</span>
+          <span className="chs-card__label">Поля ввода · Select</span>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--chs-space-6)" }}>
             <Field label="Название процесса" placeholder="Согласование счёта" value={q} onChange={(e)=>setQ(e.target.value)} />
             <Field label="ID инстанса" mono placeholder="INS-0000-0" />
-            <Field label="Лимит, ткн" mono defaultValue="250000" />
-            <Field label="SLA, мин" mono invalid defaultValue="-15" hint="Значение должно быть ≥ 0" />
+            <SelectDemo />
+            <Select
+              label="Приоритет"
+              invalid
+              defaultValue="urgent"
+              hint="Срочный недоступен для этого процесса"
+              options={[
+                { value: "low", label: "Низкий" },
+                { value: "normal", label: "Обычный" },
+                { value: "urgent", label: "Срочный" },
+              ]}
+            />
           </div>
         </div>
       </div>
@@ -321,12 +348,12 @@ function KitSection() {
   return (
     <Section num="05" title="Обязательный kit" desc="OBLIK · поверхности и состояния">
       {/* Поверхности: Modal / Drawer */}
-      <div className="chs-subhead">Поверхности — Modal · Drawer (фокус-ловушка, Esc, scroll-lock)</div>
+      <div className="chs-subhead">Поверхности — Modal · Drawer · ConfirmDialog (фокус-ловушка, Esc, scroll-lock)</div>
       <div className="chs-card">
         <div className="chs-specrow">
           <Button variant="primary" onClick={() => setModalOpen(true)}>Открыть модал</Button>
           <Button variant="secondary" onClick={() => setDrawerOpen(true)}>Открыть drawer</Button>
-          <Button variant="danger" onClick={() => setConfirmOpen(true)}>Опасное действие</Button>
+          <Button variant="danger" onClick={() => setConfirmOpen(true)}>Опасное действие (ConfirmDialog)</Button>
         </div>
       </div>
 
@@ -345,18 +372,15 @@ function KitSection() {
         </div>
       </Modal>
 
-      <Modal
+      <ConfirmDialog
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
-        size="sm"
+        onConfirm={() => setConfirmOpen(false)}
+        tone="danger"
         title="Остановить инстанс?"
-        footer={<>
-          <Button variant="ghost" onClick={() => setConfirmOpen(false)}>Отмена</Button>
-          <Button variant="danger" onClick={() => setConfirmOpen(false)}>Остановить</Button>
-        </>}
-      >
-        Инстанс <MonoId>INS-8837-A</MonoId> будет остановлен. Незавершённые задачи перейдут в паузу.
-      </Modal>
+        confirmLabel="Остановить"
+        message={<>Инстанс <MonoId>INS-8837-A</MonoId> будет остановлен. Незавершённые задачи перейдут в паузу.</>}
+      />
 
       <Drawer
         open={drawerOpen}
