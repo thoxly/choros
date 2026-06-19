@@ -34,15 +34,22 @@
    маппинг ошибок) вынесена в чистый модуль records-form.js и покрыта unit-тестами.
    Авторизация — devHeaders() (X-Dev-User), как у остальных экранов.
 
-   OBLIK (T-0302): «Создать запись» — через kit <Modal>; динамические поля через
-   .chs-input (видимый ввод в ОБЕИХ темах через реальные --chs-color-* токены, без
-   несуществующих --chs-bg-primary/--chs-border). Ноль хардкода цвета (G6).
+   OBLIK (T-0302): динамические поля через .chs-input (видимый ввод в ОБЕИХ темах
+   через реальные --chs-color-* токены, без несуществующих --chs-bg-primary/
+   --chs-border). Ноль хардкода цвета (G6).
+
+   OBLIK (T-0319): «Создать запись» — через правый kit <Drawer> (не <Modal>).
+   Форма генерирует НЕОГРАНИЧЕННОЕ число полей из record_schema; модал плохо
+   скроллится на 20+ полях и прячет таблицу записей. Боковая панель держит таблицу
+   на виду (прецедент — TaskDetail-drawer инбокса) и скроллится естественно;
+   Отмена/«Создать запись» — в footer-слот Drawer. Де-жаргон: «реестр» в видимом
+   тексте → «набор полей»/«Данные»/«Запись» (словарь конструктора).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Button, Mono, Modal, EmptyState, ErrorState, LoadingState, KitIcon,
+  Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -74,12 +81,17 @@ const errStyle = {
 const labelTxt = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-medium)', color: 'var(--chs-color-text)' };
 
 /**
- * CreateRecordModal — dynamic form generated from the chosen registry_def's
+ * CreateRecordDrawer — dynamic form generated from the chosen registry_def's
  * record_schema. One control per `properties` field; input type by field type
  * (text/number/checkbox); required markers from required[]. Values are typed +
  * serialized by records-form.js so the server's AJV validation passes.
+ *
+ * Rendered in a right-side kit <Drawer> (T-0319): the form can produce an
+ * unbounded number of fields, which a modal scrolls badly; the drawer keeps the
+ * records table visible and scrolls naturally. The kit Drawer owns the overlay,
+ * focus-trap, Esc and scroll-lock — no hand-rolled overlay (gate G6).
  */
-function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDef }) {
+function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryDef }) {
   const formFields = useMemo(
     () => (registryDef ? schemaToFormFields(registryDef.record_schema) : []),
     [registryDef],
@@ -149,10 +161,11 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
   const canSubmit = open && registryDef && formFields.length > 0;
 
   return (
-    <Modal
+    <Drawer
       open={Boolean(open && registryDef)}
       onClose={onClose}
       title="Новая запись"
+      side="right"
       footer={
         <>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
@@ -164,12 +177,12 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
     >
       <form id="create-record-form" onSubmit={handleSubmit}>
         <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-          Реестр «{registryDef ? registryDef.display_name : ''}». Поля сгенерированы из его схемы.
+          Набор полей «{registryDef ? registryDef.display_name : ''}». Поля сгенерированы из его схемы.
         </p>
 
         {formFields.length === 0 && (
           <p style={{ marginBottom: 'var(--chs-space-6)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-            У реестра нет полей. Определите их в конструкторе полей, затем добавляйте записи.
+            В наборе полей нет полей. Определите их в конструкторе полей, затем добавляйте записи.
           </p>
         )}
 
@@ -222,7 +235,7 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
           </div>
         )}
       </form>
-    </Modal>
+    </Drawer>
   );
 }
 
@@ -320,7 +333,7 @@ function AppRecordsScreen() {
 
   return (
     <>
-      <CreateRecordModal
+      <CreateRecordDrawer
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
@@ -333,10 +346,16 @@ function AppRecordsScreen() {
           padding: 'var(--chs-space-5) var(--chs-space-6)',
           borderBottom: '1px solid var(--chs-color-border)',
         }}>
-          <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-            Записи приложения {app ? `«${app.display_name}»` : ''}
-            {records !== null ? ` · ${recordList.length}` : ''}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)' }}>
+            {/* Non-sidebar up-nav back to the application list (T-0319). */}
+            <Button variant="ghost" size="sm" onClick={() => navigate('/apps')} title="К списку приложений">
+              ← к приложению
+            </Button>
+            <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+              Записи приложения {app ? `«${app.display_name}»` : ''}
+              {records !== null ? ` · ${recordList.length}` : ''}
+            </span>
+          </div>
           <div style={{ display: 'flex', gap: 'var(--chs-space-5)', alignItems: 'center' }}>
             {/* >1 registry_def → user MUST pick which one (POST 409s otherwise). */}
             {defList.length > 1 && (
@@ -345,9 +364,9 @@ function AppRecordsScreen() {
                 style={{ width: 'auto' }}
                 value={selectedDefId || ''}
                 onChange={(e) => setSelectedDefId(e.target.value || null)}
-                aria-label="Реестр полей"
+                aria-label="Набор полей"
               >
-                <option value="">— выберите реестр —</option>
+                <option value="">— выберите набор полей —</option>
                 {defList.map((d) => (
                   <option key={d.id} value={d.id}>{d.display_name}</option>
                 ))}
@@ -359,7 +378,7 @@ function AppRecordsScreen() {
               glyph={<KitIcon name="plus" />}
               disabled={!selectedDef}
               onClick={() => setCreateOpen(true)}
-              title={selectedDef ? 'Создать запись' : 'Сначала выберите реестр полей'}
+              title={selectedDef ? 'Создать запись' : 'Сначала выберите набор полей'}
             >
               Создать запись
             </Button>
@@ -369,9 +388,9 @@ function AppRecordsScreen() {
         <div className="chs-inbox__scroll">
           {/* registry_def load states first — records depend on a chosen def. */}
           {defsError ? (
-            <ErrorState message={`Не удалось загрузить реестры: ${defsError}`} onRetry={loadDefs} />
+            <ErrorState message={`Не удалось загрузить наборы полей: ${defsError}`} onRetry={loadDefs} />
           ) : defs === null ? (
-            <LoadingState label="Загрузка реестров…" />
+            <LoadingState label="Загрузка наборов полей…" />
           ) : defList.length === 0 ? (
             <EmptyState
               icon={<KitIcon name="inbox" size={28} />}
@@ -385,8 +404,8 @@ function AppRecordsScreen() {
             />
           ) : !selectedDef ? (
             <EmptyState
-              title="Выберите реестр полей"
-              description="У приложения несколько реестров полей. Выберите реестр выше, чтобы увидеть и создавать его записи."
+              title="Выберите набор полей"
+              description="У приложения несколько наборов полей. Выберите набор выше, чтобы увидеть и создавать его записи."
             />
           ) : recordsError ? (
             <ErrorState message={`Не удалось загрузить записи: ${recordsError}`} onRetry={loadRecords} />
@@ -395,7 +414,7 @@ function AppRecordsScreen() {
           ) : recordList.length === 0 ? (
             <EmptyState
               icon={<KitIcon name="inbox" size={28} />}
-              title={`В реестре «${selectedDef.display_name}» пока нет записей`}
+              title={`В наборе полей «${selectedDef.display_name}» пока нет записей`}
               description="Создайте первую."
               action={
                 <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>Создать запись</Button>
