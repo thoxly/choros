@@ -26,7 +26,7 @@
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Button, MonoId, StatusChip } from '../components/components.jsx';
+import { Button, MonoId, StatusChip, KitIcon } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
 import BpmnPropertiesPanel from '../canvas/bpmn-properties-panel.jsx';
@@ -68,10 +68,10 @@ function ValidationBanner({ result, onDismiss }) {
         <span>Диаграмма валидна</span>
         <button
           onClick={onDismiss}
-          style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: '0 var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}
+          style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: '0 var(--chs-space-3)', fontSize: 'var(--chs-text-sm)', display: 'inline-flex', alignItems: 'center' }}
           aria-label="Закрыть"
         >
-          ✕
+          <KitIcon name="close" />
         </button>
       </div>
     );
@@ -101,10 +101,10 @@ function ValidationBanner({ result, onDismiss }) {
         </span>
         <button
           onClick={onDismiss}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--chs-color-text-muted)', padding: '0 var(--chs-space-3)', fontSize: 'var(--chs-text-sm)' }}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--chs-color-text-muted)', padding: '0 var(--chs-space-3)', fontSize: 'var(--chs-text-sm)', display: 'inline-flex', alignItems: 'center' }}
           aria-label="Закрыть"
         >
-          ✕
+          <KitIcon name="close" />
         </button>
       </div>
 
@@ -153,10 +153,10 @@ function SaveLoadStatusBanner({ message, isError, onDismiss }) {
       <span style={{ flex: 1 }}>{message}</span>
       <button
         onClick={onDismiss}
-        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: '0 var(--chs-space-3)' }}
+        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: '0 var(--chs-space-3)', display: 'inline-flex', alignItems: 'center' }}
         aria-label="Закрыть"
       >
-        ✕
+        <KitIcon name="close" />
       </button>
     </div>
   );
