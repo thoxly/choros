@@ -32,6 +32,7 @@ import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
+import { getRoleSlugsForActor } from "../db/grants-dao.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
@@ -149,9 +150,35 @@ const USER_ROLES: Record<string, string[]> = {
   "e-sokolov": ["fin-ctrl"],
 };
 
-function rolesForUser(devUserId?: string | null): string[] {
-  if (!devUserId) return [];
-  return USER_ROLES[devUserId] ?? [];
+/**
+ * T-0331 (S0a): Resolve the actor's role slugs from the live DB when available,
+ * falling back to the in-memory USER_ROLES fixture for memory-mode / no-DB tests.
+ *
+ * DB path: getRoleSlugsForActor (grants-dao.ts) queries role_assignment → role
+ * inside a tenant-scoped RLS transaction. Returns [] for an unknown actor.
+ *
+ * Fallback path (hasDb() === false): the existing in-memory USER_ROLES fixture,
+ * which preserves all existing memory-mode test behaviour (FF-11).
+ *
+ * Fail-closed (NF-3): when DATABASE_URL is set, any DB error propagates to the
+ * caller rather than silently degrading to the in-memory fixture. Authority call
+ * sites (claim, approve) MUST see this propagation so the router's INTERNAL:500
+ * envelope is returned instead of evaluating grants against stale fixture data.
+ * The no-DB path (hasDb() === false) keeps the fixture fallback as before.
+ */
+async function resolveRolesForActor(
+  actor?: string | null,
+  tenantId: string = DEV_TENANT_ID,
+  nowMs: number = Date.now(),
+): Promise<string[]> {
+  if (!actor) return [];
+  if (hasDb()) {
+    // No try/catch: DB errors propagate to the caller (fail-closed, NF-3).
+    // A fixture fallback here would let a transient DB error silently grant
+    // access to actors whose live DB grants have been revoked.
+    return await getRoleSlugsForActor(getOrgPool(), tenantId, actor, nowMs);
+  }
+  return USER_ROLES[actor] ?? [];
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +538,12 @@ export function registerInboxRoutes(
     }
 
     const base = await findInboxItems(actor);
-    const myRoles = rolesForUser(actor);
+    // T-0331 (S0a): resolve role slugs from live DB (falls back to in-memory fixture
+    // when !hasDb()); DB errors propagate as 500 (fail-closed, NF-3). tenantId from
+    // resolveTenant mirrors the same source used by findInboxItems so role-check and
+    // task-list are always co-scoped to the same tenant.
+    const inboxTenantId = await resolveTenant(actor);
+    const myRoles = await resolveRolesForActor(actor, inboxTenantId);
 
     // Per-tab counts from the tenant-scoped base (so the UI badge totals are server-truth).
     const counts: Record<TabId, number> = {
@@ -750,7 +782,9 @@ export function registerInboxRoutes(
     // Claim-from-pool invariant: caller must hold the ROLE the task is addressed to.
     // Empty role set (unknown dev-user) is permitted in the dev fixture so the
     // pre-existing T-0138 claimant flow keeps working.
-    const myRoles = rolesForUser(devUserId);
+    // T-0331 (S0a): resolveRolesForActor uses live DB when available; tenantId is
+    // already resolved above (resolveTenant(devUserId) → same tenant scope as the task).
+    const myRoles = await resolveRolesForActor(devUserId, tenantId);
     if (myRoles.length > 0 && taskRole !== undefined && !myRoles.includes(taskRole)) {
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
@@ -826,7 +860,9 @@ export function registerInboxRoutes(
       // approve-grant check (deny-by-default): the actor must hold the role the task
       // is addressed to. An actor without role-membership cannot approve (the moat:
       // e.g. an agent-slot holding no role-approver is denied here, structurally).
-      const myRoles = rolesForUser(actor);
+      // T-0331 (S0a): resolveRolesForActor uses live DB when available; tenantId is
+      // already resolved above via resolveActorTenantDep.
+      const myRoles = await resolveRolesForActor(actor, tenantId);
       if (!myRoles.includes(task.role)) {
         throw new HttpError(
           403,
