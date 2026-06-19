@@ -92,6 +92,26 @@ function isConflict(err: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// isFkViolation — detect FOREIGN KEY violation from pg error (23503)
+// Returns the blocking constraint name if available, for the 409 body.
+// ---------------------------------------------------------------------------
+
+function isFkViolation(err: unknown): boolean {
+  if (err && typeof err === "object" && "code" in err) {
+    return (err as { code: string }).code === "23503";
+  }
+  return false;
+}
+
+function fkConstraintName(err: unknown): string {
+  if (err && typeof err === "object" && "constraint" in err) {
+    const c = (err as { constraint?: string }).constraint;
+    if (typeof c === "string" && c.length > 0) return c;
+  }
+  return "unknown";
+}
+
+// ---------------------------------------------------------------------------
 // registerSeedWriteRoutes — called from server.ts after grants pool is ready
 // ---------------------------------------------------------------------------
 
@@ -490,15 +510,26 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     const deptId = params["id"] as string;
     assertUuidShape(deptId, "id");
 
-    await withTenantTx(pool, tenant_id, async (client) => {
-      const { rowCount } = await client.query(
-        `DELETE FROM choros.department WHERE tenant_id = $1 AND id = $2`,
-        [tenant_id, deptId],
-      );
-      if ((rowCount ?? 0) === 0) {
-        throw new HttpError(404, "NOT_FOUND", `department ${deptId} not found`);
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const { rowCount } = await client.query(
+          `DELETE FROM choros.department WHERE tenant_id = $1 AND id = $2`,
+          [tenant_id, deptId],
+        );
+        if ((rowCount ?? 0) === 0) {
+          throw new HttpError(404, "NOT_FOUND", `department ${deptId} not found`);
+        }
+      });
+    } catch (err) {
+      if (isFkViolation(err)) {
+        throw new HttpError(
+          409,
+          "FK_IN_USE",
+          `department ${deptId} cannot be deleted: it is still referenced by dependent records (constraint: ${fkConstraintName(err)})`,
+        );
       }
-    });
+      throw err;
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
@@ -527,15 +558,26 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     const posId = params["id"] as string;
     assertUuidShape(posId, "id");
 
-    await withTenantTx(pool, tenant_id, async (client) => {
-      const { rowCount } = await client.query(
-        `DELETE FROM choros.position WHERE tenant_id = $1 AND id = $2`,
-        [tenant_id, posId],
-      );
-      if ((rowCount ?? 0) === 0) {
-        throw new HttpError(404, "NOT_FOUND", `position ${posId} not found`);
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const { rowCount } = await client.query(
+          `DELETE FROM choros.position WHERE tenant_id = $1 AND id = $2`,
+          [tenant_id, posId],
+        );
+        if ((rowCount ?? 0) === 0) {
+          throw new HttpError(404, "NOT_FOUND", `position ${posId} not found`);
+        }
+      });
+    } catch (err) {
+      if (isFkViolation(err)) {
+        throw new HttpError(
+          409,
+          "FK_IN_USE",
+          `position ${posId} cannot be deleted: it is still referenced by dependent records (constraint: ${fkConstraintName(err)})`,
+        );
       }
-    });
+      throw err;
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
@@ -564,15 +606,26 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     const empId = params["id"] as string;
     assertUuidShape(empId, "id");
 
-    await withTenantTx(pool, tenant_id, async (client) => {
-      const { rowCount } = await client.query(
-        `DELETE FROM choros.employee WHERE tenant_id = $1 AND id = $2`,
-        [tenant_id, empId],
-      );
-      if ((rowCount ?? 0) === 0) {
-        throw new HttpError(404, "NOT_FOUND", `employee ${empId} not found`);
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const { rowCount } = await client.query(
+          `DELETE FROM choros.employee WHERE tenant_id = $1 AND id = $2`,
+          [tenant_id, empId],
+        );
+        if ((rowCount ?? 0) === 0) {
+          throw new HttpError(404, "NOT_FOUND", `employee ${empId} not found`);
+        }
+      });
+    } catch (err) {
+      if (isFkViolation(err)) {
+        throw new HttpError(
+          409,
+          "FK_IN_USE",
+          `employee ${empId} cannot be deleted: it is still referenced by dependent records (constraint: ${fkConstraintName(err)})`,
+        );
       }
-    });
+      throw err;
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
@@ -601,15 +654,26 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     const roleId = params["id"] as string;
     assertUuidShape(roleId, "id");
 
-    await withTenantTx(pool, tenant_id, async (client) => {
-      const { rowCount } = await client.query(
-        `DELETE FROM choros.role WHERE tenant_id = $1 AND id = $2`,
-        [tenant_id, roleId],
-      );
-      if ((rowCount ?? 0) === 0) {
-        throw new HttpError(404, "NOT_FOUND", `role ${roleId} not found`);
+    try {
+      await withTenantTx(pool, tenant_id, async (client) => {
+        const { rowCount } = await client.query(
+          `DELETE FROM choros.role WHERE tenant_id = $1 AND id = $2`,
+          [tenant_id, roleId],
+        );
+        if ((rowCount ?? 0) === 0) {
+          throw new HttpError(404, "NOT_FOUND", `role ${roleId} not found`);
+        }
+      });
+    } catch (err) {
+      if (isFkViolation(err)) {
+        throw new HttpError(
+          409,
+          "FK_IN_USE",
+          `role ${roleId} cannot be deleted: it is still referenced by dependent records (constraint: ${fkConstraintName(err)})`,
+        );
       }
-    });
+      throw err;
+    }
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
