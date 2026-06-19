@@ -20,13 +20,13 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, MonoId } from '../components/components.jsx';
+import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   validateHire, buildHirePayload,
   validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions,
+  mapAgentError, statusLabel, positionOptions, displayAgentName,
 } from './agents-form.js';
 
 // Dev tenant UUID — the silo the hire/list endpoints scope to (server DEV_TENANT_ID).
@@ -39,75 +39,49 @@ const LLM_PROVIDERS = [
   { value: 'self-hosted', label: 'Свой эндпойнт (self-hosted)' },
 ];
 
-// ---- Inline styles (mirror screen-org.jsx — no custom CSS classes) ----------
-const inputStyle = (invalid) => ({
-  width: '100%', boxSizing: 'border-box', padding: '8px 10px', marginTop: '4px',
-  background: 'var(--chs-bg-primary, #14151a)',
-  border: `1px solid ${invalid ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-border, #30333d)'}`,
-  borderRadius: '6px', color: 'inherit', fontSize: 'var(--chs-text-sm, 13px)', fontFamily: 'inherit',
-});
-const errStyle = { display: 'block', marginTop: '4px', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-danger, #e53e3e)' };
-const hintStyle = { ...errStyle, color: 'var(--chs-color-text-faint, #666)' };
-const labelStyle = { display: 'block', marginBottom: '14px' };
-const labelSpan = { fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 };
+// ---- Token-only styles (OBLIK: consume --chs-* only, no hardcoded color) -----
+// The <select> elements reuse the kit .chs-input class for theming; these inline
+// rules carry only layout (spacing/size), never raw color literals.
+const errStyle = { display: 'block', marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' };
+const hintStyle = { ...errStyle, color: 'var(--chs-color-text-faint)' };
+const labelStyle = { display: 'block', marginBottom: 'var(--chs-space-5)' };
+const labelSpan = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-medium)' };
 const bannerErrStyle = {
-  marginBottom: '16px', padding: '10px 14px',
-  background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-  border: '1px solid var(--chs-color-danger, #e53e3e)', borderRadius: '6px',
-  fontSize: 'var(--chs-text-sm, 13px)',
+  marginBottom: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+  background: 'var(--chs-color-danger-soft)', border: '1px solid var(--chs-color-danger)',
+  borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)',
 };
 const cardStyle = {
-  display: 'flex', alignItems: 'center', gap: 16, padding: '12px 16px',
-  background: 'var(--chs-bg-secondary, #1e2028)', border: '1px solid var(--chs-border, #30333d)',
-  borderRadius: '8px',
+  display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)',
+  padding: 'var(--chs-space-4) var(--chs-space-5)',
+  background: 'var(--chs-color-surface)', border: '1px solid var(--chs-color-border)',
+  borderRadius: 'var(--chs-radius-3)', color: 'var(--chs-color-text)',
 };
-const emptyStyle = {
-  padding: '32px', textAlign: 'center', color: 'var(--chs-color-text-muted, #888)',
-  border: '1px dashed var(--chs-border, #30333d)', borderRadius: '8px',
-};
-const badgeStyle = (ok) => ({
-  fontSize: '12px', padding: '2px 8px', borderRadius: '10px',
-  background: ok ? 'var(--chs-bg-ok-subtle, rgba(56,178,107,0.16))' : 'var(--chs-bg-warn-subtle, rgba(214,158,46,0.16))',
-  color: ok ? 'var(--chs-color-ok, #38b26b)' : 'var(--chs-color-warn, #d69e2e)',
-});
-
-function ModalShell({ title, onClose, children }) {
-  return (
-    <div
-      role="dialog" aria-modal="true" aria-label={title}
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      {children}
-    </div>
-  );
-}
-
-const formStyle = {
-  background: 'var(--chs-bg-secondary, #1e2028)', border: '1px solid var(--chs-border, #30333d)',
-  borderRadius: '8px', padding: '28px 32px', minWidth: '400px', maxWidth: '520px',
-  boxShadow: '0 8px 32px rgba(0,0,0,0.4)', maxHeight: '88vh', overflowY: 'auto',
-};
+// Kit input/select theming: .chs-input owns all color (both themes, WCAG AA);
+// .chs-input--invalid adds the danger border. width:100% via inline layout.
+const selectCls = (invalid) => `chs-input ${invalid ? 'chs-input--invalid' : ''}`;
+const fieldInputStyle = { width: '100%', boxSizing: 'border-box', marginTop: 'var(--chs-space-2)' };
 
 /* ---------------------------------------------------------------------------
-   Список агентов
+   Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
    --------------------------------------------------------------------------- */
 function AgentRow({ agent, onBind }) {
+  const name = displayAgentName(agent.display_name);
   return (
     <div style={cardStyle}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 600 }}>{agent.display_name}</div>
-        <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+        <div style={{ fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>{name}</div>
+        <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
           <MonoId>{agent.slug}</MonoId>
           {agent.position ? ` · ${agent.position}` : ' · должность не назначена'}
           {agent.department ? ` · ${agent.department}` : ''}
         </div>
       </div>
-      <div style={{ textAlign: 'right', fontSize: 12 }}>
-        <span style={badgeStyle(agent.llm_bound)} title={agent.llm_bound ? 'Секрет-хэндл привязан' : 'LLM не привязана'}>
-          {statusLabel(agent.status)}
-        </span>
-        <div style={{ opacity: 0.7, marginTop: 4 }}>
+      <div style={{ textAlign: 'right', fontSize: 'var(--chs-text-xs)' }}>
+        <Tooltip label={agent.llm_bound ? 'Секрет-хэндл привязан' : 'LLM не привязана'}>
+          <StatusChip status={agent.llm_bound ? 'done' : 'waiting'} label={statusLabel(agent.status)} />
+        </Tooltip>
+        <div style={{ color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-3)' }}>
           {agent.llm_provider ? agent.llm_provider : 'провайдер не задан'}
           {agent.llm_model ? ` · ${agent.llm_model}` : ''}
         </div>
@@ -156,30 +130,29 @@ function HireModal({ positions, onClose, onDone }) {
   };
 
   return (
-    <ModalShell title="Подключить агента" onClose={onClose}>
-      <form style={formStyle} onSubmit={submit}>
-        <h2 style={{ margin: '0 0 4px 0', fontSize: '16px', fontWeight: 600 }}>Подключить агента</h2>
-        <p style={{ margin: '0 0 20px 0', fontSize: '13px', color: 'var(--chs-color-text-muted, #888)' }}>
+    <Modal open title="Подключить агента" onClose={onClose} size="sm">
+      <form onSubmit={submit}>
+        <p style={{ margin: '0 0 var(--chs-space-7) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Агент — штатная единица: подключается к должности в оргструктуре и оттуда берёт задачи.
           LLM привязывается отдельным шагом после создания.
         </p>
 
         <label style={labelStyle}>
           <span style={labelSpan}>Слаг</span>
-          <input style={inputStyle(!!fieldErrors.slug)} value={values.slug} onChange={set('slug')} placeholder="recon-bot" autoFocus />
+          <input className={selectCls(fieldErrors.slug)} style={fieldInputStyle} value={values.slug} onChange={set('slug')} placeholder="recon-bot" aria-invalid={!!fieldErrors.slug} autoFocus />
           {fieldErrors.slug ? <span style={errStyle}>{fieldErrors.slug}</span>
             : <span style={hintStyle}>строчные латинские, цифры, дефис · 1–64</span>}
         </label>
 
         <label style={labelStyle}>
           <span style={labelSpan}>Отображаемое имя</span>
-          <input style={inputStyle(!!fieldErrors.display_name)} value={values.display_name} onChange={set('display_name')} placeholder="Сверка-агент" />
+          <input className={selectCls(fieldErrors.display_name)} style={fieldInputStyle} value={values.display_name} onChange={set('display_name')} placeholder="Сверка-агент" aria-invalid={!!fieldErrors.display_name} />
           {fieldErrors.display_name && <span style={errStyle}>{fieldErrors.display_name}</span>}
         </label>
 
         <label style={labelStyle}>
           <span style={labelSpan}>Должность</span>
-          <select style={inputStyle(!!fieldErrors.position_id)} value={values.position_id} onChange={set('position_id')}>
+          <select className={selectCls(fieldErrors.position_id)} style={fieldInputStyle} value={values.position_id} onChange={set('position_id')} aria-invalid={!!fieldErrors.position_id}>
             <option value="">— выберите должность —</option>
             {positions.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
@@ -191,14 +164,14 @@ function HireModal({ positions, onClose, onDone }) {
 
         {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
 
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end' }}>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
-          <Button type="submit" variant="primary" size="sm" disabled={submitting}>
+          <Button type="submit" variant="primary" size="sm" disabled={submitting} loading={submitting}>
             {submitting ? 'Подключаю…' : 'Подключить'}
           </Button>
         </div>
       </form>
-    </ModalShell>
+    </Modal>
   );
 }
 
@@ -239,10 +212,9 @@ function BindModal({ agent, onClose, onDone }) {
   };
 
   return (
-    <ModalShell title="Привязать LLM" onClose={onClose}>
-      <form style={formStyle} onSubmit={submit}>
-        <h2 style={{ margin: '0 0 4px 0', fontSize: '16px', fontWeight: 600 }}>Привязать LLM · {agent.display_name}</h2>
-        <p style={{ margin: '0 0 20px 0', fontSize: '13px', color: 'var(--chs-color-text-muted, #888)' }}>
+    <Modal open title={`Привязать LLM · ${displayAgentName(agent.display_name)}`} onClose={onClose} size="sm">
+      <form onSubmit={submit}>
+        <p style={{ margin: '0 0 var(--chs-space-7) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Ключ LLM — секрет. Вставьте <strong>ссылку-хэндл</strong> на секрет
           (например <code>vault://secret/llm/recon</code> или <code>env://LLM_KEY</code>),
           <strong> а не сам ключ</strong>. Сервер хранит только хэндл и никогда не показывает значение обратно.
@@ -250,7 +222,7 @@ function BindModal({ agent, onClose, onDone }) {
 
         <label style={labelStyle}>
           <span style={labelSpan}>Провайдер</span>
-          <select style={inputStyle(!!fieldErrors.provider)} value={values.provider} onChange={set('provider')} autoFocus>
+          <select className={selectCls(fieldErrors.provider)} style={fieldInputStyle} value={values.provider} onChange={set('provider')} aria-invalid={!!fieldErrors.provider} autoFocus>
             <option value="">— выберите провайдера —</option>
             {LLM_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
@@ -258,31 +230,31 @@ function BindModal({ agent, onClose, onDone }) {
         </label>
 
         <label style={labelStyle}>
-          <span style={labelSpan}>Модель <span style={{ color: 'var(--chs-color-text-faint, #666)' }}>(опц.)</span></span>
-          <input style={inputStyle(false)} value={values.model} onChange={set('model')} placeholder="claude-sonnet-4" />
+          <span style={labelSpan}>Модель <span style={{ color: 'var(--chs-color-text-faint)' }}>(опц.)</span></span>
+          <input className={selectCls(false)} style={fieldInputStyle} value={values.model} onChange={set('model')} placeholder="claude-sonnet-4" />
         </label>
 
         <label style={labelStyle}>
           <span style={labelSpan}>Ссылка-хэндл на секрет ключа</span>
           <input
             type="password" autoComplete="off"
-            style={inputStyle(!!fieldErrors.handle)}
+            className={selectCls(fieldErrors.handle)} style={fieldInputStyle}
             value={values.handle} onChange={set('handle')}
-            placeholder="vault://secret/llm/recon"
+            placeholder="vault://secret/llm/recon" aria-invalid={!!fieldErrors.handle}
           />
           {fieldErrors.handle && <span style={errStyle}>{fieldErrors.handle}</span>}
         </label>
 
         {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
 
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-5)', justifyContent: 'flex-end' }}>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
-          <Button type="submit" variant="primary" size="sm" disabled={submitting}>
+          <Button type="submit" variant="primary" size="sm" disabled={submitting} loading={submitting}>
             {submitting ? 'Привязываю…' : 'Привязать'}
           </Button>
         </div>
       </form>
-    </ModalShell>
+    </Modal>
   );
 }
 
@@ -325,10 +297,12 @@ export default function AgentsScreen() {
 
   useEffect(() => { loadAgents(); loadPositions(); }, [loadAgents, loadPositions]);
 
+  const hasAgents = Array.isArray(agents) && agents.length > 0;
+
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 16 }}>
-        <p style={{ fontSize: 13, opacity: 0.75, margin: 0, maxWidth: 640 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--chs-space-6)', gap: 'var(--chs-space-6)' }}>
+        <p style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', margin: 0, maxWidth: 640 }}>
           Агенты тенанта. Каждый подключён к должности в оргструктуре и оттуда берёт задачи.
           LLM привязывается через ссылку-хэндл на секрет — сырой ключ в системе не хранится.
         </p>
@@ -341,16 +315,26 @@ export default function AgentsScreen() {
         </Button>
       </div>
 
-      {error && <div style={{ ...bannerErrStyle, marginBottom: 12 }}>{error}</div>}
-
       {agents === null ? (
-        <div style={emptyStyle}>Загрузка агентов…</div>
-      ) : agents.length === 0 ? (
-        <div style={emptyStyle}>
-          {error ? 'Список недоступен.' : 'Агентов пока нет. Нажмите «Подключить агента», чтобы создать первого.'}
-        </div>
+        <LoadingState label="Загрузка агентов…" />
+      ) : error ? (
+        <ErrorState
+          title="Не удалось загрузить агентов"
+          message={error}
+          onRetry={loadAgents}
+        />
+      ) : !hasAgents ? (
+        <EmptyState
+          title="Агентов пока нет"
+          description="Подключите первого агента — он встанет на должность в оргструктуре и начнёт брать задачи."
+          action={
+            <Button variant="primary" size="sm" onClick={() => setHireOpen(true)}>
+              Подключить агента
+            </Button>
+          }
+        />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-4)' }}>
           {agents.map((a) => <AgentRow key={a.id} agent={a} onBind={setBindAgent} />)}
         </div>
       )}

@@ -202,6 +202,23 @@ export function statusLabel(status) {
 }
 
 /**
+ * Human display name for an agent — strips the provisioning marker that leaks
+ * into seeded display_name values ("Config-агент (seed)", "Агент-документатор
+ * (seed)") so the user never sees the "(seed)" dev-jargon (principles.md §3,
+ * audit finding #6). Underlying id/slug are untouched — only the VISIBLE label
+ * is cleaned. Tolerates English/Cyrillic spelling and trailing whitespace.
+ * @param {string} name raw display_name from GET /api/agents
+ * @returns {string} cleaned label (falls back to the trimmed input if nothing to strip)
+ */
+export function displayAgentName(name) {
+  const raw = str(name).trim();
+  // Strip a trailing "(seed)" / "(сид)" provisioning marker (case-insensitive),
+  // optionally preceded by whitespace; collapse the leftover trailing space.
+  const cleaned = raw.replace(/\s*\((?:seed|сид)\)\s*$/i, '').trim();
+  return cleaned.length > 0 ? cleaned : raw;
+}
+
+/**
  * Build the position dropdown options from a GET /api/org/tenant-state positions
  * array. Returns [{ id, label }]. Defensive against missing fields.
  * @param {Array<{id?:string, slug?:string, title?:string}>} rows
