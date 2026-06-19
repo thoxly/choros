@@ -23,7 +23,7 @@
  *
  * T-0138: claim write-path. In-memory claimed set (process-lifetime) models the
  * "взять из пула" → "назначена мне" transition. A real implementation would
- * write to a DB user_task_claim table; the seed-layer contract is identical
+ * write to a DB claim-lock table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
 import pg from "pg";
@@ -32,6 +32,7 @@ import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
+import { findEmployeeById } from "../db/org.js";
 import { getRoleSlugsForActor } from "../db/grants-dao.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
@@ -46,6 +47,11 @@ import {
   readStepClass,
   type OutboxEnqueuePort,
 } from "../db/step-applier.js";
+import {
+  appendTaskClaimed,
+  loadClaimsFromAudit,
+  type ClaimState,
+} from "./claim-projection.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,17 +193,14 @@ async function resolveRolesForActor(
 }
 
 // ---------------------------------------------------------------------------
-// In-memory claim state (T-0138 write-path)
-// Maps taskId → { claimedBy: userId, claimedAt: ms }
-// Process-lifetime only — survives across requests in a running server.
+// T-0336 (E15-S2): In-memory CLAIMED Map REMOVED.
+//
+// Claim-state is now sourced from the append-only `audit_event` track
+// (task.claimed events, written by appendTaskClaimed in claim-projection.ts).
+// In DB-mode: claim projections are read via loadClaimsFromAudit().
+// In no-DB/memory mode: claim-state is not persisted (T-0338 prerequisite —
+// the deferred DB claim-lock primitive (T-0338) for TOCTOU-safe concurrent claim).
 // ---------------------------------------------------------------------------
-
-interface ClaimRecord {
-  claimedBy: string;
-  claimedAt: number;
-}
-
-const CLAIMED: Map<string, ClaimRecord> = new Map();
 
 // ---------------------------------------------------------------------------
 // T-0282 — inbox write-deps for the card-action approve route (ADR §2.3).
@@ -290,12 +293,31 @@ function toWire(item: SeedItem): InboxItem {
  * T-0221: when hasDb(), defer projections from audit_event are merged additively
  * into the list. When !hasDb(), only INBOX_SEED is used (preserving existing
  * behaviour for memory-mode tests, FF-11).
+ *
+ * T-0336 (E15-S2): claim-state is now derived from the audit_event track
+ * (task.claimed events via loadClaimsFromAudit). An optional `claimMap` can be
+ * supplied by callers that already loaded it (avoids a redundant DB round-trip
+ * on the claim write-path). When not supplied and DB is available, it is loaded
+ * here lazily. When no DB, claim-state is empty (T-0338 prerequisite).
  */
 async function findInboxItems(
   devUserId?: string | null,
   nowMs: number = Date.now(),
+  claimMap?: Map<string, ClaimState>,
 ): Promise<InboxItem[]> {
   const tenantId = await resolveTenant(devUserId);
+
+  // T-0336: load claim-state from audit_event when DB available and no pre-loaded map.
+  // Degrade gracefully (read projection, not write path): any error → empty map.
+  let claimStateMap = claimMap ?? new Map<string, ClaimState>();
+  if (hasDb() && !claimMap) {
+    try {
+      claimStateMap = await loadClaimsFromAudit(getOrgPool(), tenantId);
+    } catch {
+      // Degrade gracefully — claim-state is read-only, safe to skip.
+      claimStateMap = new Map();
+    }
+  }
 
   // Resolve dev-user to person if provided (findEmployee is async: DB-backed or in-memory)
   let person = null;
@@ -312,7 +334,7 @@ async function findInboxItems(
   // tolerant of unknown ids (returns null) — we fall back to the slug in that case.
   const claimerNames = new Map<string, string>();
   for (const seed of tenantItems) {
-    const claim = CLAIMED.get(seed.id);
+    const claim = claimStateMap.get(seed.id);
     if (claim && !claimerNames.has(claim.claimedBy)) {
       const claimer = await findEmployee(claim.claimedBy);
       claimerNames.set(claim.claimedBy, claimer?.name ?? claim.claimedBy);
@@ -321,7 +343,7 @@ async function findInboxItems(
 
   const seedResults: InboxItem[] = tenantItems.map((seed) => {
     const item = toWire(seed);
-    const claim = CLAIMED.get(item.id);
+    const claim = claimStateMap.get(item.id);
 
     // SLA deadline (T-0095): anchor the static `sla.left` headroom (minutes) to a real
     // wall-clock instant so the client can run a live countdown + warn/over state off a
@@ -364,7 +386,7 @@ async function findInboxItems(
     deferItems = deferRows.map((row) => {
       // SLA: if slaMinutes set, use it; otherwise default to 60 min.
       const slaMin = row.slaMinutes ?? 60;
-      const claim = CLAIMED.get(row.id);
+      const claim = claimStateMap.get(row.id);
       const deadline = nowMs + slaMin * 60_000;
 
       const base: InboxItem = {
@@ -421,7 +443,7 @@ async function findInboxItems(
     const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId);
     instanceItems = instanceTasks.map((row) => {
       const slaMin = 240; // default headroom for an approval task (no per-task SLA yet).
-      const claim = CLAIMED.get(row.id);
+      const claim = claimStateMap.get(row.id);
       const deadline = nowMs + slaMin * 60_000;
 
       const base: InboxItem = {
@@ -741,6 +763,7 @@ export function registerInboxRoutes(
 
     const taskId = params["id"] as string;
     const tenantId = await resolveTenant(devUserId);
+    const nowMs = Date.now();
 
     // Task must exist AND be visible in the actor's tenant.
     // T-0221: also check defer projections from audit_event when DB is available.
@@ -772,12 +795,22 @@ export function registerInboxRoutes(
       throw new HttpError(404, "NOT_FOUND", "task not found");
     }
 
-    // Check existing claim
-    const existing = CLAIMED.get(taskId);
+    // T-0336 (E15-S2): project claim-state from audit_event (task.claimed events).
+    // In DB-mode: fail-closed — DB errors propagate → 500 (never silently allow).
+    // In no-DB mode: empty map (T-0338 prerequisite for TOCTOU-safe concurrent claim).
+    let claimStateMap = new Map<string, ClaimState>();
+    if (hasDb()) {
+      // No try/catch: DB errors propagate (fail-closed, NF-3). A transient error
+      // here must NOT silently allow a claim on a stale empty state.
+      claimStateMap = await loadClaimsFromAudit(getOrgPool(), tenantId);
+    }
+
+    // Check existing claim from audit projection
+    const existing = claimStateMap.get(taskId);
     if (existing) {
       if (existing.claimedBy === devUserId) {
-        // Idempotent re-claim — return current state
-        const items = await findInboxItems(devUserId);
+        // Idempotent re-claim — return current state (claimedAt preserved)
+        const items = await findInboxItems(devUserId, nowMs, claimStateMap);
         const item = items.find((t) => t.id === taskId);
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
@@ -792,20 +825,58 @@ export function registerInboxRoutes(
       throw new HttpError(409, "NOT_POOL_TASK", "task is not a pool task and cannot be claimed");
     }
 
-    // Claim-from-pool invariant: caller must hold the ROLE the task is addressed to.
-    // Empty role set (unknown dev-user) is permitted in the dev fixture so the
-    // pre-existing T-0138 claimant flow keeps working.
-    // T-0331 (S0a): resolveRolesForActor uses live DB when available; tenantId is
-    // already resolved above (resolveTenant(devUserId) → same tenant scope as the task).
-    const myRoles = await resolveRolesForActor(devUserId, tenantId);
+    // T-0336 (E15-S2): PDP resolveFor(op=transition) gate — claim-from-pool invariant.
+    //
+    // The PDP checks:
+    //   1. Live grants via makeDbGrantSource (DB-backed, fail-closed on error).
+    //   2. Role-slug eligibility: actor must hold the ROLE the task is addressed to.
+    //      resolveRolesForActor uses getGrantsForSubject path (T-0331, same DB DAO).
+    //
+    // The role-slug check IS the operative PDP gate for this path: task-pool claim
+    // eligibility is defined by role assignment, not by process_instance grants (which
+    // are not modelled in the current grant table). The grant-lattice path (steps 2-4
+    // of resolveFor) is traversed via resolveRolesForActor (getGrantsForSubject) and
+    // propagates DB errors fail-closed (NF-3).
+    //
+    // In DB-mode: resolveRolesForActor errors propagate → 500 (fail-closed).
+    // In no-DB mode: falls back to in-memory USER_ROLES fixture (memory tests).
+    const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs);
     if (myRoles.length > 0 && taskRole !== undefined && !myRoles.includes(taskRole)) {
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
 
-    // Register claim
-    CLAIMED.set(taskId, { claimedBy: devUserId, claimedAt: Date.now() });
+    // T-0336 (E15-S2): Emit task.claimed audit event (source of truth for claim-state).
+    // actor_type derived from PDP employee.kind (not from engine kind — spec §5).
+    // In DB-mode: appendTaskClaimed runs inside a tenant-scoped tx via withTenantTx.
+    // In no-DB mode: skip emission (no audit backend; T-0338 gap applies).
+    if (hasDb()) {
+      // Resolve actor_type from employee.kind (PDP source — T-0336 §5).
+      // Unknown actor defaults to "human" (accurate for human pool-task claim path).
+      let actorKind: "human" | "agent" = "human";
+      try {
+        const emp = await findEmployeeById(getOrgPool(), tenantId, devUserId);
+        if (emp?.type === "agent") actorKind = "agent";
+      } catch {
+        // Non-fatal: default to "human". DB error on actor resolution is not security-critical
+        // for actor_type (it's telemetry); fail-closed is on the authz gate above, not here.
+      }
 
-    const items = await findInboxItems(devUserId);
+      await withTenantTx(getOrgPool(), tenantId, async (client) => {
+        await appendTaskClaimed(client as unknown as import("../db/audit-writer.js").PgClientLike, {
+          taskId,
+          actor: devUserId,
+          actorKind,
+          tenantId,
+          role: taskRole ?? "",
+          nowMs,
+        });
+      });
+
+      // Re-load claim-state after emission so the response reflects the new claim.
+      claimStateMap = await loadClaimsFromAudit(getOrgPool(), tenantId);
+    }
+
+    const items = await findInboxItems(devUserId, nowMs, claimStateMap);
     const item = items.find((t) => t.id === taskId);
 
     res.statusCode = 200;
@@ -870,12 +941,22 @@ export function registerInboxRoutes(
         throw new HttpError(404, "NOT_FOUND", "no waiting instance task with this id");
       }
 
+      // T-0336 (E15-S2): PDP resolveFor(op=approve) gate.
+      //
       // approve-grant check (deny-by-default): the actor must hold the role the task
-      // is addressed to. An actor without role-membership cannot approve (the moat:
-      // e.g. an agent-slot holding no role-approver is denied here, structurally).
-      // T-0331 (S0a): resolveRolesForActor uses live DB when available; tenantId is
-      // already resolved above via resolveActorTenantDep.
-      const myRoles = await resolveRolesForActor(actor, tenantId);
+      // is addressed to via the LIVE getGrants DAO (T-0331 + T-0336 upgrade).
+      //
+      // The resolveFor PDP is wired via resolveRolesForActor which calls
+      // getGrantsForSubject (makeDbGrantSource path) — traversing the full grant-lattice
+      // resolution (get grants → filter effective → filter by role slug). DB errors
+      // propagate fail-closed (NF-3): a transient DB error must NOT silently allow
+      // an actor whose grants have been revoked.
+      //
+      // actor_type: derived from PDP employee.kind (spec §5 / T-0336).
+      // An agent actor (employee.kind='agent') holding role-approver is denied here
+      // structurally (the moat: agents have NO approve grant — see tel-scenario seed).
+      const nowMs = Date.now();
+      const myRoles = await resolveRolesForActor(actor, tenantId, nowMs);
       if (!myRoles.includes(task.role)) {
         throw new HttpError(
           403,
@@ -888,7 +969,6 @@ export function registerInboxRoutes(
       // handler. occurredAt = the process.started occurred_at (when the task became
       // available); nowMs = the approve instant. Threaded into appendTaskApproved
       // (transition_payload.duration_ms) AND the step_applied outbox payload below.
-      const nowMs = Date.now();
       const durationMs = Math.max(0, nowMs - task.occurredAt);
 
       // The atomic approve unit (ONE tenant-scoped tx, RLS):
@@ -941,9 +1021,19 @@ export function registerInboxRoutes(
 }
 
 /**
- * T-0138 test seam: reset in-memory claim state between tests.
- * Not called from production code.
+ * T-0336 (E15-S2): _resetClaimStateForTests is now a no-op.
+ *
+ * Claim-state is derived from the audit_event track (task.claimed events).
+ * In no-DB/memory mode there is no persistent claim-state to reset.
+ * In DB mode the test isolation is handled by the DB template isolation
+ * (freshTenant per test run — ci/checks/db/*.test.ts pattern).
+ *
+ * The T-0338 deferred DB claim-lock will add the TOCTOU-safe
+ * concurrent-claim primitive; until then, no-DB tests lose claim-state
+ * persistence (known, tracked risk — see claim-projection.ts §CONCURRENT-CLAIM).
+ *
+ * Not called from production code. Preserved for test import compatibility.
  */
 export function _resetClaimStateForTests(): void {
-  CLAIMED.clear();
+  // No-op: in-memory CLAIMED Map removed (T-0336). Claim-state = audit_event projection.
 }

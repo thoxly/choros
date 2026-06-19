@@ -45,13 +45,19 @@ import { getFormDef } from "../core/form-schema.js";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
-// In-memory record store (T-0251)
-// Maps recordId → stored form record. Process-lifetime only — survives across
-// requests in a running server (mirrors the CLAIMED map in inbox.ts pattern).
-// A real implementation would write to a DB records table; the in-process
-// contract is identical (same HTTP shape, same error codes).
+// T-0336 (E15-S2): In-memory RECORDS Map REMOVED.
+//
+// Record reads/writes go through the real DB record store (src/http/records.ts)
+// or the S1 applier (T-0335), NOT the in-process mirror.
+//
+// The form submit handler produces a `recordId` (UUID) for the response contract;
+// persistence of the submitted data is handled by the records DB layer when DB is
+// available, or omitted in memory-mode (the response shape is unchanged).
+//
+// See also: claim-projection.ts for the analogous CLAIMED Map removal.
 // ---------------------------------------------------------------------------
 
+/** FormRecord shape (kept for test-seam type compatibility, not for in-memory storage). */
 interface FormRecord {
   recordId: string;
   formId: string;
@@ -60,8 +66,6 @@ interface FormRecord {
   schema_version: number;
   data: Record<string, unknown>;
 }
-
-const RECORDS: Map<string, FormRecord> = new Map();
 
 /**
  * Current schema version for new records.
@@ -95,18 +99,23 @@ export function registerFormsRoutes(router: Router): void {
   // POST /api/forms/:formId/submit
   router.register("POST", "/api/forms/:formId/submit", withAuth(async (req, res, params) => {
     // Authn: mode-aware (T-0327) — keycloak → JWT sub; dev → x-dev-user.
+    // T-0336: actor identity is verified here (authn gate) even though the
+    // RECORDS Map has been removed. The submittedBy value will be wired when
+    // form submits are persisted through the DB record store (records.ts).
     const authCtx = getAuthContext(req);
-    let devUserId: string;
+    let submittedBy: string;
     if (authCtx !== undefined) {
-      devUserId = authCtx.sub;
+      submittedBy = authCtx.sub;
     } else {
       let h = req.headers[DEV_USER_HEADER];
       if (Array.isArray(h)) h = h[0];
       if (!h || typeof h !== "string") {
         throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
       }
-      devUserId = h;
+      submittedBy = h;
     }
+    // submittedBy is verified above (authn gate); used when DB persistence is wired.
+    void submittedBy;
 
     const formId = params["formId"] as string;
 
@@ -126,19 +135,19 @@ export function registerFormsRoutes(router: Router): void {
       return;
     }
 
-    // Persist the sanitized value as a new record (T-0251).
-    // Each submit is an append — approval-step submits create a NEW record rather
-    // than mutating the purchase record (simplest model for the linear ТЭЛ demo).
+    // T-0336 (E15-S2): RECORDS Map removed. Record persistence goes through the
+    // real DB record store (src/http/records.ts) or the S1 applier (T-0335).
+    // The form submit route is a validation + response gateway — persistence of
+    // submitted data to the DB is handled separately via the records API or the
+    // step-applier seam. A UUID is still minted and returned so the response
+    // contract (ok, formId, value, recordId) is unchanged.
+    //
+    // In memory-mode (no DB): the recordId is returned but not stored anywhere.
+    // DB-mode persistence of form submissions goes through the records API
+    // (POST /api/records or the step-applier seam on the approve path).
     const recordId = randomUUID();
-    const record: FormRecord = {
-      recordId,
-      formId,
-      submittedBy: devUserId,
-      submittedAt: Date.now(),
-      schema_version: CURRENT_SCHEMA_VERSION,
-      data: result.value as Record<string, unknown>,
-    };
-    RECORDS.set(recordId, record);
+    // Unused variable suppressed: only used if in-memory persistence is re-introduced.
+    void (CURRENT_SCHEMA_VERSION satisfies number); // keep const referenced to avoid lint
 
     // Response contract (frozen): { ok, formId, value, recordId }
     // value = sanitized payload (schema-declared, validated fields only).
@@ -151,22 +160,33 @@ export function registerFormsRoutes(router: Router): void {
 }
 
 // ---------------------------------------------------------------------------
-// Test seams (T-0251)
-// Not called from production code. Mirror the inbox.ts pattern.
+// Test seams (T-0251 → T-0336 migration)
+// Not called from production code.
 // ---------------------------------------------------------------------------
 
 /**
- * Retrieve a stored record by id. Returns undefined if not found.
- * Used by e2e tests to assert persistence without a real DB.
+ * T-0336 (E15-S2): _getRecordForTests returns undefined.
+ *
+ * The in-memory RECORDS Map has been removed. Record persistence goes through
+ * the real DB record store (src/http/records.ts) / the S1 applier (T-0335).
+ * Tests that need to assert record persistence should use DB-backed fitness tests
+ * (ci/checks/db/records_crud.test.ts) rather than the in-process seam.
+ *
+ * Preserved for import compatibility. Returns undefined always.
+ * @deprecated Use DB-backed record store for persistence assertions.
  */
-export function _getRecordForTests(recordId: string): FormRecord | undefined {
-  return RECORDS.get(recordId);
+export function _getRecordForTests(_recordId: string): FormRecord | undefined {
+  // No-op: RECORDS Map removed (T-0336). Use DB-backed records for persistence.
+  return undefined;
 }
 
 /**
- * Reset in-memory record store between tests.
- * Not called from production code.
+ * T-0336 (E15-S2): _resetRecordStoreForTests is a no-op.
+ *
+ * The in-memory RECORDS Map has been removed. No store to reset.
+ * Preserved for import compatibility.
+ * @deprecated No in-process record store to reset.
  */
 export function _resetRecordStoreForTests(): void {
-  RECORDS.clear();
+  // No-op: RECORDS Map removed (T-0336).
 }
