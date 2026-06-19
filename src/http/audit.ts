@@ -19,7 +19,7 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import {
   runDemoLegalPrecheck,
   demoApproveDenied,
@@ -414,12 +414,12 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   //
   // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
   // PDP check: operation=read, resource=audit_trace before returning data.
-  router.register("GET", "/api/audit", async (_req, res) => {
+  router.register("GET", "/api/audit", withAuth(async (_req, res) => {
     const data = getDefaultAuditInstance();
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(data));
-  });
+  }));
 
   // GET /api/audit/export — download audit log as JSON file (T-0138).
   //
@@ -437,12 +437,17 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
   //   — all three routes must be closed together in the hardening pass.)
   //
   // Response: 200 application/json + Content-Disposition: attachment.
-  router.register("GET", "/api/audit/export", async (req, res) => {
-    // Dev-mode auth gate: require x-dev-user header
-    let devUser = req.headers[DEV_USER_HEADER];
-    if (Array.isArray(devUser)) devUser = devUser[0];
-    if (!devUser || typeof devUser !== "string") {
-      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  router.register("GET", "/api/audit/export", withAuth(async (req, res) => {
+    // Mode-aware actor resolution (T-0327): keycloak → JWT sub validated by withAuth;
+    // dev → x-dev-user. Actor is resolved for audit but not used further (access check only).
+    const _authCtx = getAuthContext(req);
+    if (_authCtx === undefined) {
+      // Dev mode — verify x-dev-user is present (same as before).
+      let devUser = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(devUser)) devUser = devUser[0];
+      if (!devUser || typeof devUser !== "string") {
+        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      }
     }
 
     // Parse optional ?instance= query param
@@ -473,13 +478,13 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.end(body);
-  });
+  }));
 
   // GET /api/audit/:instanceId — return specific instance or 404
   //
   // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
   // PDP check: operation=read, resource=audit_trace before returning data.
-  router.register("GET", "/api/audit/:instanceId", async (_req, res, params) => {
+  router.register("GET", "/api/audit/:instanceId", withAuth(async (_req, res, params) => {
     const instanceId = params.instanceId as string;
     // T-0234: the demo ТЭЛ instance is built lazily (async motor run, stub port).
     const data =
@@ -492,5 +497,5 @@ export function registerAuditRoutes(router: Router, _store?: JobStore): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(data));
-  });
+  }));
 }

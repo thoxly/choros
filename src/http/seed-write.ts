@@ -22,7 +22,7 @@ import pg from "pg";
 import { loadAdminContext } from "../db/org.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -46,6 +46,8 @@ function assertUuidShape(value: string, label: string): void {
 // ---------------------------------------------------------------------------
 
 function extractActor(req: import("node:http").IncomingMessage): string {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) return ctx.sub;
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -143,7 +145,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 201: { id: uuid, slug: string }
   // 409: slug exists
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/tenants", async (req, res) => {
+  router.register("POST", "/api/tenants", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     // Gate: loadAdminContext → isGenesisOwner (before INSERT, FF-6)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
@@ -220,7 +222,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id, slug }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/departments — create a department under a tenant (isGenesisOwner gate)
@@ -228,7 +230,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 201: { id: uuid, slug: string }
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/departments", async (req, res) => {
+  router.register("POST", "/api/departments", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -278,7 +280,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id, slug }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/positions — create a position inside a department (isGenesisOwner gate)
@@ -286,7 +288,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 201: { id: uuid, slug: string }
   // 409: (tenant_id, department_id, slug) exists
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/positions", async (req, res) => {
+  router.register("POST", "/api/positions", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -338,7 +340,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id, slug }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/employees — create an employee (isGenesisOwner gate)
@@ -347,7 +349,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, slug) exists
   // 400: kind not in {human,agent}
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/employees", async (req, res) => {
+  router.register("POST", "/api/employees", withAuth(async (req, res) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -401,7 +403,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id, slug }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/roles — create a role (mgmt_object:role:create grant gate, ADR §2.3 option C)
@@ -409,7 +411,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 201: { id: uuid, slug: string }
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/roles", async (req, res) => {
+  router.register("POST", "/api/roles", withAuth(async (req, res) => {
     const actorId = extractActor(req);
 
     // Read body first so we can use target tenant_id in the delegation context (R-4)
@@ -482,7 +484,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id, slug }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // DELETE /api/departments/:id — delete a department (isGenesisOwner gate, AC-9)
@@ -491,7 +493,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // Auth gate uses DEV_TENANT_ID (genesis-owner is in the dev silo by construction).
   // RLS scope and WHERE use the caller-supplied tenant_id.
   // -------------------------------------------------------------------------
-  router.register("DELETE", "/api/departments/:id", async (req, res, params) => {
+  router.register("DELETE", "/api/departments/:id", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     // Auth gate: genesis-owner check always in dev silo (ADR §2.3 option C)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
@@ -534,13 +536,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: deptId }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // DELETE /api/positions/:id — delete a position (isGenesisOwner gate, AC-9)
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
-  router.register("DELETE", "/api/positions/:id", async (req, res, params) => {
+  router.register("DELETE", "/api/positions/:id", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -582,13 +584,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: posId }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // DELETE /api/employees/:id — delete an employee (isGenesisOwner gate, AC-9)
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
-  router.register("DELETE", "/api/employees/:id", async (req, res, params) => {
+  router.register("DELETE", "/api/employees/:id", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -630,13 +632,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: empId }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // DELETE /api/roles/:id — delete a role (isGenesisOwner gate, AC-9)
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
-  router.register("DELETE", "/api/roles/:id", async (req, res, params) => {
+  router.register("DELETE", "/api/roles/:id", withAuth(async (req, res, params) => {
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -678,7 +680,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ id: roleId }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/tenants/:slug — resolve tenant id by slug (used by DB-probe tests)
@@ -693,7 +695,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // When T-0022 splits the pool to choros_app (NOBYPASSRLS), this route will
   // require a SECURITY DEFINER function to perform the slug→UUID lookup.
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/tenants/:slug", async (req, res, params) => {
+  router.register("GET", "/api/tenants/:slug", withAuth(async (req, res, params) => {
     const slug = params["slug"] as string;
     const client = await pool.connect();
     try {
@@ -710,14 +712,14 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     } finally {
       client.release();
     }
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/org/tenant-state — get current tenant state for reset diff (by tenant_id query param)
   // Auth gate: extractActor → loadAdminContext → isGenesisOwner (R-3: same gate as write routes).
   // The importer already sends X-Dev-User: e-owner in all requests, so this is transparent.
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/org/tenant-state", async (req, res) => {
+  router.register("GET", "/api/org/tenant-state", withAuth(async (req, res) => {
     // Auth gate: genesis-owner required (R-3)
     const actorId = extractActor(req);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
@@ -760,5 +762,5 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(state));
-  });
+  }));
 }

@@ -12,7 +12,7 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import {
   listOrgTree,
   findEmployeeById,
@@ -200,13 +200,21 @@ export async function listSelectableUsers(): Promise<Array<{
 export function registerOrgRoutes(router: Router, _store?: JobStore): void {
   // GET /api/org — return full org tree
   // T-0141: resolve actor's tenant from X-Dev-User header (fallback: DEV_TENANT_ID)
-  router.register("GET", "/api/org", async (req, res) => {
+  router.register("GET", "/api/org", withAuth(async (req, res) => {
     let departments: OrgDepartment[];
     if (hasDb()) {
-      let actorSlug = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(actorSlug)) actorSlug = actorSlug[0];
+      // Mode-aware actor resolution (T-0327): keycloak → JWT sub; dev → x-dev-user.
+      const authCtx = getAuthContext(req);
+      let actorSlug: string | undefined;
+      if (authCtx !== undefined) {
+        actorSlug = authCtx.sub;
+      } else {
+        let h = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(h)) h = h[0];
+        actorSlug = typeof h === "string" && h.length > 0 ? h : undefined;
+      }
       const tenantId =
-        actorSlug && typeof actorSlug === "string"
+        actorSlug
           ? await resolveActorTenant(getOrgPool(), actorSlug)
           : DEV_TENANT_ID;
       departments = await listOrgTree(getOrgPool(), tenantId);
@@ -216,10 +224,10 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ departments }));
-  });
+  }));
 
   // GET /api/org/employee/:id — return details of one employee
-  router.register("GET", "/api/org/employee/:id", async (_req, res, params) => {
+  router.register("GET", "/api/org/employee/:id", withAuth(async (_req, res, params) => {
     const employee = await findEmployee(params.id as string);
     if (!employee) {
       throw new HttpError(404, "NOT_FOUND", "employee not found");
@@ -227,7 +235,7 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(employee));
-  });
+  }));
 
   // GET /api/users — return human-only list (used by auth.ts route handler)
   // Note: /api/users is registered here for DB-backed path; auth.ts also registers it.

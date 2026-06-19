@@ -16,6 +16,7 @@
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { queryGrantTrail, type GrantTrailRow } from "../db/audit-grant-trail.js";
 import { getOrgPool, DEV_TENANT_ID } from "../db/org.js";
 
@@ -208,7 +209,7 @@ function extractQueryParams(req: IncomingMessage): ParsedGrantTrailParams {
 // ---------------------------------------------------------------------------
 
 export function registerGrantTrailRoutes(router: Router, pool?: pg.Pool): void {
-  router.register("GET", "/api/grant-trail", async (req, res) => {
+  router.register("GET", "/api/grant-trail", withAuth(async (req, res) => {
     const parsed = extractQueryParams(req);
 
     let rows: GrantTrailRow[];
@@ -220,13 +221,17 @@ export function registerGrantTrailRoutes(router: Router, pool?: pg.Pool): void {
       // Resolve tenantId from X-Dev-User header; fall back to DEV_TENANT_ID.
       // Day-1: all requests use the single dev tenant (T-0054 will add proper resolution).
       let tenantId = DEV_TENANT_ID;
-      const devUser = req.headers["x-dev-user"];
-      if (typeof devUser === "string" && devUser.length > 0) {
-        // Day-1: tenantId is the DEV_TENANT_ID regardless of which user is acting.
-        // The user identity is not a tenantId — leave tenantId as DEV_TENANT_ID.
-        // (T-0054 will implement proper JWT-based tenant resolution.)
-        tenantId = DEV_TENANT_ID;
+      // Mode-aware actor resolution (T-0327): keycloak → JWT sub; dev → x-dev-user.
+      // Day-1: tenantId is still DEV_TENANT_ID regardless of actor (T-0054 will fix).
+      const authCtx = getAuthContext(req);
+      if (authCtx === undefined) {
+        // Dev mode — actor from x-dev-user (informational only here; tenantId stays DEV_TENANT_ID).
+        const devUser = req.headers[DEV_USER_HEADER];
+        if (typeof devUser === "string" && devUser.length > 0) {
+          tenantId = DEV_TENANT_ID;
+        }
       }
+      // In keycloak mode authCtx.sub is the JWT subject; tenantId is still DEV_TENANT_ID (T-0054).
 
       const result = await queryGrantTrail(dbPool, tenantId, {
         roleId: parsed.roleId,
@@ -270,5 +275,5 @@ export function registerGrantTrailRoutes(router: Router, pool?: pg.Pool): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ rows, hasMore }));
-  });
+  }));
 }

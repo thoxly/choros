@@ -16,6 +16,7 @@
 import React, { useState, useEffect, useId } from 'react';
 import { Button, Field, KitIcon } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
+import { authHeaders } from '../../app-shell/dev-auth.js';
 
 const ACTOR_ID = 'e-owner'; // dev-silo genesis owner (confirmed by seed)
 
@@ -39,7 +40,7 @@ function useOrgDirectory() {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { 'x-dev-user': ACTOR_ID } })
+    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { ...authHeaders() } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((d) => {
         if (!alive) return;

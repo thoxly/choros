@@ -21,7 +21,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { PostgresPrefStore } from "../core/postgres/pgPrefStore.js";
@@ -213,15 +213,20 @@ export function registerNotificationPrefRoutes(
   // -------------------------------------------------------------------------
   // GET /api/notification-preferences  — admin: list all tenant preferences
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/notification-preferences", async (req, res) => {
+  router.register("GET", "/api/notification-preferences", withAuth(async (req, res) => {
     let actorId: string;
     {
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      const authCtx = getAuthContext(req);
+      if (authCtx !== undefined) {
+        actorId = authCtx.sub;
+      } else {
+        let devUser = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(devUser)) devUser = devUser[0];
+        if (!devUser || typeof devUser !== "string") {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+        actorId = devUser;
       }
-      actorId = devUser;
     }
 
     // PDP gate: actor must hold mgmt_object:notification_config / read (AC-6/AC-10).
@@ -238,20 +243,25 @@ export function registerNotificationPrefRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ preferences }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // PUT /api/notification-preferences  — admin: UPSERT + audit
   // -------------------------------------------------------------------------
-  router.register("PUT", "/api/notification-preferences", async (req, res) => {
+  router.register("PUT", "/api/notification-preferences", withAuth(async (req, res) => {
     let actorId: string;
     {
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      const authCtx = getAuthContext(req);
+      if (authCtx !== undefined) {
+        actorId = authCtx.sub;
+      } else {
+        let devUser = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(devUser)) devUser = devUser[0];
+        if (!devUser || typeof devUser !== "string") {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+        actorId = devUser;
       }
-      actorId = devUser;
     }
 
     // PDP gate: actor must hold mgmt_object:notification_config / update (AC-7/AC-10).
@@ -303,20 +313,25 @@ export function registerNotificationPrefRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true, eventKind, recipientScope, channels }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/notification-preferences/self  — own preferences (actor:<self>)
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/notification-preferences/self", async (req, res) => {
+  router.register("GET", "/api/notification-preferences/self", withAuth(async (req, res) => {
     let actorId: string;
     {
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      const authCtx = getAuthContext(req);
+      if (authCtx !== undefined) {
+        actorId = authCtx.sub;
+      } else {
+        let devUser = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(devUser)) devUser = devUser[0];
+        if (!devUser || typeof devUser !== "string") {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+        actorId = devUser;
       }
-      actorId = devUser;
     }
 
     const tenantId = DEV_TENANT_ID;
@@ -331,20 +346,25 @@ export function registerNotificationPrefRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ preferences }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // PUT /api/notification-preferences/self  — UPSERT own (FF-SELF-PREF-SCOPED)
   // -------------------------------------------------------------------------
-  router.register("PUT", "/api/notification-preferences/self", async (req, res) => {
+  router.register("PUT", "/api/notification-preferences/self", withAuth(async (req, res) => {
     let actorId: string;
     {
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      const authCtx = getAuthContext(req);
+      if (authCtx !== undefined) {
+        actorId = authCtx.sub;
+      } else {
+        let devUser = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(devUser)) devUser = devUser[0];
+        if (!devUser || typeof devUser !== "string") {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+        actorId = devUser;
       }
-      actorId = devUser;
     }
 
     const tenantId = DEV_TENANT_ID;
@@ -393,5 +413,5 @@ export function registerNotificationPrefRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true, eventKind, recipientScope, channels }));
-  });
+  }));
 }

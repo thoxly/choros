@@ -39,7 +39,7 @@
  * lookup is in-process and pure, so no DB is required for validation or storage.
  */
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { validateFormSubmission, type FieldError } from "../core/form-validator.js";
 import { getFormDef } from "../core/form-schema.js";
 import { randomUUID } from "node:crypto";
@@ -93,12 +93,19 @@ function sendValidationErrors(res: import("node:http").ServerResponse, fields: F
 
 export function registerFormsRoutes(router: Router): void {
   // POST /api/forms/:formId/submit
-  router.register("POST", "/api/forms/:formId/submit", async (req, res, params) => {
-    // Authn: dev auth mode requires x-dev-user (mirrors inbox claim write-path).
-    let devUserId = req.headers[DEV_USER_HEADER];
-    if (Array.isArray(devUserId)) devUserId = devUserId[0];
-    if (!devUserId || typeof devUserId !== "string") {
-      throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  router.register("POST", "/api/forms/:formId/submit", withAuth(async (req, res, params) => {
+    // Authn: mode-aware (T-0327) — keycloak → JWT sub; dev → x-dev-user.
+    const authCtx = getAuthContext(req);
+    let devUserId: string;
+    if (authCtx !== undefined) {
+      devUserId = authCtx.sub;
+    } else {
+      let h = req.headers[DEV_USER_HEADER];
+      if (Array.isArray(h)) h = h[0];
+      if (!h || typeof h !== "string") {
+        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+      }
+      devUserId = h;
     }
 
     const formId = params["formId"] as string;
@@ -140,7 +147,7 @@ export function registerFormsRoutes(router: Router): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true, formId, value: result.value, recordId }));
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
