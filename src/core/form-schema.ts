@@ -46,7 +46,11 @@
 // continue to work unchanged.
 // ---------------------------------------------------------------------------
 
+import type { FieldType as _FieldType } from "./field-type-dictionary.js";
 export type { FieldType } from "./field-type-dictionary.js";
+// Re-alias for use in this file's interface definitions (TS requires the name to
+// be in scope when referenced, even if it's also re-exported from this module).
+type FieldType = _FieldType;
 
 /**
  * One field's validation contract. `required` here is the BASE requiredness;

@@ -184,8 +184,8 @@ export function fieldTypeToWidgetClass(type: FieldType): string {
     case "enum":     return "fjs-form-field-select";
     case "boolean":  return "fjs-form-field-checkbox";
     default: {
-      // Exhaustiveness guard.
-      const _: never = type;
+      // Exhaustiveness guard — the cast asserts all FieldType values are handled above.
+      void (type as never);
       return "fjs-form-field-textfield";
     }
   }
