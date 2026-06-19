@@ -12,7 +12,8 @@
 # Check-5  (resource_type):   value 'doc_page' present in grant INSERT rows (correct resource_type).
 # Check-6  (frozen-guard):    none of the frozen source files modified vs merge-base with dev
 #                             (grant-lattice.ts, grant-resolver.ts, mcp-tool-registry.ts,
-#                             agents.ts, grants.ts, audit-writer.ts — same list as config-agent-seed.sh).
+#                             audit-writer.ts — same list as config-agent-seed.sh; the
+#                             two src/http route handlers were removed in T-0291, founder-sanctioned).
 # Check-7  (known_tenant_tables untouched): ci/checks/known_tenant_tables.txt unchanged
 #                             vs merge-base (pure seed adds no table).
 # Check-8  (UUID collision guard): migration uses pinned UUIDs e0...005 / d0...015 /
@@ -124,12 +125,15 @@ BASE=$(git -C "${ROOT}" merge-base HEAD origin/dev 2>/dev/null \
        || git -C "${ROOT}" rev-parse HEAD~1 2>/dev/null \
        || echo "")
 
+# Seed-coupled core invariant: this seed migration promises it does not drift
+# the grant algebra / resolver / tool-registry / audit-sink its rows depend on.
+# (T-0291, founder-sanctioned) src/http/agents.ts & src/http/grants.ts removed —
+# they are HTTP route handlers, not seed/catalog data; freezing them over-reached
+# onto unrelated tasks' legitimate route edits (same self-scope class as Check-9).
 FROZEN=(
   "src/core/grant-lattice.ts"
   "src/core/grant-resolver.ts"
   "src/core/mcp-tool-registry.ts"
-  "src/http/agents.ts"
-  "src/http/grants.ts"
   "src/db/audit-writer.ts"
 )
 
