@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field } from '../components/components.jsx';
+import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field, KitIcon } from '../components/components.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
@@ -156,6 +156,7 @@ function LaunchModal({ open, onClose, onLaunched }) {
  * POSTs /api/process-app-bindings. All calls use authHeaders() (mode-aware).
  */
 function ProcessCatalogSection() {
+  const navigate = useNavigate();
   const [catalog, setCatalog] = useState(null); // null | { definitions, instances, bindings }
   const [apps, setApps] = useState([]);
   const [error, setError] = useState(null);
@@ -218,21 +219,33 @@ function ProcessCatalogSection() {
         <h2 style={{ margin: 0, fontSize: 'var(--chs-text-md, 14px)', fontWeight: 600 }}>
           Определения процессов · связь с приложениями
         </h2>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => setBindOpen(true)}
-          disabled={defs.length === 0 || apps.length === 0}
-          title={
-            defs.length === 0
-              ? 'Нет процессов для связывания'
-              : apps.length === 0
-                ? 'Сначала создайте приложение в конструкторе'
-                : 'Связать процесс с приложением'
-          }
-        >
-          Связать с приложением
-        </Button>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-3)' }}>
+          {/* T-0323: entry into the process modeler for a brand-new diagram. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            glyph={<KitIcon name="plus" className="chs-btn__glyph" />}
+            onClick={() => navigate('/processes/new/edit')}
+            title="Открыть конструктор для нового процесса"
+          >
+            Новый процесс
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setBindOpen(true)}
+            disabled={defs.length === 0 || apps.length === 0}
+            title={
+              defs.length === 0
+                ? 'Нет процессов для связывания'
+                : apps.length === 0
+                  ? 'Сначала создайте приложение в конструкторе'
+                  : 'Связать процесс с приложением'
+            }
+          >
+            Связать с приложением
+          </Button>
+        </div>
       </div>
 
       {error ? (
@@ -262,6 +275,7 @@ function ProcessCatalogSection() {
                   <th>Источник</th>
                   <th>Статус</th>
                   <th className="chs-r">Инстансов</th>
+                  <th className="chs-r">Действие</th>
                 </tr>
               </thead>
               <tbody>
@@ -273,6 +287,17 @@ function ProcessCatalogSection() {
                     <td>{definitionStatusLabel(d.status)}</td>
                     <td className="chs-r">
                       <Mono style={{ color: 'var(--chs-color-text-muted)' }}>{d.instance_count}</Mono>
+                    </td>
+                    <td className="chs-r">
+                      {/* T-0323: open the REAL bpmn-js modeler for this definition. */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => navigate(`/processes/${d.process_key}/edit`)}
+                        title="Открыть в конструкторе"
+                      >
+                        В конструкторе
+                      </Button>
                     </td>
                   </tr>
                 ))}
