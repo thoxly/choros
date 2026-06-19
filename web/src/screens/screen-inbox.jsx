@@ -5,10 +5,10 @@
    действие «взять из пула».
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
-import { Button, MonoId, Mono, ExecutorBadge } from '../components/components.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Button, MonoId, Mono, ExecutorBadge, StatusChip } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
-import { devHeaders } from '../app-shell/dev-auth.js';
+import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
 
 const TABS = [
   { id: "all", label: "Все" },
@@ -105,6 +105,270 @@ function SLACell({ sla, deadline }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-0272: TaskDetailPanel — in-screen expandable panel for task detail.
+// Opens when the user clicks «Открыть» on any inbox row.
+// Shows: task info (name, step, inst, executor type, SLA) + optional instance
+// projection (current process status, step, started-at).
+// Allows completing a step: human/approver → POST /api/inbox/:id/action {action:'approve'}.
+// Shows the outcome after the step completes: status=done and the transition label.
+// ---------------------------------------------------------------------------
+
+const STATUS_LABEL = {
+  running: "Выполняется",
+  waiting: "Ожидание решения",
+  done: "Завершено",
+  failed: "Ошибка",
+  paused: "Пауза",
+};
+
+function TaskDetailPanel({ taskId, onClose, onActionDone }) {
+  const [loading, setLoading] = useState(true);
+  const [detail, setDetail] = useState(null); // { item, projection }
+  const [fetchError, setFetchError] = useState(null);
+  const [completing, setCompleting] = useState(false);
+  const [outcome, setOutcome] = useState(null); // null | { status, instanceId, action }
+  const [actionError, setActionError] = useState(null);
+
+  const loadDetail = useCallback(async () => {
+    setLoading(true);
+    setFetchError(null);
+    try {
+      const res = await fetch(`/api/inbox/${taskId}`, { headers: authHeaders() });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error?.message || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setDetail(data);
+    } catch (e) {
+      setFetchError(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (taskId) loadDetail();
+  }, [taskId, loadDetail]);
+
+  const handleComplete = useCallback(async () => {
+    if (!detail?.item || completing) return;
+    setCompleting(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/inbox/${taskId}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ action: 'approve' }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const code = body?.error?.code ?? `HTTP ${res.status}`;
+        throw new Error(code === 'NOT_ELIGIBLE' ? 'Нет права на выполнение этого шага' : `Ошибка: ${code}`);
+      }
+      setOutcome(body);
+      // Notify parent to refresh the inbox list.
+      if (onActionDone) onActionDone();
+    } catch (e) {
+      setActionError(String(e?.message || e));
+    } finally {
+      setCompleting(false);
+    }
+  }, [taskId, detail, completing, onActionDone]);
+
+  if (!taskId) return null;
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 900,
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-end',
+        pointerEvents: 'none',
+      }}
+    >
+      {/* Backdrop */}
+      <div
+        style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+          pointerEvents: 'auto',
+        }}
+        onClick={onClose}
+        aria-label="Закрыть задачу"
+      />
+      {/* Slide-in panel */}
+      <div
+        role="complementary"
+        aria-label="Детали задачи"
+        style={{
+          position: 'relative', zIndex: 901, pointerEvents: 'auto',
+          width: '420px', maxWidth: '90vw', height: '100vh',
+          background: 'var(--chs-bg-secondary, #1e2028)',
+          borderLeft: '1px solid var(--chs-border, #30333d)',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '-4px 0 24px rgba(0,0,0,0.3)',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '16px 20px',
+          borderBottom: '1px solid var(--chs-border, #30333d)',
+          flexShrink: 0,
+        }}>
+          <h2 style={{ margin: 0, fontSize: 'var(--chs-text-md, 14px)', fontWeight: 600 }}>
+            Задача
+          </h2>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Закрыть">✕</Button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+          {loading ? (
+            <div style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm, 13px)' }}>
+              Загрузка…
+            </div>
+          ) : fetchError ? (
+            <div>
+              <div style={{
+                marginBottom: '12px', padding: '10px 14px',
+                background: 'rgba(229,62,62,0.12)', border: '1px solid var(--chs-color-danger, #e53e3e)',
+                borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+              }}>
+                Не удалось загрузить: {fetchError}
+              </div>
+              <Button variant="secondary" size="sm" onClick={loadDetail}>Повторить</Button>
+            </div>
+          ) : detail ? (
+            <>
+              {/* Task info */}
+              <section style={{ marginBottom: '20px' }}>
+                <h3 style={{ margin: '0 0 12px 0', fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 600, color: 'var(--chs-color-text-muted, #888)' }}>
+                  ЗАДАЧА
+                </h3>
+                <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', rowGap: '8px', fontSize: 'var(--chs-text-sm, 13px)' }}>
+                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Название</span>
+                  <span style={{ fontWeight: 500 }}>{detail.item.name}</span>
+
+                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Шаг</span>
+                  <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.item.step}</Mono>
+
+                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Инстанс</span>
+                  <MonoId>{detail.item.inst}</MonoId>
+
+                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Исполнитель</span>
+                  <ExecutorBadge type={detail.item.execType || 'human'} name={detail.item.execName} />
+
+                  <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Статус</span>
+                  <StatusChip status={detail.item.status} />
+
+                  {detail.item.due && (
+                    <>
+                      <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Дедлайн</span>
+                      <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.item.due}</Mono>
+                    </>
+                  )}
+                </div>
+              </section>
+
+              {/* Process/instance projection (if available) */}
+              {detail.projection && (
+                <section style={{ marginBottom: '20px' }}>
+                  <h3 style={{ margin: '0 0 12px 0', fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 600, color: 'var(--chs-color-text-muted, #888)' }}>
+                    ПРОЦЕСС
+                  </h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', rowGap: '8px', fontSize: 'var(--chs-text-sm, 13px)' }}>
+                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Инстанс</span>
+                    <MonoId>{detail.projection.inst}</MonoId>
+
+                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Процесс</span>
+                    <Mono style={{ fontSize: 'var(--chs-text-sm, 13px)' }}>{detail.projection.procKey}</Mono>
+
+                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Текущий шаг</span>
+                    <span>{detail.projection.step}</span>
+
+                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Состояние</span>
+                    <StatusChip status={detail.projection.status} label={STATUS_LABEL[detail.projection.status]} />
+
+                    <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>Запущен</span>
+                    <Mono style={{ fontSize: 'var(--chs-text-xs, 11px)', color: 'var(--chs-color-text-muted, #888)' }}>
+                      {new Date(detail.projection.startedAt).toLocaleString('ru-RU')}
+                    </Mono>
+                  </div>
+                </section>
+              )}
+
+              {/* Outcome: shown after step completion */}
+              {outcome && (
+                <section style={{ marginBottom: '20px' }}>
+                  <div style={{
+                    padding: '12px 16px',
+                    background: 'rgba(56,161,105,0.12)',
+                    border: '1px solid var(--chs-color-success, #38a169)',
+                    borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+                  }}>
+                    <div style={{ fontWeight: 600, marginBottom: '4px' }}>Шаг выполнен</div>
+                    <div style={{ color: 'var(--chs-color-text-muted, #888)' }}>
+                      Процесс <strong>{outcome.instanceId}</strong> перешёл в состояние{' '}
+                      <strong>{STATUS_LABEL[outcome.status] ?? outcome.status}</strong>.
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {/* Action error */}
+              {actionError && (
+                <div style={{
+                  marginBottom: '12px', padding: '10px 14px',
+                  background: 'rgba(229,62,62,0.12)', border: '1px solid var(--chs-color-danger, #e53e3e)',
+                  borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+                }}>
+                  {actionError}
+                </div>
+              )}
+            </>
+          ) : null}
+        </div>
+
+        {/* Footer: complete-step action */}
+        {detail && !outcome && (
+          <div style={{
+            padding: '16px 20px',
+            borderTop: '1px solid var(--chs-border, #30333d)',
+            flexShrink: 0,
+            display: 'flex', gap: '8px', justifyContent: 'flex-end',
+          }}>
+            <Button variant="ghost" size="sm" onClick={onClose}>Закрыть</Button>
+            {/* Show complete-step only when the task is still actionable (not done/failed) */}
+            {detail.item.status !== 'done' && detail.item.status !== 'failed' && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={completing}
+                onClick={handleComplete}
+              >
+                {completing ? 'Выполнение…' : 'Выполнить шаг'}
+              </Button>
+            )}
+          </div>
+        )}
+
+        {outcome && (
+          <div style={{
+            padding: '16px 20px',
+            borderTop: '1px solid var(--chs-border, #30333d)',
+            flexShrink: 0,
+            display: 'flex', justifyContent: 'flex-end',
+          }}>
+            <Button variant="secondary" size="sm" onClick={onClose}>Закрыть</Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function InboxScreen() {
   const [tab, setTab] = useState("all");
   const [exec, setExec] = useState(null); // executor-type filter: agent|human|service|null
@@ -117,6 +381,8 @@ function InboxScreen() {
   const [claiming, setClaiming] = useState(() => ({}));
   // T-0287: per-task approve inflight tracking (taskId → true)
   const [approving, setApproving] = useState(() => ({}));
+  // T-0272: task detail panel (selectedTaskId → open; null → closed)
+  const [selectedTaskId, setSelectedTaskId] = useState(null);
 
   // T-0093: tabs/filters/sort are applied SERVER-SIDE. The query mirrors the API:
   // ?tab=...&exec=...&sort=sla. The server returns the filtered `items` plus full
@@ -200,6 +466,13 @@ function InboxScreen() {
   const rows = items || [];
 
   return (
+    <>
+    {/* T-0272: task detail side panel */}
+    <TaskDetailPanel
+      taskId={selectedTaskId}
+      onClose={() => setSelectedTaskId(null)}
+      onActionDone={() => { load(); setSelectedTaskId(null); }}
+    />
     <div className="chs-inbox">
       <div className="chs-inbox__bar">
         <div className="chs-tabs">
@@ -300,15 +573,21 @@ function InboxScreen() {
                           {claiming[t.id] ? '…' : 'Взять'}
                         </Button>
                       ) : isTaken && t.mine && t.role === 'role-approver' ? (
-                        <Button variant="primary" size="sm" disabled={!!approving[t.id]} onClick={() => approveTask(t.id)}>
-                          {approving[t.id] ? '…' : 'Согласовать'}
-                        </Button>
+                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
+                          <Button variant="primary" size="sm" disabled={!!approving[t.id]} onClick={() => approveTask(t.id)}>
+                            {approving[t.id] ? '…' : 'Согласовать'}
+                          </Button>
+                        </div>
                       ) : isTaken ? (
-                        <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
-                          <Icon name="check" /> взято{t.mine ? " (мной)" : ""}{whenLabel ? ` · ${whenLabel}` : ""}
-                        </span>
+                        <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }}>
+                          <span className="chs-taken-tag" title={whenLabel ? `Взято ${takenName}, ${whenLabel}` : undefined}>
+                            <Icon name="check" /> взято{t.mine ? " (мной)" : ""}{whenLabel ? ` · ${whenLabel}` : ""}
+                          </span>
+                          <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
+                        </div>
                       ) : (
-                        <Button variant="ghost" size="sm">Открыть</Button>
+                        <Button variant="ghost" size="sm" onClick={() => setSelectedTaskId(t.id)}>Открыть</Button>
                       )}
                     </td>
                   </tr>
@@ -319,6 +598,7 @@ function InboxScreen() {
         )}
       </div>
     </div>
+    </>
   );
 }
 
