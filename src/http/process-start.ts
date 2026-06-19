@@ -189,6 +189,9 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
             procKey: processKey,
             actor,
             nowMs: Date.now(),
+            // T-0339 (E15-S3): supply tenantId so instance.started + task.created
+            // transition-journal events are emitted (F2 Phase 1).
+            tenantId,
           });
         } catch {
           // Projection is additive; never fail the start on a projection write error.

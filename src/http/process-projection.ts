@@ -54,6 +54,26 @@ export const PROCESS_STARTED_TYPE = "process.started";
 export const TASK_APPROVED_TYPE = "task.approved";
 
 // ---------------------------------------------------------------------------
+// T-0339 [E15-S3]: Canonical 6-event transition journal event-type constants.
+// These are the types queried by the mat-view (migration 079) + cycle-time
+// analytics. They are NOT replacement types — they are ADDITIONAL events emitted
+// alongside the existing projection events for the transition journal.
+// ---------------------------------------------------------------------------
+
+/** F2/S3: emitted alongside process.started to seed the transition journal. */
+export const INSTANCE_STARTED_TYPE = "instance.started";
+/** F2/S3: emitted when a waiting user-task is created (pool task seeded). */
+export const TASK_CREATED_TYPE = "task.created";
+/** F2/S3: emitted when an instance fully ends (all steps done). */
+export const INSTANCE_ENDED_TYPE = "instance.ended";
+/**
+ * F2/S3: emitted when a gateway is evaluated (S5 DMN wiring, T-0340).
+ * Stub constant here so cycle-time queries + mat-view can reference the type
+ * before S5 is wired. Actual emission is in src/core/gateway-journal.ts.
+ */
+export const GATEWAY_EVALUATED_TYPE = "gateway.evaluated";
+
+// ---------------------------------------------------------------------------
 // UUID guard — mirrors deferred-inbox-store.ts.
 // ---------------------------------------------------------------------------
 
@@ -163,6 +183,12 @@ export async function appendProcessStarted(
     readonly step?: string;
     /** Display name of the waiting inbox task; defaults to APPROVE_TASK_NAME. */
     readonly taskName?: string;
+    /**
+     * T-0339 (E15-S3): tenant id for transition-journal events (instance.started +
+     * task.created). Optional for backward-compat; when absent the transition_payload
+     * is omitted from the journal events (pre-S3 callers).
+     */
+    readonly tenantId?: string;
   },
 ): Promise<string> {
   const taskId = randomUUID();
@@ -170,6 +196,7 @@ export async function appendProcessStarted(
   const step = args.step ?? APPROVE_STEP;
   const taskName = args.taskName ?? APPROVE_TASK_NAME;
 
+  // --- 1. process.started (projection seed — FROZEN shape, must not change) ---
   const input: AuditEventInput = {
     id: taskId,
     type: PROCESS_STARTED_TYPE,
@@ -191,8 +218,75 @@ export async function appendProcessStarted(
     },
     occurred_at: args.nowMs,
   };
-
   await writer.appendAuditEvent(tx, input);
+
+  // --- 2. T-0339 (E15-S3): emit instance.started + task.created for the
+  //    transition journal (F2 Phase 1). Only when tenantId is supplied (S3 callers).
+  //    These are ADDITIVE events; the process.started projection above is unchanged.
+  if (args.tenantId) {
+    const actorType = projectActorType("human", "user-task"); // process start = human actor
+
+    // instance.started — lifecycle start of the process instance
+    await writer.appendAuditEvent(tx, {
+      id: randomUUID(),
+      type: INSTANCE_STARTED_TYPE,
+      actor: args.actor,
+      subject: `instance:${args.instanceId}`,
+      scope: { proc_key: args.procKey },
+      via: "process-start",
+      proposed_by: null,
+      confirmed_by: null,
+      payload: {
+        inst: args.instanceId,
+        proc_key: args.procKey,
+        [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          processKey: args.procKey,
+          activity: INSTANCE_STARTED_TYPE,
+          actor: args.actor,
+          actorType,
+          ts: args.nowMs,
+          durationMs: null,
+          verdict: "start",
+        }),
+      },
+      occurred_at: args.nowMs,
+    });
+
+    // task.created — the waiting user-task seeded for the first step
+    await writer.appendAuditEvent(tx, {
+      id: randomUUID(),
+      type: TASK_CREATED_TYPE,
+      actor: args.actor,
+      subject: `task:${taskId}`,
+      scope: { proc_key: args.procKey, task_id: taskId, role },
+      via: "process-start",
+      proposed_by: null,
+      confirmed_by: null,
+      payload: {
+        task_id: taskId,
+        inst: args.instanceId,
+        proc_key: args.procKey,
+        role,
+        step,
+        task_name: taskName,
+        [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          processKey: args.procKey,
+          activity: TASK_CREATED_TYPE,
+          actor: args.actor,
+          actorType,
+          ts: args.nowMs,
+          durationMs: null,
+          verdict: "created",
+        }),
+      },
+      occurred_at: args.nowMs,
+    });
+  }
+
   return taskId;
 }
 
@@ -278,6 +372,39 @@ export async function appendTaskApproved(
   };
 
   await writer.appendAuditEvent(tx, input);
+
+  // T-0339 (E15-S3): emit instance.ended for the transition journal (F2 Phase 1).
+  // The linear ТЭЛ path: approve → end → done (one task, one instance lifecycle end).
+  // Only emitted when tenantId is supplied (S3 callers; backward-compat with T-0332/T-0335).
+  if (args.tenantId) {
+    await writer.appendAuditEvent(tx, {
+      id: randomUUID(),
+      type: INSTANCE_ENDED_TYPE,
+      actor: args.actor,
+      subject: `instance:${args.instanceId}`,
+      scope: { proc_key: args.procKey },
+      via: "inbox-approve",
+      proposed_by: null,
+      confirmed_by: args.actor,
+      payload: {
+        inst: args.instanceId,
+        proc_key: args.procKey,
+        inbox_task_id: args.taskId,
+        [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
+          tenantId: args.tenantId,
+          instanceId: args.instanceId,
+          processKey: args.procKey,
+          activity: INSTANCE_ENDED_TYPE,
+          actor: args.actor,
+          actorType,
+          ts: args.nowMs,
+          durationMs: null, // instance total duration not computed here (can be derived from journal)
+          verdict: "end",
+        }),
+      },
+      occurred_at: args.nowMs,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

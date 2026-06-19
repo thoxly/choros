@@ -58,6 +58,13 @@ import {
   type ScopeElement,
   type AncestryOracle,
 } from "../core/grant-lattice.js";
+// T-0339 [E15-S3]: cycle-time analytics for the transition journal.
+import {
+  loadCycleTimeByActivity,
+  loadActorTypeBreakdown,
+  type CycleTimeAnalytics,
+  type ActorTypeBreakdown,
+} from "../db/transition-journal.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -954,4 +961,51 @@ export function registerReportPageRenderRoutes(
       res.end(JSON.stringify(result));
     },
   );
+
+  // -------------------------------------------------------------------------
+  // T-0339 [E15-S3]: GET /api/process-analytics — cycle-time analytics
+  //
+  // Returns cycle-time GROUP BY analytics over the F2 Phase 1 transition journal:
+  //   - bottleneck: the activity with the highest average duration (the bottleneck step)
+  //   - rows: all activities sorted by avg_duration_ms DESC (human vs agent split)
+  //   - actorBreakdown: per-(activity, actor_type) count
+  //
+  // Uses loadCycleTimeByActivity (self-join on audit_event) + loadActorTypeBreakdown.
+  // Requires x-dev-user header (auth context) and the tenant from DEV_TENANT_ID.
+  //
+  // AC-2 (report-page-render-isolation.sh): uses the same injectable pool path.
+  // -------------------------------------------------------------------------
+  router.register(
+    "GET",
+    "/api/process-analytics",
+    async (req, res) => {
+      // Auth context required (matches Floor-1 pattern — no anonymous analytics).
+      extractActor(req); // throws 401 if missing
+
+      const pool = _poolHint ?? getPool();
+      const tenantId = DEV_TENANT_ID;
+
+      const [cycleTime, actorBreakdown] = await Promise.all([
+        loadCycleTimeByActivity(pool, tenantId),
+        loadActorTypeBreakdown(pool, tenantId),
+      ]);
+
+      const analyticsResult: {
+        bottleneck: string | null;
+        cycleTime: CycleTimeAnalytics;
+        actorBreakdown: ActorTypeBreakdown[];
+      } = {
+        bottleneck: cycleTime.bottleneck,
+        cycleTime,
+        actorBreakdown,
+      };
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(analyticsResult));
+    },
+  );
 }
+
+// Re-export analytics types so callers can import from one place.
+export type { CycleTimeAnalytics, ActorTypeBreakdown };
