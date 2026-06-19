@@ -8,6 +8,8 @@
  *   - validateFields catches empty list, bad keys, duplicate keys;
  *   - mapSchemaError surfaces the API contract honestly.
  *
+ * T-0294: tests for select (enum) and date field types.
+ *
  * The "accepted by the real validator" guarantee is verified two ways:
  *   1. structurally — the shape matches the seeds + validator unit tests;
  *   2. directly — we import ajv (the SAME dependency the backend validator uses)
@@ -40,12 +42,32 @@ function backendAccepts(schema) {
   }
 }
 
+// T-0294: AJV-primitive types that map directly to JSON Schema type values.
+// "select" and "date" are EDITOR-LEVEL types — they map to "string" + optional
+// "enum" in the JSON schema (buildRecordSchema handles this), not to a `type`
+// value directly.
+const JSON_SCHEMA_PRIMITIVE_TYPES = ['string', 'number', 'integer', 'boolean'];
+
 describe('apps-schema · supported types', () => {
-  it('offers only AJV-strict-compilable primitive types', () => {
-    for (const t of FIELD_TYPE_VALUES) {
+  it('JSON-Schema primitive types compile with AJV strict (no format, no enum)', () => {
+    for (const t of JSON_SCHEMA_PRIMITIVE_TYPES) {
       const schema = { type: 'object', properties: { f: { type: t } }, additionalProperties: false };
-      expect(backendAccepts(schema)).toBe(true);
+      expect(backendAccepts(schema), `type "${t}" must compile`).toBe(true);
     }
+  });
+
+  it('T-0294: select and date are editor-level types (not raw AJV type values)', () => {
+    // These types are valid in FIELD_TYPE_VALUES but do NOT map 1:1 to JSON Schema
+    // "type" — they are converted by buildRecordSchema. The raw {"type":"select"}
+    // would be rejected by AJV; that is expected. Use buildRecordSchema to get a
+    // schema that the backend accepts.
+    expect(FIELD_TYPE_VALUES).toContain('select');
+    expect(FIELD_TYPE_VALUES).toContain('date');
+    // Verify buildRecordSchema produces AJV-valid output for these types:
+    const selectSchema = buildRecordSchema([{ key: 'status', type: 'select', options: ['a', 'b'], required: false }]);
+    expect(backendAccepts(selectSchema)).toBe(true);
+    const dateSchema = buildRecordSchema([{ key: 'due', type: 'date', required: false }]);
+    expect(backendAccepts(dateSchema)).toBe(true);
   });
 
   it('does not offer `format` (AJV strict throws on unknown formats)', () => {
@@ -195,6 +217,140 @@ describe('apps-schema · validateField / blankField', () => {
     const b = blankField();
     expect(FIELD_TYPE_VALUES.includes(b.type)).toBe(true);
     expect(validateField(b).key).toBeTruthy(); // empty key → error
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0294: select and date field types
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0294 · select field type', () => {
+  it('buildRecordSchema: select emits { type: "string", enum: [...] } (AJV-compilable)', () => {
+    const schema = buildRecordSchema([
+      { key: 'status', type: 'select', options: ['open', 'closed', 'pending'], required: true },
+    ]);
+    expect(schema.properties.status).toEqual({ type: 'string', enum: ['open', 'closed', 'pending'] });
+    expect(backendAccepts(schema)).toBe(true);
+    expect(schema.required).toEqual(['status']);
+  });
+
+  it('buildRecordSchema: select never emits `format`', () => {
+    const schema = buildRecordSchema([{ key: 's', type: 'select', options: ['a'], required: false }]);
+    expect(JSON.stringify(schema)).not.toContain('format');
+  });
+
+  it('buildRecordSchema: select AJV enum validation rejects non-enum value', () => {
+    const schema = buildRecordSchema([{ key: 's', type: 'select', options: ['a', 'b'], required: false }]);
+    const ajv = new Ajv();
+    const validate = ajv.compile(schema);
+    expect(validate({ s: 'a' })).toBe(true);
+    expect(validate({ s: 'c' })).toBe(false); // 'c' not in enum → rejected
+  });
+
+  it('buildRecordSchema: select with title emits title in property', () => {
+    const schema = buildRecordSchema([
+      { key: 'stage', type: 'select', title: 'Стадия', options: ['lead', 'deal'], required: false },
+    ]);
+    expect(schema.properties.stage.title).toBe('Стадия');
+    expect(schema.properties.stage.enum).toEqual(['lead', 'deal']);
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('buildRecordSchema: select deduplicates and trims options', () => {
+    const schema = buildRecordSchema([
+      { key: 's', type: 'select', options: [' a ', 'b', ' a '], required: false },
+    ]);
+    expect(schema.properties.s.enum).toEqual(['a', 'b']); // deduplicated + trimmed
+  });
+
+  it('parseRecordSchema: recognises a string+enum property as select', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        deal_stage: { type: 'string', enum: ['lead', 'qualified', 'won', 'lost'], title: 'Стадия сделки' },
+      },
+      required: ['deal_stage'],
+    };
+    const fields = parseRecordSchema(schema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'deal_stage',
+      type: 'select',
+      title: 'Стадия сделки',
+      required: true,
+      options: ['lead', 'qualified', 'won', 'lost'],
+    });
+  });
+
+  it('parseRecordSchema: round-trips a select field', () => {
+    const fields = [{ key: 'status', type: 'select', title: 'Статус', options: ['new', 'done'], required: true }];
+    const schema = buildRecordSchema(fields);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'status', type: 'select', title: 'Статус', options: ['new', 'done'], required: true });
+  });
+
+  it('validateField: select without options → error', () => {
+    const err = validateField({ key: 'status', type: 'select', options: [] });
+    expect(err.options).toBeTruthy();
+  });
+
+  it('validateField: select with blank-only options → error', () => {
+    const err = validateField({ key: 'status', type: 'select', options: ['  ', ''] });
+    expect(err.options).toBeTruthy();
+  });
+
+  it('validateField: select with duplicate options → error', () => {
+    const err = validateField({ key: 'status', type: 'select', options: ['a', 'b', 'a'] });
+    expect(err.options).toBeTruthy();
+  });
+
+  it('validateField: select with valid options → no error', () => {
+    const err = validateField({ key: 'status', type: 'select', options: ['open', 'closed'] });
+    expect(err.options).toBeUndefined();
+  });
+
+  it('validateFields: accepts a select field with valid options', () => {
+    const r = validateFields([{ key: 'status', type: 'select', options: ['open', 'closed'], required: true }]);
+    expect(r.valid).toBe(true);
+  });
+
+  it('validateFields: rejects a select field with no options', () => {
+    const r = validateFields([{ key: 'status', type: 'select', options: [], required: false }]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].options).toBeTruthy();
+  });
+});
+
+describe('apps-schema T-0294 · date field type', () => {
+  it('buildRecordSchema: date emits { type: "string" } (no format — AJV strict rejects format:date)', () => {
+    const schema = buildRecordSchema([
+      { key: 'close_date', type: 'date', title: 'Дата закрытия', required: true },
+    ]);
+    expect(schema.properties.close_date).toEqual({ type: 'string', title: 'Дата закрытия' });
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('buildRecordSchema: date never emits `format`', () => {
+    const schema = buildRecordSchema([{ key: 'd', type: 'date', required: false }]);
+    expect(JSON.stringify(schema)).not.toContain('format');
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('buildRecordSchema: date schema accepts ISO date strings (as plain string validation)', () => {
+    const schema = buildRecordSchema([{ key: 'd', type: 'date', required: true }]);
+    const ajv = new Ajv();
+    const validate = ajv.compile(schema);
+    // AJV validates it as a string (format is not enforced); any non-empty string passes.
+    expect(validate({ d: '2024-01-15' })).toBe(true);
+    expect(validate({ d: 'not-a-date' })).toBe(true); // string type — AJV accepts it
+    // The UI constrains input via <input type="date">, not the schema.
+  });
+
+  it('validateField: date field → no options error', () => {
+    const err = validateField({ key: 'due', type: 'date' });
+    expect(err.options).toBeUndefined();
+    expect(Object.keys(err)).toHaveLength(0); // no errors for a valid date field
   });
 });
 

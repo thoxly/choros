@@ -51,9 +51,23 @@ const labelTxt = { fontSize: 'var(--chs-text-xs, 12px)', fontWeight: 500, color:
 /**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
+ *
+ * T-0294: when type="select", a textarea for entering option values (one per line)
+ * is rendered below the type dropdown. When type changes away from "select", the
+ * options state is preserved but hidden (non-destructive — lets user switch back).
  */
 function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
   const set = (patch) => onChange({ ...field, ...patch });
+
+  // T-0294: convert options array ↔ newline-separated string for the textarea.
+  const optionsText = Array.isArray(field.options)
+    ? field.options.join('\n')
+    : (typeof field.options === 'string' ? field.options : '');
+  const setOptionsFromText = (text) => {
+    // Split on newlines; keep empty lines during editing (they're filtered on save).
+    set({ options: text.split('\n') });
+  };
+
   return (
     <tr>
       <td style={{ verticalAlign: 'top' }}>
@@ -81,6 +95,30 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
           ))}
         </select>
         {errors.type && <span style={errStyle}>{errors.type}</span>}
+        {/* T-0294: options input for select type */}
+        {field.type === 'select' && (
+          <div style={{ marginTop: '6px' }}>
+            <span style={{ ...errStyle, display: 'block', marginTop: 0, marginBottom: '3px', color: 'var(--chs-color-text-muted, #888)' }}>
+              Варианты (по одному на строку):
+            </span>
+            <textarea
+              className="chs-input"
+              style={{
+                ...inputStyle(Boolean(errors.options)),
+                resize: 'vertical',
+                minHeight: '60px',
+                fontFamily: 'inherit',
+              }}
+              value={optionsText}
+              onChange={(e) => setOptionsFromText(e.target.value)}
+              placeholder={'вариант_1\nвариант_2\nвариант_3'}
+              aria-label="Варианты select"
+              aria-invalid={Boolean(errors.options)}
+              rows={3}
+            />
+            {errors.options && <span style={errStyle}>{errors.options}</span>}
+          </div>
+        )}
       </td>
       <td style={{ verticalAlign: 'top' }}>
         <input
