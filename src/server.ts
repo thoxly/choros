@@ -10,6 +10,7 @@ import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
 import { registerFormsRoutes } from "./http/forms.js";
+import { makeFormRecordPersister } from "./http/form-record-persister.js";
 import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
@@ -243,9 +244,23 @@ function buildRouter(
       : undefined,
   );
 
-  // Register form-submission endpoints (T-0102). Server-side field validation;
-  // schema lookup is pure/in-process so no DATABASE_URL is required.
-  registerFormsRoutes(router);
+  // Register form-submission endpoints (T-0102 / T-0337 E15-S4).
+  // Server-side field validation is pure/in-process (no DATABASE_URL required).
+  // When grantsPool is available, the real DB persist port is wired (T-0337):
+  // form submit writes to choros.record in a tenant-scoped tx + audit event.
+  // Without grantsPool (memory mode / tests), the in-memory RECORDS Map fallback
+  // is used — the test suite passes registerFormsRoutes with no deps.
+  registerFormsRoutes(
+    router,
+    grantsPool
+      ? {
+          persist: makeFormRecordPersister(
+            grantsPool,
+            (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+          ),
+        }
+      : undefined,
+  );
 
   // Register audit endpoints
   registerAuditRoutes(router, store as JobStore);

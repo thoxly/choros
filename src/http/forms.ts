@@ -2,7 +2,18 @@
  * src/http/forms.ts
  *
  * T-0102 · E9: Form submission with SERVER-SIDE field validation.
- * T-0251 · E9: PERSIST submitted record on success (in-memory mode).
+ * T-0251 · E9: PERSIST submitted record on success (in-memory mode — now with
+ *              real-DB path wired in T-0337 [E15-S4]).
+ * T-0337 · E15-S4: Forms-from-schema.
+ *   - The in-memory RECORDS Map is the fallback store (used when no DB pool
+ *     is injected, i.e. "memory" mode for tests). When a FormStoreDeps is
+ *     provided at registration (composition root: DATABASE_URL present), submit
+ *     persists the record via the real DB record store (records.ts createRecord /
+ *     the S1 applier path) in a tenant-scoped tx.
+ *   - FormStoreDeps carries the FormPersistPort — a minimal port the form submit
+ *     route calls to persist. The composition root (server.ts) wires the real
+ *     createRecord function here; the in-memory fallback wires a RECORDS Map shim.
+ *   - The submit response contract is UNCHANGED: { ok, formId, value, recordId }.
  *
  * Registers:
  *   POST /api/forms/:formId/submit
@@ -27,13 +38,6 @@
  *   - on success only the SANITIZED value (schema-declared fields, validated
  *     types) is persisted — a forged extra key never reaches storage.
  *
- * Record store design (T-0251):
- *   In-process in-memory store (mirrors the CLAIMED map in inbox.ts). Each
- *   successful form submit creates a NEW record — including approval-step submits
- *   (approval decision is a separate immutable record; it does NOT mutate the
- *   original purchase record). This keeps the linear ТЭЛ demo simple: every
- *   submit is an append, the records are never updated by this path.
- *
  * Zero external dependencies beyond node:http types + router.ts + the pure core.
  * Auth via the x-dev-user convention (same as inbox.ts / binding.ts). The schema
  * lookup is in-process and pure, so no DB is required for validation or storage.
@@ -45,11 +49,49 @@ import { getFormDef } from "../core/form-schema.js";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
-// In-memory record store (T-0251)
+// FormPersistPort — the minimal persistence contract (T-0337 E15-S4)
+//
+// Injected at registration time. The composition root wires either:
+//   - the real DB path: createRecord from records.ts (pool + resolveActorTenant)
+//   - the in-memory fallback (RECORDS Map): used when no pool is available
+//
+// This port is intentionally minimal — it only needs to:
+//   1. Persist the validated record data under the actor's tenant
+//   2. Return a stable recordId
+//   3. Not touch the HTTP request/response (that stays in the route handler)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a validated form submission as a record in the data store.
+ *
+ * @param actorSlug  - the authenticated actor (dev-user slug or OIDC sub)
+ * @param formId     - the form id ("purchase" | "approval")
+ * @param data       - the SANITIZED form payload (validated by form-validator.ts)
+ * @returns recordId - the server-minted UUID of the persisted record
+ *
+ * Throws on any persistence error (the route handler propagates it as 500).
+ */
+export type FormPersistPort = (
+  actorSlug: string,
+  formId: string,
+  data: Record<string, unknown>,
+) => Promise<string>;
+
+/**
+ * Optional deps injected by the composition root (server.ts) when a DB pool
+ * is available. When absent, the route uses the in-memory RECORDS Map fallback.
+ */
+export interface FormStoreDeps {
+  /** Real DB persistence — wired when DATABASE_URL is present. */
+  readonly persist: FormPersistPort;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory record store (T-0251 / T-0337 fallback)
 // Maps recordId → stored form record. Process-lifetime only — survives across
-// requests in a running server (mirrors the CLAIMED map in inbox.ts pattern).
-// A real implementation would write to a DB records table; the in-process
-// contract is identical (same HTTP shape, same error codes).
+// requests in a running server. Used when no FormStoreDeps is injected (memory
+// mode or tests without a live DB). The real DB path (FormStoreDeps.persist)
+// bypasses this map entirely.
 // ---------------------------------------------------------------------------
 
 interface FormRecord {
@@ -69,6 +111,25 @@ const RECORDS: Map<string, FormRecord> = new Map();
  * Increment when the stored shape changes incompatibly (T-0085 ADR §3.5).
  */
 const CURRENT_SCHEMA_VERSION = 1;
+
+// In-memory persist implementation (fallback when no pool is available).
+function memoryPersist(
+  actorSlug: string,
+  formId: string,
+  data: Record<string, unknown>,
+): Promise<string> {
+  const recordId = randomUUID();
+  const record: FormRecord = {
+    recordId,
+    formId,
+    submittedBy: actorSlug,
+    submittedAt: Date.now(),
+    schema_version: CURRENT_SCHEMA_VERSION,
+    data,
+  };
+  RECORDS.set(recordId, record);
+  return Promise.resolve(recordId);
+}
 
 // ---------------------------------------------------------------------------
 // Error envelope (extends the router's {error:{code,message}} with field errors)
@@ -91,7 +152,19 @@ function sendValidationErrors(res: import("node:http").ServerResponse, fields: F
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerFormsRoutes(router: Router): void {
+/**
+ * Register the form submit endpoint.
+ *
+ * @param router  - the HTTP router
+ * @param deps    - optional: when present, the real DB persist port is used;
+ *                  when absent (undefined), falls back to the in-memory RECORDS Map.
+ *                  Tests call `createServer(undefined, undefined, "memory")` which
+ *                  omits deps → in-memory fallback → tests stay green without DB.
+ */
+export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void {
+  // Resolve the persist function: real DB or in-memory fallback.
+  const persist: FormPersistPort = deps?.persist ?? memoryPersist;
+
   // POST /api/forms/:formId/submit
   router.register("POST", "/api/forms/:formId/submit", withAuth(async (req, res, params) => {
     // Authn: mode-aware (T-0327) — keycloak → JWT sub; dev → x-dev-user.
@@ -126,19 +199,12 @@ export function registerFormsRoutes(router: Router): void {
       return;
     }
 
-    // Persist the sanitized value as a new record (T-0251).
-    // Each submit is an append — approval-step submits create a NEW record rather
-    // than mutating the purchase record (simplest model for the linear ТЭЛ demo).
-    const recordId = randomUUID();
-    const record: FormRecord = {
-      recordId,
-      formId,
-      submittedBy: devUserId,
-      submittedAt: Date.now(),
-      schema_version: CURRENT_SCHEMA_VERSION,
-      data: result.value as Record<string, unknown>,
-    };
-    RECORDS.set(recordId, record);
+    // Persist the sanitized value (T-0251 / T-0337).
+    // When deps.persist is the real DB path (T-0337), this writes to the entity
+    // store in a tenant-scoped tx with audit event (records.ts createRecord pattern).
+    // When no deps are injected (memory mode), the in-memory RECORDS Map is used.
+    const sanitizedData = result.value as Record<string, unknown>;
+    const recordId = await persist(devUserId, formId, sanitizedData);
 
     // Response contract (frozen): { ok, formId, value, recordId }
     // value = sanitized payload (schema-declared, validated fields only).
@@ -153,11 +219,14 @@ export function registerFormsRoutes(router: Router): void {
 // ---------------------------------------------------------------------------
 // Test seams (T-0251)
 // Not called from production code. Mirror the inbox.ts pattern.
+// These operate on the in-memory RECORDS Map (the fallback used in tests).
+// When the real DB persist is wired, these seams see no entries (the DB has them).
 // ---------------------------------------------------------------------------
 
 /**
  * Retrieve a stored record by id. Returns undefined if not found.
  * Used by e2e tests to assert persistence without a real DB.
+ * Only covers in-memory store entries (memory mode / fallback).
  */
 export function _getRecordForTests(recordId: string): FormRecord | undefined {
   return RECORDS.get(recordId);
