@@ -13,11 +13,78 @@
    Инвариант I-4: каждое намерение — событие аудита (сервер пишет в единый сток).
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useId } from 'react';
 import { Button, Field } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 
 const ACTOR_ID = 'e-owner'; // dev-silo genesis owner (confirmed by seed)
+
+// Dev tenant UUID — the silo every org row is scoped to (server DEV_TENANT_ID).
+// Same constant screen-org.jsx uses; the tenant-state read is genesis-owner gated
+// and ACTOR_ID above IS that owner, so the directory fetch passes the same gate.
+const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+
+/* ----------------------------------------------------------------------------
+   Org directory (T-0312 · audit #10): the hire/substitute/revoke forms used to
+   ask the admin to TYPE a raw role/employee/org-node UUID (placeholder
+   `e0000000-…`) — a dev-jargon leak (principles.md §3) and an error trap. We now
+   resolve those ids from GET /api/org/tenant-state (the same endpoint screen-org
+   reads): it returns { departments, positions, employees, roles } as { id, slug }
+   rows, scoped to the dev silo. The picker lists them by human slug → value=id,
+   so the admin chooses a name and the underlying UUID is still what we submit.
+   ---------------------------------------------------------------------------- */
+function useOrgDirectory() {
+  const [dir, setDir] = useState({ employees: [], roles: [], departments: [] });
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { 'x-dev-user': ACTOR_ID } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => {
+        if (!alive) return;
+        const opt = (rows) => (Array.isArray(rows) ? rows : []).map((x) => ({ id: x.id, label: x.slug || x.id }));
+        setDir({ employees: opt(d.employees), roles: opt(d.roles), departments: opt(d.departments) });
+        setLoading(false);
+      })
+      .catch((e) => { if (alive) { setError(e.message); setLoading(false); } });
+    return () => { alive = false; };
+  }, []);
+  return { ...dir, error, loading };
+}
+
+/* OrgPicker — choose an entity by human name; the value submitted is its UUID.
+   Kit-classed native <select> (the kit has no Select primitive; .chs-input
+   carries the tokenised surface). If the directory failed to load we fall back
+   to a kit <Field> raw-UUID input so the form is never dead-ended (honest
+   degrade) — but the happy path never types a UUID. */
+function OrgPicker({ label, value, onChange, options, placeholder = '— выбрать —', dirError, fallbackPlaceholder, hint }) {
+  const autoId = useId();
+  const selId = `org-pick-${autoId}`;
+  if (dirError) {
+    return (
+      <Field
+        label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={fallbackPlaceholder || '— справочник недоступен, введите UUID —'}
+        mono
+        hint={hint || `справочник не загружен (${dirError})`}
+      />
+    );
+  }
+  return (
+    <label className="chs-field" htmlFor={selId}>
+      <span className="chs-label">{label}</span>
+      <select id={selId} className="chs-input" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{placeholder}</option>
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>{o.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 async function postIntent(path, body, actorId = ACTOR_ID) {
   try {
@@ -52,7 +119,7 @@ function ResultBanner({ result }) {
 }
 
 /* ---- Нанять: сотрудник → должность(пресет) ---- */
-function HireForm({ presets }) {
+function HireForm({ presets, dir }) {
   const [slug, setSlug] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [roleId, setRoleId] = useState('');
@@ -82,7 +149,9 @@ function HireForm({ presets }) {
             <option value="agent">Агент</option>
           </select>
         </label>
-        <Field label="UUID роли (должность)" value={roleId} onChange={(e) => setRoleId(e.target.value)} placeholder="e0000000-…" mono />
+        <OrgPicker label="Роль (должность)" value={roleId} onChange={setRoleId}
+          options={dir.roles} dirError={dir.error} placeholder="— выбрать роль —"
+          fallbackPlaceholder="UUID роли" />
         <label className="chs-field">
           <span className="chs-label">Пресет-роль</span>
           <select className="chs-input" value={presetId} onChange={(e) => setPresetId(e.target.value)}>
@@ -109,7 +178,7 @@ function HireForm({ presets }) {
 }
 
 /* ---- Уволить: отключить сотрудника (атомарный revoke) ---- */
-function FireForm() {
+function FireForm({ dir }) {
   const [employeeId, setEmployeeId] = useState('');
   const [result, setResult] = useState(null);
   const submit = async () => {
@@ -121,7 +190,9 @@ function FireForm() {
     <section className="chs-section2 chs-intent">
       <SectionHead title="Уволить" aux="атомарный revoke всех прав · затем переназначение задач" />
       <div className="chs-intent__grid">
-        <Field label="UUID сотрудника" value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} placeholder="d0000000-…" mono />
+        <OrgPicker label="Сотрудник" value={employeeId} onChange={setEmployeeId}
+          options={dir.employees} dirError={dir.error} placeholder="— выбрать сотрудника —"
+          fallbackPlaceholder="UUID сотрудника" />
       </div>
       <p className="chs-section2__note">
         Все назначения и одиночные гранты сотрудника снимаются в одной транзакции — частичное увольнение невозможно.
@@ -138,7 +209,7 @@ function FireForm() {
 }
 
 /* ---- Подмена: X замещает Y до даты (делегированное подмножество) ---- */
-function SubstituteForm() {
+function SubstituteForm({ dir }) {
   const [absentId, setAbsentId] = useState('');
   const [substituteId, setSubstituteId] = useState('');
   const [roleId, setRoleId] = useState('');
@@ -162,10 +233,18 @@ function SubstituteForm() {
     <section className="chs-section2 chs-intent">
       <SectionHead title="Подмена" aux="X покрывает Y до даты · делегированное подмножество (⊆ замещаемого)" />
       <div className="chs-intent__grid">
-        <Field label="Отсутствует (UUID)" value={absentId} onChange={(e) => setAbsentId(e.target.value)} placeholder="d0000000-…004" mono />
-        <Field label="Замещает (UUID)" value={substituteId} onChange={(e) => setSubstituteId(e.target.value)} placeholder="d0000000-…002" mono />
-        <Field label="UUID роли" value={roleId} onChange={(e) => setRoleId(e.target.value)} placeholder="e0000000-…002" mono />
-        <Field label="Орг-узел (UUID отдела)" value={orgNodeId} onChange={(e) => setOrgNodeId(e.target.value)} placeholder="b0000000-…001" mono />
+        <OrgPicker label="Отсутствует" value={absentId} onChange={setAbsentId}
+          options={dir.employees} dirError={dir.error} placeholder="— кого замещают —"
+          fallbackPlaceholder="UUID отсутствующего" />
+        <OrgPicker label="Замещает" value={substituteId} onChange={setSubstituteId}
+          options={dir.employees} dirError={dir.error} placeholder="— кто замещает —"
+          fallbackPlaceholder="UUID замещающего" />
+        <OrgPicker label="Роль" value={roleId} onChange={setRoleId}
+          options={dir.roles} dirError={dir.error} placeholder="— роль подмены —"
+          fallbackPlaceholder="UUID роли" />
+        <OrgPicker label="Орг-узел (отдел)" value={orgNodeId} onChange={setOrgNodeId}
+          options={dir.departments} dirError={dir.error} placeholder="— отдел (орг-охват) —"
+          fallbackPlaceholder="UUID отдела" />
         <Field label="До (дата/время)" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
       </div>
       <p className="chs-section2__note">
@@ -222,6 +301,7 @@ function UrgentRevokeForm() {
 function IntentsScreen() {
   const [presets, setPresets] = useState([]);
   const [loadErr, setLoadErr] = useState(null);
+  const dir = useOrgDirectory(); // { employees, roles, departments, error, loading }
 
   useEffect(() => {
     // Пресеты приходят из словарей (определения сидит T-0224). Этот экран НЕ
@@ -249,9 +329,9 @@ function IntentsScreen() {
               Пресеты не загружены ({loadErr}) — поля пресета будут пусты, пока сид T-0224 не применён.
             </p>
           )}
-          <HireForm presets={presets} />
-          <FireForm />
-          <SubstituteForm />
+          <HireForm presets={presets} dir={dir} />
+          <FireForm dir={dir} />
+          <SubstituteForm dir={dir} />
           <UrgentRevokeForm />
         </div>
       </div>

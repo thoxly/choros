@@ -10,7 +10,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, RoleAssignment, ReservationMeter, BudgetMeter } from '../components/components.jsx';
+import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Modal, RoleAssignment, ReservationMeter, BudgetMeter } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import {
@@ -119,56 +119,62 @@ const EXEC_DETAIL = {
   },
 };
 
-/* ---- CRUD modal (shared) ---- */
-
-const modalInputStyle = (invalid) => ({
-  width: '100%', boxSizing: 'border-box',
-  padding: '8px 10px', marginTop: '4px',
-  background: 'var(--chs-bg-primary, #14151a)',
-  border: `1px solid ${invalid ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-border, #30333d)'}`,
-  borderRadius: '6px', color: 'inherit',
-  fontSize: 'var(--chs-text-sm, 13px)', fontFamily: 'inherit',
-});
-const modalErrStyle = { display: 'block', marginTop: '4px', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-danger, #e53e3e)' };
-const modalHintStyle = { ...modalErrStyle, color: 'var(--chs-color-text-faint, #666)' };
+/* ---- CRUD modal (shared) ----
+   Migrated to the kit (T-0312): the modal surface is the kit <Modal> (tokenised
+   overlay/panel, focus-trap, Esc/scrim close) and each field is the kit <Field>
+   (text/slug) or a token-classed <select className="chs-input"> (no hand-rolled
+   input style, no broken `--chs-bg-primary` fallback — that token never existed,
+   so the old input fell to `color: inherit` on no background and was invisible in
+   the light theme). Colours/spacing come from --chs-color-* only. */
 
 /**
  * OrgFormField — one controlled field. kind: "text" | "slug" | "select".
+ * text/slug render the kit <Field> (label↔input wired, aria-invalid, hint/error
+ * via aria-describedby). select renders a kit-classed native <select> (the kit
+ * has no Select primitive; .chs-input carries the same tokenised surface).
  */
 function OrgFormField({ field, value, onChange, error }) {
   const invalid = Boolean(error);
-  return (
-    <label style={{ display: 'block', marginBottom: '14px' }}>
-      <span style={{ fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 }}>
-        {field.label}{field.optional ? <span style={{ color: 'var(--chs-color-text-faint, #666)' }}> (опц.)</span> : null}
-      </span>
-      {field.kind === 'select' ? (
+  const labelNode = (
+    <>{field.label}{field.optional ? <span className="chs-org__optional"> (опц.)</span> : null}</>
+  );
+  if (field.kind === 'select') {
+    const selId = `org-fld-${field.key}`;
+    const descId = (error || field.hint) ? `${selId}-hint` : undefined;
+    return (
+      <div className="chs-field chs-org__modalfield">
+        <label className="chs-label" htmlFor={selId}>{labelNode}</label>
         <select
-          className="chs-input"
-          style={modalInputStyle(invalid)}
+          id={selId}
+          className={`chs-input ${invalid ? 'chs-input--invalid' : ''}`}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          aria-invalid={invalid}
+          aria-invalid={invalid || undefined}
+          aria-describedby={descId}
         >
           <option value="">{field.placeholder || '— выберите —'}</option>
           {(field.options || []).map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
-      ) : (
-        <input
-          className={field.kind === 'slug' ? 'chs-input chs-input--mono' : 'chs-input'}
-          style={modalInputStyle(invalid)}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={field.placeholder}
-          aria-invalid={invalid}
-        />
-      )}
-      {error
-        ? <span style={modalErrStyle}>{error}</span>
-        : field.hint ? <span style={modalHintStyle}>{field.hint}</span> : null}
-    </label>
+        {error
+          ? <span id={descId} className="chs-hint chs-hint--invalid">{error}</span>
+          : field.hint ? <span id={descId} className="chs-hint">{field.hint}</span> : null}
+      </div>
+    );
+  }
+  return (
+    <div className="chs-org__modalfield">
+      <Field
+        label={labelNode}
+        mono={field.kind === 'slug'}
+        invalid={invalid}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={field.placeholder}
+        hint={error || field.hint || undefined}
+      />
+    </div>
   );
 }
 
@@ -177,7 +183,7 @@ function OrgFormField({ field, value, onChange, error }) {
  *   { title, subtitle, fields[], validate(values), buildPayload(values),
  *     endpoint, entity }
  * On 201 calls onCreated(parsedBody). Honest error surfacing via mapOrgError:
- * field errors land on the named input, others in a banner.
+ * field errors land on the named input, others in a banner. Surface = kit <Modal>.
  */
 function OrgCrudModal({ open, config, onClose, onCreated }) {
   const initial = () => Object.fromEntries((config?.fields || []).map((f) => [f.key, f.default || '']));
@@ -230,41 +236,23 @@ function OrgCrudModal({ open, config, onClose, onCreated }) {
   if (!open || !config) return null;
 
   return (
-    <div
-      role="dialog" aria-modal="true" aria-label={config.title}
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)' }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <form
-        onSubmit={handleSubmit}
-        style={{
-          background: 'var(--chs-bg-secondary, #1e2028)', border: '1px solid var(--chs-border, #30333d)',
-          borderRadius: '8px', padding: '28px 32px', minWidth: '400px', maxWidth: '520px',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.4)', maxHeight: '88vh', overflowY: 'auto',
-        }}
-      >
-        <h2 style={{ margin: '0 0 4px 0', fontSize: 'var(--chs-text-lg, 16px)', fontWeight: 600 }}>{config.title}</h2>
-        {config.subtitle && (
-          <p style={{ margin: '0 0 20px 0', fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>{config.subtitle}</p>
-        )}
+    <Modal open={open} onClose={onClose} title={config.title} size="sm">
+      <form onSubmit={handleSubmit} className="chs-org__modalform">
+        {config.subtitle && <p className="chs-org__modalsub">{config.subtitle}</p>}
         {(config.fields || []).map((f) => (
           <OrgFormField key={f.key} field={{ ...f, label: f.label }} value={values[f.key] ?? ''} onChange={(v) => setField(f.key, v)} error={fieldErrors[f.key]} />
         ))}
         {submitErr && (
-          <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-            border: '1px solid var(--chs-color-danger, #e53e3e)', borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
-          }}>{submitErr}</div>
+          <div className="chs-org__formbanner chs-org__formbanner--err" role="alert">{submitErr}</div>
         )}
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+        <div className="chs-org__modalbar">
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
           <Button type="submit" variant="primary" size="sm" disabled={submitting}>
             {submitting ? 'Сохранение…' : 'Создать'}
           </Button>
         </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -445,8 +433,8 @@ const moneyFmt = (n) => "₽" + fmtRu(n);
 /* ---- Explain-PDP в карточке сотрудника (T-0223 · инвариант I-3) ----
    «Почему Вася не видит X» = трасса PDP, ВСТРОЕНА в карточку, ЗА mgmt-грантом.
    Сам эндпойнт POST /api/pdp/explain (T-0136) проверяет авторизацию:
-   самоопрос ИЛИ admin с delegable mgmt_object:grant — иначе 403 (анти-oracle,
-   без подробностей). UI лишь показывает вердикт/трассу и честно сообщает 403.
+   самоопрос ИЛИ admin с delegable mgmt_object:grant — иначе 403 без подробностей
+   (запрос чужих прав не раскрывается). UI лишь показывает вердикт/трассу и честно сообщает 403.
    Скрытые поля (drop-маска) эндпойнт не раскрывает даже при самоопросе. */
 function ExplainPanel({ subjectSlug }) {
   const [resourceType, setResourceType] = useState("mcp://ledger.invoices");
@@ -472,7 +460,7 @@ function ExplainPanel({ subjectSlug }) {
         }),
       });
       if (resp.status === 403) {
-        // Анти-oracle: не-admin о чужом субъекте — без деталей (инвариант I-3).
+        // Без раскрытия: не-admin о чужом субъекте — без деталей (инвариант I-3).
         setResult({ forbidden: true });
         return;
       }
@@ -491,7 +479,7 @@ function ExplainPanel({ subjectSlug }) {
     <section className="chs-section2">
       <div className="chs-section2__head">
         <h3 className="chs-section2__title">Почему видит / не видит — explain-PDP</h3>
-        <span className="chs-section2__aux">за mgmt-грантом · анти-oracle</span>
+        <span className="chs-section2__aux">за mgmt-грантом · без раскрытия чужих прав</span>
       </div>
       <div style={{ display: "flex", gap: "var(--chs-space-3)", flexWrap: "wrap", alignItems: "flex-end" }}>
         <label className="chs-field" style={{ flex: "1 1 14ch" }}>
@@ -516,7 +504,7 @@ function ExplainPanel({ subjectSlug }) {
         <div style={{ marginTop: "var(--chs-space-3)", fontSize: "var(--chs-text-sm)" }}>
           {result.forbidden ? (
             <span style={{ color: "var(--chs-color-danger, red)" }}>
-              403 — нет mgmt-гранта на просмотр прав этого субъекта (анти-oracle: подробности скрыты).
+              403 — нет mgmt-гранта на просмотр прав этого субъекта: подробности скрыты, нет прав на просмотр.
             </span>
           ) : result.error ? (
             <span style={{ color: "var(--chs-color-danger, red)" }}>Ошибка: {result.error}</span>

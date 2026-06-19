@@ -213,6 +213,25 @@
 .chs-trow__vac { font-size: var(--chs-text-2xs); color: var(--chs-color-warning); letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; font-weight: var(--chs-weight-medium); }
 .chs-trow__deptglyph { width: 11px; height: 11px; flex: none; border-radius: var(--chs-radius-1); border: 1.5px solid var(--chs-color-text-faint); }
 
+/* CRUD-модалка оргструктуры (kit <Modal> + <Field>) — T-0312.
+   Цвета/отступы — только токены --chs-*; никакого хардкода (G6). */
+.chs-org__modalform { display: flex; flex-direction: column; gap: var(--chs-space-6); }
+.chs-org__modalsub { margin: 0; font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); line-height: var(--chs-leading-snug); }
+.chs-org__modalfield { display: block; }
+.chs-org__optional { color: var(--chs-color-text-faint); font-weight: var(--chs-weight-regular); }
+.chs-org__formbanner {
+  padding: var(--chs-space-4) var(--chs-space-5);
+  border-radius: var(--chs-radius-2);
+  font-size: var(--chs-text-sm);
+  line-height: var(--chs-leading-snug);
+}
+.chs-org__formbanner--err {
+  color: var(--chs-color-danger);
+  background: var(--chs-color-danger-soft);
+  border: 1px solid var(--chs-color-danger);
+}
+.chs-org__modalbar { display: flex; gap: var(--chs-space-4); justify-content: flex-end; margin-top: var(--chs-space-2); }
+
 /* Карточка исполнителя */
 .chs-org__detail { min-height: 0; overflow-y: auto; }
 .chs-detail { max-width: 780px; padding: var(--chs-space-9) var(--chs-space-10) var(--chs-space-11); }
