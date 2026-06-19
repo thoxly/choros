@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState } from '../components/components.jsx';
+import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field } from '../components/components.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
@@ -385,90 +385,79 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
     }
   }, [processKey, applicationId, formKey, reset, onBound]);
 
-  if (!open) return null;
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Связать процесс с приложением"
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) handleClose(); }}
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Связать процесс с приложением"
+      size="sm"
+      footer={
+        <>
+          <Button variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
+          <Button variant="primary" size="sm" onClick={handleSubmit} disabled={submitting}>
+            {submitting ? 'Сохранение…' : 'Связать'}
+          </Button>
+        </>
+      }
     >
-      <div style={{
-        background: 'var(--chs-bg-secondary, #1e2028)',
-        border: '1px solid var(--chs-border, #30333d)',
-        borderRadius: '8px', padding: '28px 32px', minWidth: '380px', maxWidth: '520px',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-      }}>
-        <h2 style={{ margin: '0 0 18px 0', fontSize: 'var(--chs-text-lg, 16px)', fontWeight: 600 }}>
-          Связать процесс с приложением
-        </h2>
-
-        <label style={{ display: 'block', marginBottom: '14px' }}>
-          <span style={{ display: 'block', marginBottom: '4px', fontSize: 'var(--chs-text-sm, 13px)' }}>Процесс</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-5)' }}>
+        <div className="chs-field">
+          <label className="chs-label" htmlFor="bind-process-key">Процесс</label>
           <select
+            id="bind-process-key"
+            className={`chs-input ${fieldErrors.process_key ? 'chs-input--invalid' : ''}`}
             value={processKey}
             onChange={(e) => setProcessKey(e.target.value)}
-            style={{ width: '100%', padding: '6px 8px' }}
+            aria-invalid={fieldErrors.process_key ? true : undefined}
           >
             <option value="">— выберите процесс —</option>
             {defOpts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           {fieldErrors.process_key && (
-            <span style={{ color: 'var(--chs-color-danger, #e53e3e)', fontSize: 'var(--chs-text-xs, 11px)' }}>{fieldErrors.process_key}</span>
+            <span className="chs-hint chs-hint--invalid">{fieldErrors.process_key}</span>
           )}
-        </label>
+        </div>
 
-        <label style={{ display: 'block', marginBottom: '14px' }}>
-          <span style={{ display: 'block', marginBottom: '4px', fontSize: 'var(--chs-text-sm, 13px)' }}>Приложение</span>
+        <div className="chs-field">
+          <label className="chs-label" htmlFor="bind-application-id">Приложение</label>
           <select
+            id="bind-application-id"
+            className={`chs-input ${fieldErrors.application_id ? 'chs-input--invalid' : ''}`}
             value={applicationId}
             onChange={(e) => setApplicationId(e.target.value)}
-            style={{ width: '100%', padding: '6px 8px' }}
+            aria-invalid={fieldErrors.application_id ? true : undefined}
           >
             <option value="">— выберите приложение —</option>
             {appOpts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           {fieldErrors.application_id && (
-            <span style={{ color: 'var(--chs-color-danger, #e53e3e)', fontSize: 'var(--chs-text-xs, 11px)' }}>{fieldErrors.application_id}</span>
+            <span className="chs-hint chs-hint--invalid">{fieldErrors.application_id}</span>
           )}
-        </label>
+        </div>
 
-        <label style={{ display: 'block', marginBottom: '18px' }}>
-          <span style={{ display: 'block', marginBottom: '4px', fontSize: 'var(--chs-text-sm, 13px)' }}>Форма (необязательно)</span>
-          <input
-            type="text"
-            value={formKey}
-            placeholder="purchase-form"
-            onChange={(e) => setFormKey(e.target.value)}
-            style={{ width: '100%', padding: '6px 8px', boxSizing: 'border-box' }}
-          />
-        </label>
+        <Field
+          label="Форма (необязательно)"
+          id="bind-form-key"
+          type="text"
+          value={formKey}
+          placeholder="purchase-form"
+          onChange={(e) => setFormKey(e.target.value)}
+        />
 
         {submitError && (
           <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-            border: '1px solid var(--chs-color-danger, #e53e3e)',
-            borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+            padding: 'var(--chs-space-3) var(--chs-space-4)',
+            background: 'var(--chs-color-danger-soft)',
+            border: '1px solid var(--chs-color-danger)',
+            borderRadius: 'var(--chs-radius-3)',
+            fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
           }}>
             {submitError}
           </div>
         )}
-
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-          <Button variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
-          <Button variant="primary" size="sm" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? 'Сохранение…' : 'Связать'}
-          </Button>
-        </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 

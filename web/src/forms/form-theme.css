@@ -102,6 +102,8 @@
   --chs-color-surface-2:     oklch(0.945 0.006 85);
   --chs-color-surface-raised:oklch(0.990 0.004 85);
   --chs-color-overlay:       oklch(0.990 0.004 85);
+  /* scrim — затемняющая вуаль за оверлеями формы (синхрон с design/tokens.css) */
+  --chs-color-scrim:         oklch(0.20 0.01 75 / 0.45);
 
   --chs-color-border:        oklch(0.900 0.006 80);
   --chs-color-border-strong: oklch(0.820 0.008 80);
@@ -155,6 +157,8 @@
   --chs-color-surface-2:     oklch(0.285 0.008 75);
   --chs-color-surface-raised:oklch(0.285 0.008 75);
   --chs-color-overlay:       oklch(0.285 0.008 75);
+  /* scrim — на тёмной теме затемняем сильнее (синхрон с design/tokens.css) */
+  --chs-color-scrim:         oklch(0.12 0.006 75 / 0.62);
 
   --chs-color-border:        oklch(0.330 0.008 75);
   --chs-color-border-strong: oklch(0.430 0.009 75);
