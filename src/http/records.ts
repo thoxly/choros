@@ -234,6 +234,29 @@ const RECORD_SELECT_JOIN =
   `r.data, r.created_at, r.updated_at`;
 
 // ---------------------------------------------------------------------------
+// T-0295: enriched detail shape — extends the base row with record_schema +
+// created_by so the detail screen can render field labels + actor context.
+// Only used by GET /api/records/:id (not the list / create / update paths).
+// ---------------------------------------------------------------------------
+
+interface RecordDetailRow extends RecordJoinedRow {
+  record_schema: unknown;
+  created_by: string | null;
+}
+
+function serializeRecordDetail(row: RecordDetailRow): Record<string, unknown> {
+  return {
+    ...serializeRecord(row),
+    record_schema: row.record_schema,
+    created_by: row.created_by ?? null,
+  };
+}
+
+const RECORD_DETAIL_SELECT_JOIN =
+  `r.id, r.registry_id, rd.application_id, rd.record_schema_version, ` +
+  `rd.record_schema, r.data, r.created_at, r.updated_at, r.created_by`;
+
+// ---------------------------------------------------------------------------
 // Governing registry_def — the schema a record is validated against.
 // ---------------------------------------------------------------------------
 
@@ -563,14 +586,20 @@ async function listRecords(
   });
 }
 
-async function getRecord(
+/**
+ * T-0295: enriched detail fetch — adds record_schema (for label rendering) +
+ * created_by (actor context) to the base record shape. Only called by the
+ * GET /api/records/:id route so the list/create/update paths are unaffected.
+ * Replaces the former bare `getRecord` function which only returned base fields.
+ */
+async function getRecordDetail(
   pool: pg.Pool,
   tenantId: string,
   id: string,
-): Promise<RecordJoinedRow | null> {
+): Promise<RecordDetailRow | null> {
   return withTenantTx(pool, tenantId, async (client) => {
-    const res = await client.query<RecordJoinedRow>(
-      `SELECT ${RECORD_SELECT_JOIN}
+    const res = await client.query<RecordDetailRow>(
+      `SELECT ${RECORD_DETAIL_SELECT_JOIN}
          FROM choros.record r
          JOIN choros.registry_def rd
            ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
@@ -803,7 +832,9 @@ export function registerRecordRoutes(
     res.end(JSON.stringify({ records: rows.map(serializeRecord) }));
   });
 
-  // GET /api/records/:id — get one record (404 if not in the caller's tenant).
+  // GET /api/records/:id — get one record enriched for the detail screen
+  // (T-0295): includes record_schema + created_by in addition to the base
+  // fields. 404 if not in the caller's tenant (RLS-filtered or does not exist).
   router.register(
     "GET",
     "/api/records/:id",
@@ -813,7 +844,7 @@ export function registerRecordRoutes(
 
       const actor = extractActor(req);
       const tenantId = await resolveActorTenant(actor);
-      const row = await getRecord(pool, tenantId, id);
+      const row = await getRecordDetail(pool, tenantId, id);
       if (row === null) {
         // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
         throw new HttpError(404, "NOT_FOUND", "record not found");
@@ -821,7 +852,7 @@ export function registerRecordRoutes(
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(serializeRecord(row)));
+      res.end(JSON.stringify(serializeRecordDetail(row)));
     },
   );
 
