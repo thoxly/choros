@@ -3,9 +3,9 @@
    Оболочка: левая навигация, топбар, переключатель тем, роутинг.
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
-import { useNavigate, useLocation, Routes, Route } from 'react-router-dom';
-import { Button } from '../components/components.jsx';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom';
+import { Button, Modal, Tooltip } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
 import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
@@ -35,7 +35,7 @@ export { Icon };
 
 const RIGHTS_TABS = [
   { id: "overview",    label: "Обзор ролей",       path: "/rights",              status: "live" },
-  { id: "intents",     label: "Бытовые операции",  path: "/rights/intents",      status: "live" },
+  { id: "intents",     label: "Повседневные операции",  path: "/rights/intents",  status: "live" },
   { id: "editor",      label: "Редактор роли",      path: "/rights/editor",       status: "demo" },
   { id: "criticality", label: "Критичность",        path: "/rights/criticality",  status: "demo" },
   { id: "sod",         label: "SoD",                path: "/rights/sod",          status: "demo" },
@@ -76,20 +76,32 @@ function NavItem({ item, active }) {
   const status = effectiveStatus(item);
   const isSoon = status === "soon";
   const clickable = !!item.screen && !isSoon;
-  const titleAttr = isSoon ? "Скоро" : status === "demo" ? `${item.label} (демо)` : item.label;
+  // T-0307 (audit #5): the `count` on a nav item is a STATIC seed in
+  // nav-config — it does NOT come from the section's live content (e.g. nav
+  // shows «Процессы 7» while the page lists a different number, «Инбокс 18»
+  // while the inbox tabs fetch their own counts from /api/inbox). A badge that
+  // contradicts the page it points to is worse than no badge, so we don't
+  // render these seed counts. Honest, content-derived counts live inside the
+  // screens (inbox tab counts, rights rail count), which remain the source of
+  // truth. Re-introduce a sidebar count only when it is wired to the same feed.
+  // The visible «демо»/«скоро» word IS the honest status label; an aria-label
+  // spells out the meaning for assistive tech. We do NOT nest a focusable kit
+  // Tooltip trigger inside this <button> (that is invalid nested-interactive
+  // markup) — the kit Tooltip is applied on the rights sub-tab demo badge,
+  // which sits OUTSIDE its button and can host a tooltip cleanly (T-0307 #5).
+  const badge =
+    status === "demo" ? <span className="chs-navitem__demo" aria-label="демо — данные иллюстративные">демо</span> :
+    isSoon ? <span className="chs-navitem__soon" aria-label="скоро — раздел ещё не готов">скоро</span> : null;
   return (
     <button
       className="chs-navitem"
       aria-current={active ? "true" : undefined}
       disabled={!clickable}
       onClick={() => clickable && navigate('/' + item.id)}
-      title={titleAttr}
     >
       <Icon name={item.icon} className="chs-navitem__icon" />
       <span className="chs-navitem__label">{item.label}</span>
-      {item.count != null && status === "live" && <span className="chs-navitem__count">{item.count}</span>}
-      {status === "demo" && <span className="chs-navitem__demo">демо</span>}
-      {isSoon && <span className="chs-navitem__soon">скоро</span>}
+      {badge}
     </button>
   );
 }
@@ -192,20 +204,111 @@ function RightsSubTabs() {
   return (
     <div className="chs-subtabs">
       {RIGHTS_TABS.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          className="chs-subtab"
-          aria-selected={active === t.id}
-          onClick={() => navigate(t.path)}
-          data-screen-label={t.label}
-          title={t.status === "demo" ? `${t.label} (демо — mock-данные)` : t.label}
-        >
-          {t.label}
-          {t.status === "demo" && <span className="chs-subtab__demo">демо</span>}
-        </button>
+        // The «демо» badge is rendered as a sibling of the button (not nested
+        // inside it) so the kit Tooltip can wrap it without putting a focusable
+        // tooltip-trigger inside an interactive <button> (invalid markup).
+        // T-0307 #5: replaces the silent title= demo hint with a real Tooltip.
+        <span className="chs-subtab-wrap" key={t.id}>
+          <button
+            type="button"
+            className="chs-subtab"
+            aria-selected={active === t.id}
+            onClick={() => navigate(t.path)}
+            data-screen-label={t.label}
+          >
+            {t.label}
+          </button>
+          {t.status === "demo" && (
+            <Tooltip label="Демо — данные иллюстративные (mock)" placement="bottom">
+              <span className="chs-subtab__demo">демо</span>
+            </Tooltip>
+          )}
+        </span>
       ))}
     </div>
+  );
+}
+
+/**
+ * T-0307 (audit #8): command palette for ⌘K. Lists the real, navigable product
+ * sections (every NAV item that has a screen and is not «soon»), each with its
+ * breadcrumb group so the destination reads honestly. Type-to-filter; Enter /
+ * click navigates. Built on the kit Modal (focus-trap, Esc, scroll-lock,
+ * overlay via tokens — principles.md §4) — no hand-rolled overlay, no dead
+ * control. Destinations are derived from the SAME nav-config source the sidebar
+ * uses, so the palette can never drift from the live navigation.
+ */
+function paletteDestinations() {
+  const out = [];
+  for (const grp of NAV) {
+    for (const item of visibleItems(grp)) {
+      if (!item.screen) continue;
+      if (effectiveStatus(item) === "soon") continue;
+      out.push({ id: item.id, label: item.label, group: grp.group, icon: item.icon, path: "/" + item.id });
+    }
+  }
+  return out;
+}
+
+function CommandPalette({ open, onClose, onGo }) {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef(null);
+  const dests = paletteDestinations();
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? dests.filter((d) => d.label.toLowerCase().includes(q) || d.group.toLowerCase().includes(q))
+    : dests;
+
+  // Reset the query each time the palette opens, and focus the search input.
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      // Focus after the Modal's own focus-trap has run.
+      const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [open]);
+
+  function onSubmit(e) {
+    e.preventDefault();
+    if (matches.length > 0) onGo(matches[0].path);
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Перейти к разделу" size="sm">
+      <form className="chs-palette" onSubmit={onSubmit}>
+        <input
+          ref={inputRef}
+          type="text"
+          className="chs-input chs-palette__input"
+          placeholder="Найти раздел…"
+          aria-label="Поиск раздела"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <ul className="chs-palette__list" role="listbox" aria-label="Разделы">
+          {matches.length === 0 && (
+            <li className="chs-palette__empty" role="presentation">Ничего не найдено</li>
+          )}
+          {matches.map((d) => (
+            <li key={d.id} role="presentation">
+              <button
+                type="button"
+                role="option"
+                aria-selected={false}
+                className="chs-palette__item"
+                onClick={() => onGo(d.path)}
+              >
+                <Icon name={d.icon} className="chs-palette__icon" />
+                <span className="chs-palette__label">{d.label}</span>
+                <span className="chs-palette__group">{d.group}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </form>
+    </Modal>
   );
 }
 
@@ -213,6 +316,7 @@ function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "light");
   const [rightsFocus, setRightsFocus] = useState(null);
   const [launchOpen, setLaunchOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false); // T-0307: ⌘K command palette
   // Auth bootstrap (T-0258): authReady gates the first render until we know the
   // mode; authConfig holds it; currentUser is the active identity (dev-user in
   // dev mode, keycloak user in keycloak mode). authError surfaces login errors.
@@ -252,14 +356,30 @@ function AppShell() {
     };
   }, []);
 
-  // Derive current screen from pathname
+  // Derive current screen from pathname. T-0307 (audit §1): the app now lands on
+  // the Конструктор / Приложения section (where a new user builds), not someone
+  // else's operational «Инбокс задач» — so the empty-path fallback is "apps".
   const pathParts = location.pathname.split('/').filter(Boolean);
-  const screen = pathParts[0] || "inbox";
+  const screen = pathParts[0] || "apps";
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("chs-theme", theme);
   }, [theme]);
+
+  // T-0307 (audit #8): ⌘K / Ctrl+K opens the command palette globally — the
+  // sidebar hint is now a live affordance, not a dead <div>. Esc-to-close is
+  // handled by the Modal's own focus-trap when it is open.
+  useEffect(() => {
+    function onKey(e) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   const setTheme = (t) => setThemeState(t);
   const openRights = (roleId) => {
@@ -317,11 +437,23 @@ function AppShell() {
           </div>
         </div>
 
-        <div className="chs-nav__search">
+        <button
+          type="button"
+          className="chs-nav__search"
+          aria-label="Поиск по разделам (Cmd+K)"
+          aria-haspopup="dialog"
+          onClick={() => setPaletteOpen(true)}
+        >
           <Icon name="search" />
-          <span>Поиск</span>
+          <span>Поиск разделов</span>
           <kbd>⌘K</kbd>
-        </div>
+        </button>
+
+        <CommandPalette
+          open={paletteOpen}
+          onClose={() => setPaletteOpen(false)}
+          onGo={(path) => { setPaletteOpen(false); navigate(path); }}
+        />
 
         <div className="chs-nav__scroll">
           {NAV.map((grp) => {
@@ -355,7 +487,8 @@ function AppShell() {
         {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
-            <Route path="/" element={<InboxScreen />} />
+            {/* T-0307 (audit §1): default landing → Конструктор / Приложения. */}
+            <Route path="/" element={<Navigate to="/apps" replace />} />
             <Route path="/apps" element={<AppsScreen />} />
             {/* T-0266: application field-constructor (registry_def editor) */}
             <Route path="/app-schema/:appId" element={<AppSchemaScreen />} />
