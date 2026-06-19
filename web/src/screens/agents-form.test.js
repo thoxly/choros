@@ -17,7 +17,7 @@ import {
   SLUG_RE,
   validateHire, buildHirePayload,
   classifyHandle, handleRejectMessage, validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions,
+  mapAgentError, statusLabel, positionOptions, displayAgentName,
 } from './agents-form.js';
 
 describe('validateHire', () => {
@@ -150,6 +150,29 @@ describe('statusLabel', () => {
   it('labels configured vs needs_llm', () => {
     expect(statusLabel('configured')).toMatch(/привязана/i);
     expect(statusLabel('needs_llm')).toMatch(/Нужна/i);
+  });
+});
+
+describe('displayAgentName — strips the (seed) provisioning marker (audit #6)', () => {
+  it('drops a trailing "(seed)" so dev-jargon never reaches product text', () => {
+    expect(displayAgentName('Config-агент (seed)')).toBe('Config-агент');
+    expect(displayAgentName('Агент-документатор (seed)')).toBe('Агент-документатор');
+  });
+  it('is case-insensitive and tolerates the Cyrillic "(сид)" spelling + trailing space', () => {
+    expect(displayAgentName('Recon (SEED) ')).toBe('Recon');
+    expect(displayAgentName('Сверка (сид)')).toBe('Сверка');
+  });
+  it('leaves a clean human name untouched (and trims)', () => {
+    expect(displayAgentName('Сверка-агент')).toBe('Сверка-агент');
+    expect(displayAgentName('  Контролёр  ')).toBe('Контролёр');
+  });
+  it('does not strip "(seed)" mid-string — only the trailing marker', () => {
+    expect(displayAgentName('seed-станция (prod)')).toBe('seed-станция (prod)');
+  });
+  it('is defensive against non-strings / empties', () => {
+    expect(displayAgentName(undefined)).toBe('');
+    expect(displayAgentName(null)).toBe('');
+    expect(displayAgentName('(seed)')).toBe('(seed)'); // nothing left → keep the trimmed input
   });
 });
 
