@@ -33,11 +33,17 @@
    Вся нетривиальная логика (схема→поля формы, типизация/сериализация значений,
    маппинг ошибок) вынесена в чистый модуль records-form.js и покрыта unit-тестами.
    Авторизация — devHeaders() (X-Dev-User), как у остальных экранов.
+
+   OBLIK (T-0302): «Создать запись» — через kit <Modal>; динамические поля через
+   .chs-input (видимый ввод в ОБЕИХ темах через реальные --chs-color-* токены, без
+   несуществующих --chs-bg-primary/--chs-border). Ноль хардкода цвета (G6).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Button, Mono } from '../components/components.jsx';
+import {
+  Button, Mono, Modal, EmptyState, ErrorState, LoadingState, KitIcon,
+} from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
   schemaToFormFields,
@@ -50,23 +56,22 @@ import {
   extractFieldErrors,
 } from './records-form.js';
 
+// Anything at/below this is a seed/unset created_at, not a real date — render a
+// dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
+const EPOCH_FLOOR_MS = 24 * 60 * 60 * 1000; // ~1970-01-02
+
 function fmtTs(ms) {
-  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < EPOCH_FLOOR_MS) return '—';
   const d = new Date(ms);
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-const inputStyle = (invalid) => ({
-  width: '100%', boxSizing: 'border-box',
-  padding: '8px 10px', marginTop: '4px',
-  background: 'var(--chs-bg-primary, #14151a)',
-  border: `1px solid ${invalid ? 'var(--chs-color-danger, #e53e3e)' : 'var(--chs-border, #30333d)'}`,
-  borderRadius: '6px', color: 'inherit',
-  fontSize: 'var(--chs-text-sm, 13px)', fontFamily: 'inherit',
-});
-const errStyle = { display: 'block', marginTop: '4px', fontSize: 'var(--chs-text-xs, 12px)', color: 'var(--chs-color-danger, #e53e3e)' };
-const labelTxt = { fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 500 };
+const errStyle = {
+  display: 'block', marginTop: 'var(--chs-space-2)',
+  fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)',
+};
+const labelTxt = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-medium)', color: 'var(--chs-color-text)' };
 
 /**
  * CreateRecordModal — dynamic form generated from the chosen registry_def's
@@ -141,40 +146,29 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
     }
   }, [formFields, values, applicationId, registryDef, onCreated]);
 
-  if (!open || !registryDef) return null;
+  const canSubmit = open && registryDef && formFields.length > 0;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Создать запись"
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: 'rgba(0,0,0,0.55)',
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    <Modal
+      open={Boolean(open && registryDef)}
+      onClose={onClose}
+      title="Новая запись"
+      footer={
+        <>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
+          <Button type="submit" form="create-record-form" variant="primary" size="sm" loading={submitting} disabled={!canSubmit}>
+            {submitting ? 'Сохранение…' : 'Создать запись'}
+          </Button>
+        </>
+      }
     >
-      <form
-        onSubmit={handleSubmit}
-        style={{
-          background: 'var(--chs-bg-secondary, #1e2028)',
-          border: '1px solid var(--chs-border, #30333d)',
-          borderRadius: '8px', padding: '28px 32px',
-          minWidth: '420px', maxWidth: '560px',
-          maxHeight: '82vh', overflowY: 'auto',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-        }}
-      >
-        <h2 style={{ margin: '0 0 4px 0', fontSize: 'var(--chs-text-lg, 16px)', fontWeight: 600 }}>
-          Новая запись
-        </h2>
-        <p style={{ margin: '0 0 20px 0', fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
-          Реестр «{registryDef.display_name}». Поля сгенерированы из его схемы.
+      <form id="create-record-form" onSubmit={handleSubmit}>
+        <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+          Реестр «{registryDef ? registryDef.display_name : ''}». Поля сгенерированы из его схемы.
         </p>
 
         {formFields.length === 0 && (
-          <p style={{ marginBottom: '16px', color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)' }}>
+          <p style={{ marginBottom: 'var(--chs-space-6)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
             У реестра нет полей. Определите их в конструкторе полей, затем добавляйте записи.
           </p>
         )}
@@ -183,7 +177,7 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
           const invalid = Boolean(fieldErrors[f.key]);
           if (f.inputKind === 'checkbox') {
             return (
-              <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+              <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-4)', marginBottom: 'var(--chs-space-5)' }}>
                 <input
                   type="checkbox"
                   checked={Boolean(values[f.key])}
@@ -191,51 +185,44 @@ function CreateRecordModal({ open, onClose, onCreated, applicationId, registryDe
                   aria-label={f.label}
                 />
                 <span style={labelTxt}>
-                  {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger, #e53e3e)' }}> *</span>}
+                  {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger)' }}> *</span>}
                 </span>
                 {invalid && <span style={errStyle}>{fieldErrors[f.key]}</span>}
               </label>
             );
           }
           return (
-            <label key={f.key} style={{ display: 'block', marginBottom: '14px' }}>
+            <div key={f.key} className="chs-field" style={{ marginBottom: 'var(--chs-space-5)' }}>
               <span style={labelTxt}>
-                {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger, #e53e3e)' }}> *</span>}
+                {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger)' }}> *</span>}
               </span>
               <input
-                className="chs-input"
+                className={`chs-input ${invalid ? 'chs-input--invalid' : ''}`}
                 type={f.inputKind === 'number' ? 'number' : 'text'}
                 step={f.type === 'integer' ? '1' : 'any'}
-                style={inputStyle(invalid)}
                 value={values[f.key] ?? ''}
                 onChange={(e) => setVal(f.key, e.target.value)}
                 aria-label={f.label}
-                aria-invalid={invalid}
+                aria-invalid={invalid || undefined}
               />
               {invalid && <span style={errStyle}>{fieldErrors[f.key]}</span>}
-            </label>
+            </div>
           );
         })}
 
         {submitErr && (
-          <div style={{
-            marginBottom: '16px', padding: '10px 14px',
-            background: 'var(--chs-bg-danger-subtle, rgba(229,62,62,0.12))',
-            border: '1px solid var(--chs-color-danger, #e53e3e)',
-            borderRadius: '6px', fontSize: 'var(--chs-text-sm, 13px)',
+          <div role="alert" style={{
+            marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+            background: 'var(--chs-color-danger-soft)',
+            border: '1px solid var(--chs-color-danger)',
+            borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
           }}>
             {submitErr}
           </div>
         )}
-
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-          <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
-          <Button type="submit" variant="primary" size="sm" disabled={submitting || formFields.length === 0}>
-            {submitting ? 'Сохранение…' : 'Создать запись'}
-          </Button>
-        </div>
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -342,20 +329,20 @@ function AppRecordsScreen() {
       />
       <div className="chs-inbox">
         <div style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px',
-          padding: 'var(--chs-space-3, 12px) var(--chs-space-4, 16px)',
-          borderBottom: '1px solid var(--chs-border, #30333d)',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--chs-space-5)',
+          padding: 'var(--chs-space-5) var(--chs-space-6)',
+          borderBottom: '1px solid var(--chs-color-border)',
         }}>
-          <span style={{ fontSize: 'var(--chs-text-sm, 13px)', color: 'var(--chs-color-text-muted, #888)' }}>
+          <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
             Записи приложения {app ? `«${app.display_name}»` : ''}
             {records !== null ? ` · ${recordList.length}` : ''}
           </span>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 'var(--chs-space-5)', alignItems: 'center' }}>
             {/* >1 registry_def → user MUST pick which one (POST 409s otherwise). */}
             {defList.length > 1 && (
               <select
                 className="chs-input"
-                style={{ ...inputStyle(false), width: 'auto', marginTop: 0 }}
+                style={{ width: 'auto' }}
                 value={selectedDefId || ''}
                 onChange={(e) => setSelectedDefId(e.target.value || null)}
                 aria-label="Реестр полей"
@@ -369,6 +356,7 @@ function AppRecordsScreen() {
             <Button
               variant="primary"
               size="sm"
+              glyph={<KitIcon name="plus" />}
               disabled={!selectedDef}
               onClick={() => setCreateOpen(true)}
               title={selectedDef ? 'Создать запись' : 'Сначала выберите реестр полей'}
@@ -381,41 +369,38 @@ function AppRecordsScreen() {
         <div className="chs-inbox__scroll">
           {/* registry_def load states first — records depend on a chosen def. */}
           {defsError ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-              <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить реестры: {defsError}</p>
-              <Button onClick={loadDefs}>Повторить</Button>
-            </div>
+            <ErrorState message={`Не удалось загрузить реестры: ${defsError}`} onRetry={loadDefs} />
           ) : defs === null ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Загрузка реестров…</div>
+            <LoadingState label="Загрузка реестров…" />
           ) : defList.length === 0 ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-              <p style={{ marginBottom: 'var(--chs-space-3)', color: 'var(--chs-color-text-muted, #888)' }}>
-                У приложения пока нет полей. Сначала определите поля — потом сюда можно вносить записи.
-              </p>
-              <Button variant="primary" onClick={() => navigate(`/app-schema/${appId}`)}>
-                Настроить поля
-              </Button>
-            </div>
+            <EmptyState
+              icon={<KitIcon name="inbox" size={28} />}
+              title="У приложения пока нет полей"
+              description="Сначала определите поля — потом сюда можно вносить записи."
+              action={
+                <Button variant="primary" onClick={() => navigate(`/app-schema/${appId}`)}>
+                  Настроить поля
+                </Button>
+              }
+            />
           ) : !selectedDef ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-              <p style={{ color: 'var(--chs-color-text-muted, #888)' }}>
-                У приложения несколько реестров полей. Выберите реестр выше, чтобы увидеть и создавать его записи.
-              </p>
-            </div>
+            <EmptyState
+              title="Выберите реестр полей"
+              description="У приложения несколько реестров полей. Выберите реестр выше, чтобы увидеть и создавать его записи."
+            />
           ) : recordsError ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-              <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить записи: {recordsError}</p>
-              <Button onClick={loadRecords}>Повторить</Button>
-            </div>
+            <ErrorState message={`Не удалось загрузить записи: ${recordsError}`} onRetry={loadRecords} />
           ) : records === null ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>Загрузка записей…</div>
+            <LoadingState label="Загрузка записей…" />
           ) : recordList.length === 0 ? (
-            <div style={{ padding: 'var(--chs-space-5)', textAlign: 'center' }}>
-              <p style={{ marginBottom: 'var(--chs-space-3)', color: 'var(--chs-color-text-muted, #888)' }}>
-                В реестре «{selectedDef.display_name}» пока нет записей. Создайте первую.
-              </p>
-              <Button variant="primary" onClick={() => setCreateOpen(true)}>Создать запись</Button>
-            </div>
+            <EmptyState
+              icon={<KitIcon name="inbox" size={28} />}
+              title={`В реестре «${selectedDef.display_name}» пока нет записей`}
+              description="Создайте первую."
+              action={
+                <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>Создать запись</Button>
+              }
+            />
           ) : (
             <table className="chs-itable">
               <thead>
@@ -432,7 +417,7 @@ function AppRecordsScreen() {
                   return (
                     <tr
                       key={rec.id}
-                      style={rec.id === highlightId ? { background: 'var(--chs-bg-success-subtle, rgba(56,161,105,0.12))' } : undefined}
+                      style={rec.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
                     >
                       {columns.map((c) => (
                         <td key={c.key}>{formatCellValue(data[c.key], c.type)}</td>
@@ -447,8 +432,8 @@ function AppRecordsScreen() {
                         <Link
                           to={`/apps/${appId}/records/${rec.id}`}
                           style={{
-                            fontSize: 'var(--chs-text-xs, 12px)',
-                            color: 'var(--chs-color-accent, #6366f1)',
+                            fontSize: 'var(--chs-text-xs)',
+                            color: 'var(--chs-color-accent)',
                             textDecoration: 'none',
                           }}
                           title="Открыть запись"
