@@ -1,7 +1,7 @@
 {
-  "task_id": "T-0291",
+  "task_id": "T-0341",
   "status": "pr_open",
-  "branch": "task/T-0291",
+  "branch": "task/T-0341",
   "ci_local": {
     "build": true,
     "lint": true,
@@ -10,72 +10,26 @@
     "fitness": true
   },
   "files_changed": [
-    "src/http/agents.ts",
-    "src/http/applications.ts",
-    "src/http/grant-propose.ts",
-    "src/http/grants.ts",
-    "src/http/processes.ts",
-    "src/http/records.ts",
-    "src/http/registry-defs.ts",
-    "src/http/rights-intents.ts",
-    "src/__tests__/spaAuth.test.ts",
-    "web/src/screens/screen-processes.jsx",
-    "web/src/screens/rights/ra-role-editor.jsx",
-    "web/src/screens/rights/ra-intents.jsx",
-    "ci/checks/config-agent-seed.sh",
-    "ci/checks/implementation-agent-seed.sh",
-    "ci/checks/docs-author-seed.sh",
-    "ci/checks/data/frozen-sanctions.jsonl"
+    "web/src/app-shell/keycloak-auth.js",
+    "web/src/app-shell/keycloak-auth.test.js"
   ],
-  "deviations_from_adr": [
-    "ADR §5/§7 recommended a per-task founder frozen-sanction for the Check-6 false-red on agents.ts/grants.ts. The FOUNDER instead chose the root-cause fix: NARROW Check-6 so it no longer over-reaches onto src/http route handlers. Implemented as such. This is a sanctioned change of approach, not a silent contract drift — the security decision (mode-aware withAuth wrap + authHeaders() migration) is unchanged from the ADR.",
-    "ADR did not anticipate the frozen-checks-immutable meta-gate (FF-FCI1, T-0146) firing on the cross-task edit of the 3 seed-check scripts. Resolved with 3 append-only FOUNDER-class sanction lines in frozen-sanctions.jsonl (FF-FCI12), decision field citing the real control-plane signal founder_request:T-0291-keycloak-gate (NOT a fabricated founder_decide). Reviewer must scrutinize this authorization trail (see notes)."
-  ],
+  "deviations_from_adr": [],
   "blocked_reason": null,
-  "friction_events": [
-    "memory/friction/FE-T0291-0001.json"
-  ],
-  "rebase": {
-    "done": true,
-    "rebased_onto": "537c145",
-    "head_commits_ahead_of_dev": 4,
-    "behind_dev": 0,
-    "conflicts_resolved": [
-      "web/src/screens/rights/ra-intents.jsx: kept T-0327's /api/org/tenant-state -> authHeaders() (already on dev) AND applied T-0291's postIntent -> authHeaders(); dropped the now-unreferenced ACTOR_ID const (postIntent no longer uses it) to avoid a dead-const lint; both auth-header changes coexist.",
-      "records.ts: replayed clean (the prior commit already reconciled dev's getRecordDetail/serializeRecordDetail with the withAuth wrap); 7 other server files + spaAuth.test.ts + the 2 other jsx replayed with zero conflict."
-    ]
-  },
-  "check6_narrowing": {
-    "founder_sanctioned": true,
-    "files_edited": [
-      "ci/checks/config-agent-seed.sh",
-      "ci/checks/implementation-agent-seed.sh",
-      "ci/checks/docs-author-seed.sh"
-    ],
-    "entries_removed": ["src/http/agents.ts", "src/http/grants.ts"],
-    "entries_retained_still_frozen": [
-      "src/core/grant-lattice.ts",
-      "src/core/grant-resolver.ts",
-      "src/core/mcp-tool-registry.ts",
-      "src/db/audit-writer.ts"
-    ],
-    "real_invariant_preserved": "Check-6's real invariant — a seed migration (044/059/062) must not drift the grant algebra/resolver/tool-registry/audit-sink its rows depend on — is fully intact. The 4 seed-coupled core/db files stay in FROZEN. Empirically verified: simulating a benign edit to the still-frozen src/core/mcp-tool-registry.ts produced ERRORS=1 (CAUGHT) under the unchanged Check-6 logic; reverted clean. Only the 2 src/http route-handler over-reach entries were removed; every other check predicate (Checks 1-5,7-11 + self-tests) is byte-untouched. The implementation-agent-seed self-test arm does not exercise Check-6, so removal is self-test-safe.",
-    "meta_gate_authorization": "Editing the 3 foreign seed-checks trips frozen-checks-immutable FF-FCI1 (a task may not edit another task's ci/checks/*.sh). Authorized via 3 append-only FOUNDER-class lines in ci/checks/data/frozen-sanctions.jsonl; the gate prints SANCTION+AUDIT [FF-FCI12] for each and then PASSes. The decision field cites founder_request:T-0291-keycloak-gate (the real control-plane signal that authorized this T-0291 work + the founder's explicit root-cause directive). Coder did NOT call founder_decide and did NOT fabricate a founder_decide@DATE."
-  },
+  "friction_events": [],
   "gate_results": {
-    "build": "green",
-    "tsc": "green",
-    "eslint": "green (0 errors; 3 pre-existing warnings in untouched files)",
-    "vitest_server": "green — 2903 passed / 6 skipped (incl. spaAuth.test.ts 20/20)",
-    "vitest_web_auth_headers": "green — 12/12 (web/** excluded from root vitest config by design; run directly)",
-    "fitness": "ALL GREEN (exit 0). Check-6 in all 3 seed-checks now green WITH agents.ts/grants.ts modified; frozen-checks-immutable green via FF-FCI12 sanction. The 4 'FAIL' lines in the fitness log are self-test artifacts (each followed by 'PASS [self-test]'/'SELF-TEST PASS' confirming the check correctly caught a planted violation).",
-    "fitness_db": "not run locally — requires live postgres on homeserver-vm (Mac OOMs, run s33). DB/acceptance gates deferred to server per ADR §6.",
+    "build": "green — npm run -s build exits 0 (tsc + seed/tsconfig.json)",
+    "tsc": "green — tsc --noEmit 0 errors (covers src/**/*.ts only; web/*.js not in tsconfig by design)",
+    "eslint": "green — eslint src exits 0 errors (3 pre-existing warnings in untouched files)",
+    "vitest_server": "green — 2903 passed / 6 skipped (132 test files; no regression)",
+    "vitest_web_keycloak": "green — 22/22 keycloak-auth.test.js (12 pre-existing + 10 new T-0341 tests)",
+    "vitest_web_all": "green for 6 of 8 web test files; 2 pre-existing failures (apps-schema.test.js, records-form.test.js) fail with 'Cannot find module ./core' in ajv — confirmed identical failure with our changes stashed; unrelated to T-0341",
+    "fitness": "ALL GREEN (exit 0). The 4 'FAIL' lines in fitness output are self-test artifacts (each immediately followed by PASS [self-test] confirming the check correctly detected a planted violation). No frozen file touched.",
     "any_red": false
   },
   "scope_clean": true,
   "touched_out_of_scope": [],
-  "routes_wrapped_files": 8,
-  "screens_migrated": 3,
-  "tests_added": 20,
-  "notes_for_reviewer": "Scrutinize the founder-authorization trail for the Check-6 narrowing: (1) the substantive guard edit removes ONLY src/http/agents.ts & src/http/grants.ts from the FROZEN arrays — confirm no other predicate or frozen entry was altered (git diff dev..HEAD -- ci/checks/*.sh shows -2 entries +comments per file). (2) The 4 core/db files stay frozen and genuine seed-drift is still caught. (3) The 3 frozen-sanctions.jsonl lines are append-only, sanctioned_by:'founder', decision cites the real founder_request signal — verify this matches the founder's directive (NOT a coder-forged founder_decide). (4) The auth fix itself is unchanged from the ADR: 8 server route files withAuth-wrapped, 3 screens on authHeaders(), no bare x-dev-user literal in any fetch call site (the only X-Dev-User left is the legitimate dev dual-control override in ra-role-editor postSecondConfirm + comments/UI labels). Known keycloak happy-path gap on grants/agents/rights/processes-start (extractActor reads x-dev-user only there) is fail-CLOSED (401), pre-existing, not a security hole, and keycloak is founder-gated off in prod — same note as the prior review."
+  "tests_added": 10,
+  "native_vs_fallback_identical": true,
+  "fallback_approach": "Detection: globalThis.crypto?.subtle?.digest truthy check before invoking native. Fallback: self-contained FIPS 180-4 SHA-256 (sha256Fallback) operating on UTF-8 bytes of the verifier, returning Uint8Array(32). Output passed through the same base64UrlEncode helper — byte-identical to the native path. Function stays async; callers unchanged.",
+  "notes_for_reviewer": "The sha256Fallback is a self-contained ~80-line FIPS 180-4 SHA-256 implementation using only JS bitwise ops and Uint32Array — zero external deps, zero imports. Correctness is proved three ways: (1) selection-logic test: with crypto.subtle set to undefined, generatePkcePair() does not throw and returns a valid pair; then native crypto.subtle is restored to hash the same verifier bytes — the two challenges must match. (2) NIST vector: sha256('abc') native hash confirmed == ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad. (3) Round-trip over 4 sample verifiers: native and fallback produce identical code_challenge for the same verifier. The 2 pre-existing web test failures (apps-schema, records-form) are ajv resolution failures unrelated to this task — confirmed by stashing our changes and re-running."
 }

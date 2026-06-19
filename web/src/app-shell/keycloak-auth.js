@@ -156,12 +156,125 @@ export function randomString(bytes = 32) {
   return base64UrlEncode(buf);
 }
 
+/**
+ * Pure-JS SHA-256 fallback for insecure contexts (plain HTTP on a non-localhost
+ * host) where `crypto.subtle` is undefined.  Operates on a Uint8Array of the
+ * UTF-8 bytes of `msg` and returns a 32-byte Uint8Array digest.
+ *
+ * Algorithm: FIPS PUB 180-4, SHA-256.  Only arithmetic we rely on: 32-bit
+ * unsigned right-shift (>>>) and bitwise ops — all safe in JavaScript.
+ *
+ * Reference: https://csrc.nist.gov/publications/detail/fips/180/4/final
+ * @param {Uint8Array} msgBytes
+ * @returns {Uint8Array}
+ */
+function sha256Fallback(msgBytes) {
+  // Initial hash values (first 32 bits of fractional parts of sqrt of primes).
+  let [h0, h1, h2, h3, h4, h5, h6, h7] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+
+  // Round constants (first 32 bits of fractional parts of cbrt of first 64 primes).
+  const K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ]);
+
+  // Pre-processing: padding.
+  const L = msgBytes.length;
+  // Message length in bits must fit in 64 bits (lower 32 for us — SHA-256
+  // supports up to 2^64-1 bits; a PKCE verifier is ≤ 128 bytes so upper word
+  // is always zero).
+  const bitLenHi = Math.floor((L * 8) / 0x100000000) >>> 0;
+  const bitLenLo = (L * 8) >>> 0;
+
+  // Padded length: 1 byte for the 0x80 marker + 8 bytes for the length, all
+  // rounded up to a multiple of 64 bytes.
+  const paddedLen = Math.ceil((L + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(msgBytes);
+  padded[L] = 0x80;
+  // Append the 64-bit big-endian bit length at the last 8 bytes.
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLen - 8, bitLenHi, false);
+  view.setUint32(paddedLen - 4, bitLenLo, false);
+
+  // Process each 512-bit (64-byte) chunk.
+  const W = new Uint32Array(64);
+  for (let chunkStart = 0; chunkStart < paddedLen; chunkStart += 64) {
+    // Prepare message schedule.
+    for (let i = 0; i < 16; i++) {
+      W[i] = view.getUint32(chunkStart + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const w15 = W[i - 15];
+      const s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+      const w2 = W[i - 2];
+      const s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+      W[i] = (W[i - 16] + s0 + W[i - 7] + s1) >>> 0;
+    }
+
+    // Compression.
+    let [a, b, c, d, e, f, g, h] = [h0, h1, h2, h3, h4, h5, h6, h7];
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + K[i] + W[i]) >>> 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e;
+      e = (d + temp1) >>> 0;
+      d = c; c = b; b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+  }
+
+  // Produce the 32-byte digest.
+  const digest = new Uint8Array(32);
+  const dv = new DataView(digest.buffer);
+  dv.setUint32(0,  h0, false); dv.setUint32(4,  h1, false);
+  dv.setUint32(8,  h2, false); dv.setUint32(12, h3, false);
+  dv.setUint32(16, h4, false); dv.setUint32(20, h5, false);
+  dv.setUint32(24, h6, false); dv.setUint32(28, h7, false);
+  return digest;
+}
+
 /** Generate a PKCE { codeVerifier, codeChallenge } pair (S256). */
 export async function generatePkcePair() {
   const codeVerifier = randomString(32);
   const data = new TextEncoder().encode(codeVerifier);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  const codeChallenge = base64UrlEncode(new Uint8Array(digest));
+  let digestBytes;
+  if (globalThis.crypto?.subtle?.digest) {
+    // Secure context (HTTPS or localhost): use native WebCrypto.
+    const buf = await globalThis.crypto.subtle.digest('SHA-256', data);
+    digestBytes = new Uint8Array(buf);
+  } else {
+    // Insecure context (plain HTTP on a non-localhost host — e.g. the dev
+    // stack at http://100.121.76.86:3000): fall back to pure-JS SHA-256.
+    digestBytes = sha256Fallback(data);
+  }
+  const codeChallenge = base64UrlEncode(digestBytes);
   return { codeVerifier, codeChallenge };
 }
 
