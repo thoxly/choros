@@ -168,7 +168,21 @@ describe("payload assembly", () => {
 });
 
 describe("mapOrgError", () => {
-  it("409 → slug conflict on the slug field", () => {
+  it("409 CONFLICT → slug conflict on the slug field (create flows)", () => {
+    const r = mapOrgError(409, { error: { code: "CONFLICT", message: "slug exists" } });
+    expect(r.field).toBe("slug");
+    expect(r.message).toMatch(/занят/);
+  });
+  it("409 FK_IN_USE → honest in-use hint (T-0292: backend maps pg 23503 → 409)", () => {
+    const r = mapOrgError(409, { error: { code: "FK_IN_USE", message: "department cannot be deleted" } }, "подразделение");
+    expect(r.field).toBeUndefined();
+    expect(r.message).toMatch(/связанные записи/);
+    expect(r.message).toMatch(/подразделение/);
+    // must NOT claim it's a slug conflict
+    expect(r.message).not.toMatch(/Слаг/);
+  });
+  it("409 without a code → slug conflict (backward-compat)", () => {
+    // bare 409 (no body code) still maps to slug conflict for create flows
     const r = mapOrgError(409, { error: { message: "x" } });
     expect(r.field).toBe("slug");
     expect(r.message).toMatch(/занят/);
@@ -185,11 +199,11 @@ describe("mapOrgError", () => {
   it("400 → surfaces server VALIDATION message verbatim", () => {
     expect(mapOrgError(400, { error: { message: "slug is required" } }).message).toBe("slug is required");
   });
-  it("500 → honest in-use hint (FK violation, no cascade) with entity label", () => {
+  it("500 → generic fallback (T-0292: FK violations now return 409 FK_IN_USE, not 500)", () => {
+    // 500 is now only for truly unexpected server errors; the FK-in-use case is
+    // mapped backend-side to 409 FK_IN_USE (T-0292). 500 surfaces server message.
     const r = mapOrgError(500, { error: { message: "internal server error" } }, "роль");
-    expect(r.message).toMatch(/роль/);
-    expect(r.message).toMatch(/связанные записи/);
-    expect(r.message).not.toMatch(/internal server error/);
+    expect(r.message).toBe("internal server error");
   });
   it("unknown status fallback uses entity label", () => {
     expect(mapOrgError(418, null, "подразделение").message).toMatch(/подразделение/);

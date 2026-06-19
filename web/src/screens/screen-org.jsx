@@ -33,11 +33,9 @@ const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
    No dead buttons: every control here POSTs/DELETEs to a real endpoint. There is
    NO update/PATCH route for any org entity, so we expose create + delete only —
    no edit stub (would be a dead control). DELETE is real and verified on the live
-   stack: it succeeds (200) for an UNREFERENCED entity but the backend does not map
-   FK-in-use to a clean 409 (no ON DELETE CASCADE) — a referenced entity returns
-   500. mapOrgError(500) translates that into an honest "удалите связанные записи
-   сначала" hint instead of echoing the raw internal error. (Backend FK-mapping
-   improvement is out of this UI slice — flagged separately.)
+   stack: it succeeds (200) for an UNREFERENCED entity. If the entity is still
+   referenced (no ON DELETE CASCADE), the backend now maps the pg 23503 FK violation
+   to an honest 409 FK_IN_USE (T-0292). mapOrgError handles this with an actionable hint.
    ---------------------------------------------------------------------------- */
 
 const ENTITY_LABEL = {

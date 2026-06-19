@@ -203,7 +203,18 @@ export function mapOrgError(status, body, entity = "запись") {
     body && typeof body === "object"
       ? (body.error?.message || body.message)
       : undefined;
+  const errorCode =
+    body && typeof body === "object" ? (body.error?.code || body.code) : undefined;
   if (status === 409) {
+    // FK_IN_USE: backend mapped pg 23503 → honest 409 (T-0292).
+    // Distinct from CONFLICT (slug duplicate on create).
+    if (errorCode === "FK_IN_USE") {
+      return {
+        message:
+          `Не удалось удалить ${entity} — есть связанные записи ` +
+          `(должности, сотрудники или назначения ролей). Удалите их сначала.`,
+      };
+    }
     return { field: "slug", message: "Слаг уже занят в этом тенанте" };
   }
   if (status === 403) {
@@ -221,20 +232,8 @@ export function mapOrgError(status, body, entity = "запись") {
   if (status === 400) {
     return { message: serverMsg || "Проверьте корректность полей" };
   }
-  // The seed-write DELETE routes only map UNIQUE (409) + not-found (404). A
-  // foreign-key violation (deleting an entity still referenced by positions /
-  // employees / role-assignments) is NOT mapped server-side and surfaces as a
-  // generic 500 INTERNAL. We translate that into an honest, actionable hint
-  // rather than echoing "internal server error" — the operation is real, it just
-  // can't delete an in-use entity (no ON DELETE CASCADE). VERIFIED on the live
-  // stack (T-0269): unreferenced delete → 200; referenced → 500.
-  if (status === 500) {
-    return {
-      message:
-        `Не удалось удалить ${entity} — вероятно, есть связанные записи ` +
-        `(должности, сотрудники или назначения ролей). Удалите их сначала.`,
-    };
-  }
+  // T-0292: backend now maps pg 23503 FK violations → 409 FK_IN_USE (handled above).
+  // The 500 branch below is a fallback for unexpected server errors unrelated to FK.
   return { message: serverMsg || `Не удалось сохранить ${entity} (HTTP ${status})` };
 }
 

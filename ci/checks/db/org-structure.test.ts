@@ -249,6 +249,77 @@ describe('AC-12: employee slug uniqueness per tenant', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // T-0292: FK-blocked DELETE surfaces pg 23503 (not silently cascades)
+  // The HTTP layer (src/http/seed-write.ts) catches this and returns 409 FK_IN_USE.
+  // This test confirms the DB-layer behavior the backend relies on.
+  // ---------------------------------------------------------------------------
+
+  it('T-0292: DELETE department with child positions raises 23503 (FK blocked, no cascade)', async () => {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await ensureTenant(c, TENANT_A);
+      const deptId = uuid();
+      await c.query(
+        `INSERT INTO choros.department
+           (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, NULL, $3, $3, 0, 0)`,
+        [TENANT_A, deptId, `dept-fk-del-${deptId.slice(0, 8)}`],
+      );
+      const posId = uuid();
+      await c.query(
+        `INSERT INTO choros.position
+           (tenant_id, id, department_id, slug, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+        [TENANT_A, posId, deptId, `pos-fk-del-${posId.slice(0, 8)}`],
+      );
+      // DELETE the department while it still has a position referencing it.
+      // Expect FK violation 23503 — no ON DELETE CASCADE defined.
+      await expect(
+        c.query(
+          `DELETE FROM choros.department WHERE tenant_id = $1 AND id = $2`,
+          [TENANT_A, deptId],
+        ),
+      ).rejects.toMatchObject({ code: '23503' });
+      await c.query('ROLLBACK');
+    });
+  });
+
+  it('T-0292: DELETE position with child employees raises 23503 (FK blocked, no cascade)', async () => {
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await ensureTenant(c, TENANT_A);
+      const deptId = uuid();
+      await c.query(
+        `INSERT INTO choros.department
+           (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, NULL, $3, $3, 0, 0)`,
+        [TENANT_A, deptId, `dept-fk-pos-${deptId.slice(0, 8)}`],
+      );
+      const posId = uuid();
+      await c.query(
+        `INSERT INTO choros.position
+           (tenant_id, id, department_id, slug, title, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4, 0, 0)`,
+        [TENANT_A, posId, deptId, `pos-fk-pos-${posId.slice(0, 8)}`],
+      );
+      await c.query(
+        `INSERT INTO choros.employee
+           (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
+        [TENANT_A, uuid(), posId, `emp-fk-pos-${posId.slice(0, 8)}`],
+      );
+      // DELETE position while it still has an employee — FK violation 23503.
+      await expect(
+        c.query(
+          `DELETE FROM choros.position WHERE tenant_id = $1 AND id = $2`,
+          [TENANT_A, posId],
+        ),
+      ).rejects.toMatchObject({ code: '23503' });
+      await c.query('ROLLBACK');
+    });
+  });
+
   it('same slug allowed across different tenants', async () => {
     const slug = `slug-cross-${uuid().slice(0, 8)}`;
     await withClient(migratorUrl(), async (c) => {
