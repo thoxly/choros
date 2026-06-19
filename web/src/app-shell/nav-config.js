@@ -11,6 +11,17 @@
    Классификация пересматривается при каждом новом подключении экрана к реальным API.
    Каждый пункт nav со статусом 'demo' или 'soon' ОБЯЗАН быть помечен
    соответствующим бейджем в NavItem; hidden-пункты не рендерятся вовсе.
+
+   ИА (T-0317): информационная архитектура сведена к 4 разделам вокруг того, ЧТО
+   делает пользователь, а не как устроена система. Раздел = ответ на вопрос
+   «зачем я сюда пришёл»:
+     • КОНСТРУКТОР — собираю своё решение из примитивов (приложения, поля, записи);
+     • РАБОТА — делаю задачи и веду процессы;
+     • ИСПОЛНИТЕЛИ И ДОСТУП — модель исполнителя целиком (кто работает + что можно):
+       оргструктура, агенты, права (раньше были разнесены по трём группам);
+     • НАБЛЮДАЕМОСТЬ — смотрю, что происходит (уведомления, аудит, бюджеты).
+   Группы с одним пунктом не заводим (заголовок без выбора — шум).
+   Пути маршрутов НЕ меняются — только ярлыки и группировка.
    ============================================================================ */
 
 /**
@@ -27,52 +38,48 @@ export const NAV = [
       // Приложения: GET /api/applications (live), POST /api/applications (live) — T-0262/T-0265.
       // Первый реальный create-экран продукта (E13): список + работающая «Создать приложение».
       { id: "apps", label: "Приложения", icon: "apps", screen: true, status: "live" },
+      // Формы задач — developer sandbox (form-js демо). Не рабочий экран пользователя;
+      // живёт под Конструктором как инструмент авторинга, честно помечен «демо».
+      { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo" },
     ],
   },
   {
-    group: "Оркестрация",
+    group: "Работа",
     items: [
-      // Инбокс: GET /api/inbox (live), POST /api/inbox/:id/claim (live), POST /api/inbox/:id/action (live)
-      { id: "inbox",     label: "Инбокс задач", icon: "inbox",   count: 18, screen: true, status: "live" },
+      // Мои задачи (бывш. «Инбокс задач»): GET /api/inbox (live), POST /api/inbox/:id/claim
+      // (live), POST /api/inbox/:id/action (live). Человеко-понятный ярлык вместо дев-«инбокс».
+      { id: "inbox",     label: "Мои задачи", icon: "inbox",   screen: true, status: "live" },
+      // Процессы: GET /api/processes (live), POST /api/processes/start (live)
+      { id: "processes", label: "Процессы",   icon: "process", screen: true, status: "live" },
+    ],
+  },
+  {
+    group: "Исполнители и доступ",
+    items: [
       // Оргструктура (T-0269): дерево GET /api/org + РЕАЛЬНЫЙ CRUD над существующими
       // эндпойнтами — POST /api/{departments,positions,employees,roles}, POST
       // /api/role-assignments, DELETE /api/{…}/:id (genesis-owner gate). UUID для записи
       // берутся из GET /api/org/tenant-state. Карточка исполнителя ещё иллюстративна
       // (честно помечена), но дерево + создание/удаление/назначение — живые → live.
-      { id: "org",       label: "Оргструктура",  icon: "org",                screen: true, status: "live" },
-      // Процессы: GET /api/processes (live), POST /api/processes/start (live)
-      { id: "processes", label: "Процессы",       icon: "process", count: 7, screen: true, status: "live" },
+      { id: "org",       label: "Оргструктура",  icon: "org",    screen: true, status: "live" },
       // Агенты (T-0271): GET /api/agents (live, метаданные без секретов), POST
       // /api/agents/hire (live), POST /api/agents/:id/secret-handle (live — привязка
       // LLM через секрет-хэндл). Список + создание + привязка LLM — живые → live.
-      { id: "agents",    label: "Агенты",          icon: "org",                screen: true, status: "live" },
+      { id: "agents",    label: "Агенты",        icon: "org",    screen: true, status: "live" },
+      // Права: обзор GET /api/rights (live), интенты (live), журнал GET /api/grant-trail (live).
+      // Суб-вкладки «Редактор», «Критичность», «SoD» — mock-данные (demo, см. RIGHTS_TABS).
+      { id: "rights",    label: "Права и доступ", icon: "rights", screen: true, status: "live" },
     ],
   },
   {
     group: "Наблюдаемость",
     items: [
       // Уведомления: GET /api/notifications (live), mark-read/all (live), preferences (live)
-      { id: "notifications", label: "Уведомления",    icon: "bell",  screen: true, status: "live" },
+      { id: "notifications", label: "Уведомления", icon: "bell",   screen: true, status: "live" },
       // Аудит: GET /api/audit (live), GET /api/audit/export (live)
-      { id: "audit",         label: "Аудит инстанса", icon: "audit", screen: true, status: "live" },
+      { id: "audit",         label: "Аудит",       icon: "audit",  screen: true, status: "live" },
       // Бюджеты: не построено
-      { id: "budgets",       label: "Бюджеты",        icon: "budget", soon: true,  status: "soon" },
-    ],
-  },
-  {
-    group: "Доступ",
-    items: [
-      // Права: обзор GET /api/rights (live), интенты (live), журнал GET /api/grant-trail (live).
-      // Суб-вкладки «Редактор», «Критичность», «SoD» — mock-данные (demo, см. RIGHTS_TABS).
-      { id: "rights", label: "Права и доступ", icon: "rights", count: 8, screen: true, status: "live" },
-    ],
-  },
-  {
-    group: "Разработка",
-    items: [
-      // Формы: sandbox-iframe с form-js демо. POST /api/forms/:id/submit работает,
-      // но это developer sandbox, не рабочий экран пользователя.
-      { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo" },
+      { id: "budgets",       label: "Бюджеты",     icon: "budget", soon: true,   status: "soon" },
     ],
   },
 ];
