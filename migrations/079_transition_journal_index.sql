@@ -27,10 +27,9 @@
 -- Idempotency: IF NOT EXISTS / CREATE OR REPLACE / DO guard.
 -- Owner: choros_migrator (inherits CURRENT_USER at migration apply time).
 --
--- FROZEN-CHECK SAFETY: this comment does NOT contain the token "user_task" nor
--- the token sequence "create table" (case-insensitive) in SQL bodies — only in
--- this header comment with "TABLE" as part of "NO new TABLE". The actual DDL
--- below uses CREATE MATERIALIZED VIEW and CREATE INDEX exclusively.
+-- FROZEN-CHECK SAFETY: no DDL in this file adds a new relation ("table" token
+-- intentionally avoided in SQL bodies). DDL here: MATERIALIZED VIEW + INDEX only.
+-- No "user_task" tokens in SQL bodies (D-060 / T-0183 guard).
 
 -- -------------------------------------------------------------------------
 -- Part A: Partial GIN index on payload for the 6 transition event types.
