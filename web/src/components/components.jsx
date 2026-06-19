@@ -5,6 +5,41 @@
    ============================================================================ */
 
 import React from 'react';
+const { useState, useEffect, useRef, useCallback, useId } = React;
+
+/* ----------------------------------------------------------------------------
+   Kit-иконки — линейные, в стиле Lucide (stroke 1.6, currentColor, без эмодзи;
+   см. design/principles.md §2). Локальные для kit, чтобы примитивы были
+   самодостаточны и не зависели от app-shell/icon.jsx (нет циклов, грузятся в
+   витрину через babel-standalone). Размер наследуется от размера шрифта (1em).
+   ---------------------------------------------------------------------------- */
+function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
+  const p = { fill: "none", stroke: "currentColor", strokeWidth, strokeLinecap: "round", strokeLinejoin: "round" };
+  const dim = size || "1em";
+  return (
+    <svg className={`chs-kiticon ${className}`} viewBox="0 0 16 16" width={dim} height={dim} aria-hidden="true" focusable="false">
+      {name === "close"     && (<path {...p} d="M4 4l8 8M12 4l-8 8" />)}
+      {name === "alert"     && (<><path {...p} d="M8 2.5L14.5 13.5H1.5z" /><path {...p} d="M8 6.5v3.2" /><circle cx="8" cy="11.6" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "error"     && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M8 4.6v4.2" /><circle cx="8" cy="11" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "info"      && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M8 7.4v3.6" /><circle cx="8" cy="5.2" r="0.8" fill="currentColor" stroke="none" /></>)}
+      {name === "success"   && (<><circle {...p} cx="8" cy="8" r="6" /><path {...p} d="M5.3 8.2l1.9 1.9L11 6.2" /></>)}
+      {name === "retry"     && (<><path {...p} d="M13 8a5 5 0 1 1-1.5-3.55" /><path {...p} d="M13 2.5V5h-2.5" /></>)}
+      {name === "inbox"     && (<><path {...p} d="M2 4.5h12v7H2z" /><path {...p} d="M2 9.5h3l1 1.5h4l1-1.5h3" /></>)}
+      {name === "plus"      && (<path {...p} d="M8 3v10M3 8h10" />)}
+    </svg>
+  );
+}
+
+/* Spinner — индикатор загрузки. prefers-reduced-motion гасит вращение (CSS). */
+function Spinner({ size, className = "" }) {
+  const dim = size || "1em";
+  return (
+    <svg className={`chs-spinner ${className}`} viewBox="0 0 16 16" width={dim} height={dim} aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" strokeOpacity="0.22" />
+      <path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
 
 const EXEC_META = {
   human:   { label: "Человек", cls: "chs-exec--human",   color: "var(--chs-exec-human)" },
@@ -80,27 +115,44 @@ function StatusChip({ status = "running", label }) {
   );
 }
 
-/* Button */
-function Button({ variant = "secondary", size, children, glyph, ...rest }) {
+/* Button — варианты/размеры + disabled (aria-disabled), loading (spinner +
+   aria-busy + блок клика), видимый :focus-visible ring (--chs-color-focus-ring). */
+function Button({ variant = "secondary", size, children, glyph, loading = false, disabled = false, className = "", ...rest }) {
+  const isDisabled = disabled || loading;
   return (
-    <button className={`chs-btn chs-btn--${variant} ${size === "sm" ? "chs-btn--sm" : ""}`} {...rest}>
-      {glyph}
+    <button
+      type={rest.type || "button"}
+      className={`chs-btn chs-btn--${variant} ${size === "sm" ? "chs-btn--sm" : ""} ${loading ? "chs-btn--loading" : ""} ${className}`}
+      disabled={isDisabled}
+      aria-disabled={isDisabled || undefined}
+      aria-busy={loading || undefined}
+      {...rest}
+    >
+      {loading ? <Spinner className="chs-btn__spinner" /> : glyph}
       {children}
     </button>
   );
 }
 
-/* Input field */
-function Field({ label, mono = false, invalid = false, hint, ...rest }) {
+/* Input field — явная привязка label↔input (htmlFor/id), aria-invalid на ошибке,
+   hint как aria-describedby, видимый фокус-ринг (через .chs-input). Обе темы
+   читаемы (токены). id автогенерится, если не передан. */
+function Field({ label, mono = false, invalid = false, hint, id, className = "", ...rest }) {
+  const autoId = useId();
+  const inputId = id || `chs-field-${autoId}`;
+  const hintId = hint ? `${inputId}-hint` : undefined;
   return (
-    <label className="chs-field">
-      {label && <span className="chs-label">{label}</span>}
+    <div className="chs-field">
+      {label && <label className="chs-label" htmlFor={inputId}>{label}</label>}
       <input
-        className={`chs-input ${mono ? "chs-input--mono" : ""} ${invalid ? "chs-input--invalid" : ""}`}
+        id={inputId}
+        className={`chs-input ${mono ? "chs-input--mono" : ""} ${invalid ? "chs-input--invalid" : ""} ${className}`}
+        aria-invalid={invalid || undefined}
+        aria-describedby={hintId}
         {...rest}
       />
-      {hint && <span style={{ fontSize: "var(--chs-text-xs)", color: invalid ? "var(--chs-color-danger)" : "var(--chs-color-text-faint)" }}>{hint}</span>}
-    </label>
+      {hint && <span id={hintId} className={`chs-hint ${invalid ? "chs-hint--invalid" : ""}`}>{hint}</span>}
+    </div>
   );
 }
 
@@ -214,8 +266,304 @@ function AuditEvent({ ts, actorType = "service", actor, action, target }) {
   );
 }
 
+/* ============================================================================
+   ОБЯЗАТЕЛЬНЫЙ KIT (OBLIK §2.1) — поверхности и состояния, которые экраны
+   сейчас собирают руками инлайн-стилями. Все цвета/отступы/тени/радиусы — из
+   токенов --chs-*; ноль хардкода. a11y по design/principles.md §4/§6.
+   ============================================================================ */
+
+/* ----- focus-trap + scroll-lock — общая механика для Modal/Drawer ----- */
+const FOCUSABLE = [
+  'a[href]', 'button:not([disabled])', 'textarea:not([disabled])',
+  'input:not([disabled])', 'select:not([disabled])', '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+/* Блокирует прокрутку body, пока хотя бы один оверлей открыт (рефкаунт). */
+let _scrollLockCount = 0;
+let _scrollLockPrev = "";
+function lockBodyScroll() {
+  if (typeof document === "undefined") return;
+  if (_scrollLockCount === 0) {
+    _scrollLockPrev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  _scrollLockCount += 1;
+}
+function unlockBodyScroll() {
+  if (typeof document === "undefined") return;
+  _scrollLockCount = Math.max(0, _scrollLockCount - 1);
+  if (_scrollLockCount === 0) document.body.style.overflow = _scrollLockPrev;
+}
+
+/* Фокус-ловушка: фокус на первый элемент при открытии, цикл Tab/Shift-Tab внутри
+   panelRef, восстановление фокуса на триггер при закрытии, scroll-lock + Esc. */
+function useFocusTrap({ open, panelRef, onClose, closeOnEsc = true }) {
+  const restoreRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    restoreRef.current = typeof document !== "undefined" ? document.activeElement : null;
+    lockBodyScroll();
+
+    const panel = panelRef.current;
+    // фокус на первый фокусируемый элемент панели (или саму панель)
+    const focusables = panel ? panel.querySelectorAll(FOCUSABLE) : [];
+    if (focusables.length) focusables[0].focus();
+    else if (panel) panel.focus();
+
+    function onKeyDown(e) {
+      if (e.key === "Escape" && closeOnEsc) {
+        e.stopPropagation();
+        onClose && onClose();
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      const items = panel.querySelectorAll(FOCUSABLE);
+      if (!items.length) { e.preventDefault(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.contains(active))) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault(); first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      unlockBodyScroll();
+      const r = restoreRef.current;
+      if (r && typeof r.focus === "function") r.focus();
+    };
+  }, [open, panelRef, onClose, closeOnEsc]);
+}
+
+/* ----------------------------- Modal / Dialog ----------------------------- */
+/* Затемнённый оверлей (--chs-color-overlay + --chs-shadow-3, НЕ хардкод rgba),
+   центрированная панель. role=dialog/aria-modal/aria-labelledby; фокус-ловушка;
+   Esc и клик по оверлею закрывают; scroll-lock. Заменяет рукотворные модалки. */
+function Modal({ open, onClose, title, children, footer, size = "md", closeOnOverlay = true, closeOnEsc = true, labelId }) {
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-modal-title-${autoId}` : undefined);
+  useFocusTrap({ open, panelRef, onClose, closeOnEsc });
+  if (!open) return null;
+  return (
+    <div className="chs-overlay" onMouseDown={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+      <div
+        ref={panelRef}
+        className={`chs-modal chs-modal--${size}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
+      >
+        {title && (
+          <div className="chs-modal__head">
+            <h2 className="chs-modal__title" id={headingId}>{title}</h2>
+            <button type="button" className="chs-overlay__close" aria-label="Закрыть" onClick={() => onClose && onClose()}>
+              <KitIcon name="close" />
+            </button>
+          </div>
+        )}
+        <div className="chs-modal__body">{children}</div>
+        {footer && <div className="chs-modal__foot">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- Drawer --------------------------------- */
+/* Боковая панель (right/left). Та же a11y, что у Modal. */
+function Drawer({ open, onClose, title, children, footer, side = "right", closeOnOverlay = true, closeOnEsc = true, labelId }) {
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-drawer-title-${autoId}` : undefined);
+  useFocusTrap({ open, panelRef, onClose, closeOnEsc });
+  if (!open) return null;
+  return (
+    <div className={`chs-overlay chs-overlay--drawer chs-overlay--${side}`} onMouseDown={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+      <div
+        ref={panelRef}
+        className={`chs-drawer chs-drawer--${side}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={headingId}
+        tabIndex={-1}
+      >
+        {title && (
+          <div className="chs-drawer__head">
+            <h2 className="chs-drawer__title" id={headingId}>{title}</h2>
+            <button type="button" className="chs-overlay__close" aria-label="Закрыть" onClick={() => onClose && onClose()}>
+              <KitIcon name="close" />
+            </button>
+          </div>
+        )}
+        <div className="chs-drawer__body">{children}</div>
+        {footer && <div className="chs-drawer__foot">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ EmptyState ------------------------------- */
+/* Слот иконки + заголовок + описание + опциональный CTA. principles.md §6. */
+function EmptyState({ icon, title, description, action, compact = false }) {
+  return (
+    <div className={`chs-state chs-state--empty ${compact ? "chs-state--compact" : ""}`} role="status">
+      {icon && <div className="chs-state__icon">{icon}</div>}
+      {title && <div className="chs-state__title">{title}</div>}
+      {description && <div className="chs-state__desc">{description}</div>}
+      {action && <div className="chs-state__action">{action}</div>}
+    </div>
+  );
+}
+
+/* --------------------------- LoadingState / Skeleton --------------------- */
+/* Spinner + текст. prefers-reduced-motion гасит анимацию (CSS). */
+function LoadingState({ label = "Загрузка…", compact = false }) {
+  return (
+    <div className={`chs-state chs-state--loading ${compact ? "chs-state--compact" : ""}`} role="status" aria-live="polite" aria-busy="true">
+      <Spinner className="chs-state__spinner" />
+      {label && <div className="chs-state__desc">{label}</div>}
+    </div>
+  );
+}
+
+/* Skeleton — shimmer-плейсхолдер. variant: line | block | circle.
+   prefers-reduced-motion гасит мерцание (CSS), placeholder остаётся. */
+function Skeleton({ variant = "line", width, height, count = 1, className = "" }) {
+  const style = {};
+  if (width != null) style.width = typeof width === "number" ? `${width}px` : width;
+  if (height != null) style.height = typeof height === "number" ? `${height}px` : height;
+  if (count > 1) {
+    return (
+      <div className={`chs-skeleton-group ${className}`} aria-hidden="true">
+        {Array.from({ length: count }).map((_, i) => (
+          <span key={i} className={`chs-skeleton chs-skeleton--${variant}`} style={style} />
+        ))}
+      </div>
+    );
+  }
+  return <span className={`chs-skeleton chs-skeleton--${variant} ${className}`} style={style} aria-hidden="true" />;
+}
+
+/* ------------------------------- ErrorState ------------------------------ */
+/* Иконка ошибки + сообщение + опциональная «Повторить». principles.md §6. */
+function ErrorState({ title = "Что-то пошло не так", message, onRetry, retryLabel = "Повторить", compact = false }) {
+  return (
+    <div className={`chs-state chs-state--error ${compact ? "chs-state--compact" : ""}`} role="alert">
+      <div className="chs-state__icon chs-state__icon--error"><KitIcon name="error" size={28} /></div>
+      {title && <div className="chs-state__title">{title}</div>}
+      {message && <div className="chs-state__desc">{message}</div>}
+      {onRetry && (
+        <div className="chs-state__action">
+          <Button variant="secondary" size="sm" glyph={<KitIcon name="retry" className="chs-btn__glyph" />} onClick={onRetry}>{retryLabel}</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------- Popover -------------------------------- */
+/* Привязанная плавающая панель (меню/пикеры). Клик-вне и Esc закрывают; базовое
+   позиционирование (placement bottom|top|left|right + align start|end|center).
+   Триггер и панель оборачиваются в inline-relative контейнер. */
+function Popover({ open, onClose, trigger, children, placement = "bottom", align = "start", className = "" }) {
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    function onDocPointer(e) {
+      if (rootRef.current && !rootRef.current.contains(e.target)) onClose && onClose();
+    }
+    function onKey(e) { if (e.key === "Escape") onClose && onClose(); }
+    document.addEventListener("mousedown", onDocPointer, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDocPointer, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, onClose]);
+  return (
+    <span className={`chs-popover-root ${className}`} ref={rootRef}>
+      {trigger}
+      {open && (
+        <div className={`chs-popover chs-popover--${placement} chs-popover--align-${align}`} role="dialog">
+          {children}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/* -------------------------------- Tooltip -------------------------------- */
+/* Подсказка по hover/focus; role=tooltip, доступна с клавиатуры (focus триггера).
+   CSS показывает .chs-tooltip__bubble на :hover/:focus-within — работает без JS. */
+function Tooltip({ label, children, placement = "top", className = "" }) {
+  const autoId = useId();
+  const tipId = `chs-tip-${autoId}`;
+  return (
+    <span className={`chs-tooltip ${className}`}>
+      <span className="chs-tooltip__trigger" tabIndex={0} aria-describedby={tipId}>{children}</span>
+      <span className={`chs-tooltip__bubble chs-tooltip__bubble--${placement}`} role="tooltip" id={tipId}>{label}</span>
+    </span>
+  );
+}
+
+/* --------------------------------- Toast --------------------------------- */
+/* Транзиентное уведомление (success/error/info/warning через статус-токены).
+   Авто-скрытие (duration, 0 = не скрывать) + ручное закрытие. role=status/alert.
+   Низкоуровневый компонент — для очереди используй ToastViewport/useToasts. */
+const TOAST_ICON = { success: "success", error: "error", info: "info", warning: "alert" };
+function Toast({ tone = "info", title, message, onClose, action }) {
+  return (
+    <div className={`chs-toast chs-toast--${tone}`} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"}>
+      <span className="chs-toast__icon"><KitIcon name={TOAST_ICON[tone] || "info"} size={16} /></span>
+      <div className="chs-toast__body">
+        {title && <div className="chs-toast__title">{title}</div>}
+        {message && <div className="chs-toast__msg">{message}</div>}
+      </div>
+      {action && <div className="chs-toast__action">{action}</div>}
+      {onClose && (
+        <button type="button" className="chs-toast__close" aria-label="Закрыть" onClick={onClose}>
+          <KitIcon name="close" size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* useToasts — лёгкая очередь тостов + ToastViewport (фикс-стек). push() ставит
+   тост с авто-дисмиссом; компонент монтирует область сам. */
+function useToasts({ duration = 4000 } = {}) {
+  const [toasts, setToasts] = useState([]);
+  const idRef = useRef(0);
+  const dismiss = useCallback((id) => setToasts((ts) => ts.filter((t) => t.id !== id)), []);
+  const push = useCallback((toast) => {
+    const id = ++idRef.current;
+    setToasts((ts) => [...ts, { ...toast, id }]);
+    const d = toast.duration != null ? toast.duration : duration;
+    if (d > 0) setTimeout(() => dismiss(id), d);
+    return id;
+  }, [duration, dismiss]);
+  return { toasts, push, dismiss };
+}
+
+function ToastViewport({ toasts = [], dismiss, position = "bottom-right" }) {
+  return (
+    <div className={`chs-toast-viewport chs-toast-viewport--${position}`}>
+      {toasts.map((t) => (
+        <Toast key={t.id} tone={t.tone} title={t.title} message={t.message} action={t.action} onClose={() => dismiss && dismiss(t.id)} />
+      ))}
+    </div>
+  );
+}
+
 export {
   ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
+  KitIcon, Spinner,
+  Modal, Drawer, EmptyState, LoadingState, Skeleton, ErrorState,
+  Popover, Tooltip, Toast, ToastViewport, useToasts,
 };

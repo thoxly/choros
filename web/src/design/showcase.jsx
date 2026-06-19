@@ -310,6 +310,150 @@ function PrimitivesSection() {
   );
 }
 
+/* ---------- Обязательный kit (OBLIK) ---------- */
+function KitSection() {
+  const [modalOpen, setModalOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { toasts, push, dismiss } = useToasts({ duration: 4000 });
+
+  return (
+    <Section num="05" title="Обязательный kit" desc="OBLIK · поверхности и состояния">
+      {/* Поверхности: Modal / Drawer */}
+      <div className="chs-subhead">Поверхности — Modal · Drawer (фокус-ловушка, Esc, scroll-lock)</div>
+      <div className="chs-card">
+        <div className="chs-specrow">
+          <Button variant="primary" onClick={() => setModalOpen(true)}>Открыть модал</Button>
+          <Button variant="secondary" onClick={() => setDrawerOpen(true)}>Открыть drawer</Button>
+          <Button variant="danger" onClick={() => setConfirmOpen(true)}>Опасное действие</Button>
+        </div>
+      </div>
+
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Создать процесс"
+        footer={<>
+          <Button variant="ghost" onClick={() => setModalOpen(false)}>Отмена</Button>
+          <Button variant="primary" onClick={() => setModalOpen(false)}>Создать</Button>
+        </>}
+      >
+        <div style={{ display: "grid", gap: "var(--chs-space-6)" }}>
+          <Field label="Название процесса" placeholder="Согласование счёта" />
+          <Field label="Лимит, ткн" mono defaultValue="250000" hint="Бюджет на инстанс" />
+        </div>
+      </Modal>
+
+      <Modal
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        size="sm"
+        title="Остановить инстанс?"
+        footer={<>
+          <Button variant="ghost" onClick={() => setConfirmOpen(false)}>Отмена</Button>
+          <Button variant="danger" onClick={() => setConfirmOpen(false)}>Остановить</Button>
+        </>}
+      >
+        Инстанс <MonoId>INS-8837-A</MonoId> будет остановлен. Незавершённые задачи перейдут в паузу.
+      </Modal>
+
+      <Drawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        title="Задача TSK-0192"
+        footer={<Button variant="primary" size="sm" onClick={() => setDrawerOpen(false)}>Готово</Button>}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--chs-space-6)" }}>
+          <StatusChip status="running" />
+          <ExecutorBadge type="agent" name="extract-v3" />
+          <BudgetMeter label="Токены" used={148920} total={250000} unit="ткн" />
+          <p style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-muted)", margin: 0, lineHeight: 1.5 }}>
+            Боковая панель для детали объекта в контексте списка — не крадёт навигацию.
+          </p>
+        </div>
+      </Drawer>
+
+      {/* Состояния */}
+      <div className="chs-subhead">Состояния — Empty · Loading · Error · Skeleton</div>
+      <div className="chs-grid chs-grid--3">
+        <div className="chs-panel">
+          <EmptyState
+            icon={<KitIcon name="inbox" size={26} />}
+            title="Пока нет записей"
+            description="Создайте первую запись приложения, чтобы она появилась здесь."
+            action={<Button variant="primary" size="sm" glyph={<KitIcon name="plus" className="chs-btn__glyph" />}>Создать запись</Button>}
+          />
+        </div>
+        <div className="chs-panel">
+          <LoadingState label="Загружаем инстансы…" />
+        </div>
+        <div className="chs-panel">
+          <ErrorState
+            message="Сервер вернул 500 при загрузке списка."
+            onRetry={() => push({ tone: "info", title: "Повтор запроса", message: "Список перезагружается." })}
+          />
+        </div>
+      </div>
+      <div className="chs-card" style={{ marginTop: "var(--chs-space-6)" }}>
+        <span className="chs-card__label">Skeleton — shimmer-плейсхолдер (prefers-reduced-motion гасит)</span>
+        <div style={{ display: "flex", gap: "var(--chs-space-6)", alignItems: "center" }}>
+          <Skeleton variant="circle" />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "var(--chs-space-4)" }}>
+            <Skeleton variant="line" width="40%" />
+            <Skeleton variant="line" width="70%" />
+          </div>
+        </div>
+        <div style={{ marginTop: "var(--chs-space-6)" }}>
+          <Skeleton variant="line" count={3} />
+        </div>
+      </div>
+
+      {/* Кнопки: новые состояния */}
+      <div className="chs-subhead">Button — disabled · loading · focus-visible</div>
+      <div className="chs-card">
+        <div className="chs-specrow">
+          <Button variant="primary" loading>Сохранение…</Button>
+          <Button variant="secondary" loading>Загрузка</Button>
+          <Button variant="primary" disabled>Недоступно</Button>
+          <Button variant="secondary" disabled>Недоступно</Button>
+          <Button variant="primary" glyph={<KitIcon name="plus" className="chs-btn__glyph" />}>С иконкой</Button>
+        </div>
+      </div>
+
+      {/* Popover · Tooltip · Toast */}
+      <div className="chs-subhead">Popover · Tooltip · Toast</div>
+      <div className="chs-card">
+        <div className="chs-specrow" style={{ alignItems: "center", gap: "var(--chs-space-8)" }}>
+          <Popover
+            open={menuOpen}
+            onClose={() => setMenuOpen(false)}
+            placement="bottom"
+            align="start"
+            trigger={<Button variant="secondary" size="sm" onClick={() => setMenuOpen((v) => !v)}>Меню ▾</Button>}
+          >
+            <div style={{ display: "flex", flexDirection: "column", minWidth: 160 }}>
+              {["Открыть", "Дублировать", "Архивировать"].map((t) => (
+                <button key={t} className="chs-menuitem" onClick={() => setMenuOpen(false)}>{t}</button>
+              ))}
+            </div>
+          </Popover>
+
+          <Tooltip label="Подсказка появляется по hover и фокусу" placement="top">
+            <Button variant="ghost" size="sm">Наведи / Tab</Button>
+          </Tooltip>
+
+          <Button variant="primary" size="sm" onClick={() => push({ tone: "success", title: "Процесс запущен", message: "INS-8841-A создан." })}>Toast: успех</Button>
+          <Button variant="secondary" size="sm" onClick={() => push({ tone: "error", title: "Ошибка запуска", message: "SMTP-шлюз недоступен." })}>Toast: ошибка</Button>
+          <Button variant="ghost" size="sm" onClick={() => push({ tone: "info", message: "Изменения сохранены." })}>Toast: инфо</Button>
+        </div>
+      </div>
+
+      <ToastViewport toasts={toasts} dismiss={dismiss} position="bottom-right" />
+    </Section>
+  );
+}
+
 /* ---------- App ---------- */
 /* Превью брендбука («тёплая нейтраль + кобальт»). Светлая — основная тема
    (default), тёмная — равноправная; обе превьюшатся переключателем. Тот же флип,
@@ -347,6 +491,7 @@ function App() {
         <TypeSection />
         <ScaleSection />
         <PrimitivesSection />
+        <KitSection />
 
         <footer className="chs-foot">
           <span>CHOROS · chs-* tokens · :root (светлая) + [data-theme=dark]</span>

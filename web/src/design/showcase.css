@@ -88,4 +88,17 @@
 .chs-specrow { display: flex; flex-wrap: wrap; gap: var(--chs-space-5); align-items: center; }
 .chs-specrow + .chs-specrow { margin-top: var(--chs-space-6); }
 
+/* Пункт меню в Popover-витрине (kit-секция) */
+.chs-menuitem {
+  display: flex; align-items: center;
+  width: 100%;
+  padding: var(--chs-space-3) var(--chs-space-5);
+  border: none; background: transparent; cursor: pointer;
+  font-family: var(--chs-font-sans); font-size: var(--chs-text-base);
+  color: var(--chs-color-text); text-align: left;
+  border-radius: var(--chs-radius-2);
+}
+.chs-menuitem:hover { background: var(--chs-color-hover); }
+.chs-menuitem:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: -2px; }
+
 footer.chs-foot { margin-top: var(--chs-space-11); padding-top: var(--chs-space-7); border-top: 1px solid var(--chs-color-border); color: var(--chs-color-text-faint); font-size: var(--chs-text-xs); font-family: var(--chs-font-mono); display:flex; justify-content: space-between; flex-wrap: wrap; gap: var(--chs-space-5); }
