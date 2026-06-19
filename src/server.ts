@@ -27,7 +27,8 @@ import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
 import { registerRecordRoutes } from "./http/records.js";
-import { makeHttpKeycloakAdminPort } from "./keycloak/admin-port.js";
+import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
+import { registerRegisterRoutes } from "./http/register.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
 import { makeStaticHandler, resolveDefaultDistDir } from "./http/static.js";
 import { type ResolverDeps } from "./core/grant-resolver.js";
@@ -427,6 +428,29 @@ function buildRouter(
   // composed above from env (NO env reads in core — NF-1).
   if (grantsPool && flowableClient) {
     registerProcessDefsRoutes(router, grantsPool, flowableClient);
+  }
+
+  // T-0342: Register public registration endpoint (POST /api/register).
+  // Deps-gated on grantsPool (DB required to create the new tenant). KC registrar
+  // config is read from env (KC_REGISTRAR_CLIENT_ID + KC_REGISTRAR_CLIENT_SECRET);
+  // if absent, endpoint returns 503 AUTH_UNAVAILABLE (honest-degrade per ADR §8 step 4).
+  // Do NOT wrap in withAuth — this is a PRE-LOGIN public endpoint (FF-1).
+  if (grantsPool) {
+    const registrarClientSecret = process.env["KC_REGISTRAR_CLIENT_SECRET"];
+    const kcUserPort = registrarClientSecret
+      ? makeHttpKeycloakUserPort()
+      : // No registrar secret configured: port always returns AUTH_UNAVAILABLE (honest-degrade)
+        {
+          async createHumanUser(): Promise<{ userId: string }> {
+            const err = new Error("AUTH_UNAVAILABLE");
+            (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+            throw err;
+          },
+          async deleteUser(): Promise<void> {
+            /* no-op compensation */
+          },
+        };
+    registerRegisterRoutes(router, { pool: grantsPool, kc: kcUserPort });
   }
 
   // Set static file handler as fallback for everything else

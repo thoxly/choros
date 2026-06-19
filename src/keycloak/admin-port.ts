@@ -1,5 +1,5 @@
 /**
- * src/keycloak/admin-port.ts — T-0042 (E5.2): Live Keycloak Admin REST adapter.
+ * src/keycloak/admin-port.ts — T-0042 (E5.2) + T-0342 (E14): Live Keycloak Admin REST adapter.
  *
  * Implements KeycloakAdminPort against the Keycloak Admin REST API:
  *   - Obtains an admin token via client_credentials (realm admin client).
@@ -8,12 +8,20 @@
  *   - Sets actor_type=agent attribute on the auto-created service-account user.
  *   - DELETE /admin/realms/<realm>/clients/<id> — best-effort orphan cleanup (NF-4).
  *
+ * T-0342 adds KeycloakUserPort — human user management via a registrar service-account:
+ *   - createHumanUser: POST /admin/realms/<realm>/users with actor_type=["human"] + password (FF-3)
+ *   - deleteUser: DELETE /admin/realms/<realm>/users/<id> — best-effort compensation (FF-2)
+ *
  * Admin credentials are read from environment variables (NF-6):
  *   KEYCLOAK_BASE_URL     — e.g. http://localhost:8080
  *   KEYCLOAK_REALM        — e.g. choros
  *   KEYCLOAK_ADMIN_CLIENT — e.g. admin-cli
  *   KEYCLOAK_ADMIN        — admin client_id (or username for direct grant)
  *   KEYCLOAK_ADMIN_PASSWORD — admin client_secret (or password)
+ *
+ * Registrar credentials (T-0342 — human user creation via choros-registrar service-account):
+ *   KC_REGISTRAR_CLIENT_ID     — e.g. choros-registrar
+ *   KC_REGISTRAR_CLIENT_SECRET — registrar client_secret (DEV fixture only, RL-1)
  *
  * No production secrets are committed here (NF-6 / RL-1).
  *
@@ -27,7 +35,39 @@ import { URL } from "node:url";
 import type { KeycloakAdminPort, KcClientSpec } from "../core/agent-hire.js";
 
 // ---------------------------------------------------------------------------
-// Config
+// T-0342: KeycloakUserPort — human user management via registrar service-account
+// ---------------------------------------------------------------------------
+
+/** Specification for creating a human user in Keycloak (T-0342 / FF-3). */
+export interface KcHumanUserSpec {
+  username: string;     // = email
+  email: string;
+  password: string;
+  actorType: "human";  // MANDATORY: verifyClaims checks for actor_type (FF-3)
+}
+
+/**
+ * Port for managing human users in Keycloak (T-0342).
+ * Live implementation: makeHttpKeycloakUserPort.
+ * Test/dev fake implementation: InMemoryKeycloakUserPort (fake-user-port.ts).
+ */
+export interface KeycloakUserPort {
+  /**
+   * Create a human user in Keycloak.
+   * Sets actor_type=["human"] attribute so verifyClaims passes (FF-3).
+   * Throws HttpError(409, "EMAIL_TAKEN") if username/email already exists.
+   * Throws HttpError(503, "AUTH_UNAVAILABLE") if KC is unreachable.
+   */
+  createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }>;
+  /**
+   * Delete a user by KC user UUID — best-effort compensation (FF-2).
+   * Swallows all errors (orphan cleanup; called only on DB failure after KC create).
+   */
+  deleteUser(userId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Config (agent-admin port — existing)
 // ---------------------------------------------------------------------------
 
 export interface KcAdminConfig {
@@ -212,6 +252,134 @@ export function makeHttpKeycloakAdminPort(cfg?: KcAdminConfig): KeycloakAdminPor
         });
       } catch {
         // Best-effort: swallow errors on orphan cleanup (NF-4)
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// T-0342: Registrar config + live KeycloakUserPort factory
+// ---------------------------------------------------------------------------
+
+export interface KcRegistrarConfig {
+  baseUrl: string;         // e.g. "http://keycloak:8180"
+  realm: string;           // e.g. "choros"
+  clientId: string;        // KC_REGISTRAR_CLIENT_ID
+  clientSecret: string;    // KC_REGISTRAR_CLIENT_SECRET
+}
+
+function resolveRegistrarConfig(): KcRegistrarConfig {
+  return {
+    baseUrl: process.env["KEYCLOAK_BASE_URL"] ?? "http://localhost:8080",
+    realm: process.env["KEYCLOAK_REALM"] ?? "choros",
+    clientId: process.env["KC_REGISTRAR_CLIENT_ID"] ?? "choros-registrar",
+    clientSecret: process.env["KC_REGISTRAR_CLIENT_SECRET"] ?? "",
+  };
+}
+
+async function getRegistrarToken(cfg: KcRegistrarConfig): Promise<string> {
+  const tokenUrl = `${cfg.baseUrl}/realms/${cfg.realm}/protocol/openid-connect/token`;
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: cfg.clientId,
+    client_secret: cfg.clientSecret,
+  }).toString();
+  const resp = await doRequest(tokenUrl, "POST", body, {
+    "Content-Type": "application/x-www-form-urlencoded",
+  });
+  if (resp.status !== 200) {
+    const err = new Error(`KC registrar token failed: ${resp.status} ${resp.body}`);
+    (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+    throw err;
+  }
+  const json = JSON.parse(resp.body) as { access_token: string };
+  return json.access_token;
+}
+
+/**
+ * makeHttpKeycloakUserPort — live HTTP adapter implementing KeycloakUserPort (T-0342).
+ * Uses the choros-registrar service-account (realm-internal client_credentials —
+ * no master-realm admin required). Reads config from env unless cfg is provided.
+ */
+export function makeHttpKeycloakUserPort(cfg?: KcRegistrarConfig): KeycloakUserPort {
+  const config = cfg ?? resolveRegistrarConfig();
+
+  return {
+    async createHumanUser(spec: KcHumanUserSpec): Promise<{ userId: string }> {
+      let token: string;
+      try {
+        token = await getRegistrarToken(config);
+      } catch {
+        const err = new Error("AUTH_UNAVAILABLE");
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
+      }
+
+      const usersUrl = `${config.baseUrl}/admin/realms/${config.realm}/users`;
+
+      const userBody = {
+        username: spec.username,
+        email: spec.email,
+        enabled: true,
+        emailVerified: true,
+        attributes: {
+          actor_type: ["human"],   // MANDATORY for verifyClaims (FF-3)
+        },
+        credentials: [
+          {
+            type: "password",
+            value: spec.password,
+            temporary: false,
+          },
+        ],
+      };
+
+      const createResp = await doRequest(usersUrl, "POST", JSON.stringify(userBody), {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      });
+
+      if (createResp.status === 409) {
+        const err = new Error("EMAIL_TAKEN");
+        (err as NodeJS.ErrnoException).code = "EMAIL_TAKEN";
+        throw err;
+      }
+      if (createResp.status !== 201) {
+        const err = new Error(`KC createHumanUser failed: ${createResp.status} ${createResp.body}`);
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
+      }
+
+      // GET the created user by username to obtain the KC user UUID (= future JWT sub)
+      const searchResp = await doRequest(
+        `${usersUrl}?username=${encodeURIComponent(spec.username)}&exact=true`,
+        "GET",
+        null,
+        { Authorization: `Bearer ${token}` },
+      );
+      if (searchResp.status !== 200) {
+        const err = new Error(`KC user lookup failed: ${searchResp.status} ${searchResp.body}`);
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
+      }
+      const users = JSON.parse(searchResp.body) as Array<{ id: string }>;
+      if (users.length === 0) {
+        const err = new Error("KC user not found after create");
+        (err as NodeJS.ErrnoException).code = "AUTH_UNAVAILABLE";
+        throw err;
+      }
+      return { userId: users[0].id };
+    },
+
+    async deleteUser(userId: string): Promise<void> {
+      try {
+        const token = await getRegistrarToken(config);
+        const userUrl = `${config.baseUrl}/admin/realms/${config.realm}/users/${userId}`;
+        await doRequest(userUrl, "DELETE", null, {
+          Authorization: `Bearer ${token}`,
+        });
+      } catch {
+        // Best-effort: swallow all errors (compensation only; FF-2)
       }
     },
   };
