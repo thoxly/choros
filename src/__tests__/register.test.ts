@@ -562,6 +562,141 @@ describe("slugifyOrgName — pure", () => {
 });
 
 // ---------------------------------------------------------------------------
+// slugifyOrgName — Cyrillic transliteration (i18n bug fix)
+// ---------------------------------------------------------------------------
+
+describe("slugifyOrgName — Cyrillic transliteration", () => {
+  it("'Браузер Приёмка' → 'brauzer-priemka' (non-empty latin slug, ё→e)", () => {
+    // ё → "e" per the transliteration map; result is latin-only and non-empty
+    const result = slugifyOrgName("Браузер Приёмка");
+    expect(result).toBe("brauzer-priemka");
+    // Must be non-empty and not fall back to 'org' for a real Cyrillic org name
+    expect(result).not.toBe("org");
+  });
+
+  it("all-Cyrillic name produces a non-empty latin slug", () => {
+    const result = slugifyOrgName("ТестоваяКомпания");
+    expect(result.length).toBeGreaterThan(0);
+    expect(result).not.toBe("org");
+    // Output must be latin/dash only
+    expect(/^[a-z0-9-]+$/.test(result)).toBe(true);
+  });
+
+  it("mixed Cyrillic+Latin name is handled", () => {
+    const result = slugifyOrgName("Компания ABC");
+    expect(/^[a-z0-9-]+$/.test(result)).toBe(true);
+    expect(result).toContain("abc");
+  });
+
+  it("all-symbols name (no letters after transliteration) falls back to 'org'", () => {
+    // Input with only punctuation and spaces — no letters of any kind
+    expect(slugifyOrgName("!!! ???")).toBe("org");
+  });
+
+  it("'Браузер Два' and 'Браузер Приёмка' produce DIFFERENT base slugs (no spurious collision)", () => {
+    // Before the fix: both mapped to "" → "org", causing spurious ORG_TAKEN on the 2nd registration.
+    // After the fix: each Cyrillic name gets its own distinct latin slug.
+    const slug1 = slugifyOrgName("Браузер Приёмка"); // → "brauzer-priemka"
+    const slug2 = slugifyOrgName("Браузер Два");     // → "brauzer-dva"
+    expect(slug1).not.toBe(slug2);
+    expect(slug1).not.toBe("org");
+    expect(slug2).not.toBe("org");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slug uniqueness — retry-on-collision (i18n bug fix)
+// Two orgs with the SAME display name must BOTH succeed with distinct slugs.
+// ---------------------------------------------------------------------------
+
+describe("registerTenant — slug uniqueness (retry-on-collision)", () => {
+  it("two registrations with the same orgName both succeed with different slugs", async () => {
+    // Pool that simulates a 23505 unique violation on the FIRST tenant INSERT,
+    // then succeeds on the second attempt (different slug candidate).
+    let tenantInsertCount = 0;
+    class RetryFakePoolClient {
+      queries: Array<{ text: string; values?: unknown[] }> = [];
+
+      async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        this.queries.push({ text, values: vals });
+
+        if (text.includes("INSERT") && text.includes("choros.tenant")) {
+          tenantInsertCount++;
+          if (tenantInsertCount === 1) {
+            // First attempt → simulate slug collision (23505)
+            const err = Object.assign(new Error("duplicate key value violates unique constraint"), {
+              code: "23505",
+            });
+            throw err;
+          }
+        }
+        return { rows: [] };
+      }
+
+      release(): void { /* no-op */ }
+    }
+
+    const retryPool: pg.Pool = {
+      connect: async () => new RetryFakePoolClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    const kcLocal = new InMemoryKeycloakUserPort();
+
+    const result = await registerTenant(
+      { pool: retryPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "Браузер Приёмка", email: "user1@example.com", password: "password123" },
+    );
+
+    // Registration must succeed (no exception thrown)
+    expect(result.tenantSlug).toBeDefined();
+    // The slug must be non-empty latin (transliteration worked)
+    expect(/^[a-z0-9-]+$/.test(result.tenantSlug)).toBe(true);
+    expect(result.tenantSlug).not.toBe("org");
+    // On retry a suffix was appended — slug differs from the base (ё→e → base is "brauzer-priemka")
+    expect(result.tenantSlug).not.toBe("brauzer-priemka");
+    // The suffix slug still starts with the base
+    expect(result.tenantSlug.startsWith("brauzer-priemka-")).toBe(true);
+    // KC user must be alive (compensation NOT triggered for recoverable slug collision)
+    expect(kcLocal.deleteCallCount).toBe(0);
+    expect(tenantInsertCount).toBe(2); // First failed, second succeeded
+  });
+
+  it("compensation (deleteUser) is called when all slug retries are exhausted", async () => {
+    // Pool that ALWAYS fails on tenant INSERT with 23505
+    class AlwaysFailPoolClient {
+      async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        void values;
+        if (text.includes("INSERT") && text.includes("choros.tenant")) {
+          const err = Object.assign(new Error("duplicate key"), { code: "23505" });
+          throw err;
+        }
+        return { rows: [] };
+      }
+      release(): void { /* no-op */ }
+    }
+
+    const alwaysFailPool: pg.Pool = {
+      connect: async () => new AlwaysFailPoolClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    const kcLocal = new InMemoryKeycloakUserPort();
+
+    await expect(
+      registerTenant(
+        { pool: alwaysFailPool, kc: kcLocal, nowMs: () => 1234567890000 },
+        { orgName: "Contested Org", email: "user2@example.com", password: "password123" },
+      ),
+    ).rejects.toMatchObject({ code: "ORG_TAKEN" });
+
+    // KC user must have been compensated (deleted) after exhausting retries
+    expect(kcLocal.deleteCallCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FF-7: resolveActorTenant / extractActor signatures unchanged
 // ---------------------------------------------------------------------------
 

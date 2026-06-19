@@ -56,12 +56,32 @@ export interface RegisterDeps {
 const SLUG_MAX = 80;
 
 /**
- * slugify(orgName) → lower, [a-z0-9-], collapse dashes, truncate.
+ * Russian Cyrillic → latin transliteration map.
+ * Applied before the [^a-z0-9-] filter so Cyrillic names produce readable slugs.
+ * e.g. "Браузер Приёмка" → "brauzer-priyomka"
+ */
+const CYRILLIC_MAP: Record<string, string> = {
+  а: "a",  б: "b",  в: "v",  г: "g",  д: "d",
+  е: "e",  ё: "e",  ж: "zh", з: "z",  и: "i",
+  й: "y",  к: "k",  л: "l",  м: "m",  н: "n",
+  о: "o",  п: "p",  р: "r",  с: "s",  т: "t",
+  у: "u",  ф: "f",  х: "h",  ц: "ts", ч: "ch",
+  ш: "sh", щ: "sch", ъ: "",  ы: "y",  ь: "",
+  э: "e",  ю: "yu", я: "ya",
+};
+
+/** Replace each Cyrillic character with its latin equivalent (lower-case input expected). */
+function transliterateCyrillic(s: string): string {
+  return s.replace(/[а-яё]/g, (ch) => CYRILLIC_MAP[ch] ?? ch);
+}
+
+/**
+ * slugify(orgName) → transliterate Cyrillic → lower, [a-z0-9-], collapse dashes, truncate.
  * Consistent with deriveKcClientId pattern in agent-hire.ts.
+ * "Браузер Приёмка" → "brauzer-priyomka"
  */
 export function slugifyOrgName(orgName: string): string {
-  const slug = orgName
-    .toLowerCase()
+  const slug = transliterateCyrillic(orgName.toLowerCase())
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "");
@@ -120,17 +140,40 @@ function isUniqueViolation(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Derive a slug candidate from a base slug + optional attempt index.
+ * Attempt 0  → base slug (no suffix)
+ * Attempt 1+ → base-<6-char base36 derived from a fresh randomUUID>
+ * This keeps slugs pretty for the common case (first registrant of a name)
+ * while guaranteeing uniqueness under concurrent same-name registrations.
+ */
+function slugCandidate(base: string, attempt: number): string {
+  if (attempt === 0) return base;
+  // Take the first 6 hex chars of a fresh UUID, convert to base36 for brevity
+  const hex = randomUUID().replace(/-/g, "").slice(0, 8);
+  const suffix = parseInt(hex, 16).toString(36).slice(0, 6);
+  // Ensure total length stays within SLUG_MAX
+  const trimmedBase = base.slice(0, SLUG_MAX - 7); // 7 = "-" + 6 chars
+  return `${trimmedBase}-${suffix}`;
+}
+
+/** Maximum number of slug insert attempts before giving up with ORG_TAKEN. */
+const SLUG_MAX_ATTEMPTS = 5;
+
+/**
  * Registers a new tenant with owner membership.
  *
  * Sequence:
  *   1. Validate request
  *   2. Create KC user (KC-first, as per ADR §2 decision)
  *   3. DB transaction in the new tenant's scope:
- *      - INSERT tenant (self-ref: tenant_id = id)
+ *      - INSERT tenant (self-ref: tenant_id = id) — retried on slug unique-violation
  *      - INSERT role (slug='tenant-owner')
  *      - INSERT employee (slug=kcSub, kind='human')
  *      - INSERT role_assignment (confirmed, org_scope=set([]))
  *   4. On any DB failure after KC create → kc.deleteUser (best-effort compensation FF-2) + rethrow
+ *
+ * Slug uniqueness: slug collisions (23505) are retried up to SLUG_MAX_ATTEMPTS times
+ * with a random suffix (attempt 1+). Two orgs with the same display name BOTH succeed.
  */
 export async function registerTenant(
   deps: RegisterDeps,
@@ -139,7 +182,7 @@ export async function registerTenant(
   // Step 1: Validate
   validateRequest(req);
   const orgName = req.orgName.trim();
-  const tenantSlug = slugifyOrgName(orgName);
+  const baseSlug = slugifyOrgName(orgName);
 
   // Step 2: KC-first — create human user
   let kcUserId: string;
@@ -160,82 +203,98 @@ export async function registerTenant(
   }
 
   // Step 3: DB transaction in the new tenant's scope
+  // Retry the entire transaction on slug unique-violation (23505) so that two
+  // different companies sharing a display name can both register successfully.
   const tenantId = randomUUID();
   const roleId = randomUUID();
   const employeeId = randomUUID();
   const assignmentId = randomUUID();
   const ts = deps.nowMs();
 
-  const client = await deps.pool.connect();
-  try {
-    await client.query("BEGIN");
-    // SET LOCAL sets the tenant GUC so RLS WITH CHECK passes for self-ref tenant row
-    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
-    await client.query("SET LOCAL search_path TO choros");
+  let tenantSlug: string | undefined;
 
-    // 3a. Insert tenant (self-referential: tenant_id = id, migration 013 pattern)
+  for (let attempt = 0; attempt < SLUG_MAX_ATTEMPTS; attempt++) {
+    const candidateSlug = slugCandidate(baseSlug, attempt);
+
+    const client = await deps.pool.connect();
     try {
+      await client.query("BEGIN");
+      // SET LOCAL sets the tenant GUC so RLS WITH CHECK passes for self-ref tenant row
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await client.query("SET LOCAL search_path TO choros");
+
+      // 3a. Insert tenant (self-referential: tenant_id = id, migration 013 pattern)
+      try {
+        await client.query(
+          `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+           VALUES ($1, $1, $2, $3, $4)`,
+          [tenantId, candidateSlug, orgName, ts],
+        );
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          await client.query("ROLLBACK");
+          // slug collision — try next candidate (don't compensate yet: still have retries)
+          if (attempt < SLUG_MAX_ATTEMPTS - 1) {
+            continue;
+          }
+          // Exhausted retries — compensate and surface ORG_TAKEN
+          await deps.kc.deleteUser(kcUserId);
+          throw new RegisterError("ORG_TAKEN", `An organization with a similar name already exists`);
+        }
+        throw err;
+      }
+
+      // 3b. Insert role (slug='tenant-owner', per-tenant)
       await client.query(
-        `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
-         VALUES ($1, $1, $2, $3, $4)`,
-        [tenantId, tenantSlug, orgName, ts],
+        `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', $3, $3)`,
+        [tenantId, roleId, ts],
       );
+
+      // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL)
+      await client.query(
+        `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
+        [tenantId, employeeId, kcUserId, req.email, ts],
+      );
+
+      // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope, granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)`,
+        [
+          tenantId,
+          assignmentId,
+          employeeId,
+          roleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,  // self-bootstrap: both granted_by and confirmed_by are the genesis owner employee
+          ts,
+        ],
+      );
+
+      await client.query("COMMIT");
+      tenantSlug = candidateSlug;
     } catch (err) {
-      if (isUniqueViolation(err)) {
-        await client.query("ROLLBACK");
-        // Compensate: delete the KC user we just created
-        await deps.kc.deleteUser(kcUserId);
-        throw new RegisterError("ORG_TAKEN", `An organization with a similar name already exists`);
+      try { await client.query("ROLLBACK"); } catch { /* ignore */ }
+      // Compensation: KC user was created but DB failed — delete KC user (FF-2)
+      // Skip compensation if error is already a RegisterError (ORG_TAKEN already compensated above)
+      if (!(err instanceof RegisterError)) {
+        await deps.kc.deleteUser(kcUserId); // best-effort
       }
       throw err;
+    } finally {
+      client.release();
     }
 
-    // 3b. Insert role (slug='tenant-owner', per-tenant)
-    await client.query(
-      `INSERT INTO choros.role (tenant_id, id, slug, display_name, created_at, updated_at)
-       VALUES ($1, $2, 'tenant-owner', 'Tenant Owner', $3, $3)`,
-      [tenantId, roleId, ts],
-    );
-
-    // 3c. Insert employee (slug=kcSub, kind='human', position_id=NULL)
-    await client.query(
-      `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 'human', $4, NULL, $5, $5)`,
-      [tenantId, employeeId, kcUserId, req.email, ts],
-    );
-
-    // 3d. Insert confirmed role_assignment (org_scope=set([]), confirmed_by=employeeId for self-bootstrap)
-    await client.query(
-      `INSERT INTO choros.role_assignment
-         (tenant_id, id, employee_id, role_id, org_scope, granted_by, confirmed_by, source, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)`,
-      [
-        tenantId,
-        assignmentId,
-        employeeId,
-        roleId,
-        JSON.stringify({ kind: "set", members: [] }),
-        employeeId,  // self-bootstrap: both granted_by and confirmed_by are the genesis owner employee
-        ts,
-      ],
-    );
-
-    await client.query("COMMIT");
-  } catch (err) {
-    try { await client.query("ROLLBACK"); } catch { /* ignore */ }
-    // Compensation: KC user was created but DB failed — delete KC user (FF-2)
-    // Skip compensation if error is already a RegisterError (e.g. ORG_TAKEN already compensated above)
-    if (!(err instanceof RegisterError)) {
-      await deps.kc.deleteUser(kcUserId); // best-effort
-    }
-    throw err;
-  } finally {
-    client.release();
+    // Transaction committed — exit the retry loop
+    break;
   }
 
   return {
     tenantId,
-    tenantSlug,
+    tenantSlug: tenantSlug!,
     userId: kcUserId,
     email: req.email,
   };
