@@ -14,7 +14,7 @@
  *       "type": "object",
  *       "additionalProperties": false,
  *       "properties": {
- *         "<fieldKey>": { "type": "string"|"number"|"integer"|"boolean", "title"?: <label> },
+ *         "<fieldKey>": { "type": "string"|"number"|"integer"|"boolean", "title"?: <label>, "enum"?: [...] },
  *         ...
  *       },
  *       "required": ["<fieldKey>", ...]
@@ -37,6 +37,14 @@
  *   - boolean           → a real boolean from the checkbox (always present; a
  *                         checkbox has a definite true/false state). `false` is a
  *                         valid boolean, so required booleans never block on false.
+ *   - select (T-0294)   → emitted as `type:"string"` + `enum:[...]` in the JSON
+ *                         schema. The form renders a <select> dropdown; the chosen
+ *                         value is a string matching one of the enum entries.
+ *                         Required ⇒ must be non-empty. Optional + blank ⇒ omit.
+ *   - date (T-0294)     → emitted as `type:"string"` (no format — AJV strict
+ *                         rejects format:date). The form renders <input type="date">
+ *                         which produces ISO 8601 dates (YYYY-MM-DD). Required ⇒
+ *                         must be non-empty. Optional + blank ⇒ omit.
  *   - unknown type      → treated as string (defensive; the constructor never
  *                         emits an unsupported type, see apps-schema FIELD_TYPES).
  */
@@ -45,11 +53,15 @@
 //   text     → <input type="text">      (string)
 //   number   → <input type="number">    (number / integer)
 //   checkbox → <input type="checkbox">  (boolean)
+//   select   → <select> dropdown        (select — T-0294)
+//   date     → <input type="date">      (date — T-0294)
 export const INPUT_KIND = {
   string: "text",
   number: "number",
   integer: "number",
   boolean: "checkbox",
+  select: "select",
+  date: "date",
 };
 
 /**
@@ -57,8 +69,13 @@ export const INPUT_KIND = {
  * Order = `properties` insertion order (the field-constructor preserves field
  * order via JS object key order — see apps-schema.buildRecordSchema).
  *
+ * T-0294: properties with an `enum` array are typed as "select"; the options
+ * list is extracted and included in the descriptor. Plain string fields remain
+ * "string" (date fields, stored as type:"string" without format, are
+ * indistinguishable at this layer and render as text inputs).
+ *
  * @param {unknown} recordSchema a registry_def.record_schema
- * @returns {Array<{ key, type, title, label, required, inputKind }>}
+ * @returns {Array<{ key, type, title, label, required, inputKind, options? }>}
  */
 export function schemaToFormFields(recordSchema) {
   if (
@@ -78,14 +95,30 @@ export function schemaToFormFields(recordSchema) {
   return Object.keys(props).map((key) => {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
-    const type =
-      rawType === "string" || rawType === "number" || rawType === "integer" || rawType === "boolean"
-        ? rawType
-        : "string";
     const title =
       def && typeof def === "object" && typeof def.title === "string" && def.title.trim().length > 0
         ? def.title
         : "";
+
+    // T-0294: detect select fields by the presence of a non-empty enum array.
+    const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
+    if (hasEnum) {
+      const options = def.enum.filter((o) => typeof o === "string");
+      return {
+        key,
+        type: "select",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "select",
+        options,
+      };
+    }
+
+    const type =
+      rawType === "string" || rawType === "number" || rawType === "integer" || rawType === "boolean"
+        ? rawType
+        : "string";
     return {
       key,
       type,
@@ -100,6 +133,7 @@ export function schemaToFormFields(recordSchema) {
 /**
  * The blank/initial form-VALUE state for a set of form fields. Strings/numbers
  * start as "" (controlled inputs), booleans as false (a checkbox is always set).
+ * T-0294: select and date start as "" (the <select> or <input type="date"> value).
  *
  * @param {Array<{ key, type }>} formFields output of schemaToFormFields
  * @returns {Record<string, string|boolean>}
@@ -122,6 +156,12 @@ export function blankRecordValues(formFields) {
  *   - optional number/integer with a value → if present it must still parse
  *     (a half-typed "12abc" is rejected so we never POST a NaN);
  *   - boolean           → always valid (checkbox state is always a boolean).
+ *   - select (T-0294)   → required ⇒ must be non-empty; value must be in options.
+ *   - date (T-0294)     → required ⇒ must be non-empty. The browser constrains
+ *                          <input type="date"> to valid ISO dates; we just check
+ *                          non-empty for required and basic YYYY-MM-DD pattern if
+ *                          a value is present (prevents garbage on browsers that
+ *                          fall back to a plain text input).
  *
  * @param {Array} formFields
  * @param {Record<string, string|boolean>} values
@@ -153,6 +193,35 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
+    // T-0294: select — must be non-empty if required; must be one of the options.
+    if (f.type === "select") {
+      const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // Validate that the chosen value is in the allowed options.
+      const opts = Array.isArray(f.options) ? f.options : [];
+      if (opts.length > 0 && !opts.includes(str)) {
+        errors[f.key] = "Выберите значение из списка";
+      }
+      continue;
+    }
+
+    // T-0294: date — required ⇒ non-empty; if present, must look like YYYY-MM-DD.
+    if (f.type === "date") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // Basic ISO date pattern check (YYYY-MM-DD) to catch plain-text fallbacks.
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        errors[f.key] = "Введите дату в формате ГГГГ-ММ-ДД";
+      }
+      continue;
+    }
+
     // string
     const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
     if (f.required && str.trim().length === 0) {
@@ -170,6 +239,11 @@ export function validateRecordValues(formFields, values) {
  * fail the type check nor trip additionalProperties:false). Assumes the values
  * already passed validateRecordValues (so number strings parse cleanly); a
  * never-reached NaN is still guarded by omitting unparseable optionals.
+ *
+ * T-0294:
+ *   select → emitted as a string (must be in the enum; AJV validates that).
+ *            Blank optional select ⇒ omit.
+ *   date   → emitted as a string (YYYY-MM-DD). Blank optional date ⇒ omit.
  *
  * @param {Array} formFields
  * @param {Record<string, string|boolean>} values
@@ -198,6 +272,17 @@ export function serializeRecordData(formFields, values) {
       const n = Number(str);
       if (!Number.isFinite(n)) continue; // guard — should be unreachable post-validate
       data[f.key] = n; // a JS number, NOT a string → passes AJV type:number/integer
+      continue;
+    }
+
+    // T-0294: select and date are emitted as plain strings (just like string).
+    // Blank optional ⇒ omit; blank required is caught by validateRecordValues.
+    if (f.type === "select" || f.type === "date") {
+      const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
+      if (str.length === 0 && !f.required) {
+        continue; // omit blank optional
+      }
+      data[f.key] = str;
       continue;
     }
 

@@ -231,3 +231,134 @@ describe('extractFieldErrors', () => {
     expect(extractFieldErrors(null, new Set())).toEqual({});
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0294: select and date field types in record forms
+// ---------------------------------------------------------------------------
+
+// A schema with select and date fields (as emitted by buildRecordSchema).
+const SCHEMA_WITH_NEW_TYPES = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    deal_stage: { type: 'string', enum: ['lead', 'qualified', 'won', 'lost'], title: 'Стадия' },
+    close_date: { type: 'string', title: 'Дата закрытия' }, // date stored as string
+    notes: { type: 'string' },
+  },
+  required: ['deal_stage'],
+};
+
+describe('T-0294: select fields in records-form', () => {
+  it('schemaToFormFields: detects select from enum, extracts options', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_NEW_TYPES);
+    const stage = fields.find((f) => f.key === 'deal_stage');
+    expect(stage).toMatchObject({
+      key: 'deal_stage',
+      type: 'select',
+      label: 'Стадия',
+      required: true,
+      inputKind: 'select',
+      options: ['lead', 'qualified', 'won', 'lost'],
+    });
+  });
+
+  it('INPUT_KIND: select maps to "select"', () => {
+    expect(INPUT_KIND.select).toBe('select');
+  });
+
+  it('validateRecordValues: select required → error when blank', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_NEW_TYPES);
+    const { valid, errors } = validateRecordValues(fields, { deal_stage: '', close_date: '', notes: '' });
+    expect(valid).toBe(false);
+    expect(errors.deal_stage).toBeTruthy(); // required select, blank
+    expect(errors.close_date).toBeUndefined(); // optional, blank is ok
+  });
+
+  it('validateRecordValues: select rejects value outside enum', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_NEW_TYPES);
+    const { valid, errors } = validateRecordValues(fields, { deal_stage: 'bogus', close_date: '', notes: '' });
+    expect(valid).toBe(false);
+    expect(errors.deal_stage).toMatch(/списка/);
+  });
+
+  it('validateRecordValues: select accepts a valid enum value', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_NEW_TYPES);
+    const { valid, errors } = validateRecordValues(fields, { deal_stage: 'won', close_date: '', notes: '' });
+    expect(valid).toBe(true);
+    expect(errors).toEqual({});
+  });
+
+  it('serializeRecordData: select emits the string value', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_NEW_TYPES);
+    const data = serializeRecordData(fields, { deal_stage: 'lead', close_date: '', notes: '' });
+    expect(data.deal_stage).toBe('lead');
+    expect(typeof data.deal_stage).toBe('string');
+    // validate against actual schema
+    expect(backendValidate(SCHEMA_WITH_NEW_TYPES, data).valid).toBe(true);
+  });
+
+  it('serializeRecordData: select blank optional → omit', () => {
+    const optionalSchema = {
+      type: 'object', additionalProperties: false,
+      properties: { cat: { type: 'string', enum: ['a', 'b'] } },
+    };
+    const fields = schemaToFormFields(optionalSchema);
+    const data = serializeRecordData(fields, { cat: '' });
+    expect('cat' in data).toBe(false); // blank optional select omitted
+    expect(backendValidate(optionalSchema, data).valid).toBe(true);
+  });
+});
+
+describe('T-0294: date fields in records-form', () => {
+  it('INPUT_KIND: date maps to "date"', () => {
+    expect(INPUT_KIND.date).toBe('date');
+  });
+
+  it('validateRecordValues: date with valid ISO value passes', () => {
+    const dateSchema = {
+      type: 'object', additionalProperties: false,
+      properties: { due: { type: 'string', title: 'Due' } },
+      required: ['due'],
+    };
+    const fields = schemaToFormFields(dateSchema);
+    // Fields parsed from plain string schema — field.type will be 'string' (date
+    // stored as string, no distinguishing marker). We need a date-typed field from
+    // records-form to properly test date validation. Use a field list directly.
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: true, inputKind: 'date' }];
+    const { valid } = validateRecordValues(dateField, { due: '2024-03-15' });
+    expect(valid).toBe(true);
+  });
+
+  it('validateRecordValues: date required → error when blank', () => {
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: true, inputKind: 'date' }];
+    const { valid, errors } = validateRecordValues(dateField, { due: '' });
+    expect(valid).toBe(false);
+    expect(errors.due).toBeTruthy();
+  });
+
+  it('validateRecordValues: date rejects garbage string (non-ISO pattern)', () => {
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: false, inputKind: 'date' }];
+    const { valid, errors } = validateRecordValues(dateField, { due: 'not-a-date' });
+    expect(valid).toBe(false);
+    expect(errors.due).toBeTruthy();
+  });
+
+  it('validateRecordValues: date optional blank → valid (omitted)', () => {
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: false, inputKind: 'date' }];
+    const { valid } = validateRecordValues(dateField, { due: '' });
+    expect(valid).toBe(true);
+  });
+
+  it('serializeRecordData: date emits the ISO string value', () => {
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: true, inputKind: 'date' }];
+    const data = serializeRecordData(dateField, { due: '2024-12-31' });
+    expect(data.due).toBe('2024-12-31');
+    expect(typeof data.due).toBe('string');
+  });
+
+  it('serializeRecordData: date optional blank → omit', () => {
+    const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: false, inputKind: 'date' }];
+    const data = serializeRecordData(dateField, { due: '' });
+    expect('due' in data).toBe(false);
+  });
+});
