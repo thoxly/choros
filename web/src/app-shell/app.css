@@ -42,13 +42,21 @@
 .chs-nav__name { font-weight: var(--chs-weight-semibold); font-size: var(--chs-text-md); letter-spacing: var(--chs-tracking-tight); }
 .chs-nav__org { font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs); color: var(--chs-color-text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* T-0307 (audit #8): now a real <button> that opens the ⌘K command palette —
+   button-reset + a hover/focus affordance so it reads as the live control it is
+   (not the old dead <div>). */
 .chs-nav__search {
   display: flex; align-items: center; gap: var(--chs-space-4);
   margin: var(--chs-space-5) var(--chs-space-5) var(--chs-space-3);
-  height: var(--chs-control-h-sm); padding: 0 var(--chs-space-4);
+  height: var(--chs-control-h-sm); padding: 0 var(--chs-space-4); width: auto;
+  font-family: var(--chs-font-sans); text-align: left;
+  background: var(--chs-color-bg);
   border: 1px solid var(--chs-color-border-strong); border-radius: var(--chs-radius-2);
-  color: var(--chs-color-text-faint); cursor: text; flex: none;
+  color: var(--chs-color-text-faint); cursor: pointer; flex: none;
+  transition: background 80ms ease, border-color 80ms ease, color 80ms ease;
 }
+.chs-nav__search:hover { background: var(--chs-color-hover); color: var(--chs-color-text-muted); border-color: var(--chs-color-accent); }
+.chs-nav__search:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
 .chs-nav__search span { font-size: var(--chs-text-sm); flex: 1; }
 .chs-nav__search kbd {
   font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs);
@@ -713,3 +721,39 @@
   flex: 0 0 auto;
 }
 .chs-notif__action:hover { color: var(--chs-color-text); border-color: var(--chs-color-border-strong); }
+
+/* ============================================================================
+   T-0307 — Командная палитра (⌘K) + обёртка демо-бейджа суб-вкладок
+   Только токены --chs-*; поверхность собрана через kit Modal (оверлей/фокус-
+   ловушка/Esc/scroll-lock — компонент), здесь лишь её содержимое.
+   ============================================================================ */
+.chs-subtab-wrap { display: inline-flex; align-items: center; }
+
+.chs-palette { display: flex; flex-direction: column; gap: var(--chs-space-5); min-width: 0; }
+.chs-palette__input { width: 100%; }
+.chs-palette__list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 320px; overflow-y: auto;
+}
+.chs-palette__item {
+  display: flex; align-items: center; gap: var(--chs-space-5); width: 100%;
+  padding: 0 var(--chs-space-4); height: var(--chs-control-h-sm);
+  border: none; background: transparent; border-radius: var(--chs-radius-2);
+  cursor: pointer; text-align: left;
+  font-family: var(--chs-font-sans); font-size: var(--chs-text-base);
+  color: var(--chs-color-text); transition: background 80ms ease;
+}
+.chs-palette__item:hover { background: var(--chs-color-hover); }
+.chs-palette__item:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: -1px; }
+.chs-palette__icon { width: 15px; height: 15px; flex: none; color: var(--chs-color-text-faint); display: block; }
+.chs-palette__label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chs-palette__group {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs);
+  letter-spacing: var(--chs-tracking-wide); text-transform: uppercase;
+  color: var(--chs-color-text-faint); flex: none;
+}
+.chs-palette__empty {
+  padding: var(--chs-space-5) var(--chs-space-4);
+  color: var(--chs-color-text-muted); font-size: var(--chs-text-sm); text-align: center;
+}
