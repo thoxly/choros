@@ -68,8 +68,6 @@ function makeStubClient(opts: {
     updated_at: "1000",
   };
 
-  let queryCount = 0;
-
   const TENANT_ID = "a0000000-0000-0000-0000-000000000001";
   return {
     query: vi.fn(async (sql: string, _params?: unknown[]) => {
@@ -80,7 +78,6 @@ function makeStubClient(opts: {
         }
         return { rows: [] };
       }
-      queryCount++;
       // audit-writer: SELECT current_setting('choros.tenant_id', ...)
       if (/current_setting\s*\(\s*'choros\.tenant_id'/i.test(sql) && !/INSERT|UPDATE/i.test(sql)) {
         return { rows: [{ tenant_id: TENANT_ID }] };
