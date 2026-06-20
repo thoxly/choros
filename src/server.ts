@@ -383,11 +383,17 @@ function buildRouter(
   // their governing registry_def's record_schema, tenant-scoped via withTenantTx +
   // RLS (policy record_tenant_isolation), and create/update each write an audit
   // event (hash-chain). Same deps + tenant-resolution as applications.
+  // T-0351 E16: flowableClient passed so on_create bindings fire process start
+  // in the same tx as record creation (create = start, S1 seam). When flowableClient
+  // is null (no engine configured) the on_create trigger is silently skipped
+  // (honest-degrade — record still created, no process started).
   if (grantsPool) {
     registerRecordRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0351 E16: wire the shared flowableClient for on_create trigger.
+      flowable: flowableClient ?? undefined,
     });
   }
 
