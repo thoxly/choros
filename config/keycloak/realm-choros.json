@@ -235,7 +235,7 @@
     {
       "clientId": "choros-registrar",
       "name": "Choros Registrar",
-      "description": "DEV ONLY — confidential service-account client for self-serve registration (T-0342). Holds manage-users + view-users on realm-management so the app can create/delete human users via Admin REST without master-realm admin. Secret: choros-registrar-dev-secret (dev fixture, RL-1). Role grants (manage-users + view-users on realm-management) are expressed via clientRoles on the service-account-choros-registrar user entry below — KC 25.0.6 does not accept serviceAccountClientRoles on the client object.",
+      "description": "DEV-only confidential service-account client for self-serve registration (manage-users/view-users on realm-management).",
       "protocol": "openid-connect",
       "enabled": true,
       "publicClient": false,
