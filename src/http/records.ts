@@ -634,6 +634,8 @@ async function createRecord(args: {
 
         // Start the process inside the SAME tenant tx (create = start atomically).
         // If startInstance fails the whole tx rolls back (no orphan record).
+        // Known two-phase window: startInstance is a REST call outside this PG tx — an
+        // engine-success + PG-COMMIT-fail leaves an orphan engine instance (best-effort).
         const startResult = await flowable.startInstance(
           binding.process_key,
           Object.keys(variables).length > 0 ? variables : undefined,
@@ -646,8 +648,10 @@ async function createRecord(args: {
             `on_create process start failed (binding ${binding.id}): ${startResult.code}`,
           );
         }
-        // Projection write: best-effort (a write failure must NOT roll back the
-        // created record+instance). Mirrors process-start.ts appendProcessStarted pattern.
+        // Projection write: best-effort, isolated by a SAVEPOINT so a projection
+        // failure cannot poison the outer tx and cause the committed record+instance
+        // to be lost. Mirrors process-start.ts appendProcessStarted pattern.
+        await client.query('SAVEPOINT proc_proj');
         try {
           await appendProcessStarted(client as unknown as PgClientLike, {
             instanceId: startResult.instanceId,
@@ -656,8 +660,10 @@ async function createRecord(args: {
             nowMs,
             tenantId,
           });
+          await client.query('RELEASE SAVEPOINT proc_proj');
         } catch {
-          // Projection is additive; never fail the create on a projection write error.
+          // Projection is additive; roll back only the savepoint — record+instance remain.
+          await client.query('ROLLBACK TO SAVEPOINT proc_proj');
         }
       }
     }

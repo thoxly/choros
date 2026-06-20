@@ -391,6 +391,154 @@ describe("T-0351 on_create: engine fail → tx rolled back (create = start atomi
 });
 
 // ---------------------------------------------------------------------------
+// Test: savepoint — projection failure does NOT lose the committed record
+// ---------------------------------------------------------------------------
+//
+// When appendProcessStarted throws (simulated by making the client throw on the
+// second UPDATE choros.audit_head — the projection's inner write), the SAVEPOINT
+// must contain the failure so the outer tx commits normally (record + instance safe).
+// The HTTP response must be 201, proving the record was NOT lost.
+
+describe("T-0351 savepoint: projection failure does not lose the committed record", () => {
+  it("appendProcessStarted throws → record still committed (201), tx not poisoned", async () => {
+    const flowable = makeStubFlowable({ ok: true, instanceId: "inst-proj-err" });
+
+    const bindingRow = {
+      id: "bind-save-001",
+      process_key: "projErrorProcess",
+      trigger_type: "on_create",
+      start_form_key: null,
+      field_mapping: {} as Record<string, string>,
+    };
+
+    const TENANT_ID = "a0000000-0000-0000-0000-000000000001";
+    const fakeRegistryDef = {
+      id: "ae000000-0000-0000-0000-000000000001",
+      application_id: "a0000000-0000-0000-0000-000000000001",
+      record_schema: { type: "object", properties: {}, additionalProperties: true },
+      record_schema_version: 1,
+    };
+    const fakeRecord = {
+      id: "ac000000-0000-0000-0000-000000000002",
+      registry_id: fakeRegistryDef.id,
+      application_id: fakeRegistryDef.application_id,
+      record_schema_version: 1,
+      data: {},
+      created_at: "2000",
+      updated_at: "2000",
+    };
+
+    // Track SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT calls
+    const savepointLog: string[] = [];
+    // The first UPDATE choros.audit_head is the record.create audit event (must succeed).
+    // The second UPDATE choros.audit_head is inside appendProcessStarted (must throw
+    // to simulate a projection write failure — triggers the ROLLBACK TO SAVEPOINT path).
+    let auditHeadUpdateCount = 0;
+
+    const throwingClient = {
+      query: vi.fn(async (sql: string, _params?: unknown[]) => {
+        const trimmed = sql.trim();
+        // Track SAVEPOINT control commands
+        if (/^SAVEPOINT\s/i.test(trimmed)) {
+          savepointLog.push("SAVEPOINT");
+          return { rows: [] };
+        }
+        if (/^RELEASE SAVEPOINT\s/i.test(trimmed)) {
+          savepointLog.push("RELEASE");
+          return { rows: [] };
+        }
+        if (/^ROLLBACK TO SAVEPOINT\s/i.test(trimmed)) {
+          savepointLog.push("ROLLBACK_TO");
+          return { rows: [] };
+        }
+        // Standard tx control
+        if (/^(BEGIN|COMMIT|ROLLBACK|SET LOCAL)/i.test(trimmed)) {
+          return { rows: [] };
+        }
+        // audit-writer: SELECT current_setting
+        if (/current_setting\s*\(\s*'choros\.tenant_id'/i.test(sql) && !/INSERT|UPDATE/i.test(sql)) {
+          return { rows: [{ tenant_id: TENANT_ID }] };
+        }
+        // audit-writer: INSERT INTO choros.audit_head
+        if (/INSERT INTO choros\.audit_head/i.test(sql)) {
+          return { rows: [] };
+        }
+        // audit-writer: SELECT ... FROM choros.audit_head ... FOR UPDATE
+        if (/FROM choros\.audit_head/i.test(sql)) {
+          return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+        }
+        // audit-writer: UPDATE choros.audit_head — throw on 2nd call (projection path)
+        if (/UPDATE choros\.audit_head/i.test(sql)) {
+          auditHeadUpdateCount++;
+          if (auditHeadUpdateCount >= 2) {
+            throw new Error("simulated projection write failure — DB rejected UPDATE");
+          }
+          return { rows: [] };
+        }
+        // registry_def SELECT
+        if (/FROM choros\.registry_def/i.test(sql)) {
+          return { rows: [fakeRegistryDef] };
+        }
+        // record INSERT
+        if (/INSERT INTO choros\.record/i.test(sql)) {
+          return { rows: [] };
+        }
+        // audit_event INSERT
+        if (/INSERT INTO choros\.audit_event/i.test(sql)) {
+          return { rows: [] };
+        }
+        // process_app_binding SELECT
+        if (/FROM choros\.process_app_binding/i.test(sql)) {
+          return { rows: [bindingRow] };
+        }
+        // record readback SELECT (joined) — only reached if outer tx was NOT poisoned
+        if (/FROM choros\.record r/i.test(sql)) {
+          return { rows: [fakeRecord] };
+        }
+        return { rows: [] };
+      }),
+      release: vi.fn(),
+    };
+
+    const pool = {
+      connect: async () => throwingClient as unknown as import("pg").PoolClient,
+    } as unknown as import("pg").Pool;
+
+    const { server, baseUrl } = buildServer({
+      pool,
+      resolveActorTenant: async () => TENANT_ID,
+      flowable,
+    });
+
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const res = await httpReq(
+        "POST",
+        `${baseUrl()}/api/records`,
+        { "x-dev-user": "test-actor" },
+        {
+          application_id: "a0000000-0000-0000-0000-000000000001",
+          data: { note: "savepoint-test" },
+        },
+      );
+
+      // Record must be committed (201) even though projection failed
+      expect(res.status).toBe(201);
+
+      // SAVEPOINT was issued and then rolled back (not released) — projection failure
+      expect(savepointLog).toContain("SAVEPOINT");
+      expect(savepointLog).toContain("ROLLBACK_TO");
+      expect(savepointLog).not.toContain("RELEASE");
+
+      // startInstance was called (engine succeeded)
+      expect(flowable.startInstance).toHaveBeenCalledOnce();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // [DB-UNTESTED] notes
 // ---------------------------------------------------------------------------
 // The following require a live Postgres + migration 082 applied:
