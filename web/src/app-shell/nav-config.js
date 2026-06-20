@@ -53,6 +53,10 @@ export const NAV = [
       // Формы задач — developer sandbox (form-js демо). Не рабочий экран пользователя;
       // живёт под Конструктором как инструмент авторинга, честно помечен «демо».
       { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo" },
+      // Ассистент (E17 T-0358): треды-чаты с AI-агентом. КОНФИГУРАТОР (авторит модель E16
+      // в DRAFT, promote человеком) + АНАЛИТИК (read-only по данным + журналу). Shell-only:
+      // LLM-роутинг = T-0359/T-0360. demo пока: реального бэкенда нет.
+      { id: "assistant", label: "Ассистент", icon: "assistant", screen: true, status: "demo" },
     ],
   },
   {
