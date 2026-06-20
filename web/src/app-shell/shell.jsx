@@ -47,15 +47,26 @@ const RIGHTS_TABS = [
 
 // NAV is imported from ./nav-config.js
 
-// SCREEN_META (T-0317): static [group, leaf] crumb per top-level screen. Group
-// labels track the re-sectioned IA in nav-config.js (4 разделов). This is the
-// BASE crumb; the dynamic builder below extends it for deep, param-aware routes
-// (app field-editor, records, record detail) by injecting entity names.
+// SCREEN_META (T-0317 → T-0355): static [group, leaf] crumb per top-level screen.
+// Group labels track the re-sectioned IA in nav-config.js (authoring/work split).
+// This is the BASE crumb; the dynamic builder below extends it for deep,
+// param-aware routes (app field-editor, records, record detail) by injecting
+// entity names.
+// T-0355: authoring space (Конструктор/Модельер/Ассистент) is now separate from
+// work space (Работа/Исполнители и доступ/Наблюдаемость).
 const SCREEN_META = {
   overview: { crumb: ["Обзор"] },
+  // Authoring space
   apps:  { crumb: ["Конструктор", "Приложения"] },
   "app-schema": { crumb: ["Конструктор", "Приложения"] },
   "app-records": { crumb: ["Конструктор", "Приложения"] },
+  forms:  { crumb: ["Конструктор", "Формы задач"] },
+  // T-0355: Модельер lives under /processes/:id/edit — the breadcrumb reflects
+  // the authoring space. The screen id seen in the pathname is "processes" for
+  // editor deep-routes; "modeler" is a nav-config logical alias only.
+  modeler: { crumb: ["Модельер"] },
+  assistant: { crumb: ["Ассистент"] },
+  // Work space
   inbox: { crumb: ["Работа", "Мои задачи"] },
   org:   { crumb: ["Исполнители и доступ", "Оргструктура"] },
   processes: { crumb: ["Работа", "Процессы"] },
@@ -63,8 +74,6 @@ const SCREEN_META = {
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
-  forms:  { crumb: ["Конструктор", "Формы задач"] },
-  assistant: { crumb: ["Конструктор", "Ассистент"] },
 };
 
 /**
@@ -163,6 +172,11 @@ function NavItem({ item, active }) {
   const status = effectiveStatus(item);
   const isSoon = status === "soon";
   const clickable = !!item.screen && !isSoon;
+  // T-0355: support optional `path` override on nav items. Items that don't
+  // map cleanly to '/' + id (e.g. Модельер → /processes/new/edit) set a
+  // `path` in nav-config.js. All OTHER items continue to use '/' + id so
+  // routes remain unchanged (the invariant from T-0317).
+  const targetPath = item.path || '/' + item.id;
   // T-0307 (audit #5): the `count` on a nav item is a STATIC seed in
   // nav-config — it does NOT come from the section's live content (e.g. nav
   // shows «Процессы 7» while the page lists a different number, «Инбокс 18»
@@ -184,7 +198,7 @@ function NavItem({ item, active }) {
       className="chs-navitem"
       aria-current={active ? "true" : undefined}
       disabled={!clickable}
-      onClick={() => clickable && navigate('/' + item.id)}
+      onClick={() => clickable && navigate(targetPath)}
     >
       <Icon name={item.icon} className="chs-navitem__icon" />
       <span className="chs-navitem__label">{item.label}</span>
@@ -348,7 +362,8 @@ function paletteDestinations() {
     for (const item of visibleItems(grp)) {
       if (!item.screen) continue;
       if (effectiveStatus(item) === "soon") continue;
-      out.push({ id: item.id, label: item.label, group: grp.group, icon: item.icon, path: "/" + item.id });
+      // T-0355: respect `item.path` override (e.g. Модельер → /processes/new/edit).
+      out.push({ id: item.id, label: item.label, group: grp.group, icon: item.icon, path: item.path || "/" + item.id });
     }
   }
   return out;
@@ -612,20 +627,53 @@ function AppShell() {
         />
 
         <div className="chs-nav__scroll">
-          {NAV.map((grp) => {
-            const items = visibleItems(grp);
-            if (items.length === 0) return null;
-            return (
-              <div className="chs-nav__group" key={grp.group}>
-                {/* T-0326: home group («Обзор») renders as a single top item
-                    without a group label — a header over one choice is noise. */}
-                {!grp.home && <div className="chs-nav__grouplabel">{grp.group}</div>}
-                {items.map((item) => (
-                  <NavItem key={item.id} item={item} active={screen === item.id} />
-                ))}
-              </div>
-            );
-          })}
+          {/* T-0355: two-space IA — АВТОРИНГ (authoring) then РАБОТА (work).
+              A visual space-divider is injected once, at the transition point,
+              so the user immediately sees which space they are in. The home
+              «Обзор» group sits above both spaces (no space label). */}
+          {(() => {
+            let renderedDivider = false;
+            return NAV.map((grp) => {
+              const items = visibleItems(grp);
+              if (items.length === 0) return null;
+
+              // Inject the space divider exactly once, before the first 'work' group.
+              let divider = null;
+              if (grp.space === "work" && !renderedDivider) {
+                renderedDivider = true;
+                divider = (
+                  <div key="__space-divider" className="chs-nav__space-divider" aria-hidden="true" />
+                );
+              }
+
+              const groupEl = (
+                <div className="chs-nav__group" key={grp.group}>
+                  {/* T-0326: home group («Обзор») renders as a single top item
+                      without a group label — a header over one choice is noise.
+                      T-0355: groups with a single visible item in authoring space
+                      (Модельер, Ассистент) still show their label — each is a
+                      distinct tool, not a spurious header. */}
+                  {!grp.home && <div className="chs-nav__grouplabel">{grp.group}</div>}
+                  {items.map((item) => {
+                    // T-0355: active detection for items with a `path` override.
+                    // Модельер (path=/processes/new/edit) should also highlight when
+                    // editing an existing process (/processes/:id/edit). We detect the
+                    // BPMN editor by checking for the /edit suffix in the pathname,
+                    // which only matches the deep editor route, not bare /processes.
+                    // Items without a path override use the standard screen-id match.
+                    const isActive = item.path
+                      ? location.pathname.endsWith('/edit')
+                      : screen === item.id;
+                    return (
+                      <NavItem key={item.id} item={item} active={isActive} />
+                    );
+                  })}
+                </div>
+              );
+
+              return divider ? [divider, groupEl] : groupEl;
+            });
+          })()}
         </div>
 
         <div className="chs-nav__foot">
