@@ -3,9 +3,10 @@
  *
  * Cycle-time analytics over the F2 Phase 1 transition journal.
  *
- * Reads the 6-event transition journal from `choros.audit_event` (migration 006)
- * via the materialized view `choros.process_transition_journal` (migration 079) or
- * directly via self-join when the mat-view has not yet been refreshed.
+ * Reads the 6-event transition journal directly from `choros.audit_event` (migration 006)
+ * under RLS (tenant_id GUC enforced via withTenant). The materialized view
+ * `choros.process_transition_journal` (migration 079) was revoked and dropped in
+ * migration 081 (cross-tenant leak risk); all analytics now query audit_event directly.
  *
  * QUERIES:
  *   1. `loadCycleTimeByActivity`: self-join on (tenant, instance_id, activity) over
