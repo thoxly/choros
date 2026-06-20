@@ -88,6 +88,68 @@ export interface LlmResult {
 }
 
 // ---------------------------------------------------------------------------
+// T-0359 (E17) — General chat shapes (additive, does NOT break complete()).
+// ---------------------------------------------------------------------------
+
+/**
+ * One turn in a chat conversation.
+ * "user" = the human / calling code; "assistant" = model reply.
+ */
+export interface ChatMessage {
+  readonly role: "system" | "user" | "assistant";
+  readonly content: string;
+}
+
+/**
+ * One tool call returned by the model (optional, for agentic paths).
+ */
+export interface ChatToolCall {
+  readonly id: string;
+  readonly name: string;
+  readonly arguments: string; // JSON-serialized
+}
+
+/**
+ * Chat request sent to the LLM via the port.
+ * D-139: NO raw secrets here; resolved in the adapter via SecretResolverPort.
+ */
+export interface ChatLlmRequest {
+  /** System prompt (persona / task framing). */
+  readonly system: string;
+  /** Conversation history + new user turn (in order). */
+  readonly messages: ChatMessage[];
+  /**
+   * Optional tool declarations (for the configurator / analyst to call
+   * choros primitives). Each item is an OpenAI-compatible tool object.
+   * Omit when pure text generation is desired.
+   */
+  readonly tools?: readonly unknown[];
+}
+
+/**
+ * Structured result from a port.chat() call.
+ *
+ * D-139 SPLIT (mirrors LlmResult):
+ *   - `text`      = assistant text reply — safe to surface to the user.
+ *   - `toolCalls` = optional model-requested tool invocations.
+ *   - `usage`     = token counts for budget tracking.
+ *   Reasoning / chain-of-thought MUST NOT appear in any exported field —
+ *   audit-only if the adapter surfaces it.
+ */
+export interface ChatLlmResult {
+  /** Assistant text reply (empty string when toolCalls is non-empty). */
+  readonly text: string;
+  /** Model-requested tool calls, if any. */
+  readonly toolCalls?: readonly ChatToolCall[];
+  /** Token usage for budget accounting (optional — provider may omit). */
+  readonly usage?: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // LlmPort — the injectable interface (pattern: SecretResolverPort).
 // ---------------------------------------------------------------------------
 
@@ -107,6 +169,13 @@ export interface LlmPort {
    * Throws LlmDormantError when called on dormantLlmPort (fail-closed).
    */
   complete(req: LlmRequest): Promise<LlmResult>;
+
+  /**
+   * T-0359 (E17): General chat completion (multi-turn, optional tool use).
+   * Returns a ChatLlmResult.
+   * Throws LlmDormantError when called on dormantLlmPort (fail-closed).
+   */
+  chat(req: ChatLlmRequest): Promise<ChatLlmResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +202,8 @@ export class LlmDormantError extends Error {
 
 /**
  * The default LlmPort used when live LLM is not configured.
- * complete() always throws LlmDormantError — structurally impossible to
- * make a network call through this port. This is lock #3 of the dormant gate.
+ * complete() and chat() always throw LlmDormantError — structurally impossible
+ * to make a network call through this port. This is lock #3 of the dormant gate.
  *
  * Lock #1: agent_card.llm_* NULL (DB config, migrations/032).
  * Lock #2: deps.liveEnabled=false at composition root.
@@ -143,5 +212,8 @@ export class LlmDormantError extends Error {
 export const dormantLlmPort: LlmPort = {
   complete(_req: LlmRequest): Promise<LlmResult> {
     throw new LlmDormantError("llm runtime dormant — configure agent_card.llm_* to enable");
+  },
+  chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    return Promise.reject(new LlmDormantError("llm runtime dormant — configure agent_card.llm_* to enable"));
   },
 };
