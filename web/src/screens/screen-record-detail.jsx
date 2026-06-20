@@ -1,6 +1,6 @@
 /* ============================================================================
    CHOROS — screen-record-detail.jsx
-   ЭКРАН: КОНСТРУКТОР · Детали записи (T-0295, read-only).
+   ЭКРАН: КОНСТРУКТОР · Детали записи (T-0295 + T-0352 cross-app links, read-only).
 
    Открывается по маршруту /apps/:appId/records/:id.
    Загружает одну запись через GET /api/records/:id (enriched — T-0295):
@@ -8,6 +8,13 @@
        record_schema, data, created_at, updated_at, created_by }
    Рендерит все поля записи по их меткам из record_schema (schemaToFormFields)
    как читаемый список «метка → значение». Обрабатывает 404 честно.
+
+   T-0352 (E16 §6): добавлены помеченные изолированные секции связанных приложений
+   («Из договора» / «Из CRM»). Секции lazy-loaded: загружаются через
+   GET /api/records/:id/links только при раскрытии пользователем. Политика резолюции:
+     - список (screen-app-records) = без резолюции (snapshot only);
+     - карточка (этот экран) = 1-хоп live lazy на раскрытие секции;
+     - нет доступа → редактированная проекция (label/id only).
 
    READ-ONLY: форма редактирования и любые мутации НЕ входят в этот экран.
    ============================================================================ */
@@ -17,6 +24,14 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { schemaToFormFields, formatCellValue } from './records-form.js';
+import {
+  groupLinksByLabel,
+  isHopAllowed,
+  isHopDenied,
+  getRedactionReason,
+  formatLinkedFields,
+  buildLinkSectionTitle,
+} from './record-links.js';
 
 function fmtTs(ms) {
   if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
@@ -66,6 +81,206 @@ const metaSidebarStyle = {
   background: 'var(--chs-color-surface)',
   padding: 'var(--chs-space-3) var(--chs-space-6)',
 };
+
+// ---------------------------------------------------------------------------
+// T-0352 (E16 §6): LinkedSection — labeled isolated section for a cross-app ref.
+//
+// §6 card policy: 1-hop live, lazy on expand. The section is collapsed by default;
+// opening it triggers GET /api/records/:id/links (once per card load). ACL-denied
+// hops render the redacted label-only sentinel («label · Нет доступа»).
+//
+// Token-only colors (G6); no hardcoded hex. OBLIK kit alignment.
+// ---------------------------------------------------------------------------
+
+const linkedSectionHeaderStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  cursor: 'pointer',
+  padding: 'var(--chs-space-4) 0',
+  borderBottom: '1px solid var(--chs-color-border)',
+  background: 'none',
+  border: 'none',
+  width: '100%',
+  textAlign: 'left',
+};
+
+const linkedSectionTitleStyle = {
+  fontSize: 'var(--chs-text-sm)',
+  fontWeight: '500',
+  color: 'var(--chs-color-text)',
+};
+
+const linkedSectionBodyStyle = {
+  borderLeft: '2px solid var(--chs-color-border)',
+  paddingLeft: 'var(--chs-space-4)',
+  marginTop: 'var(--chs-space-2)',
+  marginBottom: 'var(--chs-space-4)',
+};
+
+const redactedRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 'var(--chs-space-2)',
+  padding: 'var(--chs-space-3) 0',
+  color: 'var(--chs-color-text-muted)',
+  fontSize: 'var(--chs-text-sm)',
+  fontStyle: 'italic',
+};
+
+/**
+ * A single labeled isolated section for one cross-app ref.
+ * Renders allowed hop fields OR a redacted sentinel.
+ */
+function LinkedSection({ title, links, loading, loadError }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div style={{ borderTop: '1px solid var(--chs-color-border)' }}>
+      {/* Section header — clicking expands the section (lazy load trigger is in parent) */}
+      <button
+        type="button"
+        style={linkedSectionHeaderStyle}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span style={linkedSectionTitleStyle}>{title}</span>
+        <KitIcon name={expanded ? 'chevron-up' : 'chevron-down'} size={14} />
+      </button>
+
+      {/* Body — rendered only when expanded */}
+      {expanded && (
+        <div style={linkedSectionBodyStyle}>
+          {loading && <LoadingState label="Загрузка связанных данных…" compact />}
+          {!loading && loadError && (
+            <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+              Не удалось загрузить данные
+            </p>
+          )}
+          {!loading && !loadError && links && links.length === 0 && (
+            <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+              —
+            </p>
+          )}
+          {!loading && !loadError && links && links.map((link) => {
+            if (isHopAllowed(link.hop)) {
+              // Allowed: show resolved fields
+              const displayFields = formatLinkedFields(link.hop.fields);
+              if (displayFields.length === 0) {
+                return (
+                  <p key={link.refId} style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+                    —
+                  </p>
+                );
+              }
+              return (
+                <div key={link.refId}>
+                  {displayFields.map(({ key, displayValue }) => (
+                    <div key={key} style={fieldRowStyle}>
+                      <span style={labelStyle}>{key}</span>
+                      <span style={valueStyle}>{displayValue}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            }
+            if (isHopDenied(link.hop)) {
+              // Denied: redacted label/id only sentinel
+              const reason = getRedactionReason(link.hop);
+              return (
+                <div key={link.refId} style={redactedRowStyle}>
+                  <KitIcon name="lock" size={13} />
+                  <span>{link.label} · {reason}</span>
+                </div>
+              );
+            }
+            return null;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * CrossAppLinksPanel — T-0352 §6 lazy link-section loader.
+ *
+ * Fetches GET /api/records/:id/links once on first render and renders one
+ * labeled isolated section per label group (§6: «Из договора» / «Из CRM»).
+ * Empty links → nothing rendered (no section chrome for records without cross refs).
+ */
+function CrossAppLinksPanel({ recordId }) {
+  const [links, setLinks] = useState(null);  // null = not yet loaded
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+
+  useEffect(() => {
+    if (!recordId) return;
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    fetch(`/api/records/${encodeURIComponent(recordId)}/links`, {
+      headers: devHeaders(),
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) {
+          // 404 = record gone; other errors = degrade silently (don't block native fields)
+          setLinks([]);
+          setLoading(false);
+          return;
+        }
+        const body = await res.json();
+        if (cancelled) return;
+        setLinks(Array.isArray(body.links) ? body.links : []);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoadError('fetch_error');
+          setLoading(false);
+          setLinks([]);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [recordId]);
+
+  // No sections if no links (clean degradation for records with no cross refs)
+  if (!loading && (!links || links.length === 0)) return null;
+
+  // Group by label (per §6: each label → one isolated section)
+  const groups = links ? groupLinksByLabel(links) : new Map();
+
+  if (!loading && groups.size === 0) return null;
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-5)' }}>
+      <p style={{ ...labelStyle, marginBottom: 'var(--chs-space-3)' }}>
+        СВЯЗАННЫЕ ДАННЫЕ
+      </p>
+      {loading ? (
+        // Show one placeholder section while loading
+        <div style={{ borderTop: '1px solid var(--chs-color-border)', padding: 'var(--chs-space-4) 0' }}>
+          <LoadingState label="Загрузка связей…" compact />
+        </div>
+      ) : (
+        [...groups.entries()].map(([label, sectionLinks]) => (
+          <LinkedSection
+            key={label}
+            title={buildLinkSectionTitle(label)}
+            links={sectionLinks}
+            loading={false}
+            loadError={loadError}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RecordDetailScreen
+// ---------------------------------------------------------------------------
 
 function RecordDetailScreen() {
   const { appId, id } = useParams();
@@ -203,6 +418,11 @@ function RecordDetailScreen() {
                   ))}
                 </div>
               )}
+
+              {/* T-0352 (E16 §6): Cross-app link sections.
+                  Lazy: fetches GET /api/records/:id/links once per card load.
+                  Hidden when record has no cross_app_ref definitions (empty degrade). */}
+              <CrossAppLinksPanel recordId={record.id} />
             </div>
 
             {/* Metadata sidebar */}
