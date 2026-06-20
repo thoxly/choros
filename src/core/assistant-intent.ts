@@ -21,6 +21,8 @@ import type { LlmPort } from "./llm-port.js";
 import type { GrantSource } from "./grant-resolver.js";
 import type { AncestryOracle } from "./grant-lattice.js";
 import type { ResolveSubject } from "./object-handle.js";
+// T-0361: real configurator handler (replaces stub below)
+import { handleConfigurator as _handleConfiguratorImpl } from "./assistant-configurator.js";
 
 // ---------------------------------------------------------------------------
 // Handler context — injected into every handler at call time.
@@ -145,21 +147,11 @@ import { handleAnalyst as _handleAnalystImpl } from "./assistant-analyst.js";
 export const handleAnalyst: IntentHandler = _handleAnalystImpl;
 
 /**
- * STUB configurator handler — T-0361 will replace with real implementation.
- * For now: calls LLM chat() for a text reply, returns intent="configurator".
- * No DRAFT authoring tools — deferred to T-0361.
+ * CONFIGURATOR handler — T-0361 real implementation.
+ * Delegates to src/core/assistant-configurator.ts (handleConfigurator).
+ * Authors the E16 model in DRAFT via tool dispatch; human promotes.
  */
-export const handleConfigurator: IntentHandler = async (userText, ctx) => {
-  const result = await ctx.llm.chat({
-    system:
-      "Ты конфигуратор-ассистент в системе Choros. " +
-      "Отвечай по-русски, кратко и по делу. " +
-      "Авторинг DRAFT-модели (поля, формы, процессы) доступен в следующей версии (T-0361). " +
-      "Сейчас расскажи пользователю, что ты понял о задаче настройки, и попроси уточнить детали.",
-    messages: [{ role: "user", content: userText }],
-  });
-  return { text: result.text, intent: "configurator" };
-};
+export const handleConfigurator: IntentHandler = _handleConfiguratorImpl;
 
 // ---------------------------------------------------------------------------
 // intentDispatch — the single entry point called by assistant.ts
