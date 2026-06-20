@@ -257,6 +257,7 @@ interface RegistryDefRow {
   id: string;
   record_schema: unknown;
   tier: string;
+  is_system: boolean;
 }
 
 interface DepRow {
@@ -358,7 +359,7 @@ async function updateSchemaInTx(args: {
   return withTenantTx(pool, tenantId, async (client: pg.PoolClient) => {
     // 1. Lock and read current registry_def row
     const regRes = await client.query<RegistryDefRow>(
-      `SELECT id, record_schema, tier
+      `SELECT id, record_schema, tier, is_system
          FROM choros.registry_def
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE`,
@@ -369,6 +370,46 @@ async function updateSchemaInTx(args: {
     }
     const existing = regRes.rows[0]!;
     const oldSchema = existing.record_schema as JsonSchemaForClassify;
+
+    // 1b. Extend-not-replace guard for system registries (T-0354 §7 ADR).
+    //   A tenant MAY add fields (additionalProperties allowed) but MUST NOT delete or
+    //   rename standard fields of an is_system registry_def.
+    //   "Rename" is detected as: a property key present in oldSchema.properties that is
+    //   absent in newSchema.properties. "Delete" is the same set-membership check.
+    //   ADD (new key in newSchema not in oldSchema) is allowed.
+    if (existing.is_system) {
+      const oldProps = (
+        oldSchema &&
+        typeof oldSchema === "object" &&
+        !Array.isArray(oldSchema) &&
+        "properties" in oldSchema &&
+        typeof (oldSchema as Record<string, unknown>)["properties"] === "object" &&
+        (oldSchema as Record<string, unknown>)["properties"] !== null
+      )
+        ? Object.keys((oldSchema as Record<string, unknown>)["properties"] as Record<string, unknown>)
+        : [];
+
+      const newProps = (
+        newSchema &&
+        typeof newSchema === "object" &&
+        !Array.isArray(newSchema) &&
+        "properties" in newSchema &&
+        typeof (newSchema as Record<string, unknown>)["properties"] === "object" &&
+        (newSchema as Record<string, unknown>)["properties"] !== null
+      )
+        ? new Set(Object.keys((newSchema as Record<string, unknown>)["properties"] as Record<string, unknown>))
+        : new Set<string>();
+
+      const removedFields = oldProps.filter((k) => !newProps.has(k));
+      if (removedFields.length > 0) {
+        throw new HttpError(
+          403,
+          "SYSTEM_REGISTRY_FIELD_PROTECTED",
+          `Cannot delete or rename standard fields of a system registry: ${removedFields.join(", ")}. ` +
+            `Tenants may only ADD fields to system registries (extend-not-replace).`,
+        );
+      }
+    }
 
     // 2. Load active deps
     const activeDeps = await loadActiveDeps(client, tenantId, registryDefId);
