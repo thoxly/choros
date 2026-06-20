@@ -41,3 +41,6 @@
 076_soglasovanie_registry_seed # T-0335 — Согласование registry_def seed (pure INSERT seed, no CREATE TABLE); owned by step-applier.ts
 077_tel_roles_seed            # T-0336 — TEL role seed (INSERT role/grant rows, no CREATE TABLE); owned by claim-projection.ts
 078_user_task_claim           # T-0338 — E15-S2-claim: user_task_claim TOCTOU-safe DB lock primitive (FORCE RLS); owned by claim-projection.ts
+079_transition_journal_index  # T-0339 — E15-S3: GIN+btree indexes on audit_event + process_transition_journal mat-view (no new tenant table); owned by transition-journal.ts analytics
+080_tel_dmn_seed              # T-0340 — E15-S5: DMN 5M-threshold seed for dev tenant (pure INSERT, no CREATE TABLE); owned by dmn-rule-table adapter
+081_revoke_transition_journal # T-0346 — E15-S3-followup SECURITY: REVOKE+DROP cross-tenant mat-view process_transition_journal (zero readers, audit_event RLS path preserved); owned by this task
