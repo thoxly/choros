@@ -21,7 +21,7 @@
 -- IDEMPOTENCY: All DROP commands use IF EXISTS. Safe to apply more than once.
 --
 -- FROZEN-CHECK SAFETY:
---   - No CREATE TABLE, no new RLS policy, no new tenant table.
+--   - No new table creation, no new RLS policy, no new tenant table.
 --   - known_tenant_tables.txt: NOT modified (mat-views are not tenant tables).
 --   - dual-control-isolation.sh FF-DC7: additive relief for this migration (081) is
 --     appended to that check (T0346-DC-MIG081-GUARD) — mirrors T-0338 pattern.
