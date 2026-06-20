@@ -28,8 +28,11 @@
 --   re-evaluate on the OLD (pinned) snapshot. This migration only INSERTs a new
 --   row; existing pinned references are unaffected.
 --
--- Known tenant: 'aaaaaaaa-0000-0000-0000-000000000001' is the canonical seed
--- tenant used in ci/checks/db/* tests and seed/demo/tel-scenario.ts.
+-- Known tenant: 'a0000000-0000-0000-0000-000000000001' is the canonical dev/seed
+-- tenant used throughout: migration 013 (tenant table seed), migration 026
+-- (genesis owner seed), migration 053 (config agent seed), the journey
+-- DEV_TENANT_ID constant (e2e/journeys/tel-linear.journey.ts), and the UI
+-- LaunchModal (web/src/screens/screen-processes.jsx x-tenant-id header).
 -- The id is a deterministic UUID for this seed row so the migration is
 -- repeatable and testable without a random UUIDv4 that changes per run.
 
@@ -46,7 +49,7 @@ INSERT INTO choros.dmn_rule_table (
   updated_at
 )
 VALUES (
-  'aaaaaaaa-0000-0000-0000-000000000001'::uuid,
+  'a0000000-0000-0000-0000-000000000001'::uuid,
   'c0de0001-e150-0005-d4f4-000000000080'::uuid,
   'ТЭЛ: порог суммы закупки',
   '{

@@ -606,6 +606,32 @@ describe("DG-12: tel-linear.bpmn20.xml contains exclusiveGateway + conditional s
     expect(bpmnContent).toMatch(/flowable:type="external"/);
     expect(bpmnContent).toMatch(/flowable:topic="tel-intake"/);
   });
+
+  // R-2 ADD shape assertions (T-0340 review fix)
+  it("DG-12h: task-approve userTask present (base Согласование — U3/U4 pool task, ADD not replace)", () => {
+    // The base approval task must exist so the journey U3/U4 pool task is reachable.
+    expect(bpmnContent).toMatch(/id="task-approve"/);
+    expect(bpmnContent).toMatch(/candidateGroups="role-approver"/);
+  });
+
+  it("DG-12i: task-approve flows into gw-approval-threshold (gateway is AFTER Согласование)", () => {
+    // The sequenceFlow from task-approve to gw-approval-threshold must be present.
+    // This ensures the gateway is placed AFTER the base approval, not before it.
+    expect(bpmnContent).toMatch(/sourceRef="task-approve"[^/]*targetRef="gw-approval-threshold"/);
+  });
+
+  it("DG-12j: exclusiveGateway has a default attribute (no-outgoing-flow safety)", () => {
+    // The default attribute ensures a missing/unrecognised approvalRequired variable
+    // routes to end rather than erroring with 'no outgoing sequence flow'.
+    expect(bpmnContent).toMatch(/exclusiveGateway[^>]*default="/);
+  });
+
+  it("DG-12k: task-triage flows to task-approve (not directly to gateway)", () => {
+    // After triage the main path goes to task-approve (not gw-approval-threshold directly).
+    expect(bpmnContent).toMatch(/sourceRef="task-triage"[^/]*targetRef="task-approve"/);
+    // And task-triage must NOT flow directly to gw-approval-threshold.
+    expect(bpmnContent).not.toMatch(/sourceRef="task-triage"[^/]*targetRef="gw-approval-threshold"/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -652,5 +678,104 @@ describe("DG-13: migration 080 is data-only (no DDL, no forbidden table tokens)"
 
   it("DG-13e: migration 080 seeds the 5M threshold value 5000000", () => {
     expect(migContent).toMatch(/5000000/);
+  });
+
+  // R-3 tenant assertion (T-0340 review fix)
+  it("DG-13f: migration 080 seeds under the canonical dev tenant a0000000-…001", () => {
+    // The canonical dev/seed tenant is a0000000-0000-0000-0000-000000000001 (migration 013,
+    // migration 026, journey DEV_TENANT_ID). The wrong tenant aaaaaaaa-… made the rule
+    // invisible to the dev tenant.
+    expect(migContent).toMatch(/a0000000-0000-0000-0000-000000000001/);
+    // Must NOT seed under the incorrect aaaaaaaa tenant.
+    const codeLines = migContent
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("--"))
+      .join("\n");
+    expect(codeLines).not.toMatch(/aaaaaaaa-0000-0000-0000-000000000001/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-14: R-1 bridge wiring — externalTaskBridge.ts imports and wires DMN gateway
+// ---------------------------------------------------------------------------
+
+describe("DG-14: externalTaskBridge.ts wires evaluateGatewayAtTriage for tel-intake (R-1)", () => {
+  const bridgePath = path.join(
+    PROJECT_ROOT,
+    "src/core/externalTaskBridge.ts",
+  );
+
+  let bridgeContent: string;
+  try {
+    bridgeContent = fs.readFileSync(bridgePath, "utf-8");
+  } catch {
+    bridgeContent = "";
+  }
+
+  it("DG-14a: externalTaskBridge.ts imports from dmn-gateway and includes evaluateGatewayAtTriage", () => {
+    // The import may be multi-line; check both the symbol and the module separately.
+    expect(bridgeContent).toMatch(/evaluateGatewayAtTriage/);
+    expect(bridgeContent).toMatch(/from.*dmn-gateway/);
+  });
+
+  it("DG-14b: externalTaskBridge.ts imports TEL_GATEWAY_VAR from dmn-gateway", () => {
+    expect(bridgeContent).toMatch(/TEL_GATEWAY_VAR/);
+  });
+
+  it("DG-14c: externalTaskBridge.ts calls evaluateGatewayAtTriage at runtime", () => {
+    // The function must be invoked (not just imported) in the task_completed path.
+    expect(bridgeContent).toMatch(/evaluateGatewayAtTriage\s*\(/);
+  });
+
+  it("DG-14d: externalTaskBridge.ts checks for tel-intake topic before evaluating", () => {
+    // The wiring is topic-gated (only fires for the tel-intake external task).
+    expect(bridgeContent).toMatch(/tel-intake/);
+  });
+
+  it("DG-14e: externalTaskBridge.ts merges TEL_GATEWAY_VAR into completeTask payload", () => {
+    // The evaluated gateway variable must be spread into the payload sent to completeTask.
+    expect(bridgeContent).toMatch(/\[TEL_GATEWAY_VAR\]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-15: R-1 unit smoke — evaluateGatewayAtTriage wires into a realistic bridge
+//         stub (the triage-seam call with a real amount binding)
+// ---------------------------------------------------------------------------
+
+describe("DG-15: triage-seam smoke — evaluateGatewayAtTriage called with amount binding", () => {
+  it("DG-15a: evaluateGatewayAtTriage returns needs-approval for >5M binding (as bridge would inject)", async () => {
+    const { client } = makeCapturingClient();
+    // Simulate what the bridge does: process variables from Flowable include `amount`.
+    const instanceVars: Record<string, unknown> = { amount: 5_500_000 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY,
+      gatewayId: TEL_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: instanceVars,
+      existingVariables: instanceVars,
+    });
+    expect(result.isLateCompute).toBe(true);
+    // 5.5M > 5M → needs-approval — this is what the bridge would inject as approvalRequired.
+    expect(result.gatewayVar).toBe("needs-approval");
+  });
+
+  it("DG-15b: evaluateGatewayAtTriage returns standard for ≤5M binding", async () => {
+    const { client } = makeCapturingClient();
+    const instanceVars: Record<string, unknown> = { amount: 3_000_000 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY,
+      gatewayId: TEL_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: instanceVars,
+      existingVariables: instanceVars,
+    });
+    expect(result.gatewayVar).toBe("standard");
   });
 });

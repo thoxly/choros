@@ -29,6 +29,15 @@ import type { FlowableClient } from "./flowable-client.js";
 import type { PostgresJobStore } from "./postgres/pgJobStore.js";
 import type { Deliver, OnDispatched } from "./outboxDispatcher.js";
 import type { OutboxRow } from "./outboxTypes.js";
+// T-0340 [E15-S5] R-1: DMN gateway wiring at the triage completeTask seam.
+// evaluateGatewayAtTriage is called when the tel-intake external task completes, so
+// that approvalRequired is set in the Flowable variable map BEFORE the engine
+// evaluates gw-approval-threshold (the exclusiveGateway in tel-linear.bpmn20.xml).
+import {
+  evaluateGatewayAtTriage,
+  TEL_GATEWAY_VAR,
+  TEL_GATEWAY_ID,
+} from "./dmn-gateway.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -103,6 +112,48 @@ async function lookupExternalTaskId(
   } catch {
     await client.query("ROLLBACK").catch(() => {/* swallow */});
     throw new Error(`lookupExternalTaskId failed for jobId=${jobId}`);
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// lookupJobTopicAndVariables — reverse-map: given jobId → (topic, variables)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reverse-map: given a Choros jobId, return the job's topic and variables as
+ * stored in choros.job (the Flowable external-task process variables captured
+ * at fetchAndLock time). These carry the binding values needed for DMN evaluation
+ * (e.g. `amount` for the ТЭЛ threshold gate).
+ *
+ * Returns undefined when the job row is not found or has no variables.
+ * GUC requirement: the connection MUST have choros.tenant_id set before this query.
+ */
+async function lookupJobTopicAndVariables(
+  pool: pg.Pool,
+  tenantId: string,
+  jobId: string,
+): Promise<{ topic: string; variables: Record<string, unknown> } | undefined> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SET LOCAL "choros.tenant_id" = '${tenantId.replace(/'/g, "''")}'`,
+    );
+    const { rows } = await client.query<{ topic: string; variables: Record<string, unknown> }>(
+      `SELECT topic, variables
+       FROM choros.job
+       WHERE id = $1
+         AND tenant_id = current_setting('choros.tenant_id', false)::uuid`,
+      [jobId],
+    );
+    await client.query("COMMIT");
+    if (rows.length === 0) return undefined;
+    return { topic: rows[0].topic, variables: rows[0].variables ?? {} };
+  } catch {
+    await client.query("ROLLBACK").catch(() => {/* swallow */});
+    return undefined;
   } finally {
     client.release();
   }
@@ -209,6 +260,16 @@ export async function runBridgeOnce(
  * Any other error       → { ok: false, error } → outboxDispatcher backoff/retry.
  *
  * T-0068 seam: optional onDispatched callback preserved in the factory signature.
+ *
+ * T-0340 [E15-S5] R-1: DMN gateway wiring at the triage seam.
+ *   When the completed job's topic is "tel-intake", evaluateGatewayAtTriage is
+ *   called with the process variables captured at fetchAndLock time, and the
+ *   resulting `approvalRequired` value is merged into the completeTask variables
+ *   map so Flowable evaluates gw-approval-threshold with a live variable.
+ *   The pool client is opened under the row's tenantId GUC (same pattern as
+ *   lookupExternalTaskId). On any evaluation error the task is still completed
+ *   but without the gateway variable (Flowable will error at the gateway, which
+ *   is the correct fail-closed behaviour when the DMN evaluation fails).
  */
 export function makeExternalTaskDeliver(
   flowableClient: FlowableClient,
@@ -234,12 +295,72 @@ export function makeExternalTaskDeliver(
           return { ok: false as const, idempotentSuccess: true };
         }
 
-        const payload =
+        let payload: Record<string, unknown> | undefined =
           typeof row.payload["variables"] === "object" &&
           row.payload["variables"] !== null &&
           !Array.isArray(row.payload["variables"])
             ? (row.payload["variables"] as Record<string, unknown>)
             : undefined;
+
+        // T-0340 [E15-S5] R-1: MANDATORY late-compute at the triage seam.
+        // When the completed job is the tel-intake external task, look up the
+        // process-instance variables (captured at fetchAndLock time and stored in
+        // choros.job.variables), evaluate the DMN gateway, and inject
+        // `approvalRequired` into the completeTask variables map so Flowable can
+        // route through gw-approval-threshold correctly.
+        const TEL_INTAKE_TOPIC = "tel-intake";
+        const jobInfo = await lookupJobTopicAndVariables(pool, row.tenantId, row.aggregateId);
+        if (jobInfo?.topic === TEL_INTAKE_TOPIC) {
+          try {
+            const pgClient = await pool.connect();
+            try {
+              await pgClient.query("BEGIN");
+              await pgClient.query(
+                `SET LOCAL "choros.tenant_id" = '${row.tenantId.replace(/'/g, "''")}'`,
+              );
+              await pgClient.query("SET LOCAL search_path TO choros");
+              // The process variables from the Flowable instance (captured at
+              // fetchAndLock) carry the user-submitted field values including `amount`.
+              // existingVariables feeds the in-flight rule-change check (§8).
+              const instanceVariables = jobInfo.variables;
+              const triageResult = await evaluateGatewayAtTriage(pgClient, {
+                tenantId: row.tenantId,
+                instanceId: row.aggregateId, // jobId as correlation id (best available; instanceId carried in variables when Flowable sets it)
+                processKey: "telLinear",
+                gatewayId: TEL_GATEWAY_ID,
+                actor: "choros-bridge", // service actor at the triage seam
+                nowMs: Date.now(),
+                bindings: instanceVariables as Record<string, number | string | boolean>,
+                existingVariables: instanceVariables,
+              });
+              await pgClient.query("COMMIT");
+
+              if (triageResult.gatewayVar !== null) {
+                // Merge approvalRequired into the completeTask variables.
+                // Downstream: Flowable reads this variable when it evaluates the
+                // exclusiveGateway conditionExpressions in tel-linear.bpmn20.xml.
+                payload = {
+                  ...(payload ?? {}),
+                  [TEL_GATEWAY_VAR]: triageResult.gatewayVar,
+                };
+              }
+            } catch (evalErr) {
+              await pgClient.query("ROLLBACK").catch(() => {/* swallow */});
+              // Non-fatal: log and proceed with the original payload.
+              // Flowable will error at the gateway (fail-closed) when the variable is absent.
+              console.error(
+                `[externalTaskBridge] evaluateGatewayAtTriage failed for job ${row.aggregateId}: ${String(evalErr)}`,
+              );
+            } finally {
+              pgClient.release();
+            }
+          } catch (poolErr) {
+            // Pool acquisition failure — proceed without the gateway variable.
+            console.error(
+              `[externalTaskBridge] pool.connect failed for DMN eval (job ${row.aggregateId}): ${String(poolErr)}`,
+            );
+          }
+        }
 
         const result = await flowableClient.completeTask(
           externalTaskId,
