@@ -3,8 +3,8 @@
 -- DATA-ONLY migration: seed the 5,000,000 ₽ approval-threshold DMN rule table
 -- into choros.dmn_rule_table (migration 066) for the canonical ТЭЛ process.
 --
--- NO CREATE TABLE. NO schema changes. Pure data INSERT, idempotent ON CONFLICT.
--- Passes defer-no-new-table.sh (D-061 / FF-DC7, T-0221).
+-- Schema-additive: INSERT only (no DDL, no new tables, no schema changes).
+-- Idempotent ON CONFLICT. Passes defer-no-new-table.sh (D-061 / FF-DC7, T-0221).
 --
 -- Design (machinery-plan §3 S5 / F4):
 --   The ТЭЛ (procurement approval) process has an exclusiveGateway that routes
