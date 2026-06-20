@@ -17,7 +17,15 @@
  */
 
 import https from "node:https";
-import type { LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../core/llm-port.js";
+import type {
+  LlmPort,
+  LlmRequest,
+  LlmResult,
+  PrecheckAnswer,
+  ChatLlmRequest,
+  ChatLlmResult,
+  ChatToolCall,
+} from "../core/llm-port.js";
 import { SecretResolverPort, validateSecretHandleShape, redactHandle } from "../core/secret-handle-validator.js";
 
 // ---------------------------------------------------------------------------
@@ -34,15 +42,34 @@ interface ChatCompletionRequest {
   messages: ChatMessage[];
   response_format?: { type: "json_object" };
   temperature?: number;
+  tools?: unknown[];
+  tool_choice?: string | unknown;
+}
+
+interface ChatCompletionToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
 }
 
 interface ChatCompletionChoice {
-  message: { role: string; content: string };
+  message: {
+    role: string;
+    content: string | null;
+    tool_calls?: ChatCompletionToolCall[];
+  };
   finish_reason: string | null;
+}
+
+interface ChatCompletionUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 interface ChatCompletionResponse {
   choices: ChatCompletionChoice[];
+  usage?: ChatCompletionUsage;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +178,60 @@ export class OpenAILlmPort implements LlmPort {
     };
 
     return { confidence, answer, reasoning };
+  }
+
+  /**
+   * T-0359 (E17): General chat completion (multi-turn, optional tool use).
+   * Follows the same RL-3 secret-custody pattern as complete().
+   * D-139: reasoning / chain-of-thought is NEVER returned — text only.
+   */
+  async chat(req: ChatLlmRequest): Promise<ChatLlmResult> {
+    // RL-3: resolve the secret at call time, via SecretResolverPort.
+    const apiKey = await this.config.secretResolver.resolveSecret(
+      this.config.secretHandle,
+      { tenantId: this.config.tenantId },
+    );
+
+    // Build the messages array: prepend system message if provided.
+    const messages: ChatMessage[] = req.system
+      ? [
+          { role: "system", content: req.system },
+          ...req.messages.map((m) => ({ role: m.role, content: m.content })),
+        ]
+      : req.messages.map((m) => ({ role: m.role, content: m.content }));
+
+    const body: ChatCompletionRequest = {
+      model: this.config.model,
+      messages,
+      temperature: 0,
+      ...(req.tools && req.tools.length > 0
+        ? { tools: req.tools as unknown[], tool_choice: "auto" }
+        : {}),
+    };
+
+    const raw = await this._post(apiKey, body);
+    const choice = raw.choices[0];
+    const message = choice?.message;
+
+    const text = message?.content ?? "";
+    const toolCalls: ChatToolCall[] | undefined =
+      message?.tool_calls && message.tool_calls.length > 0
+        ? message.tool_calls.map((tc) => ({
+            id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          }))
+        : undefined;
+
+    const usage = raw.usage
+      ? {
+          promptTokens: raw.usage.prompt_tokens,
+          completionTokens: raw.usage.completion_tokens,
+          totalTokens: raw.usage.total_tokens,
+        }
+      : undefined;
+
+    return { text, toolCalls, usage };
   }
 
   /** Make a POST to the OpenAI chat completions endpoint. */

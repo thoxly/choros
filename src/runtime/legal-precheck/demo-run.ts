@@ -26,8 +26,8 @@
 
 import { randomUUID } from "node:crypto";
 
-import type { LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../../core/llm-port.js";
-import { dormantLlmPort } from "../../core/llm-port.js";
+import type { ChatLlmRequest, ChatLlmResult, LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../../core/llm-port.js";
+import { LlmDormantError, dormantLlmPort } from "../../core/llm-port.js";
 import type { PrecheckOutcome } from "../../core/agent-precheck-motor.js";
 import { runLegalPrecheck, type PrecheckDeps } from "./run-precheck.js";
 
@@ -113,6 +113,11 @@ export class DemoStubLlmPort implements LlmPort {
         "Internal: reviewed §4.2/§7.1/§11.3, flagged payment/liability/jurisdiction risk",
     };
     return Promise.resolve(result);
+  }
+
+  // T-0359: demo run is complete()-only; chat() not wired (fail closed).
+  chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    throw new LlmDormantError("DemoStubLlmPort does not support chat()");
   }
 }
 

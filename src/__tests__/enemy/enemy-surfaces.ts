@@ -54,6 +54,9 @@ import {
   classifyOutcome,
 } from "../../core/agent-precheck-motor.js";
 import {
+  type ChatLlmRequest,
+  type ChatLlmResult,
+  LlmDormantError,
   type LlmPort,
   type LlmResult,
 } from "../../core/llm-port.js";
@@ -196,6 +199,10 @@ function reasoningLlmPort(input: ReasoningEgressProbeInput): LlmPort {
         reasoning: input.reasoning, // INTERNAL-ONLY — must never reach egress (D-139).
       };
       return Promise.resolve(result);
+    },
+    // T-0359: reasoning-egress probe is complete()-only; chat() fail closed.
+    chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+      throw new LlmDormantError("reasoningLlmPort does not support chat()");
     },
   };
 }

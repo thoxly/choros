@@ -29,6 +29,7 @@ import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
 import { registerRecordRoutes } from "./http/records.js";
 import { registerRecordLinksRoutes } from "./http/record-links.js";
+import { registerAssistantRoutes } from "./http/assistant.js";
 import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
 import { registerRegisterRoutes } from "./http/register.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
@@ -46,6 +47,7 @@ import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
+import { dormantLlmPort } from "./core/llm-port.js";
 
 const { Pool } = pg;
 
@@ -498,6 +500,22 @@ function buildRouter(
         }
       : undefined,
   );
+
+  // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // APPEND-ONLY: the last register* call before setFallback.
+  if (grantsPool) {
+    registerAssistantRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // llmPortFactory: returns dormantLlmPort when no LLM is configured.
+      // Production wiring: composition root provides a factory that reads
+      // agent_card.llm_* from DB and builds OpenAILlmPort per tenant.
+      // For now: always dormant — BYO-key wiring is T-0362 (Wave 3).
+      llmPortFactory: (_tenantId: string) => dormantLlmPort,
+    });
+  }
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));

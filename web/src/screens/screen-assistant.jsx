@@ -42,32 +42,35 @@ import { authHeaders } from '../app-shell/dev-auth.js';
    Структуры данных фиксируют контракт между shell (T-0358) и impl (T-0359+).
    --------------------------------------------------------------------------- */
 
-// STUB: возвращает список тредов из локального стейта (нет бэкенда)
-// → REPLACE T-0359: GET /api/assistant/threads
+// T-0359: REAL threads hook — GET/POST /api/assistant/threads
 function useThreadsStub() {
   const [threads, setThreads] = useState(null);
   const [error, setError] = useState(null);
 
   const load = useCallback(() => {
     setError(null);
-    // TODO-SEAM T-0359: fetch('/api/assistant/threads', { headers: authHeaders() })
-    //   .then(r => r.json()).then(d => setThreads(d.threads)).catch(...)
-    // Stub: пустой список тредов — честное «начните разговор»
-    setThreads([]);
+    fetch('/api/assistant/threads', { headers: authHeaders() })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => setThreads(d.threads ?? []))
+      .catch((err) => setError(err.message ?? 'Не удалось загрузить разговоры.'));
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  const createThread = useCallback(({ title, contextRef }) => {
-    // TODO-SEAM T-0359: POST /api/assistant/threads → { id, title, created_at }
-    const id = `thread-${Date.now()}`;
-    const thread = {
-      id,
-      title: title || 'Новый разговор',
-      created_at: new Date().toISOString(),
-      message_count: 0,
-      context_ref: contextRef || null,
-    };
+  const createThread = useCallback(async ({ title, contextRef }) => {
+    const r = await fetch('/api/assistant/threads', {
+      method: 'POST',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title || 'Новый разговор', context_ref: contextRef || null }),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => `HTTP ${r.status}`);
+      throw new Error(msg);
+    }
+    const thread = await r.json();
     setThreads((prev) => [thread, ...(prev || [])]);
     return thread;
   }, []);
@@ -75,8 +78,7 @@ function useThreadsStub() {
   return { threads, error, load, createThread };
 }
 
-// STUB: сообщения треда + отправка
-// → REPLACE T-0359/T-0360: GET+POST /api/assistant/threads/:id/messages
+// T-0359: REAL messages hook — GET/POST /api/assistant/threads/:id/messages
 function useMessagesStub(threadId) {
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
@@ -85,14 +87,19 @@ function useMessagesStub(threadId) {
   useEffect(() => {
     if (!threadId) { setMessages([]); return; }
     setError(null);
-    // TODO-SEAM T-0359: fetch(`/api/assistant/threads/${threadId}/messages`, { headers: authHeaders() })
-    setMessages([]);
+    fetch(`/api/assistant/threads/${threadId}/messages`, { headers: authHeaders() })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d) => setMessages(d.messages ?? []))
+      .catch((err) => setError(err.message ?? 'Не удалось загрузить сообщения.'));
   }, [threadId]);
 
   const send = useCallback(async (text, contextRef) => {
     if (!text.trim()) return;
 
-    // Optimistic: добавляем сообщение пользователя
+    // Optimistic: добавляем сообщение пользователя сразу в UI.
     const userMsg = {
       id: `msg-u-${Date.now()}`,
       role: 'user',
@@ -105,22 +112,45 @@ function useMessagesStub(threadId) {
     setError(null);
 
     try {
-      // TODO-SEAM T-0359/T-0360: POST /api/assistant/threads/${threadId}/messages
-      //   body: { text, context_ref: contextRef }
-      //   response: SSE stream → накапливать в assistantMsg.text, по done → setStreaming(false)
-      // Stub: имитируем задержку и возвращаем заглушку
-      await new Promise((r) => setTimeout(r, 800));
-      const assistantMsg = {
-        id: `msg-a-${Date.now()}`,
-        role: 'assistant',
-        // TODO-SEAM: этот текст будет стримиться из LLM; здесь — только честная заглушка.
-        text: '[Ответ ассистента появится здесь. Бэкенд LLM подключается в T-0359/T-0360.]',
-        ts: new Date().toISOString(),
-        streaming_done: true,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      const r = await fetch(`/api/assistant/threads/${threadId}/messages`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, context_ref: contextRef || null }),
+      });
+
+      if (r.status === 503) {
+        // LLM не настроен — честный 503.
+        const d = await r.json().catch(() => ({}));
+        const assistantMsg = {
+          id: `msg-dormant-${Date.now()}`,
+          role: 'assistant',
+          text: d.message ?? 'LLM не настроен — настройте BYO-ключ для активации ассистента.',
+          ts: new Date().toISOString(),
+          streaming_done: true,
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+        return;
+      }
+
+      if (!r.ok) {
+        const msg = await r.text().catch(() => `HTTP ${r.status}`);
+        throw new Error(msg);
+      }
+
+      const assistantMsg = await r.json();
+      // Normalize to expected shape.
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantMsg.id,
+          role: 'assistant',
+          text: assistantMsg.text,
+          ts: assistantMsg.ts || new Date().toISOString(),
+          streaming_done: assistantMsg.streaming_done ?? true,
+        },
+      ]);
     } catch (err) {
-      setError('Не удалось отправить сообщение. Проверьте подключение.');
+      setError(err.message ?? 'Не удалось отправить сообщение. Проверьте подключение.');
     } finally {
       setStreaming(false);
     }
@@ -129,13 +159,19 @@ function useMessagesStub(threadId) {
   return { messages, streaming, error, send };
 }
 
-// STUB: бюджет треда
-// → REPLACE T-0359: GET /api/assistant/threads/:id/budget
+// T-0359: REAL budget hook — GET /api/assistant/threads/:id/budget
 function useBudgetStub(threadId) {
-  // TODO-SEAM T-0359: fetch(`/api/assistant/threads/${threadId}/budget`, { headers: authHeaders() })
-  //   → { tokens_used, tokens_limit, cost_usd, cost_limit_usd }
-  if (!threadId) return null;
-  return { tokens_used: 0, tokens_limit: 100000, cost_usd: 0, cost_limit_usd: 1.0 };
+  const [budget, setBudget] = useState(null);
+
+  useEffect(() => {
+    if (!threadId) { setBudget(null); return; }
+    fetch(`/api/assistant/threads/${threadId}/budget`, { headers: authHeaders() })
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => setBudget(d))
+      .catch(() => setBudget(null));
+  }, [threadId]);
+
+  return budget;
 }
 
 /* ---------------------------------------------------------------------------
