@@ -1,19 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  tel-linear.bpmn20.xml — T-0279 §A (ADR T-0278 §2.1)
-  Canonical linear ТЭЛ process definition for deploy-acceptance gate.
+  tel-linear.bpmn20.xml — T-0279 §A (ADR T-0278 §2.1) + T-0340 [E15-S5]
+  Canonical ТЭЛ process definition with DMN-driven exclusiveGateway.
 
   Design constraints (ADR §2.1, NF O3):
-  - LINEAR only: no gateway branching, no cycles, no refuse-branches.
-  - Structure: startEvent → userTask «Подача заявки» → serviceTask «Триаж» (external)
-               → userTask «Согласование» → endEvent «Завершено»
-  - userTask «Подача заявки»:  candidateGroups="role-initiator"  (e-orlov, U1/U2)
-  - serviceTask «Триаж»:       external topic="tel-intake"        (a-intake, U3, DORMANT/DETERMINISTIC, ZERO LLM)
-  - userTask «Согласование»:   candidateGroups="role-approver"   (e-larina, U4)
-  - Roles from seed/demo/tel-scenario.ts:
-      initiator = e-orlov (role-initiator)
-      approver  = e-larina (role-approver / fin-ctrl)
-      intake    = a-intake (role-intake-agent, agent_card DORMANT, llm_* NULL)
+  - T-0340 [E15-S5]: adds ONE exclusiveGateway (gw-approval-threshold) after
+    the Триаж step, driven by the DMN-evaluated `approvalRequired` variable.
+    Branch A ("needs-approval"): extra userTask «Доп. согласование» (U4-extra).
+    Branch B ("standard"):       skip directly to endEvent «Завершено».
+    The gateway variable is set via the A pre-compute path (dmn-gateway.ts) at
+    the triage seam (completeTask for task-triage) before Flowable evaluates the
+    exclusiveGateway. A mandatory late-compute also runs at the triage seam to
+    avoid stale values.
+  - Structure:
+      startEvent → userTask «Подача заявки» → serviceTask «Триаж» (external)
+      → exclusiveGateway [gw-approval-threshold, reads: approvalRequired]
+        → (approvalRequired == "needs-approval") → userTask «Доп. согласование» → endEvent
+        → (default / standard track)             → endEvent «Завершено»
+  - userTask «Подача заявки»:     candidateGroups="role-initiator" (e-orlov, U1/U2)
+  - serviceTask «Триаж»:          external topic="tel-intake" (a-intake, U3, DORMANT)
+  - exclusiveGateway:             reads process variable `approvalRequired` (DMN F4)
+  - userTask «Доп. согласование»: candidateGroups="role-approver" (e-larina, U4-extra)
+  - Roles from seed/demo/tel-scenario.ts: same as before.
 
   Process key: telLinear  (camelCase per Flowable convention, like chorosSmoke)
   Deploy path: via deployBpmn REST (same as choros-smoke / customer-onboarding).
@@ -59,26 +67,53 @@
       </documentation>
     </serviceTask>
 
-    <!-- UserTask 2: Согласование (согласующий, U4) -->
-    <userTask id="task-approve"
-              name="Согласование"
+    <!-- ExclusiveGateway: DMN-driven approval threshold (T-0340 E15-S5) -->
+    <!--
+      Reads the `approvalRequired` process variable, which is set by the DMN
+      pre-compute at the triage seam (src/core/dmn-gateway.ts + migration 080
+      seed rule: amount > 5,000,000 ₽ → "needs-approval"; otherwise "standard").
+      The A pre-compute path writes `approvalRequired` into completeTask variables
+      before Flowable evaluates this gateway. A mandatory late-compute also runs
+      at the triage seam to avoid stale values (F4 contract).
+    -->
+    <exclusiveGateway id="gw-approval-threshold" name="Нужно доп. согласование?">
+      <documentation>
+        Разветвление по результату DMN-оценки суммы заявки.
+        Переменная: approvalRequired ("needs-approval" | "standard").
+        Настраивается через таблицу решений dmn_rule_table (migration 066),
+        засеянную migration 080 (порог 5 000 000 ₽).
+      </documentation>
+    </exclusiveGateway>
+
+    <!-- UserTask: Доп. согласование (extra approver, U4-extra — needs-approval branch) -->
+    <userTask id="task-extra-approve"
+              name="Доп. согласование"
               flowable:candidateGroups="role-approver">
       <documentation>
-        Согласующий (e-larina, role-approver / fin-ctrl) берёт задачу из пула
-        (claim POST /api/inbox/:id/claim) и совершает card-action «Согласовать»
-        (transition + грант approve + audit_event).
-        Соответствует шагу S4 сценария tel-scenario.ts / U4 ADR §2.1.
+        Дополнительное согласование для заявок свыше 5 000 000 ₽.
+        Согласующий (role-approver, e-larina) берёт задачу из пула.
+        Ветка: approvalRequired == "needs-approval".
       </documentation>
     </userTask>
 
     <!-- End -->
     <endEvent id="end" name="Завершено"/>
 
-    <!-- Sequence flows (linear, no branches) -->
-    <sequenceFlow id="sf-start-submit"   sourceRef="start"        targetRef="task-submit"/>
-    <sequenceFlow id="sf-submit-triage"  sourceRef="task-submit"  targetRef="task-triage"/>
-    <sequenceFlow id="sf-triage-approve" sourceRef="task-triage"  targetRef="task-approve"/>
-    <sequenceFlow id="sf-approve-end"    sourceRef="task-approve" targetRef="end"/>
+    <!-- Sequence flows -->
+    <sequenceFlow id="sf-start-submit"   sourceRef="start"               targetRef="task-submit"/>
+    <sequenceFlow id="sf-submit-triage"  sourceRef="task-submit"         targetRef="task-triage"/>
+    <!-- Triage → gateway (DMN pre-compute sets approvalRequired before this transition) -->
+    <sequenceFlow id="sf-triage-gw"      sourceRef="task-triage"         targetRef="gw-approval-threshold"/>
+    <!-- Gateway branch: needs extra approval -->
+    <sequenceFlow id="sf-gw-extra"       sourceRef="gw-approval-threshold" targetRef="task-extra-approve">
+      <conditionExpression xsi:type="tFormalExpression">${approvalRequired == 'needs-approval'}</conditionExpression>
+    </sequenceFlow>
+    <!-- Gateway branch: standard track (default — no extra approval needed) -->
+    <sequenceFlow id="sf-gw-end"         sourceRef="gw-approval-threshold" targetRef="end">
+      <conditionExpression xsi:type="tFormalExpression">${approvalRequired == 'standard'}</conditionExpression>
+    </sequenceFlow>
+    <!-- Extra approval → end -->
+    <sequenceFlow id="sf-extra-end"      sourceRef="task-extra-approve"  targetRef="end"/>
 
   </process>
 
