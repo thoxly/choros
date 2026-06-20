@@ -163,6 +163,17 @@ services:
       KC_REGISTRAR_CLIENT_SECRET: ${KC_REGISTRAR_CLIENT_SECRET:-choros-registrar-dev-secret}
       NODE_ENV:         ${NODE_ENV:-development}
       PORT:             ${PORT:-3000}
+      # T-0347 [E15-S5 deploy-acceptance]: wire the app→Flowable engine binding so the
+      # process-start route (server.ts, gated on FLOWABLE_REST_APP_ADMIN_PASSWORD) and the
+      # lifecycle bridge poll-loop (main.ts/startLifecycleBridge, gated on FLOWABLE_BASE_URL)
+      # are LIVE on the deployed stack. Base URL MUST use the compose-internal flowable
+      # container port 8080 (NOT the host-published 8082) — the in-code default of :8082 is
+      # only correct from the host. Admin creds = the dev default already on the flowable
+      # service (DEV-only, RL-1; not an external/paid secret).
+      FLOWABLE_BASE_URL:                ${FLOWABLE_BASE_URL:-http://flowable:8080/flowable-rest/service}
+      FLOWABLE_REST_BASE_URL:           ${FLOWABLE_REST_BASE_URL:-http://flowable:8080/flowable-rest/service}
+      FLOWABLE_REST_APP_ADMIN_USER_ID:  ${FLOWABLE_REST_APP_ADMIN_USER_ID:-admin}
+      FLOWABLE_REST_APP_ADMIN_PASSWORD: ${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}
     ports:
       - "${APP_PORT:-3000}:3000"
     depends_on:
