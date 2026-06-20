@@ -32,6 +32,7 @@ import NotificationsScreen from '../screens/screen-notifications.jsx';
 import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 import AgentsScreen from '../screens/screen-agents.jsx';
 import RecordDetailScreen from '../screens/screen-record-detail.jsx';
+import AssistantScreen from '../screens/screen-assistant.jsx';
 
 export { Icon };
 
@@ -63,6 +64,7 @@ const SCREEN_META = {
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
   forms:  { crumb: ["Конструктор", "Формы задач"] },
+  assistant: { crumb: ["Конструктор", "Ассистент"] },
 };
 
 /**
@@ -670,6 +672,9 @@ function AppShell() {
             <Route path="/forms" element={<FormsScreen theme={theme} />} />
             {/* T-0096: real bpmn-js editor — /processes/:id/edit */}
             <Route path="/processes/:id/edit" element={<ProcessEditorScreen />} />
+            {/* T-0358: E17 Ассистент shell — треды-чаты с AI-агентом. LLM = T-0359/T-0360. */}
+            <Route path="/assistant" element={<AssistantScreen />} />
+            <Route path="/assistant/:threadId" element={<AssistantScreen />} />
           </Routes>
         </div>
       </main>

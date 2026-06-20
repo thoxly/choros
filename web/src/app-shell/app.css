@@ -779,3 +779,389 @@
   padding: var(--chs-space-5) var(--chs-space-4);
   color: var(--chs-color-text-muted); font-size: var(--chs-text-sm); text-align: center;
 }
+
+/* ============================================================================
+   РАЗДЕЛ «АССИСТЕНТ» (T-0358, E17 shell)
+   Двухпанельный layout: левая панель — список тредов, правая — вид треда.
+   Все цвета — только --chs-* токены; светлая тема = основная (OBLIK §1).
+   ============================================================================ */
+.chs-asst {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---- Левая панель (сайдбар тредов) ---- */
+.chs-asst__sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--chs-color-surface);
+  border-right: 1px solid var(--chs-color-border);
+}
+
+.chs-asst__sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--chs-space-4);
+  height: 38px;
+  padding: 0 var(--chs-space-5);
+  flex: none;
+  border-bottom: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface-2);
+}
+
+.chs-asst__sidebar-title {
+  font-size: var(--chs-text-2xs);
+  font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+  color: var(--chs-color-text-faint);
+}
+
+.chs-asst__list-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--chs-space-4);
+}
+
+.chs-asst__threads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-2);
+}
+
+.chs-asst__thread {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-1);
+  width: 100%;
+  padding: var(--chs-space-4) var(--chs-space-5);
+  border: none;
+  border-radius: var(--chs-radius-2);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--chs-font-sans);
+  color: var(--chs-color-text-muted);
+  transition: background 80ms ease, color 80ms ease;
+}
+.chs-asst__thread:hover {
+  background: var(--chs-color-hover);
+  color: var(--chs-color-text);
+}
+.chs-asst__thread--active {
+  background: var(--chs-color-selected);
+  color: var(--chs-color-text);
+}
+.chs-asst__thread-title {
+  font-size: var(--chs-text-base);
+  font-weight: var(--chs-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+.chs-asst__thread-meta {
+  font-size: var(--chs-text-2xs);
+  color: var(--chs-color-text-faint);
+  font-family: var(--chs-font-mono);
+}
+
+/* Контекст-aware баннер в сайдбаре (когда есть предзаполненный contextRef) */
+.chs-asst__ctx-hint {
+  flex: none;
+  margin: var(--chs-space-5);
+  padding: var(--chs-space-4) var(--chs-space-5);
+  background: var(--chs-color-accent-soft);
+  border: 1px solid var(--chs-color-accent-border);
+  border-radius: var(--chs-radius-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-4);
+}
+.chs-asst__ctx-hint-label {
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-text-muted);
+}
+.chs-asst__ctx-hint-ref {
+  font-size: var(--chs-text-sm);
+  font-weight: var(--chs-weight-medium);
+  color: var(--chs-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chs-asst__ctx-hint-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-3);
+}
+
+/* ---- Правая панель (вид треда) ---- */
+.chs-asst__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--chs-color-bg);
+}
+
+.chs-asst__empty-pane {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Вид треда: хедер + messages + composer */
+.chs-asst__thread-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chs-asst__thread-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--chs-space-6);
+  height: 42px;
+  padding: 0 var(--chs-space-7);
+  flex: none;
+  border-bottom: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface);
+}
+
+.chs-asst__thread-head-title {
+  font-size: var(--chs-text-md);
+  font-weight: var(--chs-weight-semibold);
+  color: var(--chs-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/* Бюджет-индикатор в хедере треда */
+.chs-asst__budget {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--chs-space-2);
+  flex: none;
+  min-width: 140px;
+}
+.chs-asst__budget-label {
+  font-size: var(--chs-text-2xs);
+  color: var(--chs-color-text-muted);
+  font-family: var(--chs-font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.chs-asst__budget-track {
+  width: 100%;
+  height: 3px;
+  background: var(--chs-color-track);
+  border-radius: var(--chs-radius-full);
+  overflow: hidden;
+}
+.chs-asst__budget-fill {
+  height: 100%;
+  border-radius: var(--chs-radius-full);
+  background: var(--chs-color-success);
+  transition: width 200ms ease;
+}
+.chs-asst__budget-fill--warn { background: var(--chs-color-warning); }
+.chs-asst__budget-fill--over { background: var(--chs-color-danger); }
+
+/* ---- Сообщения ---- */
+.chs-asst__messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--chs-space-7) var(--chs-space-7) var(--chs-space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-6);
+}
+
+.chs-asst__msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-3);
+  max-width: 740px;
+}
+
+.chs-asst__msg--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.chs-asst__msg--asst {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.chs-asst__msg-role {
+  font-size: var(--chs-text-xs);
+  font-weight: var(--chs-weight-semibold);
+  color: var(--chs-color-text-faint);
+  letter-spacing: var(--chs-tracking-wide);
+  text-transform: uppercase;
+}
+
+.chs-asst__msg-ctx {
+  font-size: var(--chs-text-xs);
+  color: var(--chs-color-accent);
+  background: var(--chs-color-accent-soft);
+  border-radius: var(--chs-radius-1);
+  padding: 1px var(--chs-space-3);
+}
+
+.chs-asst__msg-text {
+  padding: var(--chs-space-5) var(--chs-space-6);
+  border-radius: var(--chs-radius-3);
+  font-size: var(--chs-text-base);
+  line-height: var(--chs-leading-normal);
+  color: var(--chs-color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chs-asst__msg--user .chs-asst__msg-text {
+  background: var(--chs-color-accent);
+  color: var(--chs-color-accent-fg);
+  border-bottom-right-radius: var(--chs-radius-1);
+}
+
+.chs-asst__msg--asst .chs-asst__msg-text {
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+  border-bottom-left-radius: var(--chs-radius-1);
+}
+
+/* Стриминг-пузырь: анимированные точки */
+.chs-asst__msg--streaming .chs-asst__msg-text {
+  background: var(--chs-color-surface);
+  border: 1px solid var(--chs-color-border);
+}
+.chs-asst__streaming-dots {
+  display: flex;
+  align-items: center;
+  gap: var(--chs-space-2);
+  min-width: 40px;
+}
+.chs-asst__streaming-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--chs-radius-full);
+  background: var(--chs-color-text-faint);
+  animation: chs-asst-dot 1.2s ease-in-out infinite;
+}
+.chs-asst__streaming-dots span:nth-child(2) { animation-delay: 0.2s; }
+.chs-asst__streaming-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes chs-asst-dot {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chs-asst__streaming-dots span { animation: none; opacity: 1; }
+}
+
+.chs-asst__msg-error {
+  padding: var(--chs-space-4) var(--chs-space-5);
+  background: var(--chs-color-danger-soft);
+  border: 1px solid var(--chs-color-danger);
+  border-radius: var(--chs-radius-2);
+  color: var(--chs-color-danger);
+  font-size: var(--chs-text-sm);
+}
+
+/* ---- Composer (форма ввода) ---- */
+.chs-asst__composer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chs-space-4);
+  padding: var(--chs-space-5) var(--chs-space-7) var(--chs-space-7);
+  border-top: 1px solid var(--chs-color-border);
+  background: var(--chs-color-surface);
+}
+
+/* Баннер предзаполненного контекста внутри composer */
+.chs-asst__ctx-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--chs-space-4);
+  padding: var(--chs-space-3) var(--chs-space-5);
+  background: var(--chs-color-accent-soft);
+  border: 1px solid var(--chs-color-accent-border);
+  border-radius: var(--chs-radius-2);
+  font-size: var(--chs-text-sm);
+}
+.chs-asst__ctx-label {
+  flex: 1;
+  color: var(--chs-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chs-asst__ctx-clear {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--chs-color-accent);
+  font-size: var(--chs-text-xs);
+  font-family: var(--chs-font-sans);
+  cursor: pointer;
+  padding: 0 var(--chs-space-2);
+  border-radius: var(--chs-radius-1);
+  text-decoration: underline;
+}
+.chs-asst__ctx-clear:hover { color: var(--chs-color-accent-hover); }
+.chs-asst__ctx-clear:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+
+.chs-asst__composer-inner {
+  display: flex;
+  gap: var(--chs-space-5);
+  align-items: flex-end;
+}
+
+.chs-asst__textarea {
+  flex: 1;
+  resize: none;
+  font-family: var(--chs-font-sans);
+  font-size: var(--chs-text-base);
+  line-height: var(--chs-leading-normal);
+  color: var(--chs-color-text);
+  background: var(--chs-color-bg);
+  border: 1px solid var(--chs-color-border-strong);
+  border-radius: var(--chs-radius-3);
+  padding: var(--chs-space-4) var(--chs-space-5);
+  min-height: 72px;
+  transition: border-color 80ms ease;
+}
+.chs-asst__textarea::placeholder {
+  color: var(--chs-color-text-faint);
+}
+.chs-asst__textarea:focus {
+  outline: none;
+  border-color: var(--chs-color-accent);
+  box-shadow: var(--chs-ring);
+}
+.chs-asst__textarea:disabled {
+  background: var(--chs-color-surface-2);
+  color: var(--chs-color-text-faint);
+  cursor: not-allowed;
+}
