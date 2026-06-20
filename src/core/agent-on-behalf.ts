@@ -86,8 +86,6 @@ export function makeIntersectionGrantSource(
       return agentGrants.filter((agentGrant) =>
         isGrantCoveredByUserGrants(agentGrant, effectiveUserGrants, ancestry),
       );
-
-      void subject; // result is always from agentSubject's grants, not the caller
     },
   };
 }

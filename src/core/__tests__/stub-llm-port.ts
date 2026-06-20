@@ -12,7 +12,7 @@
  *   const stub = new StubLlmPort({ mode: "dormant" });           // → LlmDormantError
  */
 
-import type { LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../llm-port.js";
+import type { ChatLlmRequest, ChatLlmResult, LlmPort, LlmRequest, LlmResult, PrecheckAnswer } from "../llm-port.js";
 import { LlmDormantError } from "../llm-port.js";
 
 // ---------------------------------------------------------------------------
@@ -133,5 +133,11 @@ export class StubLlmPort implements LlmPort {
           },
         };
     }
+  }
+
+  // T-0359: chat() is not used by the legal-precheck stub — this port is
+  // purpose-built for complete() testing. Fail closed per dormant convention.
+  chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    throw new LlmDormantError("StubLlmPort does not support chat()");
   }
 }
