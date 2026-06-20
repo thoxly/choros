@@ -44,8 +44,12 @@
  */
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { validateFormSubmission, type FieldError } from "../core/form-validator.js";
-import { getFormDef } from "../core/form-schema.js";
+import {
+  validateFormSubmission,
+  validateFormSubmissionAgainst,
+  type FieldError,
+} from "../core/form-validator.js";
+import { getFormDef, type FormDef } from "../core/form-schema.js";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -83,12 +87,36 @@ export type FormPersistPort = (
 ) => Promise<string>;
 
 /**
+ * Resolve the authoritative FormDef for a given formId by deriving it from
+ * the registry's record_schema (T-0345 — single source of truth).
+ *
+ * @param formId    - the form id to resolve ("purchase" | "approval" | dynamic)
+ * @param actorSlug - the authenticated actor slug (needed to resolve the tenant
+ *                    and then look up the registry_def in that tenant's scope)
+ *
+ * Returning null means the formId is not in the registry (404 path).
+ * Returning a FormDef means the registry schema governs validation.
+ *
+ * When this port is wired (DB mode), validation in the route handler uses the
+ * derived FormDef instead of the hardcoded form-schema.ts definition, making
+ * the registry's record_schema the live source of truth for field acceptance.
+ */
+export type FormDefResolver = (formId: string, actorSlug: string) => Promise<FormDef | null>;
+
+/**
  * Optional deps injected by the composition root (server.ts) when a DB pool
  * is available. When absent, the route uses the no-op memory fallback.
  */
 export interface FormStoreDeps {
   /** Real DB persistence — wired when DATABASE_URL is present. */
   readonly persist: FormPersistPort;
+  /**
+   * T-0345: optional resolver that derives FormDef from the registry's
+   * record_schema. When present, the route handler uses the derived FormDef
+   * for validation (single source of truth). When absent, falls back to the
+   * hardcoded getFormDef from form-schema.ts.
+   */
+  readonly resolveFormDef?: FormDefResolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +207,8 @@ function sendValidationErrors(res: import("node:http").ServerResponse, fields: F
 export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void {
   // Resolve the persist function: real DB or no-op memory fallback.
   const persist: FormPersistPort = deps?.persist ?? memoryPersist;
+  // T-0345: optional resolver that derives FormDef from the registry's record_schema.
+  const resolveFormDef: FormDefResolver | undefined = deps?.resolveFormDef;
 
   // POST /api/forms/:formId/submit
   router.register("POST", "/api/forms/:formId/submit", withAuth(async (req, res, params) => {
@@ -199,7 +229,19 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
     const formId = params["formId"] as string;
 
     // Unknown form → 404 (distinct from a malformed body for a known form).
-    if (!getFormDef(formId)) {
+    // In DB mode: try resolveFormDef first (derives from registry record_schema).
+    // In memory mode: fall back to hardcoded getFormDef from form-schema.ts.
+    let activeFormDef: FormDef | null;
+    if (resolveFormDef !== undefined) {
+      // T-0345: DB-mode path — form schema derived from registry_def.record_schema.
+      // This is the single source of truth: registry governs what fields are valid.
+      activeFormDef = await resolveFormDef(formId, actorSlug);
+    } else {
+      // Memory-mode fallback: hardcoded form-schema.ts (ТЭЛ demo / tests).
+      activeFormDef = getFormDef(formId);
+    }
+
+    if (!activeFormDef) {
       throw new HttpError(404, "UNKNOWN_FORM", `unknown form '${formId}'`);
     }
 
@@ -208,7 +250,9 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
 
     // The server is the source of truth: re-validate every field against the
     // canonical schema, independent of any client-side constraints.
-    const result = validateFormSubmission(formId, payload);
+    // T-0345: in DB mode, `activeFormDef` is derived from registry_def.record_schema
+    // (the authoritative schema); in memory mode it is the hardcoded bootstrap.
+    const result = validateFormSubmissionAgainst(activeFormDef, payload);
     if (!result.ok) {
       sendValidationErrors(res, result.errors);
       return;
@@ -217,6 +261,8 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
     // Persist the sanitized value (T-0251 / T-0337).
     // DB mode (deps.persist wired): writes to choros.record in a tenant-scoped tx
     //   with audit event (makeFormRecordPersister in server.ts).
+    //   The persister also re-validates against record_schema via assertDataValid
+    //   (T-0345 doctrine §3 enforcement — second layer inside the tx).
     // No-DB mode (no deps): memoryPersist mints a UUID for the response contract
     //   without an authoritative in-process Map (T-0336 doctrine §3.3).
     const sanitizedData = result.value as Record<string, unknown>;
