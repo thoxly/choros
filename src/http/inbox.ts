@@ -378,6 +378,11 @@ async function findInboxItems(
 
   // T-0221 (§5.4): merge defer projections from audit_event when DB is available.
   // !hasDb() → only seed (preserves memory-mode test behaviour, FF-11).
+  //
+  // T-0301: in DB mode, INBOX_SEED must NOT leak into real tenants.
+  // seedResults are showcase-fixture rows keyed to DEV_TENANT_ID; a real
+  // authenticated tenant has its own UUID and should see ONLY real DB-backed
+  // data (deferred + instance tasks). Honest-empty is correct for a fresh tenant.
   if (!hasDb()) {
     return seedResults;
   }
@@ -487,13 +492,16 @@ async function findInboxItems(
     instanceItems = [];
   }
 
-  // Merge: seed items first (existing demo data), then defer projections, then
-  // started-instance projections. Dedup by id (defensive — distinct id spaces).
-  const seenIds = new Set(seedResults.map((i) => i.id));
+  // T-0301: in DB mode return ONLY real data (deferred + instance tasks).
+  // Seed rows (INBOX_SEED) are showcase/fixture data that must NOT appear for
+  // real authenticated tenants — they would mask real inbox content.
+  // Honest-empty is correct for a fresh tenant with no real tasks.
+  // Dedup by id (defensive — distinct id spaces between the two real sources).
+  const seenIds = new Set<string>();
   const dedupedDefer = deferItems.filter((i) => !seenIds.has(i.id));
   for (const i of dedupedDefer) seenIds.add(i.id);
   const dedupedInstance = instanceItems.filter((i) => !seenIds.has(i.id));
-  return [...seedResults, ...dedupedDefer, ...dedupedInstance];
+  return [...dedupedDefer, ...dedupedInstance];
 }
 
 // ---------------------------------------------------------------------------

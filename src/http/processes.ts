@@ -14,7 +14,7 @@
  * the handler in when the composition root supplies a pool + FlowableClient.
  */
 import { HttpError, type Router } from "./router.js";
-import { withAuth } from "./auth.js";
+import { withAuth, getAuthContext } from "./auth.js";
 import { JobStore } from "../core/jobStore.js";
 import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
@@ -228,16 +228,55 @@ export function registerProcessesRoutes(
     router.register("POST", "/api/processes/start", withAuth(makeStartInstanceHandler(startDeps)));
   }
 
-  // GET /api/processes — return full process instances list. When start-deps are
-  // present (DB-backed), merge the started-instance projections (T-0282 §2.3) over
-  // the pack/seed display rows so a started ТЭЛ instance is visible (AC-1) and shows
-  // `done` after approve (AC-6). Tenant-scoped via the injected resolver; degrades
-  // gracefully to display-only on any projection error (read-only path).
+  // GET /api/processes — return full process instances list.
+  //
+  // T-0301 (mock-leak fix): in DB mode, serve ONLY real tenant-scoped instance
+  // projections. The showcase pack (seed/showcase/pack.json) and PROCESSES_SEED
+  // are display-plane fixtures that must NOT appear for real authenticated tenants;
+  // they mask real process data and break the ТЭЛ journey. Honest-empty is correct
+  // for a tenant that has not started any process instances yet.
+  //
+  // In no-DB mode (no DATABASE_URL): fall back to the existing PROCESSES_SEED /
+  // pack path (memory tests and dev-without-DB are unchanged, FF-11).
+  //
+  // T-0259 compat: when DATABASE_URL is set but the pack file is absent, that path
+  // is no longer reached for the list endpoint (DB mode goes directly to projections).
+  // The `demo: true` sentinel is retained only for the no-DB + pack-absent corner.
   router.register("GET", "/api/processes", async (req, res) => {
-    // T-0259: base may be null when DATABASE_URL is set but the pack file is
-    // absent (container without seed dir). Degrade to graceful-empty so the
-    // endpoint never 500s. The `demo: true` marker lets the frontend distinguish
-    // "no data yet" from an error.
+    // DB mode: serve ONLY real tenant-scoped projections (T-0301).
+    if (hasDb() && startDeps) {
+      // Resolve actor from JWT (keycloak mode) or x-dev-user header (dev mode).
+      const authCtx = getAuthContext(req);
+      let actorSlug: string | null = null;
+      if (authCtx !== undefined) {
+        actorSlug = authCtx.sub;
+      } else {
+        let h = req.headers["x-dev-user"];
+        if (Array.isArray(h)) h = h[0];
+        if (typeof h === "string" && h) actorSlug = h;
+      }
+
+      let instances: ProcessInstance[] = [];
+      if (actorSlug) {
+        try {
+          const tenantId = await startDeps.resolveActorTenant(actorSlug);
+          const projections = await listInstanceProjections(startDeps.pool, tenantId);
+          instances = projections.map(projectionToInstance);
+        } catch {
+          // Read-projection: degrade gracefully to honest-empty — never 500.
+          instances = [];
+        }
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ instances }));
+      return;
+    }
+
+    // No-DB / no-startDeps fallback: legacy display-plane path (FF-11).
+    // T-0259: base may be null when the pack file is absent in the deployed
+    // container. Degrade to graceful-empty so the endpoint never 500s.
     const base = findProcessInstances();
     if (base === null) {
       res.statusCode = 200;
@@ -246,29 +285,9 @@ export function registerProcessesRoutes(
       return;
     }
 
-    let merged = base;
-
-    if (startDeps) {
-      let devUserId = req.headers["x-dev-user"];
-      if (Array.isArray(devUserId)) devUserId = devUserId[0];
-      if (typeof devUserId === "string" && devUserId) {
-        try {
-          const tenantId = await startDeps.resolveActorTenant(devUserId);
-          const projections = await listInstanceProjections(startDeps.pool, tenantId);
-          const seen = new Set(base.map((i) => i.id));
-          const extra = projections
-            .filter((p) => !seen.has(p.inst))
-            .map(projectionToInstance);
-          merged = [...base, ...extra];
-        } catch {
-          merged = base; // read-only projection — never fail the display GET.
-        }
-      }
-    }
-
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ instances: merged }));
+    res.end(JSON.stringify({ instances: base }));
   });
 
   // GET /api/processes/:id — return specific instance or 404
