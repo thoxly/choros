@@ -37,6 +37,28 @@
  *
  * The `isAttr: true` flag tells moddle to treat it as an XML attribute
  * (not a child element), so the round-trip is a simple attribute read/write.
+ *
+ * T-0353 [E16] additions:
+ *
+ *   choros:outcomeName (on bpmn:SequenceFlow)
+ *     The SEMANTIC outcome name that a human chose to route along this flow
+ *     (e.g. "Согласовать", "На доработку"). Written by the properties panel
+ *     on the selected SequenceFlow after the UserTask. Serialised as:
+ *       <sequenceFlow ... choros:outcomeName="Согласовать"/>
+ *     This is the NAMED BRANCH — NOT a DMN condition. DMN-gateway remains
+ *     separate: outcome = human chooses; DMN = data chooses.
+ *
+ *   choros:outcomePreset (on bpmn:UserTask)
+ *     The id of the active preset (e.g. "decision", "decision-rework", "custom").
+ *     Tells the panel which outcome ladder is selected.
+ *
+ *   choros:outcomeButtonsJson (on bpmn:UserTask)
+ *     JSON string encoding the per-outcome button styling overrides:
+ *       [{ "name": "Согласовать", "label": "Утвердить", "color": "success",
+ *          "requiresComment": false, "confirm": false,
+ *          "targetKind": "next" }, ...]
+ *     Styling lives OFF-canvas (in this attribute), not in the flow conditions.
+ *     Round-trip: panel reads/writes this JSON blob; resolver reads targetKind.
  */
 const ChorosModdleDescriptor = {
   name: 'Choros BPMN Extension',
@@ -58,6 +80,56 @@ const ChorosModdleDescriptor = {
       properties: [
         {
           name: 'executorType',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
+    {
+      /**
+       * T-0353 [E16]: Extend bpmn:UserTask with outcome preset + button-styling
+       * JSON blob. Both live on the UserTask element (off-canvas).
+       *
+       * choros:outcomePreset    — preset id: "done" | "decision" | "decision-rework" | "custom"
+       * choros:outcomeButtonsJson — JSON-encoded ButtonDef[] (see jsdoc above)
+       *
+       * Only bpmn:UserTask carries these; service/send/etc. tasks are not
+       * routed by human outcome (they have unconditional outgoing flows).
+       */
+      name: 'UserTaskOutcomes',
+      extends: ['bpmn:UserTask'],
+      properties: [
+        {
+          name: 'outcomePreset',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'outcomeButtonsJson',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
+    {
+      /**
+       * T-0353 [E16]: Extend bpmn:SequenceFlow with the SEMANTIC outcome name.
+       *
+       * choros:outcomeName — The human-readable outcome that causes routing
+       *   along this flow (e.g. "Согласовать"). Serialised as an attribute
+       *   on the <sequenceFlow> element. NOT a DMN condition expression.
+       *
+       * Round-trip:
+       *   1. Panel writes bo.outcomeName = 'Согласовать'
+       *   2. saveXML emits <sequenceFlow ... choros:outcomeName="Согласовать"/>
+       *   3. importXML reads it back onto bo.outcomeName
+       *   4. resolveOutcomeBranch() reads bo.outcomeName to find the target
+       */
+      name: 'SequenceFlowOutcome',
+      extends: ['bpmn:SequenceFlow'],
+      properties: [
+        {
+          name: 'outcomeName',
           isAttr: true,
           type: 'String',
         },

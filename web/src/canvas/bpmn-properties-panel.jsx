@@ -31,6 +31,11 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { applyExecMarkerToElement } from './bpmn-exec-markers.js';
+import {
+  OUTCOME_PRESETS,
+  CUSTOM_PRESET_ID,
+  defaultOutcomesFor,
+} from './outcome-presets.js';
 
 /* --------------------------------------------------------------------------
    Step type → executor type mapping (T-0098 spec)
@@ -171,6 +176,415 @@ function HeaderExecIcon({ type }) {
       {type === 'service' && <rect x="2.5" y="2.5" width="9" height="9" rx="1.2" />}
       {!type && <rect x="2.5" y="2.5" width="9" height="9" rx="2" />}
     </svg>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   TARGET_KIND_LABELS — human-readable labels for OutcomeTargetKind values
+   -------------------------------------------------------------------------- */
+const TARGET_KIND_LABELS = {
+  'next':            '→ Дальше (следующий шаг)',
+  'end':             '→ Конец (завершить процесс)',
+  'back':            '→ Назад (на доработку / возврат)',
+  'subprocess-sync': '→ Подпроцесс (ждём результата)',
+  'process-async':   '→ Запустить процесс (асинхронно)',
+};
+
+const BUTTON_COLOR_LABELS = {
+  primary: 'Синий (основной)',
+  success: 'Зелёный (позитив)',
+  danger:  'Красный (отклонение)',
+  warning: 'Жёлтый (внимание)',
+  neutral: 'Серый (нейтральный)',
+};
+
+/* --------------------------------------------------------------------------
+   OutcomesPanel — T-0353 [E16]
+
+   Shows the «Исходы шага» group for a bpmn:UserTask.
+
+   Design:
+     - Preset picker (Готово / Решение / Решение с доработкой / Свои исходы).
+     - Per-outcome styling (text-override, color, requiresComment, confirm, targetKind).
+       STYLING IS OFF-CANVAS — it lives in choros:outcomeButtonsJson on the UserTask.
+     - When a preset is selected, it pre-fills the outcomes list from OUTCOME_PRESETS.
+     - Custom preset: user can add/remove/rename outcomes.
+     - On any change: writes choros:outcomePreset and choros:outcomeButtonsJson to the
+       businessObject so saveXML captures them in the XML.
+     - DOES NOT write conditions to SequenceFlows here — that is the modeler's structural
+       concern. Only the semantic outcomeName on the flow (written when user names a flow
+       from the canvas selection) routes the branch.
+
+   SEPARATION FROM DMN:
+     This panel is ONLY for UserTask outcome buttons (human-chosen branches).
+     DMN gateways (bpmn:ExclusiveGateway with choros:dmnGateway) are handled
+     separately and are NEVER shown here (T-0340 / dmn-gateway.ts).
+   -------------------------------------------------------------------------- */
+
+/**
+ * Parse choros:outcomeButtonsJson from the businessObject.
+ * Returns an empty array on failure.
+ */
+function parseOutcomeButtons(bo) {
+  // T-0099: registered moddle property path first.
+  const jsonStr = bo.outcomeButtonsJson
+    ?? (bo.$attrs && bo.$attrs['choros:outcomeButtonsJson'])
+    ?? null;
+  if (!jsonStr) return [];
+  try {
+    const parsed = JSON.parse(jsonStr);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Serialize the outcome buttons list to JSON and write to the businessObject.
+ * Also writes to bo.$attrs for the legacy/fallback path.
+ */
+function writeOutcomeButtons(bo, buttons) {
+  const json = JSON.stringify(buttons);
+  // Registered moddle property (T-0099 round-trip path).
+  bo.outcomeButtonsJson = json;
+  // Also write to $attrs for compatibility with raw XML import fallback.
+  if (!bo.$attrs) bo.$attrs = {};
+  bo.$attrs['choros:outcomeButtonsJson'] = json;
+}
+
+/**
+ * Write the preset id to the businessObject.
+ */
+function writeOutcomePreset(bo, presetId) {
+  bo.outcomePreset = presetId;
+  if (!bo.$attrs) bo.$attrs = {};
+  bo.$attrs['choros:outcomePreset'] = presetId;
+}
+
+/**
+ * Read the preset id from the businessObject.
+ */
+function readOutcomePreset(bo) {
+  return bo.outcomePreset
+    ?? (bo.$attrs && bo.$attrs['choros:outcomePreset'])
+    ?? null;
+}
+
+/** One outcome row inside the outcomes editor. */
+function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--chs-color-border)',
+        borderRadius: 'var(--chs-radius-md)',
+        padding: 'var(--chs-space-4)',
+        marginBottom: 'var(--chs-space-3)',
+        background: 'var(--chs-color-surface)',
+      }}
+    >
+      {/* Outcome name (editable only in custom preset) */}
+      <div className="bio-properties-panel-entry">
+        <label className="bio-properties-panel-label">Название исхода</label>
+        <div className="bio-properties-panel-textfield">
+          <input
+            className="bio-properties-panel-input"
+            value={outcome.name}
+            readOnly={!isCustom}
+            onChange={(e) => onChange(index, 'name', e.target.value)}
+            style={{ cursor: isCustom ? undefined : 'default' }}
+          />
+        </div>
+      </div>
+
+      {/* Button label override */}
+      <div className="bio-properties-panel-entry">
+        <label className="bio-properties-panel-label">Текст кнопки (если отличается)</label>
+        <div className="bio-properties-panel-textfield">
+          <input
+            className="bio-properties-panel-input"
+            value={outcome.label ?? ''}
+            placeholder={outcome.name}
+            onChange={(e) => onChange(index, 'label', e.target.value || undefined)}
+          />
+        </div>
+      </div>
+
+      {/* Color */}
+      <div className="bio-properties-panel-entry">
+        <label className="bio-properties-panel-label">Цвет кнопки</label>
+        <div className="bio-properties-panel-select">
+          <select
+            value={outcome.color ?? 'primary'}
+            onChange={(e) => onChange(index, 'color', e.target.value)}
+          >
+            {Object.entries(BUTTON_COLOR_LABELS).map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Routing target */}
+      <div className="bio-properties-panel-entry">
+        <label className="bio-properties-panel-label">Цель маршрута</label>
+        <div className="bio-properties-panel-select">
+          <select
+            value={outcome.targetKind ?? 'next'}
+            onChange={(e) => onChange(index, 'targetKind', e.target.value)}
+          >
+            {Object.entries(TARGET_KIND_LABELS).map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Subprocess/process target id when applicable */}
+      {(outcome.targetKind === 'subprocess-sync' || outcome.targetKind === 'process-async') && (
+        <div className="bio-properties-panel-entry">
+          <label className="bio-properties-panel-label">
+            {outcome.targetKind === 'subprocess-sync' ? 'ID подпроцесса' : 'Ключ процесса'}
+          </label>
+          <div className="bio-properties-panel-textfield">
+            <input
+              className="bio-properties-panel-input chs-mono"
+              value={outcome.target ?? ''}
+              placeholder={outcome.targetKind === 'subprocess-sync' ? 'SubProcess_1' : 'myProcessKey'}
+              onChange={(e) => onChange(index, 'target', e.target.value || undefined)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Flags */}
+      <div className="bio-properties-panel-entry" style={{ flexDirection: 'row', gap: 'var(--chs-space-4)', alignItems: 'center' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!outcome.requiresComment}
+            onChange={(e) => onChange(index, 'requiresComment', e.target.checked)}
+          />
+          Требует комментарий
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!outcome.confirm}
+            onChange={(e) => onChange(index, 'confirm', e.target.checked)}
+          />
+          Подтверждение
+        </label>
+      </div>
+
+      {/* Remove button (custom preset only) */}
+      {isCustom && (
+        <button
+          type="button"
+          onClick={() => onRemove(index)}
+          style={{
+            marginTop: 'var(--chs-space-3)',
+            fontSize: 'var(--chs-text-xs)',
+            color: 'var(--chs-color-danger, #c00)',
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        >
+          Удалить исход
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The «Исходы шага» panel group for a bpmn:UserTask. */
+function OutcomesPanel({ bo, modeler, element }) {
+  const [presetId, setPresetId] = useState(() => readOutcomePreset(bo) ?? 'done');
+  const [outcomes, setOutcomes] = useState(() => {
+    const stored = parseOutcomeButtons(bo);
+    if (stored.length > 0) return stored;
+    // Nothing stored yet → derive from current preset
+    return defaultOutcomesFor(readOutcomePreset(bo) ?? 'done');
+  });
+
+  // Commit to businessObject + fire element.changed so the canvas is aware.
+  const commit = useCallback((newPresetId, newOutcomes) => {
+    if (!bo) return;
+    writeOutcomePreset(bo, newPresetId);
+    writeOutcomeButtons(bo, newOutcomes);
+    try {
+      if (modeler) {
+        const eventBus = modeler.get('eventBus');
+        eventBus.fire('element.changed', { element });
+      }
+    } catch (_) { /* non-fatal */ }
+  }, [bo, modeler, element]);
+
+  const handlePresetChange = (newPresetId) => {
+    setPresetId(newPresetId);
+    if (newPresetId !== CUSTOM_PRESET_ID) {
+      // Reset outcomes to the preset defaults.
+      const presetOutcomes = defaultOutcomesFor(newPresetId);
+      setOutcomes(presetOutcomes);
+      commit(newPresetId, presetOutcomes);
+    } else {
+      // Switching to custom: keep existing outcomes as the starting point.
+      commit(newPresetId, outcomes);
+    }
+  };
+
+  const handleOutcomeChange = (index, field, value) => {
+    setOutcomes((prev) => {
+      const next = prev.map((o, i) =>
+        i === index ? { ...o, [field]: value } : o,
+      );
+      commit(presetId, next);
+      return next;
+    });
+  };
+
+  const handleAddOutcome = () => {
+    setOutcomes((prev) => {
+      const next = [...prev, { name: 'Новый исход', targetKind: 'next', color: 'neutral' }];
+      commit(presetId, next);
+      return next;
+    });
+  };
+
+  const handleRemoveOutcome = (index) => {
+    setOutcomes((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      commit(presetId, next);
+      return next;
+    });
+  };
+
+  const isCustom = presetId === CUSTOM_PRESET_ID;
+
+  return (
+    <PanelGroup title="Исходы шага" defaultOpen>
+      {/* Preset picker */}
+      <PPEntry label="Пресет исходов">
+        <div className="bio-properties-panel-select">
+          <select
+            value={presetId}
+            onChange={(e) => handlePresetChange(e.target.value)}
+          >
+            {OUTCOME_PRESETS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+        </div>
+        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-3)' }}>
+          {OUTCOME_PRESETS.find((p) => p.id === presetId)?.hint ?? ''}
+        </p>
+      </PPEntry>
+
+      {/* Separation note */}
+      <PPEntry>
+        <p className="bio-properties-panel-description">
+          Исход = ветку выбирает ЧЕЛОВЕК. DMN-шлюз (данные → ветка) настраивается отдельно на шлюзе.
+        </p>
+      </PPEntry>
+
+      {/* Per-outcome rows */}
+      {outcomes.length > 0 && (
+        <PPEntry>
+          <div style={{ width: '100%' }}>
+            {outcomes.map((outcome, i) => (
+              <OutcomeRow
+                key={i}
+                outcome={outcome}
+                index={i}
+                onChange={handleOutcomeChange}
+                onRemove={handleRemoveOutcome}
+                isCustom={isCustom}
+              />
+            ))}
+          </div>
+        </PPEntry>
+      )}
+
+      {/* Add outcome (custom only) */}
+      {isCustom && (
+        <PPEntry>
+          <button
+            type="button"
+            onClick={handleAddOutcome}
+            style={{
+              fontSize: 'var(--chs-text-sm)',
+              color: 'var(--chs-color-brand, #2563eb)',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              padding: 0,
+              textAlign: 'left',
+            }}
+          >
+            + Добавить исход
+          </button>
+        </PPEntry>
+      )}
+    </PanelGroup>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   SequenceFlowOutcomePanel — T-0353 [E16]
+
+   When the user selects a SequenceFlow (connection between a UserTask and the
+   next element), shows the «Имя ветки (исход)» field to set choros:outcomeName.
+
+   This is the NAMED BRANCH — what gets emitted in the XML as:
+     <sequenceFlow ... choros:outcomeName="Согласовать"/>
+
+   The resolver reads this to match the human's chosen outcome to the flow.
+   NEVER set DMN condition expressions here; that is a different dialog.
+   -------------------------------------------------------------------------- */
+function SequenceFlowOutcomePanel({ bo, modeler, element }) {
+  const [outcomeName, setOutcomeName] = useState(
+    () => bo.outcomeName ?? (bo.$attrs && bo.$attrs['choros:outcomeName']) ?? '',
+  );
+
+  const commit = useCallback((val) => {
+    bo.outcomeName = val || undefined;
+    if (!bo.$attrs) bo.$attrs = {};
+    if (val) {
+      bo.$attrs['choros:outcomeName'] = val;
+    } else {
+      delete bo.$attrs['choros:outcomeName'];
+    }
+    try {
+      if (modeler) {
+        const eventBus = modeler.get('eventBus');
+        eventBus.fire('element.changed', { element });
+      }
+    } catch (_) { /* non-fatal */ }
+  }, [bo, modeler, element]);
+
+  const handleChange = (val) => {
+    setOutcomeName(val);
+    commit(val);
+  };
+
+  return (
+    <PanelGroup title="Ветка исхода" defaultOpen>
+      <PPEntry label="Имя исхода (choros:outcomeName)">
+        <div className="bio-properties-panel-textfield">
+          <input
+            className="bio-properties-panel-input"
+            value={outcomeName}
+            placeholder="Согласовать"
+            onChange={(e) => handleChange(e.target.value)}
+          />
+        </div>
+        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-3)' }}>
+          Семантическое имя исхода, который направляет поток по этой ветке.
+          Не редактируйте условие DMN здесь — DMN настраивается на шлюзе.
+        </p>
+      </PPEntry>
+    </PanelGroup>
   );
 }
 
@@ -351,6 +765,8 @@ export default function BpmnPropertiesPanel({ modeler }) {
   const bpmnType = bo.$type;
   const typeLabel = BPMN_TYPE_LABELS[bpmnType] || bpmnType;
   const isTask = TASK_TYPES.has(bpmnType);
+  const isUserTask = bpmnType === 'bpmn:UserTask';
+  const isSequenceFlow = bpmnType === 'bpmn:SequenceFlow';
   const elemId = bo.id || '';
 
   // Choose displayed executor label for header
@@ -504,6 +920,24 @@ export default function BpmnPropertiesPanel({ modeler }) {
                 </p>
               </PPEntry>
             </PanelGroup>
+          )}
+
+          {/* T-0353 [E16]: Step outcomes — only for UserTask (human performer) */}
+          {isUserTask && (
+            <OutcomesPanel
+              bo={bo}
+              modeler={modeler}
+              element={selected.element}
+            />
+          )}
+
+          {/* T-0353 [E16]: Named branch for SequenceFlow — set choros:outcomeName */}
+          {isSequenceFlow && (
+            <SequenceFlowOutcomePanel
+              bo={bo}
+              modeler={modeler}
+              element={selected.element}
+            />
           )}
 
         </div>
