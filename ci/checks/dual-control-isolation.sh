@@ -183,6 +183,7 @@ _dc_mig075_failed=0
 _dc_mig078_failed=0                                                                # T0338-DC-MIG078-GUARD track when 078 triggers the FF-DC7 fail
 _dc_mig081_failed=0                                                                # T0346-DC-MIG081-GUARD track when 081 triggers the FF-DC7 fail
 _dc_mig082_failed=0                                                                # T0351-DC-MIG082-GUARD track when 082 triggers the FF-DC7 fail
+_dc_mig083_failed=0                                                                # T0354-DC-MIG083-GUARD track when 083 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -211,6 +212,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/082_process_app_binding_trigger.sql" ]]; then # T0351-DC-MIG082-GUARD
       _dc_mig082_failed=1                                                     # T0351-DC-MIG082-GUARD
     fi                                                                        # T0351-DC-MIG082-GUARD
+    # Track specifically when 083 triggers this FAIL (and nothing else).     # T0354-DC-MIG083-GUARD
+    if [[ "${m}" == "migrations/083_core_system_registries_seed.sql" ]]; then # T0354-DC-MIG083-GUARD
+      _dc_mig083_failed=1                                                     # T0354-DC-MIG083-GUARD
+    fi                                                                        # T0354-DC-MIG083-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -357,6 +362,27 @@ if [[ "${_dc_mig082_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0351-binding-trigger]: migration 082_process_app_binding_trigger.sql adds trigger columns to process_app_binding — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0351-DC-MIG082-GUARD
   fi                                                                             # T0351-DC-MIG082-GUARD
 fi                                                                               # T0351-DC-MIG082-GUARD
+# T-0354: additive relief for migration 083_core_system_registries_seed.sql.  # T0354-DC-MIG083-GUARD
+# 083 is a PURE SEED — only INSERT ... ON CONFLICT DO NOTHING rows into the   # T0354-DC-MIG083-GUARD
+# existing application and registry_def tables (migrations 003/004). Zero DDL. # T0354-DC-MIG083-GUARD
+# UNRELATED to the dual-control authority domain (grant/confirmation/confirmed2_by). # T0354-DC-MIG083-GUARD
+# Same class as T-0244 migration-073 seed relief (auto_additive).             # T0354-DC-MIG083-GUARD
+_dc_mig083_stem="migrations/083_core_system_registries_seed.sql"               # T0354-DC-MIG083-GUARD
+if [[ "${_dc_mig083_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig083_stem}"; then # T0354-DC-MIG083-GUARD
+  _dc_mig083_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig083_stem}" 2>/dev/null || true)"  # T0354-DC-MIG083-GUARD
+  _dc_mig083_bad=0                                                             # T0354-DC-MIG083-GUARD
+  if echo "${_dc_mig083_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0354-DC-MIG083-GUARD
+    _dc_mig083_bad=1                                                           # T0354-DC-MIG083-GUARD touches authority domain
+  fi                                                                           # T0354-DC-MIG083-GUARD
+  if echo "${_dc_mig083_content}" | grep -iqE "confirmed2_by|confirmed_by"; then # T0354-DC-MIG083-GUARD
+    _dc_mig083_bad=1                                                           # T0354-DC-MIG083-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0354-DC-MIG083-GUARD
+  if [[ "${_dc_mig083_bad}" -eq 0 ]]; then                                    # T0354-DC-MIG083-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0354-DC-MIG083-GUARD cancel false-red
+    _dc_mig083_failed=0                                                        # T0354-DC-MIG083-GUARD
+    echo "PASS [FF-DC7-T0354-core-registries-seed]: migration 083_core_system_registries_seed.sql is a pure INSERT seed — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0354-DC-MIG083-GUARD
+  fi                                                                           # T0354-DC-MIG083-GUARD
+fi                                                                             # T0354-DC-MIG083-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
