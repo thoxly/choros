@@ -28,6 +28,7 @@ import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
 import { registerRecordRoutes } from "./http/records.js";
+import { registerRecordLinksRoutes } from "./http/record-links.js";
 import { makeHttpKeycloakAdminPort, makeHttpKeycloakUserPort } from "./keycloak/admin-port.js";
 import { registerRegisterRoutes } from "./http/register.js";
 import { registerSeedWriteRoutes } from "./http/seed-write.js";
@@ -476,6 +477,21 @@ function buildRouter(
         };
     registerRegisterRoutes(router, { pool: grantsPool, kc: kcUserPort });
   }
+
+  // T-0352 (E16): Register GET /api/records/:id/links — 1-hop LIVE cross-app
+  // projection for the record card (§6 card policy: lazy, per-section expand).
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // APPEND-ONLY: must be the last register* call before setFallback.
+  registerRecordLinksRoutes(
+    router,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
 
   // Set static file handler as fallback for everything else
   router.setFallback(makeStaticHandler(resolveDefaultDistDir()));
