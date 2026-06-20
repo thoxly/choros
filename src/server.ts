@@ -10,7 +10,7 @@ import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
 import { registerFormsRoutes } from "./http/forms.js";
-import { makeFormRecordPersister } from "./http/form-record-persister.js";
+import { makeFormRecordPersister, makeFormDefResolver } from "./http/form-record-persister.js";
 import { registerAuditRoutes } from "./http/audit.js";
 import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
@@ -244,10 +244,10 @@ function buildRouter(
       : undefined,
   );
 
-  // Register form-submission endpoints (T-0102 / T-0337 E15-S4).
-  // Server-side field validation is pure/in-process (no DATABASE_URL required).
-  // When grantsPool is available, the real DB persist port is wired (T-0337):
-  // form submit writes to choros.record in a tenant-scoped tx + audit event.
+  // Register form-submission endpoints (T-0102 / T-0337 E15-S4 / T-0345).
+  // T-0345: when grantsPool is available, the FormDefResolver port is wired so
+  //   the route handler derives the active FormDef from the registry's record_schema
+  //   (single source of truth — registry governs what fields are accepted).
   // Without grantsPool (memory mode / tests), the no-op memoryPersist fallback
   // is used — mints a UUID for the response contract but no authoritative Map
   // (T-0336 doctrine §3.3). Tests pass registerFormsRoutes with no deps.
@@ -256,6 +256,10 @@ function buildRouter(
     grantsPool
       ? {
           persist: makeFormRecordPersister(
+            grantsPool,
+            (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+          ),
+          resolveFormDef: makeFormDefResolver(
             grantsPool,
             (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
           ),

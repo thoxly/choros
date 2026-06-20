@@ -1,5 +1,5 @@
 /**
- * src/http/form-record-persister.ts — T-0337 [E15-S4]
+ * src/http/form-record-persister.ts — T-0337 [E15-S4], T-0345 [E15-S4 followup]
  *
  * REAL DB PERSIST PORT for form submissions.
  *
@@ -25,10 +25,20 @@
  *   The actor's tenant is resolved from the actorSlug via resolveActorTenant
  *   (same pattern as applications.ts / registry-defs.ts / records.ts routes).
  *
+ * SINGLE SOURCE OF TRUTH (T-0345 doctrine §3):
+ *   After resolving the registry_def, this module derives the authoritative
+ *   FormDef from registry_def.record_schema via deriveFormDefFromSchema and
+ *   validates the submitted data against it using the unified form-validator.
+ *   This is the single source of truth enforcement: the registry schema governs
+ *   what fields are accepted and what values are valid — not form-schema.ts.
+ *   A submit that passes the pre-validation in forms.ts (hardcoded schema) but
+ *   fails against the registry record_schema is rejected here with 400.
+ *
  * WRITE PATTERN (mirrors records.ts createRecord §3–§4):
  *   1. Resolve tenant from actor slug.
  *   2. Resolve application by slug ("tel-approval") under the tenant.
  *   3. Resolve governing registry_def by form-slug under the application.
+ *   3b. Derive FormDef from registry_def.record_schema; validate data against it.
  *   4. INSERT record into choros.record (tenant-scoped RLS tx).
  *   5. Append record.create audit event in the same tx.
  *   Returns the server-minted record UUID.
@@ -47,17 +57,22 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import { HttpError } from "./router.js";
 import type { FormPersistPort } from "./forms.js";
 import type { ActorTenantResolver } from "./records.js";
+import { deriveFormDefFromSchema } from "../core/form-schema-derive.js";
+import { validateFormSubmissionAgainst } from "../core/form-validator.js";
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
-/** Minimal registry_def shape needed for the form record insert. */
+/** Minimal registry_def shape needed for the form record insert + schema validation. */
 interface RegistryDefRow {
   id: string;
   application_id: string;
+  /** The authoritative JSON Schema governing this registry's records. */
+  record_schema: unknown;
   record_schema_version: number | string;
 }
 
@@ -91,6 +106,25 @@ const FORM_TO_REGISTRY_SLUG: Readonly<Record<string, string>> = Object.freeze({
 const TEL_APPLICATION_SLUG = "tel-approval" as const;
 
 // ---------------------------------------------------------------------------
+// UUID shape guard (R-2 parity with records.ts — prevents SQL injection via
+// SET LOCAL choros.tenant_id = '<tenantId>' when tenantId is not a UUID)
+// ---------------------------------------------------------------------------
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Assert that `value` is a well-formed UUID (lowercase hex + 4 dashes).
+ * Throws 400 VALIDATION if the shape is wrong — the same guard records.ts uses
+ * in its withTenantTx (parity: both guard the SET LOCAL injection surface).
+ */
+function assertUuidShape(value: string, label: string): void {
+  if (!UUID_RE.test(value)) {
+    throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // withTenantTx (mirrors records.ts — same RLS pattern, no cross-import)
 // ---------------------------------------------------------------------------
 
@@ -99,6 +133,9 @@ async function withTenantTx<T>(
   tenantId: string,
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
+  // R-2 parity guard: tenantId is interpolated directly into SET LOCAL — must be
+  // a well-formed UUID to prevent SQL injection on this surface.
+  assertUuidShape(tenantId, "tenantId");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -172,8 +209,10 @@ export function makeFormRecordPersister(
       }
 
       // 3b. Resolve the governing registry_def by slug under the application.
+      //     record_schema is fetched here (T-0345) to derive the authoritative
+      //     FormDef for schema validation before persisting.
       const regRes = await client.query<RegistryDefRow>(
-        `SELECT id, application_id, record_schema_version
+        `SELECT id, application_id, record_schema, record_schema_version
            FROM choros.registry_def
           WHERE tenant_id = $1
             AND application_id = $2
@@ -183,9 +222,38 @@ export function makeFormRecordPersister(
       );
       const reg = regRes.rows[0];
       if (!reg) {
-        throw new Error(
+        throw new HttpError(
+          404,
+          "NOT_FOUND",
           `form-record-persister: registry_def slug='${registrySlug}' not found ` +
           `under application '${TEL_APPLICATION_SLUG}' for tenant ${tenantId}`,
+        );
+      }
+
+      // 3c. Derive the authoritative FormDef from the registry's record_schema
+      //     (T-0345 — single source of truth: entity schema governs form fields).
+      //
+      //     This is the live enforcement point: registry_def.record_schema is the
+      //     sole authority for which fields are accepted and what values are valid.
+      //     form-schema.ts PURCHASE/APPROVAL are bootstrap definitions that may
+      //     diverge from the registry if the schema was updated via the API.
+      //
+      //     We use deriveFormDefFromSchema (form-schema-derive.ts) to derive a
+      //     FormDef in the same FieldDef shape as form-validator.ts expects, then
+      //     validate the submitted data against it. A submit that passed the
+      //     pre-validation in forms.ts (hardcoded schema) but fails here (registry
+      //     schema) is rejected with 400 — consistent with §3 doctrine:
+      //     "entity = single source of truth; forms derive FROM it, never reverse."
+      const derivedFormDef = deriveFormDefFromSchema(registrySlug, reg.record_schema);
+      const schemaValidation = validateFormSubmissionAgainst(derivedFormDef, data);
+      if (!schemaValidation.ok) {
+        const fieldSummary = schemaValidation.errors
+          .map((e) => `${e.field || "_"}: ${e.code}`)
+          .join("; ");
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          `form data does not conform to registry_def '${registrySlug}' schema: ${fieldSummary}`,
         );
       }
 
@@ -224,5 +292,107 @@ export function makeFormRecordPersister(
     });
 
     return recordId;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// makeFormDefResolver — factory for the T-0345 FormDefResolver port
+// ---------------------------------------------------------------------------
+
+/** Shape of the registry_def row needed for FormDef derivation only. */
+interface RegistryDefSchemaRow {
+  record_schema: unknown;
+}
+
+/**
+ * Create a real-DB FormDefResolver that derives the authoritative FormDef from
+ * the registry's record_schema for a given formId.
+ *
+ * T-0345 (E15-S4 followup): makes the live submit path use the registry's
+ * record_schema as the single source of truth for form validation, replacing
+ * the hardcoded form-schema.ts lookup with a DB-derived FormDef.
+ *
+ * Flow:
+ *   1. Resolve the registry slug for this formId (FORM_TO_REGISTRY_SLUG).
+ *      Returns null if formId is unknown (route handler converts to 404).
+ *   2. Resolve the actor's tenant.
+ *   3. Look up the registry_def by slug under the "tel-approval" application.
+ *      Returns null if not found (route handler converts to 404).
+ *   4. Derive FormDef via deriveFormDefFromSchema(registrySlug, record_schema).
+ *      Returns the derived FormDef.
+ *
+ * @param pool               - pg.Pool with DATABASE_URL
+ * @param resolveActorTenant - maps actor slug → tenant UUID
+ * @returns FormDefResolver  - async (formId, actorSlug) → FormDef | null
+ */
+export function makeFormDefResolver(
+  pool: pg.Pool,
+  resolveActorTenant: ActorTenantResolver,
+): import("./forms.js").FormDefResolver {
+  return async (
+    formId: string,
+    actorSlug: string,
+  ): Promise<import("../core/form-schema.js").FormDef | null> => {
+    // 1. Map formId → registry slug.
+    const registrySlug = FORM_TO_REGISTRY_SLUG[formId];
+    if (!registrySlug) {
+      // Unknown form id — caller converts to 404.
+      return null;
+    }
+
+    // 2. Resolve the actor's tenant.
+    const tenantId = await resolveActorTenant(actorSlug);
+    // R-2 parity guard: tenantId is interpolated directly into SET LOCAL — must be
+    // a well-formed UUID to prevent SQL injection on this surface (same as withTenantTx).
+    assertUuidShape(tenantId, "tenantId");
+
+    // 3. Fetch the registry_def's record_schema (read-only, no tx needed for
+    //    the lookup — we use a pool client directly outside a tx since this is
+    //    a read and we force search_path via SET LOCAL to ensure RLS applies).
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await client.query("SET LOCAL search_path TO choros");
+
+      // Resolve application.
+      const appRes = await client.query<ApplicationRow>(
+        `SELECT id FROM choros.application
+          WHERE tenant_id = $1 AND slug = $2
+          LIMIT 1`,
+        [tenantId, TEL_APPLICATION_SLUG],
+      );
+      const app = appRes.rows[0];
+      if (!app) {
+        await client.query("ROLLBACK");
+        return null; // Application not found → form not resolvable.
+      }
+
+      // Resolve registry_def.
+      const regRes = await client.query<RegistryDefSchemaRow>(
+        `SELECT record_schema
+           FROM choros.registry_def
+          WHERE tenant_id = $1
+            AND application_id = $2
+            AND slug = $3
+          LIMIT 1`,
+        [tenantId, app.id, registrySlug],
+      );
+      const reg = regRes.rows[0];
+      if (!reg) {
+        await client.query("ROLLBACK");
+        return null; // Registry not found → form not resolvable (404).
+      }
+
+      await client.query("ROLLBACK"); // Read-only — no changes to commit.
+
+      // 4. Derive the FormDef from the authoritative record_schema.
+      return deriveFormDefFromSchema(registrySlug, reg.record_schema);
+    } catch (err) {
+      try { await client.query("ROLLBACK"); } catch { /* ignore secondary error */ }
+      throw err;
+    } finally {
+      client.release();
+    }
   };
 }

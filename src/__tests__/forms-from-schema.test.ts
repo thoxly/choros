@@ -47,7 +47,7 @@ import {
   deriveFieldDefsFromSchema,
   deriveFormDefFromSchema,
 } from "../core/form-schema-derive.js";
-import { validateFormSubmission } from "../core/form-validator.js";
+import { validateFormSubmission, validateFormSubmissionAgainst } from "../core/form-validator.js";
 import { getFormDef } from "../core/form-schema.js";
 
 // ---------------------------------------------------------------------------
@@ -520,5 +520,234 @@ describe("type dictionary: schema↔binding↔form consistency", () => {
     const result = validateFormSubmission("approval", { decision: "ok" });
     expect(result.ok).toBe(true);
     expect(result.value?.["decision"]).toBe("ok");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0345: live submit path — deriveFormDefFromSchema + validateFormSubmissionAgainst
+// ---------------------------------------------------------------------------
+
+describe("T-0345: validateFormSubmissionAgainst (submit path with derived schema)", () => {
+  /**
+   * T-0345-1: derived FormDef → accepts valid payload.
+   * The registry's record_schema is derived into a FormDef; a conforming payload
+   * validates successfully and the sanitized value contains only schema-declared fields.
+   */
+  it("T-0345-1: derived FormDef accepts a conforming payload and sanitizes output", () => {
+    const recordSchema = {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      required: ["title", "status"],
+      properties: {
+        title: { type: "string", maxLength: 200 },
+        status: { type: "string", enum: ["pending", "approved", "rejected"] },
+        amount: { type: "number", minimum: 0 },
+      },
+    };
+
+    const formDef = deriveFormDefFromSchema("my-registry", recordSchema);
+
+    // Conforming payload — all declared fields, no extras.
+    const result = validateFormSubmissionAgainst(formDef, { title: "Contract Review", status: "pending", amount: 1500 });
+
+    expect(result.ok).toBe(true);
+    expect(result.value?.["title"]).toBe("Contract Review");
+    expect(result.value?.["status"]).toBe("pending");
+    expect(result.value?.["amount"]).toBe(1500);
+  });
+
+  /**
+   * T-0345-2: derived FormDef → rejects fields NOT in registry schema.
+   *
+   * The "RECORD_IN_PAYLOAD" doctrine guard (§3): a field absent from the
+   * registry's record_schema must be rejected by the derived FormDef validation —
+   * even if the field was accepted by the hardcoded form-schema.ts bootstrap.
+   * This is the single-source-of-truth enforcement.
+   */
+  it("T-0345-2: derived FormDef rejects a field not declared in the registry schema (RECORD_IN_PAYLOAD guard)", () => {
+    const recordSchema = {
+      type: "object",
+      required: ["title"],
+      properties: {
+        // Only "title" is declared. The hardcoded form-schema.ts "purchase" form
+        // also has "supplier", "category", etc. Those are NOT in this registry schema.
+        title: { type: "string" },
+      },
+    };
+
+    const formDef = deriveFormDefFromSchema("narrow-registry", recordSchema);
+
+    // Submit a payload with an extra field ("supplier") that is NOT in the registry schema.
+    const result = validateFormSubmissionAgainst(formDef, { title: "Valid title", supplier: "ООО «Вектор»" });
+
+    expect(result.ok).toBe(false);
+    // The extra field must be rejected as UNKNOWN_FIELD.
+    const unknownErr = result.errors.find((e) => e.code === "UNKNOWN_FIELD" && e.field === "supplier");
+    expect(unknownErr).toBeDefined();
+    expect(unknownErr?.code).toBe("UNKNOWN_FIELD");
+  });
+
+  /**
+   * T-0345-3: derived FormDef rejects required field missing from payload.
+   */
+  it("T-0345-3: derived FormDef rejects missing required field", () => {
+    const recordSchema = {
+      type: "object",
+      required: ["title"],
+      properties: {
+        title: { type: "string", maxLength: 100 },
+        note: { type: "string" },
+      },
+    };
+    const formDef = deriveFormDefFromSchema("req-registry", recordSchema);
+
+    // Payload missing required "title".
+    const result = validateFormSubmissionAgainst(formDef, { note: "some note" });
+
+    expect(result.ok).toBe(false);
+    const missingErr = result.errors.find((e) => e.code === "MISSING_REQUIRED" && e.field === "title");
+    expect(missingErr).toBeDefined();
+  });
+
+  /**
+   * T-0345-4: NOT_AN_OBJECT payload is rejected (non-object guard).
+   */
+  it("T-0345-4: validateFormSubmissionAgainst rejects non-object payload", () => {
+    const formDef = deriveFormDefFromSchema("any-form", {
+      type: "object",
+      properties: { name: { type: "string" } },
+    });
+
+    const result = validateFormSubmissionAgainst(formDef, "not-an-object");
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.code === "NOT_AN_OBJECT")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0345: assertUuidShape guard in form-record-persister.withTenantTx (R-2 parity)
+// ---------------------------------------------------------------------------
+
+describe("T-0345: assertUuidShape guard in makeFormRecordPersister (R-2 parity)", () => {
+  /**
+   * T-0345-5: makeFormRecordPersister throws HttpError(400, VALIDATION) when
+   * resolveActorTenant returns a malformed UUID (e.g. a plain slug like "alice").
+   *
+   * The assertUuidShape check fires inside withTenantTx before any pool.connect()
+   * call, so a stub pool that never connects is sufficient for this test.
+   *
+   * This is the R-2 parity guard (mirrors records.ts withTenantTx assertUuidShape).
+   */
+  it("T-0345-5: assertUuidShape guard fires on malformed tenantId before DB access", async () => {
+    // Import the persister factory and HttpError.
+    const { makeFormRecordPersister } = await import("../http/form-record-persister.js");
+    const { HttpError } = await import("../http/router.js");
+
+    // Stub pool: connect() would throw an assertion error if called — we verify
+    // it is NOT called because assertUuidShape fires first.
+    let poolConnectCalled = false;
+    const stubPool = {
+      connect: () => {
+        poolConnectCalled = true;
+        return Promise.reject(new Error("pool.connect() must not be called before UUID check"));
+      },
+    } as unknown as Parameters<typeof makeFormRecordPersister>[0];
+
+    // Stub resolveActorTenant returns a malformed UUID (plain slug, not a UUID).
+    const stubResolveActorTenant = async (_slug: string) => "not-a-uuid-at-all";
+
+    const persister = makeFormRecordPersister(stubPool, stubResolveActorTenant);
+
+    // Call with a known form id so the registry slug resolution succeeds.
+    let thrownError: unknown;
+    try {
+      await persister("alice", "purchase", { subject: "Ноутбуки", supplier: "ООО «Вектор»", budget: "ИТ-инфраструктура · CAPEX" });
+    } catch (e) {
+      thrownError = e;
+    }
+
+    // Must throw HttpError 400 VALIDATION — not a generic Error.
+    expect(thrownError).toBeInstanceOf(HttpError);
+    const httpErr = thrownError as InstanceType<typeof HttpError>;
+    expect(httpErr.statusCode).toBe(400);
+    expect(httpErr.code).toBe("VALIDATION");
+    expect(httpErr.message).toMatch(/tenantId.*must be a valid UUID/);
+
+    // Pool.connect must NOT have been called (UUID check is pre-pool).
+    expect(poolConnectCalled).toBe(false);
+  });
+
+  /**
+   * T-0345-6: makeFormDefResolver returns null for an unknown formId
+   * (no registry slug registered → 404 path).
+   */
+  it("T-0345-6: makeFormDefResolver returns null for unknown formId (404 path)", async () => {
+    const { makeFormDefResolver } = await import("../http/form-record-persister.js");
+
+    // Stub pool that should not be reached (resolver returns early for unknown form).
+    let poolConnectCalled = false;
+    const stubPool = {
+      connect: () => {
+        poolConnectCalled = true;
+        return Promise.reject(new Error("pool.connect() must not be called for unknown form"));
+      },
+    } as unknown as Parameters<typeof makeFormDefResolver>[0];
+
+    const stubResolveActorTenant = async (_slug: string) => "b0000000-0000-0000-0000-000000000001";
+    const resolver = makeFormDefResolver(stubPool, stubResolveActorTenant);
+
+    const result = await resolver("unknown-form-id", "alice");
+
+    expect(result).toBeNull();
+    expect(poolConnectCalled).toBe(false);
+  });
+
+  /**
+   * T-0345-7: makeFormDefResolver throws HttpError(400, VALIDATION) when
+   * resolveActorTenant returns a malformed UUID (e.g. a plain slug like "alice").
+   *
+   * Mirrors T-0345-5 (makeFormRecordPersister) — assertUuidShape parity check
+   * fires before any pool.connect() call on the resolver path too.
+   *
+   * R-2 parity: tenantId is interpolated into SET LOCAL choros.tenant_id —
+   * both makeFormRecordPersister and makeFormDefResolver must guard this surface.
+   */
+  it("T-0345-7: assertUuidShape guard fires on malformed tenantId in makeFormDefResolver before DB access", async () => {
+    const { makeFormDefResolver } = await import("../http/form-record-persister.js");
+    const { HttpError } = await import("../http/router.js");
+
+    // Stub pool: connect() would throw an assertion error if called — we verify
+    // it is NOT called because assertUuidShape fires first.
+    let poolConnectCalled = false;
+    const stubPool = {
+      connect: () => {
+        poolConnectCalled = true;
+        return Promise.reject(new Error("pool.connect() must not be called before UUID check"));
+      },
+    } as unknown as Parameters<typeof makeFormDefResolver>[0];
+
+    // Stub resolveActorTenant returns a malformed UUID (plain slug, not a UUID).
+    const stubResolveActorTenant = async (_slug: string) => "not-a-uuid-at-all";
+
+    const resolver = makeFormDefResolver(stubPool, stubResolveActorTenant);
+
+    // Use a known form id so the registry slug resolution succeeds and we reach
+    // the assertUuidShape guard (unknown formId returns null before the guard).
+    let thrownError: unknown;
+    try {
+      await resolver("purchase", "alice");
+    } catch (e) {
+      thrownError = e;
+    }
+
+    // Must throw HttpError 400 VALIDATION — not a generic Error.
+    expect(thrownError).toBeInstanceOf(HttpError);
+    const httpErr = thrownError as InstanceType<typeof HttpError>;
+    expect(httpErr.statusCode).toBe(400);
+    expect(httpErr.code).toBe("VALIDATION");
+    expect(httpErr.message).toMatch(/tenantId.*must be a valid UUID/);
+
+    // Pool.connect must NOT have been called (UUID check is pre-pool).
+    expect(poolConnectCalled).toBe(false);
   });
 });

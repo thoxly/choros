@@ -167,6 +167,33 @@ export function validateFormSubmission(formId: string, payload: unknown): FormVa
   return validateAgainst(form, payload);
 }
 
+/**
+ * Validate a submitted payload against a pre-resolved FormDef (no registry lookup).
+ *
+ * T-0345 [E15-S4 followup]: used by the live submit path when the FormDef has been
+ * derived from the registry's `record_schema` (via deriveFormDefFromSchema) rather
+ * than looked up from the hardcoded form-schema.ts registry. Allows the caller to
+ * supply a dynamically-derived schema while reusing all the same validation rules
+ * (missing required, wrong type, over-length, out-of-range, disallowed enum,
+ * unknown/extra field) — single implementation, two call sites.
+ *
+ * @param formDef  - the FormDef to validate against (derived or static)
+ * @param payload  - the raw submitted payload
+ * @returns FormValidationResult — same shape as validateFormSubmission
+ */
+export function validateFormSubmissionAgainst(
+  formDef: FormDef,
+  payload: unknown,
+): FormValidationResult {
+  if (!isPlainObject(payload)) {
+    return {
+      ok: false,
+      errors: [err("", "NOT_AN_OBJECT", "form payload must be a JSON object")],
+    };
+  }
+  return validateAgainst(formDef, payload);
+}
+
 function validateAgainst(form: FormDef, payload: Record<string, unknown>): FormValidationResult {
   const errors: FieldError[] = [];
   const known = new Set(form.fields.map((f) => f.key));
