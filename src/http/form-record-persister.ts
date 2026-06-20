@@ -342,6 +342,9 @@ export function makeFormDefResolver(
 
     // 2. Resolve the actor's tenant.
     const tenantId = await resolveActorTenant(actorSlug);
+    // R-2 parity guard: tenantId is interpolated directly into SET LOCAL — must be
+    // a well-formed UUID to prevent SQL injection on this surface (same as withTenantTx).
+    assertUuidShape(tenantId, "tenantId");
 
     // 3. Fetch the registry_def's record_schema (read-only, no tx needed for
     //    the lookup — we use a pool client directly outside a tx since this is

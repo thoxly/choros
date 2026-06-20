@@ -45,7 +45,6 @@
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import {
-  validateFormSubmission,
   validateFormSubmissionAgainst,
   type FieldError,
 } from "../core/form-validator.js";
@@ -261,7 +260,7 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
     // Persist the sanitized value (T-0251 / T-0337).
     // DB mode (deps.persist wired): writes to choros.record in a tenant-scoped tx
     //   with audit event (makeFormRecordPersister in server.ts).
-    //   The persister also re-validates against record_schema via assertDataValid
+    //   The persister also re-validates against record_schema via validateFormSubmissionAgainst
     //   (T-0345 doctrine §3 enforcement — second layer inside the tx).
     // No-DB mode (no deps): memoryPersist mints a UUID for the response contract
     //   without an authoritative in-process Map (T-0336 doctrine §3.3).

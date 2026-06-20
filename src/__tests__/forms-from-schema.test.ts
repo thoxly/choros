@@ -701,4 +701,53 @@ describe("T-0345: assertUuidShape guard in makeFormRecordPersister (R-2 parity)"
     expect(result).toBeNull();
     expect(poolConnectCalled).toBe(false);
   });
+
+  /**
+   * T-0345-7: makeFormDefResolver throws HttpError(400, VALIDATION) when
+   * resolveActorTenant returns a malformed UUID (e.g. a plain slug like "alice").
+   *
+   * Mirrors T-0345-5 (makeFormRecordPersister) — assertUuidShape parity check
+   * fires before any pool.connect() call on the resolver path too.
+   *
+   * R-2 parity: tenantId is interpolated into SET LOCAL choros.tenant_id —
+   * both makeFormRecordPersister and makeFormDefResolver must guard this surface.
+   */
+  it("T-0345-7: assertUuidShape guard fires on malformed tenantId in makeFormDefResolver before DB access", async () => {
+    const { makeFormDefResolver } = await import("../http/form-record-persister.js");
+    const { HttpError } = await import("../http/router.js");
+
+    // Stub pool: connect() would throw an assertion error if called — we verify
+    // it is NOT called because assertUuidShape fires first.
+    let poolConnectCalled = false;
+    const stubPool = {
+      connect: () => {
+        poolConnectCalled = true;
+        return Promise.reject(new Error("pool.connect() must not be called before UUID check"));
+      },
+    } as unknown as Parameters<typeof makeFormDefResolver>[0];
+
+    // Stub resolveActorTenant returns a malformed UUID (plain slug, not a UUID).
+    const stubResolveActorTenant = async (_slug: string) => "not-a-uuid-at-all";
+
+    const resolver = makeFormDefResolver(stubPool, stubResolveActorTenant);
+
+    // Use a known form id so the registry slug resolution succeeds and we reach
+    // the assertUuidShape guard (unknown formId returns null before the guard).
+    let thrownError: unknown;
+    try {
+      await resolver("purchase", "alice");
+    } catch (e) {
+      thrownError = e;
+    }
+
+    // Must throw HttpError 400 VALIDATION — not a generic Error.
+    expect(thrownError).toBeInstanceOf(HttpError);
+    const httpErr = thrownError as InstanceType<typeof HttpError>;
+    expect(httpErr.statusCode).toBe(400);
+    expect(httpErr.code).toBe("VALIDATION");
+    expect(httpErr.message).toMatch(/tenantId.*must be a valid UUID/);
+
+    // Pool.connect must NOT have been called (UUID check is pre-pool).
+    expect(poolConnectCalled).toBe(false);
+  });
 });
