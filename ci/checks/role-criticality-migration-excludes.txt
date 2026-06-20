@@ -44,3 +44,4 @@
 079_transition_journal_index  # T-0339 — E15-S3: GIN+btree indexes on audit_event + process_transition_journal mat-view (no new tenant table); owned by transition-journal.ts analytics
 080_tel_dmn_seed              # T-0340 — E15-S5: DMN 5M-threshold seed for dev tenant (pure INSERT, no CREATE TABLE); owned by dmn-rule-table adapter
 081_revoke_transition_journal # T-0346 — E15-S3-followup SECURITY: REVOKE+DROP cross-tenant mat-view process_transition_journal (zero readers, audit_event RLS path preserved); owned by this task
+083_core_system_registries_seed # T-0354 — E16 §7 core system registries seed (pure INSERT seed, zero DDL, rides existing tables 003/004); owned by core-system-registries.ts
