@@ -295,10 +295,34 @@ describe("intentDispatch", () => {
 
   it("stub port + configurator intent → result has intent='configurator'", async () => {
     const stub = new StubChatLlmPort({ fixedText: "Настройка готова" });
-    const ctx = makeCtx(stub);
+    // T-0361: the real configurator checks authoring_draft grants before calling the LLM.
+    // Provide an authoring_draft grant so the grant ceiling is satisfied and the stub
+    // returns its fixedText. The intersection of agent+user grants is what matters.
+    const authoringDraftGrant = makeGrant({
+      operation: "create",
+      resourceType: "authoring_draft" as Grant["resourceType"],
+      nodeId: "org-root",
+      tenantId: TENANT_A,
+    });
+    const base = makeGrantSource({
+      "assistant-agent": [authoringDraftGrant],
+      "alice": [authoringDraftGrant],
+    });
+    const intersection = makeIntersectionGrantSource(base, agentSubjectA, userSubjectA, flatOracle);
+    const ctx: HandlerContext = {
+      tenantId: TENANT_A,
+      userSubject: userSubjectA,
+      agentSubject: agentSubjectA,
+      intersectionGrants: intersection,
+      ancestry: flatOracle,
+      llm: stub,
+      threadId: "thread-1",
+      messageId: "msg-1",
+    };
     const result = await intentDispatch("настрой раздел продаж", ctx);
     expect(result.intent).toBe("configurator");
-    expect(result.text).toBe("Настройка готова");
+    // With authoring_draft grant and no tool calls from stub, text contains the fixedText.
+    expect(result.text).toContain("Настройка готова");
   });
 
   it("unknown intent falls back to analyst (safe read-only default)", async () => {
