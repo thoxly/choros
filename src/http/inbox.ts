@@ -968,10 +968,27 @@ export function registerInboxRoutes(
       if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
         throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
       }
-      const action = (rawBody as Record<string, unknown>)["action"];
+      const body = rawBody as Record<string, unknown>;
+      const action = body["action"];
       if (action !== "approve") {
         throw new HttpError(400, "VALIDATION", "action must be 'approve'");
       }
+
+      // T-0353 [E16]: Optional named outcome (the semantic branch the human chose,
+      // e.g. "Согласовать", "На доработку"). When provided, it is recorded as a
+      // STEP RESULT on the «Согласование» entity (DOCTRINE: outcome decision = record
+      // field, NOT a process variable — RECORD_IN_PAYLOAD guard).
+      // When absent, defaults to "approve" (backward compatible with existing tests).
+      const rawOutcome = body["outcome"];
+      const outcomeName: string =
+        rawOutcome !== undefined && rawOutcome !== null && typeof rawOutcome === "string"
+          ? rawOutcome
+          : "approve";
+
+      // Optional comment (also recorded on the entity, never in process variables).
+      const rawComment = body["comment"];
+      const outcomeComment: string | undefined =
+        typeof rawComment === "string" ? rawComment : undefined;
 
       const taskId = params["id"] as string;
       const tenantId = await resolveActorTenantDep(actor);
@@ -1033,6 +1050,29 @@ export function registerInboxRoutes(
         if (outboxStore) {
           // F1 step-class from form_binding (default-to-A; B → skipped/deferred).
           const stepClass = await readStepClass(client, tenantId, task.procKey);
+
+          // T-0353 [E16]: Build formData with the outcome decision.
+          // DOCTRINE (choros-data-ownership-doctrine + RECORD_IN_PAYLOAD guard):
+          //   The outcome decision + optional comment are STEP RESULT = ENTITY.
+          //   They go into the «Согласование» registry record via applyStepResult's
+          //   formData — NOT into process variables (Flowable).
+          //
+          //   outcomeName → "decision" field on the entity (e.g. "Согласовать")
+          //   outcomeComment → "comment" field on the entity (optional)
+          //   approved_by → actor slug (provenance)
+          //
+          //   The outcome-branch resolver (outcome-branch-resolver.ts) can later
+          //   read outcomeName from the flow definition to determine routing when
+          //   the process is extended to use named branches. For now, the action
+          //   route records the entity — branch resolution is the engine's job.
+          const formData: Record<string, unknown> = {
+            decision: outcomeName,
+            approved_by: actor,
+          };
+          if (outcomeComment !== undefined) {
+            formData["comment"] = outcomeComment;
+          }
+
           await applyStepResult(client, {
             tenantId,
             instanceId: task.inst,
@@ -1041,10 +1081,7 @@ export function registerInboxRoutes(
             actor,
             taskId,
             stepClass,
-            // The approve card-action carries no form body today; the «Согласование»
-            // record records the decision provenance. Future form-backed approves
-            // thread their submitted data here.
-            formData: { decision: "approve", approved_by: actor },
+            formData,
             durationMs,
             nowMs,
             outboxStore,
@@ -1054,8 +1091,10 @@ export function registerInboxRoutes(
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
+      // T-0353 [E16]: include outcomeName in response so the caller can show the
+      // chosen branch label in the UI (e.g. "Согласовано", "Отклонено").
       res.end(
-        JSON.stringify({ instanceId: task.inst, status: "done", action: "approve" }),
+        JSON.stringify({ instanceId: task.inst, status: "done", action: "approve", outcome: outcomeName }),
       );
     }));
   }
