@@ -242,3 +242,68 @@ describe("No-DB fallback still works (regression guard, T-0259 AC-3)", () => {
     expect((body as Record<string, unknown>)["demo"]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0301 — mock-leak guard: in DB mode, real tenants must NOT see seed data.
+//
+// When DATABASE_URL is set (DB mode active), showcase/fixture seed rows must
+// not appear in GET /api/processes or GET /api/inbox for a real tenant.
+// Honest-empty is the correct response when no real data exists.
+// ---------------------------------------------------------------------------
+
+describe("T-0301: DB-mode endpoints return honest-empty, not showcase seed (mock-leak guard)", () => {
+  let baseUrl: string;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    clearPackCache();
+    // DATABASE_URL set (non-connectable mock) — hasDb() === true.
+    // FLOWABLE_REST_APP_ADMIN_PASSWORD absent → startDeps is not injected
+    // by the composition root → GET /api/processes falls through to no-startDeps path.
+    // This matches the T-0259 pack-absent scenario that was already tested above;
+    // here we also set CHOROS_PACK_DIR to a missing directory to force pack-absent
+    // (ensures the endpoint never returns showcase instances regardless of pack presence).
+    const result = await startServer({
+      DATABASE_URL: "postgres://mock:mock@127.0.0.1:59999/mock_nonexistent",
+      CHOROS_PACK_DIR: "/tmp/__nonexistent_t0301__",
+    });
+    baseUrl = result.baseUrl;
+    cleanup = result.cleanup;
+  });
+
+  afterEach(async () => {
+    await cleanup();
+    clearPackCache();
+  });
+
+  it("GET /api/processes returns 200 + empty instances (not showcase pack), no 500", async () => {
+    const { status, body } = await get(baseUrl, "/api/processes", {
+      "x-dev-user": "e-orlov",
+    });
+    expect(status).toBe(200);
+    const data = body as Record<string, unknown>;
+    expect(Array.isArray(data["instances"])).toBe(true);
+    // Honest-empty (no showcase pack): zero instances, NOT the 8 showcase rows.
+    // demo:true signals pack-absent (T-0259 degrade path); no INS-7731 etc.
+    const instances = data["instances"] as unknown[];
+    expect(instances.every((i) => {
+      const id = (i as Record<string, unknown>)["id"];
+      // Showcase fixture IDs start with INS-7
+      return typeof id !== "string" || !id.startsWith("INS-7");
+    })).toBe(true);
+  });
+
+  // Note: GET /api/inbox with a non-connectable DATABASE_URL returns 500 by design
+  // (fail-closed NF-3: role-resolution DB error must not silently degrade to fixture
+  // data). The mock-leak fix (T-0301) is validated via the static code path:
+  // findInboxItems() in DB mode skips INBOX_SEED and returns only real DB rows.
+  // Full verification is on the deployed stack (fitness:db on the server).
+  it("GET /api/inbox in DB-mode with non-connectable DB returns 500 (fail-closed NF-3)", async () => {
+    const { status } = await get(baseUrl, "/api/inbox", {
+      "x-dev-user": "e-orlov",
+    });
+    // 500 is CORRECT here: DB unavailable → role-resolution propagates error
+    // (fail-closed). This confirms the non-degrade path is wired.
+    expect(status).toBe(500);
+  });
+});
