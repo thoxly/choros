@@ -235,7 +235,7 @@
     {
       "clientId": "choros-registrar",
       "name": "Choros Registrar",
-      "description": "DEV ONLY — confidential service-account client for self-serve registration (T-0342). Holds manage-users + view-users on realm-management so the app can create/delete human users via Admin REST without master-realm admin. Secret: choros-registrar-dev-secret (dev fixture, RL-1). NOTE: The manage-users/view-users role grant on realm-management is applied via the Admin REST API on first deploy (or via realm import with serviceAccountClientRoles — see below). If Keycloak import does not support the serviceAccountClientRoles shape in this realm version, apply the grant once via admin console: Client → choros-registrar → Service account roles → realm-management → manage-users + view-users.",
+      "description": "DEV-only confidential service-account client for self-serve registration (manage-users/view-users on realm-management).",
       "protocol": "openid-connect",
       "enabled": true,
       "publicClient": false,
@@ -244,10 +244,7 @@
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
       "secret": "choros-registrar-dev-secret",
-      "attributes": {},
-      "serviceAccountClientRoles": {
-        "realm-management": ["manage-users", "view-users"]
-      }
+      "attributes": {}
     },
     {
       "clientId": "agent-triage",
@@ -461,7 +458,10 @@
       "enabled": true,
       "emailVerified": true,
       "serviceAccountClientId": "choros-registrar",
-      "attributes": {}
+      "attributes": {},
+      "clientRoles": {
+        "realm-management": ["manage-users", "view-users"]
+      }
     }
   ]
 }
