@@ -108,11 +108,25 @@ describe("runAnalyst — basic success", () => {
 
 describe("runAnalyst — no business write invariant", () => {
   it("never calls a write port even for a recommendation query", async () => {
-    const writeIfCalled = vi.fn(() => {
-      throw new Error("BUSINESS WRITE DETECTED — analyst must never write");
+    // Structural guarantee: AnalystPorts has ZERO write ports — the interface
+    // only exposes listRecords/loadCycleTime/loadActorBreakdown (all read) and
+    // emitAudit (metadata-only audit log). There is no business-write port to
+    // inject, so the invariant is enforced at the type level.
+    //
+    // We make the guard real by injecting it as emitAudit and requiring that
+    // any event emitted is an audit-read type only. If a future change
+    // accidentally routes a business-write event through emitAudit, writeIfCalled
+    // will throw and fail the test.
+    const writeIfCalled = vi.fn((event: { type: string }) => {
+      if (event.type !== "assistant.analyst.read") {
+        throw new Error(
+          `BUSINESS WRITE DETECTED via emitAudit — unexpected type: ${event.type}`,
+        );
+      }
     });
 
-    // Inject no-op read ports + a write-guard for any hypothetical write.
+    // Inject no-op read ports + the write-guard wired to emitAudit.
+    // Any non-audit event type would trigger the guard and fail the test.
     const ports: AnalystPorts = {
       listRecords: async () => [{ id: "r1", name: "Клиент A" }],
       loadCycleTime: async (tid) => ({
@@ -121,20 +135,21 @@ describe("runAnalyst — no business write invariant", () => {
         rows: [],
       }),
       loadActorBreakdown: async () => [],
-      emitAudit: async () => {
-        // audit is allowed (metadata write, not business write)
+      emitAudit: async (event) => {
+        writeIfCalled(event);
       },
     };
 
-    // If runAnalyst called writeIfCalled, the test would throw and fail.
     const result = await runAnalyst(
       "рекомендую запустить процесс X — выгодно",
       makeCtx(),
       ports,
     );
 
-    // writeIfCalled must NOT have been invoked.
-    expect(writeIfCalled).not.toHaveBeenCalled();
+    // writeIfCalled IS called (for the audit event) but must never throw.
+    // Exactly one audit.read event emitted — no business write snuck through.
+    expect(writeIfCalled).toHaveBeenCalledOnce();
+    expect(writeIfCalled.mock.calls[0][0].type).toBe("assistant.analyst.read");
     // The result is still an analyst reply.
     expect(result.intent).toBe("analyst");
   });

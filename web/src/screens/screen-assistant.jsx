@@ -270,19 +270,32 @@ function MessageBubble({ msg, activeThreadId }) {
   const [saved, setSaved] = React.useState(false);
   const [saveError, setSaveError] = React.useState(null);
 
+  // Derive app_id from the message context: only an 'app' context carries a real
+  // app UUID. Records and processes belong to apps indirectly and we don't have
+  // the FK here, so we cannot derive a valid app_id from them.
+  // report_page has FK (tenant_id, app_id) → choros.application, so we must
+  // never POST a nil/fake UUID — disable the button when no app context exists.
+  const contextAppId =
+    msg.context_ref?.kind === 'app' ? msg.context_ref.id : null;
+  const canSaveReport = Boolean(contextAppId);
+  const saveDisabledReason = canSaveReport
+    ? null
+    : 'Откройте ассистента из приложения, чтобы сохранить отчёт';
+
   const handleSaveReport = async () => {
+    if (!canSaveReport) return; // guard: should not be reachable due to disabled state
     setSaving(true);
     setSaveError(null);
     try {
       // POST /api/report-pages — существующий маршрут (T-0121).
       // Saves a Floor-2 report draft with the analyst reply text as page_code.
-      // app_id defaults to a placeholder until the user links it to an app.
+      // app_id comes from the message context_ref (kind='app') — a real FK-safe UUID.
       const r = await fetch('/api/report-pages', {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: JSON.stringify({
           // slug derived from thread + message id for uniqueness
-          app_id: '00000000-0000-0000-0000-000000000000', // tenant-level placeholder
+          app_id: contextAppId,
           slug: `analyst-${(activeThreadId || 'x').slice(0, 8)}-${msg.id.slice(0, 8)}`,
           title: 'Отчёт от ассистента',
           floor: '2',
@@ -317,16 +330,19 @@ function MessageBubble({ msg, activeThreadId }) {
         </div>
       )}
       <div className="chs-asst__msg-text">{msg.text}</div>
-      {/* T-0360: Сохранить как отчёт — только для ответов аналитика */}
+      {/* T-0360: Сохранить как отчёт — только для ответов аналитика.
+          Button is disabled (with tooltip) when no app context is present to
+          avoid an FK violation on report_page(tenant_id, app_id) → application. */}
       {isAnalyst && !saved && (
         <div className="chs-asst__msg-actions">
           <Button
             variant="ghost"
             size="sm"
-            disabled={saving}
+            disabled={saving || !canSaveReport}
             loading={saving}
             onClick={handleSaveReport}
-            aria-label="Сохранить этот анализ как именованный отчёт"
+            aria-label={saveDisabledReason ?? 'Сохранить этот анализ как именованный отчёт'}
+            title={saveDisabledReason ?? undefined}
           >
             Сохранить как отчёт
           </Button>
