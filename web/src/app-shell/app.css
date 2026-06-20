@@ -67,6 +67,14 @@
 .chs-nav__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--chs-space-4) var(--chs-space-5) var(--chs-space-6); }
 .chs-nav__group { margin-top: var(--chs-space-6); }
 .chs-nav__group:first-child { margin-top: var(--chs-space-2); }
+/* T-0355: visual separator between the authoring space (Конструктор/Модельер/Ассистент)
+   and the work space (Работа/Исполнители/Наблюдаемость). Token-pure: border color
+   matches the panel separator token so the two spaces are visually distinct without
+   introducing an extra design token. */
+.chs-nav__space-divider {
+  margin: var(--chs-space-5) var(--chs-space-4) 0;
+  border-top: 1px solid var(--chs-color-border);
+}
 .chs-nav__grouplabel {
   font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold);
   letter-spacing: var(--chs-tracking-wide); text-transform: uppercase;
