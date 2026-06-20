@@ -464,6 +464,254 @@ describe("Block C — makeExternalTaskDeliver fail-path", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Block E — DMN gateway wiring (T-0340 behavioral bridge test R-1)
+// ---------------------------------------------------------------------------
+/**
+ * DG-16: makeExternalTaskDeliver — tel-intake topic triggers evaluateGatewayAtTriage
+ * and injects approvalRequired into the completeTask variables map.
+ *
+ * This is the BEHAVIORAL R-1 bridge test. Unlike DG-14 (grep) and DG-15 (isolated
+ * evaluateGatewayAtTriage call), this test drives the FULL deliver() path end-to-end
+ * through makeExternalTaskDeliver with a real task_completed row whose job topic is
+ * "tel-intake". It asserts that completeTask() receives approvalRequired in its
+ * variables — proving the DMN evaluation result actually reaches Flowable.
+ *
+ * Pool contract (three concurrent connect() calls in the deliver() path):
+ *   1. lookupExternalTaskId  → SELECT idempotency_key FROM choros.job
+ *   2. lookupJobTopicAndVariables → SELECT topic, variables FROM choros.job
+ *   3. DMN eval block        → BEGIN / SET LOCAL / SELECT FROM choros.dmn_rule_table /
+ *                              audit writes / COMMIT
+ * All three are dispatched from the SAME SQL-text-routing mock pool client.
+ */
+describe("DG-16: tel-intake bridge behavior — approvalRequired reaches completeTask", () => {
+  /**
+   * Canonical 5M threshold rule table (mirrors migration 080 seed).
+   * Same structure as in dmn-gateway.test.ts to keep the stub self-contained.
+   */
+  const TEL_THRESHOLD_STUB = {
+    id: "c0de0001-e150-0005-d4f4-000000000080",
+    name: "ТЭЛ: порог суммы закупки",
+    hitPolicy: "FIRST",
+    rules: [
+      {
+        annotation: "Сумма > 5 000 000 ₽ → доп. согласование",
+        conditions: [{ field: "amount", operator: "gt", value: 5_000_000 }],
+        effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "needs-approval" }],
+      },
+      {
+        annotation: "Стандартный трек (сумма в пределах порога)",
+        conditions: [],
+        effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "standard" }],
+      },
+    ],
+  };
+
+  /**
+   * Build a mock pool that routes SQL queries to the correct stub responses.
+   * Called by both lookupExternalTaskId, lookupJobTopicAndVariables, AND the
+   * inner DMN eval block (evaluateGatewayAtTriage → pool.connect()).
+   */
+  function makeDmnBridgeMockPool(opts: {
+    jobId: string;
+    externalTaskId: string;
+    jobTopic: string;
+    jobVariables: Record<string, unknown>;
+  }): unknown {
+    const NOW_MS = Date.now();
+    return {
+      connect: async () => ({
+        query: async (sql: unknown, params?: unknown[]) => {
+          const sqlText = typeof sql === "string" ? sql : ((sql as { text?: string }).text ?? "");
+          const upper = sqlText.trimStart().toUpperCase();
+
+          // ── Transaction control & tenant GUC (absorb silently) ──────────────
+          if (
+            upper.startsWith("BEGIN") ||
+            upper.startsWith("COMMIT") ||
+            upper.startsWith("ROLLBACK") ||
+            upper.startsWith("SET LOCAL") ||
+            upper.startsWith("SET SEARCH_PATH")
+          ) {
+            return { rows: [] };
+          }
+
+          // ── 1. lookupExternalTaskId: SELECT idempotency_key FROM choros.job ─
+          if (/SELECT idempotency_key/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            if (jobId === opts.jobId) {
+              return { rows: [{ idempotency_key: opts.externalTaskId }] };
+            }
+            return { rows: [] };
+          }
+
+          // ── 2. lookupJobTopicAndVariables: SELECT topic, variables FROM choros.job ─
+          if (/SELECT topic, variables/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            if (jobId === opts.jobId) {
+              return { rows: [{ topic: opts.jobTopic, variables: opts.jobVariables }] };
+            }
+            return { rows: [] };
+          }
+
+          // ── 3. DMN eval: rule-table queries ─────────────────────────────────
+          if (/FROM choros\.dmn_rule_table/i.test(sqlText)) {
+            return {
+              rows: [
+                {
+                  id: TEL_THRESHOLD_STUB.id,
+                  name: TEL_THRESHOLD_STUB.name,
+                  definition: TEL_THRESHOLD_STUB,
+                  process_def_id: null,
+                  status: "published",
+                  updated_at: NOW_MS - 10_000,
+                },
+              ],
+            };
+          }
+
+          // ── 4. Audit chain (absorb silently) ────────────────────────────────
+          if (
+            /INSERT INTO choros\.audit_head/i.test(sqlText) ||
+            /INSERT INTO choros\.audit_event/i.test(sqlText) ||
+            /UPDATE choros\.audit_head/i.test(sqlText)
+          ) {
+            return { rows: [] };
+          }
+          if (/FROM choros\.audit_head/i.test(sqlText) && /FOR UPDATE/i.test(sqlText)) {
+            return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+          }
+          if (/current_setting\('choros\.tenant_id'/i.test(sqlText)) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
+
+          // ── Default: absorb unknown queries ─────────────────────────────────
+          return { rows: [] };
+        },
+        release: () => {/* no-op */},
+      }),
+    };
+  }
+
+  it("DG-16a: amount > 5M → completeTask receives approvalRequired = 'needs-approval'", async () => {
+    const flowableClient = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+
+    const JOB_ID = "job-tel-intake-high";
+    const EXTERNAL_TASK_ID = "ext-task-tel-intake-high";
+    const instanceVariables = { amount: 6_000_000 };
+
+    // Wire the mock pool to respond to all three query types
+    jobStore.pool = makeDmnBridgeMockPool({
+      jobId: JOB_ID,
+      externalTaskId: EXTERNAL_TASK_ID,
+      jobTopic: "tel-intake",
+      jobVariables: instanceVariables,
+    });
+
+    const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
+
+    const row = makeOutboxRow({
+      aggregateId: JOB_ID,
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      eventType: "task_completed",
+      payload: { workerId: WORKER_ID, variables: { submitted: true } },
+    });
+
+    const result = await deliver(row);
+
+    // The deliver call must succeed
+    expect(result.ok).toBe(true);
+
+    // completeTask must have been called exactly once
+    expect(flowableClient.completeCalls).toHaveLength(1);
+
+    const [calledTaskId, _calledWorkerId, calledVars] = flowableClient.completeCalls[0];
+
+    // The external task id must match
+    expect(calledTaskId).toBe(EXTERNAL_TASK_ID);
+
+    // THE KEYSTONE ASSERTION (R-1): approvalRequired must be in the completeTask variables.
+    // This proves the DMN evaluation result (amount > 5M → "needs-approval") was merged
+    // into the payload that Flowable receives to route through gw-approval-threshold.
+    expect(calledVars).toBeDefined();
+    expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBe("needs-approval");
+  });
+
+  it("DG-16b: amount ≤ 5M → completeTask receives approvalRequired = 'standard'", async () => {
+    const flowableClient = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+
+    const JOB_ID = "job-tel-intake-low";
+    const EXTERNAL_TASK_ID = "ext-task-tel-intake-low";
+    const instanceVariables = { amount: 3_000_000 };
+
+    jobStore.pool = makeDmnBridgeMockPool({
+      jobId: JOB_ID,
+      externalTaskId: EXTERNAL_TASK_ID,
+      jobTopic: "tel-intake",
+      jobVariables: instanceVariables,
+    });
+
+    const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
+
+    const row = makeOutboxRow({
+      aggregateId: JOB_ID,
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      eventType: "task_completed",
+      payload: { workerId: WORKER_ID, variables: { submitted: true } },
+    });
+
+    const result = await deliver(row);
+
+    expect(result.ok).toBe(true);
+    expect(flowableClient.completeCalls).toHaveLength(1);
+
+    const [, , calledVars] = flowableClient.completeCalls[0];
+    expect(calledVars).toBeDefined();
+    expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBe("standard");
+  });
+
+  it("DG-16c: non-tel-intake topic → completeTask does NOT receive approvalRequired", async () => {
+    // For a non-tel-intake topic, the bridge skips DMN evaluation.
+    // The variables from the payload are passed through unchanged (no approvalRequired added).
+    const flowableClient = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+
+    const JOB_ID = "job-other-topic";
+    const EXTERNAL_TASK_ID = "ext-task-other";
+    // High amount but topic is NOT tel-intake → approvalRequired must NOT appear
+    const instanceVariables = { amount: 9_000_000 };
+
+    jobStore.pool = makeDmnBridgeMockPool({
+      jobId: JOB_ID,
+      externalTaskId: EXTERNAL_TASK_ID,
+      jobTopic: "some-other-topic",
+      jobVariables: instanceVariables,
+    });
+
+    const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
+
+    const row = makeOutboxRow({
+      aggregateId: JOB_ID,
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      eventType: "task_completed",
+      payload: { workerId: WORKER_ID, variables: { submitted: true } },
+    });
+
+    const result = await deliver(row);
+
+    expect(result.ok).toBe(true);
+    expect(flowableClient.completeCalls).toHaveLength(1);
+
+    const [, , calledVars] = flowableClient.completeCalls[0];
+    // approvalRequired must NOT be in the variables for a non-tel-intake topic
+    if (calledVars !== undefined) {
+      expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Block D — poll-loop
 // ---------------------------------------------------------------------------
 describe("Block D — startBridgePollLoop", () => {
