@@ -290,7 +290,9 @@ describe("intentDispatch", () => {
     const ctx = makeCtx(stub);
     const result = await intentDispatch("отчёт по продажам", ctx);
     expect(result.intent).toBe("analyst");
-    expect(result.text).toBe("Анализ готов");
+    // T-0360: the real analyst handler appends a save-hint to the LLM text;
+    // assert the LLM text is present (not strict equality — hint is expected).
+    expect(result.text).toContain("Анализ готов");
   });
 
   it("stub port + configurator intent → result has intent='configurator'", async () => {

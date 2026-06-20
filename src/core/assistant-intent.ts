@@ -135,21 +135,14 @@ export type IntentHandler = (
 // ---------------------------------------------------------------------------
 
 /**
- * STUB analyst handler — T-0360 will replace with real implementation.
- * For now: calls LLM chat() for a text reply, returns intent="analyst".
- * No record reads, no tool calls — deferred to T-0360.
+ * ANALYST handler — T-0360 real implementation.
+ * Delegates to src/core/assistant-analyst.ts (handleAnalyst).
+ * Read-only: reads records + S3 journal within the asker's ACL; NEVER writes
+ * business data. Produces an ephemeral ReportDraft + save-proposal hint.
  */
-export const handleAnalyst: IntentHandler = async (userText, ctx) => {
-  const result = await ctx.llm.chat({
-    system:
-      "Ты аналитик-ассистент в системе Choros. " +
-      "Отвечай по-русски, кратко и по делу. " +
-      "Анализ данных и запросы отчётов будут доступны в следующей версии (T-0360). " +
-      "Сейчас расскажи пользователю, что ты готов сделать, и попроси уточнить задачу.",
-    messages: [{ role: "user", content: userText }],
-  });
-  return { text: result.text, intent: "analyst" };
-};
+// T-0360: import the real handler (replaces the stub above)
+import { handleAnalyst as _handleAnalystImpl } from "./assistant-analyst.js";
+export const handleAnalyst: IntentHandler = _handleAnalystImpl;
 
 /**
  * STUB configurator handler — T-0361 will replace with real implementation.

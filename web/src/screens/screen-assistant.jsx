@@ -259,13 +259,57 @@ function BudgetIndicator({ budget }) {
 
 /**
  * Пузырь сообщения.
+ * T-0360 (АНАЛИТИК): для ответов аналитика (intent="analyst") рядом с текстом
+ * показывается кнопка «Сохранить как отчёт», вызывающая POST /api/report-pages
+ * с tier=draft. Это НЕ новый маршрут — существующий report-pages API (T-0121).
  */
-function MessageBubble({ msg }) {
+function MessageBubble({ msg, activeThreadId }) {
   const isUser = msg.role === 'user';
+  const isAnalyst = !isUser && msg.intent === 'analyst';
+  const [saving, setSaving] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+  const [saveError, setSaveError] = React.useState(null);
+
+  const handleSaveReport = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // POST /api/report-pages — существующий маршрут (T-0121).
+      // Saves a Floor-2 report draft with the analyst reply text as page_code.
+      // app_id defaults to a placeholder until the user links it to an app.
+      const r = await fetch('/api/report-pages', {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // slug derived from thread + message id for uniqueness
+          app_id: '00000000-0000-0000-0000-000000000000', // tenant-level placeholder
+          slug: `analyst-${(activeThreadId || 'x').slice(0, 8)}-${msg.id.slice(0, 8)}`,
+          title: 'Отчёт от ассистента',
+          floor: '2',
+          page_code: msg.text,
+        }),
+      });
+      if (!r.ok) {
+        const txt = await r.text().catch(() => `HTTP ${r.status}`);
+        throw new Error(txt);
+      }
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err.message ?? 'Не удалось сохранить отчёт.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className={`chs-asst__msg ${isUser ? 'chs-asst__msg--user' : 'chs-asst__msg--asst'}`}>
       <div className="chs-asst__msg-role">
         {isUser ? 'Вы' : 'Ассистент'}
+        {isAnalyst && (
+          <span className="chs-asst__msg-badge" aria-label="Режим аналитика">
+            {' '}анализ
+          </span>
+        )}
       </div>
       {msg.context_ref && (
         <div className="chs-asst__msg-ctx">
@@ -273,6 +317,29 @@ function MessageBubble({ msg }) {
         </div>
       )}
       <div className="chs-asst__msg-text">{msg.text}</div>
+      {/* T-0360: Сохранить как отчёт — только для ответов аналитика */}
+      {isAnalyst && !saved && (
+        <div className="chs-asst__msg-actions">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={saving}
+            loading={saving}
+            onClick={handleSaveReport}
+            aria-label="Сохранить этот анализ как именованный отчёт"
+          >
+            Сохранить как отчёт
+          </Button>
+          {saveError && (
+            <span className="chs-asst__save-error" role="alert">{saveError}</span>
+          )}
+        </div>
+      )}
+      {isAnalyst && saved && (
+        <div className="chs-asst__msg-actions">
+          <span className="chs-asst__save-ok">Отчёт сохранён</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -364,7 +431,7 @@ function Composer({ onSend, streaming, contextRef, onClearContext }) {
 /**
  * Область сообщений треда.
  */
-function ThreadView({ thread, messages, streaming, msgError, onSend, contextRef, onClearContext, budget }) {
+function ThreadView({ thread, messages, streaming, msgError, onSend, contextRef, onClearContext, budget, threadId }) {
   const bottomRef = useRef(null);
 
   // Прокрутка к последнему сообщению при добавлении нового
@@ -392,7 +459,7 @@ function ThreadView({ thread, messages, streaming, msgError, onSend, contextRef,
           />
         )}
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} />
+          <MessageBubble key={msg.id} msg={msg} activeThreadId={threadId} />
         ))}
         {streaming && <StreamingBubble />}
         {msgError && (
@@ -556,6 +623,7 @@ export default function AssistantScreen() {
             contextRef={contextRef}
             onClearContext={() => setContextRef(null)}
             budget={budget}
+            threadId={activeThread?.id}
           />
         ) : (
           <NothingSelected onCreate={handleCreate} />
