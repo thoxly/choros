@@ -182,6 +182,7 @@ _dc_mig074_failed=0
 _dc_mig075_failed=0
 _dc_mig078_failed=0                                                                # T0338-DC-MIG078-GUARD track when 078 triggers the FF-DC7 fail
 _dc_mig081_failed=0                                                                # T0346-DC-MIG081-GUARD track when 081 triggers the FF-DC7 fail
+_dc_mig082_failed=0                                                                # T0351-DC-MIG082-GUARD track when 082 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -206,6 +207,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/081_revoke_transition_journal.sql" ]]; then  # T0346-DC-MIG081-GUARD
       _dc_mig081_failed=1                                                     # T0346-DC-MIG081-GUARD
     fi                                                                        # T0346-DC-MIG081-GUARD
+    # Track specifically when 082 triggers this FAIL (and nothing else).     # T0351-DC-MIG082-GUARD
+    if [[ "${m}" == "migrations/082_process_app_binding_trigger.sql" ]]; then # T0351-DC-MIG082-GUARD
+      _dc_mig082_failed=1                                                     # T0351-DC-MIG082-GUARD
+    fi                                                                        # T0351-DC-MIG082-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -330,6 +335,28 @@ if [[ "${_dc_mig081_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0346-revoke-journal]: migration 081_revoke_transition_journal.sql drops the cross-tenant mat-view (security fix) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0346-DC-MIG081-GUARD
   fi                                                                           # T0346-DC-MIG081-GUARD
 fi                                                                             # T0346-DC-MIG081-GUARD
+# T-0351: additive relief for migration 082_process_app_binding_trigger.sql.    # T0351-DC-MIG082-GUARD
+# 082 ALTERs choros.process_app_binding (known tenant table from migration 075) by # T0351-DC-MIG082-GUARD
+# adding 3 columns (trigger_type, start_form_key, field_mapping). No new TABLE,  # T0351-DC-MIG082-GUARD
+# no new RLS policy, no confirmed2_by touch. UNRELATED to the dual-control       # T0351-DC-MIG082-GUARD
+# authority domain (grant/confirmation/confirmed2_by).                           # T0351-DC-MIG082-GUARD
+# Same class as T-0338/T-0346 migration reliefs (auto_additive).                # T0351-DC-MIG082-GUARD
+_dc_mig082_stem="migrations/082_process_app_binding_trigger.sql"                 # T0351-DC-MIG082-GUARD
+if [[ "${_dc_mig082_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig082_stem}"; then # T0351-DC-MIG082-GUARD
+  _dc_mig082_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig082_stem}" 2>/dev/null || true)"  # T0351-DC-MIG082-GUARD
+  _dc_mig082_bad=0                                                               # T0351-DC-MIG082-GUARD
+  if echo "${_dc_mig082_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0351-DC-MIG082-GUARD
+    _dc_mig082_bad=1                                                             # T0351-DC-MIG082-GUARD touches authority domain
+  fi                                                                             # T0351-DC-MIG082-GUARD
+  if echo "${_dc_mig082_content}" | grep -iqE "confirmed2_by|confirmed_by"; then # T0351-DC-MIG082-GUARD
+    _dc_mig082_bad=1                                                             # T0351-DC-MIG082-GUARD touches confirmed2_by invariant
+  fi                                                                             # T0351-DC-MIG082-GUARD
+  if [[ "${_dc_mig082_bad}" -eq 0 ]]; then                                      # T0351-DC-MIG082-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                     # T0351-DC-MIG082-GUARD cancel false-red
+    _dc_mig082_failed=0                                                          # T0351-DC-MIG082-GUARD
+    echo "PASS [FF-DC7-T0351-binding-trigger]: migration 082_process_app_binding_trigger.sql adds trigger columns to process_app_binding — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0351-DC-MIG082-GUARD
+  fi                                                                             # T0351-DC-MIG082-GUARD
+fi                                                                               # T0351-DC-MIG082-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

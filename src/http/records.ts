@@ -82,6 +82,9 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { validateRecordAgainstSchema } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.js";
+import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
+import { appendProcessStarted } from "./process-projection.js";
+import type { FlowableClient } from "../core/flowable-client.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -151,6 +154,22 @@ export interface RecordRoutesDeps {
    * does not confer.
    */
   resolveWriteFacet?: WriteFacetResolver;
+  /**
+   * T-0351 E16 (on_create trigger): OPTIONAL FlowableClient for process-start
+   * co-located with record creation. When supplied, POST /api/records checks for
+   * an on_create binding on the application and fires the engine start in the
+   * SAME transaction (create = start, S1 seam).
+   *
+   * When absent (no engine configured), the record is still created normally;
+   * the on_create trigger is silently skipped (honest-degrade: the record exists
+   * but no process starts — consistent with no flowable configured at all).
+   *
+   * DOCTRINE (RECORD_IN_PAYLOAD): only scalar values projected from the record's
+   * `data` via `field_mapping` are passed to the engine. The record object itself
+   * is NEVER sent as a variable (assertVariableValue guard in flowable-client.ts
+   * is the runtime sentinel; we also enforce at projection time here).
+   */
+  flowable?: FlowableClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +494,57 @@ type WriteOutcome =
   | { denied: true; blockedFields: string[] }
   | { denied: false; row: RecordJoinedRow };
 
+// ---------------------------------------------------------------------------
+// T-0351 E16: scalar projection for on_create trigger variables
+// DOCTRINE (RECORD_IN_PAYLOAD, S1 seam): ONLY primitive scalars (string, number,
+// boolean) projected from the record's `data` object via the binding's
+// `field_mapping` are passed to the engine. The record object itself is NEVER
+// a variable. This function enforces that contract at projection time; the
+// assertVariableValue guard in flowable-client.ts is the runtime sentinel.
+// ---------------------------------------------------------------------------
+
+/**
+ * Project scalar variables from a record's `data` for engine start via a
+ * `field_mapping` configuration. field_mapping maps engine variable name →
+ * field path (a key into the record `data` object, flat one-level lookup).
+ *
+ * ONLY primitive scalars (string, number, boolean, null) are projected.
+ * If the resolved value at a field path is an object or array it is SKIPPED
+ * (RECORD_IN_PAYLOAD discipline: no nested objects or record references passed
+ * to the engine). The engine is called only with provably scalar values.
+ *
+ * Returns an empty object when field_mapping is empty or produces no scalars.
+ */
+function projectEngineVariables(
+  data: unknown,
+  fieldMapping: Record<string, string>,
+): Record<string, string | number | boolean | null> {
+  const vars: Record<string, string | number | boolean | null> = {};
+  if (
+    data === null ||
+    typeof data !== "object" ||
+    Array.isArray(data)
+  ) {
+    return vars;
+  }
+  const record = data as Record<string, unknown>;
+  for (const [varName, fieldPath] of Object.entries(fieldMapping)) {
+    const rawValue = record[fieldPath];
+    // RECORD_IN_PAYLOAD guard: accept only primitives. Skip objects/arrays.
+    if (
+      rawValue === null ||
+      rawValue === undefined ||
+      typeof rawValue === "string" ||
+      typeof rawValue === "number" ||
+      typeof rawValue === "boolean"
+    ) {
+      vars[varName] = rawValue ?? null;
+    }
+    // Objects and arrays are intentionally skipped — not projected.
+  }
+  return vars;
+}
+
 async function createRecord(args: {
   pool: pg.Pool;
   tenantId: string;
@@ -484,8 +554,10 @@ async function createRecord(args: {
   actor: string;
   grantWriteFacet: string[] | undefined;
   nowMs: number;
+  /** T-0351 E16: optional engine client for on_create trigger (create = start). */
+  flowable?: FlowableClient;
 }): Promise<WriteOutcome> {
-  const { pool, tenantId, applicationId, registryDefId, data, actor, grantWriteFacet, nowMs } = args;
+  const { pool, tenantId, applicationId, registryDefId, data, actor, grantWriteFacet, nowMs, flowable } = args;
   const id = randomUUID();
   return withTenantTx(pool, tenantId, async (client) => {
     // 1. Resolve the governing registry_def (404/409 paths inside).
@@ -543,7 +615,54 @@ async function createRecord(args: {
       occurred_at: nowMs,
     });
 
-    // 5. Read back the joined row for the response.
+    // 5. T-0351 E16 (create = start, S1 seam): look up an on_create binding for
+    //    this application and fire the process start in the SAME transaction.
+    //    DOCTRINE (RECORD_IN_PAYLOAD / S1 seam):
+    //      - Only scalar projections from data via field_mapping are passed to the
+    //        engine. The record object itself is NEVER a variable.
+    //      - The engine call is INSIDE this tx, so a start failure rolls back the
+    //        record insert and audit event (atomicity: create = start or nothing).
+    //      - The process.started projection write is best-effort (a projection fail
+    //        must NOT roll back the record — mirrors process-start.ts §T-0282).
+    //    If flowable is not configured, skip silently (honest-degrade).
+    if (flowable !== undefined) {
+      const binding = await getOnCreateBinding(client, tenantId, reg.application_id);
+      if (binding !== null) {
+        // Project SCALAR variables from record data via field_mapping.
+        // RECORD_IN_PAYLOAD: only primitives pass through; objects/arrays are dropped.
+        const variables = projectEngineVariables(data, binding.field_mapping);
+
+        // Start the process inside the SAME tenant tx (create = start atomically).
+        // If startInstance fails the whole tx rolls back (no orphan record).
+        const startResult = await flowable.startInstance(
+          binding.process_key,
+          Object.keys(variables).length > 0 ? variables : undefined,
+        );
+        if (!startResult.ok) {
+          // Engine failure is propagated: no record without a process start.
+          throw new HttpError(
+            502,
+            "ENGINE_ERROR",
+            `on_create process start failed (binding ${binding.id}): ${startResult.code}`,
+          );
+        }
+        // Projection write: best-effort (a write failure must NOT roll back the
+        // created record+instance). Mirrors process-start.ts appendProcessStarted pattern.
+        try {
+          await appendProcessStarted(client as unknown as PgClientLike, {
+            instanceId: startResult.instanceId,
+            procKey: binding.process_key,
+            actor,
+            nowMs,
+            tenantId,
+          });
+        } catch {
+          // Projection is additive; never fail the create on a projection write error.
+        }
+      }
+    }
+
+    // 6. Read back the joined row for the response.
     const res = await client.query<RecordJoinedRow>(
       `SELECT ${RECORD_SELECT_JOIN}
          FROM choros.record r
@@ -737,7 +856,7 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, resolveWriteFacet } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet, flowable } = deps;
 
   // Resolve the caller's field write-mask for a record (FF-10 / AC-10 hook-point).
   // Honest-degrade: when no resolveWriteFacet is wired (current bootstrap), every
@@ -809,6 +928,8 @@ export function registerRecordRoutes(
       actor,
       grantWriteFacet,
       nowMs: Date.now(),
+      // T-0351 E16: pass the engine client (may be undefined if not wired).
+      flowable,
     });
     if (outcome.denied) {
       throw denialError(outcome.blockedFields);

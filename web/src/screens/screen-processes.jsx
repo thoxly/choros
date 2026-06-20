@@ -15,12 +15,16 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
   buildBindingPayload,
+  serializeFieldMapping,
   definitionSourceLabel,
   definitionStatusLabel,
   applicationOptions,
   definitionOptions,
   bindingApplicationLabel,
+  triggerTypeLabel,
   mapBindingError,
+  TRIGGER_TYPES,
+  TRIGGER_TYPE_LABELS,
 } from './process-catalog.js';
 
 // Dev tenant UUID — same constant used by screen-org.jsx ExplainPanel and tests.
@@ -240,10 +244,10 @@ function ProcessCatalogSection() {
                 ? 'Нет процессов для связывания'
                 : apps.length === 0
                   ? 'Сначала создайте приложение в конструкторе'
-                  : 'Связать процесс с приложением'
+                  : 'Настроить тип триггера процесса'
             }
           >
-            Связать с приложением
+            Настроить триггер
           </Button>
         </div>
       </div>
@@ -318,8 +322,7 @@ function ProcessCatalogSection() {
               padding: 'var(--chs-space-3)',
               color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)',
             }}>
-              Связей пока нет. Нажмите «Связать с приложением», чтобы показать, какому
-              приложению принадлежит процесс.
+              Связей пока нет. Нажмите «Настроить триггер», чтобы привязать процесс к приложению.
             </div>
           ) : (
             <table className="chs-itable">
@@ -327,6 +330,7 @@ function ProcessCatalogSection() {
                 <tr>
                   <th>Процесс</th>
                   <th>Приложение</th>
+                  <th>Триггер</th>
                   <th>Форма</th>
                 </tr>
               </thead>
@@ -335,9 +339,12 @@ function ProcessCatalogSection() {
                   <tr key={b.id}>
                     <td><MonoId>{b.process_key}</MonoId></td>
                     <td>{bindingApplicationLabel(b)}</td>
+                    <td style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+                      {triggerTypeLabel(b.trigger_type)}
+                    </td>
                     <td>
-                      {b.form_key
-                        ? <Mono style={{ fontSize: 'var(--chs-text-sm)' }}>{b.form_key}</Mono>
+                      {(b.start_form_key || b.form_key)
+                        ? <Mono style={{ fontSize: 'var(--chs-text-sm)' }}>{b.start_form_key || b.form_key}</Mono>
                         : <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>—</span>}
                     </td>
                   </tr>
@@ -352,13 +359,22 @@ function ProcessCatalogSection() {
 }
 
 /**
- * T-0270: BindProcessModal — pick a process definition + an application (+ optional
- * form key) and POST /api/process-app-bindings. authHeaders() on the call.
+ * T-0270 / T-0351 E16: BindProcessModal — trigger editor.
+ * Upgraded from a simple "pick process + app" form to a full trigger config editor:
+ *   - trigger_type select (on_create / record_action / launcher / auto)
+ *   - start_form_key text (optional form key for the entry point form)
+ *   - field_mapping textarea (one "varName=fieldPath" per line; scalar projections only)
+ * All new fields carry OBLIK kit classes + token-pure colours.
+ * POSTs /api/process-app-bindings (upsert). authHeaders() on the call.
  */
 function BindProcessModal({ open, onClose, onBound, definitions, applications }) {
   const [processKey, setProcessKey] = useState('');
   const [applicationId, setApplicationId] = useState('');
   const [formKey, setFormKey] = useState('');
+  // T-0351 E16: trigger config fields.
+  const [triggerType, setTriggerType] = useState('launcher');
+  const [startFormKey, setStartFormKey] = useState('');
+  const [fieldMappingRaw, setFieldMappingRaw] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitError, setSubmitError] = useState(null);
@@ -370,6 +386,9 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
     setProcessKey('');
     setApplicationId('');
     setFormKey('');
+    setTriggerType('launcher');
+    setStartFormKey('');
+    setFieldMappingRaw('');
     setFieldErrors({});
     setSubmitError(null);
   }, []);
@@ -380,7 +399,14 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
   }, [reset, onClose]);
 
   const handleSubmit = useCallback(async () => {
-    const form = { process_key: processKey, application_id: applicationId, form_key: formKey };
+    const form = {
+      process_key: processKey,
+      application_id: applicationId,
+      form_key: formKey,
+      trigger_type: triggerType,
+      start_form_key: startFormKey,
+      field_mapping_raw: fieldMappingRaw,
+    };
     const { valid, errors } = validateBindingForm(form);
     setFieldErrors(errors);
     setSubmitError(null);
@@ -408,24 +434,25 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
     } finally {
       setSubmitting(false);
     }
-  }, [processKey, applicationId, formKey, reset, onBound]);
+  }, [processKey, applicationId, formKey, triggerType, startFormKey, fieldMappingRaw, reset, onBound]);
 
   return (
     <Modal
       open={open}
       onClose={handleClose}
-      title="Связать процесс с приложением"
+      title="Настройка триггера процесса"
       size="sm"
       footer={
         <>
           <Button variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
           <Button variant="primary" size="sm" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? 'Сохранение…' : 'Связать'}
+            {submitting ? 'Сохранение…' : 'Сохранить'}
           </Button>
         </>
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-5)' }}>
+        {/* Process picker */}
         <div className="chs-field">
           <label className="chs-label" htmlFor="bind-process-key">Процесс</label>
           <select
@@ -443,6 +470,7 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
           )}
         </div>
 
+        {/* Application picker */}
         <div className="chs-field">
           <label className="chs-label" htmlFor="bind-application-id">Приложение</label>
           <select
@@ -460,14 +488,72 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
           )}
         </div>
 
-        <Field
-          label="Форма (необязательно)"
-          id="bind-form-key"
-          type="text"
-          value={formKey}
-          placeholder="purchase-form"
-          onChange={(e) => setFormKey(e.target.value)}
-        />
+        {/* T-0351 E16: Trigger type selector */}
+        <div className="chs-field">
+          <label className="chs-label" htmlFor="bind-trigger-type">Тип триггера</label>
+          <select
+            id="bind-trigger-type"
+            className={`chs-input ${fieldErrors.trigger_type ? 'chs-input--invalid' : ''}`}
+            value={triggerType}
+            onChange={(e) => setTriggerType(e.target.value)}
+            aria-invalid={fieldErrors.trigger_type ? true : undefined}
+          >
+            {TRIGGER_TYPES.map((tt) => (
+              <option key={tt} value={tt}>{TRIGGER_TYPE_LABELS[tt]}</option>
+            ))}
+          </select>
+          {fieldErrors.trigger_type && (
+            <span className="chs-hint chs-hint--invalid">{fieldErrors.trigger_type}</span>
+          )}
+        </div>
+
+        {/* T-0351 E16: Start form key (S4) — shown when trigger is on_create */}
+        {triggerType === 'on_create' && (
+          <Field
+            label="Форма создания (ключ из схемы, необязательно)"
+            id="bind-start-form-key"
+            type="text"
+            value={startFormKey}
+            placeholder="invoice-create"
+            onChange={(e) => setStartFormKey(e.target.value)}
+          />
+        )}
+
+        {/* Legacy form_key (non-on_create flows) */}
+        {triggerType !== 'on_create' && (
+          <Field
+            label="Форма (необязательно)"
+            id="bind-form-key"
+            type="text"
+            value={formKey}
+            placeholder="purchase-form"
+            onChange={(e) => setFormKey(e.target.value)}
+          />
+        )}
+
+        {/* T-0351 E16: Field mapping (scalar projection only — RECORD_IN_PAYLOAD doctrine) */}
+        <div className="chs-field">
+          <label className="chs-label" htmlFor="bind-field-mapping">
+            Маппинг переменных (необязательно)
+          </label>
+          <textarea
+            id="bind-field-mapping"
+            className={`chs-input ${fieldErrors.field_mapping_raw ? 'chs-input--invalid' : ''}`}
+            value={fieldMappingRaw}
+            onChange={(e) => setFieldMappingRaw(e.target.value)}
+            placeholder={'переменная=поле\nнапример: amount=summa'}
+            rows={3}
+            style={{ fontFamily: 'var(--chs-font-mono, monospace)', fontSize: 'var(--chs-text-sm)' }}
+            aria-invalid={fieldErrors.field_mapping_raw ? true : undefined}
+          />
+          {fieldErrors.field_mapping_raw ? (
+            <span className="chs-hint chs-hint--invalid">{fieldErrors.field_mapping_raw}</span>
+          ) : (
+            <span className="chs-hint" style={{ color: 'var(--chs-color-text-muted)' }}>
+              По одной строке: имяПеременной=путьКполю. Только скалярные значения передаются движку.
+            </span>
+          )}
+        </div>
 
         {submitError && (
           <div style={{

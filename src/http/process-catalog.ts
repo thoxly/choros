@@ -116,6 +116,17 @@ function extractActor(req: IncomingMessage): string {
 }
 
 // ---------------------------------------------------------------------------
+// Trigger type values (mirrors migration 082 CHECK constraint)
+// ---------------------------------------------------------------------------
+
+const TRIGGER_TYPES = ["on_create", "record_action", "launcher", "auto"] as const;
+type TriggerType = (typeof TRIGGER_TYPES)[number];
+
+function isTriggerType(v: unknown): v is TriggerType {
+  return typeof v === "string" && (TRIGGER_TYPES as readonly string[]).includes(v);
+}
+
+// ---------------------------------------------------------------------------
 // Binding row + serializer
 // ---------------------------------------------------------------------------
 
@@ -124,6 +135,10 @@ interface ProcessAppBindingRow {
   process_key: string;
   application_id: string;
   form_key: string | null;
+  // T-0351 E16: runtime trigger config columns (migration 082)
+  trigger_type: string;
+  start_form_key: string | null;
+  field_mapping: Record<string, string> | null;
   created_at: string | number;
   updated_at: string | number;
   // application display columns (LEFT JOIN — present iff the app still exists in tenant).
@@ -138,6 +153,10 @@ export interface ProcessAppBinding {
   application_slug: string | null;
   application_name: string | null;
   form_key: string | null;
+  // T-0351 E16: runtime trigger config
+  trigger_type: TriggerType;
+  start_form_key: string | null;
+  field_mapping: Record<string, string>;
   created_at: number;
   updated_at: number;
 }
@@ -150,6 +169,12 @@ function serializeBinding(row: ProcessAppBindingRow): ProcessAppBinding {
     application_slug: row.app_slug,
     application_name: row.app_display_name,
     form_key: row.form_key,
+    trigger_type: isTriggerType(row.trigger_type) ? row.trigger_type : "launcher",
+    start_form_key: row.start_form_key,
+    field_mapping:
+      row.field_mapping !== null && typeof row.field_mapping === "object"
+        ? (row.field_mapping as Record<string, string>)
+        : {},
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
   };
@@ -180,8 +205,14 @@ async function listBindingRows(
   client: pg.PoolClient,
   tenantId: string,
 ): Promise<ProcessAppBindingRow[]> {
+  // T-0351 E16: select the 3 new runtime trigger columns (migration 082).
+  // COALESCE for trigger_type/field_mapping handles rows created before 082 is applied
+  // on a given environment (defensive; migrator guarantees columns exist in prod).
   const { rows } = await client.query<ProcessAppBindingRow>(
     `SELECT b.id, b.process_key, b.application_id, b.form_key,
+            COALESCE(b.trigger_type, 'launcher')  AS trigger_type,
+            b.start_form_key,
+            COALESCE(b.field_mapping, '{}')::jsonb AS field_mapping,
             b.created_at, b.updated_at,
             a.slug         AS app_slug,
             a.display_name AS app_display_name
@@ -309,6 +340,48 @@ export function registerProcessCatalogRoutes(
         formKey = fk.length > 0 ? fk : null;
       }
 
+      // T-0351 E16: runtime trigger config fields (migration 082).
+      // trigger_type defaults to 'launcher' (backward-compat with old UIs that do not send it).
+      let triggerType: TriggerType = "launcher";
+      if ("trigger_type" in body && body["trigger_type"] !== null && body["trigger_type"] !== undefined) {
+        if (!isTriggerType(body["trigger_type"])) {
+          throw new HttpError(
+            400,
+            "VALIDATION",
+            `trigger_type must be one of: ${TRIGGER_TYPES.join(", ")}`,
+          );
+        }
+        triggerType = body["trigger_type"];
+      }
+
+      let startFormKey: string | null = null;
+      if ("start_form_key" in body && body["start_form_key"] !== null && body["start_form_key"] !== undefined) {
+        if (typeof body["start_form_key"] !== "string") {
+          throw new HttpError(400, "VALIDATION", "start_form_key must be a string or null");
+        }
+        const sfk = body["start_form_key"].trim();
+        startFormKey = sfk.length > 0 ? sfk : null;
+      }
+
+      let fieldMapping: Record<string, string> = {};
+      if ("field_mapping" in body && body["field_mapping"] !== null && body["field_mapping"] !== undefined) {
+        if (typeof body["field_mapping"] !== "object" || Array.isArray(body["field_mapping"])) {
+          throw new HttpError(400, "VALIDATION", "field_mapping must be an object");
+        }
+        // Validate: all values must be strings (field paths → scalar only).
+        const fm = body["field_mapping"] as Record<string, unknown>;
+        for (const [k, v] of Object.entries(fm)) {
+          if (typeof v !== "string") {
+            throw new HttpError(
+              400,
+              "VALIDATION",
+              `field_mapping["${k}"] must be a string (scalar field path)`,
+            );
+          }
+        }
+        fieldMapping = fm as Record<string, string>;
+      }
+
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
 
@@ -321,14 +394,32 @@ export function registerProcessCatalogRoutes(
         }
 
         // Upsert on the natural key (tenant_id, process_key, application_id).
+        // T-0351: also upsert the 3 runtime trigger columns.
         const { rows } = await client.query<{ id: string }>(
           `INSERT INTO choros.process_app_binding
-             (tenant_id, id, process_key, application_id, form_key, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $6)
+             (tenant_id, id, process_key, application_id, form_key,
+              trigger_type, start_form_key, field_mapping,
+              created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9)
            ON CONFLICT (tenant_id, process_key, application_id)
-           DO UPDATE SET form_key = EXCLUDED.form_key, updated_at = EXCLUDED.updated_at
+           DO UPDATE SET
+             form_key       = EXCLUDED.form_key,
+             trigger_type   = EXCLUDED.trigger_type,
+             start_form_key = EXCLUDED.start_form_key,
+             field_mapping  = EXCLUDED.field_mapping,
+             updated_at     = EXCLUDED.updated_at
            RETURNING id`,
-          [tenantId, randomUUID(), processKey.trim(), applicationId, formKey, nowMs],
+          [
+            tenantId,
+            randomUUID(),
+            processKey.trim(),
+            applicationId,
+            formKey,
+            triggerType,
+            startFormKey,
+            JSON.stringify(fieldMapping),
+            nowMs,
+          ],
         );
         return rows[0]!;
       });
@@ -341,6 +432,9 @@ export function registerProcessCatalogRoutes(
           process_key: processKey.trim(),
           application_id: applicationId,
           form_key: formKey,
+          trigger_type: triggerType,
+          start_form_key: startFormKey,
+          field_mapping: fieldMapping,
         }),
       );
     }),
