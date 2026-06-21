@@ -44,6 +44,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -107,14 +108,18 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — caller identity (mirrors registry-defs.ts / process-start.ts)
+// extractActor — caller identity, mode-aware (T-0372: resolves KC sub → slug)
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
-  // Keycloak mode: AuthContext is set by withAuth() middleware before the handler.
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
+  // Keycloak mode: resolve sub → employee slug (T-0372).
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    return ctx.sub;
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
   }
   // Dev mode: x-dev-user header.
   let devUser = req.headers[DEV_USER_HEADER];
@@ -240,7 +245,7 @@ export function registerApplicationRoutes(
   // the actor comes from the validated token (extractActor reads getAuthContext);
   // in dev mode withAuth is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/applications", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-    const actor = extractActor(req);
+    const actor = await extractActor(req, pool);
 
     const rawBody = await readJsonBody(req);
     if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -290,7 +295,7 @@ export function registerApplicationRoutes(
 
   // GET /api/applications — list the caller-tenant's applications.
   router.register("GET", "/api/applications", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-    const actor = extractActor(req);
+    const actor = await extractActor(req, pool);
     const tenantId = await resolveActorTenant(actor);
     const rows = await listApplications(pool, tenantId);
 
@@ -307,7 +312,7 @@ export function registerApplicationRoutes(
       const id = params["id"] ?? "";
       assertUuidShape(id, "application id");
 
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const row = await getApplication(pool, tenantId, id);
       if (row === null) {
