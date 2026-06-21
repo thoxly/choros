@@ -42,11 +42,14 @@ import { makeIntersectionGrantSource } from "../core/agent-on-behalf.js";
 import { makePgAuditWriter } from "../db/audit-writer.js";
 import {
   intentDispatch,
+  classifyIntent,
   type HandlerContext,
 } from "../core/assistant-intent.js";
 import { LlmDormantError, type LlmPort } from "../core/llm-port.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
+// T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
+import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -151,6 +154,235 @@ const flatOracle: AncestryOracle = {
 // ---------------------------------------------------------------------------
 
 const auditWriter = makePgAuditWriter();
+
+// ---------------------------------------------------------------------------
+// T-0363 (d): Draft execution of configurator approvedOps.
+//
+// Executes each ApprovedOp as DRAFT using the same DB paths the visual
+// constructor uses (co-equal invariant). Called after runConfigurator() returns.
+//
+// SECURITY:
+//  - Only ApprovedOps (tier='draft', non-destructive) are executed.
+//  - Destructive ops never reach here — they land in blockedOps in the core.
+//  - Each op is wrapped in withTenantTx so tenant isolation is preserved.
+//  - Errors per-op are logged to console.error (non-fatal) — partial success
+//    is reported in the text rather than crashing the whole message.
+// ---------------------------------------------------------------------------
+
+/** Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, error message on failure. */
+async function executeApprovedOpAsDraft(
+  pool: pg.Pool,
+  tenantId: string,
+  op: ApprovedOp,
+): Promise<string | null> {
+  try {
+    const nowMs = Date.now();
+
+    switch (op.kind) {
+      // -----------------------------------------------------------------------
+      // author_binding — upsert process_app_binding DRAFT row.
+      // Same SQL as process-catalog.ts POST /api/process-catalog/:key/binding.
+      // -----------------------------------------------------------------------
+      case "author_binding": {
+        const args = op.args;
+        const processKey   = typeof args["processKey"]   === "string" ? args["processKey"]   : null;
+        const applicationId = typeof args["applicationId"] === "string" ? args["applicationId"] : null;
+        const triggerType   = typeof args["triggerType"]  === "string" ? args["triggerType"]  : "launcher";
+        const startFormKey  = typeof args["startFormKey"] === "string" ? args["startFormKey"] : null;
+        const fieldMapping  = typeof args["fieldMapping"] === "string"
+          ? (() => { try { return JSON.parse(args["fieldMapping"] as string); } catch { return {}; } })()
+          : {};
+
+        if (!processKey || !applicationId) {
+          return `author_binding: missing processKey or applicationId`;
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          await client.query(
+            `INSERT INTO choros.process_app_binding
+               (tenant_id, id, process_key, application_id, form_key,
+                trigger_type, start_form_key, field_mapping,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9)
+             ON CONFLICT (tenant_id, process_key, application_id)
+             DO UPDATE SET
+               trigger_type   = EXCLUDED.trigger_type,
+               start_form_key = EXCLUDED.start_form_key,
+               field_mapping  = EXCLUDED.field_mapping,
+               updated_at     = EXCLUDED.updated_at`,
+            [tenantId, randomUUID(), processKey, applicationId, startFormKey,
+             triggerType, startFormKey, JSON.stringify(fieldMapping), nowMs],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // edit_jsonschema_non_destructive — merge field into registry_def.record_schema.
+      // Only additive ops reach here (redline guard runs in core).
+      // Same table as registry-defs.ts PUT /api/registry-defs/:id.
+      // -----------------------------------------------------------------------
+      case "edit_jsonschema_non_destructive": {
+        const args = op.args;
+        const registryDefId = typeof args["registryDefId"] === "string" ? args["registryDefId"] : null;
+        const fieldKey      = typeof args["fieldKey"]       === "string" ? args["fieldKey"]       : null;
+        const fieldSchemaRaw = typeof args["fieldSchema"]   === "string" ? args["fieldSchema"]    : null;
+        const opKind        = typeof args["opKind"]         === "string" ? args["opKind"]         : null;
+
+        if (!registryDefId || !fieldKey) {
+          return `edit_jsonschema_non_destructive: missing registryDefId or fieldKey`;
+        }
+
+        let fieldSchema: Record<string, unknown> = { type: "string" };
+        if (fieldSchemaRaw) {
+          try { fieldSchema = JSON.parse(fieldSchemaRaw) as Record<string, unknown>; } catch { /* use default */ }
+        }
+
+        // Only add_field / relabel / toggle_required / enum_change non-destructive ops.
+        // drop_field / rename_field / change_type are already blocked in core — safety check.
+        if (opKind === "drop_field" || opKind === "rename_field") {
+          return `edit_jsonschema_non_destructive: refusing to execute destructive op '${opKind}' — should have been blocked`;
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+
+          // Merge the field into the existing record_schema using jsonb path operations.
+          // For add_field: set properties[fieldKey] = fieldSchema (additive only).
+          await client.query(
+            `UPDATE choros.registry_def
+                SET record_schema = jsonb_set(
+                  COALESCE(record_schema, '{}'::jsonb),
+                  ARRAY['properties', $2],
+                  $3::jsonb,
+                  true
+                ),
+                updated_at = $4
+              WHERE tenant_id = $1 AND id = $5`,
+            [tenantId, fieldKey, JSON.stringify(fieldSchema), nowMs, registryDefId],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // emit_form — store form schema as a process_definition draft (form XML is
+      // serialized as JSON in bpmn_xml column until a dedicated form_def table lands).
+      // Note: this uses the process_definition table as the nearest available DRAFT
+      // store for form authoring artifacts in the current schema.
+      // -----------------------------------------------------------------------
+      case "emit_form": {
+        const args = op.args;
+        const formKey      = typeof args["formKey"]      === "string" ? args["formKey"]      : null;
+        const applicationId = typeof args["applicationId"] === "string" ? args["applicationId"] : null;
+        const formSchema   = typeof args["formSchema"]   === "string" ? args["formSchema"]   : "{}";
+
+        if (!formKey) {
+          return `emit_form: missing formKey`;
+        }
+
+        // Use a synthetic process_key that namespaces forms (choros:form:<key>)
+        // so they are distinguishable from real process definitions.
+        const syntheticProcessKey = `choros:form:${formKey}`;
+        const syntheticName = `[DRAFT FORM] ${formKey}${applicationId ? ` (app ${applicationId})` : ""}`;
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          await client.query(
+            `INSERT INTO choros.process_definition
+               (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $6)
+             ON CONFLICT (tenant_id, process_key, version) DO UPDATE
+               SET bpmn_xml   = EXCLUDED.bpmn_xml,
+                   name       = EXCLUDED.name,
+                   updated_at = EXCLUDED.updated_at`,
+            [tenantId, randomUUID(), syntheticProcessKey, syntheticName, formSchema, nowMs],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // author_dmn — store DMN XML as a process_definition DRAFT row.
+      // Same table + 'draft' status as process-defs POST /api/process-defs.
+      // -----------------------------------------------------------------------
+      case "author_dmn": {
+        const args = op.args;
+        const processKey = typeof args["processKey"] === "string" ? args["processKey"] : null;
+        const dmnKey     = typeof args["dmnKey"]     === "string" ? args["dmnKey"]     : null;
+        const dmnXml     = typeof args["dmnXml"]     === "string" ? args["dmnXml"]     : "";
+
+        if (!processKey || !dmnKey) {
+          return `author_dmn: missing processKey or dmnKey`;
+        }
+
+        const syntheticKey = `${processKey}:dmn:${dmnKey}`;
+        const syntheticName = `[DRAFT DMN] ${dmnKey} (process: ${processKey})`;
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          await client.query(
+            `INSERT INTO choros.process_definition
+               (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $6)
+             ON CONFLICT (tenant_id, process_key, version) DO UPDATE
+               SET bpmn_xml   = EXCLUDED.bpmn_xml,
+                   name       = EXCLUDED.name,
+                   updated_at = EXCLUDED.updated_at`,
+            [tenantId, randomUUID(), syntheticKey, syntheticName, dmnXml, nowMs],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      default:
+        // Unknown op kind — log and skip (fail-open on unknown ops is safer than crashing).
+        return `unknown op kind: ${String((op as ApprovedOp).kind)}`;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `op ${op.kind} failed: ${msg}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers: thread + message shapes reconstructed from audit_event rows
@@ -567,10 +799,37 @@ export function registerAssistantRoutes(
       // -----------------------------------------------------------------------
       // 5. Dispatch to intent handler.
       //    LlmDormantError → 503 (no crash, honest-degrade).
+      //    T-0363 (d): for CONFIGURATOR intent, call runConfigurator to get the
+      //    full ConfiguratorResult so approvedOps can be persisted as DRAFT.
+      //    For other intents, use the regular intentDispatch path.
       // -----------------------------------------------------------------------
       let handlerResult;
       try {
-        handlerResult = await intentDispatch(userText, handlerCtx);
+        const detectedIntent = classifyIntent(userText);
+        if (detectedIntent === "configurator") {
+          // T-0363 (d): run the full configurator loop to get approvedOps.
+          const cfgResult = await runConfigurator(userText, handlerCtx);
+          handlerResult = { text: cfgResult.text, intent: "configurator" as const };
+
+          // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).
+          const opErrors: string[] = [];
+          for (const op of cfgResult.approvedOps) {
+            const err = await executeApprovedOpAsDraft(pool, tenantId, op);
+            if (err !== null) {
+              opErrors.push(err);
+              console.error(`[T-0363] draft op failed (${op.kind}): ${err}`);
+            }
+          }
+          if (opErrors.length > 0) {
+            // Append error summary to text (non-fatal — user sees partial result).
+            handlerResult = {
+              text: handlerResult.text + `\n\n⚠ Ошибки при сохранении ${opErrors.length} операций в DRAFT: ${opErrors.join("; ")}`,
+              intent: "configurator" as const,
+            };
+          }
+        } else {
+          handlerResult = await intentDispatch(userText, handlerCtx);
+        }
       } catch (err) {
         if (err instanceof LlmDormantError) {
           // Persist a "dormant" assistant message so the thread is consistent.
