@@ -533,7 +533,9 @@ function inTab(item: InboxItem, tab: TabId, devUserId: string | null, myRoles: s
       return item.mine === true;
     case "pool":
       // Pool eligibility is by ROLE, not by name (the core invariant).
-      return item.pool === true && (myRoles.length === 0 ? true : myRoles.includes(item.role));
+      // T-0365: fail-closed — empty roles ⇒ sees NO pool tasks (zero-role actor
+      // must not see tasks). The old length===0 escape was the hole.
+      return item.pool === true && myRoles.includes(item.role);
     case "esc":
       return isEscalated(item);
     case "all":
@@ -863,7 +865,10 @@ export function registerInboxRoutes(
     // KC sub (devUserId) matches no employee are resolved via preferred_username.
     // In dev-header mode authCtx is undefined → no fallback (devUserId == slug).
     const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs, authCtx?.preferredUsername);
-    if (myRoles.length > 0 && taskRole !== undefined && !myRoles.includes(taskRole)) {
+    // T-0365: fail-closed — drop the `myRoles.length > 0 &&` guard that let a
+    // zero-role actor skip the check. Now empty roles (or role-mismatch) ⇒ 403.
+    // Keep `taskRole !== undefined` guard: unaddressed tasks have no role to check.
+    if (taskRole !== undefined && !myRoles.includes(taskRole)) {
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
 
