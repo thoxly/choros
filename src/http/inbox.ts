@@ -67,11 +67,13 @@ import {
 
 async function extractActorSlug(
   req: import("node:http").IncomingMessage,
-  pool: pg.Pool,
+  getPool: () => pg.Pool,
 ): Promise<string> {
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    // Keycloak mode: resolve sub → slug. getPool() is only called here (lazy),
+    // so dev-mode tests without DATABASE_URL never trigger getOrgPool().
+    const slug = await resolveActorSlugFromAuth(getPool(), ctx.sub, ctx.preferredUsername);
     if (slug === null) {
       throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
     }
@@ -673,7 +675,7 @@ export function registerInboxRoutes(
   // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND
   router.register("GET", "/api/inbox/:id", withAuth(async (req, res, params) => {
     // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
-    const actor = await extractActorSlug(req, getOrgPool());
+    const actor = await extractActorSlug(req, () => getOrgPool());
     const taskId = params["id"] as string;
 
     // Find the item in the actor's tenant inbox.
@@ -790,7 +792,7 @@ export function registerInboxRoutes(
   // Claiming another user's claimed task → 409 ALREADY_CLAIMED.
   router.register("POST", "/api/inbox/:id/claim", withAuth(async (req, res, params) => {
     // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
-    const devUserId = await extractActorSlug(req, getOrgPool());
+    const devUserId = await extractActorSlug(req, () => getOrgPool());
 
     const taskId = params["id"] as string;
     const tenantId = await resolveTenant(devUserId);
@@ -989,7 +991,7 @@ export function registerInboxRoutes(
       // seeded human slug 'e-larina' before grant/tenant lookup (T-0366 pattern).
       // Uses writeDeps.pool (injected, not the global getOrgPool) so the same pool is
       // used for resolution and the downstream approve tx — consistent connection behaviour.
-      const actor = await extractActorSlug(req, pool);
+      const actor = await extractActorSlug(req, () => pool);
 
       // Body validation — only the approve action is supported (AC-5; narrow scope).
       const rawBody = await readJsonBody(req);

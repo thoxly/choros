@@ -37,7 +37,15 @@ import { _resetJwksCache } from "../http/auth.js";
 // ---------------------------------------------------------------------------
 
 class FakePoolClient {
-  async query(): Promise<{ rows: unknown[] }> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async query(sql?: string): Promise<{ rows: any[] }> {
+    // T-0372: resolveActorSlugFromAuth calls an EXISTS query in KC mode.
+    // Return exists=true so the sub short-circuits as the resolved slug
+    // (self-registered-user invariant: slug == sub, per T-0342).
+    // All other queries (INSERT, SELECT for actual route handlers) return empty rows.
+    if (sql && sql.includes("SELECT EXISTS")) {
+      return { rows: [{ exists: true }] };
+    }
     return { rows: [] };
   }
   release(): void {
