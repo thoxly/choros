@@ -28,12 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # T-0364: full history + branches so baseline checks resolve the dev ref
-          # in CI (e.g. docpage-writeful-tools F-7 `git diff dev -- known_tenant_tables.txt`,
-          # frozen-check merge-base). Default shallow checkout has no dev/origin/dev ref
-          # → those checks hard-fail in CI while passing locally.
-          fetch-depth: 0
+      # T-0364: make origin/dev resolvable (== HEAD on a dev push) so the lone
+      # non-graceful baseline check (docpage-writeful-tools F-7:
+      # `git diff dev -- known_tenant_tables.txt`) passes instead of hard-failing on
+      # the absent ref. Targeted fetch of ONLY dev (NOT full history/main) so the
+      # per-task frozen-checks (defer-no-new-table, etc.) keep comparing vs HEAD/dev
+      # and do NOT over-reach onto the whole dev-vs-main accumulation.
+      - run: git fetch --no-tags --depth=1 origin dev || true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
