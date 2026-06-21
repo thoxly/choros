@@ -44,13 +44,6 @@
    на виду (прецедент — TaskDetail-drawer инбокса) и скроллится естественно;
    Отмена/«Создать запись» — в footer-слот Drawer. Де-жаргон: «реестр» в видимом
    тексте → «набор полей»/«Данные»/«Запись» (словарь конструктора).
-
-   T-0357 (E16 entry points): грузим on_create-привязки для приложения через
-   GET /api/process-app-bindings (фильтрация по application_id на фронте).
-   Если есть on_create-привязка — кнопка «Создать запись» принимает бизнес-
-   формулировку («Создать <приложение>»), а создание записи автоматически
-   запускает процесс через шов S1 (backend records.ts T-0351). Бейдж
-   «запускает процесс» появляется рядом с кнопкой, не в header-е.
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
@@ -58,7 +51,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
-import { devHeaders, authHeaders } from '../app-shell/dev-auth.js';
+import { devHeaders } from '../app-shell/dev-auth.js';
 import {
   schemaToFormFields,
   schemaToColumns,
@@ -98,15 +91,7 @@ const labelTxt = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight
  * records table visible and scrolls naturally. The kit Drawer owns the overlay,
  * focus-trap, Esc and scroll-lock — no hand-rolled overlay (gate G6).
  */
-/**
- * T-0357: businessLabel — if the app has an on_create binding, pass the app's
- * display_name here to use in the drawer title and submit button. The process
- * start is handled by the backend (records.ts T-0351 S1 seam), so the UI just
- * shows a success state with "process started" messaging.
- * startsProcess — true when there is an on_create binding; shows an informational
- * note inside the form.
- */
-function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryDef, businessLabel, startsProcess }) {
+function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryDef }) {
   const formFields = useMemo(
     () => (registryDef ? schemaToFormFields(registryDef.record_schema) : []),
     [registryDef],
@@ -175,23 +160,17 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
 
   const canSubmit = open && registryDef && formFields.length > 0;
 
-  // T-0357 (E16 entry point 1): business-aware title and submit label.
-  const drawerTitle = businessLabel ? `Создать ${businessLabel}` : 'Новая запись';
-  const submitLabel = submitting
-    ? (startsProcess ? 'Создание и запуск…' : 'Сохранение…')
-    : (businessLabel ? `Создать ${businessLabel}` : 'Создать запись');
-
   return (
     <Drawer
       open={Boolean(open && registryDef)}
       onClose={onClose}
-      title={drawerTitle}
+      title="Новая запись"
       side="right"
       footer={
         <>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
           <Button type="submit" form="create-record-form" variant="primary" size="sm" loading={submitting} disabled={!canSubmit}>
-            {submitLabel}
+            {submitting ? 'Сохранение…' : 'Создать запись'}
           </Button>
         </>
       }
@@ -200,20 +179,6 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
         <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Набор полей «{registryDef ? registryDef.display_name : ''}». Поля сгенерированы из его схемы.
         </p>
-        {/* T-0357 (E16): inform the user that creating this record will start a process. */}
-        {startsProcess && (
-          <div style={{
-            marginBottom: 'var(--chs-space-5)',
-            padding: 'var(--chs-space-3) var(--chs-space-4)',
-            background: 'var(--chs-color-info-soft, var(--chs-color-surface))',
-            border: '1px solid var(--chs-color-border)',
-            borderRadius: 'var(--chs-radius-3)',
-            fontSize: 'var(--chs-text-sm)',
-            color: 'var(--chs-color-text-muted)',
-          }}>
-            После создания запись автоматически отправится в работу.
-          </div>
-        )}
 
         {formFields.length === 0 && (
           <p style={{ marginBottom: 'var(--chs-space-6)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
@@ -288,12 +253,6 @@ function AppRecordsScreen() {
   const [createOpen, setCreateOpen] = useState(false);
   const [highlightId, setHighlightId] = useState(null);
 
-  // T-0357 (E16): on_create binding for this application.
-  // null = not yet loaded; false = none found; object = binding.
-  // When present: creating a record automatically starts the process (backend S1 seam).
-  // The button label and tooltip surface this as a business action, not a process launcher.
-  const [onCreateBinding, setOnCreateBinding] = useState(null);
-
   // ---- load registry_defs for the application -----------------------------
   const loadDefs = useCallback(async () => {
     if (!appId) { setDefsError('Не указано приложение'); return; }
@@ -330,26 +289,7 @@ function AppRecordsScreen() {
     } catch { /* header is cosmetic — ignore */ }
   }, [appId]);
 
-  // T-0357 (E16): load on_create binding for this app.
-  // GET /api/process-app-bindings returns all tenant bindings; we filter by app + type.
-  // Best-effort: a failure just means the button stays generic (no process badge).
-  const loadOnCreateBinding = useCallback(async () => {
-    if (!appId) return;
-    try {
-      const res = await fetch('/api/process-app-bindings', { headers: authHeaders() });
-      if (!res.ok) { setOnCreateBinding(false); return; }
-      const data = await res.json();
-      const bindings = Array.isArray(data.bindings) ? data.bindings : [];
-      const found = bindings.find(
-        (b) => b.application_id === appId && b.trigger_type === 'on_create',
-      );
-      setOnCreateBinding(found || false);
-    } catch {
-      setOnCreateBinding(false);
-    }
-  }, [appId]);
-
-  useEffect(() => { loadDefs(); loadApp(); loadOnCreateBinding(); }, [loadDefs, loadApp, loadOnCreateBinding]);
+  useEffect(() => { loadDefs(); loadApp(); }, [loadDefs, loadApp]);
 
   const selectedDef = useMemo(
     () => (defs || []).find((d) => d.id === selectedDefId) || null,
@@ -399,8 +339,6 @@ function AppRecordsScreen() {
         onCreated={handleCreated}
         applicationId={appId}
         registryDef={selectedDef}
-        businessLabel={onCreateBinding && app ? app.display_name : null}
-        startsProcess={Boolean(onCreateBinding)}
       />
       <div className="chs-inbox">
         <div style={{
@@ -434,38 +372,16 @@ function AppRecordsScreen() {
                 ))}
               </select>
             )}
-            {/* T-0357 (E16 entry point 1): if app has an on_create binding, the create
-                action IS the process start (create = start, S1 seam). Show a business
-                label using the app name. The backend (records.ts T-0351) handles the
-                process start atomically — no separate launch button needed. */}
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 'var(--chs-space-1)' }}>
-              <Button
-                variant="primary"
-                size="sm"
-                glyph={<KitIcon name="plus" />}
-                disabled={!selectedDef}
-                onClick={() => setCreateOpen(true)}
-                title={
-                  !selectedDef
-                    ? 'Сначала выберите набор полей'
-                    : onCreateBinding
-                      ? `Создать ${app ? app.display_name : 'запись'} — запустит процесс автоматически`
-                      : 'Создать запись'
-                }
-              >
-                {onCreateBinding && app
-                  ? `Создать ${app.display_name}`
-                  : 'Создать запись'}
-              </Button>
-              {onCreateBinding && (
-                <span style={{
-                  fontSize: 'var(--chs-text-xs)',
-                  color: 'var(--chs-color-text-muted)',
-                }}>
-                  запускает процесс
-                </span>
-              )}
-            </div>
+            <Button
+              variant="primary"
+              size="sm"
+              glyph={<KitIcon name="plus" />}
+              disabled={!selectedDef}
+              onClick={() => setCreateOpen(true)}
+              title={selectedDef ? 'Создать запись' : 'Сначала выберите набор полей'}
+            >
+              Создать запись
+            </Button>
           </div>
         </div>
 
@@ -499,11 +415,9 @@ function AppRecordsScreen() {
             <EmptyState
               icon={<KitIcon name="inbox" size={28} />}
               title={`В наборе полей «${selectedDef.display_name}» пока нет записей`}
-              description={onCreateBinding ? 'Создайте первую — процесс запустится автоматически.' : 'Создайте первую.'}
+              description="Создайте первую."
               action={
-                <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>
-                  {onCreateBinding && app ? `Создать ${app.display_name}` : 'Создать запись'}
-                </Button>
+                <Button variant="primary" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>Создать запись</Button>
               }
             />
           ) : (

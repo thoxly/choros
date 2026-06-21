@@ -247,22 +247,27 @@ function Topbar({ screen, pathname, theme, setTheme, onLaunchProcess }) {
   const navigate = useNavigate();
   const right =
     screen === "inbox" ? (
-      // T-0357 (E16): inbox topbar action no longer navigates to the process launcher.
-      // Processes start from business entry points (create record / record_action) — the
-      // inbox just shows tasks that arrived. The button is removed from the inbox topbar.
-      null
-    ) : screen === "processes" ? (
-      // T-0357 (E16): generic «Запустить процесс» runtime launcher dissolved.
-      // Topbar on the processes screen now leads to the modeler (design-time) only.
-      // Runtime process starts happen from business entry points (create / record_action).
+      // T-0281: «Новая задача» — enabled, navigates to /processes where the
+      // launch modal lives (POST /api/processes/start, frozen contract §2.2).
       <Button
-        variant="secondary"
+        variant="primary"
         size="sm"
         glyph={<Icon name="plus" className="chs-btn__glyph" />}
-        onClick={() => navigate('/processes/new/edit')}
-        title="Открыть конструктор для нового процесса"
+        onClick={() => navigate('/processes')}
+        title="Запустить процесс"
       >
-        Новый процесс
+        Новая задача
+      </Button>
+    ) : screen === "processes" ? (
+      // T-0281: «Запустить процесс» button in topbar on processes screen.
+      <Button
+        variant="primary"
+        size="sm"
+        glyph={<Icon name="plus" className="chs-btn__glyph" />}
+        onClick={onLaunchProcess}
+        title="Запустить процесс"
+      >
+        Запустить процесс
       </Button>
     ) : screen === "org" ? (
       <Button variant="secondary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Исполнитель</Button>
