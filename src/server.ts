@@ -48,8 +48,85 @@ import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
 import { dormantLlmPort } from "./core/llm-port.js";
+// T-0363 (E17): DeepSeek / OpenAI-compatible LLM adapter (composition-root only — RL-3).
+import { OpenAILlmPort } from "./adapters/openai-llm-port.js";
+import { validateSecretHandleShape, redactHandle, type SecretResolverPort } from "./core/secret-handle-validator.js";
+// T-0363 (E17): Analyst production ports.
+import { setAnalystPorts } from "./core/assistant-analyst.js";
+import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
 
 const { Pool } = pg;
+
+// ---------------------------------------------------------------------------
+// T-0363 (E17): DeepSeek / OpenAI-compatible LLM composition root.
+//
+// Read from process.env ONCE at module-evaluation time.
+// No secret value is logged or committed — only the opaque handle reference.
+// RL-3: the raw key is never stored raw; the env-backed SecretResolverPort
+//   reads it at call-time from process.env so it is never captured in a closure.
+// The secretHandle "env://DEEPSEEK_API_KEY" passes validateSecretHandleShape:
+//   - length ≥ 8 ✓  - not a vendor prefix ✓  - not bare hex ✓  - not JWT ✓
+// ---------------------------------------------------------------------------
+
+const DEEPSEEK_API_KEY   = process.env["DEEPSEEK_API_KEY"];
+const DEEPSEEK_BASE_URL  = process.env["DEEPSEEK_BASE_URL"] ?? "https://api.deepseek.com";
+const DEEPSEEK_MODEL     = process.env["DEEPSEEK_MODEL"]    ?? "deepseek-chat";
+
+/**
+ * Opaque handle for the DeepSeek API key.
+ * The handle is an env-reference string — NOT a raw key.
+ * It passes validateSecretHandleShape (env:// prefix, length > 8, no vendor prefix).
+ */
+const DEEPSEEK_HANDLE = "env://DEEPSEEK_API_KEY";
+
+// Validate at startup so misconfiguration fails loudly rather than at first request.
+const _handleVerdict = validateSecretHandleShape(DEEPSEEK_HANDLE);
+if (!_handleVerdict.ok) {
+  // This is a programming error — the handle constant above must be corrected.
+  throw new Error(
+    `[T-0363] Invalid DeepSeek secret handle (${_handleVerdict.reason}): ` +
+    `handle (redacted): ${redactHandle(DEEPSEEK_HANDLE)}`,
+  );
+}
+
+/**
+ * Env-backed SecretResolverPort for DeepSeek.
+ * Reads the raw key from process.env at CALL TIME only — never stored in a closure.
+ * RL-3: the resolver is the ONLY place that touches the raw key.
+ * Stage-deploy invariant: this object is created in src/server.ts (composition root),
+ * NOT in src/core/** or src/adapters/** (stage-deploy boundary intact).
+ */
+const deepseekSecretResolver: SecretResolverPort = {
+  async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
+    if (handle === DEEPSEEK_HANDLE) {
+      const key = process.env["DEEPSEEK_API_KEY"];
+      if (!key) {
+        throw new Error(`[T-0363] DeepSeek API key not found in environment (handle: ${redactHandle(handle)})`);
+      }
+      return key;
+    }
+    throw new Error(`[T-0363] Unknown secret handle: ${redactHandle(handle)}`);
+  },
+};
+
+/**
+ * LlmPort factory: returns a real OpenAILlmPort per tenant when DEEPSEEK_API_KEY
+ * is configured, or dormantLlmPort (→ 503) when absent.
+ * Each call creates a fresh port so tenant isolation is preserved even if
+ * per-tenant config diverges in a future Stage-2 BYO-key extension.
+ */
+function makeLlmPortFactory(tenantId: string) {
+  if (DEEPSEEK_API_KEY) {
+    return new OpenAILlmPort({
+      endpoint: DEEPSEEK_BASE_URL,
+      model: DEEPSEEK_MODEL,
+      secretHandle: DEEPSEEK_HANDLE,
+      tenantId,
+      secretResolver: deepseekSecretResolver,
+    });
+  }
+  return dormantLlmPort;
+}
 
 // ---------------------------------------------------------------------------
 // Store-mode type (T-0186)
@@ -501,7 +578,22 @@ function buildRouter(
       : undefined,
   );
 
+  // T-0363 (c): Wire analyst production ports so handleAnalyst reads real DB data.
+  // Ports are read-only (RecordLister, CycleTimeLister, ActorBreakdownLister).
+  // Honest-degrade: when grantsPool is null (no DB) the default no-op ports remain.
+  if (grantsPool) {
+    setAnalystPorts({
+      loadCycleTime: (tenantId: string) =>
+        loadCycleTimeByActivity(grantsPool, tenantId),
+      loadActorBreakdown: (tenantId: string) =>
+        loadActorTypeBreakdown(grantsPool, tenantId),
+      // listRecords: not wired here (requires ACL-filter factory integration with
+      // intersectionGrants at call-time — T-0360 follow-up). Defaults to [].
+    });
+  }
+
   // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
+  // T-0363 (b): llmPortFactory now wires DeepSeek when DEEPSEEK_API_KEY is set.
   // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
   // APPEND-ONLY: the last register* call before setFallback.
   if (grantsPool) {
@@ -509,11 +601,8 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
-      // llmPortFactory: returns dormantLlmPort when no LLM is configured.
-      // Production wiring: composition root provides a factory that reads
-      // agent_card.llm_* from DB and builds OpenAILlmPort per tenant.
-      // For now: always dormant — BYO-key wiring is T-0362 (Wave 3).
-      llmPortFactory: (_tenantId: string) => dormantLlmPort,
+      // T-0363: real DeepSeek port when key is set; dormantLlmPort → 503 when absent.
+      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId),
     });
   }
 

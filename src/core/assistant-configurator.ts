@@ -733,3 +733,38 @@ export async function handleConfigurator(
     intent: "configurator",
   };
 }
+
+// ---------------------------------------------------------------------------
+// runConfigurator — exported for the HTTP layer (T-0363 draft execution)
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0363: Run the configurator planning loop and return the FULL ConfiguratorResult
+ * (including approvedOps, blockedOps, etc.). Called by the assistant HTTP route
+ * so it can execute approvedOps as DRAFT via the same DB paths the constructor uses.
+ *
+ * The grant ceiling check is included here (mirrors handleConfigurator).
+ * When the user lacks authoring_draft, returns a result with empty approvedOps/blockedOps
+ * and a single grant-ceiling message in text.
+ *
+ * Security: all approvedOps have tier='draft'; destructive ops land in blockedOps.
+ * Pure core — no DB, no process.env. DB execution is the HTTP layer's responsibility.
+ */
+export async function runConfigurator(
+  userText: string,
+  ctx: HandlerContext,
+): Promise<ConfiguratorResult> {
+  const hasGrant = await hasAuthoringDraftGrant(ctx);
+  if (!hasGrant) {
+    return {
+      text:
+        "У вас недостаточно прав для настройки системы (требуется грант authoring_draft). " +
+        "Обратитесь к администратору.",
+      approvedOps: [],
+      blockedOps: [],
+      pendingPromotes: [],
+      grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
+    };
+  }
+  return runConfiguratorLoop(userText, ctx);
+}

@@ -174,6 +174,10 @@ services:
       FLOWABLE_REST_BASE_URL:           ${FLOWABLE_REST_BASE_URL:-http://flowable:8080/flowable-rest/service}
       FLOWABLE_REST_APP_ADMIN_USER_ID:  ${FLOWABLE_REST_APP_ADMIN_USER_ID:-admin}
       FLOWABLE_REST_APP_ADMIN_PASSWORD: ${FLOWABLE_REST_APP_ADMIN_PASSWORD:-choros_flowable_dev_pw}
+      # T-0363 (E17): DeepSeek LLM wiring. Key has NO default — absent → dormant LLM (honest-degrade).
+      DEEPSEEK_API_KEY:  ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL:    ${DEEPSEEK_MODEL:-deepseek-chat}
     ports:
       - "${APP_PORT:-3000}:3000"
     depends_on:

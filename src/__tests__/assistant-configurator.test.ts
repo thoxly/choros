@@ -25,6 +25,7 @@
 import { describe, it, expect } from "vitest";
 import {
   handleConfigurator,
+  runConfigurator,
   type ConfiguratorResult,
   type ApprovedOp,
   type PendingPromote,
@@ -33,6 +34,7 @@ import type { HandlerContext } from "../core/assistant-intent.js";
 import { StubChatLlmPort } from "../core/__tests__/stub-chat-llm-port.js";
 import type { GrantSource } from "../core/grant-resolver.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
+import type { LlmPort, LlmRequest, LlmResult, ChatLlmRequest, ChatLlmResult } from "../core/llm-port.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 
 // ---------------------------------------------------------------------------
@@ -354,5 +356,140 @@ describe("AC-T361-10: update-operation authoring_draft grant satisfies ceiling",
     // Grant satisfied → LLM was called
     expect(stub.chatCalls.length).toBeGreaterThan(0);
     expect(result.intent).toBe("configurator");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T363-1 (T-0363 d): drop_field tool call lands in blockedOps NOT approvedOps
+// ---------------------------------------------------------------------------
+
+/**
+ * ToolCallLlmPort — stub LlmPort that returns a single tool call on the first chat()
+ * invocation, then a text-only reply on subsequent calls (simulates one tool round).
+ * ZERO NETWORK: no API key needed.
+ */
+class ToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  private readonly _toolName: string;
+  private readonly _toolArgs: Record<string, unknown>;
+
+  constructor(toolName: string, toolArgs: Record<string, unknown>) {
+    this._toolName = toolName;
+    this._toolArgs = toolArgs;
+  }
+
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({
+      confidence: 0.9,
+      answer: { answerForm: "test", redFlags: [], summary: "test" },
+    });
+  }
+
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this._callCount++;
+    if (this._callCount === 1) {
+      // First call: return the tool call.
+      return {
+        text: "",
+        toolCalls: [
+          {
+            id: `call-${this._toolName}-001`,
+            name: this._toolName,
+            arguments: JSON.stringify(this._toolArgs),
+          },
+        ],
+      };
+    }
+    // Subsequent calls: text-only (done).
+    return {
+      text: "Готово. Операция обработана.",
+      toolCalls: undefined,
+    };
+  }
+}
+
+describe("AC-T363-1: drop_field tool call lands in blockedOps, NOT approvedOps (T-0363 d)", () => {
+  it("drop_field on non-core-pinned field → blockedOps (pending_human_confirm), approvedOps empty", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "drop_field",
+      fieldKey: "amount",
+      isCorePinned: "false",
+      humanReadableReason: "Тест — удаление поля",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("удали поле amount", ctx);
+
+    // INVARIANT: destructive op must NOT be in approvedOps
+    expect(result.approvedOps).toHaveLength(0);
+    // INVARIANT: it must land in blockedOps
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("pending_human_confirm");
+    expect(blocked.toolName).toBe("edit_jsonschema");
+  });
+
+  it("drop_field on core-pinned field → blockedOps (core_pinned_absolute_deny)", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "drop_field",
+      fieldKey: "tenant_id",
+      isCorePinned: "true",
+      humanReadableReason: "Тест — удаление системного поля",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("удали системное поле tenant_id", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("core_pinned_absolute_deny");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T363-2 (T-0363 d): add_field tool call lands in approvedOps with tier='draft'
+// ---------------------------------------------------------------------------
+
+describe("AC-T363-2: benign add_field tool call lands in approvedOps with tier='draft' (T-0363 d)", () => {
+  it("add_field → approvedOps[0].kind='edit_jsonschema_non_destructive', tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("edit_jsonschema", {
+      registryDefId: "a0000000-0000-0000-0000-000000000099",
+      opKind: "add_field",
+      fieldKey: "inn",
+      fieldSchema: JSON.stringify({ type: "string", title: "ИНН" }),
+      isCorePinned: "false",
+      humanReadableReason: "Добавить поле ИНН",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь поле ИНН", ctx);
+
+    // INVARIANT: non-destructive op must be in approvedOps
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("edit_jsonschema_non_destructive");
+    // INVARIANT: tier must always be 'draft'
+    expect(op.tier).toBe("draft");
+    // args preserved for DB execution
+    expect(op.args["opKind"]).toBe("add_field");
+    expect(op.args["fieldKey"]).toBe("inn");
+  });
+
+  it("author_binding tool call → approvedOps with author_binding kind and tier='draft'", async () => {
+    const llm = new ToolCallLlmPort("author_binding", {
+      processKey: "purchase-approval",
+      applicationId: "a0000000-0000-0000-0000-000000000001",
+      triggerType: "on_create",
+      humanReadableReason: "Привязать процесс согласования к заявке",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("привяжи процесс согласования", ctx);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("author_binding");
+    expect(op.tier).toBe("draft");
   });
 });
