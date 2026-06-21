@@ -116,15 +116,29 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
     // sandbox postMessage → parent fetch /api/forms/purchase/submit; assert the 200
     // + recordId (server-side validation passed, record persisted) (AC-2) AND the
     // in-UI success panel (.chs-form-result--success) — proof the click landed.
+    //
+    // T-0370: form-defs.js PURCHASE now uses registry-aligned field keys:
+    //   data-field="title"  (text, required) — was data-field="subject"
+    //   data-field="amount" (number)         — was data-field="price"
+    // The server in DB mode validates against registry_def.record_schema (title/amount)
+    // via makeFormDefResolver → deriveFormDefFromSchema. Memory mode uses the updated
+    // form-schema.ts PURCHASE (same title/amount fields). Both paths now accept the
+    // same payload shape, fixing the UNKNOWN_FIELD → 400 root cause.
     await page.goto("/forms");
     const frame: FrameLocator = page.frameLocator("iframe.chs-form-viewer");
-    // The purchase form (FormViewer sandbox-iframe) ships valid defaults for all
-    // three required schema fields (supplier «ООО «Вектор»», subject, budget
-    // «ИТ-инфраструктура · CAPEX»; form-defs.js). The user types the subject (real
-    // typing into the live form), then clicks «Отправить на согласование».
-    const subjectInput = frame.locator('[data-field="subject"] input.fjs-input').first();
-    await expect(subjectInput, "AC-2: purchase form renders in the iframe").toBeVisible();
-    await subjectInput.fill("Договор оказания услуг по разработке ПО (годовой)");
+    // The `title` field (data-field="title") is the required text field; fill it
+    // to exercise the real typing path and satisfy the required constraint.
+    const titleInput = frame.locator('[data-field="title"] input.fjs-input').first();
+    await expect(titleInput, "AC-2: purchase form renders in the iframe (title field)").toBeVisible();
+    await titleInput.fill("Договор оказания услуг по разработке ПО (годовой)");
+
+    // The `amount` field (data-field="amount") is the number field. Fill it with a
+    // numeric string to exercise the T-0369 coercion path: sandbox posts "496000"
+    // as a string; coerceFormPayload converts it to 496000 (number) before validation
+    // so the record stores a real number (DMN amount routing works).
+    const amountInput = frame.locator('[data-field="amount"] input.fjs-input').first();
+    await expect(amountInput, "AC-2: amount field visible").toBeVisible();
+    await amountInput.fill("496000");
 
     // REAL click on the in-iframe submit button. With allow-forms the native submit
     // is no longer blocked: the sandbox script's submit handler (form-defs.js) runs,
@@ -144,9 +158,16 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
     // Frozen response contract (src/http/forms.ts): { ok, formId, value, recordId }
     // — recordId is top-level (the persisted record's id), value is the sanitized
     // payload. Assert both: server-side validation passed AND a record persisted.
-    const formBody = (await formResp.json()) as { ok: boolean; recordId?: string };
+    // T-0370+T-0369: also assert amount is a JS number (not a string) to confirm
+    // the coercion path is exercised end-to-end.
+    const formBody = (await formResp.json()) as {
+      ok: boolean;
+      recordId?: string;
+      value?: { amount?: unknown };
+    };
     expect(formBody.ok, "AC-2: server-side validation passed").toBe(true);
     expect(formBody.recordId, "AC-2: a record was persisted").toBeTruthy();
+    expect(typeof formBody.value?.amount, "AC-2: amount coerced to number (T-0369)").toBe("number");
     // The success panel renders in the parent SPA after the 200 — the user-visible
     // confirmation that the click submitted the form (FormViewer success state).
     await expect(

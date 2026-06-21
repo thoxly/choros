@@ -15,6 +15,11 @@
  * fields from strings before validation, so FormViewer sandbox-iframe submissions
  * that send amount:"6000000" now → 200 (not 400). Non-numeric strings still → 400.
  *
+ * T-0370 (field alignment): PURCHASE form schema aligned to registry_def.record_schema
+ * «Заявки» (migration 076). Old fields (supplier/subject/qty/price/budget) replaced
+ * with registry fields (title/amount/requester/status). validPurchase() updated to
+ * use the new field set. Memory-mode and DB-mode now validate the same field keys.
+ *
  * Drives the real HTTP server (createServer) and asserts the "server distrusts
  * client" contract end-to-end: forged payloads are rejected with a 400
  * VALIDATION envelope carrying field-level errors; valid payloads return 200 with
@@ -24,16 +29,16 @@
  *   AC-2: 404 UNKNOWN_FORM for an unregistered form id
  *   AC-3: 400 INVALID_JSON for a malformed body
  *   AC-4: 200 + sanitized value for a valid purchase
- *   AC-5: 400 VALIDATION (field errors) for missing required
+ *   AC-5: 400 VALIDATION (field errors) for missing required (title)
  *   AC-6: 400 VALIDATION for non-numeric string on a number field (T-0369: "abc" → WRONG_TYPE)
- *   AC-7: 400 VALIDATION for disallowed enum value
+ *   AC-7: 400 VALIDATION for disallowed enum value (status)
  *   AC-8: 400 VALIDATION for unknown/extra forged field
  *   AC-9: response never echoes a forged extra field
  *   AC-10: valid submit returns a recordId (no-DB: record not persisted in-process)
- *   AC-11: (T-0369) numeric string for number field → 200, persisted value is a JS number
- *   AC-12: (T-0369) already-a-number for number field → 200, value unchanged
- *   AC-13: (T-0369) non-numeric string for number field → 400 WRONG_TYPE (not coerced)
- *   AC-14: (T-0369) empty string for number field → 400 (not coerced to 0)
+ *   AC-11: (T-0369) numeric string for amount field → 200, persisted value is a JS number
+ *   AC-12: (T-0369) already-a-number for amount field → 200, value unchanged
+ *   AC-13: (T-0369) non-numeric string for amount field → 400 WRONG_TYPE (not coerced)
+ *   AC-14: (T-0369) empty string for amount field → 200 with field absent (not coerced to 0)
  *   AC-15: (T-0369) numeric-looking string for a text field → stays a string (no coercion)
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
@@ -88,13 +93,13 @@ describe("Forms submit E2E — server-side validation (T-0102)", () => {
 
   const AUTH = { "x-dev-user": "e-kravtsova", "content-type": "application/json" };
 
+  // T-0370: registry-aligned fields (title/amount) replacing old form-level fields.
+  // Memory mode uses form-schema.ts PURCHASE (now matches registry schema);
+  // DB mode uses makeFormDefResolver → deriveFormDefFromSchema (same fields).
   function validPurchase(): Record<string, unknown> {
     return {
-      supplier: "ООО «Вектор»",
-      subject: "Ноутбуки ThinkPad T14",
-      qty: 4,
-      price: 124000,
-      budget: "ИТ-инфраструктура · CAPEX",
+      title: "Ноутбуки ThinkPad T14",
+      amount: 496000,
     };
   }
 
@@ -125,37 +130,37 @@ describe("Forms submit E2E — server-side validation (T-0102)", () => {
     expect(r.statusCode).toBe(200);
     const data = JSON.parse(r.body) as { ok: boolean; value: Record<string, unknown> };
     expect(data.ok).toBe(true);
-    expect(data.value.supplier).toBe("ООО «Вектор»");
-    expect(data.value.qty).toBe(4);
+    expect(data.value.title).toBe("Ноутбуки ThinkPad T14");
+    expect(data.value.amount).toBe(496000);
   });
 
   // AC-5
   it("rejects a payload missing a required field with field-level errors", async () => {
     const p = validPurchase();
-    delete p["supplier"];
+    delete p["title"]; // title is the required field in the registry-aligned schema
     const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify(p));
     expect(r.statusCode).toBe(400);
     const env = JSON.parse(r.body).error as { code: string; fields: Array<{ field: string; code: string }> };
     expect(env.code).toBe("VALIDATION");
-    expect(env.fields.some((f) => f.field === "supplier" && f.code === "MISSING_REQUIRED")).toBe(true);
+    expect(env.fields.some((f) => f.field === "title" && f.code === "MISSING_REQUIRED")).toBe(true);
   });
 
   // AC-6 — non-numeric string for a number field must still be rejected as WRONG_TYPE.
   // T-0369: numeric strings ("4") are now coerced to numbers before validation;
   // non-numeric strings ("abc") cannot be coerced and must still fail.
   it("rejects a non-numeric string for a number field (WRONG_TYPE)", async () => {
-    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), qty: "abc" }));
+    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), amount: "abc" }));
     expect(r.statusCode).toBe(400);
     const env = JSON.parse(r.body).error as { fields: Array<{ field: string; code: string }> };
-    expect(env.fields.some((f) => f.field === "qty" && f.code === "WRONG_TYPE")).toBe(true);
+    expect(env.fields.some((f) => f.field === "amount" && f.code === "WRONG_TYPE")).toBe(true);
   });
 
-  // AC-7 — disallowed enum value (a supplier the dropdown never offered)
+  // AC-7 — disallowed enum value (a status value outside the allowed set)
   it("rejects a disallowed enum value", async () => {
-    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), supplier: "ООО «Левая»" }));
+    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), status: "unknown_status" }));
     expect(r.statusCode).toBe(400);
     const env = JSON.parse(r.body).error as { fields: Array<{ field: string; code: string }> };
-    expect(env.fields.some((f) => f.field === "supplier" && f.code === "DISALLOWED_VALUE")).toBe(true);
+    expect(env.fields.some((f) => f.field === "status" && f.code === "DISALLOWED_VALUE")).toBe(true);
   });
 
   // AC-8 — unknown/extra forged field
@@ -202,70 +207,67 @@ describe("Forms submit E2E — server-side validation (T-0102)", () => {
   // T-0369: number coercion (HTML form strings → JS numbers at the HTTP boundary)
   // ---------------------------------------------------------------------------
 
-  // AC-11: numeric string for a number field → 200; persisted value.qty is a number.
-  // This is the deploy-acceptance AC-2 fix: FormViewer sandbox iframe sends "6000000"
-  // (string) for amount fields; the coercion pass converts it to 6000000 (number)
-  // before validation, so the record stores a real number → DMN amount routing works.
-  it("AC-11: numeric string for a number field → 200, persisted value is a JS number", async () => {
-    const body = { ...validPurchase(), qty: "42", price: "124000" };
+  // AC-11: numeric string for a number field → 200; persisted value.amount is a number.
+  // This is the deploy-acceptance AC-2 fix: FormViewer sandbox iframe sends the amount
+  // as a string (e.g. "496000"); the coercion pass converts it to a JS number before
+  // validation so the record stores a real number → DMN amount routing works.
+  it("AC-11: numeric string for amount field → 200, persisted value is a JS number", async () => {
+    const body = { ...validPurchase(), amount: "496000" };
     const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify(body));
     expect(r.statusCode).toBe(200);
     const data = JSON.parse(r.body) as { ok: boolean; value: Record<string, unknown> };
     expect(data.ok).toBe(true);
-    // Coerced values must be JS numbers, not strings.
-    expect(typeof data.value["qty"]).toBe("number");
-    expect(data.value["qty"]).toBe(42);
-    expect(typeof data.value["price"]).toBe("number");
-    expect(data.value["price"]).toBe(124000);
+    // Coerced value must be a JS number, not a string.
+    expect(typeof data.value["amount"]).toBe("number");
+    expect(data.value["amount"]).toBe(496000);
   });
 
   // AC-12: already-a-number for a number field → 200, value unchanged.
   // Coercion must be a no-op for already-typed values.
-  it("AC-12: already-a-number for a number field → 200, value unchanged", async () => {
-    const body = { ...validPurchase(), qty: 4, price: 124000 };
+  it("AC-12: already-a-number for amount field → 200, value unchanged", async () => {
+    const body = { ...validPurchase(), amount: 250000 };
     const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify(body));
     expect(r.statusCode).toBe(200);
     const data = JSON.parse(r.body) as { ok: boolean; value: Record<string, unknown> };
     expect(data.ok).toBe(true);
-    expect(data.value["qty"]).toBe(4);
-    expect(data.value["price"]).toBe(124000);
+    expect(data.value["amount"]).toBe(250000);
   });
 
   // AC-13: non-numeric string for a number field → 400 WRONG_TYPE (not coerced).
   // "abc" cannot be parsed as a finite number — the coercion pass leaves it as a
   // string, and the validator correctly returns WRONG_TYPE.
-  it("AC-13: non-numeric string ('abc') for a number field → 400 WRONG_TYPE", async () => {
-    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), qty: "abc" }));
+  it("AC-13: non-numeric string ('abc') for amount field → 400 WRONG_TYPE", async () => {
+    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), amount: "abc" }));
     expect(r.statusCode).toBe(400);
     const env = JSON.parse(r.body).error as { code: string; fields: Array<{ field: string; code: string }> };
     expect(env.code).toBe("VALIDATION");
-    expect(env.fields.some((f) => f.field === "qty" && f.code === "WRONG_TYPE")).toBe(true);
+    expect(env.fields.some((f) => f.field === "amount" && f.code === "WRONG_TYPE")).toBe(true);
   });
 
   // AC-14: empty string for a number field → field treated as absent, NOT coerced to 0.
-  // qty is optional in the purchase form, so empty string → isAbsent → field skipped
-  // → 200 with qty not in output. The invariant: "" must not become 0 in storage.
-  it("AC-14: empty string for a number field → 200 with field absent (not coerced to 0)", async () => {
-    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), qty: "" }));
-    // qty is optional so empty string → field treated as absent → valid submit.
+  // amount is optional so empty string → isAbsent → field skipped → 200 with amount
+  // absent. The invariant: "" must not become 0 in storage.
+  it("AC-14: empty string for amount field → 200 with field absent (not coerced to 0)", async () => {
+    const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify({ ...validPurchase(), amount: "" }));
+    // amount is optional so empty string → field treated as absent → valid submit.
     expect(r.statusCode).toBe(200);
     const data = JSON.parse(r.body) as { ok: boolean; value: Record<string, unknown> };
     expect(data.ok).toBe(true);
-    // The key invariant: qty must NOT be 0 (empty string was NOT coerced to 0).
-    expect(Object.prototype.hasOwnProperty.call(data.value, "qty")).toBe(false);
+    // The key invariant: amount must NOT be 0 (empty string was NOT coerced to 0).
+    expect(Object.prototype.hasOwnProperty.call(data.value, "amount")).toBe(false);
   });
 
   // AC-15: numeric-looking string for a TEXT field → stays a string (no coercion).
   // Only declared "number" fields are coerced. Text fields with numeric-looking
-  // values must not be touched (e.g. subject: "123" is a valid string).
+  // values must not be touched (e.g. title: "123" is a valid string).
   it("AC-15: numeric-looking string for a text field → stays a string (no coercion)", async () => {
-    const body = { ...validPurchase(), subject: "123" };
+    const body = { ...validPurchase(), title: "123" };
     const r = await request("POST", "/api/forms/purchase/submit", AUTH, JSON.stringify(body));
     expect(r.statusCode).toBe(200);
     const data = JSON.parse(r.body) as { ok: boolean; value: Record<string, unknown> };
     expect(data.ok).toBe(true);
-    // subject is a text field; "123" must remain a string, not become the number 123.
-    expect(typeof data.value["subject"]).toBe("string");
-    expect(data.value["subject"]).toBe("123");
+    // title is a text field; "123" must remain a string, not become the number 123.
+    expect(typeof data.value["title"]).toBe("string");
+    expect(data.value["title"]).toBe("123");
   });
 });

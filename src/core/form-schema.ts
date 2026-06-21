@@ -85,43 +85,40 @@ export interface FormDef {
 
 // ---------------------------------------------------------------------------
 // FORM 1 — Заявка на закупку (purchase)
-// Field keys mirror web/src/forms/form-defs.js (PURCHASE markup):
-//   supplier(select,req) category(select) subject(text,req) qty(number)
-//   price(number) due(date) budget(select,req) method(radio) reason(textarea)
-//   urgent(checkbox)
+// T-0370: aligned to the registry_def.record_schema for the «Заявки» registry
+// (slug='purchases', migration 076 + 086). Field keys now mirror BOTH:
+//   web/src/forms/form-defs.js (PURCHASE markup — data-field attributes)
+//   registry_def.record_schema properties (title/amount/requester/status)
+// so the server validates the same field set in BOTH memory mode (this hardcoded
+// def) and DB mode (makeFormDefResolver → deriveFormDefFromSchema). Previously
+// the two sets differed (old: supplier/subject/qty/price/budget; registry:
+// title/amount/requester/status), causing UNKNOWN_FIELD → 400 in the DB-mode
+// deploy-acceptance gate (T-0370 root cause).
+//
+// form-defs.js (sandbox-iframe visual layer) is updated in parallel so the
+// submit payload uses `data-field="title"` and `data-field="amount"`.
+// FF-FORMS1-2 binding invariant preserved: every data-field in form-defs.js
+// has a matching key here.
 // ---------------------------------------------------------------------------
 
 const PURCHASE: FormDef = {
   id: "purchase",
   fields: [
+    // Тема заявки — text, submitted as `title` (matches registry_def «title»).
+    { key: "title", type: "text", required: true, maxLength: 500 },
+    // Сумма — number, submitted as `amount` (matches registry_def «amount»).
+    // T-0369 coercion: sandbox-iframe sends the value as a numeric string;
+    // coerceFormPayload converts it to a JS number before validation so
+    // the persisted record stores a real number (DMN amount routing works).
+    { key: "amount", type: "number", min: 0, max: 1_000_000_000 },
+    // Инициатор — text, optional (populated from session in production).
+    { key: "requester", type: "text", maxLength: 500 },
+    // Статус — enum, optional (server sets default "pending" on create).
     {
-      key: "supplier",
+      key: "status",
       type: "enum",
-      required: true,
-      options: ["ООО «Вектор»", "АО «Линия»", "ООО «Стек-Трейд»", "Новый контрагент…"],
+      options: ["pending", "approved", "rejected"],
     },
-    {
-      key: "category",
-      type: "enum",
-      options: ["IT-оборудование", "Программное обеспечение", "Услуги", "Канцелярия и АХО"],
-    },
-    { key: "subject", type: "text", required: true, maxLength: 500 },
-    { key: "qty", type: "number", min: 1, max: 100000 },
-    { key: "price", type: "number", min: 0, max: 1000000000 },
-    { key: "due", type: "date" },
-    {
-      key: "budget",
-      type: "enum",
-      required: true,
-      options: [
-        "ИТ-инфраструктура · CAPEX",
-        "Операционные ИТ · OPEX",
-        "Развитие продукта · CAPEX",
-      ],
-    },
-    { key: "method", type: "enum", options: ["Прямая", "Тендер", "Рамочный"] },
-    { key: "reason", type: "textarea", maxLength: 2000 },
-    { key: "urgent", type: "boolean" },
   ],
 };
 
