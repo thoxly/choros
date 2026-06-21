@@ -362,16 +362,25 @@ export async function resolveActorSlugFromAuth(
   sub: string,
   preferredUsername: string | undefined,
 ): Promise<string | null> {
-  // Existence check helper: does ANY tenant have an employee with this slug?
+  // Existence check helper: does ANY tenant have a HUMAN employee with this slug?
   // Cross-tenant BYPASSRLS — mirrors resolveActorTenant (no tenant GUC; the
   // tenant is scoped later by resolveActorTenant on the returned slug).
+  //
+  // SECURITY — kind='human' restriction (T-0372):
+  //   Agents authenticate via their Keycloak client_id (service-account JWT), never
+  //   via preferred_username. Restricting to kind='human' ensures that a forged or
+  //   stolen preferred_username can never resolve to a no-KC-user agent or seed slug
+  //   (e.g. 'config-agent-seed', which holds authoring_draft grants). All registered
+  //   users (T-0342 invariant: slug == sub) and seeded human personas (e-orlov,
+  //   e-larina, e-configurator…) are kind='human', so this restriction is non-breaking
+  //   for the existing population while closing the agent-impersonation vector.
   async function employeeSlugExists(
     client: pg.PoolClient,
     slug: string,
   ): Promise<boolean> {
     const { rows } = await client.query<{ exists: boolean }>(
       `SELECT EXISTS (
-         SELECT 1 FROM choros.employee WHERE slug = $1
+         SELECT 1 FROM choros.employee WHERE slug = $1 AND kind = 'human'
        ) AS exists`,
       [slug],
     );

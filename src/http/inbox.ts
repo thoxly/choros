@@ -31,7 +31,7 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { DEV_TENANT_ID, getOrgPool, resolveActorTenant } from "../db/org.js";
+import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
 import { getRoleSlugsForActor } from "../db/grants-dao.js";
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
@@ -54,6 +54,39 @@ import {
   loadClaimsFromAudit,
   type ClaimState,
 } from "./claim-projection.js";
+
+// ---------------------------------------------------------------------------
+// extractActorSlug — mode-aware, resolves the authenticated request → the
+// correct employee SLUG (T-0372, mirrors assistant.ts extractActorSlug).
+//
+// In keycloak mode: resolves via resolveActorSlugFromAuth (sub-first →
+// preferred_username fallback → null → 401). Prevents raw KC sub (UUID)
+// from being used as an employee slug for grant/tenant resolution.
+// In dev mode: the x-dev-user header value IS the slug (unchanged).
+// ---------------------------------------------------------------------------
+
+async function extractActorSlug(
+  req: import("node:http").IncomingMessage,
+  getPool: () => pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    // Keycloak mode: resolve sub → slug. getPool() is only called here (lazy),
+    // so dev-mode tests without DATABASE_URL never trigger getOrgPool().
+    const slug = await resolveActorSlugFromAuth(getPool(), ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  // Dev mode: x-dev-user header value IS the slug.
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -581,11 +614,13 @@ export function registerInboxRoutes(
   // Backward compatible: with NO query params, returns the full tenant list under
   // `items` (legacy shape) plus the additive `counts` object.
   router.register("GET", "/api/inbox", withAuth(async (req, res) => {
-    // Mode-aware actor resolution (T-0327).
+    // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
     const authCtx = getAuthContext(req);
     let actor: string | null;
     if (authCtx !== undefined) {
-      actor = authCtx.sub;
+      // Keycloak mode: resolve sub → employee slug (sub-first, preferred_username fallback).
+      // resolveActorSlugFromAuth returns null when no employee matches → treat as no actor.
+      actor = await resolveActorSlugFromAuth(getOrgPool(), authCtx.sub, authCtx.preferredUsername);
     } else {
       let devUserId = req.headers[DEV_USER_HEADER];
       if (Array.isArray(devUserId)) devUserId = devUserId[0];
@@ -639,19 +674,8 @@ export function registerInboxRoutes(
   //     instance-backed tasks (tasks whose id is the inbox_task_id of a process.started event).
   // Errors: 401 UNAUTHENTICATED, 404 NOT_FOUND
   router.register("GET", "/api/inbox/:id", withAuth(async (req, res, params) => {
-    // Mode-aware actor resolution (T-0327).
-    const authCtx = getAuthContext(req);
-    let actor: string;
-    if (authCtx !== undefined) {
-      actor = authCtx.sub;
-    } else {
-      let devUserId = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUserId)) devUserId = devUserId[0];
-      if (!devUserId || typeof devUserId !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-      }
-      actor = devUserId;
-    }
+    // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
+    const actor = await extractActorSlug(req, () => getOrgPool());
     const taskId = params["id"] as string;
 
     // Find the item in the actor's tenant inbox.
@@ -767,19 +791,8 @@ export function registerInboxRoutes(
   //   is preserved, NOT advanced — so «когда взято» is stable across re-claims).
   // Claiming another user's claimed task → 409 ALREADY_CLAIMED.
   router.register("POST", "/api/inbox/:id/claim", withAuth(async (req, res, params) => {
-    // Mode-aware actor resolution (T-0327).
-    const authCtx = getAuthContext(req);
-    let devUserId: string;
-    if (authCtx !== undefined) {
-      devUserId = authCtx.sub;
-    } else {
-      let h = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(h)) h = h[0];
-      if (!h || typeof h !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-      }
-      devUserId = h;
-    }
+    // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
+    const devUserId = await extractActorSlug(req, () => getOrgPool());
 
     const taskId = params["id"] as string;
     const tenantId = await resolveTenant(devUserId);
@@ -861,10 +874,9 @@ export function registerInboxRoutes(
     // In DB-mode: resolveRolesForActor errors propagate → 500 (fail-closed).
     // In no-DB mode: falls back to in-memory USER_ROLES fixture (memory tests).
     //
-    // T-0366: pass authCtx?.preferredUsername as fallback so seed personas whose
-    // KC sub (devUserId) matches no employee are resolved via preferred_username.
-    // In dev-header mode authCtx is undefined → no fallback (devUserId == slug).
-    const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs, authCtx?.preferredUsername);
+    // T-0372: devUserId is already the resolved employee slug (extractActorSlug
+    // handled sub→slug above). No fallback needed — devUserId IS the slug.
+    const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs);
     // T-0365: fail-closed — drop the `myRoles.length > 0 &&` guard that let a
     // zero-role actor skip the check. Now empty roles (or role-mismatch) ⇒ 403.
     // Keep `taskRole !== undefined` guard: unaddressed tasks have no role to check.
@@ -974,19 +986,12 @@ export function registerInboxRoutes(
     const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore } = writeDeps;
 
     router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
-      // Mode-aware actor resolution (T-0327).
-      const authCtx = getAuthContext(req);
-      let actor: string;
-      if (authCtx !== undefined) {
-        actor = authCtx.sub;
-      } else {
-        let devUserId = req.headers[DEV_USER_HEADER];
-        if (Array.isArray(devUserId)) devUserId = devUserId[0];
-        if (!devUserId || typeof devUserId !== "string") {
-          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-        }
-        actor = devUserId;
-      }
+      // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
+      // CRITICAL: e-larina approve→200 requires the KC sub UUID to be resolved to the
+      // seeded human slug 'e-larina' before grant/tenant lookup (T-0366 pattern).
+      // Uses writeDeps.pool (injected, not the global getOrgPool) so the same pool is
+      // used for resolution and the downstream approve tx — consistent connection behaviour.
+      const actor = await extractActorSlug(req, () => pool);
 
       // Body validation — only the approve action is supported (AC-5; narrow scope).
       const rawBody = await readJsonBody(req);
@@ -1039,11 +1044,10 @@ export function registerInboxRoutes(
       // An agent actor (employee.kind='agent') holding role-approver is denied here
       // structurally (the moat: agents have NO approve grant — see tel-scenario seed).
       //
-      // T-0366: pass authCtx?.preferredUsername as fallback for KC seed personas
-      // whose JWT sub does not match employee.slug. In dev-header mode authCtx is
-      // undefined → no fallback (actor == slug already).
+      // T-0372: actor is already the resolved employee slug (extractActorSlug handled
+      // the sub→slug resolution above). No fallback needed — actor IS the slug.
       const nowMs = Date.now();
-      const myRoles = await resolveRolesForActor(actor, tenantId, nowMs, authCtx?.preferredUsername);
+      const myRoles = await resolveRolesForActor(actor, tenantId, nowMs);
       if (!myRoles.includes(task.role)) {
         throw new HttpError(
           403,

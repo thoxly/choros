@@ -1,9 +1,14 @@
 /**
- * src/__tests__/resolve-actor-slug.test.ts — T-0371 unit tests for
+ * src/__tests__/resolve-actor-slug.test.ts — T-0371/T-0372 unit tests for
  * resolveActorSlugFromAuth in src/db/org.ts.
  *
  * Pure unit — no live Postgres. Mocks pool.connect() → a fake client whose
  * query() returns { rows: [{ exists: true|false }] } based on slug argument.
+ *
+ * NOTE (T-0372): the DB lookup is now restricted to kind='human'. The fake
+ * pool simulates this by only returning exists=true for slugs that are in the
+ * existsSlugs set (representing rows where kind='human'). Agent slugs are absent
+ * from the set, so they return exists=false, matching the production SQL guard.
  *
  * Covers:
  *   (a) sub matches an employee → returns sub (short-circuit; preferred_username NOT consulted)
@@ -11,6 +16,7 @@
  *   (c) neither sub nor preferredUsername matches → returns null (fail-closed)
  *   (d) preferredUsername === sub → only one lookup, returns null when it misses (no redundant query)
  *   (e) empty/undefined preferredUsername with missing sub → null
+ *   (f) agent slug is not in kind='human' set → returns null even if slug matches an employee name
  */
 
 import { describe, it, expect } from "vitest";
@@ -163,5 +169,32 @@ describe("T-0371 resolveActorSlugFromAuth — (e) undefined preferredUsername wi
     expect(result).toBeNull();
     // Empty string is falsy → the fallback branch is skipped.
     expect(queryCalls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) T-0372: agent slug absent from kind='human' set → returns null
+// Simulates the kind='human' DB restriction: the fake pool only has the agent
+// slug in existsSlugs if we add it. This test ensures we DON'T add agent
+// slugs (i.e. existsSlugs = only human slugs) → the resolver must return null
+// even when the preferred_username exactly matches an agent slug.
+// ---------------------------------------------------------------------------
+
+describe("T-0372 resolveActorSlugFromAuth — (f) agent slug not in kind='human' set → null", () => {
+  it("returns null when neither sub nor preferredUsername resolve to a human employee", async () => {
+    // Simulate: DB only contains kind='human' rows. 'config-agent-seed' is kind='agent'
+    // so it is absent from the fake existsSlugs set.
+    const sub = "kc-client-uuid-for-config-agent";
+    const preferredUsername = "config-agent-seed"; // kind='agent' slug
+
+    // existsSlugs is empty — no human employees with these slugs.
+    const { pool, queryCalls } = makeFakePool(new Set());
+
+    const result = await resolveActorSlugFromAuth(pool, sub, preferredUsername);
+
+    // Must be null: the agent slug does not resolve to a human employee (T-0372 guard).
+    expect(result).toBeNull();
+    // Both lookups were attempted (sub miss → preferredUsername miss → null).
+    expect(queryCalls).toEqual([sub, preferredUsername]);
   });
 });

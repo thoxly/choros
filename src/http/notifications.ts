@@ -25,6 +25,7 @@ import {
 } from "../core/postgres/pgNotificationStore.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -72,9 +73,16 @@ async function withTenantTx<T>(
 // Actor extraction helper
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(req: import("node:http").IncomingMessage, pool: pg.Pool): Promise<string> {
+  // T-0372: resolve KC sub → employee slug.
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -104,7 +112,7 @@ export function registerNotificationRoutes(
   // GET /api/notifications  — own notification listing, keyset-paginated
   // -------------------------------------------------------------------------
   router.register("GET", "/api/notifications", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     // Parse query parameters
@@ -146,7 +154,7 @@ export function registerNotificationRoutes(
   // NOTE: registered BEFORE /:id/read to prevent router matching 'unread-count' as :id
   // -------------------------------------------------------------------------
   router.register("GET", "/api/notifications/unread-count", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     const count = await withTenantTx(pool, tenantId, (client) =>
@@ -162,7 +170,7 @@ export function registerNotificationRoutes(
   // POST /api/notifications/:id/read  — mark single notification as read
   // -------------------------------------------------------------------------
   router.register("POST", "/api/notifications/:id/read", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     const notifId = params["id"];
@@ -194,7 +202,7 @@ export function registerNotificationRoutes(
   // PATCH /api/notifications  — batch mark-read
   // -------------------------------------------------------------------------
   router.register("PATCH", "/api/notifications", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     const rawBody = await readJsonBody(req);

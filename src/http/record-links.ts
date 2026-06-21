@@ -53,6 +53,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   resolveHop,
   type CrossAppRefDef,
@@ -130,13 +131,17 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — mirrors records.ts (Keycloak + dev-mode header)
+// extractActor — mirrors records.ts, mode-aware (T-0372: resolves KC sub → slug)
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    return ctx.sub;
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
   }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
@@ -312,7 +317,7 @@ export function registerRecordLinksRoutes(
       const id = params["id"] ?? "";
       assertUuidShape(id, "record id");
 
-      const actor = extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
 
       const result = await withTenantTx(pool, tenantId, async (client) => {
