@@ -342,3 +342,68 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose stop flowable postgres
+
+  # T-0364 (founder decision 2026-06-21): dev auto-deploy, folded into this workflow.
+  # WHY a job here (not the standalone deploy-dev.yml): a `workflow_run` trigger only
+  # activates from the workflow file on the DEFAULT branch (main, founder-gated GT-3) —
+  # ours lived only on dev, so it was dormant and never fired. A job with `needs` runs
+  # from dev's OWN workflow copy on a push. It gates on the SUBSTANTIVE jobs (ci =
+  # tsc/eslint/unit + db/kc/stack/flowable integration), NOT on the advisory fitness
+  # guards (per the founder's "развязать деплой от гардов"). deploy-acceptance is
+  # informational and intentionally excluded from `needs`. Runs only on push to dev.
+  # Requires repo secrets: DEPLOY_SSH_KEY (private key for ubuntu@homeserver-vm) and
+  # TAILSCALE_AUTHKEY (reusable, tag:ci — the server is Tailscale-only). Never touches
+  # main or prod.
+  deploy-dev:
+    name: Deploy to dev (homeserver-vm)
+    runs-on: ubuntu-latest
+    needs: [ci, db, kc, stack, flowable]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    steps:
+      - uses: actions/checkout@v4
+      # Secrets cannot be referenced in a job-level `if:` (GitHub rejects the workflow —
+      # that was the original deploy-dev.yml bug). So gate at the STEP level: this precheck
+      # reads the secret into env and the deploy steps run only when both are present.
+      # Missing TAILSCALE_AUTHKEY ⟹ deploy is SKIPPED (job stays green, log says why) and
+      # auto-activates the moment the founder adds the secret. No red noise in the interim.
+      - name: Precheck deploy secrets
+        id: precheck
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$TS_KEY" ] || [ -z "$SSH_KEY" ]; then
+            echo "::notice::Auto-deploy SKIPPED — missing secret(s): \
+              $([ -z "$TS_KEY" ] && echo TAILSCALE_AUTHKEY) $([ -z "$SSH_KEY" ] && echo DEPLOY_SSH_KEY). \
+              Add them in repo Settings → Secrets to enable dev auto-deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Both deploy secrets present — proceeding to deploy."
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Connect to Tailscale
+        if: steps.precheck.outputs.ready == 'true'
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+      - name: Install SSH key
+        if: steps.precheck.outputs.ready == 'true'
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 100.121.76.86 >> ~/.ssh/known_hosts 2>/dev/null || true
+      - name: Deploy
+        if: steps.precheck.outputs.ready == 'true'
+        env:
+          DEPLOY_HOST: "100.121.76.86"
+          DEPLOY_USER: "ubuntu"
+          DEPLOY_DIR: "/srv/choros"
+          SSH_KEY_PATH: "/home/runner/.ssh/deploy_key"
+        run: bash scripts/deploy-dev.sh
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
