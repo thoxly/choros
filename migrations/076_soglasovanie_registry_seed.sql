@@ -48,30 +48,7 @@ ON CONFLICT (tenant_id, slug) DO NOTHING;
 
 -- Registry 1: «Заявки» — PRIMARY record registry (purchases / applications submitted).
 -- This is the registry that process.started events bind to via process_app_binding.
---
--- record_schema: the AUTHORITATIVE schema for the purchase record (T-0345 — the
---   registry is the single source of truth; the live submit path derives the
---   FormDef from this schema via deriveFormDefFromSchema and validates against it).
---
--- T-0364 (deploy-acceptance fix): this schema MUST mirror the canonical purchase
---   form (src/core/form-schema.ts PURCHASE / web/src/forms/form-defs.js). The
---   purchase form (the ТЭЛ «Заявка на закупку») submits these exact field keys —
---   supplier, category, subject, qty, price, due, budget, method, reason, urgent.
---   The previous minimal demo schema (title/amount/requester/status) did NOT match
---   the form, so once T-0345 made the registry govern validation, EVERY purchase
---   field was rejected as UNKNOWN_FIELD → 400 (the validator enforces a closed
---   field set, regardless of additionalProperties). Aligning the schema here makes
---   a real purchase submission valid AND keeps the registry as the single source of
---   truth — the form derives FROM this schema, never the reverse.
---
---   Field-type derivation (field-type-dictionary.deriveFieldType):
---     string + enum[]          → "enum"      (supplier, category, budget, method)
---     string                   → "text"      (subject)
---     number                   → "number"    (qty, price)
---     string + format="date"   → "date"      (due)
---     string + x-choros-widget="textarea" → "textarea" (reason)
---     boolean                  → "boolean"   (urgent)
---   required = [supplier, subject, budget] (mirrors PURCHASE FieldDef.required).
+-- record_schema: minimal schema for the demo purchase record.
 INSERT INTO choros.registry_def
   (tenant_id, id, application_id, slug, display_name, description,
    record_schema, is_system, created_at, updated_at)
@@ -88,39 +65,16 @@ VALUES
       "$id": "purchases",
       "type": "object",
       "additionalProperties": true,
-      "required": ["supplier", "subject", "budget"],
       "properties": {
-        "supplier": {
+        "title": { "type": "string", "title": "Тема заявки" },
+        "amount": { "type": "number", "title": "Сумма" },
+        "requester": { "type": "string", "title": "Инициатор" },
+        "status": {
           "type": "string",
-          "title": "Поставщик",
-          "enum": ["ООО «Вектор»", "АО «Линия»", "ООО «Стек-Трейд»", "Новый контрагент…"]
-        },
-        "category": {
-          "type": "string",
-          "title": "Категория",
-          "enum": ["IT-оборудование", "Программное обеспечение", "Услуги", "Канцелярия и АХО"]
-        },
-        "subject": { "type": "string", "title": "Предмет закупки", "maxLength": 500 },
-        "qty": { "type": "number", "title": "Кол-во", "minimum": 1, "maximum": 100000 },
-        "price": { "type": "number", "title": "Цена за ед.", "minimum": 0, "maximum": 1000000000 },
-        "due": { "type": "string", "format": "date", "title": "Срок поставки" },
-        "budget": {
-          "type": "string",
-          "title": "ЦФО · статья бюджета",
-          "enum": ["ИТ-инфраструктура · CAPEX", "Операционные ИТ · OPEX", "Развитие продукта · CAPEX"]
-        },
-        "method": {
-          "type": "string",
-          "title": "Способ закупки",
-          "enum": ["Прямая", "Тендер", "Рамочный"]
-        },
-        "reason": {
-          "type": "string",
-          "title": "Обоснование",
-          "x-choros-widget": "textarea",
-          "maxLength": 2000
-        },
-        "urgent": { "type": "boolean", "title": "Срочная закупка" }
+          "enum": ["pending", "approved", "rejected"],
+          "title": "Статус",
+          "default": "pending"
+        }
       }
     }'::jsonb,
    true,
