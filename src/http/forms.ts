@@ -189,6 +189,89 @@ function sendValidationErrors(res: import("node:http").ServerResponse, fields: F
 }
 
 // ---------------------------------------------------------------------------
+// T-0369: HTML form string coercion (pre-validation pass)
+//
+// HTML forms (including sandbox-iframe FormViewer) submit ALL values as strings
+// because <input type="number"> serialises its value as a string in the body.
+// The form-validator.ts remains strict (a number field MUST receive a JS number).
+// This coercion pass bridges the gap: it converts incoming string values to their
+// declared types BEFORE validation, while preserving the validator's strict
+// semantics for already-typed values and non-coercible strings.
+//
+// Rules:
+//   "number" field : string → Number() if result is finite; empty/non-numeric →
+//                    leave as-is (validator will reject with WRONG_TYPE).
+//                    Already a number → unchanged.
+//   "boolean" field: "true"/"false" (case-insensitive) → boolean literal.
+//                    Anything else → unchanged (validator rejects).
+//   All other types: untouched (string stays string, etc.).
+//
+// The coerced payload is what gets VALIDATED and PERSISTED, so DMN routing on
+// numeric fields (e.g. amount > threshold) works correctly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strict numeric string test: only accepts finite-number representations.
+ * Uses Number() (not parseFloat) so "6m" or " " do NOT coerce.
+ * Empty string, whitespace-only, and non-numeric strings return false.
+ */
+function isFiniteNumberString(s: string): boolean {
+  const trimmed = s.trim();
+  if (trimmed === "") return false;
+  const n = Number(trimmed);
+  return Number.isFinite(n);
+}
+
+/**
+ * Pre-validation coercion pass (T-0369).
+ *
+ * Iterates over DECLARED FormDef fields only and coerces incoming string values
+ * to the field's declared JS type. Unknown/extra keys (forged fields) are left
+ * untouched — the validator's UNKNOWN_FIELD check handles them downstream.
+ *
+ * @param formDef - the resolved FormDef (declares field types)
+ * @param payload - the raw JSON object from readJsonBody
+ * @returns a new object with coerced values for declared fields; other keys
+ *          are preserved unchanged so the validator can reject them.
+ */
+function coerceFormPayload(
+  formDef: FormDef,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const coerced: Record<string, unknown> = { ...payload };
+
+  for (const field of formDef.fields) {
+    const raw = payload[field.key];
+    if (typeof raw !== "string") continue; // already typed or absent — skip
+
+    switch (field.type) {
+      case "number": {
+        if (isFiniteNumberString(raw)) {
+          coerced[field.key] = Number(raw.trim());
+        }
+        // Non-numeric / empty strings: leave as-is → WRONG_TYPE from validator.
+        break;
+      }
+      case "boolean": {
+        const lower = raw.toLowerCase();
+        if (lower === "true") {
+          coerced[field.key] = true;
+        } else if (lower === "false") {
+          coerced[field.key] = false;
+        }
+        // Other strings: leave as-is → WRONG_TYPE from validator.
+        break;
+      }
+      default:
+        // text / textarea / date / enum: no coercion needed (already strings).
+        break;
+    }
+  }
+
+  return coerced;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -245,7 +328,17 @@ export function registerFormsRoutes(router: Router, deps?: FormStoreDeps): void 
     }
 
     // readJsonBody enforces size limits + JSON syntax (400 INVALID_JSON / 413).
-    const payload = await readJsonBody(req);
+    const rawPayload = await readJsonBody(req);
+
+    // T-0369: coerce string values from HTML form submission (sandbox iframe)
+    // to their declared field types BEFORE validation. form-validator.ts remains
+    // strict; this pass only converts numeric/boolean strings for declared fields.
+    // Non-coercible strings (e.g. "abc" for a number field) are left unchanged
+    // so the validator still returns WRONG_TYPE.
+    const payload =
+      rawPayload !== null && typeof rawPayload === "object" && !Array.isArray(rawPayload)
+        ? coerceFormPayload(activeFormDef, rawPayload as Record<string, unknown>)
+        : rawPayload;
 
     // The server is the source of truth: re-validate every field against the
     // canonical schema, independent of any client-side constraints.
