@@ -357,11 +357,11 @@ describe("form-schema-derive: single source verification", () => {
     expect(statusField?.options).toContain("approved");
     expect(statusField?.options).toContain("rejected");
 
-    // Cross-check: the hardcoded form-schema "purchase" form (ТЭЛ demo) exports
-    // different fields (supplier, category, subject, etc.) because it predates the
-    // registry_def API and was authored for the form-js sandbox UI, not the record store.
-    // The assertion here is that BOTH are valid FieldDef arrays using the SAME FieldType
-    // vocabulary (the unified type dictionary in field-type-dictionary.ts).
+    // Cross-check: the hardcoded form-schema "purchase" form (ТЭЛ demo) now exports
+    // the SAME fields as the registry schema (title/amount/requester/status) after
+    // T-0370 alignment. The assertion here is that BOTH are valid FieldDef arrays
+    // using the SAME FieldType vocabulary (the unified type dictionary in
+    // field-type-dictionary.ts).
     const bootstrapPurchase = getFormDef("purchase");
     expect(bootstrapPurchase).not.toBeNull();
 
@@ -401,10 +401,11 @@ describe("forms.ts: FormPersistPort wiring", () => {
     const addr = server.address() as { port: number };
     const baseUrl = `http://localhost:${addr.port}`;
 
+    // T-0370: use registry-aligned fields (title/amount) — old fields (supplier/
+    // subject/budget) are now UNKNOWN_FIELD in the updated form-schema.ts PURCHASE.
     const body = JSON.stringify({
-      supplier: "ООО «Вектор»",
-      subject: "Ноутбуки ThinkPad",
-      budget: "ИТ-инфраструктура · CAPEX",
+      title: "Ноутбуки ThinkPad",
+      amount: 496000,
     });
 
     const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {

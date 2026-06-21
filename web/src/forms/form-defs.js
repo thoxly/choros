@@ -56,6 +56,10 @@
 
   /* ============================================================================
      ФОРМА 1 — ЗАЯВКА НА ЗАКУПКУ
+     T-0370: field keys aligned to registry_def.record_schema «Заявки»
+     (migration 076, slug='purchases'): title (text) + amount (number).
+     Fields without `data-field` are visual-only and are NOT submitted.
+     FF-FORMS1-2: every data-field here has a matching key in form-schema.ts.
      ============================================================================ */
   var PURCHASE =
     '<form class="fjs-container" novalidate>' +
@@ -68,101 +72,43 @@
     '<span class="fjs-form-title-id">PR-2026-0418</span></div>' +
     "</div></div>" +
 
-    // поставщик / категория
-    '<div class="fjs-row">' +
-    '<div class="fjs-column" data-col="2">' +
-    select(
-      "supplier",
-      "Поставщик",
-      "ООО «Вектор»",
-      [
-        { label: "ООО «Вектор»", mono: "ИНН 7701..." },
-        { label: "АО «Линия»", mono: "ИНН 7736..." },
-        { label: "ООО «Стек-Трейд»", mono: "ИНН 5024..." },
-        { label: "Новый контрагент…" }
-      ],
-      { required: true }
-    ) +
-    "</div>" +
-    '<div class="fjs-column">' +
-    select("category", "Категория", "IT-оборудование", [
-      { label: "IT-оборудование" },
-      { label: "Программное обеспечение" },
-      { label: "Услуги" },
-      { label: "Канцелярия и АХО" }
-    ]) +
-    "</div>" +
-    "</div>" +
-
-    // предмет закупки
-    '<div class="fjs-form-field fjs-form-field-textfield" data-field="subject">' +
-    '<label class="fjs-form-field-label">Предмет закупки<span class="fjs-asterix">*</span></label>' +
+    // тема заявки (title) — submitted as data-field="title" (registry «Тема заявки»)
+    '<div class="fjs-form-field fjs-form-field-textfield" data-field="title">' +
+    '<label class="fjs-form-field-label">Тема заявки<span class="fjs-asterix">*</span></label>' +
     '<input class="fjs-input" type="text" value="Ноутбуки Lenovo ThinkPad T14 Gen 5 (32 ГБ / 1 ТБ)">' +
     '<div class="fjs-form-field-description">Краткая номенклатура; детальная спецификация — во вложении.</div>' +
     "</div>" +
 
-    // кол-во / цена / срок
-    '<div class="fjs-row">' +
-    '<div class="fjs-column">' +
-    '<div class="fjs-form-field fjs-form-field-number" data-field="qty">' +
-    '<label class="fjs-form-field-label">Кол-во</label>' +
+    // сумма (amount) — submitted as data-field="amount" (registry «Сумма»).
+    // T-0369: sandbox sends this as a numeric string; coerceFormPayload in forms.ts
+    // converts it to a JS number before validation so a real number is persisted.
+    '<div class="fjs-form-field fjs-form-field-number" data-field="amount">' +
+    '<label class="fjs-form-field-label">Сумма, ₽</label>' +
     '<div class="fjs-input-group">' +
-    '<input class="fjs-input fjs-input--adorned" type="text" inputmode="numeric" value="4" data-amount>' +
-    '<div class="fjs-number-arrow-container">' +
-    '<button type="button" class="fjs-number-arrow-up" data-step="1">▲</button>' +
-    '<button type="button" class="fjs-number-arrow-down" data-step="-1">▼</button>' +
-    "</div></div></div></div>" +
-    '<div class="fjs-column">' +
-    '<div class="fjs-form-field fjs-form-field-number" data-field="price">' +
-    '<label class="fjs-form-field-label">Цена за ед.</label>' +
-    '<div class="fjs-input-group">' +
-    '<input class="fjs-input fjs-input--adorned" type="text" inputmode="decimal" value="124 000" data-amount>' +
+    '<input class="fjs-input fjs-input--adorned" type="text" inputmode="decimal" value="496000" data-amount>' +
     '<span class="fjs-input-adornment">₽</span>' +
-    "</div></div></div>" +
-    '<div class="fjs-column">' +
-    '<div class="fjs-form-field fjs-form-field-datetime" data-field="due">' +
-    '<label class="fjs-form-field-label">Срок поставки</label>' +
-    '<div class="fjs-input-group">' +
-    '<input class="fjs-input fjs-input--adorned" type="text" value="21.06.2026">' +
-    '<span class="fjs-input-adornment">' +
-    CAL +
-    "</span></div></div></div>" +
-    "</div>" +
+    "</div></div>" +
 
-    // ЦФО / способ закупки
+    // визуальные поля (без data-field — не отправляются в /submit)
     '<div class="fjs-row">' +
     '<div class="fjs-column" data-col="2">' +
-    select(
-      "budget",
-      "ЦФО · статья бюджета",
-      "ИТ-инфраструктура · CAPEX",
-      [
-        { label: "ИТ-инфраструктура · CAPEX", mono: "B-204" },
-        { label: "Операционные ИТ · OPEX", mono: "B-211" },
-        { label: "Развитие продукта · CAPEX", mono: "B-118" }
-      ],
-      { required: true }
-    ) +
-    "</div>" +
-    '<div class="fjs-column" data-col="2">' +
-    '<div class="fjs-form-field fjs-form-field-radio" data-field="method">' +
-    '<label class="fjs-form-field-label">Способ закупки</label>' +
-    '<div class="fjs-radio-group" data-inline="true">' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Прямая" checked><span>Прямая</span></label>' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Тендер"><span>Тендер</span></label>' +
-    '<label class="fjs-radio-label"><input type="radio" class="fjs-radio" name="method" value="Рамочный"><span>Рамочный</span></label>' +
-    "</div></div></div>" +
+    // поставщик — визуальный select (без data-field; подача через реестр контрагентов)
+    '<div class="fjs-form-field fjs-form-field-select">' +
+    '<label class="fjs-form-field-label">Поставщик</label>' +
+    '<div class="fjs-select-display" tabindex="0"><span class="fjs-select-value">ООО «Вектор»</span>' + CHEVRON + "</div>" +
+    "</div></div>" +
+    '<div class="fjs-column">' +
+    // срок поставки — визуальный (без data-field)
+    '<div class="fjs-form-field fjs-form-field-datetime">' +
+    '<label class="fjs-form-field-label">Срок поставки</label>' +
+    '<div class="fjs-input-group"><input class="fjs-input fjs-input--adorned" type="text" value="21.06.2026">' +
+    '<span class="fjs-input-adornment">' + CAL + "</span></div></div></div>" +
     "</div>" +
 
-    // обоснование
-    '<div class="fjs-form-field fjs-form-field-textarea" data-field="reason">' +
+    // обоснование — визуальный textarea (без data-field)
+    '<div class="fjs-form-field fjs-form-field-textarea">' +
     '<label class="fjs-form-field-label">Обоснование</label>' +
     '<textarea class="fjs-textarea" rows="2">Замена парка устройств отдела разработки с истёкшим сроком амортизации. Согласовано с руководителем направления.</textarea>' +
-    "</div>" +
-
-    // срочная
-    '<div class="fjs-form-field fjs-form-field-checkbox" data-field="urgent">' +
-    '<label class="fjs-checkbox-label"><input type="checkbox" class="fjs-checkbox"><span>Срочная закупка — вне планового цикла</span></label>' +
     "</div>" +
 
     '<div class="fjs-form-field fjs-form-field-separator"><hr class="fjs-separator"></div>' +
@@ -285,9 +231,9 @@
     "  d.addEventListener('click',function(){closeAll(null);});",
     // number steppers
     "  d.querySelectorAll('.fjs-number-arrow-up,.fjs-number-arrow-down').forEach(function(b){b.addEventListener('click',function(){var inp=b.closest('.fjs-input-group').querySelector('.fjs-input');var v=num(inp.value)+parseInt(b.getAttribute('data-step'),10);if(v<0)v=0;inp.value=fmt(v);recalc();});});",
-    // total recalc (purchase)
-    "  function recalc(){var q=d.querySelector('[data-field=qty] .fjs-input');var p=d.querySelector('[data-field=price] .fjs-input');var t=d.querySelector('[data-total]');if(q&&p&&t){t.textContent=fmt(num(q.value)*num(p.value))+' ₽';}}",
-    "  d.querySelectorAll('[data-field=qty] .fjs-input,[data-field=price] .fjs-input').forEach(function(i){i.addEventListener('input',recalc);});recalc();",
+    // total sync (purchase): mirror amount field → итого display (T-0370: qty/price merged into amount)
+    "  function recalc(){var a=d.querySelector('[data-field=amount] .fjs-input');var t=d.querySelector('[data-total]');if(a&&t){t.textContent=fmt(num(a.value))+' ₽';}}",
+    "  d.querySelectorAll('[data-field=amount] .fjs-input').forEach(function(i){i.addEventListener('input',recalc);});recalc();",
     // decision → comment required
     "  var dec=d.querySelectorAll('input[name=decision]');var reqStar=d.querySelector('[data-req-when-reject]');",
     "  dec.forEach(function(r){r.addEventListener('change',function(){var need=(d.querySelector('input[name=decision]:checked')||{}).value!=='ok';if(reqStar)reqStar.hidden=!need;});});",
