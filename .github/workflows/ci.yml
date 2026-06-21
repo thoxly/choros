@@ -28,6 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # T-0364: full history + branches so baseline checks resolve the dev ref
+          # in CI (e.g. docpage-writeful-tools F-7 `git diff dev -- known_tenant_tables.txt`,
+          # frozen-check merge-base). Default shallow checkout has no dev/origin/dev ref
+          # → those checks hard-fail in CI while passing locally.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
