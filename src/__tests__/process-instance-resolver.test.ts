@@ -368,4 +368,72 @@ describe("resolveInstanceTarget", () => {
     expect(result.kind).toBe("unresolved");
     expect((result as InstanceTargetUnresolved).reason).toBe("no_process_started_event");
   });
+
+  // -------------------------------------------------------------------------
+  // T-0356 (E16): primaryRecordId extraction from process.started payload
+  // -------------------------------------------------------------------------
+
+  it("RES-11: process.started payload with record_id → primaryRecordId on resolved ref", async () => {
+    // Simulate a process started via the on_create trigger (create=start path):
+    // the audit event payload carries record_id set by appendProcessStarted.
+    const ORIGINATING_RECORD_ID = "00000000-0000-0000-0007-000000000007";
+    const pool = makeStubPool((sql) => {
+      if (sql.includes("audit_event")) {
+        return [
+          {
+            payload: {
+              inst: INSTANCE_ID,
+              proc_key: PROCESS_KEY,
+              task_role: "role-approver",
+              task_step: "Согласование",
+              inbox_task_id: "00000000-0000-0000-0000-000000000099",
+              // T-0356: record_id is present (on_create path)
+              record_id: ORIGINATING_RECORD_ID,
+            },
+          },
+        ];
+      }
+      if (sql.includes("process_app_binding")) {
+        return [appBindingRow()];
+      }
+      if (sql.includes("registry_def")) {
+        return [registryRow()];
+      }
+      return [];
+    });
+
+    const result = await resolveInstanceTarget(pool, TENANT_ID, INSTANCE_ID);
+
+    expect(result.kind).toBe("resolved");
+    const resolved = result as InstanceTargetRef;
+    // Core fields unchanged
+    expect(resolved.instanceId).toBe(INSTANCE_ID);
+    expect(resolved.processKey).toBe(PROCESS_KEY);
+    // T-0356: primaryRecordId must be exposed on the resolved ref
+    expect(resolved.primaryRecordId).toBe(ORIGINATING_RECORD_ID);
+  });
+
+  it("RES-12: process.started payload without record_id → primaryRecordId absent (launcher path)", async () => {
+    // The explicit launch path (process-start.ts) does NOT set record_id.
+    // primaryRecordId should be absent (undefined) on the resolved ref.
+    const pool = makeStubPool((sql) => {
+      if (sql.includes("audit_event")) {
+        return [auditStartedRow()]; // no record_id in payload
+      }
+      if (sql.includes("process_app_binding")) {
+        return [appBindingRow()];
+      }
+      if (sql.includes("registry_def")) {
+        return [registryRow()];
+      }
+      return [];
+    });
+
+    const result = await resolveInstanceTarget(pool, TENANT_ID, INSTANCE_ID);
+
+    expect(result.kind).toBe("resolved");
+    const resolved = result as InstanceTargetRef;
+    // T-0356: no record_id in payload → primaryRecordId must be undefined
+    expect(resolved.primaryRecordId).toBeUndefined();
+  });
 });

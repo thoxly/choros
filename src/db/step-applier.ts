@@ -354,12 +354,15 @@ export async function applyStepResult(
 
   // cross_app_ref write-side: if a definition links the «Согласование» (source)
   // registry to the primary «Заявки» (target) registry, set the primary record's
-  // UUID under the resolved ref_field key. The primary record id is the instance's
-  // own primary record — addressed here by the resolver's registry; the concrete
-  // primary record UUID is carried via the cross-ref pointer value. We write the
-  // INSTANCE id as the pointer when no concrete primary record is resolvable, since
-  // the «Заявки» record id is not addressable in T-0335 (same 1:1 gap as B / T-0344);
-  // the ref_field is still populated so the link exists once the primary is wired.
+  // UUID under the resolved ref_field key.
+  //
+  // T-0356 (E16): when the process was started by the on_create trigger, the
+  // resolver carries the real originating «Заявки» record id as primaryRecordId.
+  // Use it as the pointer value so the «Согласование» record points at the actual
+  // purchase record, not the engine instance id. Fall back to instanceId for
+  // processes started via the explicit launch affordance (process-start.ts), where
+  // primaryRecordId is absent — the fallback preserves backward compatibility and
+  // keeps the ref non-empty (upgradable once the 1:1 addressing lands).
   const recordData: Record<string, unknown> = { ...formData };
   const crossRef = await getCrossAppRef(
     client,
@@ -368,12 +371,8 @@ export async function applyStepResult(
     target.registryId,
   );
   if (crossRef !== null) {
-    // The pointer value is the PRIMARY record's UUID. The primary «Заявки» record's
-    // concrete id is not resolvable in T-0335 (1:1 addressing gap, T-0344); we carry
-    // the instance id as the addressable correlation key so the link is non-empty and
-    // upgradable to the real record id when 1:1 addressing lands. (Set under the
-    // designated ref_field key so resolveHop can traverse it later.)
-    recordData[crossRef.refField] = instanceId;
+    // T-0356: prefer the real record id; fall back to instanceId (T-0344 compat).
+    recordData[crossRef.refField] = target.primaryRecordId ?? instanceId;
   }
 
   // INSERT the «Согласование» record (tenant-scoped under the caller's RLS tx),
