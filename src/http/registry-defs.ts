@@ -61,7 +61,7 @@ import {
 } from "../core/schema-change-classifier.js";
 import { validateRecordSchemaDefinition } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
-import { loadAdminContext } from "../db/org.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -234,11 +234,16 @@ async function withTenantTx<T>(
 
 async function extractActor(
   req: IncomingMessage,
+  pool: pg.Pool,
 ): Promise<string> {
-  // Keycloak mode: AuthContext is set by withAuth() middleware before the handler.
+  // Keycloak mode: resolve sub → employee slug (T-0372).
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    return ctx.sub;
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
   }
   // Dev mode: x-dev-user header
   let devUser = req.headers[DEV_USER_HEADER];
@@ -737,7 +742,7 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/registry-defs", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-    const actor = await extractActor(req);
+    const actor = await extractActor(req, pool);
 
     const rawBody = await readJsonBody(req);
     if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -808,7 +813,7 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
   // GET /api/registry-defs — list the caller-tenant's registry_defs,
   // optionally filtered by ?application_id=.
   router.register("GET", "/api/registry-defs", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
-    const actor = await extractActor(req);
+    const actor = await extractActor(req, pool);
 
     // Parse ?application_id= filter from the request URL.
     let applicationId: string | null = null;
@@ -841,7 +846,7 @@ function registerRegistryDefCrudRoutes(router: Router, deps: RegistryDefCrudDeps
       const id = params["id"] ?? "";
       assertUuidShape(id, "registry_def id");
 
-      const actor = await extractActor(req);
+      const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const row = await getRegistryDef(pool, tenantId, id);
       if (row === null) {
@@ -891,8 +896,8 @@ export function registerRegistryDefRoutes(
     const registryDefId = params["id"] ?? "";
     assertUuidShape(registryDefId, "registry_def id");
 
-    // 1. Extract actor
-    const actor = await extractActor(req);
+    // 1. Extract actor (use _poolHint or lazy pool for slug resolution)
+    const actor = await extractActor(req, _poolHint ?? getPool());
 
     // 2. Parse body
     const rawBody = await readJsonBody(req);
