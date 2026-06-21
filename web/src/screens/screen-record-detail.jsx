@@ -22,7 +22,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
-import { devHeaders } from '../app-shell/dev-auth.js';
+import { devHeaders, authHeaders } from '../app-shell/dev-auth.js';
 import { schemaToFormFields, formatCellValue } from './records-form.js';
 import {
   groupLinksByLabel,
@@ -279,6 +279,127 @@ function CrossAppLinksPanel({ recordId }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0357 (E16 entry point 2): RecordActionsPanel
+//
+// Loads record_action bindings for this application and renders them as
+// business action buttons on the record card. Each binding produces a button
+// labelled with the process name (or a derived label from the process_key).
+// Clicking the button POSTs /api/processes/start (FROZEN contract §2.2).
+//
+// Empty: no bindings → panel renders nothing (clean degradation).
+// Loading: spinner while fetching. Error: silent degrade (panel hidden).
+//
+// Token-only colors (OBLIK G6); no inline styles with hardcoded hex.
+// ---------------------------------------------------------------------------
+
+function RecordActionsPanel({ appId, recordId, record }) {
+  const [bindings, setBindings] = useState(null);  // null = loading, [] = none
+  const [actionState, setActionState] = useState({}); // processKey → 'idle'|'running'|'ok'|'error'
+
+  useEffect(() => {
+    if (!appId) { setBindings([]); return; }
+    let cancelled = false;
+    fetch('/api/process-app-bindings', { headers: authHeaders() })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) { setBindings([]); return; }
+        const data = await res.json();
+        const all = Array.isArray(data.bindings) ? data.bindings : [];
+        const filtered = all.filter(
+          (b) => b.application_id === appId && b.trigger_type === 'record_action',
+        );
+        setBindings(filtered);
+        const initial = {};
+        for (const b of filtered) initial[b.process_key] = 'idle';
+        setActionState(initial);
+      })
+      .catch(() => { if (!cancelled) setBindings([]); });
+    return () => { cancelled = true; };
+  }, [appId]);
+
+  const handleAction = useCallback(async (binding) => {
+    if (!binding) return;
+    setActionState((prev) => ({ ...prev, [binding.process_key]: 'running' }));
+    try {
+      const res = await fetch('/api/processes/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ processKey: binding.process_key }),
+      });
+      if (res.status === 201) {
+        setActionState((prev) => ({ ...prev, [binding.process_key]: 'ok' }));
+        // Reset to idle after a moment so the button is re-usable.
+        setTimeout(() => {
+          setActionState((prev) => ({ ...prev, [binding.process_key]: 'idle' }));
+        }, 3000);
+      } else {
+        setActionState((prev) => ({ ...prev, [binding.process_key]: 'error' }));
+        setTimeout(() => {
+          setActionState((prev) => ({ ...prev, [binding.process_key]: 'idle' }));
+        }, 4000);
+      }
+    } catch {
+      setActionState((prev) => ({ ...prev, [binding.process_key]: 'error' }));
+      setTimeout(() => {
+        setActionState((prev) => ({ ...prev, [binding.process_key]: 'idle' }));
+      }, 4000);
+    }
+  }, []);
+
+  // Don't render the panel until loaded; don't render if empty.
+  if (bindings === null) return null;
+  if (bindings.length === 0) return null;
+
+  return (
+    <div style={{
+      marginTop: 'var(--chs-space-5)',
+      paddingTop: 'var(--chs-space-5)',
+      borderTop: '1px solid var(--chs-color-border)',
+    }}>
+      <p style={{
+        margin: '0 0 var(--chs-space-3) 0',
+        fontSize: 'var(--chs-text-xs)',
+        color: 'var(--chs-color-text-muted)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+      }}>
+        ДЕЙСТВИЯ
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+        {bindings.map((b) => {
+          const state = actionState[b.process_key] || 'idle';
+          const label = b.application_name
+            ? `${b.application_name}`
+            : (b.application_slug || b.process_key);
+          // Use process_key to derive a readable label if no application name.
+          // The action label is the binding's process name (not the key).
+          const actionLabel = state === 'running'
+            ? 'Выполняется…'
+            : state === 'ok'
+              ? 'Отправлено'
+              : state === 'error'
+                ? 'Ошибка — повторить?'
+                : label;
+
+          return (
+            <Button
+              key={b.process_key}
+              variant={state === 'ok' ? 'ghost' : 'secondary'}
+              size="sm"
+              disabled={state === 'running'}
+              loading={state === 'running'}
+              onClick={() => handleAction(b)}
+            >
+              {actionLabel}
+            </Button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -453,6 +574,15 @@ function RecordDetailScreen() {
                   {record.record_schema_version}
                 </Mono>
               </div>
+
+              {/* T-0357 (E16 entry point 2): record_action buttons.
+                  Loaded lazily from process-app-bindings; rendered only when
+                  there are record_action bindings for this application. */}
+              <RecordActionsPanel
+                appId={appId}
+                recordId={record.id}
+                record={record}
+              />
             </aside>
           </div>
         )}
