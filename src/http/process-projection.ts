@@ -189,6 +189,15 @@ export async function appendProcessStarted(
      * is omitted from the journal events (pre-S3 callers).
      */
     readonly tenantId?: string;
+    /**
+     * T-0356 (E16): the originating record id when this process was started by an
+     * on_create trigger (create = start). Persisted into the process.started payload
+     * as `record_id` so the resolver can later expose it as primaryRecordId, letting
+     * the step-applier write the real «Заявки» record id into cross_app_ref instead
+     * of the instanceId placeholder. Optional — callers that start a process outside
+     * the record-create path (process-start.ts) simply omit it.
+     */
+    readonly recordId?: string;
   },
 ): Promise<string> {
   const taskId = randomUUID();
@@ -215,6 +224,9 @@ export async function appendProcessStarted(
       task_step: step,
       task_name: taskName,
       inbox_task_id: taskId, // self-referential back-link (mirrors T-0221 FF-3).
+      // T-0356 (E16): originating record id from the on_create trigger path.
+      // Absent when the process was started via the explicit launch affordance.
+      ...(args.recordId !== undefined ? { record_id: args.recordId } : {}),
     },
     occurred_at: args.nowMs,
   };

@@ -105,6 +105,15 @@ export interface InstanceTargetRef {
   readonly registryDisplayName: string;
   /** Tenant id this resolution was scoped to. */
   readonly tenantId: string;
+  /**
+   * T-0356 (E16): the originating record id when the process was started by an
+   * on_create trigger (create = start). Sourced from the process.started audit event
+   * payload field `record_id` set by appendProcessStarted. When present the
+   * step-applier uses it as the cross_app_ref pointer value (the real «Заявки» record
+   * UUID) instead of the instanceId placeholder. Absent for processes started via the
+   * explicit launch affordance (process-start.ts).
+   */
+  readonly primaryRecordId?: string;
 }
 
 /** Reason categories for unresolved outcomes (used by T-0335 to decide branching). */
@@ -275,6 +284,10 @@ async function resolveInstanceTargetReads(
         detail: `process.started event for instance ${instanceId} missing proc_key in payload`,
       };
     }
+    // T-0356 (E16): extract the originating record id set by the on_create trigger path.
+    // Present only when appendProcessStarted received a recordId (create=start).
+    const primaryRecordId =
+      typeof payload["record_id"] === "string" ? payload["record_id"] : undefined;
 
     // Step 2: resolve application_id from process_app_binding.
     //
@@ -354,6 +367,8 @@ async function resolveInstanceTargetReads(
       registrySlug: reg.slug,
       registryDisplayName: reg.display_name,
       tenantId,
+      // T-0356 (E16): carry through if present (from on_create trigger path).
+      ...(primaryRecordId !== undefined ? { primaryRecordId } : {}),
     };
   }
 }

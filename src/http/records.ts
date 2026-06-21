@@ -659,6 +659,10 @@ async function createRecord(args: {
             actor,
             nowMs,
             tenantId,
+            // T-0356 (E16): pass the just-created record id so the resolver can
+            // expose it as primaryRecordId and the step-applier can write it as the
+            // real cross_app_ref pointer (closes the T-0344 create-path gap).
+            recordId: id,
           });
           await client.query('RELEASE SAVEPOINT proc_proj');
         } catch {

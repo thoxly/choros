@@ -195,15 +195,26 @@ function baseArgs(
  *   - resolveApprovalsRegistry → APPROVALS_REGISTRY_ID (registry_def WHERE slug='soglasovanie').
  *   - getCrossAppRef → null by default (no cross-ref).
  *   - record INSERT → absorbed as { rows: [] }.
+ *
+ * T-0356: optional primaryRecordId simulates on_create path (record_id in audit payload).
  */
 function makeHappyClient(opts?: {
   crossRef?: { id: string; ref_field: string; label: string } | null;
+  /** T-0356: if set, embed record_id into the audit_event payload (create=start path). */
+  primaryRecordId?: string;
 }): ReturnType<typeof makeStubClient> {
   const crossRef = opts?.crossRef ?? null;
+  const primaryRecordId = opts?.primaryRecordId;
   return makeStubClient((sql, values) => {
     // resolveInstanceTargetOnClient: audit_event → started payload
     if (/FROM choros\.audit_event/i.test(sql) && !/INSERT/i.test(sql)) {
-      return [auditStartedPayload()];
+      // T-0356: if primaryRecordId is set, embed record_id so the resolver
+      // returns it as target.primaryRecordId (on_create path).
+      const payload = {
+        ...auditStartedPayload().payload,
+        ...(primaryRecordId !== undefined ? { record_id: primaryRecordId } : {}),
+      };
+      return [{ payload }];
     }
     // resolveInstanceTargetOnClient: process_app_binding → applicationId
     if (/FROM choros\.process_app_binding/i.test(sql)) {
@@ -503,5 +514,46 @@ describe("applyStepResult — cross_app_ref write-side", () => {
     // formData fields present (decision, approved_by) — but NO purchase_ref
     expect(data).toHaveProperty("decision", "approve");
     expect(data).not.toHaveProperty("purchase_ref");
+  });
+
+  // T-0356 (E16): primaryRecordId path — cross_app_ref uses real record id, not instanceId.
+  it("SA-7b: T-0356 — cross_app_ref present + primaryRecordId → ref_field set to primaryRecordId (real record UUID)", async () => {
+    const ORIGINATING_RECORD_ID = "aa111111-0000-0000-0000-000000000001";
+    const { store } = makeOutboxSpy();
+    const { client, calls } = makeHappyClient({
+      crossRef: { id: CROSS_APP_REF_ID, ref_field: "purchase_ref", label: "Заявка" },
+      primaryRecordId: ORIGINATING_RECORD_ID, // on_create path: resolver carries real record id
+    });
+
+    const result = await applyStepResult(client, baseArgs({ outboxStore: store }));
+
+    expect(result.kind).toBe("applied-A");
+
+    const recordInsert = calls.find((c) => /INSERT INTO choros\.record/i.test(c.sql));
+    expect(recordInsert).toBeDefined();
+    const data = JSON.parse(recordInsert?.values[3] as string);
+    expect(data).toHaveProperty("purchase_ref");
+    // T-0356: must be the real record id, NOT the instance id (T-0344 gap closed)
+    expect(data["purchase_ref"]).toBe(ORIGINATING_RECORD_ID);
+    expect(data["purchase_ref"]).not.toBe(INSTANCE_ID);
+  });
+
+  it("SA-7c: T-0356 — cross_app_ref present + no primaryRecordId → ref_field falls back to instanceId (launcher path compat)", async () => {
+    const { store } = makeOutboxSpy();
+    const { client, calls } = makeHappyClient({
+      crossRef: { id: CROSS_APP_REF_ID, ref_field: "purchase_ref", label: "Заявка" },
+      // No primaryRecordId → launcher path (process-start.ts does not set record_id)
+    });
+
+    const result = await applyStepResult(client, baseArgs({ outboxStore: store }));
+
+    expect(result.kind).toBe("applied-A");
+
+    const recordInsert = calls.find((c) => /INSERT INTO choros\.record/i.test(c.sql));
+    expect(recordInsert).toBeDefined();
+    const data = JSON.parse(recordInsert?.values[3] as string);
+    expect(data).toHaveProperty("purchase_ref");
+    // Backward-compat: falls back to instanceId when primaryRecordId absent
+    expect(data["purchase_ref"]).toBe(INSTANCE_ID);
   });
 });
