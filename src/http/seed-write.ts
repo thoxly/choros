@@ -19,7 +19,7 @@
 
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { loadAdminContext } from "../db/org.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
@@ -43,11 +43,19 @@ function assertUuidShape(value: string, label: string): void {
 // ---------------------------------------------------------------------------
 // extractActor — identical to grants.ts pattern (FF-6 requires same seam)
 // No hardcoded slug comparison (FF-6 / AC-18).
+// T-0372: resolve KC sub → employee slug so seeded admin personas (e-owner, …)
+// are keyed on their slug (not their random KC sub UUID) for admin-context lookup.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(req: import("node:http").IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -146,7 +154,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: slug exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/tenants", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     // Gate: loadAdminContext → isGenesisOwner (before INSERT, FF-6)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -231,7 +239,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/departments", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to create departments");
@@ -289,7 +297,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, department_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/positions", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to create positions");
@@ -350,7 +358,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 400: kind not in {human,agent}
   // -------------------------------------------------------------------------
   router.register("POST", "/api/employees", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to create employees");
@@ -412,7 +420,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/roles", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
 
     // Read body first so we can use target tenant_id in the delegation context (R-4)
     const body = await readJsonBody(req);
@@ -494,7 +502,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // RLS scope and WHERE use the caller-supplied tenant_id.
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/departments/:id", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     // Auth gate: genesis-owner check always in dev silo (ADR §2.3 option C)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
@@ -543,7 +551,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/positions/:id", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete positions");
@@ -591,7 +599,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/employees/:id", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete employees");
@@ -639,7 +647,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/roles/:id", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete roles");
@@ -721,7 +729,7 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // -------------------------------------------------------------------------
   router.register("GET", "/api/org/tenant-state", withAuth(async (req, res) => {
     // Auth gate: genesis-owner required (R-3)
-    const actorId = extractActor(req);
+    const actorId = await extractActor(req, pool);
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to read tenant state");
