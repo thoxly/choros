@@ -342,3 +342,162 @@ describe("getGrantsForSubject — fail-closed DB error propagation (R-1, T-0331)
     ).rejects.toThrow("simulated network failure");
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0366 — fallback slug for KC seed personas
+//
+// Seed personas have employee.slug = 'e-larina' but KC sub = a random UUID
+// (e.g. 'f4a5f440-3c5b-438b-b1eb-eac5d4dff3e9'). The primary lookup
+// (slug=sub) returns 0 rows; the fallback (slug=preferred_username) resolves
+// the employee and returns the correct role slugs.
+//
+// Three scenarios:
+//   (a) sub matches employee slug (registered user) → primary hit, no fallback.
+//   (b) sub matches NO employee, fallback (preferred_username) matches → roles via fallback.
+//   (c) neither primary nor fallback matches → [].
+// ---------------------------------------------------------------------------
+
+/** Extended fake employees: adds a seed persona whose slug ≠ sub UUID. */
+const FAKE_EMPLOYEES_WITH_SEED: Record<string, string> = {
+  ...FAKE_EMPLOYEES,
+  // Registered user: slug == sub (UUID sub format for this test).
+  "registered-sub-uuid": "d0000000-0000-0000-0000-000000000010",
+  // Seed persona: slug = 'e-larina', KC sub = random UUID that won't match slug.
+  "e-larina": "d0000000-0000-0000-0000-000000000005",
+};
+
+const FAKE_ASSIGNMENTS_WITH_SEED: Record<string, Array<{
+  role_id: string;
+  confirmed_by: string | null;
+  valid_from: number | null;
+  valid_until: number | null;
+}>> = {
+  ...FAKE_ASSIGNMENTS,
+  "d0000000-0000-0000-0000-000000000010": [
+    // Registered user: confirmed role-approver.
+    { role_id: "r-fin-ctrl", confirmed_by: "seed", valid_from: null, valid_until: null },
+  ],
+  "d0000000-0000-0000-0000-000000000005": [
+    // Seed persona e-larina: confirmed fin-cfo + role-approver assignments.
+    { role_id: "r-fin-ctrl", confirmed_by: "seed", valid_from: null, valid_until: null },
+  ],
+};
+
+const FAKE_ROLES_WITH_SEED = { ...FAKE_ROLES };
+
+function makeFakePoolWithSeed(nowMs: number): import("pg").Pool {
+  const fakeClient = {
+    query: async (text: string, values?: unknown[]) => {
+      const sql = typeof text === "object" ? (text as { text: string }).text : text;
+      const params = values ?? [];
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(sql)) return { rows: [] };
+      if (/^\s*SET LOCAL/i.test(sql)) return { rows: [] };
+
+      if (/FROM choros\.employee/i.test(sql)) {
+        const slug = params[1] as string;
+        const id = FAKE_EMPLOYEES_WITH_SEED[slug];
+        return { rows: id ? [{ id }] : [] };
+      }
+
+      if (/JOIN choros\.role\b/i.test(sql)) {
+        const empId = params[1] as string;
+        const assignments = (FAKE_ASSIGNMENTS_WITH_SEED[empId] ?? []).filter((ra) => {
+          if (!ra.confirmed_by) return false;
+          if (ra.valid_from !== null && ra.valid_from > nowMs) return false;
+          if (ra.valid_until !== null && ra.valid_until <= nowMs) return false;
+          return true;
+        });
+        const slugs = [...new Set(
+          assignments
+            .map((ra) => FAKE_ROLES_WITH_SEED[ra.role_id]?.slug)
+            .filter((s): s is string => s !== undefined),
+        )];
+        return { rows: slugs.map((slug) => ({ slug })) };
+      }
+
+      if (/FROM choros\.role_assignment\b/i.test(sql)) {
+        const empId = params[1] as string;
+        const rows = (FAKE_ASSIGNMENTS_WITH_SEED[empId] ?? []).filter((ra) => {
+          if (!ra.confirmed_by) return false;
+          if (ra.valid_from !== null && ra.valid_from > nowMs) return false;
+          if (ra.valid_until !== null && ra.valid_until <= nowMs) return false;
+          return true;
+        });
+        return { rows: rows.map((r) => ({ role_id: r.role_id })) };
+      }
+
+      if (/FROM choros\."grant"/i.test(sql)) {
+        return { rows: [] };
+      }
+
+      return { rows: [] };
+    },
+    release: () => {},
+  } as unknown as import("pg").PoolClient;
+
+  return {
+    connect: async () => fakeClient,
+  } as unknown as import("pg").Pool;
+}
+
+describe("getRoleSlugsForActor — T-0366 KC seed persona fallback", () => {
+  const NOW = 10000;
+
+  it("(a) registered user: primary (sub=slug) hits → roles resolved, fallback never consulted", async () => {
+    const pool = makeFakePoolWithSeed(NOW);
+    // 'registered-sub-uuid' is the slug AND the sub for this registered user.
+    const slugs = await getRoleSlugsForActor(
+      pool, TENANT_ID,
+      "registered-sub-uuid",   // primary = sub = slug → hits employee row
+      NOW,
+      "some-other-username",   // fallback provided but must NOT be consulted
+    );
+    expect(slugs).toContain("fin-ctrl");
+  });
+
+  it("(b) KC seed persona: sub matches no employee, fallback (preferred_username=e-larina) resolves roles", async () => {
+    const pool = makeFakePoolWithSeed(NOW);
+    // 'f4a5f440-3c5b-438b-b1eb-eac5d4dff3e9' is the KC UUID sub — no employee row.
+    const slugs = await getRoleSlugsForActor(
+      pool, TENANT_ID,
+      "f4a5f440-3c5b-438b-b1eb-eac5d4dff3e9",  // primary (sub) → no employee row
+      NOW,
+      "e-larina",              // fallback (preferred_username) → resolves to seed persona
+    );
+    expect(slugs).toContain("fin-ctrl");
+  });
+
+  it("(c) neither primary nor fallback matches → [] (no impersonation)", async () => {
+    const pool = makeFakePoolWithSeed(NOW);
+    const slugs = await getRoleSlugsForActor(
+      pool, TENANT_ID,
+      "unknown-sub-uuid",      // primary → no row
+      NOW,
+      "e-nobody",              // fallback → also no row
+    );
+    expect(slugs).toEqual([]);
+  });
+
+  it("no fallback provided and primary misses → [] (unchanged behaviour)", async () => {
+    const pool = makeFakePoolWithSeed(NOW);
+    const slugs = await getRoleSlugsForActor(
+      pool, TENANT_ID,
+      "unknown-sub-uuid",      // primary → no row
+      NOW,
+      // no fallback
+    );
+    expect(slugs).toEqual([]);
+  });
+
+  it("fallback equals primary → treated as no-fallback, returns [] when neither matches", async () => {
+    const pool = makeFakePoolWithSeed(NOW);
+    // When fallbackSlug === actorSlug, the DAO skips the second lookup (same slug → same result).
+    const slugs = await getRoleSlugsForActor(
+      pool, TENANT_ID,
+      "unknown-sub-uuid",
+      NOW,
+      "unknown-sub-uuid",      // fallback === primary → skipped
+    );
+    expect(slugs).toEqual([]);
+  });
+});
