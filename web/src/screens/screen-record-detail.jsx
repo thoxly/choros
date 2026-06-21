@@ -282,17 +282,37 @@ function CrossAppLinksPanel({ recordId }) {
 // T-0357 (E16 entry point 2): RecordActionsPanel
 //
 // Loads record_action bindings for this application and renders them as
-// business action buttons on the record card. Each binding produces a button
-// labelled with the process name (or a derived label from the process_key).
+// business action buttons on the record card. Each binding = one button.
 // Clicking the button POSTs /api/processes/start (FROZEN contract §2.2).
 //
+// Label priority: application_name → application_slug → process_key (jargon fallback,
+// only when the binding has no associated app — e.g. deleted app). The button label
+// is the BUSINESS name of the application/process being acted on, not a technical key.
+//
 // Empty: no bindings → panel renders nothing (clean degradation).
-// Loading: spinner while fetching. Error: silent degrade (panel hidden).
+// Loading (null state): panel stays hidden until loaded.
+// Error: silent degrade (panel stays hidden) — does not block record viewing.
 //
 // Token-only colors (OBLIK G6); no inline styles with hardcoded hex.
 // ---------------------------------------------------------------------------
 
-function RecordActionsPanel({ appId, recordId, record }) {
+/** Derive the business-language label for a record_action button.
+ * Uses the application display name if available (set by the person who
+ * configured the binding), falling back to slug, then — only as a last resort
+ * when the application was deleted — the raw process key.
+ * @param {{application_name?:string|null, application_slug?:string|null, process_key:string}} b
+ * @returns {string}
+ */
+function recordActionLabel(b) {
+  if (b.application_name && b.application_name.trim().length > 0) return b.application_name.trim();
+  if (b.application_slug && b.application_slug.trim().length > 0) return b.application_slug.trim();
+  // Last resort: process_key is a developer identifier, but it's better than nothing.
+  // The binding editor (BindProcessModal) always requires an application, so this
+  // path only fires when the application was deleted after the binding was made.
+  return b.process_key;
+}
+
+function RecordActionsPanel({ appId }) {
   const [bindings, setBindings] = useState(null);  // null = loading, [] = none
   const [actionState, setActionState] = useState({}); // processKey → 'idle'|'running'|'ok'|'error'
 
@@ -321,6 +341,8 @@ function RecordActionsPanel({ appId, recordId, record }) {
     if (!binding) return;
     setActionState((prev) => ({ ...prev, [binding.process_key]: 'running' }));
     try {
+      // FROZEN contract §2.2: POST /api/processes/start → 201 { instanceId, processKey, tenantId }.
+      // We change WHICH affordance calls this, not the contract itself.
       const res = await fetch('/api/processes/start', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeaders() },
@@ -356,30 +378,21 @@ function RecordActionsPanel({ appId, recordId, record }) {
       paddingTop: 'var(--chs-space-5)',
       borderTop: '1px solid var(--chs-color-border)',
     }}>
-      <p style={{
-        margin: '0 0 var(--chs-space-3) 0',
-        fontSize: 'var(--chs-text-xs)',
-        color: 'var(--chs-color-text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.04em',
-      }}>
-        ДЕЙСТВИЯ
+      {/* Section header: uppercase label using the existing chs-label class (OBLIK kit). */}
+      <p className="chs-label" style={{ margin: '0 0 var(--chs-space-3) 0' }}>
+        Действия
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
         {bindings.map((b) => {
           const state = actionState[b.process_key] || 'idle';
-          const label = b.application_name
-            ? `${b.application_name}`
-            : (b.application_slug || b.process_key);
-          // Use process_key to derive a readable label if no application name.
-          // The action label is the binding's process name (not the key).
-          const actionLabel = state === 'running'
+          const idleLabel = recordActionLabel(b);
+          const buttonLabel = state === 'running'
             ? 'Выполняется…'
             : state === 'ok'
               ? 'Отправлено'
               : state === 'error'
                 ? 'Ошибка — повторить?'
-                : label;
+                : idleLabel;
 
           return (
             <Button
@@ -390,7 +403,7 @@ function RecordActionsPanel({ appId, recordId, record }) {
               loading={state === 'running'}
               onClick={() => handleAction(b)}
             >
-              {actionLabel}
+              {buttonLabel}
             </Button>
           );
         })}
@@ -577,11 +590,10 @@ function RecordDetailScreen() {
 
               {/* T-0357 (E16 entry point 2): record_action buttons.
                   Loaded lazily from process-app-bindings; rendered only when
-                  there are record_action bindings for this application. */}
+                  there are record_action bindings for this application.
+                  POST /api/processes/start is the FROZEN §2.2 contract. */}
               <RecordActionsPanel
                 appId={appId}
-                recordId={record.id}
-                record={record}
               />
             </aside>
           </div>

@@ -6,10 +6,19 @@
    T-0281: добавлена кнопка «Запустить процесс» + modal запуска канонического ТЭЛ.
    Fetch-контракт §2.2 ADR T-0278: POST /api/processes/start с заголовками
    x-dev-user (актор) и x-tenant-id (тенант), тело { processKey: "telLinear" }.
+
+   T-0357 (E16 entry points): generic «Запустить процесс» hardcoded-telLinear button
+   dissolved from the RUNTIME surface. Spec ADR §2 / §9: users start processes from
+   business entry points (create record / record_action / inbox task), not from a
+   generic launcher on the processes screen. The LaunchModal is kept ONLY as an
+   admin/debug affordance, shown when ?_debug_launch=1 is present in the URL — never
+   surfaced in normal use. The topbar button on this screen is replaced with «Новый
+   процесс» → modeler (design-time). The EmptyState no longer refers to the generic
+   launcher; instead it directs users to the business entry points.
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field, KitIcon } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -574,8 +583,14 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
 
 function ProcessesScreen({ launchOpen, onLaunchClose }) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [instances, setInstances] = useState(null);
   const [error, setError] = useState(null);
+
+  // T-0357: debug gate — LaunchModal is only shown when ?_debug_launch=1 is in
+  // the URL. This gates the generic telLinear launcher as an admin/debug affordance,
+  // not a runtime feature. Normal users never see this modal.
+  const debugLaunchEnabled = searchParams.get('_debug_launch') === '1';
 
   const load = useCallback(async () => {
     setError(null);
@@ -593,7 +608,7 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
     load();
   }, [load]);
 
-  // When a process is launched successfully, close modal and reload list
+  // When a process is launched successfully (debug), close modal and reload list
   const handleLaunched = useCallback(() => {
     if (onLaunchClose) onLaunchClose();
     load();
@@ -604,20 +619,27 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
   }, [onLaunchClose]);
 
   const list = instances || [];
-  // Modal is opened by the topbar «Запустить процесс» trigger (shell.jsx → launchOpen).
-  const modalOpen = Boolean(launchOpen);
+  // T-0357: LaunchModal is admin/debug only (behind ?_debug_launch=1).
+  // launchOpen prop from shell.jsx is wired but only the debug gate honours it.
+  const modalOpen = Boolean(launchOpen) && debugLaunchEnabled;
 
   return (
     <>
-      <LaunchModal
-        open={modalOpen}
-        onClose={handleExternalClose}
-        onLaunched={handleLaunched}
-      />
+      {/* T-0357 (E16): LaunchModal is admin/debug-only (not surfaced in normal runtime).
+          The generic «Запустить процесс» launcher is dissolved; processes start from
+          business entry points: create record (on_create), record_action, or inbox task.
+          This modal is kept for developer/admin use (?_debug_launch=1 URL param only). */}
+      {debugLaunchEnabled && (
+        <LaunchModal
+          open={modalOpen}
+          onClose={handleExternalClose}
+          onLaunched={handleLaunched}
+        />
+      )}
       <div className="chs-inbox">
-        {/* T-0311 / Audit #11: the «Запустить процесс» launch trigger lives in the
-            topbar (shell.jsx) for this screen; the duplicate in-screen header button
-            was removed so the affordance appears exactly once. */}
+        {/* T-0311 / Audit #11: the «Запустить процесс» launch trigger was in the
+            topbar (shell.jsx) for this screen; T-0357 replaces it with «Новый процесс»
+            → modeler, so the generic runtime launcher is dissolved. */}
       <div className="chs-inbox__scroll">
         {error ? (
           <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
@@ -630,8 +652,13 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
           </div>
         ) : list.length === 0 ? (
           <EmptyState
-            title="Нет запущенных процессов"
-            description="Пока ни один процесс не запущен. Нажмите «Запустить процесс» в верхней панели, чтобы начать новый."
+            title="Нет активных процессов"
+            description="Процессы запускаются автоматически при создании объектов или из действий на карточке записи. Новый процесс можно спроектировать в конструкторе."
+            action={
+              <Button variant="secondary" size="sm" onClick={() => navigate('/processes/new/edit')}>
+                Открыть конструктор
+              </Button>
+            }
           />
         ) : (
           <table className="chs-itable">
