@@ -12,6 +12,9 @@
  *   - POST /api/process-defs/:key/publish calls lint + deployBpmn + persists
  */
 
+// Test doubles (router/pool/req/res stubs) are cast to the real signatures via
+// `as any`; matches the repo convention for unit tests (inbox-action.test.ts et al.).
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { registerProcessDefsRoutes } from "../http/process-defs.js";
