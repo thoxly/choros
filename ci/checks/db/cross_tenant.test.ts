@@ -283,6 +283,17 @@ async function seedAppTimer(c: pg.Client, tenantId: string): Promise<string> {
   return id;
 }
 
+async function seedUserTaskClaim(c: pg.Client, tenantId: string): Promise<void> {
+  // T-0338: PK (tenant_id, task_id), state CHECK ∈ {claimed,released}; role/claimed_by free text.
+  const now = Date.now();
+  await c.query(
+    `INSERT INTO choros.user_task_claim
+       (tenant_id, task_id, claimed_by, claimed_at, role, state)
+     VALUES ($1, 'ut-ct-test', 'ct-test-actor', $2, 'ct-test-role', 'claimed')`,
+    [tenantId, now],
+  );
+}
+
 /**
  * Seed one row into choros.outbox (T-0062). Minimal valid row: state defaults to
  * 'pending', idempotency_key is NOT NULL (unique per row to avoid any accidental
@@ -751,6 +762,11 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       break;
     case 'app_timer':
       await seedAppTimer(c, tenantId);
+      break;
+    case 'user_task_claim':
+      // T-0338 (E15): TOCTOU claim lock. PK (tenant_id, task_id); state ∈ {claimed,released}.
+      // No FK to other seeded rows (task_id/claimed_by are free text).
+      await seedUserTaskClaim(c, tenantId);
       break;
     case 'tenant':
       // tenant_id = id for the tenant row (self-anchoring per T-0017 ADR §3.1)

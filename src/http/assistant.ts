@@ -332,14 +332,10 @@ async function fetchBudget(
   }
   const agentId = empRows[0].id;
 
-  // Sum spend from spend_ledger for this agent (all time, USD currency).
-  const { rows: spendRows } = await client.query<{ total: string }>(
-    `SELECT COALESCE(SUM(amount), 0) AS total
-       FROM choros.spend_ledger
-      WHERE tenant_id = $1 AND employee_id = $2 AND currency = 'USD'`,
-    [tenantId, agentId],
-  );
-  const costUsed = Number(spendRows[0]?.total ?? 0);
+  // FF-BUD-10 (T-0023): budget tracking is DORMANT day-1 — no runtime read of the
+  // dormant budget ledger tables. Spend reports 0 until the budget subsystem is
+  // activated. (The ceiling below reads agent_budget, which is not dormancy-gated.)
+  const costUsed = 0;
 
   // Read the agent_budget ceiling (take the first 'total' window if present).
   const { rows: budgetRows } = await client.query<{
