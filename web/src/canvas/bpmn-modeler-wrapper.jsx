@@ -3,6 +3,9 @@
    T-0096: Embeds the REAL bpmn-js BpmnModeler into a React component.
    T-0097: Wires the executor-type chs-exec-* marker layer (bpmn-exec-markers.js).
    T-0099: Registers the choros moddle extension (executorType round-trip).
+   T-0324: Accepts initialXml prop — uses fetched backend XML instead of the
+           hardcoded default when provided. The DEFAULT_DIAGRAM_XML is used only
+           when creating a new (blank) definition that has no backend record yet.
 
    Scope of this component (T-0096 + T-0097 + T-0099):
      - Instantiate BpmnModeler mounted into a DOM container ref
@@ -142,7 +145,7 @@ const DEFAULT_DIAGRAM_XML = `<?xml version="1.0" encoding="UTF-8"?>
      { modeler }  — the BpmnModeler instance (or null before mount)
    -------------------------------------------------------------------------- */
 const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
-  { className = '', style, onReady },
+  { className = '', style, onReady, initialXml },
   ref
 ) {
   const containerRef = useRef(null);
@@ -151,6 +154,10 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
   useImperativeHandle(ref, () => ({
     get modeler() { return modelerRef.current; },
   }));
+
+  // T-0324: use initialXml when provided (fetched from backend); fall back to
+  // DEFAULT_DIAGRAM_XML only for new definitions that have no backend record yet.
+  const xmlToLoad = initialXml || DEFAULT_DIAGRAM_XML;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -175,9 +182,9 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
     const detachMarkerListeners = attachExecMarkerListeners(modeler);
 
     modeler
-      .importXML(DEFAULT_DIAGRAM_XML)
+      .importXML(xmlToLoad)
       .then(() => {
-        // Fit the default diagram into the viewport after import
+        // Fit the diagram into the viewport after import
         modeler.get('canvas').zoom('fit-viewport', 'auto');
 
         // T-0097 fix: ensure Activity_agent carries choros:executorType="agent"
@@ -215,7 +222,10 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
       modeler.destroy();
       modelerRef.current = null;
     };
-  }, []); // mount once — diagram XML is the default only (T-0099 adds load/save)
+    // xmlToLoad is intentionally excluded: the modeler mounts once; T-0324 loads
+    // the XML before rendering this component so it never changes after mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount once — diagram XML from backend is loaded before first render
 
   return (
     <div
