@@ -46,6 +46,7 @@ import {
   type HandlerContext,
 } from "../core/assistant-intent.js";
 import { LlmDormantError, type LlmPort } from "../core/llm-port.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
@@ -117,12 +118,55 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — mode-aware (mirrors agents-list.ts pattern)
+// extractActorSlug — mode-aware, resolves the authenticated request → the
+// correct employee SLUG (T-0371).
+//
+// THE BUG (proven live, s39): the previous extractActor returned the raw JWT
+// `sub` in keycloak mode. But `sub` is the Keycloak user UUID, while grant and
+// tenant resolution downstream are keyed on employee.slug. Self-registered users
+// satisfy slug == sub (T-0342) so they resolved; SEEDED personas (e-orlov,
+// e-larina, e-configurator…) have human-readable slugs whose KC sub is a random
+// UUID → employee WHERE slug=<UUID> missed → getGrantsForSubject returned [] →
+// every grant-gated path fail-closed (e.g. e-configurator getting "недостаточно
+// прав, требуется грант authoring_draft" despite holding that grant via 088).
+//
+// FIX (T-0366 identity pattern, applied at the ROUTE seam for this task only):
+//   keycloak mode → resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername):
+//     sub-first (registered user, slug == sub) → preferred_username fallback
+//     (seeded persona) → fail-closed (null → 401). See the security analysis on
+//     resolveActorSlugFromAuth in src/db/org.ts: the fallback cannot be abused to
+//     impersonate a seeded persona because (a) the sub lookup is always tried
+//     first and short-circuits for registered users, and (b) Keycloak enforces
+//     username uniqueness per realm, so the seeded personas' usernames cannot be
+//     claimed by a second user.
+//   dev mode → the x-dev-user header value IS the slug (unchanged).
+//
+// FOLLOW-UP (do NOT fix here — see handoff): src/http/forms.ts, records write,
+// and applications have the SAME latent bug (they key tenant/grant resolution on
+// the raw sub via their own extractActor). They should adopt resolveActorSlugFromAuth
+// in a follow-up task; this change is scoped to the assistant route to bound review.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+async function extractActorSlug(
+  req: IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    // keycloak mode: ctx.sub is the KC user UUID, NOT the employee slug.
+    // Resolve it to the real slug (sub-first, preferred_username-fallback).
+    const slug = await resolveActorSlugFromAuth(
+      pool,
+      ctx.sub,
+      ctx.preferredUsername,
+    );
+    if (slug === null) {
+      // No employee matches sub or preferred_username → fail-closed.
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  // dev mode: the x-dev-user header value IS the slug.
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -611,7 +655,7 @@ export function registerAssistantRoutes(
     "GET",
     "/api/assistant/threads",
     withAuth(async (req, res) => {
-      const actorSlug = extractActor(req);
+      const actorSlug = await extractActorSlug(req, pool);
       const tenantId = await resolveActorTenant(actorSlug);
 
       const threads = await withTenantTx(pool, tenantId, async (client) => {
@@ -631,7 +675,7 @@ export function registerAssistantRoutes(
     "POST",
     "/api/assistant/threads",
     withAuth(async (req, res) => {
-      const actorSlug = extractActor(req);
+      const actorSlug = await extractActorSlug(req, pool);
       const tenantId = await resolveActorTenant(actorSlug);
 
       const body = (await readJsonBody(req)) as {
@@ -689,7 +733,7 @@ export function registerAssistantRoutes(
       const threadId = params["id"] ?? "";
       if (!threadId) throw new HttpError(400, "VALIDATION", "thread id required");
 
-      const actorSlug = extractActor(req);
+      const actorSlug = await extractActorSlug(req, pool);
       const tenantId = await resolveActorTenant(actorSlug);
 
       const messages = await withTenantTx(pool, tenantId, async (client) => {
@@ -714,7 +758,7 @@ export function registerAssistantRoutes(
       const threadId = params["id"] ?? "";
       if (!threadId) throw new HttpError(400, "VALIDATION", "thread id required");
 
-      const actorSlug = extractActor(req);
+      const actorSlug = await extractActorSlug(req, pool);
       const tenantId = await resolveActorTenant(actorSlug);
 
       const body = (await readJsonBody(req)) as {
@@ -929,7 +973,7 @@ export function registerAssistantRoutes(
       const threadId = params["id"] ?? "";
       if (!threadId) throw new HttpError(400, "VALIDATION", "thread id required");
 
-      const actorSlug = extractActor(req);
+      const actorSlug = await extractActorSlug(req, pool);
       const tenantId = await resolveActorTenant(actorSlug);
 
       const budget = await withTenantTx(pool, tenantId, async (client) => {

@@ -308,6 +308,101 @@ export async function resolveActorTenant(
 }
 
 // ---------------------------------------------------------------------------
+// resolveActorSlugFromAuth — T-0371: resolve an authenticated request → the
+// correct employee SLUG before that slug is used for tenant/grant resolution.
+//
+// THE BUG THIS FIXES (proven live, s39): in keycloak mode the JWT `sub` is the
+// KC user UUID, NOT the employee slug. Self-registered users satisfy the T-0342
+// invariant employee.slug == jwt.sub, but SEEDED personas (e-orlov, e-larina,
+// e-configurator…) have human-readable slugs while their KC sub is a random
+// UUID. Callers that key tenant/grant resolution on the raw sub therefore miss
+// the employee row for seeded personas and fail-close (empty grants), even when
+// the persona holds a perfectly valid CONFIRMED grant for its real slug.
+//
+// RESOLUTION (the T-0366 identity pattern: sub-first, preferred_username-fallback):
+//   1. If an employee exists with slug == `sub` → return `sub` (registered-user
+//      invariant; ALWAYS tried first and short-circuits).
+//   2. Else if an employee exists with slug == `preferredUsername` → return
+//      `preferredUsername` (seeded persona whose KC sub ≠ slug).
+//   3. Else → return null (fail-closed; the caller must NOT silently fall through
+//      to a UUID that resolveActorTenant would map to DEV_TENANT_ID).
+//
+// This is a BYPASSRLS cross-tenant EXISTENCE check on choros.employee.slug — it
+// mirrors resolveActorTenant's query pattern exactly (no tenant GUC needed: the
+// tenant is scoped afterwards by resolveActorTenant on the resolved slug). The
+// slug existence test is cross-tenant by necessity (we don't yet know the tenant),
+// but it only ever RETURNS A SLUG STRING — it confers no authority on its own.
+//
+// SECURITY — impersonation vector (preferred_username fallback):
+//   Could a self-registered user set preferred_username = 'e-orlov' and, because
+//   no employee has slug == their-own-sub-UUID, fall through to the e-orlov
+//   employee and impersonate a seeded persona?  NO:
+//     - The `sub` lookup is ALWAYS performed first and short-circuits. A
+//       registered user satisfies slug == sub (T-0342), so the fallback is never
+//       reached for them — they can only ever resolve to THEIR OWN employee.
+//     - The fallback only activates when slug == sub matches NO employee. For a
+//       legitimately registered user that never happens (their employee row has
+//       slug == sub). So the fallback path is reachable only for a token whose
+//       sub matches no employee at all.
+//     - `preferred_username` defaults to the Keycloak username, and Keycloak
+//       enforces USERNAME UNIQUENESS PER REALM. The seeded personas (e-orlov,
+//       e-larina, …, e-configurator) ARE provisioned as KC users with those exact
+//       usernames, so a second user CANNOT register/claim username 'e-orlov'.
+//       Therefore an attacker cannot mint a token whose preferred_username is a
+//       seeded persona's slug — KC would reject the duplicate username at
+//       registration. The only principal that can present preferred_username
+//       'e-orlov' is the genuine e-orlov KC user.
+//   Net: the resolved slug always maps to the real employee owned by the
+//   authenticated principal. On ambiguity (neither lookup matches) we fail closed
+//   (null) rather than widen authority.
+// ---------------------------------------------------------------------------
+
+export async function resolveActorSlugFromAuth(
+  pool: pg.Pool,
+  sub: string,
+  preferredUsername: string | undefined,
+): Promise<string | null> {
+  // Existence check helper: does ANY tenant have an employee with this slug?
+  // Cross-tenant BYPASSRLS — mirrors resolveActorTenant (no tenant GUC; the
+  // tenant is scoped later by resolveActorTenant on the returned slug).
+  async function employeeSlugExists(
+    client: pg.PoolClient,
+    slug: string,
+  ): Promise<boolean> {
+    const { rows } = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM choros.employee WHERE slug = $1
+       ) AS exists`,
+      [slug],
+    );
+    return rows.length > 0 && rows[0]!.exists === true;
+  }
+
+  const client = await pool.connect();
+  try {
+    // 1. sub-first: registered-user invariant (slug == sub). Short-circuits so a
+    //    registered user NEVER reaches the preferred_username fallback.
+    if (sub && (await employeeSlugExists(client, sub))) {
+      return sub;
+    }
+    // 2. preferred_username fallback: seeded persona whose KC sub ≠ slug.
+    //    Skipped when it equals sub (same lookup → same miss) or is empty.
+    if (
+      preferredUsername &&
+      preferredUsername !== sub &&
+      (await employeeSlugExists(client, preferredUsername))
+    ) {
+      return preferredUsername;
+    }
+    // 3. fail-closed: do NOT fall through to a UUID that resolveActorTenant
+    //    would silently map to DEV_TENANT_ID.
+    return null;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // resolveTenantBySlug — T-0141: resolve tenant UUID from tenant slug.
 //
 // Used for DEMO_TENANT_SLUG resolution in /api/users (pre-login picker).
