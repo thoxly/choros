@@ -28,13 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # T-0364: make origin/dev resolvable (== HEAD on a dev push) so the lone
-      # non-graceful baseline check (docpage-writeful-tools F-7:
-      # `git diff dev -- known_tenant_tables.txt`) passes instead of hard-failing on
-      # the absent ref. Targeted fetch of ONLY dev (NOT full history/main) so the
-      # per-task frozen-checks (defer-no-new-table, etc.) keep comparing vs HEAD/dev
-      # and do NOT over-reach onto the whole dev-vs-main accumulation.
-      - run: git fetch --no-tags --depth=1 origin dev || true
+      # T-0364: per-task baseline checks (docpage-writeful-tools F-7, defer-no-new-table,
+      # frozen merge-base checks) need a resolvable `dev` ref WITH history. Default
+      # shallow checkout has none → they either hard-fail (F-7) or fall back to a
+      # working-tree grep that over-reaches onto the whole dev accumulation (e.g. E15's
+      # user_task gets blamed on T-0221). Fetch origin/dev with FULL history (NOT main)
+      # and point a local `dev` branch at it. On a dev push origin/dev == HEAD ⟹ every
+      # check sees an EMPTY delta (compare vs self) ⟹ passes; on PRs origin/dev is the
+      # real base ⟹ checks still work. main is never fetched ⟹ no over-reach.
+      - run: |
+          git fetch --no-tags origin dev || true
+          git branch -f dev FETCH_HEAD 2>/dev/null || git branch -f dev origin/dev 2>/dev/null || true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
