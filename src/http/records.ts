@@ -648,6 +648,48 @@ async function createRecord(args: {
             `on_create process start failed (binding ${binding.id}): ${startResult.code}`,
           );
         }
+
+        // T-0368 (E16): dissolve double-submit.
+        //
+        // A create=start instance enters the BPMN at startEvent and immediately
+        // waits at the «Подача заявки» (task-submit) user task — because the BPMN's
+        // intent is that the initiator fills the form there. But for on_create
+        // instances the CREATE FORM IS the submit: the record+data already exist
+        // (just inserted above). Keeping the process waiting at task-submit means the
+        // user must submit a second time — a hollow double step.
+        //
+        // Fix: immediately after startInstance, find the first active user task for
+        // the new instance (will be task-submit). If found, auto-complete it with no
+        // variables (field_mapping already injected amount into Flowable variables at
+        // startInstance time). The process then advances to the triage serviceTask.
+        //
+        // This is best-effort: a lookup or complete failure is logged but does NOT
+        // roll back the record or the started instance — the instance just waits
+        // at task-submit (degraded, not broken). The BPMN is NOT modified; the
+        // explicit launcher path (process-start.ts) is unaffected (it never calls
+        // getFirstActiveUserTask / completeUserTask).
+        try {
+          const taskResult = await flowable.getFirstActiveUserTask(startResult.instanceId);
+          if (taskResult.ok && taskResult.taskId !== null) {
+            // Auto-complete the waiting user task (task-submit for on_create path).
+            const completeResult = await flowable.completeUserTask(taskResult.taskId);
+            if (!completeResult.ok) {
+              // Non-fatal: log and continue — record and instance are live.
+              console.warn(
+                `[on_create skip-submit] completeUserTask failed for instance ` +
+                  `${startResult.instanceId}, task ${taskResult.taskId}: ${completeResult.code}`,
+              );
+            }
+          }
+        } catch (skipErr) {
+          // Non-fatal: skip-submit errors must NOT invalidate the committed record.
+          console.warn(
+            `[on_create skip-submit] unexpected error for instance ` +
+              `${startResult.instanceId}:`,
+            skipErr,
+          );
+        }
+
         // Projection write: best-effort, isolated by a SAVEPOINT so a projection
         // failure cannot poison the outer tx and cause the committed record+instance
         // to be lost. Mirrors process-start.ts appendProcessStarted pattern.

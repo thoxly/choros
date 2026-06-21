@@ -24,6 +24,8 @@ import type {
   FetchResult,
   CompleteTaskResult,
   FailTaskResult,
+  GetFirstUserTaskResult,
+  CompleteUserTaskResult,
 } from "../core/flowable-client.js";
 import type { PostgresJobStore } from "../core/postgres/pgJobStore.js";
 import type { OutboxRow } from "../core/outboxTypes.js";
@@ -107,6 +109,15 @@ class MockFlowableClient implements FlowableClient {
   ): Promise<FailTaskResult> {
     this.failCalls.push([taskId, workerId, errorMessage, retries, retryTimeoutMs]);
     return this.failResult;
+  }
+
+  // T-0368: skip-submit stubs — not exercised by externalTaskBridge tests.
+  async getFirstActiveUserTask(_instanceId: string): Promise<GetFirstUserTaskResult> {
+    return { ok: true, taskId: null };
+  }
+
+  async completeUserTask(_taskId: string): Promise<CompleteUserTaskResult> {
+    return { ok: true };
   }
 }
 

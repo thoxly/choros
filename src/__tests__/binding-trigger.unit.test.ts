@@ -29,6 +29,9 @@ function makeStubFlowable(result: StartResult): FlowableClient {
     fetchAndLock: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     completeTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
+    // T-0368: skip-submit stubs — return no active user task so auto-complete is a no-op in unit tests.
+    getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
+    completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
   };
 }
 
