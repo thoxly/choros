@@ -186,6 +186,14 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    # WORKAROUND (host embedded-DNS bug): on this dev host Docker's embedded resolver
+    # (127.0.0.11) returns EAI_AGAIN when forwarding external names, even with `dns:`
+    # set — while the container CAN resolve via 1.1.1.1 directly. Pin the LLM host via
+    # /etc/hosts so E17 live chat works. Override DEEPSEEK_HOST_IP if DeepSeek's IP
+    # rotates; the durable fix is at the host (Docker daemon / Tailscale DNS) — see
+    # founder_request:choros-host-docker-dns. Empty default = no pin (relies on DNS).
+    extra_hosts:
+      - "api.deepseek.com:${DEEPSEEK_HOST_IP:-3.173.21.63}"
     depends_on:
       postgres:
         condition: service_healthy
