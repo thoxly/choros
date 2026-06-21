@@ -180,6 +180,12 @@ services:
       DEEPSEEK_MODEL:    ${DEEPSEEK_MODEL:-deepseek-chat}
     ports:
       - "${APP_PORT:-3000}:3000"
+    # Pin public resolvers: Docker's embedded DNS forwarder was returning EAI_AGAIN
+    # for external names (e.g. api.deepseek.com) → E17 live-LLM calls 500'd and npm
+    # build npm-ci hit intermittent SIGPIPE. Direct resolvers make egress reliable.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       postgres:
         condition: service_healthy
