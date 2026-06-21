@@ -37,8 +37,13 @@ jobs:
       # check sees an EMPTY delta (compare vs self) ⟹ passes; on PRs origin/dev is the
       # real base ⟹ checks still work. main is never fetched ⟹ no over-reach.
       - run: |
-          git fetch --no-tags origin dev || true
-          git branch -f dev FETCH_HEAD 2>/dev/null || git branch -f dev origin/dev 2>/dev/null || true
+          # Per-task baseline checks do `git merge-base HEAD dev` / `git diff dev`.
+          # On a dev-push HEAD is the --no-ff merge commit, so its FIRST PARENT (HEAD~1)
+          # is the previous dev. Point local `dev` there so the checks see ONLY this
+          # merge's delta (not the whole accumulation) → they pass when the change adds
+          # no table / doesn't touch known_tenant_tables.txt. Deepen by 1 to get HEAD~1.
+          git fetch --deepen=1 origin 2>/dev/null || git fetch --depth=2 origin dev 2>/dev/null || true
+          git branch -f dev HEAD~1 2>/dev/null || true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
