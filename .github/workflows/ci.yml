@@ -55,7 +55,21 @@ jobs:
       # гонять в интеграционно-честном окружении.
       - run: npm --prefix web ci
       - run: npm --prefix web run build
-      - run: npm run ci
+      # T-0364 (founder decision 2026-06-21: "развязать деплой от гардов" — decouple dev
+      # auto-deploy from the per-task frozen-check guard suite). `npm run ci` is split so the
+      # SUBSTANTIVE gate stays BLOCKING (tsc --noEmit + eslint + unit tests here, plus the
+      # db/kc/stack/flowable jobs and the server-side rebuild in deploy-dev.sh) while only
+      # `npm run fitness` (the ~200 frozen ci/checks/*.sh guards) is made advisory. The guards
+      # still RUN and stay VISIBLE in the log, but their systemic baseline-resolution failures
+      # on dev integration-pushes (E16/E17 accumulation — no single CI git-setup satisfies all
+      # ~30 per-task baselines at once) no longer block dev deploys. They remain fully enforcing
+      # on task branches / PRs; main stays founder-gated (GT-3).
+      - run: node_modules/.bin/tsc --noEmit
+      - run: npm run lint
+      - run: npm run test
+      - name: fitness guards (advisory on dev push — see comment above)
+        continue-on-error: true
+        run: npm run fitness
 
   # T-0053 · integration-honest Postgres gate (D-056): pins its OWN postgres:16
   # service container — no dependency on ambient build state. Runs the migration
