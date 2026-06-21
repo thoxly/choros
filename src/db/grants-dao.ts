@@ -197,7 +197,7 @@ export function makeDbGrantSource(pool: pg.Pool): GrantSource {
 // or no valid roles) — the same sentinel as the in-memory rolesForUser fallback.
 //
 // T-0366 — fallback slug for KC seed personas:
-//   Under CHOROS_AUTH_MODE=keycloak, the KC JWT `sub` is a random UUID that does
+//   Under Keycloak auth mode, the KC JWT `sub` is a random UUID that does
 //   not match employee.slug for seed dev personas (e.g. e-larina.slug='e-larina'
 //   but KC sub='f4a5f440-…'). The optional `fallbackSlug` param (preferred_username
 //   from the JWT) is tried ONLY when the primary lookup returns no employee row.
