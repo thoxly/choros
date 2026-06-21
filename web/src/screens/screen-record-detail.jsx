@@ -40,6 +40,11 @@ function fmtTs(ms) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Dev tenant sentinel — the backend resolves tenant scope via x-tenant-id (same
+// per-file pattern as screen-processes.jsx / screen-org.jsx). Keycloak-mode tenant
+// derivation is pre-existing debt (T-0328 scope), not this task's.
+const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+
 const fieldRowStyle = {
   display: 'flex',
   flexDirection: 'column',
@@ -345,7 +350,8 @@ function RecordActionsPanel({ appId }) {
       // We change WHICH affordance calls this, not the contract itself.
       const res = await fetch('/api/processes/start', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
+        // FROZEN §2.2 requires x-tenant-id (process-start.ts rejects 400 without it).
+        headers: { 'content-type': 'application/json', ...authHeaders(), 'x-tenant-id': DEV_TENANT_ID },
         body: JSON.stringify({ processKey: binding.process_key }),
       });
       if (res.status === 201) {
