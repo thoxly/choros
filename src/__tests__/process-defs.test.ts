@@ -63,6 +63,9 @@ function makeStubFlowableClient(deployResult: DeployResult): FlowableClient {
     fetchAndLock: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     completeTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
+    // T-0368: skip-submit stubs — not exercised by process-defs tests.
+    getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
+    completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
   };
 }
 

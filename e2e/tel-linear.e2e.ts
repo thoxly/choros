@@ -281,3 +281,361 @@ async function waitForInstanceTask(page: Page, instanceId: string): Promise<stri
   }
   return "";
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T-0368 (E16): create=start DMN routing acceptance
+//
+// Verifies end-to-end that creating a «Заявки» (purchases) record via
+// POST /api/records fires the telLinear process via the on_create binding,
+// skips the «Подача заявки» user task (dissolve-double-submit), runs triage,
+// and the DMN gateway routes correctly:
+//   CS-1 (6 000 000 ₽ > 5 000 000 threshold) → needs-approval → «Доп. согласование»
+//   CS-2 (3 000 000 ₽ ≤ 5 000 000 threshold) → standard track → done after base approve
+//
+// Additionally verifies:
+//   CS-3: after base approve on the CS-1 instance, the «Согласование» record was
+//         created with data.purchase_ref == the originating «Заявки» record id
+//         (cross_app_ref seed from migration 089 closes the pointer gap).
+//
+// These tests call the API directly (no UI form submission) because the goal is
+// to prove the process-engine routing — not the form rendering — works via the
+// create=start code path. HARD assertions only (no green-faking).
+//
+// Requires a LIVE stack (Postgres + Flowable). If the stack is not up, tests are
+// skipped via the SKIP_CREATE_START_E2E env var so CI can gate selectively.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stable UUIDs from seed migrations (076, 083, 085, 087).
+const TEL_APP_ID = "a7000000-0000-0000-0000-000000000001";    // tel-approval application
+const PURCHASES_REG_ID = "a7000000-0000-0000-0000-000000000002"; // «Заявки» registry_def
+const SOGLASOVANIE_REG_ID = "a7000000-0000-0000-0000-000000000003"; // «Согласование» registry_def
+
+/**
+ * Create a «Заявки» record via POST /api/records as the given actor.
+ * Returns { recordId, instanceId } on 201, throws on non-201.
+ *
+ * The on_create binding (migration 087) fires telLinear start in-tx;
+ * the process.started audit_event carries record_id (T-0356).
+ */
+async function createPurchaseRecord(
+  page: Page,
+  actor: string,
+  amount: number,
+  title: string,
+): Promise<{ recordId: string; instanceId: string }> {
+  const result = await page.evaluate(
+    async ({
+      appId,
+      regId,
+      actor: act,
+      data,
+      tenant,
+    }: {
+      appId: string;
+      regId: string;
+      actor: string;
+      data: Record<string, unknown>;
+      tenant: string;
+    }) => {
+      const res = await fetch("/api/records", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-dev-user": act,
+          "x-tenant-id": tenant,
+        },
+        body: JSON.stringify({
+          application_id: appId,
+          registry_def_id: regId,
+          data,
+        }),
+      });
+      const body = await res.json();
+      return { status: res.status, body };
+    },
+    {
+      appId: TEL_APP_ID,
+      regId: PURCHASES_REG_ID,
+      actor,
+      data: { title, amount },
+      tenant: DEV_TENANT_ID,
+    },
+  );
+
+  if (result.status !== 201) {
+    throw new Error(
+      `createPurchaseRecord failed: HTTP ${result.status} ${JSON.stringify(result.body)}`,
+    );
+  }
+
+  // The 201 response carries the record. The process.started audit event is written
+  // in the same tx (records.ts + appendProcessStarted T-0356). The instanceId is
+  // resolved by polling the audit_event log via the inbox projection.
+  const recordId = (result.body as { id?: string }).id ?? "";
+  if (!recordId) throw new Error("createPurchaseRecord: no id in response body");
+
+  // Poll the process projection (audit_event log) for the started instance whose
+  // payload.record_id matches our new record id. The projection writes in the same
+  // tx as the record insert, so it should be immediately visible.
+  const instanceId = await page.evaluate(
+    async ({
+      recId,
+      tenant,
+      actor: act,
+    }: {
+      recId: string;
+      tenant: string;
+      actor: string;
+    }) => {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const res = await fetch("/api/processes", {
+          headers: { "x-dev-user": act, "x-tenant-id": tenant },
+        });
+        if (!res.ok) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        const data = await res.json();
+        const instances: Array<{ id?: string; payload?: { record_id?: string } }> =
+          data.instances ?? [];
+        const match = instances.find(
+          (inst) => inst.payload?.record_id === recId,
+        );
+        if (match?.id) return match.id;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return null;
+    },
+    { recId: recordId, tenant: DEV_TENANT_ID, actor },
+  );
+
+  if (!instanceId) {
+    throw new Error(
+      `createPurchaseRecord: no process instance found for record ${recordId} after 15s`,
+    );
+  }
+
+  return { recordId, instanceId: instanceId as string };
+}
+
+/**
+ * Claim + approve a pool task for the given instance as the approver (e-larina).
+ * Returns the «Согласование» soglasovanie record id written by the step-applier
+ * (read from GET /api/records filtered by registry_def_id).
+ *
+ * For CS-1 (needs-approval path), the step-applier fires before the gateway
+ * routes to «Доп. согласование» — so the soglasovanie record exists after approve.
+ */
+async function claimAndApproveTask(
+  page: Page,
+  taskId: string,
+): Promise<void> {
+  // Claim the pool task.
+  const claimResult = await page.evaluate(
+    async ({ tid }: { tid: string }) => {
+      const res = await fetch(`/api/inbox/${tid}/claim`, {
+        method: "POST",
+        headers: { "x-dev-user": "e-larina" },
+      });
+      return res.status;
+    },
+    { tid: taskId },
+  );
+  expect(claimResult, `CS: claim task ${taskId} must return 200`).toBe(200);
+
+  // Approve the claimed task.
+  const approveResult = await page.evaluate(
+    async ({ tid }: { tid: string }) => {
+      const res = await fetch(`/api/inbox/${tid}/action`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-dev-user": "e-larina",
+        },
+        body: JSON.stringify({ action: "approve" }),
+      });
+      const body = await res.json();
+      return { status: res.status, body };
+    },
+    { tid: taskId },
+  );
+  expect(approveResult.status, `CS: approve task ${taskId} must return 200`).toBe(200);
+}
+
+test.describe("T-0368 create=start DMN routing (on_create → triage → gateway)", () => {
+  test.skip(
+    process.env["SKIP_CREATE_START_E2E"] === "1",
+    "create=start DMN routing e2e skipped (set SKIP_CREATE_START_E2E=0 with live stack)",
+  );
+
+  // ──────────────────────────────────────────────────── CS-1: 6M → needs-approval
+  // Creating a purchase with amount > 5_000_000 must:
+  //   1. Trigger on_create → telLinear starts → task-submit auto-completed (skip-submit)
+  //   2. Triage (external task) fires deterministically → sets approvalRequired=needs-approval
+  //   3. Base «Согласование» task appears in approver pool
+  //   4. After claim + approve: gateway reads approvalRequired=needs-approval → routes to
+  //      «Доп. согласование» (task-extra-approve) — NOT to end
+  //   5. «Доп. согласование» task is visible in the approver pool (instance not done yet)
+  test(
+    "CS-1: amount=6_000_000 → on_create starts process → DMN needs-approval → Доп.согласование",
+    async ({ page }) => {
+      await loginAs(page, INITIATOR);
+
+      // Step 1: Create the purchase record (fires on_create → telLinear start).
+      const { recordId, instanceId } = await createPurchaseRecord(
+        page,
+        INITIATOR.id,
+        6_000_000,
+        "Договор на 6 млн — должен уйти на доп.согласование",
+      );
+      expect(recordId, "CS-1: purchase record must be persisted").toBeTruthy();
+      expect(instanceId, "CS-1: process must have started (on_create binding)").toBeTruthy();
+
+      // Step 2: Wait for the base «Согласование» task to appear in the approver pool.
+      // The task-submit auto-completion + triage (external task) must have run.
+      const taskId = await waitForInstanceTask(page, instanceId);
+      expect(taskId, "CS-1: base approval task must appear in approver pool after triage").toBeTruthy();
+
+      // Step 3: Claim + approve the base task as e-larina.
+      // After approve the gateway reads approvalRequired; for 6M it must be 'needs-approval'.
+      await loginAs(page, APPROVER);
+      await claimAndApproveTask(page, taskId);
+
+      // Step 4: After the base approve, the gateway routes to «Доп. согласование».
+      // The instance is NOT done yet — assert by polling for a second pool task
+      // for this instance (the «Доп. согласование» task-extra-approve).
+      const extraTaskId = await waitForInstanceTask(page, instanceId);
+      expect(
+        extraTaskId,
+        "CS-1: after base approve with 6M, «Доп. согласование» task must appear in pool",
+      ).toBeTruthy();
+      // The second task must be a DIFFERENT task id (not the same as the approved one).
+      expect(extraTaskId, "CS-1: extra approval task must be a new task").not.toBe(taskId);
+
+      // Step 5 (CS-3): Assert cross_app_ref pointer — the «Согласование» record
+      // created by the step-applier must have data.purchase_ref == recordId.
+      // The record is created at approve time by applyStepResult in step-applier.ts.
+      const crossRefOk = await page.evaluate(
+        async ({
+          regId,
+          purchaseRecId,
+          tenant,
+        }: {
+          regId: string;
+          purchaseRecId: string;
+          tenant: string;
+        }) => {
+          const res = await fetch(`/api/records?registry_def_id=${regId}`, {
+            headers: { "x-dev-user": "e-larina", "x-tenant-id": tenant },
+          });
+          if (!res.ok) return { found: false, details: `HTTP ${res.status}` };
+          const data = await res.json();
+          const records: Array<{ data?: Record<string, unknown> }> = data.records ?? [];
+          // Find a «Согласование» record whose purchase_ref matches our purchase record id.
+          const match = records.find((r) => r.data?.["purchase_ref"] === purchaseRecId);
+          return {
+            found: !!match,
+            details: match
+              ? `found purchase_ref=${purchaseRecId}`
+              : `no match; records=${JSON.stringify(records.map((r) => r.data?.["purchase_ref"]))}`,
+          };
+        },
+        { regId: SOGLASOVANIE_REG_ID, purchaseRecId: recordId, tenant: DEV_TENANT_ID },
+      );
+      expect(
+        crossRefOk.found,
+        `CS-3: «Согласование» record must have purchase_ref=${recordId} — ${crossRefOk.details}`,
+      ).toBe(true);
+    },
+  );
+
+  // ──────────────────────────────────────────────────── CS-2: 3M → standard track
+  // Creating a purchase with amount ≤ 5_000_000 must:
+  //   1. Trigger on_create → telLinear starts → task-submit auto-completed
+  //   2. Triage fires → sets approvalRequired=standard (or absent → default)
+  //   3. Base «Согласование» task appears
+  //   4. After claim + approve: gateway routes to end (standard) — instance is DONE
+  //   5. No «Доп. согласование» task exists for this instance
+  test(
+    "CS-2: amount=3_000_000 → on_create starts process → DMN standard track → done after base approve",
+    async ({ page }) => {
+      await loginAs(page, INITIATOR);
+
+      // Step 1: Create the purchase record.
+      const { recordId, instanceId } = await createPurchaseRecord(
+        page,
+        INITIATOR.id,
+        3_000_000,
+        "Договор на 3 млн — стандартный трек",
+      );
+      expect(recordId, "CS-2: purchase record must be persisted").toBeTruthy();
+      expect(instanceId, "CS-2: process must have started (on_create binding)").toBeTruthy();
+
+      // Step 2: Wait for the base «Согласование» task in the approver pool.
+      const taskId = await waitForInstanceTask(page, instanceId);
+      expect(taskId, "CS-2: base approval task must appear in approver pool after triage").toBeTruthy();
+
+      // Step 3: Claim + approve as e-larina.
+      // For 3M, approvalRequired = standard → gateway takes the default branch → end.
+      await loginAs(page, APPROVER);
+
+      const claimStatus = await page.evaluate(
+        async ({ tid }: { tid: string }) => {
+          const res = await fetch(`/api/inbox/${tid}/claim`, {
+            method: "POST",
+            headers: { "x-dev-user": "e-larina" },
+          });
+          return res.status;
+        },
+        { tid: taskId },
+      );
+      expect(claimStatus, "CS-2: claim must return 200").toBe(200);
+
+      const approveResult = await page.evaluate(
+        async ({ tid }: { tid: string }) => {
+          const res = await fetch(`/api/inbox/${tid}/action`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-dev-user": "e-larina",
+            },
+            body: JSON.stringify({ action: "approve" }),
+          });
+          const body = await res.json();
+          return { status: res.status, body };
+        },
+        { tid: taskId },
+      );
+      expect(approveResult.status, "CS-2: approve must return 200").toBe(200);
+
+      // Step 4: After approve, the instance should be done (standard track → end).
+      // The approve action returns { status: "done" } for the standard path.
+      expect(
+        (approveResult.body as { status?: string }).status,
+        "CS-2: approve on 3M instance must return status=done (standard gateway → end)",
+      ).toBe("done");
+
+      // Step 5: Assert no «Доп. согласование» task appeared for this instance.
+      // Poll the pool inbox for 3 seconds — it must stay empty for this instance.
+      const hasExtraTask = await page.evaluate(
+        async ({ inst }: { inst: string }) => {
+          // Wait 3s then check — triage + gateway are near-instant; if a task
+          // appeared it would already be there.
+          await new Promise((r) => setTimeout(r, 3_000));
+          const res = await fetch("/api/inbox?tab=pool", {
+            headers: { "x-dev-user": "e-larina" },
+          });
+          if (!res.ok) return false;
+          const data = await res.json();
+          return (data.items ?? []).some((i: { inst: string }) => i.inst === inst);
+        },
+        { inst: instanceId },
+      );
+      expect(
+        hasExtraTask,
+        "CS-2: standard track (3M) must NOT produce a «Доп. согласование» task",
+      ).toBe(false);
+    },
+  );
+});

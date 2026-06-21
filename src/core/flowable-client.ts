@@ -73,6 +73,24 @@ export type FailTaskResult =
   | { ok: true }
   | { ok: false; code: FlowableErrorCode };
 
+/**
+ * T-0368 (E16): result of getFirstActiveUserTask — the task id of the first
+ * active user task for an instance, or null when no active user task exists.
+ */
+export type GetFirstUserTaskResult =
+  | { ok: true; taskId: string | null }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
+ * T-0368 (E16): result of completeUserTask — complete a Flowable user task
+ * via the BPMN REST API (not the external-job API). Used by the on_create
+ * trigger to auto-complete the «Подача заявки» (task-submit) user task so
+ * that a create=start instance does not wait at a second submit step.
+ */
+export type CompleteUserTaskResult =
+  | { ok: true }
+  | { ok: false; code: FlowableErrorCode };
+
 /** Wire shape from Flowable /runtime/external-jobs/acquire (FR-3). */
 export interface ExternalTask {
   readonly id: string;
@@ -120,6 +138,26 @@ export interface FlowableClient {
     retries: number,
     retryTimeoutMs: number,
   ): Promise<FailTaskResult>;
+  /**
+   * T-0368 (E16): find the first active user task id for the given process
+   * instance. Used after a create=start to identify the waiting task-submit
+   * user task so it can be auto-completed. Returns { ok: true, taskId: null }
+   * when the instance has no active user tasks (already at a service task or
+   * completed), { ok: false } on engine error.
+   *
+   * Flowable endpoint: GET {baseUrl}/runtime/tasks?processInstanceId={id}&size=1
+   */
+  getFirstActiveUserTask(instanceId: string): Promise<GetFirstUserTaskResult>;
+  /**
+   * T-0368 (E16): complete a Flowable USER task (not an external/service task)
+   * by id. Used by the on_create trigger path to auto-complete the
+   * «Подача заявки» (task-submit) user task so the instance advances past
+   * the submit step without waiting for a human.
+   *
+   * Flowable endpoint: PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
+   * Success: 200 (Flowable 7 returns the task JSON on PUT complete).
+   */
+  completeUserTask(taskId: string): Promise<CompleteUserTaskResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,11 +543,70 @@ export function makeFlowableClient(
     }, resolved) as Promise<FailTaskResult>;
   }
 
+  // -------------------------------------------------------------------------
+  // FR-6: getFirstActiveUserTask — T-0368 (E16) on_create skip-submit seam
+  //
+  // GET {baseUrl}/runtime/tasks?processInstanceId={id}&size=1
+  // Returns the first active USER task for an instance (not external tasks).
+  // Used after startInstance via on_create trigger to discover the task-submit
+  // user task so it can be immediately auto-completed (dissolve double-submit).
+  // -------------------------------------------------------------------------
+  async function getFirstActiveUserTask(instanceId: string): Promise<GetFirstUserTaskResult> {
+    return withRetry(async () => {
+      const url = `${resolved.baseUrl}/runtime/tasks?processInstanceId=${encodeURIComponent(instanceId)}&size=1`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        const items = data["data"] as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(items) || items.length === 0) {
+          return { ok: true as const, taskId: null };
+        }
+        const taskId = String(items[0]!["id"] ?? "");
+        return { ok: true as const, taskId: taskId || null };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<GetFirstUserTaskResult>;
+  }
+
+  // -------------------------------------------------------------------------
+  // FR-7: completeUserTask — T-0368 (E16) on_create skip-submit seam
+  //
+  // PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
+  // Flowable 7 returns 200 with the task JSON on a successful complete.
+  // No variables are passed (task-submit has no output variables — the
+  // field_mapping already injected amount at startInstance time).
+  // -------------------------------------------------------------------------
+  async function completeUserTask(taskId: string): Promise<CompleteUserTaskResult> {
+    return withRetry(async () => {
+      const resp = await globalThis.fetch(
+        `${resolved.baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: auth,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "complete" }),
+        },
+      );
+      // Flowable 7 returns 200 with the completed task body on success.
+      if (resp.status === 200 || resp.status === 204) {
+        return { ok: true as const };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<CompleteUserTaskResult>;
+  }
+
   return {
     deployBpmn,
     startInstance,
     fetchAndLock,
     completeTask,
     failTask,
+    getFirstActiveUserTask,
+    completeUserTask,
   };
 }

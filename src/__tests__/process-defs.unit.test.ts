@@ -80,6 +80,9 @@ function makeFlowable(overrides: Partial<FlowableClient> = {}): FlowableClient {
     completeTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     deployBpmn: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
+    // T-0368: skip-submit stubs — not exercised by process-defs tests.
+    getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
+    completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
     ...overrides,
   };
 }
