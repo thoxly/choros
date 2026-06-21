@@ -195,6 +195,17 @@ export function makeDbGrantSource(pool: pg.Pool): GrantSource {
 //
 // Returns [] (empty array) for an unknown actor (no employee row, no assignments,
 // or no valid roles) — the same sentinel as the in-memory rolesForUser fallback.
+//
+// T-0366 — fallback slug for KC seed personas:
+//   Under CHOROS_AUTH_MODE=keycloak, the KC JWT `sub` is a random UUID that does
+//   not match employee.slug for seed dev personas (e.g. e-larina.slug='e-larina'
+//   but KC sub='f4a5f440-…'). The optional `fallbackSlug` param (preferred_username
+//   from the JWT) is tried ONLY when the primary lookup returns no employee row.
+//
+//   Security invariant: primary is ALWAYS tried first and short-circuits — the
+//   fallback is never consulted for registered users (slug == sub, so primary hits).
+//   The fallback only activates when the primary slug matches NO employee, which
+//   happens exclusively for seed personas whose KC sub was not set from their slug.
 // ---------------------------------------------------------------------------
 
 export async function getRoleSlugsForActor(
@@ -202,18 +213,36 @@ export async function getRoleSlugsForActor(
   tenantId: string,
   actorSlug: string,
   nowMs: number = Date.now(),
+  fallbackSlug?: string,
 ): Promise<string[]> {
   return withTenantReadTx(pool, tenantId, async (client) => {
     // Resolve actor slug → employee id.
+    // T-0366: try primary first; if no row AND fallback is provided (and distinct),
+    // try the fallback slug. The primary short-circuits so registered users
+    // (slug == sub) never reach the fallback path — no impersonation risk.
     const { rows: empRows } = await client.query<{ id: string }>(
       `SELECT id FROM choros.employee
         WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
       [tenantId, actorSlug],
     );
-    if (empRows.length === 0) {
+
+    let employeeId: string;
+    if (empRows.length > 0) {
+      employeeId = empRows[0]!.id;
+    } else if (fallbackSlug !== undefined && fallbackSlug !== actorSlug) {
+      // Primary slug matched no employee — try the fallback (preferred_username).
+      const { rows: fbRows } = await client.query<{ id: string }>(
+        `SELECT id FROM choros.employee
+          WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+        [tenantId, fallbackSlug],
+      );
+      if (fbRows.length === 0) {
+        return [];
+      }
+      employeeId = fbRows[0]!.id;
+    } else {
       return [];
     }
-    const employeeId = empRows[0]!.id;
 
     // Confirmed, in-window assignments → role slugs in one join.
     const { rows } = await client.query<{ slug: string }>(

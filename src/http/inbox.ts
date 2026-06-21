@@ -178,18 +178,26 @@ const USER_ROLES: Record<string, string[]> = {
  * sites (claim, approve) MUST see this propagation so the router's INTERNAL:500
  * envelope is returned instead of evaluating grants against stale fixture data.
  * The no-DB path (hasDb() === false) keeps the fixture fallback as before.
+ *
+ * T-0366 — fallbackActor for KC seed personas:
+ *   In keycloak mode, the actor is the JWT `sub` (a random UUID) which does not
+ *   match employee.slug for seed personas. The optional `fallbackActor` param
+ *   (JWT preferred_username) is passed to getRoleSlugsForActor so that when the
+ *   primary lookup fails, the fallback (preferred_username) is tried instead.
+ *   In dev-header mode, actor == slug already, so fallbackActor is not supplied.
  */
 async function resolveRolesForActor(
   actor?: string | null,
   tenantId: string = DEV_TENANT_ID,
   nowMs: number = Date.now(),
+  fallbackActor?: string,
 ): Promise<string[]> {
   if (!actor) return [];
   if (hasDb()) {
     // No try/catch: DB errors propagate to the caller (fail-closed, NF-3).
     // A fixture fallback here would let a transient DB error silently grant
     // access to actors whose live DB grants have been revoked.
-    return await getRoleSlugsForActor(getOrgPool(), tenantId, actor, nowMs);
+    return await getRoleSlugsForActor(getOrgPool(), tenantId, actor, nowMs, fallbackActor);
   }
   return USER_ROLES[actor] ?? [];
 }
@@ -850,7 +858,11 @@ export function registerInboxRoutes(
     //
     // In DB-mode: resolveRolesForActor errors propagate → 500 (fail-closed).
     // In no-DB mode: falls back to in-memory USER_ROLES fixture (memory tests).
-    const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs);
+    //
+    // T-0366: pass authCtx?.preferredUsername as fallback so seed personas whose
+    // KC sub (devUserId) matches no employee are resolved via preferred_username.
+    // In dev-header mode authCtx is undefined → no fallback (devUserId == slug).
+    const myRoles = await resolveRolesForActor(devUserId, tenantId, nowMs, authCtx?.preferredUsername);
     if (myRoles.length > 0 && taskRole !== undefined && !myRoles.includes(taskRole)) {
       throw new HttpError(403, "NOT_ELIGIBLE", "actor does not hold the role this task is addressed to");
     }
@@ -1021,8 +1033,12 @@ export function registerInboxRoutes(
       // actor_type: derived from PDP employee.kind (spec §5 / T-0336).
       // An agent actor (employee.kind='agent') holding role-approver is denied here
       // structurally (the moat: agents have NO approve grant — see tel-scenario seed).
+      //
+      // T-0366: pass authCtx?.preferredUsername as fallback for KC seed personas
+      // whose JWT sub does not match employee.slug. In dev-header mode authCtx is
+      // undefined → no fallback (actor == slug already).
       const nowMs = Date.now();
-      const myRoles = await resolveRolesForActor(actor, tenantId, nowMs);
+      const myRoles = await resolveRolesForActor(actor, tenantId, nowMs, authCtx?.preferredUsername);
       if (!myRoles.includes(task.role)) {
         throw new HttpError(
           403,
