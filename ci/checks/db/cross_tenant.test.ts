@@ -1551,6 +1551,7 @@ const SEEDED_TABLES = new Set<string>([
   'mcp_tool',
   'object_handle',
   'app_timer',
+  'user_task_claim',
   'tenant',
   'department',
   'position',
