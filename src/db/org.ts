@@ -412,6 +412,92 @@ export async function resolveActorSlugFromAuth(
 }
 
 // ---------------------------------------------------------------------------
+// resolveAgentSlugFromAuth — T-0424 [SECURITY]: resolve an authenticated AGENT
+// (Keycloak service-account) request → the correct agent employee SLUG, before
+// that slug is used for tenant/grant resolution. The SEPARATE, disjoint sibling
+// of resolveActorSlugFromAuth (the human bridge) — selected by the validated
+// `actor_type` claim, NEVER called for human tokens (and a no-op if it were).
+//
+// T-0423 ADR §2.2. THE THREAT (T-0372) THAT KEEPS THIS A SECOND FUNCTION:
+//   Agents authenticate via their Keycloak client_id (service-account JWT). The
+//   human resolver is kind='human'-only precisely so a forged/stolen
+//   preferred_username can never resolve to an agent slug (e.g. config-agent-seed,
+//   which holds authoring_draft grants). Folding agents into it would reverse that
+//   guard. Instead this path resolves ONLY kind='agent' employees, via the
+//   authoritative hire-time binding agent_card.kc_client_id.
+//
+// MECHANISM (the convention is already wired end-to-end — no new credential,
+// token system, or table; see ADR §1.4):
+//   1. actorType must be 'agent' — a hard kind gate / defense-in-depth: this
+//      resolver is a no-op (null) for anything but an agent claim.
+//   2. Keycloak's default preferred_username for a service-account user is
+//      "service-account-<clientId>". Strip the "service-account-" prefix to
+//      recover the clientId (fail-closed if not so prefixed, or empty after).
+//   3. <clientId> == agent_card.kc_client_id (text NOT NULL, populated by
+//      agent-hire's deriveKcClientId and by the seed migrations). JOIN employee
+//      ON kind='agent' → employee.slug.
+//   4. Else → null (fail-closed; the caller MUST NOT fall through to a UUID that
+//      resolveActorTenant would silently map to DEV_TENANT_ID).
+//
+// DISJOINTNESS (ADR §3): the JOIN's e.kind = 'agent' filter PLUS the agent_card
+// FK — which can only reference a kind='agent' employee (032_agent_card.sql:57-63
+// CHECK(employee_kind='agent') + composite FK into employee(tenant_id,id,kind))
+// — make it STRUCTURALLY IMPOSSIBLE for this resolver to return a human slug.
+// The human resolver stays kind='human'-only. The crossover set is empty.
+//
+// TENANT SCOPING (ADR §3.4): this is a BYPASSRLS cross-tenant lookup (no tenant
+// GUC) because the tenant is unknown until the slug resolves — it mirrors
+// resolveActorSlugFromAuth/resolveActorTenant. A Keycloak clientId is
+// realm-global-unique (one realm cannot host two clients with the same clientId),
+// so a given kc_client_id maps to exactly one agent across the platform; the
+// returned slug then drives resolveActorTenant, binding the caller to that agent's
+// OWN tenant, after which all invoke logic runs under that tenant's RLS GUC. The
+// resolver only ever RETURNS A SLUG STRING — it confers no authority on its own
+// (identity ⊥ rights; authorization remains the fail-closed invoke-grant check).
+// ---------------------------------------------------------------------------
+
+export async function resolveAgentSlugFromAuth(
+  pool: pg.Pool,
+  ctx: { sub: string; preferredUsername: string; actorType: "human" | "agent" },
+): Promise<string | null> {
+  // 1. Hard kind gate (defense-in-depth): never resolve a non-agent claim here.
+  if (ctx.actorType !== "agent") return null;
+
+  // 2. KC default: a service-account user's preferred_username is
+  //    "service-account-<clientId>". Strip the prefix to recover the clientId.
+  const PREFIX = "service-account-";
+  if (
+    typeof ctx.preferredUsername !== "string" ||
+    !ctx.preferredUsername.startsWith(PREFIX)
+  ) {
+    return null; // fail-closed: not a service-account preferred_username
+  }
+  const kcClientId = ctx.preferredUsername.slice(PREFIX.length);
+  if (!kcClientId) return null; // fail-closed: empty clientId
+
+  // 3. Map kc_client_id → agent employee.slug. Cross-tenant BYPASSRLS (no tenant
+  //    GUC; tenant is scoped afterwards by resolveActorTenant on the slug). The
+  //    JOIN + e.kind='agent' + the agent_card FK guarantee an AGENT slug only.
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT e.slug
+         FROM choros.agent_card ac
+         JOIN choros.employee e
+           ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
+        WHERE ac.kc_client_id = $1
+          AND e.kind = 'agent'
+        LIMIT 1`,
+      [kcClientId],
+    );
+    // 4. null ⇒ caller throws 401 fail-closed (unknown / unprovisioned client).
+    return rows.length > 0 ? rows[0]!.slug : null;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // resolveTenantBySlug — T-0141: resolve tenant UUID from tenant slug.
 //
 // Used for DEMO_TENANT_SLUG resolution in /api/users (pre-login picker).
