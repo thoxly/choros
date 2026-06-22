@@ -1,0 +1,53 @@
+-- 092 · agent_card.kc_client_id GLOBAL uniqueness (T-0426 [SECURITY])
+--
+-- Schema-backs a realm-global invariant that, until now, lived ONLY at runtime in
+-- Keycloak. This migration adds NO new relation — it adds a single global UNIQUE
+-- INDEX over the EXISTING choros.agent_card (migration 032). Additive, idempotent.
+--
+-- WHY (the residual from the T-0424 review):
+--   resolveAgentSlugFromAuth (src/db/org.ts) does a BYPASSRLS cross-tenant lookup
+--   `WHERE ac.kc_client_id = $1 LIMIT 1`. agent_card's existing UNIQUE is PER-TENANT
+--   (tenant_id, kc_client_id) (032), and deriveKcClientId(slug) (src/core/agent-hire.ts)
+--   has NO tenant component. So two tenants hiring an agent with the SAME slug would
+--   derive the SAME kc_client_id in DIFFERENT rows, and the cross-tenant resolver
+--   could then map one client to the WRONG tenant's agent (a cross-tenant identity
+--   leak). Today that can't happen ONLY because the hire flow is KC-first
+--   (src/http/agents.ts: createServiceAccountClient runs BEFORE insertAgentRows) and
+--   Keycloak enforces realm-global clientId uniqueness at create time — a RUNTIME
+--   invariant, not a DB guarantee. This index makes it a DB guarantee: a colliding
+--   kc_client_id can never be written, even by a seed migration, a future
+--   tenant-aware regression, or any path that bypasses the KC-first ordering.
+--
+-- DATA SAFETY (verified clean before authoring — T-0426 investigation):
+--   The ONLY writers of agent_card are:
+--     1. seed migrations 032/044/059/062 — ALL target the single DEV tenant
+--        (a0000000-…-0001) with DISTINCT kc_client_id values
+--        (agent-recon/agent-invoice/agent-triage/s-ledger/s-ocr/agent-config/
+--         agent-implementation/agent-docs-author — 8 distinct, 0 duplicates).
+--     2. insertAgentRows (src/db/agent-provision.ts) via the KC-first hire flow,
+--        where Keycloak already guarantees realm-global clientId uniqueness.
+--   Self-registration (src/core/register.ts) creates an 'assistant-agent' EMPLOYEE
+--   per tenant but writes NO agent_card row, so it does not populate this column.
+--   Therefore: SELECT kc_client_id, COUNT(*) FROM choros.agent_card
+--              GROUP BY kc_client_id HAVING COUNT(*) > 1  →  ZERO rows on live data.
+--   The global UNIQUE index is addable on existing data WITHOUT failing.
+--
+-- FROZEN-CHECK / SEAM SAFETY:
+--   * NO new relation — index only over an existing relation. No CREATE TABLE, no
+--     new tenant relation, no user_task token. (defer-no-new-table / new-relation
+--     guards are not tripped.)
+--   * Migration slot 092 is the next free lexicographic slot after 091.
+--     The agent-hire-migration-seam check only constrains the 042 slot — untouched.
+--   * Idempotent: CREATE UNIQUE INDEX IF NOT EXISTS.
+--   * Owner: choros_migrator (inherits CURRENT_USER at apply time). No grant change
+--     needed — an index is not a grantable relation; existing agent_card grants hold.
+--
+-- INTERACTION WITH THE EXISTING PER-TENANT UNIQUE (032):
+--   The per-tenant UNIQUE (tenant_id, kc_client_id) stays — it is the conflict seam
+--   that insertAgentRows / AgentConflictError keys on for same-tenant 409s. This new
+--   GLOBAL index is STRICTLY STRONGER (a superset constraint): any pair the global
+--   index rejects the per-tenant one already permitted, never the reverse. Both
+--   coexist; the global one closes the cross-tenant gap.
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_card_kc_client_id_global_uq
+  ON choros.agent_card (kc_client_id);

@@ -481,12 +481,19 @@ export async function resolveAgentSlugFromAuth(
   const client = await pool.connect();
   try {
     const { rows } = await client.query<{ slug: string }>(
+      // T-0426 [SECURITY]: a global UNIQUE INDEX on agent_card(kc_client_id)
+      // (migration 092) schema-backs the realm-global clientId invariant, so this
+      // query matches AT MOST one row. The deterministic ORDER BY is belt-and-braces:
+      // were a colliding row to exist (e.g. a future scheme regression that drops
+      // the global UNIQUE), resolution stays STABLE/repeatable rather than random,
+      // so the failure is detectable instead of an intermittent cross-tenant leak.
       `SELECT e.slug
          FROM choros.agent_card ac
          JOIN choros.employee e
            ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
         WHERE ac.kc_client_id = $1
           AND e.kind = 'agent'
+        ORDER BY ac.tenant_id, ac.employee_id
         LIMIT 1`,
       [kcClientId],
     );
