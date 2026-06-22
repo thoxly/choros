@@ -28,6 +28,7 @@ import pg from "pg";
 import type { Grant } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 import type { GrantSource } from "../core/grant-resolver.js";
+import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 
 // ---------------------------------------------------------------------------
 // UUID shape guard (mirrors org.ts — defence-in-depth, T-0116 R-3)
@@ -327,4 +328,47 @@ export async function findTenantOwnerSlug(
     );
     return rows.length > 0 ? (rows[0]!.slug) : null;
   });
+}
+
+// ---------------------------------------------------------------------------
+// getFieldVisibilityPolicy — T-0419 (D7-3-FU): derive FieldVisibilityPolicy
+// from data_classification rows for a tenant (T-0081 / ADR §4.1).
+//
+// The FieldVisibilityPolicy.roleScopedFields is the set of JSONB field names
+// whose visibility is per-role-scoped. These are the fields classified as
+// 'confidential' or 'restricted' in data_classification — the two classes
+// where a caller's role must EXPLICITLY confer the field (facet narrowing)
+// to see it. 'public' and 'internal' fields remain on the union-floor
+// (whole-resource semantics; most-restrictive post-filter does not hide them).
+//
+// NO new store: data_classification (migration 017) already exists and is
+// RLS-isolated per tenant. This function is the edge-layer assembly described
+// in T-0081 ADR §4.1 / §11. No migration required.
+//
+// Honest-degrade: if the tenant has no data_classification rows (typical for
+// a fresh tenant or one that has not classified any fields), roleScopedFields
+// is empty → policy is a no-op (NF-1, byte-identical to pre-T-0419).
+// ---------------------------------------------------------------------------
+
+export async function getFieldVisibilityPolicy(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<FieldVisibilityPolicy> {
+  const roleScopedFields = await withTenantReadTx(pool, tenantId, async (client) => {
+    // Query all data_classification rows for the tenant (RLS-scoped).
+    // Fields classified as 'confidential' or 'restricted' are role-scoped:
+    // they are only visible when the actor's covering grant EXPLICITLY confers
+    // them (via resourceFacet.fields). 'public' and 'internal' fields use the
+    // union-floor (whole-resource semantics — not role-scoped).
+    const { rows } = await client.query<{ facet_field: string }>(
+      `SELECT DISTINCT facet_field
+         FROM choros.data_classification
+        WHERE tenant_id = $1
+          AND class IN ('confidential', 'restricted')`,
+      [tenantId],
+    );
+    return new Set(rows.map((r) => r.facet_field));
+  });
+
+  return { roleScopedFields };
 }

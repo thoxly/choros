@@ -51,6 +51,8 @@ import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
+// T-0419 (D7-3-FU): production field-visibility resolver — grants + policy from DB.
+import { getGrantsForSubject, getFieldVisibilityPolicy } from "./db/grants-dao.js";
 import { dormantLlmPort } from "./core/llm-port.js";
 // T-0363 (E17): DeepSeek / OpenAI-compatible LLM adapter (composition-root only — RL-3).
 import { OpenAILlmPort } from "./adapters/openai-llm-port.js";
@@ -604,6 +606,18 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
+      // T-0419 (D7-3-FU): field-visibility resolver — active in production.
+      // coveringGrants: same getGrantsForSubject DAO used by the full PDP
+      //   (single-resolver constraint — no second authority path).
+      // policy: derived from data_classification rows for the tenant (T-0081 §4.1):
+      //   fields classified 'confidential'/'restricted' become roleScopedFields;
+      //   no new store — projection of existing migration-017 rows.
+      // Honest-degrade: if grantsPool is null (no DB), this dep is absent and
+      //   redaction degrades to a no-op (NF-1, block above guards).
+      resolveFieldVisibility: async (actorSlug: string, tenantId: string, nowMs: number) => ({
+        coveringGrants: await getGrantsForSubject(grantsPool, tenantId, actorSlug, nowMs),
+        policy: await getFieldVisibilityPolicy(grantsPool, tenantId),
+      }),
       // T-0351 E16: wire the shared flowableClient for on_create trigger.
       flowable: flowableClient ?? undefined,
     });

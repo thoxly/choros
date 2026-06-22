@@ -89,9 +89,12 @@ import type { FlowableClient } from "../core/flowable-client.js";
 import {
   parsePaginationParams,
   encodeRecordsCursor,
+  applyFieldVisibilityRedaction,
   MAX_PAGE_SIZE,
   type RecordsPage,
 } from "../core/data-access-port.js";
+import type { Grant } from "../core/grant-lattice.js";
+import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -149,6 +152,34 @@ export type WriteFacetResolver = (
   recordId: string,
 ) => Promise<string[] | undefined>;
 
+/**
+ * Resolve the caller's field-visibility context for the records LIST.
+ *
+ * Returns the actor's covering grants (already resolved via the SAME
+ * getGrantsForSubject / makeDbGrantSource path the rest of the PDP uses —
+ * single-resolver constraint) and the FieldVisibilityPolicy describing which
+ * JSONB keys are role-scoped.
+ *
+ * HONEST-DEGRADE: OPTIONAL on RecordRoutesDeps. When absent, the list endpoint
+ * calls applyFieldVisibilityRedaction with an empty policy (roleScopedFields=∅)
+ * — a no-op that is byte-identical to pre-T-0419 behaviour (NF-1). Redaction
+ * activates the moment this resolver is injected.
+ *
+ * NO SECOND AUTHORITY PATH: the grants returned here MUST come from the same
+ * GrantSource/getGrantsForSubject DAO that makeDbGrantSource uses (T-0331 /
+ * T-0419 single-resolver). The policy is an assembled projection of existing
+ * record_schema + data_classification rows, not a new store.
+ *
+ * @param actorSlug  the caller identity (dev-user slug / OIDC sub)
+ * @param tenantId   the caller's resolved tenant
+ * @param nowMs      current epoch ms (same instant for effective-window filtering)
+ */
+export type FieldVisibilityResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<{ coveringGrants: Grant[]; policy: FieldVisibilityPolicy }>;
+
 export interface RecordRoutesDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
@@ -161,6 +192,21 @@ export interface RecordRoutesDeps {
    * does not confer.
    */
   resolveWriteFacet?: WriteFacetResolver;
+  /**
+   * T-0419 [D7-3-FU] — OPTIONAL field-visibility resolver for the records LIST.
+   *
+   * When supplied, the LIST handler resolves the actor's covering grants + policy
+   * via this resolver, then calls applyFieldVisibilityRedaction on each row's
+   * `data` BEFORE serialization. Redacted JSONB keys are PHYSICALLY ABSENT from
+   * the response (not null — F-3). This closes PD-19's "agent widget field-leak"
+   * for the list surface.
+   *
+   * When absent (honest-degrade): applyFieldVisibilityRedaction is called with
+   * an empty policy (roleScopedFields=∅) — a no-op, byte-identical to
+   * pre-T-0419 (NF-1). No second authority path: the resolver MUST source
+   * grants from the SAME getGrantsForSubject DAO (single-resolver constraint).
+   */
+  resolveFieldVisibility?: FieldVisibilityResolver;
   /**
    * T-0351 E16 (on_create trigger): OPTIONAL FlowableClient for process-start
    * co-located with record creation. When supplied, POST /api/records checks for
@@ -996,7 +1042,7 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, resolveWriteFacet, flowable } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, flowable } = deps;
 
   // Resolve the caller's field write-mask for a record (FF-10 / AC-10 hook-point).
   // Honest-degrade: when no resolveWriteFacet is wired (current bootstrap), every
@@ -1095,21 +1141,58 @@ export function registerRecordRoutes(
   //
   // Tenant isolation: actor resolved → tenantId → RLS inside withTenantTx.
   // Actor narrowing: actor resolves to its own tenant only (resolveActorTenant).
-  // Field-visibility: applyFieldVisibilityRedaction is imported from the
-  //   data-access port but is NOT invoked on this list endpoint. Redaction is
-  //   deferred to a follow-up increment. A future change can call it here and
-  //   inject a real FieldVisibilityPolicy without altering the response shape.
+  // Field-visibility (T-0419 [D7-3-FU]): applyFieldVisibilityRedaction is applied
+  //   to each row's `data` BEFORE serialization. When resolveFieldVisibility is
+  //   injected (production), the actor's covering grants + FieldVisibilityPolicy
+  //   are resolved via the SAME GrantSource/getGrantsForSubject path used by the
+  //   full PDP (single-resolver constraint — no second authority path). When the
+  //   dep is absent (honest-degrade), an empty policy is used and redaction is a
+  //   no-op (NF-1, byte-identical to pre-T-0419). Redacted JSONB keys are
+  //   PHYSICALLY ABSENT from the response (not null, ADR §6.1 F-3).
   router.register("GET", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
     const { applicationId, registryDefId, limit, cursor } = parseRecordsListQuery(req);
 
     const tenantId = await resolveActorTenant(actor);
+    const nowMs = Date.now();
+
+    // Resolve field-visibility context once per request (not per row).
+    // Honest-degrade: no resolver → empty policy → no-op redaction (NF-1).
+    const EMPTY_FV_POLICY: FieldVisibilityPolicy = { roleScopedFields: new Set() };
+    let fvGrants: Grant[] = [];
+    let fvPolicy: FieldVisibilityPolicy = EMPTY_FV_POLICY;
+    if (resolveFieldVisibility !== undefined) {
+      const fv = await resolveFieldVisibility(actor, tenantId, nowMs);
+      fvGrants = fv.coveringGrants;
+      fvPolicy = fv.policy;
+    }
+
     const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor);
+
+    // Apply field-visibility redaction to each row's data before serialization.
+    // unionVisible = all keys in the row's data object (pre-T-0081 union floor:
+    // the caller has already passed the covering-grant check via the DB query;
+    // whole-resource semantics mean all stored keys are in unionVisible unless the
+    // most-restrictive role-policy hides them). Redacted keys are physically absent.
+    const serialized = page.items.map((row) => {
+      const base = serializeRecord(row);
+      if (fvPolicy.roleScopedFields.size === 0) {
+        // Fast path: empty policy → no-op (NF-1, avoids object churn per row).
+        return base;
+      }
+      const rawData =
+        row.data !== null && typeof row.data === "object" && !Array.isArray(row.data)
+          ? (row.data as Record<string, unknown>)
+          : {};
+      const unionVisible = new Set(Object.keys(rawData));
+      const { redacted } = applyFieldVisibilityRedaction(rawData, fvGrants, unionVisible, fvPolicy);
+      return { ...base, data: redacted };
+    });
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
-      records: page.items.map(serializeRecord),
+      records: serialized,
       nextCursor: page.nextCursor,
       limit: page.limit,
     }));
