@@ -21,7 +21,22 @@
  *
  * НЕ является публичной точкой расширения: перечень источников varNames
  * закреплён в bpmn-linter.ts (ADR §2.4); эта функция — только compat-логика.
+ *
+ * T-0399 [D7-K]: BindingField extended to carry the binding CONTRACT
+ * (PD-18) — contract kind + presentation + enum options. These are additive,
+ * OPTIONAL fields: existing rows (key/type/required/label only) remain valid;
+ * the contract is the single source of truth the unified renderer keys off.
+ * `options` carries the enum value list end-to-end so an enum no longer
+ * silently renders as a text input in the inbox (the snapshot bug, spec §2).
+ * The catalog (binding-contract-catalog.ts) is a pure sibling module, so
+ * importing it keeps binding-compat.ts pure (no I/O — fitness NB-3 intact).
  */
+
+import {
+  isBindingContractKind,
+  type BindingContractKind,
+  type PresentationMode,
+} from "./binding-contract-catalog.js";
 
 // ---------------------------------------------------------------------------
 // Exported types (frozen public surface — ADR §6)
@@ -32,6 +47,26 @@ export interface BindingField {
   type: string;
   required: boolean;
   label?: string;
+  /**
+   * T-0399 [D7-K]: the binding contract kind (PD-18). When absent, consumers
+   * derive it from `type` via the catalog (scalar/enum). Carried so structural
+   * contracts (relation/collection/…) and Floor-2 widgets bind through the
+   * single catalog vocabulary, not a local type map.
+   */
+  contract?: BindingContractKind;
+  /**
+   * T-0399 [D7-K]: presentation-mode override. Must be a mode the contract
+   * supports (resolvePresentation enforces this on read); when absent, the
+   * contract's defaultPresentation is used.
+   */
+  presentation?: PresentationMode;
+  /**
+   * T-0399 [D7-K]: enum option values. Previously dropped when FormBuilder
+   * snapshotted record_schema into form_binding.fields → an enum rendered as a
+   * text input in the inbox (spec §2 silent bug). Carrying it fixes the
+   * authoring side: the renderer now sees the options and draws a <select>.
+   */
+  options?: string[];
 }
 
 export type BindingViolationType = "missing_in_schema" | "missing_in_bpmn";
@@ -212,11 +247,39 @@ export function validateBindingFields(raw: unknown): { ok: true; fields: Binding
       continue;
     }
 
+    // T-0399 [D7-K]: contract (optional) — must be a known catalog kind if present.
+    const contract = obj["contract"];
+    if (contract !== undefined && !isBindingContractKind(contract)) {
+      errors.push({ index: i, field: item, reason: `field.contract "${String(contract)}" is not a known binding-contract kind` });
+      continue;
+    }
+
+    // T-0399 [D7-K]: presentation (optional) — a string if present. The exact
+    // mode is reconciled against the contract on read (resolvePresentation), so
+    // a presentation that doesn't fit silently falls back rather than 400-ing.
+    const presentation = obj["presentation"];
+    if (presentation !== undefined && typeof presentation !== "string") {
+      errors.push({ index: i, field: item, reason: "field.presentation must be a string if present" });
+      continue;
+    }
+
+    // T-0399 [D7-K]: options (optional) — array of strings if present (enum values).
+    const options = obj["options"];
+    if (options !== undefined) {
+      if (!Array.isArray(options) || !options.every((o) => typeof o === "string")) {
+        errors.push({ index: i, field: item, reason: "field.options must be an array of strings if present" });
+        continue;
+      }
+    }
+
     fields.push({
       key,
       type,
       required,
       ...(typeof label === "string" ? { label } : {}),
+      ...(isBindingContractKind(contract) ? { contract } : {}),
+      ...(typeof presentation === "string" ? { presentation: presentation as PresentationMode } : {}),
+      ...(Array.isArray(options) ? { options: options as string[] } : {}),
     });
   }
 

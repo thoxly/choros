@@ -27,6 +27,26 @@ import {
 } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { parseRecordSchema, FIELD_TYPES } from '../screens/apps-schema.js';
+// T-0399 [D7-K]: derive the binding contract so the snapshot carries it (+options)
+// into form_binding.fields — fixing the silent enum→text-input bug (spec §2).
+// Uses the web-local mirror of the catalog (field-contract.js) — not the server
+// src/core/ module — to keep the vite build self-contained (layer boundary).
+import { deriveContractFromFieldType } from './field-contract.js';
+
+// Map an apps-schema field `type` (select/date/boolean/number/integer/string) to
+// the canonical FieldType the catalog speaks. A field with `options` is an enum.
+function fieldTypeForContract(field) {
+  if (Array.isArray(field?.options) && field.options.length > 0) return 'enum';
+  switch (field?.type) {
+    case 'select': return 'enum';
+    case 'boolean': return 'boolean';
+    case 'number':
+    case 'integer': return 'number';
+    case 'date': return 'date';
+    case 'textarea': return 'textarea';
+    default: return 'text';
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -351,18 +371,28 @@ function FormBuilder() {
     setFormErrors(errors);
     if (Object.keys(errors).length > 0) return;
 
-    // Build BindingField[] from included fields in order
+    // Build BindingField[] from included fields in order.
+    // T-0399 [D7-K]: carry the binding CONTRACT (PD-18) + enum options +
+    // presentation into the snapshot. Previously `options` were dropped here, so
+    // an enum re-rendered as a plain text input in the inbox (spec §2 bug). The
+    // contract + options now travel end-to-end through form_binding.fields.
     const bindingFields = configOrder
       .filter((k) => configs[k]?.included !== false)
       .map((k, idx) => {
         const f = fields.find((ff) => ff.key === k);
         const cfg = configs[k] || {};
+        const ft = fieldTypeForContract(f);
+        const { kind, presentation } = deriveContractFromFieldType(ft);
+        const hasOptions = Array.isArray(f?.options) && f.options.length > 0;
         return {
           key: k,
           type: f?.type ?? 'string',
           required: cfg.required ?? f?.required ?? false,
           label: cfg.label || f?.title || k,
           display_order: idx,
+          contract: kind,
+          presentation,
+          ...(hasOptions ? { options: f.options.filter((o) => typeof o === 'string') } : {}),
         };
       });
 
