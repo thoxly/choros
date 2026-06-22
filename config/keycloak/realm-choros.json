@@ -69,10 +69,14 @@
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "access.token.lifespan": "300",
-        "post.logout.redirect.uris": "http://localhost:3000/*##http://localhost:8080/*"
+        "post.logout.redirect.uris": "http://localhost:3000/*##http://localhost:8080/*##http://100.121.76.86:3000/*"
       },
-      "redirectUris": ["http://localhost:3000/*", "http://localhost:8080/*"],
-      "webOrigins": ["http://localhost:3000", "http://localhost:8080", "+"],
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:8080/*",
+        "http://100.121.76.86:3000/*"
+      ],
+      "webOrigins": ["http://localhost:3000", "http://localhost:8080", "http://100.121.76.86:3000", "+"],
       "protocolMappers": [
         {
           "name": "actor-type-mapper",
@@ -463,5 +467,72 @@
         "realm-management": ["manage-users", "view-users"]
       }
     }
-  ]
+  ],
+  "userProfile": {
+    "attributes": [
+      {
+        "name": "username",
+        "displayName": "${username}",
+        "validations": {
+          "length": { "min": 3, "max": 255 },
+          "username-prohibited-characters": {}
+        }
+      },
+      {
+        "name": "email",
+        "displayName": "${email}",
+        "validations": {
+          "email": {},
+          "length": { "max": 255 }
+        }
+      },
+      {
+        "name": "firstName",
+        "displayName": "${firstName}",
+        "required": {
+          "roles": []
+        },
+        "permissions": {
+          "view": ["admin", "user"],
+          "edit": ["admin", "user"]
+        }
+      },
+      {
+        "name": "lastName",
+        "displayName": "${lastName}",
+        "required": {
+          "roles": []
+        },
+        "permissions": {
+          "view": ["admin", "user"],
+          "edit": ["admin", "user"]
+        }
+      },
+      {
+        "name": "actor_type",
+        "displayName": "Actor Type",
+        "group": "choros",
+        "required": {
+          "roles": []
+        },
+        "permissions": {
+          "view": ["admin"],
+          "edit": ["admin"]
+        },
+        "validations": {
+          "options": { "options": ["human", "agent"] }
+        },
+        "annotations": {
+          "inputType": "select"
+        }
+      }
+    ],
+    "groups": [
+      {
+        "name": "choros",
+        "displayHeader": "Choros",
+        "displayDescription": "Choros-specific attributes (DEV ONLY)"
+      }
+    ]
+  }
 }
