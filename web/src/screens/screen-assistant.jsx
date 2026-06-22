@@ -32,7 +32,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Button, EmptyState, LoadingState, ErrorState, Skeleton,
+  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -655,12 +655,19 @@ export default function AssistantScreen() {
   // Активный тред — из URL-параметра или стейта
   const [activeThread, setActiveThread] = useState(null);
 
-  // Синхронизация активного треда с URL
+  // Синхронизация активного треда с URL.
+  // ВАЖНО: если paramThreadId совпадает с уже активным тредом (который мог быть
+  // lazy-create-hidden — 0 сообщений, поэтому не попал в список), НЕ обнуляем
+  // activeThread. Это предотвращает race, при котором handleCreate ставит
+  // activeThread сразу после navigate(`/assistant/<id>`), а useEffect сбрасывает
+  // его в null, потому что новый тред ещё скрыт (нет сообщений → не в списке).
   useEffect(() => {
     if (!threads) return;
     if (paramThreadId) {
       const found = threads.find((t) => t.id === paramThreadId);
-      setActiveThread(found || null);
+      // If the thread isn't in the visible list but matches the current activeThread,
+      // keep the current activeThread (e.g. lazy-create: 0 messages, not yet visible).
+      setActiveThread((prev) => found ?? (prev?.id === paramThreadId ? prev : null));
     } else {
       setActiveThread(null);
     }
@@ -703,14 +710,27 @@ export default function AssistantScreen() {
     patchThread(id, { pinned });
   }, [patchThread]);
 
-  // T-0384: delete thread
-  const handleDelete = useCallback((id) => {
+  // T-0384: delete confirmation state.
+  // Stores the thread id pending deletion (null = dialog closed).
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const pendingDeleteThread = threads?.find((t) => t.id === pendingDeleteId) || null;
+
+  // Called when the user clicks ✕ — opens the confirmation dialog.
+  const handleDeleteRequest = useCallback((id) => {
+    setPendingDeleteId(id);
+  }, []);
+
+  // Called when the user confirms deletion in the dialog.
+  const handleDeleteConfirm = useCallback(() => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
     deleteThread(id);
     if (activeThread?.id === id) {
       setActiveThread(null);
       navigate('/assistant');
     }
-  }, [deleteThread, activeThread, navigate]);
+  }, [pendingDeleteId, deleteThread, activeThread, navigate]);
 
   const handleSend = useCallback((text, ctxRef) => {
     send(text, ctxRef);
@@ -747,7 +767,7 @@ export default function AssistantScreen() {
           onRetry={loadThreads}
           onRename={handleRename}
           onPin={handlePin}
-          onDelete={handleDelete}
+          onDelete={handleDeleteRequest}
         />
 
         {/* Контекст-aware вход: если есть contextRef в state, показываем баннер */}
@@ -799,6 +819,22 @@ export default function AssistantScreen() {
           <NothingSelected onCreate={handleCreate} />
         )}
       </section>
+
+      {/* T-0384: подтверждение удаления разговора */}
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="Удалить разговор?"
+        message={
+          pendingDeleteThread
+            ? `Разговор «${pendingDeleteThread.title}» будет удалён. Это действие нельзя отменить.`
+            : 'Разговор будет удалён. Это действие нельзя отменить.'
+        }
+        confirmLabel="Удалить"
+        cancelLabel="Отмена"
+        tone="danger"
+        onConfirm={handleDeleteConfirm}
+        onClose={() => setPendingDeleteId(null)}
+      />
     </div>
   );
 }

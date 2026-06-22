@@ -678,4 +678,58 @@ describe("assistant thread UX routes (T-0384)", () => {
     );
     expect(badSql).toHaveLength(0);
   });
+
+  // -------------------------------------------------------------------------
+  // AC-T384-19: Cross-user ownership guard — PATCH and DELETE by another user
+  //             in the same tenant must return 404 and must NOT append any
+  //             tombstone or mutation event for the original owner's thread.
+  // -------------------------------------------------------------------------
+  it("AC-T384-19: PATCH and DELETE by a different subject in same tenant return 404 (ownership guard)", async () => {
+    await start();
+
+    const aliceHeader = { [DEV_USER_HEADER]: "e-alice" };
+    const bobHeader   = { [DEV_USER_HEADER]: "e-bob" };
+
+    // Alice creates a thread and sends the first message to make it visible.
+    const aliceThreadId = await createThread("Разговор Алисы");
+    // Note: createThread() uses authHeader which is e-alice — consistent.
+    await sendMessage(aliceThreadId, "Первое сообщение Алисы");
+
+    // Count events owned by Alice before Bob's attempts.
+    const eventsBefore = store.rows.filter((r) => r.subject === "e-alice").length;
+
+    // Bob attempts PATCH on Alice's thread — must get 404.
+    const patchRes = await httpReq(
+      "PATCH",
+      `${base}/api/assistant/threads/${aliceThreadId}`,
+      bobHeader,
+      { title: "Боб меняет название" },
+    );
+    expect(patchRes.status).toBe(404);
+
+    // Bob attempts DELETE on Alice's thread — must get 404.
+    const deleteRes = await httpReq(
+      "DELETE",
+      `${base}/api/assistant/threads/${aliceThreadId}`,
+      bobHeader,
+    );
+    expect(deleteRes.status).toBe(404);
+
+    // No new events must have been appended for Alice's thread as a result of
+    // Bob's unauthorized attempts.
+    const eventsAfter = store.rows.filter((r) => r.subject === "e-alice").length;
+    expect(eventsAfter).toBe(eventsBefore);
+
+    // Specifically, no tombstone event for Alice's thread.
+    const tombstone = store.rows.find(
+      (r) => r.type === "assistant.thread.deleted" && r.payload["thread_id"] === aliceThreadId,
+    );
+    expect(tombstone).toBeUndefined();
+
+    // Alice's thread must still appear in Alice's list (not deleted).
+    const listRes = await httpReq("GET", `${base}/api/assistant/threads`, aliceHeader);
+    expect(listRes.status).toBe(200);
+    const { threads: aliceThreads } = listRes.json as { threads: Array<{ id: string }> };
+    expect(aliceThreads.find((t) => t.id === aliceThreadId)).toBeDefined();
+  });
 });
