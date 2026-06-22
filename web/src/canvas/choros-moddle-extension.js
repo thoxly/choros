@@ -59,6 +59,22 @@
  *          "targetKind": "next" }, ...]
  *     Styling lives OFF-canvas (in this attribute), not in the flow conditions.
  *     Round-trip: panel reads/writes this JSON blob; resolver reads targetKind.
+ *
+ * T-0325 additions:
+ *
+ *   choros:assignedRoleId (on bpmn:Activity)
+ *     UUID of the org role assigned to execute this step.
+ *     Sourced from GET /api/org/tenant-state → roles[].id (real data, no mock).
+ *     Round-trip: panel writes → saveXML emits → importXML reads back.
+ *     Dispatcher reads this to claim the step for the right role holder.
+ *
+ *   choros:byoEndpoint (on bpmn:Activity)
+ *     BYO LLM base URL for agent tasks (e.g. "https://llm.internal/v1").
+ *     Only meaningful when choros:executorType="agent".
+ *
+ *   choros:byoModel (on bpmn:Activity)
+ *     Model identifier for the BYO LLM endpoint.
+ *     Only meaningful when choros:executorType="agent".
  */
 const ChorosModdleDescriptor = {
   name: 'Choros BPMN Extension',
@@ -80,6 +96,34 @@ const ChorosModdleDescriptor = {
       properties: [
         {
           name: 'executorType',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * T-0325: UUID of the org role assigned to this step.
+           * Written by the properties panel from the real /api/org/tenant-state
+           * roles list. Serialised as choros:assignedRoleId="<uuid>" in XML.
+           */
+          name: 'assignedRoleId',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * T-0325: BYO LLM base URL for agent tasks.
+           * Only meaningful when executorType="agent".
+           */
+          name: 'byoEndpoint',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * T-0325: BYO LLM model identifier.
+           * Only meaningful when executorType="agent".
+           */
+          name: 'byoModel',
           isAttr: true,
           type: 'String',
         },
