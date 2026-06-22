@@ -154,6 +154,22 @@ export const NAV = [
       { id: "budgets",       label: "Бюджеты",     icon: "budget", soon: true,   status: "soon" },
     ],
   },
+  // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
+  // GET /api/llm-config (live), PUT /api/llm-config (live).
+  // Секрет-хэндл настраивается отдельно через экран «Агенты» → «Привязать LLM».
+  {
+    group: "Конфигурация",
+    space: "work",
+    items: [
+      {
+        id: "llm-config",
+        label: "LLM-подключение",
+        icon: "assistant",
+        screen: true,
+        status: "live",
+      },
+    ],
+  },
 ];
 
 /**

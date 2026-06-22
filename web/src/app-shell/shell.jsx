@@ -33,6 +33,8 @@ import ProcessEditorScreen from '../screens/screen-process-editor.jsx';
 import AgentsScreen from '../screens/screen-agents.jsx';
 import RecordDetailScreen from '../screens/screen-record-detail.jsx';
 import AssistantScreen from '../screens/screen-assistant.jsx';
+// T-0382 (D5): LLM connection screen — per-tenant BYO LLM configuration.
+import LlmConfigScreen from '../screens/screen-llm-config.jsx';
 
 export { Icon };
 
@@ -74,6 +76,8 @@ const SCREEN_META = {
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
+  // T-0382 (D5): LLM connection screen.
+  "llm-config": { crumb: ["Конфигурация", "LLM-подключение"] },
 };
 
 /**
@@ -730,6 +734,8 @@ function AppShell() {
             {/* T-0358: E17 Ассистент shell — треды-чаты с AI-агентом. LLM = T-0359/T-0360. */}
             <Route path="/assistant" element={<AssistantScreen />} />
             <Route path="/assistant/:threadId" element={<AssistantScreen />} />
+            {/* T-0382 (D5): LLM connection screen — per-tenant BYO LLM configuration. */}
+            <Route path="/llm-config" element={<LlmConfigScreen />} />
           </Routes>
         </div>
       </main>

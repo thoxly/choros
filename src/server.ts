@@ -56,6 +56,10 @@ import { validateSecretHandleShape, redactHandle, type SecretResolverPort } from
 // T-0363 (E17): Analyst production ports.
 import { setAnalystPorts } from "./core/assistant-analyst.js";
 import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
+// T-0382 (D5): per-tenant LLM config (BYO) — read from agent_card at call time.
+import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
+// T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
+import { registerLlmConfigRoutes } from "./http/llm-config.js";
 
 const { Pool } = pg;
 
@@ -112,21 +116,91 @@ const deepseekSecretResolver: SecretResolverPort = {
 };
 
 /**
- * LlmPort factory: returns a real OpenAILlmPort per tenant when DEEPSEEK_API_KEY
- * is configured, or dormantLlmPort (→ 503) when absent.
- * Each call creates a fresh port so tenant isolation is preserved even if
- * per-tenant config diverges in a future Stage-2 BYO-key extension.
+ * T-0382 (D5): env-backed resolver that resolves handles of the form
+ * "env://SOME_VAR" by reading process.env at call time.  This covers the
+ * backward-compatible global-key path AND the case where a tenant stores a
+ * handle like "env://MY_LLM_KEY" pointing at a deployment-level env var.
+ *
+ * When the DB-backed per-tenant config is used, the handle shape is the
+ * opaque value written by the tenant admin via POST /api/agents/:id/secret-handle
+ * (e.g. "vault://secret/llm/my-agent" or "env://TENANT_LLM_KEY").
+ * The resolver checks both patterns.
  */
-function makeLlmPortFactory(tenantId: string) {
+const tenantSecretResolver: SecretResolverPort = {
+  async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
+    // Pattern 1: env:// reference (reads named env var at call time).
+    if (handle.startsWith("env://")) {
+      const varName = handle.slice("env://".length);
+      const key = process.env[varName];
+      if (!key) {
+        throw new Error(`[T-0382] Env var not found for handle: ${redactHandle(handle)}`);
+      }
+      return key;
+    }
+    // Pattern 2: legacy DEEPSEEK_HANDLE for backward compat.
+    if (handle === DEEPSEEK_HANDLE) {
+      const key = process.env["DEEPSEEK_API_KEY"];
+      if (!key) {
+        throw new Error(`[T-0382] DeepSeek API key not found (handle: ${redactHandle(handle)})`);
+      }
+      return key;
+    }
+    // Other handle shapes (vault://, etc.) are not resolvable at the env layer.
+    // Return a descriptive error so the dormant path activates gracefully.
+    throw new Error(
+      `[T-0382] Cannot resolve handle scheme at env layer: ${redactHandle(handle)}. ` +
+      `Use an env:// handle or wire a vault resolver.`,
+    );
+  },
+};
+
+/**
+ * T-0382 (D5): per-tenant LLM port factory (async).
+ *
+ * Priority order:
+ *   1. Per-tenant agent_card config (all three llm_* fields non-null AND handle valid).
+ *   2. Global env fallback (DEEPSEEK_API_KEY — backward-compatible T-0363 path).
+ *   3. dormantLlmPort → 503 (fail-closed default).
+ *
+ * Each call queries the DB fresh so live config changes are picked up without
+ * a restart (no caching — the per-message latency hit is a single indexed
+ * SELECT on a small table; acceptable per PD-5).
+ *
+ * Called only from buildRouter's assistant route wiring and llm-config route —
+ * both in src/server.ts (composition root). NOT called from core or adapters.
+ */
+async function makeLlmPortFactory(
+  tenantId: string,
+  grantsPool: pg.Pool | null,
+) {
+  // 1. Attempt per-tenant DB config.
+  const tenantCfg = await loadTenantLlmConfig(grantsPool, tenantId);
+  if (tenantCfg) {
+    const verdict = validateSecretHandleShape(tenantCfg.llm_secret_handle);
+    if (verdict.ok) {
+      return new OpenAILlmPort({
+        endpoint: tenantCfg.llm_endpoint,
+        model:    tenantCfg.llm_model,
+        secretHandle: tenantCfg.llm_secret_handle,
+        tenantId,
+        secretResolver: tenantSecretResolver,
+      });
+    }
+    // Invalid handle shape in DB → fall through to env fallback (log but don't crash).
+  }
+
+  // 2. Global env fallback (T-0363 backward-compatible path).
   if (DEEPSEEK_API_KEY) {
     return new OpenAILlmPort({
       endpoint: DEEPSEEK_BASE_URL,
-      model: DEEPSEEK_MODEL,
+      model:    DEEPSEEK_MODEL,
       secretHandle: DEEPSEEK_HANDLE,
       tenantId,
       secretResolver: deepseekSecretResolver,
     });
   }
+
+  // 3. No config → dormant (fail-closed, three-lock §6).
   return dormantLlmPort;
 }
 
@@ -615,6 +689,8 @@ function buildRouter(
 
   // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
   // T-0363 (b): llmPortFactory now wires DeepSeek when DEEPSEEK_API_KEY is set.
+  // T-0382 (D5): llmPortFactory is now async and reads per-tenant agent_card config
+  //   first, falling back to global env (backward-compatible).
   // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
   // APPEND-ONLY: the last register* call before setFallback.
   if (grantsPool) {
@@ -622,8 +698,20 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
-      // T-0363: real DeepSeek port when key is set; dormantLlmPort → 503 when absent.
-      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId),
+      // T-0382: async factory — reads per-tenant agent_card llm_* then falls back
+      // to global DEEPSEEK_API_KEY env; dormantLlmPort → 503 when neither is set.
+      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId, grantsPool),
+    });
+  }
+
+  // T-0382 (D5): LLM connection screen backend (GET/PUT per-tenant LLM config).
+  // Additive — registers two routes to read/write llm_endpoint+llm_model on agent_card.
+  // Secret-handle binding remains via the existing POST /api/agents/:id/secret-handle.
+  if (grantsPool) {
+    registerLlmConfigRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
     });
   }
 
