@@ -58,7 +58,8 @@
 import type { IncomingMessage } from "node:http";
 import type pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthMode } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, getAuthMode, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { checkRole, withTenantTx } from "./binding.js";
 import {
   applyFloor1Edit,
@@ -94,7 +95,34 @@ function assertNonEmptyText(value: string, label: string): void {
   }
 }
 
-function extractActor(req: IncomingMessage): string {
+// T-0420 [SECURITY] P1: mode-aware caller identity (mirrors binding.ts::extractActorSlug
+// and the T-0418 P0 process-defs::extractActor). floor1-editor is a process-authoring
+// surface (UI + agents) gated by the process_designer role via checkRole. The route is now
+// withAuth-wrapped (Bearer validated + getAuthContext populated BEFORE this runs), so the
+// identity feeding authorizeEditor is the VALIDATED token in keycloak mode, not an
+// unauthenticated x-dev-user header.
+//   - keycloak: identity from the validated token (sub/preferred_username → employee.slug);
+//     null → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+//   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
+async function extractActor(req: IncomingMessage, pool: pg.Pool | null): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    // A token authenticated (keycloak). Resolve the slug from it — never fall
+    // through to x-dev-user once an identity was validated. Without a pool we
+    // cannot resolve and must fail closed (503), matching authorizeEditor.
+    if (!pool) {
+      throw new HttpError(
+        503,
+        "NO_DATABASE",
+        "identity resolution requires a database connection in keycloak auth mode",
+      );
+    }
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -378,12 +406,14 @@ export function registerFloor1EditorRoutes(
   //
   // Response 200: { fields: BindingField[], uiSchema: FormUiSchema }
   //
+  // T-0420 [SECURITY] P1: withAuth-wrapped — keycloak mode REQUIRES a valid Bearer
+  // (401 otherwise; no x-dev-user bypass); dev mode is a no-op pass-through.
   router.register(
     "POST",
     "/tenants/:tenantId/processes/:processKey/forms/:formKey/edits",
-    async (req, res, _params) => {
-      // Auth check (→ 401 if absent)
-      const actorId = extractActor(req);
+    withAuth(async (req, res, _params) => {
+      // Auth check — actor derived from the validated token (keycloak) or x-dev-user (dev).
+      const actorId = await extractActor(req, pool);
 
       // URL parsing
       const urlParts = extractEditorUrlParts(req.url ?? "");
@@ -463,6 +493,6 @@ export function registerFloor1EditorRoutes(
           uiSchema: result.uiSchema,
         }),
       );
-    },
+    }),
   );
 }

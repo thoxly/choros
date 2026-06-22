@@ -90,6 +90,31 @@ function refuseIfNotEntitled(
 /**
  * Register the vendor activation + vendor-service endpoints.
  *
+ * T-0420 [SECURITY] P1 — vendor-signed trust domain (ADR T-0328 §3.5):
+ *   These `/vendor/*` routes INTENTIONALLY bypass `withAuth`. They are NOT a
+ *   keycloak-SSO surface: the vendor control plane is a separate trust domain
+ *   from a tenant's Keycloak user directory, so forcing it through `withAuth`
+ *   would conflate two trust domains (ADR §6 "Putting vendor-activation behind
+ *   Keycloak — Rejected").
+ *
+ *   The credential is the signed **activation key** (`choros1.<payload>.<sig>`),
+ *   verified offline by `verifyKey` (src/vendor/activation.ts) using an Ed25519
+ *   signature over the canonical payload bytes (node:crypto `verify`). The check
+ *   is **cryptographic and fail-closed**: any signature mismatch / malformed
+ *   envelope / parse error / unparseable validity window resolves to
+ *   `state: "invalid"`, which `refuseIfNotEntitled` maps to `403 ACTIVATION_INVALID`.
+ *   No/expired key → `autonomous` → `402 PAYMENT_REQUIRED`. There is no path where
+ *   an unsigned or badly-signed key is honoured as entitled — the vendor-service
+ *   calls only proceed when `isEntitled(status, service)` is true, which requires
+ *   `state: "active"` (valid signature AND in-term).
+ *
+ *   ALLOWLIST NOTE (for a future "every src/http/* route is withAuth-or-allowlisted"
+ *   fitness guard, ADR §4.1 step 6): `/vendor/activation`, `/vendor/updates/check`,
+ *   `/vendor/agentic-ops/run`, `/vendor/support/ticket` are the documented
+ *   vendor-signed bypass — they are gated by the activation-key signature, not by a
+ *   Keycloak JWT. The stronger control (ingress mTLS / network ACL isolating these
+ *   from tenant traffic) is host-level and tracked separately.
+ *
  * @param router    the app router.
  * @param provider  optional ActivationStatus provider (injectable for tests).
  *                  Defaults to reading env/fs via currentActivationStatus().
