@@ -44,6 +44,7 @@ import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
+import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
@@ -376,6 +377,10 @@ function buildRouter(
     // Thin orchestration over the existing kernel (grants/substitution/validateNarrowing/
     // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
     registerRightsIntentRoutes(router, grantsPool);
+    // Register dual-control change-request API (T-0390 D2-FU).
+    // Must be registered BEFORE intents :id catch-alls — routes are exact paths
+    // /api/rights/change-requests and /api/rights/change-requests/:id/approve|reject.
+    registerRightsChangeRequestRoutes(router, grantsPool);
   }
 
   // FlowableClient for engine write-paths (start-instance + process-def publish).
