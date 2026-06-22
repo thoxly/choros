@@ -9,7 +9,11 @@
  *   2. Role pool — confirmed holders in window (getRoleSlugsForActor / role membership).
  *      The pool is the full set of slugs holding the named role.
  *   3. Substitution — a holder is absent → their substitute takes the task.
- *      `resolveSubstitution` from src/core/substitution.ts is WIRED HERE.
+ *      The step is gated behind an optional `substitution` port in ResolverDeps.
+ *      The DB-backed SubstitutionSource (which resolves UUIDs for absent_employee_id
+ *      and role_id from the substitution_rule table) is a follow-up task (T-0053).
+ *      Until that port is injected (it is NOT wired in production today), this step
+ *      is a no-op and control falls through to step 4.
  *   4. Fallback → owner — role is empty (no confirmed holders in window).
  *      Executor is configurable per-tenant/process; DEFAULT = tenant owner (F6/PD-10).
  *      The task is MARKED with `fallbackReason: "role_unfilled"` so the UI/notification
@@ -21,8 +25,10 @@
  *     Callers (inbox.ts) supply the ports with DB-backed implementations.
  *   - No new DB table (D-061). The fallback executor config is a future per-tenant/
  *     process table; for now the default-owner path is the only implementation.
- *   - Substitution path reuses `resolveSubstitution` (src/core/substitution.ts)
- *     verbatim — no new algebra.
+ *   - Substitution path is gated behind an optional port that callers inject.
+ *     The DB-backed implementation (UUID-based lookup per absent_employee_id)
+ *     is a follow-up (T-0053). `resolveSubstitution` from substitution.ts is
+ *     available for callers that inject a properly UUID-backed port.
  *
  * Fallback marking (F7): when the resolver falls back to owner, the returned
  * `ExecutorResolution` carries `fallbackReason: "role_unfilled"`. The inbox
@@ -190,26 +196,31 @@ export async function resolveExecutor(
   }
 
   // --- Step 3: Substitution — no holder present → try substitute -----------
+  // The substitution_rule table stores absent_employee_id and role_id as UUIDs
+  // (FK to employee and role respectively — see migrations/036_substitution_rule.sql).
+  // A correct DB-backed port must therefore resolve the role slug → role.id UUID
+  // and each holder's slug → employee.id UUID before calling getActiveSubstitutions,
+  // then map the returned substituteEmployeeId UUID back to a slug.
+  //
+  // That UUID-resolution layer (a DB-backed SubstitutionSource) is pending T-0053.
+  // Until callers inject a properly-wired port the step is a controlled no-op:
+  // `deps.substitution` is undefined in production (makeExecutorResolverDeps does
+  // not inject it), so the block below is never entered and control falls through
+  // to step 4 (fallback-owner). This is intentional and documented.
   if (deps.substitution) {
-    // When the role pool is empty (e.g. the single holder of a role is on leave),
-    // we look for a substitution rule that covers a known absent holder of the role.
-    // The substitution.ts resolveSubstitution expects a specific absent employee id;
-    // here we pass roleSlug as a proxy absent-id to check for a role-level
-    // substitution rule (the most common case: "while Alice is away, Bob covers
-    // the fin-ctrl role"). Callers that set up substitutions at the employee level
-    // will supply the absent employee's id via opts.directSlug → step 1 handles it.
-    //
-    // Convention: substitution_rule.absent_employee_id may be either an employee UUID
-    // or a role slug (role-level substitution). The in-memory source and the DB DAO
-    // both treat this as an opaque string match.
-    const rules = await deps.substitution.getActiveSubstitutions(tenantId, roleSlug, nowMs);
-    // Default org scope: BOTTOM (⊥ ⊑ anything = true), so a rule with any scope
-    // covers a request with no explicit scope. Safe for single-org tenants.
+    // NOTE: the injected port is responsible for UUID resolution (slug→UUID→slug).
+    // When a correctly wired port is present it calls getActiveSubstitutions with
+    // the absent employee's UUID, then resolveSubstitution matches by UUID fields,
+    // and the returned substituteEmployeeId UUID is translated back to a slug by
+    // the port before returning.
     const orgScope: ScopeElement = opts.orgScope ?? BOTTOM;
     const oracle = deps.ancestry ?? NO_OP_ANCESTRY;
 
-    // resolveSubstitution iterates rules, matching by absentEmployeeId === roleSlug,
-    // role match, scope containment, and effective window.
+    // The port provides rules already filtered for `absentEmployeeId` (as UUID).
+    // We pass a placeholder here; correct ports must supply their own absent-id
+    // from a prior role-holder lookup, not the raw roleSlug.
+    // For now no production port is wired, so this branch is never reached.
+    const rules = await deps.substitution.getActiveSubstitutions(tenantId, roleSlug, nowMs);
     const matched = resolveSubstitution(rules, roleSlug, roleSlug, orgScope, oracle, nowMs);
     if (matched !== null) {
       return {
