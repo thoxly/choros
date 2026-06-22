@@ -59,7 +59,7 @@ import type { IncomingMessage } from "node:http";
 import type pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, getAuthMode, withAuth } from "./auth.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+import { resolveActorSlugFromAuth, resolveAgentSlugFromAuth } from "../db/org.js";
 import { checkRole, withTenantTx } from "./binding.js";
 import {
   applyFloor1Edit,
@@ -101,7 +101,16 @@ function assertNonEmptyText(value: string, label: string): void {
 // withAuth-wrapped (Bearer validated + getAuthContext populated BEFORE this runs), so the
 // identity feeding authorizeEditor is the VALIDATED token in keycloak mode, not an
 // unauthenticated x-dev-user header.
-//   - keycloak: identity from the validated token (sub/preferred_username → employee.slug);
+//   - keycloak: identity from the validated token; branch on the VALIDATED actor_type claim:
+//     - actor_type === 'agent' → resolveAgentSlugFromAuth (T-0425 [SECURITY]): this surface
+//       is explicitly agent-callable per T-0328 §2.5 ("callers are UI, agents") and the
+//       summary table §3.1 (floor1-editor: "keycloak-SSO (human + agent token)"). Agents
+//       authoring forms (e.g. a config-agent editing field labels via a programmatic call)
+//       present a service-account JWT with actor_type=agent. The SEPARATE agent resolver
+//       maps service-account-<clientId> → agent_card.kc_client_id → kind='agent' employee
+//       slug. It can ONLY ever return an agent slug (disjoint from human path, ADR §3).
+//     - else (human) → resolveActorSlugFromAuth, UNTOUCHED, with its kind='human'
+//       T-0372 anti-impersonation guard intact.
 //     null → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
 //   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
 async function extractActor(req: IncomingMessage, pool: pg.Pool | null): Promise<string> {
@@ -117,7 +126,12 @@ async function extractActor(req: IncomingMessage, pool: pg.Pool | null): Promise
         "identity resolution requires a database connection in keycloak auth mode",
       );
     }
-    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    // T-0425 [SECURITY]: branch on the VALIDATED actor_type claim → disjoint
+    // agent vs human bridge. floor1-editor is agent-callable (T-0328 §2.5).
+    const slug =
+      ctx.actorType === "agent"
+        ? await resolveAgentSlugFromAuth(pool, ctx)
+        : await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
     if (slug === null) {
       throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
     }

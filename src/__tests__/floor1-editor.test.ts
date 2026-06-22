@@ -926,12 +926,24 @@ describe("HTTP AC-26 — Malformed fields body → 400 VALIDATION", () => {
 /**
  * Stub pg.Pool: BEGIN/SET LOCAL/COMMIT/ROLLBACK are no-ops; the
  * role_assignment count query returns the configured cnt.
+ *
+ * T-0425: also stubs the agent resolver query (agent_card JOIN employee).
+ * agentSlug: when non-null, indicates an agent card exists that maps to this slug;
+ *            when null, the agent_card lookup returns empty (agent 401 path).
  */
-function makeStubPool(roleCount: number): pg.Pool {
+function makeStubPool(roleCount: number, agentSlug: string | null = null): pg.Pool {
   const client = {
     query: async (text: string, _params?: unknown[]) => {
       if (typeof text === "string" && text.includes("role_assignment")) {
         return { rows: [{ cnt: roleCount }] };
+      }
+      // T-0425: resolveAgentSlugFromAuth query (agent_card JOIN employee, kind='agent').
+      // This fires when actor_type=agent, keyed on the derived kc_client_id.
+      if (typeof text === "string" && text.includes("agent_card")) {
+        if (agentSlug !== null) {
+          return { rows: [{ slug: agentSlug }] };
+        }
+        return { rows: [] };
       }
       // T-0420: resolveActorSlugFromAuth existence check (keycloak identity path).
       // Resolve the token's sub to a real human employee so the wrapped route
@@ -981,6 +993,32 @@ function bearerToken(sub = "e-designer"): string {
     sub,
     preferred_username: sub,
     actor_type: "human",
+  };
+  const header = base64urlJson({ alg: "RS256", kid: KID, typ: "JWT" });
+  const payload = base64urlJson(claims);
+  const signingInput = `${header}.${payload}`;
+  const sig = crypto
+    .sign("RSA-SHA256", Buffer.from(signingInput, "utf8"), kcPrivateKey)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+  return `${signingInput}.${sig}`;
+}
+
+/**
+ * T-0425: Sign a Bearer JWT for an AGENT service-account caller.
+ * actor_type=agent, preferred_username=service-account-<clientId> (KC default).
+ * The stub pool maps kcClientId -> agentSlug via the agent_card query.
+ */
+function bearerTokenAgent(kcClientId = "agent-config"): string {
+  const claims = {
+    iss: `http://127.0.0.1:${jwksPort}/realms/choros`,
+    aud: "choros-api",
+    exp: Math.floor(Date.now() / 1000) + 300,
+    sub: `svc-account-uuid-${kcClientId}`, // service-account user UUID in KC (≠ slug)
+    preferred_username: `service-account-${kcClientId}`, // KC service-account default
+    actor_type: "agent",
   };
   const header = base64urlJson({ alg: "RS256", kid: KID, typ: "JWT" });
   const payload = base64urlJson(claims);
@@ -1177,6 +1215,146 @@ describe("HTTP AC-28 — keycloak mode, actor with process_designer → 200 (all
     } finally {
       await close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0425 AC-29 — floor1-editor: agent token resolves the agent slug (200)
+//
+// floor1-editor is a legitimately agent-callable surface (T-0328 §2.5: "callers
+// are UI, agents"; §3.1 table row 6: "keycloak-SSO (human + agent token)").
+// An agent with actor_type=agent, preferred_username=service-account-<clientId>
+// must resolve through resolveAgentSlugFromAuth → the agent's employee slug, and
+// then reach authorizeEditor (dev mode: softened → 200).
+//
+// The stub pool maps the agent_card lookup to the agent slug. In dev auth mode
+// authorizeEditor soft-passes, so 200 is expected.
+// ---------------------------------------------------------------------------
+
+describe("HTTP AC-29 — T-0425: keycloak mode, agent token resolves agent slug → 200 (process_designer soft-pass in keycloak if role present)", () => {
+  it("agent token with matching agent_card → resolves agent slug → 200 when process_designer present", async () => {
+    await withKeycloakMode(async () => {
+      // makeStubPool(roleCount=1, agentSlug='a-config'): role_assignment finds
+      // process_designer for the agent employee, agent_card maps the token to 'a-config'.
+      const { port, close } = await startTestServer(makeStubPool(1, "a-config"));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,           // no x-dev-user — keycloak path only
+          bearerTokenAgent("agent-config"), // actor_type=agent, svc-account-agent-config
+        );
+        // Agent resolved to 'a-config'; process_designer role present → 200.
+        expect(resp.status).toBe(200);
+        const body = resp.body as { fields: { key: string; label: string }[] };
+        expect(body.fields.find((f) => f.key === "supplier")?.label).toBe("Поставщик");
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("agent token with matching agent_card but missing process_designer → 403", async () => {
+    await withKeycloakMode(async () => {
+      // agentSlug='a-config' (card resolves), roleCount=0 (no process_designer) → 403.
+      const { port, close } = await startTestServer(makeStubPool(0, "a-config"));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerTokenAgent("agent-config"),
+        );
+        expect(resp.status).toBe(403);
+        expect((resp.body as { error: { code: string } }).error.code).toBe("FORBIDDEN");
+      } finally {
+        await close();
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0425 AC-30 — floor1-editor: disjointness — agent ↛ human, human ↛ agent
+//
+// A human token still resolves via the human path (kind='human' guard intact,
+// T-0372). An agent token with no matching agent_card → 401 fail-closed.
+// A human token with actor_type=human cannot ride the agent path.
+// ---------------------------------------------------------------------------
+
+describe("HTTP AC-30 — T-0425: disjointness — agent path and human path are disjoint on floor1-editor", () => {
+  it("human token still resolves via human path → 200 (T-0372 guard untouched)", async () => {
+    await withKeycloakMode(async () => {
+      // makeStubPool(roleCount=1, agentSlug=null): human path → employee EXISTS=true;
+      // agent_card lookup irrelevant (actor_type=human never reaches it).
+      const { port, close } = await startTestServer(makeStubPool(1, null));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerToken(), // actor_type=human, preferred_username=e-designer
+        );
+        expect(resp.status).toBe(200);
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("agent token with NO matching agent_card → 401 fail-closed (unprovisioned agent)", async () => {
+    await withKeycloakMode(async () => {
+      // agentSlug=null → agent_card returns empty → resolveAgentSlugFromAuth → null → 401.
+      const { port, close } = await startTestServer(makeStubPool(1, null));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerTokenAgent("agent-unknown"), // valid token but no agent_card
+        );
+        // Agent has no provisioned agent_card → null → 401 fail-closed.
+        expect(resp.status).toBe(401);
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("agent token cannot ride the human path (human resolver only returns kind=human)", async () => {
+    await withKeycloakMode(async () => {
+      // Even if the pool's human-employee-exists stub returns true, an agent token
+      // (actor_type=agent) routes to resolveAgentSlugFromAuth, not resolveActorSlugFromAuth.
+      // With agentSlug=null the agent resolver returns null → 401, proving the
+      // human path is not consulted for agent tokens.
+      const { port, close } = await startTestServer(makeStubPool(1, null));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          undefined,
+          bearerTokenAgent("agent-config"), // actor_type=agent, no matching card
+        );
+        expect(resp.status).toBe(401); // agent cannot fall through to human path
+      } finally {
+        await close();
+      }
+    });
   });
 });
 
