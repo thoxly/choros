@@ -533,9 +533,16 @@ function InboxScreen() {
   // T-0272: task detail panel (selectedTaskId → open; null → closed)
   const [selectedTaskId, setSelectedTaskId] = useState(null);
 
+  // T-0401: pagination state for load-more. `page` tracks the last fetched page;
+  // `totalPages` caps the load-more button. Reset to page 1 on filter/tab change.
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [loadingMore, setLoadingMore] = useState(false);
+
   // T-0093: tabs/filters/sort are applied SERVER-SIDE. The query mirrors the API:
   // ?tab=...&exec=...&sort=sla. The server returns the filtered `items` plus full
   // per-tab `counts` (computed from the tenant-scoped base, not the filtered view).
+  // T-0401: also passes ?page=N; response now includes page/totalPages/total.
   const load = async () => {
     setError(null);
     try {
@@ -543,14 +550,42 @@ function InboxScreen() {
       if (tab && tab !== "all") qs.set("tab", tab);
       if (exec) qs.set("exec", exec);
       if (sortSla) qs.set("sort", "sla");
-      const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      const res = await fetch(`/api/inbox${suffix}`, { headers: devHeaders() });
+      // Page 1 on initial/refresh load.
+      qs.set("page", "1");
+      const res = await fetch(`/api/inbox?${qs.toString()}`, { headers: devHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setItems(data.items);
+      setPage(data.page ?? 1);
+      setTotalPages(data.totalPages ?? 1);
       if (data.counts) setCounts(data.counts);
     } catch (e) {
       setError(e.message);
+    }
+  };
+
+  // T-0401: fetch the next page and append to the existing list.
+  const loadMore = async () => {
+    if (loadingMore) return;
+    const nextPage = page + 1;
+    setLoadingMore(true);
+    try {
+      const qs = new URLSearchParams();
+      if (tab && tab !== "all") qs.set("tab", tab);
+      if (exec) qs.set("exec", exec);
+      if (sortSla) qs.set("sort", "sla");
+      qs.set("page", String(nextPage));
+      const res = await fetch(`/api/inbox?${qs.toString()}`, { headers: devHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setItems((prev) => [...(prev || []), ...(data.items || [])]);
+      setPage(data.page ?? nextPage);
+      setTotalPages(data.totalPages ?? totalPages);
+      // counts remain from the initial full-set response — don't overwrite.
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -606,7 +641,10 @@ function InboxScreen() {
   };
 
   // Re-fetch whenever the tab/filter/sort changes — semantics live on the server.
+  // T-0401: also reset pagination so load-more starts fresh from page 1.
   useEffect(() => {
+    setPage(1);
+    setTotalPages(1);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, exec, sortSla]);
@@ -745,6 +783,19 @@ function InboxScreen() {
               })}
             </tbody>
           </table>
+        )}
+        {/* T-0401: load-more control — shown only when there are more pages. */}
+        {items !== null && items.length > 0 && page < totalPages && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--chs-space-5)' }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={loadingMore}
+              onClick={loadMore}
+            >
+              {loadingMore ? 'Загрузка…' : 'Показать ещё'}
+            </Button>
+          </div>
         )}
       </div>
     </div>

@@ -227,6 +227,9 @@ function AppRecordsScreen() {
   const [recordsError, setRecordsError] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [highlightId, setHighlightId] = useState(null);
+  // T-0401: cursor-based pagination state for load-more.
+  const [nextCursor, setNextCursor] = useState(null);
+  const [loadingMoreRecords, setLoadingMoreRecords] = useState(false);
 
   // ---- load registry_defs for the application -----------------------------
   const loadDefs = useCallback(async () => {
@@ -272,10 +275,13 @@ function AppRecordsScreen() {
   );
 
   // ---- load records for the chosen registry_def ---------------------------
+  // T-0401: consumes paginated response { records, nextCursor }. Initial load
+  // resets the list; loadMoreRecords appends via ?after=<cursor>.
   const loadRecords = useCallback(async () => {
-    if (!appId || !selectedDefId) { setRecords(null); return; }
+    if (!appId || !selectedDefId) { setRecords(null); setNextCursor(null); return; }
     setRecordsError(null);
     setRecords(null);
+    setNextCursor(null);
     try {
       const res = await fetch(
         `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}`,
@@ -284,10 +290,31 @@ function AppRecordsScreen() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setRecords(Array.isArray(data.records) ? data.records : []);
+      setNextCursor(data.nextCursor ?? null);
     } catch (e) {
       setRecordsError(e.message);
     }
   }, [appId, selectedDefId]);
+
+  // T-0401: fetch the next cursor page and append to the existing list.
+  const loadMoreRecords = useCallback(async () => {
+    if (!appId || !selectedDefId || !nextCursor || loadingMoreRecords) return;
+    setLoadingMoreRecords(true);
+    try {
+      const res = await fetch(
+        `/api/records?application_id=${encodeURIComponent(appId)}&registry_def_id=${encodeURIComponent(selectedDefId)}&after=${encodeURIComponent(nextCursor)}`,
+        { headers: devHeaders() },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRecords((prev) => [...(prev || []), ...(Array.isArray(data.records) ? data.records : [])]);
+      setNextCursor(data.nextCursor ?? null);
+    } catch (e) {
+      setRecordsError(e.message);
+    } finally {
+      setLoadingMoreRecords(false);
+    }
+  }, [appId, selectedDefId, nextCursor, loadingMoreRecords]);
 
   useEffect(() => { loadRecords(); }, [loadRecords]);
 
@@ -440,6 +467,19 @@ function AppRecordsScreen() {
                 })}
               </tbody>
             </table>
+          )}
+          {/* T-0401: load-more control — shown only when server provided a nextCursor. */}
+          {records !== null && nextCursor && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--chs-space-5)' }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={loadingMoreRecords}
+                onClick={loadMoreRecords}
+              >
+                {loadingMoreRecords ? 'Загрузка…' : 'Показать ещё'}
+              </Button>
+            </div>
           )}
         </div>
       </div>

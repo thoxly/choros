@@ -34,6 +34,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
 import { getRoleSlugsForActor, getHoldersForRole, findTenantOwnerSlug } from "../db/grants-dao.js";
+import { parsePaginationParams, paginateInMemory } from "../core/data-access-port.js";
 // executor-resolver: the batch path (resolveExecutorFallbackBatch below) calls
 // getHoldersForRole / findTenantOwnerSlug directly to avoid the port-wrapper overhead.
 // resolveExecutor (src/core/executor-resolver.ts) remains the canonical single-task
@@ -737,14 +738,23 @@ export function registerInboxRoutes(
   writeDeps?: InboxWriteDeps,
 ): void {
   // GET /api/inbox[?tab=all|mine|pool|esc][&exec=agent|human|service][&sort=sla]
+  //                [&page=N][&limit=N]
   //
   // - tenant-scoped to the actor (foreign-tenant tasks never returned)
   // - `tab` filters server-side using role-addressing + claim state + escalated flag
   // - `exec` filters by executor type; `sort=sla` orders by SLA headroom ascending
   // - response always includes `counts` (per-tab) computed from the tenant-scoped base
   //
-  // Backward compatible: with NO query params, returns the full tenant list under
-  // `items` (legacy shape) plus the additive `counts` object.
+  // T-0401 [D7-3]: PAGINATED via page/limit (in-memory).
+  //   ?page=N        — zero-based page number (default 0)
+  //   ?limit=N       — items per page (1..200, default 50)
+  //
+  // Backward compatible: response shape is ADDITIVE.
+  //   Previously: { items, counts, tab }
+  //   Now:        { items, counts, tab, page, totalPages, total, limit }
+  //   items is now the CURRENT PAGE only, not all items.
+  //   (legacy callers that never sent ?limit= or ?page= get page=0, limit=50 by default;
+  //   for small inboxes all items fit on one page so behaviour is unchanged.)
   router.register("GET", "/api/inbox", withAuth(async (req, res) => {
     // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
     const authCtx = getAuthContext(req);
@@ -780,18 +790,30 @@ export function registerInboxRoutes(
     const execFilter = parseExec(query.get("exec"));
     const sort = query.get("sort");
 
-    let items = base.filter((i) => inTab(i, tab, actor, myRoles));
+    let filtered = base.filter((i) => inTab(i, tab, actor, myRoles));
     if (execFilter) {
-      items = items.filter((i) => i.execType === execFilter);
+      filtered = filtered.filter((i) => i.execType === execFilter);
     }
     if (sort === "sla") {
       // Ascending SLA headroom — most-urgent (incl. overdue, negative `left`) first.
-      items = [...items].sort((a, b) => a.sla.left - b.sla.left);
+      filtered = [...filtered].sort((a, b) => a.sla.left - b.sla.left);
     }
+
+    // T-0401 [D7-3]: paginate the filtered result set.
+    const { limit, page } = parsePaginationParams(query);
+    const paged = paginateInMemory(filtered, page, limit);
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ items, counts, tab }));
+    res.end(JSON.stringify({
+      items: paged.items,
+      counts,
+      tab,
+      page: paged.page,
+      totalPages: paged.totalPages,
+      total: paged.total,
+      limit: paged.limit,
+    }));
   }));
 
   // GET /api/inbox/:id — task detail (T-0272).
