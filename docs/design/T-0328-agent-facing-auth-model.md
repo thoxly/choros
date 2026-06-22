@@ -225,6 +225,11 @@ service-account client in the realm) and **wiring** (`withAuth` + mode-aware act
 
 ### 3.2 agent-runtime-identity (for `invoke`) — service-account JWT
 
+> **Follow-up (T-0423):** the concrete agent-identity **resolution** mechanism — mapping a
+> validated `actor_type=agent` token to its agent `employee` via `agent_card.kc_client_id`, the
+> anti-impersonation disjointness proof, and the `DEV_TENANT_ID`-pin resolution (risk 3 below) —
+> is designed in `docs/design/T-0423-agent-service-account-identity.md`.
+
 - **How it authenticates:** the agent runtime obtains a token from Keycloak via
   `grant_type=client_credentials` against a dedicated service-account client (the realm
   already ships `agent-orchestrator`, `docs/worker-api.md:196`). The token carries
