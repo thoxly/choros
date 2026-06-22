@@ -51,6 +51,8 @@ import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
 import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
+// T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
+import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -856,7 +858,9 @@ export function registerAssistantRoutes(
         const detectedIntent = classifyIntent(userText);
         if (detectedIntent === "configurator") {
           // T-0363 (d): run the full configurator loop to get approvedOps.
-          const cfgResult = await runConfigurator(userText, handlerCtx);
+          // T-0383 (D5): load the per-tenant configurator system prompt override.
+          const cfgPromptOverride = await readPublishedAssistantPrompt(pool, tenantId, "configurator").catch(() => null);
+          const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride);
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
 
           // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).

@@ -204,6 +204,28 @@ const TOOL_REQUEST_PROMOTE: ToolDeclaration = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// CONFIGURATOR_DEFAULT_SYSTEM_PROMPT — hardcoded fallback (T-0383: B10).
+//
+// Exported so the HTTP layer can surface it as the pre-fill default in the UI.
+// ---------------------------------------------------------------------------
+
+/**
+ * The default (hardcoded) configurator system prompt.
+ * Tenants that have not set a custom prompt get this text verbatim.
+ * T-0383: this constant is the single source of truth for the default; the
+ * UI shows it in the prompt editor as placeholder/pre-fill when unset.
+ */
+export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
+  "Ты — конфигуратор-агент системы Choros (режим CONFIGURATOR). " +
+  "Твоя задача — помочь пользователю настроить систему: добавить поля, формы, привязки процессов, DMN-таблицы. " +
+  "ВСЕ изменения вносятся ТОЛЬКО в DRAFT (черновик). Промоут в production выполняет ЧЕЛОВЕК. " +
+  "Деструктивные операции (удаление/переименование поля, потеря данных) НЕЛЬЗЯ выполнять без явного подтверждения человека. " +
+  "Используй инструменты для каждого конкретного изменения. " +
+  "После каждого изменения кратко объясни что и зачем было сделано. " +
+  "Если конфигурация завершена — вызови request_promote с описанием изменений. " +
+  "Отвечай по-русски.";
+
 /** All E16 authoring tools available to the configurator. */
 const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_AUTHOR_BINDING,
@@ -562,9 +584,22 @@ const MAX_TOOL_ROUNDS = 5;
  *
  * Pure: all authoring ops are returned as data; no DB writes.
  */
+/**
+ * T-0383: resolve the effective system prompt for the configurator.
+ * Uses the per-tenant override when present; falls back to CONFIGURATOR_DEFAULT_SYSTEM_PROMPT.
+ */
+function resolveConfiguratorSystemPrompt(override: string | null): string {
+  if (override !== null && override.trim().length > 0) {
+    return override;
+  }
+  return CONFIGURATOR_DEFAULT_SYSTEM_PROMPT;
+}
+
 async function runConfiguratorLoop(
   userText: string,
   ctx: HandlerContext,
+  /** T-0383: per-tenant system prompt override (null → use default). */
+  systemPromptOverride: string | null = null,
 ): Promise<ConfiguratorResult> {
   const approvedOps: ApprovedOp[] = [];
   const blockedOps: BlockedOp[] = [];
@@ -572,15 +607,7 @@ async function runConfiguratorLoop(
   const changelogLines: string[] = [];
   const grantCeilingViolations: string[] = [];
 
-  const systemPrompt =
-    "Ты — конфигуратор-агент системы Choros (режим CONFIGURATOR). " +
-    "Твоя задача — помочь пользователю настроить систему: добавить поля, формы, привязки процессов, DMN-таблицы. " +
-    "ВСЕ изменения вносятся ТОЛЬКО в DRAFT (черновик). Промоут в production выполняет ЧЕЛОВЕК. " +
-    "Деструктивные операции (удаление/переименование поля, потеря данных) НЕЛЬЗЯ выполнять без явного подтверждения человека. " +
-    "Используй инструменты для каждого конкретного изменения. " +
-    "После каждого изменения кратко объясни что и зачем было сделано. " +
-    "Если конфигурация завершена — вызови request_promote с описанием изменений. " +
-    "Отвечай по-русски.";
+  const systemPrompt = resolveConfiguratorSystemPrompt(systemPromptOverride);
 
   // Build initial request with tools
   const initialRequest: ChatLlmRequest = {
@@ -710,10 +737,13 @@ async function runConfiguratorLoop(
  *  - Destructive = human-confirm: processToolCall runs evaluateAuthoringRedLine.
  *  - Co-equal: approvedOps mirror the same E16 tables the constructor writes.
  *  - No IO other than ctx.llm.chat() — this is pure core.
+ *
+ * T-0383: accepts optional per-tenant system prompt override (null → default).
  */
 export async function handleConfigurator(
   userText: string,
   ctx: HandlerContext,
+  systemPromptOverride: string | null = null,
 ): Promise<HandlerResult> {
   // SECURITY: Check grant ceiling FIRST (intersection already agent ∩ user)
   const hasGrant = await hasAuthoringDraftGrant(ctx);
@@ -726,7 +756,7 @@ export async function handleConfigurator(
     };
   }
 
-  const result = await runConfiguratorLoop(userText, ctx);
+  const result = await runConfiguratorLoop(userText, ctx, systemPromptOverride);
 
   return {
     text: result.text,
@@ -749,10 +779,13 @@ export async function handleConfigurator(
  *
  * Security: all approvedOps have tier='draft'; destructive ops land in blockedOps.
  * Pure core — no DB, no process.env. DB execution is the HTTP layer's responsibility.
+ *
+ * T-0383: accepts optional per-tenant system prompt override (null → default).
  */
 export async function runConfigurator(
   userText: string,
   ctx: HandlerContext,
+  systemPromptOverride: string | null = null,
 ): Promise<ConfiguratorResult> {
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
@@ -766,5 +799,5 @@ export async function runConfigurator(
       grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
     };
   }
-  return runConfiguratorLoop(userText, ctx);
+  return runConfiguratorLoop(userText, ctx, systemPromptOverride);
 }

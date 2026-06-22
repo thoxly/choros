@@ -63,6 +63,9 @@ import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition
 import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
 // T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
 import { registerLlmConfigRoutes } from "./http/llm-config.js";
+// T-0383 (D5/PD-6): per-tenant assistant system prompt routes + runtime loader.
+import { registerAssistantPromptRoutes } from "./http/assistant-prompt-routes.js";
+import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
 
 const { Pool } = pg;
 
@@ -703,6 +706,7 @@ function buildRouter(
 
   // T-0363 (c): Wire analyst production ports so handleAnalyst reads real DB data.
   // Ports are read-only (RecordLister, CycleTimeLister, ActorBreakdownLister).
+  // T-0383 (D5): also wire loadSystemPrompt port for per-tenant analyst prompt override.
   // Honest-degrade: when grantsPool is null (no DB) the default no-op ports remain.
   if (grantsPool) {
     setAnalystPorts({
@@ -712,6 +716,9 @@ function buildRouter(
         loadActorTypeBreakdown(grantsPool, tenantId),
       // listRecords: not wired here (requires ACL-filter factory integration with
       // intersectionGrants at call-time — T-0360 follow-up). Defaults to [].
+      // T-0383: per-tenant analyst system prompt (reads published instruction_meta).
+      loadSystemPrompt: (tenantId: string) =>
+        readPublishedAssistantPrompt(grantsPool, tenantId, "analyst"),
     });
   }
 
@@ -737,6 +744,17 @@ function buildRouter(
   // Secret-handle binding remains via the existing POST /api/agents/:id/secret-handle.
   if (grantsPool) {
     registerLlmConfigRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0383 (D5/PD-6): per-tenant assistant system prompt routes.
+  // GET/PUT /api/assistant/prompt/:role ('analyst' | 'configurator').
+  // Additive — registers two routes per role for the prompt editor UI.
+  if (grantsPool) {
+    registerAssistantPromptRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
