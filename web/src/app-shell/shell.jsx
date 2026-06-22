@@ -40,8 +40,8 @@ const RIGHTS_TABS = [
   { id: "overview",    label: "Обзор ролей",       path: "/rights",              status: "live" },
   { id: "intents",     label: "Повседневные операции",  path: "/rights/intents",  status: "live" },
   { id: "editor",      label: "Редактор роли",      path: "/rights/editor",       status: "demo" },
-  { id: "criticality", label: "Критичность",        path: "/rights/criticality",  status: "demo" },
-  { id: "sod",         label: "SoD",                path: "/rights/sod",          status: "demo" },
+  { id: "criticality", label: "Критичность",        path: "/rights/criticality",  status: "live" },
+  { id: "sod",         label: "SoD",                path: "/rights/sod",          status: "live" },
   { id: "trail",       label: "Журнал",             path: "/rights/trail",        status: "live" },
 ];
 
