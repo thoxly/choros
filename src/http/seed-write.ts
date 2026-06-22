@@ -15,11 +15,33 @@
  *
  * Idempotency: UNIQUE(tenant_id,slug) constraints return 409 CONFLICT (AC-1..6).
  * No hardcoded === 'e-owner' bypasses — owner-ness resolved from DB (NF-3).
+ *
+ * T-0388 [D1] — the org-write ownership gate is resolved against the CALLER's
+ * OWN tenant (derived from their authenticated identity via resolveActorTenant),
+ * NOT a hardcoded DEV_TENANT_ID. Previously a self-registered owner — who holds
+ * the tenant-owner role in THEIR tenant — got 403 NOT_OWNER because the gate
+ * checked ownership against DEV_TENANT_ID (where they hold no role). The fix
+ * (authorizeOrgWrite) for each route carrying a body/param tenant_id:
+ *   1. resolve the caller's slug + own tenant from identity,
+ *   2. if tenant_id == the caller's own tenant → gate against THAT tenant (B6),
+ *   3. else allow ONLY the bootstrap-silo forest-owner (genesis owner of
+ *      DEV_TENANT_ID — the importer/seed-pack super-admin) and gate against
+ *      DEV_TENANT_ID; any other cross-tenant write → 403 NOT_OWNER,
+ *   4. run loadAdminContext against the returned authority tenant.
+ * The central security property: the proven authority tenant and the write
+ * target (tenant_id used for RLS GUC + INSERT) are either the SAME tenant (the
+ * caller's own) or the caller is the forest-owner — so owner-ness in tenant A can
+ * never authorise a write into an unrelated tenant B.
  */
 
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+import {
+  loadAdminContext,
+  resolveActorSlugFromAuth,
+  resolveActorTenant,
+  isGenesisOwnerForTenant,
+} from "../db/org.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
@@ -28,6 +50,11 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 // Constants
 // ---------------------------------------------------------------------------
 
+// Bootstrap silo tenant. Used ONLY by POST /api/tenants (tenant-creation is a
+// privileged bootstrap operation reserved for the genesis owner of the bootstrap
+// silo — it is NOT the per-tenant org-write surface that B6 is about). All other
+// org-write routes resolve the caller's OWN tenant (authorizeOrgWrite) and only
+// fall back to this constant for the bootstrap forest-owner path (T-0388).
 const DEV_TENANT_ID =
   process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
 
@@ -62,6 +89,64 @@ async function extractActor(req: import("node:http").IncomingMessage, pool: pg.P
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// authorizeOrgWrite — T-0388: the central org-write authorization seam.
+//
+// Resolves the caller's identity and decides WHICH tenant the genesis-owner gate
+// must run against (`authTenantId`), while enforcing the cross-tenant property.
+//
+// Decision (for a request targeting `targetTenantId`):
+//   1. SAME-TENANT (the B6 fix). If the target is the caller's OWN resolved
+//      tenant, gate against that tenant. A self-registered owner thus passes the
+//      gate for writes into their own tenant (previously 403 against DEV_TENANT_ID).
+//   2. FOREST-OWNER (bootstrap super-admin; preserves the seed-pack importer).
+//      If the target is a DIFFERENT tenant, the write is allowed ONLY if the
+//      caller is the genesis owner of the bootstrap silo (DEV_TENANT_ID) — the
+//      un-parented delegation root that owns the whole forest (scoped-admin.ts).
+//      Such a caller seeds arbitrary tenants (the importer runs as e-owner); the
+//      gate then runs against DEV_TENANT_ID where their ownership lives.
+//   3. CROSS-TENANT DENY. Otherwise (different tenant, not the forest owner) →
+//      403 NOT_OWNER, BEFORE any INSERT. A genuine owner of tenant A can never
+//      spend that ownership on a write into tenant B.
+//
+// NF-3: owner-ness is ALWAYS resolved from the DB (resolveActorTenant +
+// isGenesisOwnerForTenant + the loadAdminContext gate the caller runs against
+// the returned authTenantId) — never assumed, never from a hardcoded slug.
+// The returned authTenantId is the tenant the caller MUST then pass to
+// loadAdminContext, so the auth ceiling and the proven authority tenant match.
+// ---------------------------------------------------------------------------
+
+async function authorizeOrgWrite(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+  targetTenantId: string,
+  nowMs: number,
+): Promise<{ actorId: string; authTenantId: string }> {
+  const actorId = await extractActor(req, pool);
+  const callerTenantId = await resolveActorTenant(pool, actorId);
+
+  // 1. Same-tenant write → gate against the caller's own tenant (B6).
+  if (targetTenantId === callerTenantId) {
+    return { actorId, authTenantId: callerTenantId };
+  }
+
+  // 2. Forest-owner exemption: only the bootstrap-silo genesis owner may write
+  //    cross-tenant (the importer/seed-pack super-admin). Resolved from DB.
+  const isForestOwner = await isGenesisOwnerForTenant(
+    pool,
+    DEV_TENANT_ID,
+    actorId,
+    nowMs,
+  );
+  if (isForestOwner) {
+    // The bootstrap genesis owner's authority lives in the dev silo; gate there.
+    return { actorId, authTenantId: DEV_TENANT_ID };
+  }
+
+  // 3. Cross-tenant deny — close the hole.
+  throw new HttpError(403, "NOT_OWNER", "you may only write into your own tenant");
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +239,14 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: slug exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/tenants", withAuth(async (req, res) => {
+    // T-0388: Tenant CREATION is a privileged bootstrap operation reserved for the
+    // genesis owner of the bootstrap silo (DEV_TENANT_ID) — the un-parented forest
+    // root that mints new tenants (the importer runs as e-owner). This is NOT the
+    // per-tenant org-write surface B6 is about — a self-registered owner manages
+    // people/depts/roles INSIDE their existing tenant via the routes below, they do
+    // not mint sibling tenants. The DEV_TENANT_ID genesis-ownership gate (resolved
+    // from DB, NF-3) is authoritative: only the bootstrap owner passes it, so no
+    // separate same-tenant guard is needed here.
     const actorId = await extractActor(req, pool);
     // Gate: loadAdminContext → isGenesisOwner (before INSERT, FF-6)
     const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
@@ -239,12 +332,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/departments", withAuth(async (req, res) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create departments");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
 
@@ -253,6 +340,15 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant
+    // (caller's own tenant for self-reg owners; DEV_TENANT_ID for the bootstrap
+    // forest-owner). Cross-tenant writes by non-forest-owners → 403.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create departments");
+    }
 
     const slug = b["slug"];
     if (typeof slug !== "string" || slug.length === 0) {
@@ -297,12 +393,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, department_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/positions", withAuth(async (req, res) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create positions");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
 
@@ -311,6 +401,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create positions");
+    }
 
     const department_id = b["department_id"];
     if (typeof department_id !== "string") {
@@ -358,12 +455,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 400: kind not in {human,agent}
   // -------------------------------------------------------------------------
   router.register("POST", "/api/employees", withAuth(async (req, res) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create employees");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
 
@@ -372,6 +463,14 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388 (B6 fix): cross-tenant guard + gate against the resolved authority
+    // tenant — a self-registered owner can add people to THEIR tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create employees");
+    }
 
     const kind = b["kind"];
     if (kind !== "human" && kind !== "agent") {
@@ -420,8 +519,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // 409: (tenant_id, slug) exists
   // -------------------------------------------------------------------------
   router.register("POST", "/api/roles", withAuth(async (req, res) => {
-    const actorId = await extractActor(req, pool);
-
     // Read body first so we can use target tenant_id in the delegation context (R-4)
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
@@ -432,11 +529,14 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     }
     assertUuidShape(tenant_id, "tenant_id");
 
+    // T-0388: cross-tenant guard + resolve the authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+
     // Gate: loadAdminContext → validateAdminDelegation for mgmt_object:role:create (FF-6, AC-18)
-    // Admin context uses DEV_TENANT_ID (genesis-owner lives there per ADR §2.3 option C).
-    // syntheticGrant.tenantId uses target tenant_id so delegation context is scoped
-    // to the tenant being written into (R-4).
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
+    // Admin context is loaded against the resolved authority tenant (the caller's
+    // own tenant for self-reg owners; DEV_TENANT_ID for the bootstrap forest-owner).
+    // syntheticGrant.tenantId uses the target tenant_id (R-4).
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
 
     // Build a synthetic child grant for the gate check (resource_type=mgmt_object:role, operation=create)
     const syntheticGrant = {
@@ -496,19 +596,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // DELETE /api/departments/:id — delete a department (isGenesisOwner gate, AC-9)
-  // body: { tenant_id: uuid } — tenant_id from the target entity (R-1: must match
-  //   the tenant the entity was created in, not DEV_TENANT_ID).
-  // Auth gate uses DEV_TENANT_ID (genesis-owner is in the dev silo by construction).
-  // RLS scope and WHERE use the caller-supplied tenant_id.
+  // body: { tenant_id: uuid } — T-0388: cross-tenant guarded via authorizeOrgWrite.
+  //   Auth gate (loadAdminContext → isGenesisOwner) runs against the resolved
+  //   authority tenant (the caller's own tenant, or DEV_TENANT_ID for the bootstrap
+  //   forest-owner), not a hardcoded DEV_TENANT_ID. RLS scope + WHERE use the body
+  //   tenant_id; non-forest-owner cross-tenant deletes are rejected 403.
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/departments/:id", withAuth(async (req, res, params) => {
-    const actorId = await extractActor(req, pool);
-    // Auth gate: genesis-owner check always in dev silo (ADR §2.3 option C)
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete departments");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
     const tenant_id = b["tenant_id"];
@@ -516,6 +610,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete departments");
+    }
 
     const deptId = params["id"] as string;
     assertUuidShape(deptId, "id");
@@ -551,12 +652,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/positions/:id", withAuth(async (req, res, params) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete positions");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
     const tenant_id = b["tenant_id"];
@@ -564,6 +659,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete positions");
+    }
 
     const posId = params["id"] as string;
     assertUuidShape(posId, "id");
@@ -599,12 +701,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/employees/:id", withAuth(async (req, res, params) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete employees");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
     const tenant_id = b["tenant_id"];
@@ -612,6 +708,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete employees");
+    }
 
     const empId = params["id"] as string;
     assertUuidShape(empId, "id");
@@ -647,12 +750,6 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   // body: { tenant_id: uuid } — target tenant (R-1: must match entity's tenant)
   // -------------------------------------------------------------------------
   router.register("DELETE", "/api/roles/:id", withAuth(async (req, res, params) => {
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete roles");
-    }
-
     const body = await readJsonBody(req);
     const b = body as Record<string, unknown>;
     const tenant_id = b["tenant_id"];
@@ -660,6 +757,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "tenant_id is required in request body");
     }
     assertUuidShape(tenant_id, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant.
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete roles");
+    }
 
     const roleId = params["id"] as string;
     assertUuidShape(roleId, "id");
@@ -724,23 +828,28 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
 
   // -------------------------------------------------------------------------
   // GET /api/org/tenant-state — get current tenant state for reset diff (by tenant_id query param)
-  // Auth gate: extractActor → loadAdminContext → isGenesisOwner (R-3: same gate as write routes).
-  // The importer already sends X-Dev-User: e-owner in all requests, so this is transparent.
+  // Auth gate: authorizeOrgWrite → loadAdminContext → isGenesisOwner (R-3: same gate
+  // as the write routes — this is the read-counterpart of the importer write surface).
+  // T-0388: gate against the resolved authority tenant (caller's own, or DEV_TENANT_ID
+  // for the bootstrap forest-owner); a non-forest-owner cannot read another tenant's
+  // state (cross-tenant → 403).
   // -------------------------------------------------------------------------
   router.register("GET", "/api/org/tenant-state", withAuth(async (req, res) => {
-    // Auth gate: genesis-owner required (R-3)
-    const actorId = await extractActor(req, pool);
-    const admin = await loadAdminContext(pool, DEV_TENANT_ID, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to read tenant state");
-    }
-
     const url = new URL(req.url ?? "/", "http://localhost");
     const tenantId = url.searchParams.get("tenant_id");
     if (!tenantId) {
       throw new HttpError(400, "VALIDATION", "tenant_id query param required");
     }
     assertUuidShape(tenantId, "tenant_id");
+
+    // T-0388: cross-tenant guard + gate against the resolved authority tenant —
+    // a caller may read only their OWN tenant's state (the bootstrap forest-owner
+    // may read any tenant, since the importer diffs arbitrary tenants).
+    const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenantId, nowMs());
+    const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    if (!admin.isGenesisOwner) {
+      throw new HttpError(403, "NOT_OWNER", "genesis owner required to read tenant state");
+    }
 
     const state = await withTenantTx(pool, tenantId, async (client) => {
       const depts = await client.query<{ id: string; slug: string }>(
