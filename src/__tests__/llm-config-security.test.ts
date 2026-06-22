@@ -77,7 +77,7 @@ describe("BLOCKER-1 · decideEnvHandle env:// allow-list", () => {
   });
 });
 
-describe("BLOCKER-1 · live tenantSecretResolver refuses to exfiltrate env", () => {
+describe("BLOCKER-1 + T-0413 · live tenantSecretResolver refuses ALL env:// handles", () => {
   it("THROWS on env://DATABASE_URL and never returns the env value", async () => {
     // Plant a sentinel so a leak would be visible as the returned value.
     const SENTINEL = "postgres://leaked-secret-should-never-be-returned";
@@ -86,7 +86,7 @@ describe("BLOCKER-1 · live tenantSecretResolver refuses to exfiltrate env", () 
     try {
       await expect(
         tenantSecretResolver.resolveSecret("env://DATABASE_URL", { tenantId: TENANT_ID }),
-      ).rejects.toThrow(/not permitted/i);
+      ).rejects.toThrow(/system-only/i);
     } finally {
       if (prev === undefined) delete process.env["DATABASE_URL"];
       else process.env["DATABASE_URL"] = prev;
@@ -111,13 +111,16 @@ describe("BLOCKER-1 · live tenantSecretResolver refuses to exfiltrate env", () 
     }
   });
 
-  it("RESOLVES the allow-listed env://DEEPSEEK_API_KEY when present", async () => {
+  it("T-0413: REJECTS env://DEEPSEEK_API_KEY — env:// is system-only, never tenant-resolvable", async () => {
+    // After T-0413 the tenant resolver rejects ALL env:// handles including the
+    // canonical allowlisted one. The system fallback (deepseekSecretResolver) is
+    // wired separately in makeLlmPortFactory and is NOT the tenantSecretResolver.
     const prev = process.env["DEEPSEEK_API_KEY"];
     process.env["DEEPSEEK_API_KEY"] = "dev-fallback-key";
     try {
       await expect(
         tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT_ID }),
-      ).resolves.toBe("dev-fallback-key");
+      ).rejects.toThrow(/system-only/i);
     } finally {
       if (prev === undefined) delete process.env["DEEPSEEK_API_KEY"];
       else process.env["DEEPSEEK_API_KEY"] = prev;
@@ -376,7 +379,8 @@ describe("PUT /api/llm-config — endpoint policy + authz + atomicity", () => {
     });
     expect(r.status).toBe(200);
     expect((r.json as { ok?: boolean }).ok).toBe(true);
-    expect(state.committedEndpoint).toBe("https://api.new-endpoint.com");
+    // T-0413: stored as normalized href (WHATWG adds trailing slash on bare host).
+    expect(state.committedEndpoint).toBe("https://api.new-endpoint.com/");
     expect(state.committedModel).toBe("new-model");
   });
 });
@@ -412,5 +416,80 @@ describe("GET /api/llm-config — admin-gated (MINOR)", () => {
     expect(body["secret_bound"]).toBe(true);
     // No field carries the raw handle.
     expect(JSON.stringify(body)).not.toContain("vault://x");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0413: env:// scheme is SYSTEM-ONLY + endpoint tightening (userinfo + normalization)
+// ---------------------------------------------------------------------------
+
+describe("T-0413 · tenant env:// handles are ALWAYS rejected", () => {
+  it("rejects env://DEEPSEEK_API_KEY — the shared system key must not be exfiltrable via tenant handle", async () => {
+    // Attack vector (from T-0417 red-team): tenant sets the agent secret handle to
+    // env://DEEPSEEK_API_KEY + llm_endpoint = https://attacker-host → the system key
+    // ships as a Bearer token to the attacker. T-0413 closes this by making the
+    // tenant resolver reject ALL env:// handles, including the allow-listed one.
+    const prev = process.env["DEEPSEEK_API_KEY"];
+    process.env["DEEPSEEK_API_KEY"] = "shared-system-key-must-not-leak";
+    try {
+      await expect(
+        tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT_ID }),
+      ).rejects.toThrow(/system-only/i);
+    } finally {
+      if (prev === undefined) delete process.env["DEEPSEEK_API_KEY"];
+      else process.env["DEEPSEEK_API_KEY"] = prev;
+    }
+  });
+
+  it("rejects any env:// handle — the scheme is never resolvable in the tenant path", async () => {
+    for (const handle of [
+      "env://DATABASE_URL",
+      "env://KC_REGISTRAR_CLIENT_SECRET",
+      "env://DEEPSEEK_API_KEY",
+      "env://AWS_SECRET_ACCESS_KEY",
+    ]) {
+      await expect(
+        tenantSecretResolver.resolveSecret(handle, { tenantId: TENANT_ID }),
+      ).rejects.toThrow(/system-only/i);
+    }
+  });
+});
+
+describe("T-0413 · PUT /api/llm-config rejects userinfo endpoints", () => {
+  let server: http.Server;
+  let base: string;
+
+  afterEach(async () => {
+    if (server) await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  async function start(state: FakeState): Promise<void> {
+    const h = buildServer(state);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  }
+
+  it("rejects https://user@host with 400 VALIDATION and no write", async () => {
+    const state = freshState();
+    await start(state);
+    const r = await httpReq("PUT", `${base}/api/llm-config`, { "x-dev-user": ADMIN }, {
+      llm_endpoint: "https://stolen-user@attacker.example.com",
+      llm_model: "m",
+    });
+    expect(r.status).toBe(400);
+    expect((r.json as { error: { code: string } }).error.code).toBe("VALIDATION");
+    expect(state.committedEndpoint).toBeNull();
+  });
+
+  it("stores the WHATWG-normalized href (trailing slash on bare host)", async () => {
+    const state = freshState();
+    await start(state);
+    const r = await httpReq("PUT", `${base}/api/llm-config`, { "x-dev-user": ADMIN }, {
+      llm_endpoint: "https://api.deepseek.com",
+      llm_model: "deepseek-chat",
+    });
+    expect(r.status).toBe(200);
+    // WHATWG URL normalizes bare host → adds trailing slash.
+    expect(state.committedEndpoint).toBe("https://api.deepseek.com/");
   });
 });

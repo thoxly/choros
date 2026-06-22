@@ -199,36 +199,37 @@ describe("Враг · PUT /api/llm-config rejects every non-https / malformed en
       llm_endpoint: "https://api.deepseek.com", llm_model: "deepseek-chat",
     });
     expect(r.status).toBe(200);
-    expect(state.committedEndpoint).toBe("https://api.deepseek.com");
+    // T-0413: stored as normalized href (WHATWG adds trailing slash on bare host).
+    expect(state.committedEndpoint).toBe("https://api.deepseek.com/");
   });
 
   it("PINNED: single-slash https:/host normalizes to a valid https URL (accepted — still https/TLS)", async () => {
-    // WHATWG URL normalizes "https:/host" → "https://host/" (protocol https:).
+    // WHATWG URL normalizes "https:/host" → "https://host/" (protocol https:, no userinfo).
     // This is sloppy-slash normalization, NOT a non-https bypass: the bearer still
-    // ships over TLS to that host. Pinned to document the normalization behavior.
+    // ships over TLS to that host. Accepted by policy; stored as the normalized href.
     const state = freshState();
     await start(state);
     const r = await httpReq("PUT", `${base}/api/llm-config`, { "x-dev-user": ADMIN }, {
       llm_endpoint: "https:/api.deepseek.com", llm_model: "m",
     });
     expect(r.status).toBe(200);
-    // NOTE: the route validates the *parsed* URL but persists the raw *trimmed
-    // string* (not parsedEndpoint.href), so the stored value keeps the sloppy
-    // single-slash form. Still https-scheme; the OpenAI port re-parses on use.
-    expect(state.committedEndpoint).toBe("https:/api.deepseek.com");
+    // T-0413: the route now persists parsedEndpoint.href (normalized), not the raw
+    // trimmed string. WHATWG normalizes "https:/api.deepseek.com" → "https://api.deepseek.com/".
+    expect(state.committedEndpoint).toBe("https://api.deepseek.com/");
   });
 
-  it("PINNED BEHAVIOR: https:// with userinfo (https://user@host) is currently ACCEPTED", async () => {
-    // This is NOT an env-exfil hole (the resolver only yields the allow-listed key
-    // regardless of endpoint), but the policy is protocol-only — userinfo passes.
-    // Pinned so a future tightening of the endpoint host/userinfo policy is
-    // intentional, not silent. If this ever flips to 400, update the assertion.
+  it("T-0413: https:// with userinfo (https://user@host) is REJECTED with 400", async () => {
+    // T-0413 tightens the endpoint policy: userinfo (user@host form) is disallowed.
+    // A userinfo component is never needed for a legitimate LLM API endpoint and
+    // could be used to embed data into the target URL.
     const state = freshState();
     await start(state);
     const r = await httpReq("PUT", `${base}/api/llm-config`, { "x-dev-user": ADMIN }, {
       llm_endpoint: "https://stolen-user@attacker.example.com", llm_model: "m",
     });
-    expect(r.status).toBe(200);
-    expect(state.committedEndpoint).toBe("https://stolen-user@attacker.example.com");
+    expect(r.status).toBe(400);
+    expect((r.json as { error: { code: string } }).error.code).toBe("VALIDATION");
+    expect(state.committedEndpoint).toBeNull();
+    expect(state.card.llm_endpoint).toBe("https://old.example.com");
   });
 });
