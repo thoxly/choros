@@ -492,18 +492,20 @@ function RoleEditorScreen() {
               <div className="chs-dualbanner" style={{ marginTop: "var(--chs-space-3)" }}>
                 <span className="chs-dualbanner__glyph" />
                 <div className="chs-dualbanner__txt">
-                  <b>Требуется второй аппрувер.</b>{" "}
-                  {pendingConfirms.length} грант(ов) в статусе <code>semi-confirmed</code> — критичное расширение.
+                  <b>Требуется второй подтверждающий.</b>{" "}
+                  {pendingConfirms.length}{' '}
+                  {pendingConfirms.length === 1 ? 'грант' : pendingConfirms.length < 5 ? 'гранта' : 'грантов'}{' '}
+                  ожидают второго подтверждения — критичное расширение прав.
                   Войдите как второй администратор и подтвердите.
                   <div style={{ marginTop: "var(--chs-space-3)", display: "flex", alignItems: "center", gap: "var(--chs-space-3)", flexWrap: "wrap" }}>
                     <label style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-muted)" }}>
-                      Второй аппрувер (X-Dev-User):
+                      Второй подтверждающий:
                       <input
                         className="chs-input chs-input--mono"
                         style={{ marginLeft: "var(--chs-space-2)", width: "14ch" }}
                         value={confirmActor}
                         onChange={(e) => setConfirmActor(e.target.value)}
-                        placeholder="user-id"
+                        placeholder="логин"
                       />
                     </label>
                     <Button
@@ -512,7 +514,7 @@ function RoleEditorScreen() {
                       disabled={confirmResult === "loading" || !confirmActor}
                       onClick={handleSecondConfirm}
                     >
-                      {confirmResult === "loading" ? "Подтверждение…" : "Подтвердить (confirm2)"}
+                      {confirmResult === "loading" ? "Подтверждение…" : "Подтвердить"}
                     </Button>
                     {confirmResult && confirmResult !== "loading" && (
                       confirmResult.ok
@@ -521,7 +523,7 @@ function RoleEditorScreen() {
                     )}
                   </div>
                 </div>
-                <span className="chs-dualbanner__tag">DUAL-CONTROL</span>
+                <span className="chs-dualbanner__tag">КРИТИЧНЫЕ ПРАВА</span>
               </div>
             )}
           </div>

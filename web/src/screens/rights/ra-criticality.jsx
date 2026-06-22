@@ -2,6 +2,7 @@
    CHOROS — ra-criticality.jsx
    ЭКРАН 2: КРИТИЧНОСТЬ И DUAL-CONTROL.
 
+   T-0385 [D6]: wire criticality / dual-control UI to the READY backend.
    T-0390 [D2-FU]: wired to real dual-control change-request API.
      GET  /api/rights/change-requests          — pending change requests (paged)
      POST /api/rights/change-requests/:id/approve|reject — dual-control action
@@ -24,6 +25,36 @@ import {
 } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { devHeaders } from '../../app-shell/dev-auth.js';
+import { RES_BY_URI } from './ra-data.jsx';
+
+// ---------------------------------------------------------------------------
+// Human-readable labels for grant operation codes
+// ---------------------------------------------------------------------------
+
+const OP_RU = {
+  read:       'чтение',
+  create:     'создание',
+  update:     'изменение',
+  delete:     'удаление',
+  approve:    'утверждение',
+  transition: 'переход',
+  invoke:     'вызов',
+};
+
+/**
+ * Turn a raw backend grant description ("mcp://payments.initiate:invoke")
+ * into a human-readable label ("Платёжный шлюз — вызов").
+ * Falls back to the raw string if the URI is unknown.
+ */
+function humanGrantDesc(description, details) {
+  if (details && details.resource_type && details.operation) {
+    const res = RES_BY_URI[details.resource_type];
+    const resLabel = res ? res.name : details.resource_type;
+    const opLabel = OP_RU[details.operation] ?? details.operation;
+    return `${resLabel} — ${opLabel}`;
+  }
+  return description;
+}
 
 // ---------------------------------------------------------------------------
 // Data fetching
@@ -76,11 +107,14 @@ function KindChip({ kind }) {
 }
 
 function ChangeRequestRow({ item, onApprove, onReject, busy }) {
+  const desc = item.kind === 'grant'
+    ? humanGrantDesc(item.description, item.details)
+    : item.description;
   return (
     <div className="chs-cr-row">
       <div className="chs-cr-row__header">
         <KindChip kind={item.kind} />
-        <span className="chs-cr-row__desc">{item.description}</span>
+        <span className="chs-cr-row__desc">{desc}</span>
         {item.role_name && (
           <span className="chs-cr-row__role">Роль: {item.role_name}</span>
         )}
