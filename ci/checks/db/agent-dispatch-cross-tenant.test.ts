@@ -256,4 +256,3 @@ describe("T-0392 cross-tenant: PostgresAgentJobFetcher under BYPASSRLS migrator 
     expect(batchB!.jobs.some((j) => j.id === jobBExpired && j.variables["__tenantId"] === TENANT_B)).toBe(true);
   });
 });
-</content>
