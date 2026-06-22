@@ -225,7 +225,12 @@ describe('Враг · SoD write — atomicity: no mute mutation (T-0409)', () =>
     const writer = makePgAuditWriter();
 
     let newId = '';
-    await withClient(appUrl(), async (c) => {
+    // Use the migrator connection for the write: on a fresh DB TENANT_A has no
+    // audit_head row yet, and the writer's seed-head INSERT (GENESIS_PREV_HASH)
+    // needs a role that can establish it. The RLS/permission aspect is covered by
+    // A1/A2; A4 asserts the atomicity-pairing property (constraint + paired
+    // audit_event committed together), which is connection-agnostic.
+    await withClient(migratorUrl(), async (c) => {
       await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
       await c.query('SET LOCAL search_path TO choros');
