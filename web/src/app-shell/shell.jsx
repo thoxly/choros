@@ -240,34 +240,27 @@ async function downloadAuditLog() {
   }
 }
 
-function Topbar({ screen, pathname, theme, setTheme, onLaunchProcess }) {
+function Topbar({ screen, pathname, theme, setTheme }) {
   const { entities } = useContext(CrumbContext);
   // T-0317: dynamic, param-aware crumbs (entity names injected, parents linkable).
   const crumb = buildCrumbs(pathname, entities);
   const navigate = useNavigate();
   const right =
     screen === "inbox" ? (
-      // T-0281: «Новая задача» — enabled, navigates to /processes where the
-      // launch modal lives (POST /api/processes/start, frozen contract §2.2).
-      <Button
-        variant="primary"
-        size="sm"
-        glyph={<Icon name="plus" className="chs-btn__glyph" />}
-        onClick={() => navigate('/processes')}
-        title="Запустить процесс"
-      >
-        Новая задача
-      </Button>
+      // T-0374 (B17): inbox no longer links to a generic process launcher.
+      // Processes start from configured entry points (create record / record_action).
+      null
     ) : screen === "processes" ? (
-      // T-0281: «Запустить процесс» button in topbar on processes screen.
+      // T-0374 (B17): generic «Запустить процесс» runtime launcher dissolved.
+      // The topbar on the processes screen leads to the modeler (design-time only).
       <Button
-        variant="primary"
+        variant="secondary"
         size="sm"
         glyph={<Icon name="plus" className="chs-btn__glyph" />}
-        onClick={onLaunchProcess}
-        title="Запустить процесс"
+        onClick={() => navigate('/processes/new/edit')}
+        title="Открыть конструктор для нового процесса"
       >
-        Запустить процесс
+        Новый процесс
       </Button>
     ) : screen === "org" ? (
       <Button variant="secondary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Исполнитель</Button>
@@ -434,7 +427,6 @@ function CommandPalette({ open, onClose, onGo }) {
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "light");
   const [rightsFocus, setRightsFocus] = useState(null);
-  const [launchOpen, setLaunchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false); // T-0307: ⌘K command palette
   // Auth bootstrap (T-0258): authReady gates the first render until we know the
   // mode; authConfig holds it; currentUser is the active identity (dev-user in
@@ -704,7 +696,7 @@ function AppShell() {
       </aside>
 
       <main className="chs-main">
-        <Topbar screen={screen} pathname={location.pathname} theme={theme} setTheme={setTheme} onLaunchProcess={() => setLaunchOpen(true)} />
+        <Topbar screen={screen} pathname={location.pathname} theme={theme} setTheme={setTheme} />
         {screen === "rights" && <RightsSubTabs />}
         <div className="chs-screen">
           <Routes>
@@ -721,7 +713,7 @@ function AppShell() {
             <Route path="/apps/:appId/records/:id" element={<RecordDetailScreen />} />
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
-            <Route path="/processes" element={<ProcessesScreen launchOpen={launchOpen} onLaunchClose={() => setLaunchOpen(false)} />} />
+            <Route path="/processes" element={<ProcessesScreen />} />
             {/* T-0271: agents list + hire + LLM secret-handle bind */}
             <Route path="/agents" element={<AgentsScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />

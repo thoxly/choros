@@ -3,9 +3,11 @@
    ЭКРАН: плотная таблица процессов (инстансов).
    Колонки: Процесс · Инстанс · Статус · Узел · Прогресс · Запущен · Исполнители · Действие.
 
-   T-0281: добавлена кнопка «Запустить процесс» + modal запуска канонического ТЭЛ.
-   Fetch-контракт §2.2 ADR T-0278: POST /api/processes/start с заголовками
-   x-dev-user (актор) и x-tenant-id (тенант), тело { processKey: "telLinear" }.
+   T-0374 (B17/B18): generic hardcoded «Запустить процесс» launcher removed.
+   Processes start from real business entry points configured via process↔app
+   bindings (trigger_type: on_create / record_action / launcher / auto). The
+   runtime screen now shows an honest empty state when no instances are running,
+   with a CTA to the process modeler so an admin can design new flows.
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -27,130 +29,10 @@ import {
   TRIGGER_TYPE_LABELS,
 } from './process-catalog.js';
 
-// Dev tenant UUID — same constant used by screen-org.jsx ExplainPanel and tests.
-// The backend resolves tenant scope via x-tenant-id header (process-defs.ts pattern).
-const DEV_TENANT_ID = "a0000000-0000-0000-0000-000000000001";
-
-// T-0311 / Audit #6 (G5 dev-jargon): the canonical linear-approval process is keyed
-// by the engine-level code the backend expects in the POST body (FROZEN §2.2). That
-// code is a DEVELOPER identifier — it must NEVER surface as visible product text.
-// We assemble it from parts so the bare code is never a printable token in this file
-// (the value sent to the API is byte-identical to what the engine deploys), and show
-// users the HUMAN name below instead.
-const PROCESS_KEY = ['tel', 'Linear'].join(''); // engine process key (POST body only)
-const PROCESS_DISPLAY_NAME = 'Линейное согласование'; // human-readable name (UI)
-
 const MARKER_COLOR = {
   running: "var(--chs-color-info)", done: "var(--chs-color-success)",
   failed: "var(--chs-color-danger)", waiting: "var(--chs-color-warning)",
 };
-
-/**
- * T-0281: LaunchModal — минимальный modal запуска канонического ТЭЛ-процесса.
- * Fetch-контракт §2.2 (FROZEN): POST /api/processes/start → 201 { instanceId, processKey, tenantId }.
- * На 201 перезагружает список процессов; показывает созданный instanceId.
- */
-function LaunchModal({ open, onClose, onLaunched }) {
-  const [launching, setLaunching] = useState(false);
-  const [result, setResult] = useState(null); // null | { ok, instanceId } | { error }
-
-  const handleLaunch = useCallback(async () => {
-    setLaunching(true);
-    setResult(null);
-    try {
-      // Mode-aware auth headers (dev → X-Dev-User; keycloak → Authorization: Bearer);
-      // the FROZEN start contract still carries the x-tenant-id tenant scope.
-      const res = await fetch('/api/processes/start', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...authHeaders(),
-          'x-tenant-id': DEV_TENANT_ID,
-        },
-        body: JSON.stringify({ processKey: PROCESS_KEY }),
-      });
-      if (res.status === 201) {
-        const data = await res.json();
-        setResult({ ok: true, instanceId: data.instanceId });
-        if (onLaunched) onLaunched(data);
-      } else {
-        let errMsg = `HTTP ${res.status}`;
-        try {
-          const body = await res.json();
-          errMsg = body?.error?.message || body?.message || errMsg;
-        } catch { /* ignore json parse error */ }
-        setResult({ error: errMsg });
-      }
-    } catch (e) {
-      setResult({ error: String(e?.message || e) });
-    } finally {
-      setLaunching(false);
-    }
-  }, [onLaunched]);
-
-  const handleClose = useCallback(() => {
-    setResult(null);
-    onClose();
-  }, [onClose]);
-
-  return (
-    <Modal
-      open={open}
-      onClose={handleClose}
-      title="Запустить процесс"
-      size="sm"
-      footer={
-        <>
-          <Button variant="ghost" size="sm" onClick={handleClose}>
-            {result?.ok ? 'Закрыть' : 'Отмена'}
-          </Button>
-          {!result?.ok && (
-            <Button variant="primary" size="sm" onClick={handleLaunch} disabled={launching}>
-              {launching ? 'Запуск…' : 'Запустить'}
-            </Button>
-          )}
-        </>
-      }
-    >
-      {/* Audit #6: show the HUMAN process name — the engine key stays in the API body only. */}
-      <p style={{
-        margin: '0 0 var(--chs-space-4) 0',
-        fontSize: 'var(--chs-text-sm)',
-        color: 'var(--chs-color-text-muted)',
-      }}>
-        {PROCESS_DISPLAY_NAME}
-      </p>
-
-      {result?.ok && (
-        <div style={{
-          marginBottom: 'var(--chs-space-4)',
-          padding: 'var(--chs-space-3) var(--chs-space-4)',
-          background: 'var(--chs-color-success-soft)',
-          border: '1px solid var(--chs-color-success)',
-          borderRadius: 'var(--chs-radius-3)',
-          fontSize: 'var(--chs-text-sm)',
-          color: 'var(--chs-color-text)',
-        }}>
-          Процесс запущен. Инстанс: <strong>{result.instanceId}</strong>
-        </div>
-      )}
-
-      {result?.error && (
-        <div style={{
-          marginBottom: 'var(--chs-space-4)',
-          padding: 'var(--chs-space-3) var(--chs-space-4)',
-          background: 'var(--chs-color-danger-soft)',
-          border: '1px solid var(--chs-color-danger)',
-          borderRadius: 'var(--chs-radius-3)',
-          fontSize: 'var(--chs-text-sm)',
-          color: 'var(--chs-color-text)',
-        }}>
-          Ошибка: {result.error}
-        </div>
-      )}
-    </Modal>
-  );
-}
 
 /**
  * T-0270: ProcessCatalogSection — REAL process definitions + the process↔application
@@ -572,7 +454,7 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
   );
 }
 
-function ProcessesScreen({ launchOpen, onLaunchClose }) {
+function ProcessesScreen() {
   const navigate = useNavigate();
   const [instances, setInstances] = useState(null);
   const [error, setError] = useState(null);
@@ -593,31 +475,14 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
     load();
   }, [load]);
 
-  // When a process is launched successfully, close modal and reload list
-  const handleLaunched = useCallback(() => {
-    if (onLaunchClose) onLaunchClose();
-    load();
-  }, [load, onLaunchClose]);
-
-  const handleExternalClose = useCallback(() => {
-    if (onLaunchClose) onLaunchClose();
-  }, [onLaunchClose]);
-
   const list = instances || [];
-  // Modal is opened by the topbar «Запустить процесс» trigger (shell.jsx → launchOpen).
-  const modalOpen = Boolean(launchOpen);
 
   return (
     <>
-      <LaunchModal
-        open={modalOpen}
-        onClose={handleExternalClose}
-        onLaunched={handleLaunched}
-      />
       <div className="chs-inbox">
-        {/* T-0311 / Audit #11: the «Запустить процесс» launch trigger lives in the
-            topbar (shell.jsx) for this screen; the duplicate in-screen header button
-            was removed so the affordance appears exactly once. */}
+        {/* T-0374 (B17): generic «Запустить процесс» hardcoded launcher removed.
+            Processes start via real business entry points configured in the
+            process↔app binding (on_create, record_action, launcher, auto). */}
       <div className="chs-inbox__scroll">
         {error ? (
           <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
@@ -630,8 +495,18 @@ function ProcessesScreen({ launchOpen, onLaunchClose }) {
           </div>
         ) : list.length === 0 ? (
           <EmptyState
-            title="Нет запущенных процессов"
-            description="Пока ни один процесс не запущен. Нажмите «Запустить процесс» в верхней панели, чтобы начать новый."
+            title="Нет активных процессов"
+            description="Процессы запускаются автоматически при создании объектов или по действию на карточке. Спроектируйте процесс в конструкторе и свяжите его с приложением — тогда он будет запускаться самостоятельно."
+            action={
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={false}
+                onClick={() => navigate('/processes/new/edit')}
+              >
+                Открыть конструктор
+              </Button>
+            }
           />
         ) : (
           <table className="chs-itable">
