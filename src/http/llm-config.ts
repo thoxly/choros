@@ -299,6 +299,12 @@ async function handlePutLlmConfig(
   // Endpoint URL + scheme policy. The endpoint receives the resolved LLM key as
   // an Authorization: Bearer header, so it MUST be https — an http:// endpoint
   // would ship the bearer over plaintext (T-0382 BLOCKER-1 hardening).
+  // T-0413: also reject endpoints containing userinfo (https://user@host) — the
+  // username component could be used to steer requests or to embed data into the
+  // target URL. Userinfo is never needed for a legitimate LLM API endpoint.
+  // Store parsedEndpoint.href (normalized) rather than the raw trimmed string so
+  // the persisted value is always canonical (no trailing whitespace, consistent
+  // scheme casing, etc.).
   let parsedEndpoint: URL;
   try {
     parsedEndpoint = new URL(llmEndpoint);
@@ -312,6 +318,15 @@ async function handlePutLlmConfig(
       "llm_endpoint must use https (the LLM key is sent as a bearer token)",
     );
   }
+  if (parsedEndpoint.username !== "") {
+    throw new HttpError(
+      400,
+      "VALIDATION",
+      "llm_endpoint must not contain userinfo (user@host form is not permitted)",
+    );
+  }
+  // Use the WHATWG-normalized href as the canonical stored value.
+  const canonicalEndpoint = parsedEndpoint.href;
 
   const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
 
@@ -336,10 +351,11 @@ async function handlePutLlmConfig(
     // BLOCKER-2 (T-0382): the UPDATE runs on connection A (this client) INSIDE
     // the outer withTenantTx, so the audit append below and the endpoint/model
     // write commit/rollback ATOMICALLY together.
+    // T-0413: canonicalEndpoint is the WHATWG-normalized href (not raw user input).
     const updated = await updateAgentLlmEndpointModel(
       client as unknown as PgClientLike,
       row.employee_id,
-      llmEndpoint,
+      canonicalEndpoint,
       llmModel,
       nowMs,
     );
@@ -359,7 +375,7 @@ async function handlePutLlmConfig(
       confirmed_by: null,
       payload: {
         agentEmployeeId: row.employee_id,
-        llm_endpoint: llmEndpoint,
+        llm_endpoint: canonicalEndpoint,
         llm_model: llmModel,
       },
       occurred_at: nowMs,

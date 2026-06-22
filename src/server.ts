@@ -123,58 +123,46 @@ const deepseekSecretResolver: SecretResolverPort = {
 };
 
 /**
- * T-0382 (D5): env-backed resolver for the per-tenant LLM port.
+ * T-0413 (SECURITY-FU): tenant-facing secret resolver.
  *
- * SECURITY (BLOCKER-1 fix): a tenant admin controls BOTH the secret-handle and
- * the llm_endpoint (PUT /api/llm-config), so an unrestricted `env://VARNAME`
- * resolver is an arbitrary server-env exfiltration primitive — a tenant could
- * set handle="env://DATABASE_URL" + endpoint="https://attacker.example" and the
- * env value would ship as `Authorization: Bearer <value>`.
+ * SECURITY: the `env://` scheme is SYSTEM-ONLY and MUST NOT be resolvable from a
+ * tenant-supplied handle. A tenant admin controls BOTH the secret-handle stored in
+ * agent_card AND the llm_endpoint (PUT /api/llm-config). If a tenant could supply
+ * an env:// handle (even the allow-listed DEEPSEEK_API_KEY), they could point the
+ * endpoint at an attacker host and have the server ship the SHARED system key as a
+ * Bearer token — exfiltrating a credential shared across all tenants.
  *
- * Therefore `env://` is resolvable ONLY for an explicit ALLOW-LIST of env var
- * names. The allow-list contains exactly ONE entry: the deployment's single dev
- * fallback key (DEEPSEEK_API_KEY). Any other `env://` handle is REJECTED.
+ * Therefore `env://` handles are NEVER resolvable through the tenant path,
+ * regardless of which var name they reference. Tenant BYO keys MUST be stored
+ * through the encrypted secret-handle custody store (POST /api/agents/:id/secret-handle,
+ * T-0025) and resolved through that path only.
  *
- * Real tenant BYO keys MUST be stored through the encrypted secret-handle store
- * (POST /api/agents/:id/secret-handle, T-0025) and resolved through that custody
- * path — NOT via tenant-supplied `env://` pointers. Such non-env handles
- * (e.g. vault://) are not resolvable at this env layer and fall through to the
- * dormant path (a vault resolver would be wired separately).
+ * The system env fallback (DEEPSEEK_API_KEY when no tenant config exists) is wired
+ * separately in makeLlmPortFactory via deepseekSecretResolver — that path is NOT
+ * reachable by a tenant-supplied handle.
  */
-// Exported for adversarial testing (T-0382 BLOCKER-1): a test can call
-// resolveSecret("env://DATABASE_URL") against the REAL composition-root resolver
-// and assert it throws rather than returning the server env value.
+// Exported for adversarial testing (T-0413): a test can call
+// resolveSecret("env://...") against the REAL composition-root resolver
+// and assert it always throws rather than returning any server env value.
 export const tenantSecretResolver: SecretResolverPort = {
   async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
-    // Pattern 1: env:// reference — ALLOW-LISTED env var names ONLY (decideEnvHandle).
+    // T-0413: REJECT all env:// handles in the tenant path — scheme is SYSTEM-ONLY.
+    // decideEnvHandle classifies the handle; any env:// outcome (denied OR allowed)
+    // is rejected here because the allow-list only governs the system-internal path.
     const decision = decideEnvHandle(handle);
-    if (decision.kind === "denied") {
-      // Disallowed env var → reject. A tenant cannot read arbitrary server env.
+    if (decision.kind !== "not_env") {
+      // env:// handle from a tenant-supplied source → always reject.
+      // The redactHandle strips the var name to avoid leaking it via the error message.
       throw new Error(
-        `[T-0382] env:// handle not permitted: only an explicit env allow-list is ` +
-        `resolvable (handle: ${redactHandle(handle)}). Store tenant keys via the ` +
+        `[T-0413] env:// handles are system-only and may not be used as tenant secret ` +
+        `handles (handle: ${redactHandle(handle)}). Store tenant keys via the ` +
         `secret-handle custody store (POST /api/agents/:id/secret-handle).`,
       );
     }
-    if (decision.kind === "allowed") {
-      const key = process.env[decision.varName];
-      if (!key) {
-        throw new Error(`[T-0382] Env var not found for handle: ${redactHandle(handle)}`);
-      }
-      return key;
-    }
-    // Pattern 2: legacy DEEPSEEK_HANDLE for backward compat (== env://DEEPSEEK_API_KEY).
-    if (handle === DEEPSEEK_HANDLE) {
-      const key = process.env["DEEPSEEK_API_KEY"];
-      if (!key) {
-        throw new Error(`[T-0382] DeepSeek API key not found (handle: ${redactHandle(handle)})`);
-      }
-      return key;
-    }
-    // Other handle shapes (vault://, etc.) are not resolvable at the env layer.
-    // Return a descriptive error so the dormant path activates gracefully.
+    // Other handle shapes (vault://, opaque tokens, etc.) are not resolvable at
+    // the env layer — return a descriptive error so the dormant path activates.
     throw new Error(
-      `[T-0382] Cannot resolve handle scheme at env layer: ${redactHandle(handle)}. ` +
+      `[T-0413] Cannot resolve handle scheme at env layer: ${redactHandle(handle)}. ` +
       `Use the secret-handle custody store or wire a vault resolver.`,
     );
   },

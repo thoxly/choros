@@ -213,17 +213,19 @@ describe("Враг · non-canonical schemes never reach process.env", () => {
     });
   }
 
-  it("the legacy DEEPSEEK_HANDLE backward-compat path requires the EXACT string", async () => {
-    // Pattern 2 in resolveSecret: handle === "env://DEEPSEEK_API_KEY" (exact).
-    // The uppercase scheme is not_env and not equal to the legacy handle → throw.
-    await withEnv("DEEPSEEK_API_KEY", "LEGACY-SENTINEL", async () => {
+  it("T-0413: env:// is SYSTEM-ONLY — even the exact canonical handle is rejected in the tenant path", async () => {
+    // After T-0413, tenantSecretResolver rejects ALL env:// handles (not just
+    // non-allowlisted ones). The scheme is reserved for the system fallback path
+    // (deepseekSecretResolver in makeLlmPortFactory), never for tenant-supplied handles.
+    // Both the uppercase scheme variant AND the exact canonical form must throw.
+    await withEnv("DEEPSEEK_API_KEY", "SYSTEM-ONLY-SENTINEL", async () => {
       await expect(
         tenantSecretResolver.resolveSecret("ENV://DEEPSEEK_API_KEY", { tenantId: TENANT }),
       ).rejects.toThrow();
-      // The exact canonical handle still resolves (positive control).
+      // The exact canonical handle is ALSO rejected via the tenant resolver.
       await expect(
         tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT }),
-      ).resolves.toBe("LEGACY-SENTINEL");
+      ).rejects.toThrow(/system-only/i);
     });
   });
 });
@@ -232,13 +234,13 @@ describe("Враг · non-canonical schemes never reach process.env", () => {
 // 5. SECRET-VALUE ECHO — even a DENIED handle whose var IS set must not leak
 //    the value via the thrown error message (redactHandle redacts the handle).
 // ===========================================================================
-describe("Враг · denied-handle errors never echo the env value or var name", () => {
+describe("Враг · T-0413 rejected-handle errors never echo the env value or var name", () => {
   it("env://DATABASE_URL error redacts the handle to env://... (no var name, no value)", async () => {
     await withEnv("DATABASE_URL", "postgres://super-secret-ECHO-CHECK", async () => {
       const result = tenantSecretResolver.resolveSecret("env://DATABASE_URL", {
         tenantId: TENANT,
       });
-      await expect(result).rejects.toThrow(/not permitted/i);
+      await expect(result).rejects.toThrow(/system-only/i);
       await result.catch((e: unknown) => {
         const msg = String(e);
         expect(msg).not.toContain("super-secret-ECHO-CHECK"); // no value leak
@@ -248,12 +250,12 @@ describe("Враг · denied-handle errors never echo the env value or var name"
     });
   });
 
-  it("an arbitrary allow-listable-looking var (env://AWS_SECRET_ACCESS_KEY) is denied + redacted", async () => {
+  it("an arbitrary allow-listable-looking var (env://AWS_SECRET_ACCESS_KEY) is rejected + redacted", async () => {
     await withEnv("AWS_SECRET_ACCESS_KEY", "AKIA-ECHO-SENTINEL", async () => {
       const result = tenantSecretResolver.resolveSecret("env://AWS_SECRET_ACCESS_KEY", {
         tenantId: TENANT,
       });
-      await expect(result).rejects.toThrow(/not permitted/i);
+      await expect(result).rejects.toThrow(/system-only/i);
       await result.catch((e: unknown) => {
         expect(String(e)).not.toContain("AKIA-ECHO-SENTINEL");
         expect(String(e)).not.toContain("AWS_SECRET_ACCESS_KEY");
@@ -263,37 +265,38 @@ describe("Враг · denied-handle errors never echo the env value or var name"
 });
 
 // ===========================================================================
-// 6. POSITIVE CONTROL + EMPTY-VAR — only the exact allow-listed handle resolves,
-//    and even then only when the env var is actually present.
+// 6. T-0413 SYSTEM-ONLY INVARIANT — the tenant resolver rejects ALL env://
+//    handles, including the canonical DEEPSEEK_API_KEY form, regardless of
+//    whether the env var is set. The system fallback (deepseekSecretResolver)
+//    is wired SEPARATELY in makeLlmPortFactory and is NOT reachable here.
 // ===========================================================================
-describe("Враг · positive control — ONLY env://DEEPSEEK_API_KEY resolves", () => {
-  it("resolves the exact handle when the var is present", async () => {
-    await withEnv("DEEPSEEK_API_KEY", "the-only-resolvable-value", async () => {
+describe("Враг · T-0413 — env:// is SYSTEM-ONLY; tenant resolver rejects ALL env:// forms", () => {
+  it("rejects env://DEEPSEEK_API_KEY (the canonical allowed name) even when the var is present", async () => {
+    await withEnv("DEEPSEEK_API_KEY", "the-system-only-value", async () => {
       await expect(
         tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT }),
-      ).resolves.toBe("the-only-resolvable-value");
+      ).rejects.toThrow(/system-only/i);
     });
   });
 
-  it("throws (does not return empty) when the allow-listed var is UNSET", async () => {
+  it("rejects env://DEEPSEEK_API_KEY when the var is UNSET (same: scheme always rejected)", async () => {
     const prev = process.env["DEEPSEEK_API_KEY"];
     delete process.env["DEEPSEEK_API_KEY"];
     try {
       await expect(
         tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/system-only/i);
     } finally {
       if (prev !== undefined) process.env["DEEPSEEK_API_KEY"] = prev;
     }
   });
 
-  it("an empty-string env value for the allow-listed var is treated as not-found (throws)", async () => {
-    // decideEnvHandle says `allowed`, but resolveSecret guards `if (!key)` → throw.
-    // An empty bearer token must not silently ship.
+  it("rejects env://DEEPSEEK_API_KEY with an empty env value (scheme is rejected before var read)", async () => {
+    // The rejection happens at the env:// scheme check, BEFORE any env var is read.
     await withEnv("DEEPSEEK_API_KEY", "", async () => {
       await expect(
         tenantSecretResolver.resolveSecret("env://DEEPSEEK_API_KEY", { tenantId: TENANT }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/system-only/i);
     });
   });
 });
