@@ -62,6 +62,9 @@ import {
   mapRecordError,
   extractFieldErrors,
 } from './records-form.js';
+// T-0399 [D7-K]: record-entry fields render through the ONE unified renderer
+// (catalog-driven), replacing the bespoke inline checkbox/number/text map below.
+import { FieldControl } from '../forms/field-renderer.jsx';
 
 // Anything at/below this is a seed/unset created_at, not a real date — render a
 // dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
@@ -73,12 +76,6 @@ function fmtTs(ms) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-
-const errStyle = {
-  display: 'block', marginTop: 'var(--chs-space-2)',
-  fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)',
-};
-const labelTxt = { fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-medium)', color: 'var(--chs-color-text)' };
 
 /**
  * CreateRecordDrawer — dynamic form generated from the chosen registry_def's
@@ -186,42 +183,20 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
           </p>
         )}
 
-        {formFields.map((f) => {
-          const invalid = Boolean(fieldErrors[f.key]);
-          if (f.inputKind === 'checkbox') {
-            return (
-              <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-4)', marginBottom: 'var(--chs-space-5)' }}>
-                <input
-                  type="checkbox"
-                  checked={Boolean(values[f.key])}
-                  onChange={(e) => setVal(f.key, e.target.checked)}
-                  aria-label={f.label}
-                />
-                <span style={labelTxt}>
-                  {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger)' }}> *</span>}
-                </span>
-                {invalid && <span style={errStyle}>{fieldErrors[f.key]}</span>}
-              </label>
-            );
-          }
-          return (
-            <div key={f.key} className="chs-field" style={{ marginBottom: 'var(--chs-space-5)' }}>
-              <span style={labelTxt}>
-                {f.label}{f.required && <span style={{ color: 'var(--chs-color-danger)' }}> *</span>}
-              </span>
-              <input
-                className={`chs-input ${invalid ? 'chs-input--invalid' : ''}`}
-                type={f.inputKind === 'number' ? 'number' : 'text'}
-                step={f.type === 'integer' ? '1' : 'any'}
-                value={values[f.key] ?? ''}
-                onChange={(e) => setVal(f.key, e.target.value)}
-                aria-label={f.label}
-                aria-invalid={invalid || undefined}
-              />
-              {invalid && <span style={errStyle}>{fieldErrors[f.key]}</span>}
-            </div>
-          );
-        })}
+        {/* T-0399 [D7-K]: one catalog-driven control per field. FieldControl
+            resolves the contract from the field's `type` + `options`, so select
+            (enum) and date now render their proper controls here too — the
+            previous inline map only knew checkbox vs text/number. */}
+        {formFields.map((f) => (
+          <FieldControl
+            key={f.key}
+            field={f}
+            value={values[f.key]}
+            onChange={setVal}
+            error={fieldErrors[f.key]}
+            idPrefix="record-field"
+          />
+        ))}
 
         {submitErr && (
           <div role="alert" style={{

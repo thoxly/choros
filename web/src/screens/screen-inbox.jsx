@@ -12,6 +12,10 @@ import {
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
+// T-0399 [D7-K]: the inbox form field control is now the ONE unified renderer
+// (web/src/forms/field-renderer.jsx), keyed off the binding-contract catalog —
+// replacing the inline type→control map that silently dropped enum options.
+import { FieldControl } from '../forms/field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // T-0376: InboxTaskForm — renders the bound form for a userTask in the inbox
@@ -20,118 +24,8 @@ import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
 // Does NOT edit inbox.ts — uses the standalone /api/forms/binding endpoint from
 // binding.ts. PD-9: form fields are derived from real app fields (registry_def),
 // never invented here. G2/G5/G6: kit tokens only, plain copy, no hardcoded data.
+// T-0399: field rendering delegated to the unified FieldControl (catalog-driven).
 // ---------------------------------------------------------------------------
-
-/**
- * Renders one field from a form binding as an HTML input control.
- * Field types: string → text, number/integer → number, boolean → checkbox,
- * enum (string+enum in schema) → select. Date → date input.
- * G6: no hardcoded placeholder data; uses field label from binding only.
- */
-function FormField({ field, value, onChange, error }) {
-  const id = `inbox-form-field-${field.key}`;
-  const label = field.label || field.key;
-  const isRequired = Boolean(field.required);
-
-  const inputStyle = {
-    display: 'block',
-    width: '100%',
-    boxSizing: 'border-box',
-  };
-
-  let control;
-  if (Array.isArray(field.options) && field.options.length > 0) {
-    // enum / select field
-    control = (
-      <select
-        id={id}
-        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
-        value={value ?? ''}
-        onChange={(e) => onChange(field.key, e.target.value)}
-        aria-required={isRequired || undefined}
-        aria-invalid={error ? true : undefined}
-        style={inputStyle}
-      >
-        <option value="">— выберите —</option>
-        {field.options.map((opt) => (
-          <option key={opt} value={opt}>{opt}</option>
-        ))}
-      </select>
-    );
-  } else if (field.type === 'boolean') {
-    control = (
-      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)' }}>
-        <input
-          id={id}
-          type="checkbox"
-          checked={Boolean(value)}
-          onChange={(e) => onChange(field.key, e.target.checked)}
-          aria-required={isRequired || undefined}
-          aria-invalid={error ? true : undefined}
-        />
-        {label}
-      </label>
-    );
-  } else if (field.type === 'number' || field.type === 'integer') {
-    control = (
-      <input
-        id={id}
-        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
-        type="number"
-        value={value ?? ''}
-        onChange={(e) => onChange(field.key, e.target.value)}
-        aria-required={isRequired || undefined}
-        aria-invalid={error ? true : undefined}
-        style={inputStyle}
-      />
-    );
-  } else {
-    // string / date / default → text input
-    control = (
-      <input
-        id={id}
-        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
-        type="text"
-        value={value ?? ''}
-        onChange={(e) => onChange(field.key, e.target.value)}
-        aria-required={isRequired || undefined}
-        aria-invalid={error ? true : undefined}
-        style={inputStyle}
-      />
-    );
-  }
-
-  // For boolean, the label is part of the control; for others, render it above.
-  if (field.type === 'boolean') {
-    return (
-      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
-        {control}
-        {error && (
-          <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
-            {error}
-          </span>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
-      <label className="chs-label" htmlFor={id}>
-        {label}
-        {isRequired && (
-          <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
-        )}
-      </label>
-      {control}
-      {error && (
-        <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
-          {error}
-        </span>
-      )}
-    </div>
-  );
-}
 
 /**
  * InboxTaskForm — fetches and renders the form bound to a process step.
@@ -253,12 +147,13 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
       </h3>
       <form onSubmit={handleSubmit} noValidate>
         {fields.map((f) => (
-          <FormField
+          <FieldControl
             key={f.key}
             field={f}
             value={values[f.key]}
             onChange={handleChange}
             error={fieldErrors[f.key]}
+            idPrefix="inbox-form-field"
           />
         ))}
         {formError && (
