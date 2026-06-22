@@ -58,8 +58,11 @@ import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator
 
 export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
-/** Factory that returns the LLM port for a given tenant (or dormantLlmPort). */
-export type LlmPortFactory = (tenantId: string) => LlmPort;
+/**
+ * Factory that returns the LLM port for a given tenant (or dormantLlmPort).
+ * T-0382: made async so per-tenant DB config can be read at call time.
+ */
+export type LlmPortFactory = (tenantId: string) => LlmPort | Promise<LlmPort>;
 
 export interface AssistantRouteDeps {
   pool: pg.Pool;
@@ -782,7 +785,8 @@ export function registerAssistantRoutes(
       // -----------------------------------------------------------------------
       // 2. Resolve the LLM port.
       // -----------------------------------------------------------------------
-      const llm = llmPortFactory(tenantId);
+      // T-0382: factory is now async (per-tenant agent_card config lookup).
+      const llm = await llmPortFactory(tenantId);
 
       // -----------------------------------------------------------------------
       // 3. Persist the user message (outside LLM call — do not lose it if LLM fails).

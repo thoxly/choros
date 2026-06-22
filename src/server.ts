@@ -54,9 +54,15 @@ import { dormantLlmPort } from "./core/llm-port.js";
 // T-0363 (E17): DeepSeek / OpenAI-compatible LLM adapter (composition-root only — RL-3).
 import { OpenAILlmPort } from "./adapters/openai-llm-port.js";
 import { validateSecretHandleShape, redactHandle, type SecretResolverPort } from "./core/secret-handle-validator.js";
+// T-0382 (D5) BLOCKER-1: env:// secret-handle allow-list (arbitrary env exfil guard).
+import { decideEnvHandle } from "./core/env-secret-allowlist.js";
 // T-0363 (E17): Analyst production ports.
 import { setAnalystPorts } from "./core/assistant-analyst.js";
 import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
+// T-0382 (D5): per-tenant LLM config (BYO) — read from agent_card at call time.
+import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
+// T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
+import { registerLlmConfigRoutes } from "./http/llm-config.js";
 
 const { Pool } = pg;
 
@@ -113,21 +119,111 @@ const deepseekSecretResolver: SecretResolverPort = {
 };
 
 /**
- * LlmPort factory: returns a real OpenAILlmPort per tenant when DEEPSEEK_API_KEY
- * is configured, or dormantLlmPort (→ 503) when absent.
- * Each call creates a fresh port so tenant isolation is preserved even if
- * per-tenant config diverges in a future Stage-2 BYO-key extension.
+ * T-0382 (D5): env-backed resolver for the per-tenant LLM port.
+ *
+ * SECURITY (BLOCKER-1 fix): a tenant admin controls BOTH the secret-handle and
+ * the llm_endpoint (PUT /api/llm-config), so an unrestricted `env://VARNAME`
+ * resolver is an arbitrary server-env exfiltration primitive — a tenant could
+ * set handle="env://DATABASE_URL" + endpoint="https://attacker.example" and the
+ * env value would ship as `Authorization: Bearer <value>`.
+ *
+ * Therefore `env://` is resolvable ONLY for an explicit ALLOW-LIST of env var
+ * names. The allow-list contains exactly ONE entry: the deployment's single dev
+ * fallback key (DEEPSEEK_API_KEY). Any other `env://` handle is REJECTED.
+ *
+ * Real tenant BYO keys MUST be stored through the encrypted secret-handle store
+ * (POST /api/agents/:id/secret-handle, T-0025) and resolved through that custody
+ * path — NOT via tenant-supplied `env://` pointers. Such non-env handles
+ * (e.g. vault://) are not resolvable at this env layer and fall through to the
+ * dormant path (a vault resolver would be wired separately).
  */
-function makeLlmPortFactory(tenantId: string) {
+// Exported for adversarial testing (T-0382 BLOCKER-1): a test can call
+// resolveSecret("env://DATABASE_URL") against the REAL composition-root resolver
+// and assert it throws rather than returning the server env value.
+export const tenantSecretResolver: SecretResolverPort = {
+  async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
+    // Pattern 1: env:// reference — ALLOW-LISTED env var names ONLY (decideEnvHandle).
+    const decision = decideEnvHandle(handle);
+    if (decision.kind === "denied") {
+      // Disallowed env var → reject. A tenant cannot read arbitrary server env.
+      throw new Error(
+        `[T-0382] env:// handle not permitted: only an explicit env allow-list is ` +
+        `resolvable (handle: ${redactHandle(handle)}). Store tenant keys via the ` +
+        `secret-handle custody store (POST /api/agents/:id/secret-handle).`,
+      );
+    }
+    if (decision.kind === "allowed") {
+      const key = process.env[decision.varName];
+      if (!key) {
+        throw new Error(`[T-0382] Env var not found for handle: ${redactHandle(handle)}`);
+      }
+      return key;
+    }
+    // Pattern 2: legacy DEEPSEEK_HANDLE for backward compat (== env://DEEPSEEK_API_KEY).
+    if (handle === DEEPSEEK_HANDLE) {
+      const key = process.env["DEEPSEEK_API_KEY"];
+      if (!key) {
+        throw new Error(`[T-0382] DeepSeek API key not found (handle: ${redactHandle(handle)})`);
+      }
+      return key;
+    }
+    // Other handle shapes (vault://, etc.) are not resolvable at the env layer.
+    // Return a descriptive error so the dormant path activates gracefully.
+    throw new Error(
+      `[T-0382] Cannot resolve handle scheme at env layer: ${redactHandle(handle)}. ` +
+      `Use the secret-handle custody store or wire a vault resolver.`,
+    );
+  },
+};
+
+/**
+ * T-0382 (D5): per-tenant LLM port factory (async).
+ *
+ * Priority order:
+ *   1. Per-tenant agent_card config (all three llm_* fields non-null AND handle valid).
+ *   2. Global env fallback (DEEPSEEK_API_KEY — backward-compatible T-0363 path).
+ *   3. dormantLlmPort → 503 (fail-closed default).
+ *
+ * Each call queries the DB fresh so live config changes are picked up without
+ * a restart (no caching — the per-message latency hit is a single indexed
+ * SELECT on a small table; acceptable per PD-5).
+ *
+ * Called only from buildRouter's assistant route wiring and llm-config route —
+ * both in src/server.ts (composition root). NOT called from core or adapters.
+ */
+async function makeLlmPortFactory(
+  tenantId: string,
+  grantsPool: pg.Pool | null,
+) {
+  // 1. Attempt per-tenant DB config.
+  const tenantCfg = await loadTenantLlmConfig(grantsPool, tenantId);
+  if (tenantCfg) {
+    // TenantLlmConfig.secretHandle is the aliased opaque handle (RL-3: not raw key).
+    const verdict = validateSecretHandleShape(tenantCfg.secretHandle);
+    if (verdict.ok) {
+      return new OpenAILlmPort({
+        endpoint:     tenantCfg.llmEndpoint,
+        model:        tenantCfg.llmModel,
+        secretHandle: tenantCfg.secretHandle,
+        tenantId,
+        secretResolver: tenantSecretResolver,
+      });
+    }
+    // Invalid handle shape in DB → fall through to env fallback (log but don't crash).
+  }
+
+  // 2. Global env fallback (T-0363 backward-compatible path).
   if (DEEPSEEK_API_KEY) {
     return new OpenAILlmPort({
       endpoint: DEEPSEEK_BASE_URL,
-      model: DEEPSEEK_MODEL,
+      model:    DEEPSEEK_MODEL,
       secretHandle: DEEPSEEK_HANDLE,
       tenantId,
       secretResolver: deepseekSecretResolver,
     });
   }
+
+  // 3. No config → dormant (fail-closed, three-lock §6).
   return dormantLlmPort;
 }
 
@@ -621,6 +717,8 @@ function buildRouter(
 
   // T-0359 (E17): Register AI-assistant routes (thread/message/budget).
   // T-0363 (b): llmPortFactory now wires DeepSeek when DEEPSEEK_API_KEY is set.
+  // T-0382 (D5): llmPortFactory is now async and reads per-tenant agent_card config
+  //   first, falling back to global env (backward-compatible).
   // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
   // APPEND-ONLY: the last register* call before setFallback.
   if (grantsPool) {
@@ -628,8 +726,20 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
-      // T-0363: real DeepSeek port when key is set; dormantLlmPort → 503 when absent.
-      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId),
+      // T-0382: async factory — reads per-tenant agent_card llm_* then falls back
+      // to global DEEPSEEK_API_KEY env; dormantLlmPort → 503 when neither is set.
+      llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId, grantsPool),
+    });
+  }
+
+  // T-0382 (D5): LLM connection screen backend (GET/PUT per-tenant LLM config).
+  // Additive — registers two routes to read/write llm_endpoint+llm_model on agent_card.
+  // Secret-handle binding remains via the existing POST /api/agents/:id/secret-handle.
+  if (grantsPool) {
+    registerLlmConfigRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
     });
   }
 
