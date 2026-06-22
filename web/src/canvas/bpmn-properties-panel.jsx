@@ -1050,7 +1050,7 @@ export default function BpmnPropertiesPanel({ modeler }) {
               </PPEntry>
               <PPEntry>
                 <p className="bio-properties-panel-description">
-                  Клиент хостит LLM-эндпоинт самостоятельно (BYO). Endpoint и модель сохраняются в XML процесса (choros:byoEndpoint, choros:byoModel). Бюджет и автономия задаются на уровне агента в Оргструктуре.
+                  Клиент хостит LLM-эндпоинт самостоятельно (BYO). Endpoint и модель сохраняются вместе с процессом. Бюджет и автономия задаются на уровне агента в Оргструктуре.
                 </p>
               </PPEntry>
             </PanelGroup>
@@ -1076,7 +1076,7 @@ export default function BpmnPropertiesPanel({ modeler }) {
                     aria-label="Назначенная роль"
                     hint={
                       roles.length === 0
-                        ? 'Роли не найдены — создайте их в Оргструктуре'
+                        ? 'Роли недоступны — проверьте доступ или создайте их в Оргструктуре'
                         : undefined
                     }
                   />
@@ -1084,7 +1084,7 @@ export default function BpmnPropertiesPanel({ modeler }) {
               </PPEntry>
               <PPEntry>
                 <p className="bio-properties-panel-description">
-                  Инструменты и видимые поля формы — производные от грантов роли, не задаются отдельными тумблерами. UUID роли сохраняется как choros:assignedRoleId в XML.
+                  Инструменты и видимые поля формы — производные от грантов роли, не задаются отдельными тумблерами.
                 </p>
               </PPEntry>
             </PanelGroup>
