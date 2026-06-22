@@ -38,6 +38,7 @@ import {
   classifyOutcome,
   CONFIDENCE_FLOOR,
 } from "../../core/agent-precheck-motor.js";
+import { MIN_AUTONOMY_THRESHOLD } from "../../core/agent-hire.js";
 import type { AgentStepContext } from "./agent-step-context.js";
 
 // Re-export the outcome union for the dispatch loop / outcome decomposer.
@@ -224,8 +225,14 @@ export async function runAgentStep(
   // takes precedence; fall back to DEFAULT_AUTONOMY_THRESHOLD (tenant-level default in
   // code, no new table). Either way gate A is ALWAYS active: proceed only when
   // confidence ≥ threshold (the "activate the threshold" requirement from spec §7/F4).
-  const autonomyThreshold =
+  //
+  // Defense-in-depth: clamp any stored value up to MIN_AUTONOMY_THRESHOLD so that
+  // a pre-existing sub-floor row (inserted before T-0398) cannot weaken gate A.
+  // The canonical floor is enforced at write time in buildAgentHirePlan; this clamp
+  // is the read-side backstop for rows that predate the write-side floor.
+  const rawThreshold =
     ctx.autonomyThreshold != null ? ctx.autonomyThreshold : DEFAULT_AUTONOMY_THRESHOLD;
+  const autonomyThreshold = Math.max(rawThreshold, MIN_AUTONOMY_THRESHOLD);
   const thresholdFailed = result.confidence < autonomyThreshold;
   const belowFloor = result.confidence < CONFIDENCE_FLOOR;
   const ambiguous =

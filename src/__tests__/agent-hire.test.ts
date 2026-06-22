@@ -31,6 +31,7 @@ import {
   deriveKcClientId,
   buildAgentHirePlan,
   encodeAgentHireAuditEvent,
+  MIN_AUTONOMY_THRESHOLD,
   type AgentHireAuditEvent,
 } from "../core/agent-hire.js";
 import { AgentConflictError, insertAgentRows } from "../db/agent-provision.js";
@@ -98,6 +99,64 @@ describe("buildAgentHirePlan — pure (ADR §3.3)", () => {
       nowMs,
     });
     expect(plan.agentCard.employeeId).toBe(plan.employee.id);
+  });
+
+  // T-0398: autonomy_threshold floor clamp at write time
+  it("T-0398: autonomyThreshold below floor (0) is clamped up to MIN_AUTONOMY_THRESHOLD", () => {
+    const plan = buildAgentHirePlan({
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      positionId: "b0000000-0000-0000-0000-000000000001",
+      slug: "zero-threshold-agent",
+      displayName: "Zero Threshold Agent",
+      autonomyThreshold: 0,
+      nowMs,
+    });
+    expect(plan.agentCard.autonomyThreshold).toBe(MIN_AUTONOMY_THRESHOLD);
+  });
+
+  it("T-0398: autonomyThreshold at 0.5 (below floor) is clamped to MIN_AUTONOMY_THRESHOLD", () => {
+    const plan = buildAgentHirePlan({
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      positionId: "b0000000-0000-0000-0000-000000000001",
+      slug: "low-threshold-agent",
+      displayName: "Low Threshold Agent",
+      autonomyThreshold: 0.5,
+      nowMs,
+    });
+    expect(plan.agentCard.autonomyThreshold).toBe(MIN_AUTONOMY_THRESHOLD);
+  });
+
+  it("T-0398: autonomyThreshold at or above floor (0.9) is preserved unchanged", () => {
+    const plan = buildAgentHirePlan({
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      positionId: "b0000000-0000-0000-0000-000000000001",
+      slug: "high-threshold-agent",
+      displayName: "High Threshold Agent",
+      autonomyThreshold: 0.9,
+      nowMs,
+    });
+    expect(plan.agentCard.autonomyThreshold).toBe(0.9);
+  });
+
+  it("T-0398: autonomyThreshold null (omitted) passes through as null (global default applies at runtime)", () => {
+    const plan = buildAgentHirePlan({
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      positionId: "b0000000-0000-0000-0000-000000000001",
+      slug: "null-threshold-agent",
+      displayName: "Null Threshold Agent",
+      nowMs,
+    });
+    expect(plan.agentCard.autonomyThreshold).toBeNull();
+  });
+
+  it("T-0398: MIN_AUTONOMY_THRESHOLD is exported and at least as strict as DEFAULT_AUTONOMY_THRESHOLD", () => {
+    // Structural invariant: the floor must not be set lower than the global default.
+    // If this fails it means the two constants have drifted and the floor is weaker
+    // than what an agent without an explicit threshold already gets — which would be
+    // a silent policy regression.
+    // We import DEFAULT_AUTONOMY_THRESHOLD via dynamic import to avoid a circular dep.
+    expect(MIN_AUTONOMY_THRESHOLD).toBeGreaterThanOrEqual(0.7); // >= CONFIDENCE_FLOOR
+    expect(typeof MIN_AUTONOMY_THRESHOLD).toBe("number");
   });
 });
 

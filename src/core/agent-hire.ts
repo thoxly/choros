@@ -21,6 +21,21 @@ import type { ScopeElement } from "./grant-lattice.js";
 import type { AuditEventInput } from "./audit-grant-encoder.js";
 
 // ---------------------------------------------------------------------------
+// MIN_AUTONOMY_THRESHOLD — app-level floor for agent autonomy_threshold.
+//
+// An admin may set a per-agent autonomy_threshold at hire time. Without a
+// floor the DB CHECK allows 0, which would defeat gate A for all steps (the
+// agent would always be judged "confident enough"). We clamp any admin-supplied
+// value up to this floor so the gate is never weaker than the structural
+// CONFIDENCE_FLOOR (0.70 in agent-precheck-motor.ts). The chosen value matches
+// DEFAULT_AUTONOMY_THRESHOLD (run-agent-step.ts) so that setting a per-agent
+// override cannot silently downgrade to the CONFIDENCE_FLOOR structural level —
+// only the same or stricter policy bar is allowed at the per-agent override
+// layer. Exported so run-agent-step.ts can apply defense-in-depth at read.
+// ---------------------------------------------------------------------------
+export const MIN_AUTONOMY_THRESHOLD = 0.85;
+
+// ---------------------------------------------------------------------------
 // Keycloak Admin Port — the ONLY new IO boundary (NF-7, ADR §3.2)
 // ---------------------------------------------------------------------------
 
@@ -152,7 +167,10 @@ export function buildAgentHirePlan(input: AgentHireInput): AgentHirePlan {
       llmEndpoint: input.llmEndpoint ?? null,
       llmModel: input.llmModel ?? null,
       llmSecretHandle: input.llmSecretHandle ?? null,
-      autonomyThreshold: input.autonomyThreshold ?? null,
+      autonomyThreshold:
+        input.autonomyThreshold != null
+          ? Math.max(input.autonomyThreshold, MIN_AUTONOMY_THRESHOLD)
+          : null,
       budgetPolicyId: null,
       escalationRuleId: null,
       createdAt: nowMs,
