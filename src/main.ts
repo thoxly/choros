@@ -25,6 +25,13 @@ import {
   type LifecycleBridgeDeps,
   type LifecycleBridgeHandle,
 } from "./server/lifecycle-bridge.js";
+import {
+  startAgentDispatchLoop,
+  buildAgentDispatchDeps,
+  buildDegradedAgentDispatchDeps,
+  type AgentDispatchHandle,
+  type AgentDispatchDeps,
+} from "./server/agent-dispatch-loop.js";
 import { makeKeyedDigest, type KeyedDigest } from "./core/keyed-digest.js";
 
 export interface MainHandle {
@@ -32,6 +39,12 @@ export interface MainHandle {
   server?: http.Server;
   /** The lifecycle bridge handle (no-op when degraded). */
   lifecycle: LifecycleBridgeHandle;
+  /**
+   * T-0392 [D4-FU]: the agent dispatch loop handle (no-op when degraded —
+   * topics empty or DATABASE_URL absent). Stopped in the graceful shutdown
+   * alongside the lifecycle bridge (parallel background loop pattern).
+   */
+  agentDispatch: AgentDispatchHandle;
   /**
    * T-0118 (E4.3-fu): the resolver-deps fragment assembled at the composition
    * root. Currently carries the per-tenant `KeyedDigest` port bound to the silo
@@ -62,6 +75,16 @@ export interface StartMainOptions {
   lifecycleDeps?: LifecycleBridgeDeps;
   /** Override startLifecycleBridge (default: the real one). For composition only. */
   startBridge?: typeof startLifecycleBridge;
+  /**
+   * T-0392 [D4-FU]: Override the agent dispatch deps. In production these are built
+   * from DATABASE_URL (pool/jobStore/outboxStore) via buildAgentDispatchDeps.
+   * Tests inject in-memory deps so the composition wiring is exercised without IO.
+   * When absent AND DATABASE_URL is set, the production deps are built automatically.
+   * When absent AND DATABASE_URL is absent, the loop degrades to a no-op (topics=[]).
+   */
+  agentDispatchDeps?: AgentDispatchDeps;
+  /** Override startAgentDispatchLoop (default: the real one). For composition only. */
+  startDispatch?: typeof startAgentDispatchLoop;
 }
 
 /**
@@ -112,13 +135,15 @@ function buildKeyedDigestFromEnv(env: NodeJS.ProcessEnv): KeyedDigest {
 }
 
 /**
- * Start the choros process: HTTP server + lifecycle-audit bridge. Pure composition
- * — no module-level side effects (importing this file starts nothing).
+ * Start the choros process: HTTP server + lifecycle-audit bridge + agent-dispatch
+ * loop. Pure composition — no module-level side effects (importing this file starts
+ * nothing).
  */
 export function startMain(opts: StartMainOptions = {}): MainHandle {
   const env = opts.env ?? process.env;
   const listen = opts.listen ?? true;
   const start = opts.startBridge ?? startLifecycleBridge;
+  const startDispatch = opts.startDispatch ?? startAgentDispatchLoop;
 
   let ownedPool: Pool | undefined;
   let lifecycleDeps: LifecycleBridgeDeps;
@@ -154,12 +179,45 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   // Degraded without FLOWABLE_BASE_URL / DATABASE_URL: returns a no-op handle.
   const lifecycle = start(lifecycleDeps, env);
 
+  // T-0392 [D4-FU]: start the agent-dispatch poll loop alongside the lifecycle
+  // bridge (same composition-root pattern — NEVER inside createServer, FF-9).
+  // Degraded when DATABASE_URL absent (no pool → topics=[] → noopHandle). When
+  // DATABASE_URL is set, builds production deps from the same pool as lifecycleDeps
+  // (pool is shared; each background loop owns its own connections from it).
+  let agentDispatchDeps: AgentDispatchDeps;
+  if (opts.agentDispatchDeps !== undefined) {
+    agentDispatchDeps = opts.agentDispatchDeps;
+  } else if (
+    lifecycleDeps.pool !== undefined &&
+    lifecycleDeps.jobStore !== undefined &&
+    lifecycleDeps.outboxStore !== undefined
+  ) {
+    // Production: share the pool/jobStore/outboxStore already built for the
+    // lifecycle bridge. buildAgentDispatchDeps reads AGENT_TOPICS from env.
+    agentDispatchDeps = buildAgentDispatchDeps(
+      {
+        pool: lifecycleDeps.pool,
+        jobStore: lifecycleDeps.jobStore,
+        outboxStore: lifecycleDeps.outboxStore,
+      },
+      env,
+    );
+  } else {
+    // No pool available — degrade to empty topics: startAgentDispatchLoop returns
+    // noopHandle immediately (topics.length === 0 branch). The other deps fields
+    // are never reached so minimal stubs satisfy the type.
+    agentDispatchDeps = buildDegradedAgentDispatchDeps();
+  }
+  const agentDispatch = startDispatch(agentDispatchDeps);
+
   return {
     server,
     lifecycle,
+    agentDispatch,
     resolverDeps: resolverDepsObj, // same allocation as passed to createServer() (R-2 / AC-7)
     stop: () => {
       lifecycle.stop();
+      agentDispatch.stop();
       server?.close();
       void ownedPool?.end();
     },
