@@ -26,6 +26,12 @@
  *   (g) DISJOINTNESS: the SAME identity strings cannot resolve on BOTH paths —
  *       human↛agent (human resolver never returns an agent slug) and
  *       agent↛human (agent resolver never returns a human slug)
+ *   (h) T-0426 DETERMINISM: the LIMIT 1 lookup carries a deterministic
+ *       `ORDER BY ac.tenant_id, ac.employee_id`, so even if a duplicate
+ *       kc_client_id ever existed across tenants (which migration 092's global
+ *       UNIQUE now forbids at the DB), resolution is STABLE/repeatable, not
+ *       random — a regression would be detectable, never an intermittent
+ *       cross-tenant leak.
  */
 
 import { describe, it, expect } from "vitest";
@@ -225,6 +231,89 @@ describe("T-0424 resolveAgentSlugFromAuth — (f) unknown kc_client_id → null"
 // human resolver, and a human's identity and the agent resolver, and show neither
 // path yields the other kind's slug.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// (h) T-0426 — deterministic ORDER BY on the LIMIT 1 lookup.
+//
+// The resolver's query is `... WHERE ac.kc_client_id = $1 AND e.kind='agent'
+// ORDER BY ac.tenant_id, ac.employee_id LIMIT 1`. We (1) assert the emitted SQL
+// carries the ORDER BY (so it can never silently regress to a non-deterministic
+// LIMIT 1), and (2) prove that with two duplicate-kc_client_id agent rows across
+// tenants the SAME (lowest-ordered) slug is returned REPEATEDLY — stable, not
+// random. Migration 092's global UNIQUE now forbids such duplicates at the DB;
+// this is belt-and-braces for any path that bypasses it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Order-aware fake pool. Holds rows of { kcClientId, tenantId, employeeId, slug }
+ * and emulates the resolver query INCLUDING the ORDER BY tenant_id, employee_id
+ * + LIMIT 1, so a duplicate kc_client_id deterministically yields the lowest pair.
+ * Captures the executed SQL for the ORDER-BY-present assertion.
+ */
+function makeOrderedAgentPool(
+  rows: { kcClientId: string; tenantId: string; employeeId: string; slug: string }[],
+): { pool: Pool; lastSql: () => string } {
+  let capturedSql = "";
+  const fakeClient = {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    query: async (sql: string, params?: unknown[]): Promise<any> => {
+      capturedSql = sql;
+      const kcClientId = (params ?? [])[0] as string | undefined;
+      const matches = rows
+        .filter((r) => r.kcClientId === kcClientId)
+        // ORDER BY ac.tenant_id, ac.employee_id
+        .sort((a, b) =>
+          a.tenantId < b.tenantId ? -1
+          : a.tenantId > b.tenantId ? 1
+          : a.employeeId < b.employeeId ? -1
+          : a.employeeId > b.employeeId ? 1
+          : 0,
+        );
+      // LIMIT 1
+      return { rows: matches.length > 0 ? [{ slug: matches[0]!.slug }] : [] };
+    },
+    release: () => { /* no-op */ },
+  } as unknown as PoolClient;
+  const pool = { connect: async () => fakeClient } as unknown as Pool;
+  return { pool, lastSql: () => capturedSql };
+}
+
+describe("T-0426 resolveAgentSlugFromAuth — (h) deterministic ORDER BY", () => {
+  it("emits an ORDER BY ac.tenant_id, ac.employee_id on the LIMIT 1 lookup", async () => {
+    const { pool, lastSql } = makeOrderedAgentPool([
+      { kcClientId: "agent-recon", tenantId: "t1", employeeId: "e1", slug: "a-recon" },
+    ]);
+
+    await resolveAgentSlugFromAuth(pool, agentCtx("service-account-agent-recon"));
+
+    const sql = lastSql().replace(/\s+/g, " ");
+    // Guard against a regression back to a bare `LIMIT 1` (non-deterministic).
+    expect(sql).toContain("ORDER BY ac.tenant_id, ac.employee_id");
+    expect(sql).toContain("LIMIT 1");
+  });
+
+  it("resolves a duplicate kc_client_id to the SAME slug repeatably (stable, not random)", async () => {
+    // Two tenants, same derived kc_client_id (the pre-092 collision scenario:
+    // deriveKcClientId has no tenant component). The ORDER BY pins resolution to
+    // the lowest (tenant_id, employee_id) row, so it is deterministic.
+    const rows = [
+      { kcClientId: "agent-dup", tenantId: "t-bbbb", employeeId: "e-2222", slug: "agent-in-tenant-b" },
+      { kcClientId: "agent-dup", tenantId: "t-aaaa", employeeId: "e-1111", slug: "agent-in-tenant-a" },
+    ];
+    const { pool } = makeOrderedAgentPool(rows);
+
+    // Resolve several times — the answer must be identical every call (no random
+    // LIMIT-1 ordering) and must be the lowest-ordered (t-aaaa) row's slug.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        resolveAgentSlugFromAuth(pool, agentCtx("service-account-agent-dup")),
+      ),
+    );
+
+    expect(new Set(results).size).toBe(1); // deterministic across calls
+    expect(results[0]).toBe("agent-in-tenant-a"); // lowest (tenant_id, employee_id)
+  });
+});
 
 describe("T-0424 disjointness — human↛agent and agent↛human across BOTH resolvers", () => {
   it("human resolver (resolveActorSlugFromAuth) NEVER returns an agent slug", async () => {
