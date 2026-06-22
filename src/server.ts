@@ -18,6 +18,7 @@ import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.j
 import { registerInvokeRoutes } from "./http/invoke.js";
 import { registerGrantProposeRoute } from "./http/grant-propose.js";
 import { registerSecretHandleRoutes } from "./http/secret-handle.js";
+import { withAuthRegistrar } from "./http/auth-wrap-router.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
@@ -467,7 +468,13 @@ function buildRouter(
     // The path is a distinct fixed segment — it is never captured by the
     // existing '/api/grants/:id/revoke' pattern.
     registerGrantProposeRoute(router, grantsPool);
-    registerSecretHandleRoutes(router, grantsPool);
+    // T-0418 [SECURITY] P0: secret-handle.ts is FROZEN (FF-25-6) — its body still
+    // resolves identity via the dev-only x-dev-user extractActor. Wrap at the
+    // REGISTRATION SITE: withAuthRegistrar applies withAuth() to every route the
+    // frozen registrar registers, so in keycloak mode a valid Bearer is REQUIRED
+    // (401 otherwise; x-dev-user no longer bypasses) and in dev mode it is a no-op
+    // pass-through (existing behaviour unchanged). secret-handle.ts is byte-untouched.
+    registerSecretHandleRoutes(withAuthRegistrar(router) as unknown as typeof router, grantsPool);
     // Register seed write-API (T-0140): POST /api/tenants|departments|positions|employees|roles
     // and DELETE variants for reset. Same pool as grants.
     registerSeedWriteRoutes(router, grantsPool);

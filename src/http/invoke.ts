@@ -38,7 +38,8 @@ import {
 } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
 export { SEED_ORACLE };
 
@@ -85,10 +86,35 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// extractActor — reads caller identity from X-Dev-User header (NF-6)
+// extractCallerId — mode-aware caller identity (T-0418 [SECURITY] P0).
+//
+// invoke is an AGENT-RUNTIME surface whose authorization is a real fail-closed
+// invoke-grant check keyed on `callerId` (== role_assignment.employee_id). Before
+// T-0418 the caller was read from the UNAUTHENTICATED x-dev-user header even in
+// keycloak mode — so an attacker could impersonate any caller and ride that
+// actor's invoke-grants. The routes are now withAuth-wrapped (the Bearer JWT is
+// validated and getAuthContext populated BEFORE this runs), and the caller is
+// derived from the VALIDATED token — never from a header.
+//
+// Mirrors binding.ts::extractActorSlug (the canonical mode-aware pattern):
+//   - keycloak: getAuthContext is populated → resolve the slug from the token
+//     (sub/preferred_username → employee.slug). null → 401 fail-closed; we never
+//     fall through to x-dev-user when an identity was authenticated.
+//   - dev: getAuthContext is undefined (withAuth is a no-op) → x-dev-user, the
+//     existing dev convention. Dev tests + the SPA dev path are unchanged.
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+async function extractCallerId(req: IncomingMessage, pool: pg.Pool): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    // keycloak path: the identity is the validated token, NOT a request header.
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  // dev path: x-dev-user convention.
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -274,8 +300,10 @@ function validateInvokeBody(body: unknown): InvokeBody {
 export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
 
   // ---------- POST /api/invoke/request (FR-3 / AC-1/2/5/7/8/9/10/11) -------
-  router.register("POST", "/api/invoke/request", async (req, res) => {
-    const callerId = extractActor(req);
+  // T-0418 [SECURITY] P0: withAuth-wrapped — keycloak mode REQUIRES a valid Bearer
+  // (401 otherwise; x-dev-user no longer bypasses); dev mode is a no-op pass-through.
+  router.register("POST", "/api/invoke/request", withAuth(async (req, res) => {
+    const callerId = await extractCallerId(req, pool);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
 
@@ -340,11 +368,12 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(result));
-  });
+  }));
 
   // ---------- POST /api/invoke/command (FR-4 / AC-3/4/6/7) -----------------
-  router.register("POST", "/api/invoke/command", async (req, res) => {
-    const callerId = extractActor(req);
+  // T-0418 [SECURITY] P0: withAuth-wrapped — caller derived from validated token.
+  router.register("POST", "/api/invoke/command", withAuth(async (req, res) => {
+    const callerId = await extractCallerId(req, pool);
     const tenantId = DEV_TENANT_ID;
     const nowMs = Date.now();
 
@@ -403,5 +432,5 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
     res.statusCode = 202;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(result));
-  });
+  }));
 }
