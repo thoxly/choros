@@ -40,6 +40,11 @@ import {
   type RoleGrantSource,
   type RoleCriticalityLevel,
 } from "../../core/role-criticality.js";
+import { readStepDef, compileObjective } from "./objective-compiler.js";
+
+// Re-export for callers that need the step-def types and compiler directly.
+export type { BpmnStepDef, CompiledObjective } from "./objective-compiler.js";
+export { readStepDef, compileObjective } from "./objective-compiler.js";
 
 // ---------------------------------------------------------------------------
 // AgentStepContext — the assembled per-job context (ADR §4).
@@ -65,8 +70,14 @@ export interface AgentStepContext {
   readonly objective: {
     /** Structured step intent (the binding/form fields, F1). */
     readonly fields: Record<string, unknown>;
-    /** Optional NL objective compiled by the configurator (F1; absent day-1). */
-    readonly prompt?: string;
+    /**
+     * Compiled neutral prompt (T-0379 F1 objective compiler).
+     * Always present (non-empty string): step name + declared inputs/outputs +
+     * configurator NL hint + published instruction text, folded by compileObjective.
+     * The motor (run-agent-step.ts) includes this as the `document` block in the
+     * neutral LlmRequest when calling the LLM.
+     */
+    readonly prompt: string;
     /** Published competence instruction text (from the instruction store via DI port); "" when absent. */
     readonly instruction: string;
     /** Answer-form code (from the published instruction row; "agent_step_v1" default). */
@@ -258,6 +269,13 @@ export async function assembleAgentStepContext(
   const instr =
     v.agentEmployeeId !== "" ? await deps.instruction.readPublished(tx, v.agentEmployeeId) : null;
 
+  // --- F1 Objective compiler: structured step def + NL instruction → compiled prompt. ---
+  // readStepDef extracts the BPMN step definition from job.variables (step name, declared
+  // inputs/outputs, configurator NL hint, field values). compileObjective folds these +
+  // the published instruction text into a single neutral prompt string (T-0379).
+  const stepDef = readStepDef(job.variables ?? {}, job.topic, v.procKey);
+  const compiledObj = compileObjective(stepDef, instr);
+
   // --- Record ref: resolve the instance's target registry/app/primary record. ---
   const target =
     v.instanceId !== ""
@@ -310,8 +328,13 @@ export async function assembleAgentStepContext(
     roleId: v.roleId,
     objective: {
       fields: v.fields,
+      // F1 compiler output: compiled neutral prompt (step name + inputs + NL hint +
+      // instruction text folded into a single LLM-ready string, T-0379).
+      prompt: compiledObj.prompt,
       instruction: instr?.instructionText ?? "",
-      answerForm: instr?.answerForm ?? "agent_step_v1",
+      // answerForm from the compiled objective (sourced from published instruction
+      // or "agent_step_v1" default — same semantics as before, threaded via compiler).
+      answerForm: compiledObj.answerForm,
       hasInstruction: instr != null,
     },
     recordRef: {

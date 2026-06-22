@@ -39,6 +39,7 @@ function makeCtx(over: Partial<AgentStepContext> = {}): AgentStepContext {
     ...rest,
     objective: {
       fields: { amount: 100 },
+      prompt: "Step: Триаж\nProcess: telLinear",
       instruction: "Триаж заявки",
       answerForm: "agent_step_v1",
       hasInstruction: true,
@@ -113,7 +114,7 @@ describe("runAgentStep — missing instruction", () => {
   it("no published instruction → defer (signal=dormant), no LLM call", async () => {
     const stub = new StubLlmPort();
     const outcome = await runAgentStep(
-      makeCtx({ objective: { fields: {}, instruction: "", answerForm: "agent_step_v1", hasInstruction: false } }),
+      makeCtx({ objective: { fields: {}, prompt: "Step: unknown", instruction: "", answerForm: "agent_step_v1", hasInstruction: false } }),
       { llm: stub, liveEnabled: true },
     );
     expect(outcome.kind).toBe("defer-to-human");

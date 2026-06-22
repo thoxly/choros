@@ -36,7 +36,7 @@ function makeCtx(): AgentStepContext {
     procKey: "telLinear",
     agentEmployeeId: AGENT,
     roleId: "role-intake-agent",
-    objective: { fields: { amount: 100 }, instruction: "Триаж", answerForm: "agent_step_v1", hasInstruction: true },
+    objective: { fields: { amount: 100 }, prompt: "Step: Триаж\nProcess: telLinear", instruction: "Триаж", answerForm: "agent_step_v1", hasInstruction: true },
     recordRef: { resolved: false, registryId: null, applicationId: null, primaryRecordId: null, snapshot: { amount: 100 } },
     tools: [],
     llm: { endpoint: null, model: null, secretHandle: null },
