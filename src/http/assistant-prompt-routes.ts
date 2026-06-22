@@ -17,7 +17,9 @@
  * This is consistent with all other authoring artifacts (registry_def, application, etc.).
  *
  * AUTH: same x-dev-user / keycloak-Bearer pattern as llm-config.ts.
- * AUTHZ: genesis-owner OR authoring_draft/update grant (same as configurator gate).
+ * AUTHZ: genesis-owner OR mgmt_object:agent/update grant (same predicate as
+ *        llm-config.ts / secret-handle.ts). Applied to BOTH GET and PUT handlers
+ *        via assertAdminGate() which calls loadAdminContext + holdsAgentMgmtUpdate.
  *        Read (GET) requires the same gate (the prompt text is tenant-internal).
  *
  * TENANT ISOLATION: resolveActorTenant + withTenantTx (SET LOCAL choros.tenant_id).
@@ -30,7 +32,10 @@
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+import { resolveActorSlugFromAuth, loadAdminContext } from "../db/org.js";
+import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
+import { SEED_ORACLE } from "./seed-ancestry.js";
+import type { AdminContext } from "../core/scoped-admin.js";
 import {
   readAssistantPromptState,
   saveAssistantPromptDraft,
@@ -110,6 +115,53 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Authz gate — mirrors llm-config.ts (same predicate as secret-handle routes)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true iff the actor holds genesis-owner status OR a confirmed
+ * mgmt_object:agent/update grant covering the given org scope.
+ * This is the same predicate used by llm-config.ts and secret-handle.ts.
+ */
+function holdsAgentMgmtUpdate(
+  admin: AdminContext,
+  agentOrgScope: ScopeElement,
+): boolean {
+  if (admin.isGenesisOwner) return true;
+  return admin.adminGrants.some(
+    (g) =>
+      g.resourceType === "mgmt_object:agent" &&
+      g.operation === "update" &&
+      g.delegable &&
+      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, SEED_ORACLE),
+  );
+}
+
+/**
+ * Asserts the actor has genesis-owner status OR mgmt_object:agent/update grant.
+ * Throws 403 ADMIN_GATE_REJECTED on failure.
+ * Call BEFORE any data read/write.
+ */
+async function assertAdminGate(
+  pool: pg.Pool,
+  tenantId: string,
+  actor: string,
+): Promise<void> {
+  const nowMs = Date.now();
+  const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
+  // Use an org-root scope for the prompt gate (prompt is tenant-wide, not dept-scoped).
+  const orgRootScope: ScopeElement = {
+    kind: "node",
+    hierarchy: "org",
+    nodeId: "org",
+    nodeLevel: "department",
+  };
+  if (!holdsAgentMgmtUpdate(admin, orgRootScope)) {
+    throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Role validation
 // ---------------------------------------------------------------------------
 
@@ -154,6 +206,10 @@ async function handleGetPrompt(
   const actor = await extractActorSlug(req, pool);
   const tenantId = await resolveActorTenant(actor);
 
+  // AUTHZ: genesis-owner OR mgmt_object:agent/update grant required.
+  // The system prompt is management-tier metadata; non-admins must not read it.
+  await assertAdminGate(pool, tenantId, actor);
+
   const state = await withTenantTx(pool, tenantId, async (client) => {
     return readAssistantPromptState(client as unknown as import("../db/audit-writer.js").PgClientLike, role);
   });
@@ -194,6 +250,11 @@ async function handlePutPrompt(
 ): Promise<void> {
   const actor = await extractActorSlug(req, pool);
   const tenantId = await resolveActorTenant(actor);
+
+  // AUTHZ: genesis-owner OR mgmt_object:agent/update grant required.
+  // Rewriting the assistant system prompt is a privileged operation; any
+  // authenticated tenant member must NOT be able to reach this.
+  await assertAdminGate(pool, tenantId, actor);
 
   const body = await readJsonBody(req) as Record<string, unknown> | null;
   const text = typeof body?.["text"] === "string" ? (body["text"] as string) : null;

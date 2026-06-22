@@ -290,7 +290,12 @@ export async function saveAssistantPromptDraft(
     delete existingMeta[metaKey];
   }
 
-  // instruction_text = analyst prompt (backward-compat with objective-compiler).
+  // instruction_text: kept equal to the analyst_system_prompt for backward-compat
+  // with any reader that reads the generic instruction_text column (e.g. the
+  // objective-compiler). NOTE: this CREATES an instruction row on the assistant-agent
+  // employee. If that employee is ever resolved as a process-step executor, the analyst
+  // chat prompt would silently become its compiled objective. Callers MUST ensure the
+  // assistant-agent slug is not used as a task assignee in process bindings.
   const analystText =
     typeof existingMeta[META_ANALYST_KEY] === "string"
       ? (existingMeta[META_ANALYST_KEY] as string)

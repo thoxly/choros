@@ -14,7 +14,7 @@
  * DB / network: ZERO (all stubs).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   runAnalyst,
   setAnalystPorts,
@@ -24,7 +24,6 @@ import {
   type AnalystPorts,
 } from "../core/assistant-analyst.js";
 import {
-  handleConfigurator,
   runConfigurator,
   CONFIGURATOR_DEFAULT_SYSTEM_PROMPT,
 } from "../core/assistant-configurator.js";
@@ -193,11 +192,13 @@ describe("runConfigurator — per-tenant system prompt (T-0383)", () => {
   const authoringDraftGrant: Grant = {
     id: "g-001",
     tenantId: TENANT_A,
+    roleId: "role-configurator",
     resourceType: AUTHORING_DRAFT,
     operation: "create",
     scope: { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" },
     delegable: false,
-    confirmedBy: "admin",
+    grantedBy: "e-admin",
+    createdAt: 0,
   };
 
   function makeCtxWithGrant(llm: StubChatLlmPort): HandlerContext {
