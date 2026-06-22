@@ -264,35 +264,8 @@ function axesFromGrants(grants) {
   return axes;
 }
 
-/* ---------------------------------------------------------------------------
-   ПРАВИЛА SoD — несовместимые роли (кто запрашивает ≠ кто утверждает)
-   --------------------------------------------------------------------------- */
-const SOD_RULES = [
-  {
-    id: "SoD-01", title: "Инициатор ≠ Согласующий платежа",
-    a: "Контролёр расчётов", b: "Согласование ≤ ₽250 000",
-    rationale: "Тот, кто заводит платёж, не должен сам его утверждать.",
-    severity: "block",
-  },
-  {
-    id: "SoD-02", title: "Согласующий ≠ Приёмник эскалаций",
-    a: "Согласование ≤ ₽250 000", b: "Приёмник эскалаций агентов",
-    rationale: "Утверждающий не разбирает собственные эскалации.",
-    severity: "block",
-  },
-  {
-    id: "SoD-03", title: "Сверка ≠ Инициация платежа",
-    a: "Сверка платежей", b: "Инициировать платёж",
-    rationale: "Сверяющий счёт не должен инициировать по нему платёж.",
-    severity: "warn",
-  },
-  {
-    id: "SoD-04", title: "L1 ≠ Возвраты средств",
-    a: "Линия поддержки L1", b: "Эскалации L2",
-    rationale: "Первая линия не санкционирует возвраты, которые сама и приняла.",
-    severity: "warn",
-  },
-];
+// T-0375 [D2]: SOD_RULES hardcoded mock removed. Real SoD rules will come from
+// GET /api/rights/sod-rules (not yet implemented). Follow-up: T-0375-FU-sod-api.
 
 /* ---------------------------------------------------------------------------
    ЖУРНАЛ ВЫДАЧИ ПРАВ — append-only grant trail
@@ -401,6 +374,6 @@ function Segmented({ value, onChange, options }) {
 
 export {
   OP_LABEL, OP_RU, ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI,
-  PRESETS, CRIT_AXES, critLevel, CRIT_META, axesFromGrants, SOD_RULES, TRAIL,
+  PRESETS, CRIT_AXES, critLevel, CRIT_META, axesFromGrants, TRAIL,
   CriticalityBadge, AxisList, ScopeToken, ProvenanceTag, SectionHead, Segmented,
 };

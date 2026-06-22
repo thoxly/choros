@@ -101,6 +101,18 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
       group: 'choros-tasks',
       separator: true,
     },
+
+    // ---- Remove default bpmn-js no-op elements (B13 / T-0375) -------------
+    // These elements are decorative no-ops in this product: they can be placed
+    // on the canvas but the engine does not process them at runtime.  Returning
+    // null removes them from the merged palette so users are only offered
+    // elements that actually execute.
+    'create.data-object':          null, // DataObjectReference  — no engine binding
+    'create.data-store':           null, // DataStoreReference   — no engine binding
+    'create.subprocess-expanded':  null, // SubProcess           — not supported by runtime
+    'create.participant-expanded': null, // Pool/Participant      — lanes not supported
+    'create.group':                null, // Group (artifact)     — no engine binding
+    'create.intermediate-event':   null, // IntermediateThrowEvent — not wired
   };
 };
 
