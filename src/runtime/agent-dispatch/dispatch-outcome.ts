@@ -107,7 +107,18 @@ function deferredAuditEvent(
   ctx: AgentStepContext,
   doubtReason: string,
   signal: string,
-  extra: { deferRole: string; deferSlaMinutes?: number; deferName: string },
+  extra: {
+    deferRole: string;
+    deferSlaMinutes?: number;
+    deferName: string;
+    /**
+     * F5 — agent draft for prefilled human escalation form (from DeferTaskPlan).
+     * Included in the audit payload so the inbox projection can surface it to
+     * the human reviewer as a prefilled accept/edit/reject form.
+     * Null when absent (dormant / error — no LLM answer to carry).
+     */
+    agentDraft?: import("../../core/llm-port.js").PrecheckAnswer;
+  },
 ): AuditEventInput {
   return {
     id: taskId,
@@ -128,6 +139,8 @@ function deferredAuditEvent(
       defer_role: extra.deferRole,
       defer_sla_minutes: extra.deferSlaMinutes ?? null,
       defer_name: extra.deferName,
+      // F5: prefilled draft for human reviewer (null when dormant/error — no draft).
+      agent_draft: extra.agentDraft ?? null,
     },
     occurred_at: ctx.nowMs,
   };
@@ -267,6 +280,8 @@ export async function applyAgentOutcome(
       deferredAuditEvent(taskId, ctx, plan.doubtReason, outcome.signal, {
         deferRole: plan.role,
         deferName: plan.name,
+        // F5: carry the agent's draft (from planDeferTask which threads outcome.agentDraft).
+        agentDraft: plan.agentDraft,
       }),
     );
 

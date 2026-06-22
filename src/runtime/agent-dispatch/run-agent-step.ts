@@ -44,6 +44,24 @@ import type { AgentStepContext } from "./agent-step-context.js";
 export type { PrecheckOutcome };
 
 // ---------------------------------------------------------------------------
+// F4 — DEFAULT_AUTONOMY_THRESHOLD: tenant-level default for gate A.
+//
+// Applied when agent_card.autonomy_threshold IS NULL (no per-agent override).
+// This is the "tenant default" called out in spec §7/F4. No new table: a
+// conservative hard-coded constant covers day-1. A future tenant-config column
+// (e.g. tenant_settings.autonomy_threshold) would shadow this via DI at the
+// composition root without touching the motor logic here.
+//
+// Value 0.85 (85%) is more conservative than CONFIDENCE_FLOOR (0.70): an agent
+// proceeds autonomously only with very high confidence. This asymmetry is
+// intentional — CONFIDENCE_FLOOR is a hard structural floor (below it the model
+// self-assessment is unreliable); the autonomy threshold is a policy gate
+// (above CONFIDENCE_FLOOR but below threshold → the model is confident BUT the
+// tenant policy requires human oversight for the step).
+// ---------------------------------------------------------------------------
+export const DEFAULT_AUTONOMY_THRESHOLD = 0.85;
+
+// ---------------------------------------------------------------------------
 // RunAgentStepDeps — injected (DI, mirrors PrecheckDeps minus the PDP).
 // ---------------------------------------------------------------------------
 
@@ -201,14 +219,19 @@ export async function runAgentStep(
 
   // --- Live result: gate A (autonomy_threshold) + CONFIDENCE_FLOOR. ---
   const result = llmOutcome.result;
-  const autonomyThreshold = ctx.autonomyThreshold;
-  const thresholdFailed =
-    autonomyThreshold != null && result.confidence < autonomyThreshold;
+
+  // F4: resolve autonomy threshold — per-agent override (agent_card.autonomy_threshold)
+  // takes precedence; fall back to DEFAULT_AUTONOMY_THRESHOLD (tenant-level default in
+  // code, no new table). Either way gate A is ALWAYS active: proceed only when
+  // confidence ≥ threshold (the "activate the threshold" requirement from spec §7/F4).
+  const autonomyThreshold =
+    ctx.autonomyThreshold != null ? ctx.autonomyThreshold : DEFAULT_AUTONOMY_THRESHOLD;
+  const thresholdFailed = result.confidence < autonomyThreshold;
   const belowFloor = result.confidence < CONFIDENCE_FLOOR;
   const ambiguous =
     result.answer.redFlags.length === 0 && result.answer.summary.trim().length < 10;
 
-  return classifyOutcome({
+  const classified = classifyOutcome({
     pdpDenied: false,
     llmDormant: false,
     modelConfidence: result.confidence,
@@ -216,4 +239,15 @@ export async function runAgentStep(
     ambiguous,
     answer: result.answer,
   });
+
+  // F5: if the gate deferred, attach the agent's draft so the human escalation
+  // form is prefilled (spec §6/§9 item 6). The LLM returned a valid answer
+  // (the agent "tried" but didn't meet the autonomy bar) — carry it forward so
+  // the reviewer can accept / edit / reject rather than starting from scratch.
+  // Dormant and error paths produce no draft (there is no LLM answer to carry).
+  if (classified.kind === "defer-to-human") {
+    return { ...classified, agentDraft: result.answer };
+  }
+
+  return classified;
 }

@@ -12,7 +12,7 @@
  * — a pure classifier/transformer, static-now-testable without DB or network.
  */
 
-import type { PrecheckOutcome } from "./agent-precheck-motor.js";
+import type { PrecheckAnswer, PrecheckOutcome } from "./agent-precheck-motor.js";
 
 // ---------------------------------------------------------------------------
 // DeferTaskPlan — the planned inbox task shape for a defer-to-human outcome.
@@ -33,6 +33,13 @@ export interface DeferTaskPlan {
   readonly slaMinutes?: number;
   /** Origin of the plan — always "defer". */
   readonly originOutcome: "defer";
+  /**
+   * F5 — agent draft for prefilled human escalation form.
+   * Present when the agent's LLM call produced a partial answer before the
+   * autonomy gate rejected it. The human reviewer can accept / edit / reject
+   * without starting from scratch. Absent when the LLM was dormant or errored.
+   */
+  readonly agentDraft?: PrecheckAnswer;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,5 +97,6 @@ export function planDeferTask(
     execName: ctx.agentEmployeeId,
     slaMinutes: ctx.slaMinutes,
     originOutcome: "defer",
+    agentDraft: outcome.agentDraft,
   };
 }
