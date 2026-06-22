@@ -1201,6 +1201,14 @@ export function registerRecordRoutes(
   // GET /api/records/:id — get one record enriched for the detail screen
   // (T-0295): includes record_schema + created_by in addition to the base
   // fields. 404 if not in the caller's tenant (RLS-filtered or does not exist).
+  //
+  // T-0421 [D7-3-FU]: field-visibility redaction is now applied to the detail
+  // endpoint BEFORE serialization, matching the LIST behaviour (T-0419).
+  // The SAME resolveFieldVisibility dep (already on RecordRoutesDeps) is reused
+  // — no second authority path. When the dep is absent, applyFieldVisibilityRedaction
+  // is called with an empty policy (roleScopedFields=∅) — a no-op identical to
+  // pre-T-0421 behaviour (honest-degrade / NF-1). Redacted JSONB keys are
+  // PHYSICALLY ABSENT from the response (not null — F-3).
   router.register(
     "GET",
     "/api/records/:id",
@@ -1210,15 +1218,41 @@ export function registerRecordRoutes(
 
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
+      const nowMs = Date.now();
       const row = await getRecordDetail(pool, tenantId, id);
       if (row === null) {
         // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
         throw new HttpError(404, "NOT_FOUND", "record not found");
       }
 
+      // T-0421: resolve field-visibility context and apply redaction to the
+      // detail record's data BEFORE serialization. Reuses the same
+      // resolveFieldVisibility dep and applyFieldVisibilityRedaction helper as
+      // the LIST endpoint (single-resolver constraint — no second authority path).
+      const EMPTY_FV_POLICY: FieldVisibilityPolicy = { roleScopedFields: new Set() };
+      let fvGrants: Grant[] = [];
+      let fvPolicy: FieldVisibilityPolicy = EMPTY_FV_POLICY;
+      if (resolveFieldVisibility !== undefined) {
+        const fv = await resolveFieldVisibility(actor, tenantId, nowMs);
+        fvGrants = fv.coveringGrants;
+        fvPolicy = fv.policy;
+      }
+
+      const serialized = serializeRecordDetail(row);
+      if (fvPolicy.roleScopedFields.size > 0) {
+        // Fast-path: skip object churn when no role-scoped fields exist (NF-1).
+        const rawData =
+          row.data !== null && typeof row.data === "object" && !Array.isArray(row.data)
+            ? (row.data as Record<string, unknown>)
+            : {};
+        const unionVisible = new Set(Object.keys(rawData));
+        const { redacted } = applyFieldVisibilityRedaction(rawData, fvGrants, unionVisible, fvPolicy);
+        serialized["data"] = redacted;
+      }
+
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(serializeRecordDetail(row)));
+      res.end(JSON.stringify(serialized));
     }),
   );
 
