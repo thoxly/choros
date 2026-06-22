@@ -51,17 +51,43 @@ import {
   requirementReason,
   type ConfirmationFlag,
 } from "../core/dual-control.js";
-import { loadAdminContext } from "../db/org.js";
+import {
+  loadAdminContext,
+  resolveActorSlugFromAuth,
+  resolveActorTenant,
+} from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, withAuth } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
 // ---------------------------------------------------------------------------
-// Constants
+// extractActorFromReq — async, Keycloak-aware slug resolver (T-0389 / NF-3)
+//
+// Mirrors the seam in seed-write.ts: resolves a KC sub → employee slug via
+// resolveActorSlugFromAuth so that seeded personas (slug ≠ sub) and
+// self-registered owners (slug == sub) both resolve correctly.
+// Falls back to x-dev-user in dev-auth mode (no JWKS round-trip).
 // ---------------------------------------------------------------------------
 
-const DEV_TENANT_ID =
-  process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
+async function extractActorFromReq(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
 
 // ---------------------------------------------------------------------------
 // withTenant helper (mirrors src/db/org.ts — write-path needs own transaction)
@@ -677,8 +703,10 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/grants", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    // T-0389 [D1]: resolve actor slug and tenant from identity, not hardcoded
+    // DEV_TENANT_ID, so self-registered owners write into THEIR own tenant (B6).
+    const actorId = await extractActorFromReq(req, pool);
+    const tenantId = await resolveActorTenant(pool, actorId);
     const nowMs = Date.now();
 
     const body = await readJsonBody(req);
@@ -959,8 +987,9 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/grants/:id/revoke", withAuth(async (req, res, params) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    // T-0389 [D1]: resolve actor slug and tenant from identity (B6).
+    const actorId = await extractActorFromReq(req, pool);
+    const tenantId = await resolveActorTenant(pool, actorId);
     const nowMs = Date.now();
     const grantId = params.id as string;
 
@@ -1017,8 +1046,10 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/role-assignments", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    // T-0389 [D1]: resolve actor slug and tenant from identity, not hardcoded
+    // DEV_TENANT_ID, so self-registered owners write into THEIR own tenant (B6).
+    const actorId = await extractActorFromReq(req, pool);
+    const tenantId = await resolveActorTenant(pool, actorId);
     const nowMs = Date.now();
 
     const body = await readJsonBody(req);
@@ -1178,8 +1209,9 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     "POST",
     "/api/role-assignments/:id/revoke",
     withAuth(async (req, res, params) => {
-      const actorId = extractActor(req);
-      const tenantId = DEV_TENANT_ID;
+      // T-0389 [D1]: resolve actor slug and tenant from identity (B6).
+      const actorId = await extractActorFromReq(req, pool);
+      const tenantId = await resolveActorTenant(pool, actorId);
       const nowMs = Date.now();
       const raId = params.id as string;
 
@@ -1226,19 +1258,6 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       res.end(JSON.stringify({ id: raId }));
     }),
   );
-}
-
-// ---------------------------------------------------------------------------
-// Local helpers
-// ---------------------------------------------------------------------------
-
-function extractActor(req: import("node:http").IncomingMessage): string {
-  let devUser = req.headers[DEV_USER_HEADER];
-  if (Array.isArray(devUser)) devUser = devUser[0];
-  if (!devUser || typeof devUser !== "string") {
-    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-  }
-  return devUser;
 }
 
 // ---------------------------------------------------------------------------
