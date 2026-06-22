@@ -267,8 +267,8 @@ export async function readStepClass(
 // ---------------------------------------------------------------------------
 
 /**
- * T-0400 [D7-2]: Load form_binding.fields for a process (the authoring-time
- * snapshot of binding fields for submit-time validation), and the live
+ * T-0400 [D7-2] / T-0416 [D7-2-FU]: Load form_binding.fields for a process (the
+ * authoring-time snapshot of binding fields for submit-time validation), and the live
  * record_schema of the target registry (for schema-drift detection).
  *
  * Registry resolution: resolves the approvals («Согласование», slug=soglasovanie)
@@ -279,13 +279,36 @@ export async function readStepClass(
  *   - `bindingFields`: BindingField[] — the snapshot (excludes __step_class marker).
  *   - `liveRecordSchema`: the current registry_def.record_schema JSON (or null).
  *
- * Never throws: if any DB query fails, the relevant field is null and the
- * validation step that depends on it is skipped gracefully.
+ * F1 (T-0416) — FAIL-CLOSED on a thrown load error vs ABSENT binding:
+ *   A key design goal: distinguish "no binding row exists" from "DB query threw".
+ *
+ *   - ABSENT binding (query succeeds, 0 rows) → bindingFields = null.
+ *     The caller (validateAndFilterFormValues) treats null as "no validation required"
+ *     and passes all values through. This is the correct backward-compat posture for
+ *     processes that have never had a form binding authored.
+ *
+ *   - DB ERROR (query throws) → re-throw from this function.
+ *     A swallowed DB error would silently turn a binding into a null, bypassing
+ *     all runtime field-set validation — that is a fail-OPEN posture on what may be
+ *     a transient infrastructure fault. If the DB is unhealthy, the safe response is
+ *     to REJECT the submit (the caller's withTenantTx ROLLBACK is the safety net).
+ *     The old `catch {} → return null` conflated both cases; this implementation
+ *     re-throws DB errors explicitly.
+ *
+ * F3 (T-0416) — form_key-aware binding selection:
+ *   The natural key of form_binding is (tenant_id, process_key, form_key), so a
+ *   process with multiple forms can have multiple binding rows. When `formKey` is
+ *   provided, the query adds `AND form_key = $3` to pin the binding to the exact
+ *   form the submit originated from. When `formKey` is null/undefined (older call
+ *   sites or processes that have not yet set a form_key), the query falls back to
+ *   ORDER BY version DESC LIMIT 1 across all rows for the process — preserving the
+ *   pre-T-0416 single-form behaviour.
  */
 async function loadFormBindingForValidation(
   client: pg.PoolClient,
   tenantId: string,
   procKey: string,
+  formKey?: string | null,
 ): Promise<{ bindingFields: BindingField[] | null; liveRecordSchema: unknown }> {
   if (!isUuid(tenantId)) {
     return { bindingFields: null, liveRecordSchema: null };
@@ -294,30 +317,76 @@ async function loadFormBindingForValidation(
   let bindingFields: BindingField[] | null = null;
   let liveRecordSchema: unknown = null;
 
-  try {
-    // Load form_binding.fields (the snapshot for procKey at the latest version).
-    const bindingRes = await client.query<{ fields: unknown }>(
-      `SELECT fields
-         FROM choros.form_binding
-        WHERE tenant_id = $1
-          AND process_key = $2
-        ORDER BY version DESC
-        LIMIT 1`,
-      [tenantId, procKey],
-    );
-    const bindingRow = bindingRes.rows[0];
-    if (bindingRow && Array.isArray(bindingRow.fields)) {
-      // Cast the raw JSONB array members to BindingField[]. The authoring-time
-      // write (binding.ts) validates the field structure; here we trust the DB.
-      bindingFields = bindingRow.fields as BindingField[];
+  // F1: do NOT catch here — a DB error must propagate (fail-closed).
+  // Only a SUCCESSFUL query that returns 0 rows should yield bindingFields = null.
+  // See the F1 comment above for the full reasoning.
+  //
+  // F3: resolve the effective form_key for this submit:
+  //   1. If `formKey` was supplied by the caller (the step's form key, from
+  //      process_app_binding.form_key or the inbox task payload), use it directly.
+  //   2. Otherwise, look up process_app_binding.form_key for this process. This
+  //      makes F3 work automatically even when the caller did not supply it.
+  //   3. If still null/absent, fall back to the latest binding for the process
+  //      (backward-compat for single-form processes).
+  let effectiveFormKey: string | null = formKey ?? null;
+  if (!effectiveFormKey) {
+    // F3 auto-resolution: look up process_app_binding.form_key for this process.
+    // Non-fatal if this query fails — we fall back to the form_key-unaware path.
+    // (Keep try/catch ONLY here, not around the binding load below.)
+    try {
+      const appBindingLookup = await client.query<{ form_key: string | null }>(
+        `SELECT form_key
+           FROM choros.process_app_binding
+          WHERE tenant_id = $1
+            AND process_key = $2
+          LIMIT 1`,
+        [tenantId, procKey],
+      );
+      effectiveFormKey = appBindingLookup.rows[0]?.form_key ?? null;
+    } catch {
+      // Non-fatal: fall back to form_key-unaware binding selection.
+      effectiveFormKey = null;
     }
-  } catch {
-    // Non-fatal: if the binding query fails, skip field-set validation.
-    bindingFields = null;
   }
+
+  const bindingRes = effectiveFormKey
+    ? await client.query<{ fields: unknown }>(
+        // F3: form_key-aware selection — pin to the exact form when available.
+        `SELECT fields
+           FROM choros.form_binding
+          WHERE tenant_id = $1
+            AND process_key = $2
+            AND form_key = $3
+          ORDER BY version DESC
+          LIMIT 1`,
+        [tenantId, procKey, effectiveFormKey],
+      )
+    : await client.query<{ fields: unknown }>(
+        // Fallback (no form_key): take the highest-version binding for the process.
+        // Backward-compat for single-form processes and pre-T-0416 call sites.
+        `SELECT fields
+           FROM choros.form_binding
+          WHERE tenant_id = $1
+            AND process_key = $2
+          ORDER BY version DESC
+          LIMIT 1`,
+        [tenantId, procKey],
+      );
+
+  const bindingRow = bindingRes.rows[0];
+  if (bindingRow && Array.isArray(bindingRow.fields)) {
+    // Cast the raw JSONB array members to BindingField[]. The authoring-time
+    // write (binding.ts) validates the field structure; here we trust the DB.
+    bindingFields = bindingRow.fields as BindingField[];
+  }
+  // If bindingRow is undefined (0 rows), bindingFields stays null → backward-compat
+  // fail-open (no binding for this process/form → skip validation).
 
   // Load the live record_schema from the approvals registry for this process's app.
   // Path: procKey → process_app_binding → applicationId → registry_def (soglasovanie)
+  // Non-fatal: schema-drift detection is advisory; a failing schema query must not
+  // block the submit. Catch only the schema-load section to keep the fail-closed
+  // posture on the binding load above.
   try {
     const appBindingRes = await client.query<{ application_id: string }>(
       `SELECT application_id
@@ -344,7 +413,7 @@ async function loadFormBindingForValidation(
       }
     }
   } catch {
-    // Non-fatal: if the schema query fails, skip drift detection.
+    // Non-fatal: if the schema query fails, skip schema-drift detection.
     liveRecordSchema = null;
   }
 
@@ -352,9 +421,9 @@ async function loadFormBindingForValidation(
 }
 
 /**
- * T-0400 [D7-2]: Validate and filter human-submitted form values before writing
- * to JSONB, enforcing the PD-9 invariant ("forms reference only existing variables")
- * at runtime.
+ * T-0400 [D7-2] / T-0416 [D7-2-FU]: Validate and filter human-submitted form values
+ * before writing to JSONB, enforcing the PD-9 invariant ("forms reference only existing
+ * variables") at runtime.
  *
  * Called from the approve handler (inbox.ts) on the open tenant-tx client, BEFORE
  * provenance fields (decision, approved_by, comment) are merged into formData.
@@ -368,26 +437,49 @@ async function loadFormBindingForValidation(
  *   ok=true  → safeValues (only validated keys; ready to spread into formData).
  *   ok=false → violations (caller throws HttpError 422).
  *
- * Fail-open on LOAD: if form_binding cannot be loaded (no binding for procKey, or
- * DB error), all submitted values pass through as safeValues. This preserves backward
- * compat for processes without a form binding.
+ * F1 (T-0416): DB errors in the binding load now PROPAGATE (fail-closed) rather than
+ * being swallowed. A thrown error here will be caught by the caller's withTenantTx
+ * ROLLBACK, preventing any unvalidated write.
+ *
+ * F2 (T-0416): When bindingFields is null (no form_binding row for the process/form),
+ * a one-time WARNING is emitted identifying the process_key so operators can see which
+ * processes lack a binding. The write still proceeds (backward-compat fail-open for
+ * processes without a binding) — fail-closed for missing bindings is a LATER step,
+ * once all live processes carry form_binding rows.
+ *
+ * F3 (T-0416): The optional `formKey` parameter is threaded to loadFormBindingForValidation
+ * so that multi-form processes validate against the correct binding.
  */
 export async function validateAndFilterFormValues(
   client: pg.PoolClient,
   tenantId: string,
   procKey: string,
   humanFormValues: Record<string, unknown>,
+  formKey?: string | null,
 ): Promise<FormSubmitValidationResult> {
+  // F1: loadFormBindingForValidation now re-throws on DB errors (fail-closed).
+  // F3: pass formKey so multi-form processes pick the right binding.
   const { bindingFields, liveRecordSchema } = await loadFormBindingForValidation(
     client,
     tenantId,
     procKey,
+    formKey,
   );
 
-  // No form binding for this process → skip validation, pass all values through.
+  // No form binding for this process/form → skip validation, pass all values through.
   // Backward compat: processes without a form binding are not affected (D7-2 is
   // additive; only bindings that declare their field set are enforced).
+  //
+  // F2 (T-0416): emit an operator-visible warning so missing bindings are observable.
+  // Rate-limiting is inherent (one log line per submit request, not per process).
+  // Do NOT fail-closed yet — that is a later step once all live processes carry bindings.
   if (bindingFields === null) {
+    const formKeyLabel = formKey ? `/${formKey}` : "";
+    console.warn(
+      `[step-applier] validateAndFilterFormValues: no form_binding found for ` +
+        `process_key="${procKey}"${formKeyLabel} (tenant=${tenantId}); ` +
+        `submitted values pass unvalidated — add a form_binding to enable runtime PD-9 enforcement`,
+    );
     return { ok: true, safeValues: { ...humanFormValues } };
   }
 
