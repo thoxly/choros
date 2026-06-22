@@ -42,6 +42,7 @@ import {
   CONFIDENCE_FLOOR,
 } from "../../core/agent-precheck-motor.js";
 import { planDeferTask } from "../../core/defer-inbox-producer.js";
+import { MIN_AUTONOMY_THRESHOLD } from "../../core/agent-hire.js";
 
 // Re-export types for consumers (invoke.ts dispatch stub).
 export type { PrecheckOutcome };
@@ -398,7 +399,14 @@ export async function runLegalPrecheck(
     };
   } else {
     const result = llmOutcome.result;
-    const autonomyThreshold = agentCard?.autonomy_threshold ?? null;
+    const rawThreshold = agentCard?.autonomy_threshold ?? null;
+    // Defense-in-depth: clamp any stored value up to MIN_AUTONOMY_THRESHOLD so that
+    // a pre-existing sub-floor row (inserted before T-0398) cannot weaken gate A.
+    // The canonical floor is enforced at write time in buildAgentHirePlan; this clamp
+    // is the read-side backstop for rows that predate the write-side floor.
+    // null stays null → global default applies via CONFIDENCE_FLOOR backstop.
+    const autonomyThreshold =
+      rawThreshold != null ? Math.max(rawThreshold, MIN_AUTONOMY_THRESHOLD) : null;
 
     // thresholdFailed: if autonomy_threshold is set AND confidence < threshold.
     const thresholdFailed =

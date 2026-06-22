@@ -31,6 +31,7 @@ import {
   runLegalPrecheck,
   type PrecheckDeps,
 } from "../run-precheck.js";
+import { MIN_AUTONOMY_THRESHOLD } from "../../../core/agent-hire.js";
 import { StubLlmPort, DEMO_PRECHECK_ANSWER } from "../../../core/__tests__/stub-llm-port.js";
 
 import type { PgClientLike } from "../../../db/audit-writer.js";
@@ -602,5 +603,62 @@ describe("D-139: PrecheckAnswer has no reasoning/trace fields", () => {
     const result = stub;
     void result; // type check only — the answer type is checked by tsc.
     expect(true).toBe(true); // structural invariant enforced by tsc + fitness check.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0398 — read-side MIN_AUTONOMY_THRESHOLD clamp in the legal-precheck path
+// ---------------------------------------------------------------------------
+// Parallel to the run-agent-step read-clamp test: a sub-floor stored value in
+// agent_card.autonomy_threshold must be clamped to MIN_AUTONOMY_THRESHOLD at
+// the legal-precheck gate A read path (run-precheck.ts), so that a pre-existing
+// row with threshold=0 cannot defeat the 0.85 bar in this path either.
+
+describe("T-0398 — read-side MIN_AUTONOMY_THRESHOLD clamp in legal-precheck gate A", () => {
+  function makeRunWithSubFloorThreshold(mode: "succeed" | "low_confidence") {
+    const stub = new StubLlmPort({ mode });
+    const auditWriter = new InMemoryAuditWriter();
+    // agent_card row with sub-floor autonomy_threshold (0 — as if written before T-0398).
+    const agentCard = {
+      llm_endpoint: "https://api.example.com/v1",
+      llm_model: "gpt-4o-mini",
+      llm_secret_handle: "vault://secret/agent/llm-key",
+      autonomy_threshold: 0, // sub-floor; must be clamped to MIN_AUTONOMY_THRESHOLD
+    };
+    const fakeTx = makeTxWithAgentCard(agentCard, makePublishedInstruction());
+    const combinedTx: PgClientLike & { __tenantId: string } = {
+      __tenantId: TENANT_A,
+      query: async (sql: string, params?: unknown[]) => fakeTx.query(sql, params),
+    };
+    const deps: PrecheckDeps = {
+      llm: stub,
+      resolverDeps: makeResolverDeps("allow"),
+      auditWriter,
+      liveEnabled: true,
+    };
+    return runLegalPrecheck(combinedTx, deps, {
+      tenantId: TENANT_A,
+      agentEmployeeId: AGENT_ID,
+      documentHandle: makeDocHandle(),
+      subject: makeSubject(),
+      dealContext: DEMO_DEAL,
+      nowMs: NOW_MS,
+    });
+  }
+
+  it("sub-floor stored value (0) → clamped to MIN_AUTONOMY_THRESHOLD; confidence (0.92) ≥ floor → proceed", async () => {
+    // succeed stub → confidence 0.92 ≥ clamped threshold 0.85 → proceed.
+    const outcome = await makeRunWithSubFloorThreshold("succeed");
+    expect(outcome.kind).toBe("proceed");
+  });
+
+  it("sub-floor stored value (0) → clamped; confidence (0.45) < floor → defer", async () => {
+    // low_confidence stub → confidence 0.45 < clamped threshold 0.85 → defer-to-human.
+    const outcome = await makeRunWithSubFloorThreshold("low_confidence");
+    expect(outcome.kind).toBe("defer-to-human");
+  });
+
+  it("MIN_AUTONOMY_THRESHOLD constant is 0.85 (gate A floor)", () => {
+    expect(MIN_AUTONOMY_THRESHOLD).toBe(0.85);
   });
 });
