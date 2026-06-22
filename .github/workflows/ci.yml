@@ -67,6 +67,11 @@ jobs:
       - run: node_modules/.bin/tsc --noEmit
       - run: npm run lint
       - run: npm run test
+      # T-0408: web (SPA) unit test tier — gates the 13 web/src/**/*.test.js files
+      # (field-contract, records-form, apps-schema, …) that the root vitest config
+      # intentionally excludes (web env differs). Runs as a separate step so the
+      # root gate count stays stable and the web tier is blocking in its own right.
+      - run: npm --prefix web run test
       - name: fitness guards (advisory on dev push — see comment above)
         continue-on-error: true
         run: npm run fitness
