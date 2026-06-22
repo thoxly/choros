@@ -484,6 +484,7 @@ export default function ProcessEditorScreen() {
     if (!modeler || isBusy) return;
 
     setIsBusy(true);
+    setStatusMsg({ text: 'Сохраняю…', isError: false });
     try {
       const { xml } = await saveDiagram(modeler);
       // Pass null processKey for new processes — backend assigns the key.
@@ -591,6 +592,7 @@ export default function ProcessEditorScreen() {
     if (!modeler || isBusy) return;
 
     setIsBusy(true);
+    setStatusMsg({ text: 'Публикую…', isError: false });
     try {
       // Step 1: Save current XML — auto-assigns key for new processes.
       const { xml } = await saveDiagram(modeler);
@@ -612,16 +614,18 @@ export default function ProcessEditorScreen() {
         version: pub.version ?? saved.version,
         status: 'published',
       }));
-      setStatusMsg({
-        text: `Опубликовано (версия ${pub.version ?? saved.version}, deployment: ${pub.deploymentId})`,
-        isError: false,
-      });
       // T-0380: surface role warnings from publish response (non-blocking).
-      if (pub.warnings && pub.warnings.length > 0) {
+      // Collapsed into one setStatusMsg call — no deploymentId (G5 jargon).
+      if (pub.warnings?.length > 0) {
         setStatusMsg({
-          text: `Опубликовано с предупреждениями (версия ${pub.version ?? saved.version})`,
+          text: `Опубликован с предупреждениями (версия ${pub.version ?? saved.version})`,
           isError: false,
           violations: pub.warnings,
+        });
+      } else {
+        setStatusMsg({
+          text: `Опубликован (версия ${pub.version ?? saved.version})`,
+          isError: false,
         });
       }
       setValidationResult(null);
