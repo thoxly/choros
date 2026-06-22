@@ -260,3 +260,71 @@ export async function getRoleSlugsForActor(
     return rows.map((r) => r.slug);
   });
 }
+
+// ---------------------------------------------------------------------------
+// getHoldersForRole — T-0380 (D4): role → employee slugs (executor-resolver
+// RoleHolderSource backing). Given a role SLUG, returns the confirmed,
+// in-window employee slugs assigned to that role. This is the reverse of
+// getRoleSlugsForActor (actor → roles) — here we go role → actors.
+//
+// Used by makeDbRoleHolderSource in executor-resolver.ts for the role-pool step.
+// ---------------------------------------------------------------------------
+
+export async function getHoldersForRole(
+  pool: pg.Pool,
+  tenantId: string,
+  roleSlug: string,
+  nowMs: number = Date.now(),
+): Promise<string[]> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT DISTINCT e.slug
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = $2
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+      [tenantId, roleSlug, nowMs],
+    );
+    return rows.map((r) => r.slug);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// findTenantOwnerSlug — T-0380 (D4): resolve the slug of the employee holding
+// the 'tenant-owner' role in this tenant.
+//
+// Used by the executor-resolver fallback-owner path (F6/PD-10): when a step's
+// role has no confirmed holders and no substitution applies, the task is routed
+// to the tenant owner. Returns null when no owner row is found (fresh tenant
+// with no seed; callers should treat null as "route to system / no assignee").
+//
+// Mirrors the isGenesisOwnerForTenant query pattern in src/db/org.ts, scoped
+// to return the slug rather than a boolean.
+// ---------------------------------------------------------------------------
+
+export async function findTenantOwnerSlug(
+  pool: pg.Pool,
+  tenantId: string,
+  nowMs: number = Date.now(),
+): Promise<string | null> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ slug: string }>(
+      `SELECT e.slug
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+        LIMIT 1`,
+      [tenantId, nowMs],
+    );
+    return rows.length > 0 ? (rows[0]!.slug) : null;
+  });
+}

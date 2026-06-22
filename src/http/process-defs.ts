@@ -25,6 +25,7 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import { getHoldersForRole } from "../db/grants-dao.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,6 +92,70 @@ function extractTenantId(req: IncomingMessage): string {
     throw new HttpError(400, "VALIDATION", "missing x-tenant-id header");
   }
   return tenantId;
+}
+
+// ---------------------------------------------------------------------------
+// T-0380 (D4/F7): Authoring-time role warning helper.
+//
+// At publish time: extract all candidateGroups referenced by userTask elements
+// in the BPMN XML, then check each against the DB. Any role with no confirmed
+// holders produces a WARNING (not a block — fallback covers it per spec §4.4/F7).
+//
+// Returns an array of warning strings. Empty = all roles have holders.
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract all unique candidateGroups values from a BPMN XML string.
+ * Matches `candidateGroups="..."` attributes on userTask elements.
+ * Pure (no IO).
+ */
+function extractCandidateGroupsFromBpmn(bpmnXml: string): string[] {
+  const seen = new Set<string>();
+  // Match candidateGroups="value1,value2" in any context (userTask or extension).
+  // Comma-separated: split and trim each slug.
+  const re = /candidateGroups\s*=\s*"([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(bpmnXml)) !== null) {
+    const rawValue = m[1];
+    if (rawValue) {
+      for (const slug of rawValue.split(",")) {
+        const trimmed = slug.trim();
+        if (trimmed) seen.add(trimmed);
+      }
+    }
+  }
+  return Array.from(seen);
+}
+
+/**
+ * T-0380 (F7): Build publish warnings for unfilled roles.
+ * For each candidateGroups slug in the BPMN, check if there are confirmed holders.
+ * Returns warning strings for roles with no holders (not a block — warning only).
+ * Degrades gracefully: DB errors are non-fatal (returns empty warnings array).
+ */
+async function buildUnfilledRoleWarnings(
+  pool: pg.Pool,
+  tenantId: string,
+  bpmnXml: string,
+): Promise<string[]> {
+  const roleSlugsCandidates = extractCandidateGroupsFromBpmn(bpmnXml);
+  if (roleSlugsCandidates.length === 0) return [];
+
+  const nowMs = Date.now();
+  const warnings: string[] = [];
+  for (const roleSlug of roleSlugsCandidates) {
+    try {
+      const holders = await getHoldersForRole(pool, tenantId, roleSlug, nowMs);
+      if (holders.length === 0) {
+        warnings.push(
+          `роль '${roleSlug}' не заполнена — задача уйдёт исполнителю по умолчанию (владельцу тенанта)`,
+        );
+      }
+    } catch {
+      // Degrade gracefully — DB error checking holders is non-fatal for publish.
+    }
+  }
+  return warnings;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +377,13 @@ export function registerProcessDefsRoutes(
       );
     });
 
-    // Step 5: Respond
+    // Step 5: T-0380 (F7): check for unfilled roles — WARNING, not block.
+    // The fallback-executor resolver covers unfilled roles at runtime (spec §4.4),
+    // so we do NOT block publication. We surface warnings so the author knows.
+    // Degrades gracefully: DB errors → empty warnings (publish still succeeds).
+    const roleWarnings = await buildUnfilledRoleWarnings(pool, tenantId, row.bpmn_xml);
+
+    // Step 6: Respond
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
@@ -321,6 +392,8 @@ export function registerProcessDefsRoutes(
       version: row.version,
       status: "published",
       deploymentId,
+      // Additive: only present when there are role warnings (non-breaking).
+      ...(roleWarnings.length > 0 ? { warnings: roleWarnings } : {}),
     }));
   });
 }

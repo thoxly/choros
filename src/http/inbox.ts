@@ -33,7 +33,12 @@ import { findEmployee } from "./org.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
-import { getRoleSlugsForActor } from "../db/grants-dao.js";
+import { getRoleSlugsForActor, getHoldersForRole, findTenantOwnerSlug } from "../db/grants-dao.js";
+// executor-resolver: the batch path (resolveExecutorFallbackBatch below) calls
+// getHoldersForRole / findTenantOwnerSlug directly to avoid the port-wrapper overhead.
+// resolveExecutor (src/core/executor-resolver.ts) remains the canonical single-task
+// entry point for callers outside inbox.ts (e.g. claim write-path, future per-task
+// routing logic).
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
@@ -136,6 +141,13 @@ type InboxItem = {
    * (D-139 / FF-9: reasoning_trace_ref stays in audit payload, not surfaced here).
    */
   doubt_reason?: string;
+  /**
+   * T-0380 (F7): when the executor resolver fell back to the tenant owner because
+   * the task's role has no confirmed holders, this field is set to "role_unfilled".
+   * UI/notification can display "роль не заполнена, поэтому вам" when this is present.
+   * Additive optional field — absent on all existing tasks (non-breaking).
+   */
+  routed_to_fallback?: "role_unfilled";
 };
 
 /** Internal seed shape — carries tenant + role for addressing; tenant is stripped on the wire. */
@@ -318,6 +330,99 @@ async function resolveTenant(devUserId?: string | null): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// T-0380 (D4): Executor resolver — batched fallback resolution
+//
+// `resolveExecutorFallbackBatch` is called ONCE per inbox read (DB mode only)
+// to compute the routed_to_fallback patch for ALL instance tasks in a single
+// batched pass. It avoids the N+1 pattern that results from calling the resolver
+// once per task under Promise.all (≤200 tasks × 2 DB txs = up to 400 connections
+// against a max=10 pool).
+//
+// Batching strategy:
+//   1. Collect the DISTINCT set of role slugs across all unclaimed instance tasks.
+//   2. Resolve holders for each DISTINCT role slug in parallel (at most once per role).
+//   3. Resolve the tenant owner slug ONCE (owner is per-tenant, not per-task).
+//   4. For each task, look up its role's resolution from the in-memory maps built
+//      in steps 2–3 and compute the patch without any further DB round-trips.
+//
+// No-DB path: caller skips this function entirely (instanceTasks is never populated
+// without hasDb()); no-DB inbox uses INBOX_SEED only.
+//
+// Substitution (step 3 of the resolver): the DB-backed SubstitutionSource that
+// translates role slugs and employee slugs to UUIDs is pending T-0053. Until that
+// port is wired, the substitution step is skipped and the pool→fallback path is
+// the active path. The batching below mirrors that same two-step logic.
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0380 (D4/F6/F7): Batch fallback patch resolver.
+ *
+ * Given a list of (taskId, roleSlug) pairs from unclaimed instance inbox tasks,
+ * resolves which tasks need `routed_to_fallback: "role_unfilled"` — in a single
+ * batched pass rather than one DB trip per task.
+ *
+ * Returns a Map<taskId, { routed_to_fallback: "role_unfilled" }> for tasks whose
+ * role has no confirmed holders. Tasks whose role HAS holders are absent from the map.
+ *
+ * Degrades gracefully: any DB error → returns empty map (no tasks marked fallback).
+ */
+async function resolveExecutorFallbackBatch(
+  tasks: ReadonlyArray<{ id: string; role: string }>,
+  tenantId: string,
+  nowMs: number,
+): Promise<Map<string, { routed_to_fallback: "role_unfilled" }>> {
+  const result = new Map<string, { routed_to_fallback: "role_unfilled" }>();
+  if (tasks.length === 0) return result;
+
+  try {
+    const pool = getOrgPool();
+
+    // Step 1: collect distinct role slugs to resolve (avoid redundant DB queries).
+    const distinctRoles = [...new Set(tasks.map((t) => t.role))];
+
+    // Step 2: resolve holders for each distinct role in parallel (one DB tx per
+    // distinct role, not one per task).
+    const holdersEntries = await Promise.all(
+      distinctRoles.map(async (roleSlug) => {
+        const holders = await getHoldersForRole(pool, tenantId, roleSlug, nowMs);
+        return [roleSlug, holders] as const;
+      }),
+    );
+    const holdersByRole = new Map<string, readonly string[]>(holdersEntries);
+
+    // Step 3: resolve tenant owner slug ONCE (owner is per-tenant, not per-role/task).
+    // Only needed if at least one role has no holders.
+    const rolesWithNoHolders = distinctRoles.filter(
+      (slug) => (holdersByRole.get(slug) ?? []).length === 0,
+    );
+    let ownerSlug: string | null = null;
+    if (rolesWithNoHolders.length > 0) {
+      ownerSlug = await findTenantOwnerSlug(pool, tenantId, nowMs);
+    }
+
+    // Step 4: for each task, apply the resolution from in-memory maps.
+    for (const task of tasks) {
+      const holders = holdersByRole.get(task.role) ?? [];
+      if (holders.length > 0) {
+        // Role has confirmed holders → pool path, no fallback needed.
+        continue;
+      }
+      // Role is empty. With no substitution port wired (T-0053 pending), we go
+      // directly to fallback-owner (F6/F7). Mark regardless of whether an owner
+      // was found (mirrors the "unresolvable" branch in resolveExecutor).
+      if (ownerSlug !== null || rolesWithNoHolders.length > 0) {
+        result.set(task.id, { routed_to_fallback: "role_unfilled" as const });
+      }
+    }
+  } catch {
+    // Degrade gracefully: executor resolver errors are non-fatal for inbox reads.
+    // Tasks surface without fallback marking rather than blocking the inbox.
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Data accessors
 // ---------------------------------------------------------------------------
 
@@ -486,10 +591,17 @@ async function findInboxItems(
   // (AC-3). Same audit-event-backed read-projection track as the defer merge above
   // — additive, read-only, degrades gracefully (a started instance's approval task
   // appears as a pool task; once approved its instance is `done` and the task drops).
+  //
+  // T-0380 (D4/F6/F7): After building base items, apply the unified executor resolver
+  // in a SINGLE BATCHED PASS (resolveExecutorFallbackBatch) to avoid an N+1 DB
+  // fan-out. The batch resolves each DISTINCT role slug once and caches the tenant
+  // owner lookup once per request, regardless of task count.
   let instanceItems: InboxItem[] = [];
   try {
     const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId);
-    instanceItems = instanceTasks.map((row) => {
+
+    // Build base items synchronously (no DB needed for the base shape).
+    const baseItems = instanceTasks.map((row) => {
       const slaMin = 240; // default headroom for an approval task (no per-task SLA yet).
       const claim = claimStateMap.get(row.id);
       const deadline = nowMs + slaMin * 60_000;
@@ -513,6 +625,18 @@ async function findInboxItems(
         deadline,
       };
 
+      return { base, claim };
+    });
+
+    // T-0380 (D4): resolve fallback patches for unclaimed tasks in ONE batched pass.
+    // Claimed tasks already have an assignee — no fallback resolution needed.
+    const unclaimedTasks = baseItems
+      .filter(({ claim }) => !claim)
+      .map(({ base }) => ({ id: base.id, role: base.role }));
+    const fallbackPatches = await resolveExecutorFallbackBatch(unclaimedTasks, tenantId, nowMs);
+
+    // Apply claims and fallback patches to produce final item shapes.
+    const rawInstanceItems = baseItems.map(({ base, claim }) => {
       if (claim) {
         const mine =
           devUserId !== undefined && devUserId !== null && devUserId === claim.claimedBy;
@@ -526,8 +650,15 @@ async function findInboxItems(
           mine,
         };
       }
+
+      // Apply fallback patch if this task's role had no holders.
+      const patch = fallbackPatches.get(base.id);
+      if (patch) {
+        return { ...base, ...patch };
+      }
       return base;
     });
+    instanceItems = rawInstanceItems;
   } catch {
     // Read-projection: degrade gracefully to no instance tasks (never a write path).
     instanceItems = [];
