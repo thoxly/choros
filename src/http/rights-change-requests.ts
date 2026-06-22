@@ -17,9 +17,17 @@
  *   confirmed_by IS NOT NULL   ← first authenticated approver (actor1)
  *   confirmed2_by IS NULL      ← awaiting a DISTINCT second approver (dual-control)
  *
- * These rows are NOT active (the read-path PDP requires confirmed2_by IS NOT NULL
- * for critical/escalating changes). This module surfaces them as "pending change
- * requests" so the second approver can act from the ra-criticality screen.
+ * These rows are surfaced as "pending change requests" so the second approver
+ * can act from the ra-criticality screen.
+ *
+ * NOTE ON PDP ACTIVATION: the current grants-dao read-path does NOT filter on
+ * confirmed2_by for grant activation (it reads confirmed_by IS NOT NULL without
+ * checking confirmed2_by). Enforcing the dual-control invariant at the PDP level
+ * is tracked as a separate security task. The reject path therefore HARD-DELETES
+ * the pending grant row (not a soft-delete) so it is definitively gone — relying
+ * on valid_until would be a silent no-op given the current read-path.
+ * role_assignment reject uses valid_until=now (which IS honored at the
+ * role_assignment read-path) and is correct as-is.
  *
  * ── Dual-control invariants enforced ────────────────────────────────────────
  *   DC-1: approver MUST be a different person than the first confirmer
@@ -38,8 +46,8 @@
  * Does NOT touch: src/http/inbox.ts, src/http/process-defs.ts,
  * src/runtime/agent-dispatch/, the modeler, src/core/role-criticality.ts.
  * Grants.ts is NOT modified — the approve path mirrors handleSecondConfirm
- * logic with its own copy so grants.ts stays frozen. The reject path deletes
- * the semi-confirmed row (it was never active) and emits an audit event.
+ * logic with its own copy so grants.ts stays frozen. The reject path
+ * hard-deletes the pending grant row and emits an audit event.
  */
 
 import { randomUUID } from "node:crypto";
@@ -413,10 +421,17 @@ async function approveChangeRequest(args: {
 // ---------------------------------------------------------------------------
 // REJECT — POST /api/rights/change-requests/:id/reject
 //
-// Removes the semi-confirmed row (it was never active — confirmed2_by IS NULL
-// means the PDP never sees it). Audited as change_request.rejected.
+// Removes the semi-confirmed row (it was pending dual-control approval and is
+// definitively cancelled). Audited as change_request.rejected.
 // The actor must be a human (DC-3) but may be the same as confirmed_by
 // (the first approver may self-reject/cancel a request they created).
+//
+// Grant reject: HARD-DELETE the pending row. A soft-delete (valid_until) would
+// be a silent no-op because the grants-dao read-path activates grants on
+// confirmed_by IS NOT NULL without checking valid_until for pending rows.
+// (PDP-level enforcement of confirmed2_by is a separate security task.)
+//
+// role_assignment reject: valid_until=now, which IS honored at the RA read-path.
 // ---------------------------------------------------------------------------
 
 async function rejectChangeRequest(args: {
@@ -446,13 +461,14 @@ async function rejectChangeRequest(args: {
         // Already confirmed — cannot reject a live row.
         throw new HttpError(409, "ALREADY_CONFIRMED", "cannot reject an already-confirmed change request");
       }
-      // Soft-delete: set valid_until = now so PDP never activates it.
-      // The row stays for audit purposes (we could also hard-DELETE but this is
-      // safer — audit trail intact, zero schema changes, mirrors urgent-revoke).
+      // Hard-delete: the row was never fully approved (confirmed2_by IS NULL)
+      // and must not persist. A soft-delete via valid_until would be a no-op
+      // because grants-dao activates grants on confirmed_by IS NOT NULL without
+      // checking valid_until for semi-confirmed rows.
       await client.query(
-        `UPDATE choros."grant" SET valid_until = $3
+        `DELETE FROM choros."grant"
           WHERE tenant_id = $1 AND id = $2 AND confirmed2_by IS NULL`,
-        [tenantId, changeId, nowMs],
+        [tenantId, changeId],
       );
     } else {
       // Try role_assignment.

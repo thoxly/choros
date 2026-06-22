@@ -12,14 +12,17 @@
  *   CR-4  approve by an agent is rejected 403 AGENT_NOT_ALLOWED (DC-3)
  *   CR-5  approve on already-confirmed row is rejected 409 ALREADY_CONFIRMED
  *   CR-6  cross-tenant isolation — empty rows from stub = 404
- *   CR-7  reject succeeds for a pending row
+ *   CR-7  reject succeeds for a pending row (grant hard-deleted; not in list)
  *   CR-8  approve on non-existent id is rejected 404
+ *   CR-9  routing — list endpoint wins when registered before :roleId catch-all
+ *   CR-10 reject removes the pending grant row (hard-delete, not present after)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerRightsChangeRequestRoutes } from "../http/rights-change-requests.js";
+import { registerRightsRoutes } from "../http/rights.js";
 import pg from "pg";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +48,8 @@ interface StubOptions {
   employeeKind?: "human" | "agent";
   /** rowCount returned by UPDATE (1 = success, 0 = race) */
   updateRowCount?: number;
+  /** Callback invoked when a DELETE statement is executed (for assertion) */
+  onDelete?: (sql: string) => void;
 }
 
 function makePool(opts: StubOptions = {}): pg.Pool {
@@ -53,6 +58,7 @@ function makePool(opts: StubOptions = {}): pg.Pool {
     raRows = [],
     employeeKind = "human",
     updateRowCount = 1,
+    onDelete,
   } = opts;
 
   const stubClient = {
@@ -163,6 +169,12 @@ function makePool(opts: StubOptions = {}): pg.Pool {
 
       // ── Audit INSERT (audit_event) ─────────────────────────────────────────
       if (/INSERT\s+INTO/i.test(sql)) {
+        return { rows: [], rowCount: 1 };
+      }
+
+      // ── DELETE (reject grant — hard-delete of pending row) ────────────────
+      if (/DELETE\s+FROM\s+choros\."grant"/i.test(sql)) {
+        onDelete?.(sql);
         return { rows: [], rowCount: 1 };
       }
 
@@ -530,5 +542,94 @@ describe("CR-8 — approve non-existent id returns 404", () => {
       { "x-dev-user": ACTOR_HUMAN },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CR-9: routing collision — list endpoint wins when registered before :roleId
+// ---------------------------------------------------------------------------
+
+describe("CR-9 — routing: list endpoint resolves before :roleId catch-all", () => {
+  // This test registers BOTH route sets in server.ts order:
+  //   1. registerRightsChangeRequestRoutes (static literal paths)
+  //   2. registerRightsRoutes              (includes GET /api/rights/:roleId)
+  // The list endpoint MUST resolve to the change-request handler, not :roleId.
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const router = new Router();
+    const pool = makePool({ grantRows: [], raRows: [] });
+    // Register in server.ts order — change-requests BEFORE :roleId catch-all.
+    registerRightsChangeRequestRoutes(router, pool);
+    registerRightsRoutes(router);
+    server = http.createServer(router.dispatch.bind(router));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => resolve());
+    });
+    const addr = server.address();
+    baseUrl = `http://localhost:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
+  });
+  afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+
+  it("GET /api/rights/change-requests resolves to list handler (not :roleId 404)", async () => {
+    // The list handler returns 200 with change_requests array (empty, no rows).
+    // If :roleId catch-all wins instead, it would call findRole("change-requests")
+    // and return 404. We assert 200 + JSON shape.
+    const res = await req(baseUrl, "GET", "/api/rights/change-requests", {
+      "x-dev-user": ACTOR_HUMAN,
+    });
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body) as { change_requests: unknown[]; total: number };
+    expect(Array.isArray(data.change_requests)).toBe(true);
+    expect(typeof data.total).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CR-10: reject hard-deletes the pending grant row (not a soft-delete)
+// ---------------------------------------------------------------------------
+
+describe("CR-10 — reject issues DELETE (not UPDATE) for pending grant", () => {
+  let close: () => Promise<void>;
+  let baseUrl: string;
+  const deletedSqls: string[] = [];
+
+  const GRANT_ROW = {
+    proposed_by: ACTOR_PROPOSER,
+    confirmed_by: ACTOR_PROPOSER,
+    confirmed2_by: null,
+  };
+
+  beforeAll(async () => {
+    const pool = makePool({
+      grantRows: [GRANT_ROW],
+      employeeKind: "human",
+      onDelete: (sql) => deletedSqls.push(sql),
+    });
+    const s = await startTestServer(pool);
+    close = s.close; baseUrl = s.baseUrl;
+  });
+  afterAll(async () => { await close(); });
+
+  it("reject returns 200 state=rejected", async () => {
+    const res = await req(
+      baseUrl, "POST", `/api/rights/change-requests/${GRANT_ID}/reject`,
+      { "x-dev-user": ACTOR_HUMAN },
+      { reason: "не соответствует политике" },
+    );
+    expect(res.status).toBe(200);
+    const data = JSON.parse(res.body) as Record<string, unknown>;
+    expect(data["state"]).toBe("rejected");
+    expect(data["kind"]).toBe("grant");
+  });
+
+  it("a DELETE statement was issued for the grant row (hard-delete, not soft)", () => {
+    // The stub onDelete callback fires on DELETE FROM choros."grant".
+    // If the old soft-delete code (UPDATE SET valid_until) ran instead,
+    // deletedSqls would be empty and this test would fail.
+    expect(deletedSqls.length).toBeGreaterThanOrEqual(1);
+    expect(deletedSqls[0]).toMatch(/DELETE\s+FROM\s+choros\."grant"/i);
+    expect(deletedSqls[0]).toMatch(/confirmed2_by\s+IS\s+NULL/i);
   });
 });

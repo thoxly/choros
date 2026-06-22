@@ -355,9 +355,6 @@ function buildRouter(
   // Seed-backed — no DATABASE_URL required (ADR §2.1 / AC-16).
   registerDictionariesRoute(router);
 
-  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
-  registerRightsRoutes(router, store as JobStore);
-
   // Register grant write-API (T-0030).
   // Write routes require grantsPool; pool is non-null when DATABASE_URL is set.
   if (grantsPool) {
@@ -378,10 +375,18 @@ function buildRouter(
     // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
     registerRightsIntentRoutes(router, grantsPool);
     // Register dual-control change-request API (T-0390 D2-FU).
-    // Must be registered BEFORE intents :id catch-alls — routes are exact paths
-    // /api/rights/change-requests and /api/rights/change-requests/:id/approve|reject.
+    // MUST be registered BEFORE registerRightsRoutes (which adds GET /api/rights/:roleId).
+    // The router is first-match-wins; without this ordering the static path
+    // /api/rights/change-requests would be swallowed by the :roleId param route,
+    // calling findRole("change-requests") and returning 404 on every list request.
     registerRightsChangeRequestRoutes(router, grantsPool);
   }
+
+  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
+  // Registered AFTER registerRightsChangeRequestRoutes so the static literal path
+  // /api/rights/change-requests is already bound and first-match-wins routing
+  // never reaches the :roleId parameter slot for that path.
+  registerRightsRoutes(router, store as JobStore);
 
   // FlowableClient for engine write-paths (start-instance + process-def publish).
   // Composed here from env at call time — NO env reads in core (NF-1). Shared by

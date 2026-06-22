@@ -167,7 +167,7 @@ function CriticalityScreen() {
       pushToast({ tone: 'success', message: 'Изменение отклонено.' });
       await load();
     } catch (e) {
-      pushToast({ tone: 'error', message: e.message ?? 'Не удалось відхилити запрос.' });
+      pushToast({ tone: 'error', message: e.message ?? 'Не удалось отклонить запрос.' });
     } finally {
       setBusy(null);
     }

@@ -271,7 +271,70 @@
 .chs-prop__state--no { color: var(--chs-color-text-faint); }
 
 /* ============================================================================
-   ЭКРАН 2 — КРИТИЧНОСТЬ И DUAL-CONTROL
+   ЭКРАН 2 — КРИТИЧНОСТЬ И DUAL-CONTROL (change-request list — T-0390)
+   ============================================================================ */
+
+/* Screen shell */
+.chs-crit-screen__header {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--chs-space-5);
+  margin-bottom: var(--chs-space-7);
+}
+.chs-crit-screen__title {
+  font-size: var(--chs-text-xl); font-weight: var(--chs-weight-semibold);
+  letter-spacing: var(--chs-tracking-tight); margin: 0; color: var(--chs-color-text);
+}
+.chs-crit-screen__count {
+  font-family: var(--chs-font-mono); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted);
+  white-space: nowrap; flex: none;
+}
+
+/* Change-request list */
+.chs-cr-list {
+  display: flex; flex-direction: column; gap: var(--chs-space-4);
+}
+
+/* Change-request row card */
+.chs-cr-row {
+  border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-3);
+  background: var(--chs-color-surface); padding: var(--chs-space-6);
+  display: flex; flex-direction: column; gap: var(--chs-space-4);
+}
+.chs-cr-row__header {
+  display: flex; align-items: center; gap: var(--chs-space-4); flex-wrap: wrap;
+}
+.chs-cr-row__desc {
+  font-size: var(--chs-text-base); font-weight: var(--chs-weight-medium);
+  color: var(--chs-color-text); flex: 1; min-width: 0;
+}
+.chs-cr-row__role {
+  font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); white-space: nowrap;
+}
+.chs-cr-row__meta {
+  display: flex; align-items: center; gap: var(--chs-space-6); flex-wrap: wrap;
+}
+.chs-cr-row__proposer {
+  font-size: var(--chs-text-sm); color: var(--chs-color-text-muted);
+}
+.chs-cr-row__proposer strong { color: var(--chs-color-text); font-weight: var(--chs-weight-medium); }
+.chs-cr-row__date {
+  font-size: var(--chs-text-sm); color: var(--chs-color-text-faint); margin-left: auto;
+}
+.chs-cr-row__actions {
+  display: flex; align-items: center; gap: var(--chs-space-4); margin-top: var(--chs-space-2);
+}
+
+/* Kind chips — grant and assignment variants extend the existing chs-chip base */
+.chs-chip--grant {
+  color: var(--chs-color-warning); background: var(--chs-color-warning-soft);
+  border: 1px solid color-mix(in oklch, var(--chs-color-warning) 42%, transparent);
+}
+.chs-chip--assignment {
+  color: var(--chs-color-info); background: var(--chs-color-info-soft);
+  border: 1px solid color-mix(in oklch, var(--chs-color-info) 42%, transparent);
+}
+
+/* ============================================================================
+   ЭКРАН 2 — КРИТИЧНОСТЬ И DUAL-CONTROL (existing role-change cards)
    ============================================================================ */
 .chs-chg { border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-3); background: var(--chs-color-surface); padding: var(--chs-space-7); }
 .chs-chg--critical { border-color: color-mix(in oklch, var(--chs-color-danger) 38%, transparent); }
