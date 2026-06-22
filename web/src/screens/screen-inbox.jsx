@@ -145,14 +145,17 @@ function FormField({ field, value, onChange, error }) {
  *   submitting  — bool: disable submit button while parent is completing the step
  */
 function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
-  const [binding, setBinding] = useState(null);   // null = loading; false = no binding; { fields } = loaded
+  // null = loading; false = no binding (404); { fields } = loaded; 'error' = transient fetch error
+  const [binding, setBinding] = useState(null);
+  const [bindingError, setBindingError] = useState(null); // null | string
   const [values, setValues] = useState({});
   const [fieldErrors, setFieldErrors] = useState({});
   const [formError, setFormError] = useState(null);
 
-  useEffect(() => {
+  const loadBinding = useCallback(() => {
     if (!processKey || !stepKey) { setBinding(false); return; }
     setBinding(null);
+    setBindingError(null);
     setValues({});
     setFieldErrors({});
     setFormError(null);
@@ -174,8 +177,18 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
           setBinding(data);
         });
       })
-      .catch(() => setBinding(false));
+      .catch((err) => {
+        // Distinguish transient network/server error from "no binding" (404).
+        // Setting bindingError surfaces a retry path rather than silently
+        // treating the task as having no form.
+        setBindingError(String(err?.message || err));
+        setBinding(false);
+      });
   }, [processKey, stepKey]);
+
+  useEffect(() => {
+    loadBinding();
+  }, [loadBinding]);
 
   const handleChange = useCallback((key, val) => {
     setValues((prev) => ({ ...prev, [key]: val }));
@@ -204,12 +217,18 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
     if (onSubmit) onSubmit(values);
   }, [binding, values, onSubmit]);
 
-  // No binding yet — loading
+  // Loading — use kit LoadingState
   if (binding === null) {
+    return <LoadingState label="Загрузка формы…" />;
+  }
+
+  // Transient fetch error — surface it with a retry, not silently as "no form"
+  if (bindingError) {
     return (
-      <div style={{ marginTop: 'var(--chs-space-4)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-        Загрузка формы…
-      </div>
+      <ErrorState
+        message={`Не удалось загрузить форму: ${bindingError}`}
+        onRetry={loadBinding}
+      />
     );
   }
 
@@ -257,7 +276,7 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
           size="sm"
           disabled={submitting}
         >
-          Сохранить данные формы
+          Готово
         </Button>
       </form>
     </section>
@@ -413,10 +432,17 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
     setCompleting(true);
     setActionError(null);
     try {
+      // T-0376: include collected form values in the approve body so the data
+      // is actually forwarded. The action endpoint ignores unknown keys (no
+      // strict validation — extra fields are accepted silently), so this is safe.
+      const approveBody = { action: 'approve' };
+      if (formData && Object.keys(formData).length > 0) {
+        approveBody.formValues = formData;
+      }
       const res = await fetch(`/api/inbox/${taskId}/action`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ action: 'approve' }),
+        body: JSON.stringify(approveBody),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -542,9 +568,9 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
               borderColor: 'var(--chs-color-info, var(--chs-color-border))',
               marginBottom: 'var(--chs-space-6)',
             }}>
-              <div style={{ ...S.noticeTitle, color: 'var(--chs-color-text)' }}>Данные формы сохранены</div>
+              <div style={{ ...S.noticeTitle, color: 'var(--chs-color-text)' }}>Форма заполнена</div>
               <div style={S.noticeBody}>
-                Нажмите «Выполнить шаг», чтобы завершить задачу.
+                Данные будут переданы при завершении шага. Нажмите «Выполнить шаг».
               </div>
             </div>
           )}
@@ -557,7 +583,7 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
                 <span style={S.key}>Инстанс</span>
                 <MonoId>{detail.projection.inst}</MonoId>
 
-                <span style={S.key}>Процесс</span>
+                <span style={S.key}>Ключ процесса</span>
                 <Mono>{detail.projection.procKey}</Mono>
 
                 <span style={S.key}>Текущий шаг</span>

@@ -57,7 +57,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
   return (
     <div
       role="group"
-      aria-label={`Поле ${field.key}`}
+      aria-label={`Поле «${label}»`}
       style={{
         display: 'grid',
         gridTemplateColumns: 'auto minmax(0,1fr) minmax(0,1.4fr) auto auto',
@@ -74,7 +74,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
           type="checkbox"
           checked={included}
           onChange={(e) => onChange({ ...config, included: e.target.checked })}
-          aria-label={`Включить поле ${field.key}`}
+          aria-label={`Включить поле «${label}»`}
         />
       </label>
 
@@ -111,7 +111,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
         value={label}
         onChange={(e) => onChange({ ...config, label: e.target.value })}
         placeholder={field.title || field.key}
-        aria-label={`Метка поля ${field.key}`}
+        aria-label={`Метка поля «${label}»`}
         disabled={!included}
       />
 
@@ -131,7 +131,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
           checked={required}
           onChange={(e) => onChange({ ...config, required: e.target.checked })}
           disabled={!included}
-          aria-label={`Обязательное поле ${field.key}`}
+          aria-label={`Обязательное поле «${label}»`}
         />
         Обяз.
       </label>
@@ -181,8 +181,10 @@ function FormBuilder() {
 
   // Step 2: pick application + registry def
   const [applications, setApplications] = useState(null); // null = loading
+  const [appsError, setAppsError] = useState(null); // null | string
   const [selectedAppId, setSelectedAppId] = useState('');
   const [registryDefs, setRegistryDefs] = useState(null); // null = not loaded
+  const [defsError, setDefsError] = useState(null); // null | string
   const [selectedDefId, setSelectedDefId] = useState('');
 
   // Step 3: field configurator state
@@ -219,6 +221,7 @@ function FormBuilder() {
   useEffect(() => {
     setLoadingApps(true);
     setApplications(null);
+    setAppsError(null);
     setSelectedAppId('');
     setRegistryDefs(null);
     setSelectedDefId('');
@@ -228,7 +231,7 @@ function FormBuilder() {
     fetch('/api/applications', { headers: authHeaders() })
       .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((data) => setApplications(data.applications || []))
-      .catch(() => setApplications([]))
+      .catch((err) => { setAppsError(String(err?.message || err)); setApplications([]); })
       .finally(() => setLoadingApps(false));
   }, []);
 
@@ -236,6 +239,7 @@ function FormBuilder() {
   useEffect(() => {
     if (!selectedAppId) {
       setRegistryDefs(null);
+      setDefsError(null);
       setSelectedDefId('');
       setFields([]);
       setConfigs({});
@@ -244,6 +248,7 @@ function FormBuilder() {
     }
     setLoadingDefs(true);
     setRegistryDefs(null);
+    setDefsError(null);
     setSelectedDefId('');
     setFields([]);
     setConfigs({});
@@ -251,7 +256,7 @@ function FormBuilder() {
     fetch(`/api/registry-defs?application_id=${encodeURIComponent(selectedAppId)}`, { headers: authHeaders() })
       .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((data) => setRegistryDefs(data.registry_defs || []))
-      .catch(() => setRegistryDefs([]))
+      .catch((err) => { setDefsError(String(err?.message || err)); setRegistryDefs([]); })
       .finally(() => setLoadingDefs(false));
   }, [selectedAppId]);
 
@@ -456,7 +461,7 @@ function FormBuilder() {
           {/* Step key — the BPMN userTask step identifier */}
           <div style={{ flex: '1 1 200px' }}>
             <Field
-              label="Ключ шага (имя задачи)"
+              label="Шаг процесса"
               mono
               value={stepKey}
               onChange={(e) => { setStepKey(e.target.value); setSaveResult(null); setFormErrors((p) => ({ ...p, stepKey: undefined })); }}
@@ -491,6 +496,20 @@ function FormBuilder() {
             <label className="chs-label" htmlFor="fb-app-select">Приложение</label>
             {loadingApps ? (
               <LoadingState label="Загрузка приложений…" />
+            ) : appsError ? (
+              <ErrorState
+                message={`Не удалось загрузить приложения: ${appsError}`}
+                onRetry={() => {
+                  setAppsError(null);
+                  setApplications(null);
+                  setLoadingApps(true);
+                  fetch('/api/applications', { headers: authHeaders() })
+                    .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+                    .then((data) => setApplications(data.applications || []))
+                    .catch((err) => { setAppsError(String(err?.message || err)); setApplications([]); })
+                    .finally(() => setLoadingApps(false));
+                }}
+              />
             ) : (
               <select
                 id="fb-app-select"
@@ -513,6 +532,20 @@ function FormBuilder() {
               <label className="chs-label" htmlFor="fb-def-select">Набор полей</label>
               {loadingDefs ? (
                 <LoadingState label="Загрузка наборов полей…" />
+              ) : defsError ? (
+                <ErrorState
+                  message={`Не удалось загрузить наборы полей: ${defsError}`}
+                  onRetry={() => {
+                    setDefsError(null);
+                    setRegistryDefs(null);
+                    setLoadingDefs(true);
+                    fetch(`/api/registry-defs?application_id=${encodeURIComponent(selectedAppId)}`, { headers: authHeaders() })
+                      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+                      .then((data) => setRegistryDefs(data.registry_defs || []))
+                      .catch((err) => { setDefsError(String(err?.message || err)); setRegistryDefs([]); })
+                      .finally(() => setLoadingDefs(false));
+                  }}
+                />
               ) : registryDefs && registryDefs.length === 0 ? (
                 <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
                   Нет наборов полей — сначала создайте их в конструкторе приложения

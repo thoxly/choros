@@ -157,19 +157,24 @@ async function extractActorSlug(
 export async function checkRole(
   client: pg.PoolClient,
   tenantId: string,
-  actorId: string,
+  actorSlug: string,
 ): Promise<void> {
   const authMode = getAuthMode();
   if (authMode !== "dev") {
-    // keycloak mode: check role_assignment for process_designer
+    // keycloak mode: check role_assignment for process_designer.
+    // role_assignment.employee_id is a UUID FK; actorSlug is the employee slug.
+    // Join through employee to resolve slug → UUID so the check works correctly.
+    // Without the join, passing a slug directly against a UUID column returns 0
+    // rows and silently yields a spurious 403 for all actors.
     const { rows } = await client.query<{ cnt: number }>(
       `SELECT count(*)::int AS cnt
          FROM choros.role_assignment ra
          JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+         JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
         WHERE ra.tenant_id = $1
-          AND ra.employee_id = $2
+          AND e.slug = $2
           AND r.slug = 'process_designer'`,
-      [tenantId, actorId],
+      [tenantId, actorSlug],
     );
     if (!rows[0] || rows[0].cnt === 0) {
       throw new HttpError(403, "FORBIDDEN", "role process_designer required");
