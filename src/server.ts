@@ -44,6 +44,7 @@ import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
+import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
@@ -354,9 +355,6 @@ function buildRouter(
   // Seed-backed — no DATABASE_URL required (ADR §2.1 / AC-16).
   registerDictionariesRoute(router);
 
-  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
-  registerRightsRoutes(router, store as JobStore);
-
   // Register grant write-API (T-0030).
   // Write routes require grantsPool; pool is non-null when DATABASE_URL is set.
   if (grantsPool) {
@@ -376,7 +374,19 @@ function buildRouter(
     // Thin orchestration over the existing kernel (grants/substitution/validateNarrowing/
     // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
     registerRightsIntentRoutes(router, grantsPool);
+    // Register dual-control change-request API (T-0390 D2-FU).
+    // MUST be registered BEFORE registerRightsRoutes (which adds GET /api/rights/:roleId).
+    // The router is first-match-wins; without this ordering the static path
+    // /api/rights/change-requests would be swallowed by the :roleId param route,
+    // calling findRole("change-requests") and returning 404 on every list request.
+    registerRightsChangeRequestRoutes(router, grantsPool);
   }
+
+  // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
+  // Registered AFTER registerRightsChangeRequestRoutes so the static literal path
+  // /api/rights/change-requests is already bound and first-match-wins routing
+  // never reaches the :roleId parameter slot for that path.
+  registerRightsRoutes(router, store as JobStore);
 
   // FlowableClient for engine write-paths (start-instance + process-def publish).
   // Composed here from env at call time — NO env reads in core (NF-1). Shared by
