@@ -155,7 +155,9 @@ export const NAV = [
     ],
   },
   // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
+  // T-0383 (D5/PD-6): Промпт ассистента — редактор системного промпта.
   // GET /api/llm-config (live), PUT /api/llm-config (live).
+  // GET/PUT /api/assistant/prompt/:role (live).
   // Секрет-хэндл настраивается отдельно через экран «Агенты» → «Привязать LLM».
   {
     group: "Конфигурация",
@@ -164,6 +166,13 @@ export const NAV = [
       {
         id: "llm-config",
         label: "LLM-подключение",
+        icon: "assistant",
+        screen: true,
+        status: "live",
+      },
+      {
+        id: "assistant-prompt",
+        label: "Промпт ассистента",
         icon: "assistant",
         screen: true,
         status: "live",

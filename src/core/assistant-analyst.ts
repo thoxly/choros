@@ -130,6 +130,14 @@ export interface AnalystPorts {
    * bound to the current tenant tx — the same audit pattern as every other route.
    */
   emitAudit?: AnalystAuditEmitter;
+  /**
+   * Load the per-tenant system prompt override for the analyst.
+   * Default: null (falls back to ANALYST_DEFAULT_SYSTEM_PROMPT).
+   * Production wiring: composition root supplies a loader that reads the published
+   * agent_instruction for the tenant's primary assistant-agent, if present.
+   * T-0383 (D5/PD-6): per-tenant editable system prompt (B10).
+   */
+  loadSystemPrompt?: (tenantId: string) => Promise<string | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,15 +154,49 @@ const defaultLoadCycleTime: CycleTimeLister = async (tenantId) => ({
 
 const defaultLoadActorBreakdown: ActorBreakdownLister = async () => [];
 
+const defaultLoadSystemPrompt = async (_tenantId: string): Promise<string | null> => null;
+
 const defaultEmitAudit: AnalystAuditEmitter = async () => {
   // no-op in test/stub mode
 };
 
 // ---------------------------------------------------------------------------
-// buildAnalystSystemPrompt — system context for the LLM synthesis call.
+// ANALYST_DEFAULT_SYSTEM_PROMPT — hardcoded fallback (T-0383: backward-compat).
+//
+// Used when the tenant has no per-tenant override stored in agent_instruction.
+// Exported so the HTTP route can display the default for tenants that haven't
+// customised it yet.
 // ---------------------------------------------------------------------------
 
-function buildAnalystSystemPrompt(tenantId: string): string {
+/**
+ * The default (hardcoded) analyst system prompt.
+ * Tenants that have not set a custom prompt get this text verbatim.
+ * T-0383: this constant is the single source of truth for the default; the
+ * UI shows it in the prompt editor as placeholder/pre-fill when unset.
+ */
+export const ANALYST_DEFAULT_SYSTEM_PROMPT =
+  "Ты аналитик-ассистент в системе Choros.\n" +
+  "Твоя роль — ТОЛЬКО читать и анализировать данные. " +
+  "Ты НИКОГДА не создаёшь, не обновляешь и не удаляешь бизнес-записи.\n" +
+  "Если пользователь просит выполнить действие (например, запустить процесс), " +
+  "ты можешь ПРЕДЛОЖИТЬ («запустить процесс X?»), но НЕ выполняешь его — " +
+  "это подтверждает человек через существующий интерфейс.\n" +
+  "Отвечай по-русски, структурированно и честно. " +
+  "В конце добавь предложение сохранить отчёт, если анализ был содержательным.";
+
+// ---------------------------------------------------------------------------
+// buildAnalystSystemPrompt — system context for the LLM synthesis call.
+// T-0383: now accepts a per-tenant override (from agent_instruction published row).
+// Falls back to ANALYST_DEFAULT_SYSTEM_PROMPT when override is absent/null.
+// The tenantId suffix appended to the default is kept for context; the override
+// is used verbatim so the tenant can include or omit tenantId as they choose.
+// ---------------------------------------------------------------------------
+
+function buildAnalystSystemPrompt(tenantId: string, override: string | null): string {
+  if (override !== null && override.trim().length > 0) {
+    return override;
+  }
+  // Default: append tenantId for orientation (backward-compatible behaviour).
   return (
     "Ты аналитик-ассистент в системе Choros (тенант: " +
     tenantId +
@@ -250,6 +292,7 @@ export async function runAnalyst(
   const loadCycleTime = ports.loadCycleTime ?? defaultLoadCycleTime;
   const loadActorBreakdown = ports.loadActorBreakdown ?? defaultLoadActorBreakdown;
   const emitAudit = ports.emitAudit ?? defaultEmitAudit;
+  const loadSystemPrompt = ports.loadSystemPrompt ?? defaultLoadSystemPrompt;
 
   const nowMs = Date.now();
 
@@ -312,8 +355,10 @@ export async function runAnalyst(
   //    System: analyst persona (read-only, propose-not-execute).
   //    Context message: stringified ReportDraft data.
   //    User message: the original query.
+  //    T-0383: load per-tenant system prompt override; fallback to default.
   // -------------------------------------------------------------------------
-  const systemPrompt = buildAnalystSystemPrompt(ctx.tenantId);
+  const promptOverride = await loadSystemPrompt(ctx.tenantId);
+  const systemPrompt = buildAnalystSystemPrompt(ctx.tenantId, promptOverride);
   const draftContext = buildDraftContext(draft);
 
   const llmResult = await (ctx.llm as LlmPort).chat({
