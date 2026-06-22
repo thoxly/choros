@@ -69,14 +69,13 @@ class InMemoryAuditStore {
    * The fake handles all queries the assistant routes issue.
    */
   makeFakePool(): import("pg").Pool {
-    const store = this;
     let seqCounter = 0;
-
-    function makeClient(): import("pg").PoolClient {
+    // Use arrow function for makeClient so 'this' refers to InMemoryAuditStore.
+    const makeClientFn = (): import("pg").PoolClient => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const query = async (sql: string, params?: unknown[]): Promise<any> => {
         const text = sql.trim();
-        store.sqlLog.push(text);
+        this.sqlLog.push(text);
 
         // AC-T384-18: Enforce append-only — detect any UPDATE/DELETE on audit_event.
         if (
@@ -129,14 +128,14 @@ class InMemoryAuditStore {
             payload = payloadRaw as Record<string, unknown>;
           }
           const occurred_at = Number(p[10] ?? 0);
-          store.rows.push({ id, type, subject, payload, occurred_at });
+          this.rows.push({ id, type, subject, payload, occurred_at });
           return { rows: [] };
         }
 
         // --- Fetch threads (assistant.thread events by subject) ---
         if (text.includes("type = 'assistant.thread'") && text.includes("AND subject = $1") && !text.includes("AND id = $1")) {
           const subject = String((params ?? [])[0] ?? "");
-          const result = store.rows
+          const result = this.rows
             .filter((r) => r.type === "assistant.thread" && r.subject === subject)
             .sort((a, b) => a.occurred_at - b.occurred_at)
             .map((r) => ({ id: r.id, occurred_at: String(r.occurred_at), payload: r.payload }));
@@ -146,7 +145,7 @@ class InMemoryAuditStore {
         // --- Fetch single thread by id ---
         if (text.includes("type = 'assistant.thread'") && text.includes("AND id = $1")) {
           const id = String((params ?? [])[0] ?? "");
-          const found = store.rows.find((r) => r.type === "assistant.thread" && r.id === id);
+          const found = this.rows.find((r) => r.type === "assistant.thread" && r.id === id);
           if (!found) return { rows: [] };
           return {
             rows: [{ id: found.id, occurred_at: String(found.occurred_at), payload: found.payload, subject: found.subject }],
@@ -165,7 +164,7 @@ class InMemoryAuditStore {
               : typeof secondParam === "string"
                 ? [secondParam]
                 : [];
-          const result = store.rows
+          const result = this.rows
             .filter(
               (r) =>
                 (r.type === "assistant.thread.renamed" ||
@@ -185,7 +184,7 @@ class InMemoryAuditStore {
           const threadIds: string[] = Array.isArray(p[0]) ? p[0].map(String) : [];
           const subject = String(p[1] ?? "");
           const counts = new Map<string, number>();
-          for (const r of store.rows) {
+          for (const r of this.rows) {
             if (r.type === "assistant.message" && r.subject === subject) {
               const tid = String(r.payload["thread_id"] ?? "");
               if (threadIds.includes(tid)) {
@@ -206,7 +205,7 @@ class InMemoryAuditStore {
           const p = params ?? [];
           const threadId = String(p[0] ?? "");
           const subject = String(p[1] ?? "");
-          const cnt = store.rows.filter(
+          const cnt = this.rows.filter(
             (r) => r.type === "assistant.message" && r.subject === subject && r.payload["thread_id"] === threadId,
           ).length;
           return { rows: [{ cnt: String(cnt) }] };
@@ -217,7 +216,7 @@ class InMemoryAuditStore {
           const p = params ?? [];
           const threadId = String(p[0] ?? "");
           const subject = String(p[1] ?? "");
-          const result = store.rows
+          const result = this.rows
             .filter(
               (r) => r.type === "assistant.message" && r.payload["thread_id"] === threadId && r.subject === subject,
             )
@@ -245,9 +244,9 @@ class InMemoryAuditStore {
       };
 
       return { query, release: () => {} } as unknown as import("pg").PoolClient;
-    }
+    };
 
-    return { connect: async () => makeClient() } as unknown as import("pg").Pool;
+    return { connect: async () => makeClientFn() } as unknown as import("pg").Pool;
   }
 }
 
