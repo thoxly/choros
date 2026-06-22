@@ -13,6 +13,9 @@
  *   FV-5  formValues=null is treated as empty (graceful degradation, not a 400)
  *   FV-6  formValues=[] (array) is treated as empty (plain-object guard)
  *   FV-7  formValues with nested/mixed values are forwarded verbatim
+ *   FV-8  body.comment (canonical) overrides any comment key in formValues
+ *   FV-9  formValues.comment is evicted when body.comment is absent (canonical path wins)
+ *   FV-10 prototype-pollution sentinel keys (__proto__, constructor, prototype) are stripped
  *
  * Architecture note: tests FV-1 and FV-2 wire a spy outboxStore to intercept the
  * step_applied payload and a record-capturing fake pool to intercept the record
@@ -518,5 +521,124 @@ describe("inbox action — formValues persistence (T-0396)", () => {
     expect(vars["approved"]).toBe(true);
     expect(vars["tags"]).toEqual(["urgent", "it"]);
     expect(vars["meta"]).toEqual({ department: "Engineering" });
+  });
+
+  // -------------------------------------------------------------------------
+  // FV-8: body.comment (canonical) overrides a comment key inside formValues
+  // The canonical comment comes from body.comment → outcomeComment, NOT from
+  // the client-supplied formValues["comment"] key.
+  // -------------------------------------------------------------------------
+  it("FV-8: body.comment overrides formValues.comment — canonical comment always wins", async () => {
+    const db = new FakeDb();
+    const taskId = await seedTask(db);
+    const { store, enqueued } = makeOutboxSpy();
+    await start({
+      pool: makeFakePool(db),
+      resolveActorTenant: async () => TENANT_ID,
+      outboxStore: store,
+    });
+
+    await httpReq(
+      "POST", `${base}/api/inbox/${taskId}/action`,
+      { "x-dev-user": APPROVER },
+      {
+        action: "approve",
+        // Canonical comment provided via body.comment
+        comment: "Approved after review",
+        // Client also sends a comment in formValues — should be evicted
+        formValues: {
+          comment: "INJECTED COMMENT",
+          legitimateField: "ok",
+        },
+      },
+    );
+
+    const stepApplied = enqueued.find((e) => e.eventType === "step_applied");
+    const vars = stepApplied?.payload["variables"] as Record<string, unknown>;
+    // Canonical body.comment wins; the formValues["comment"] is evicted
+    expect(vars["comment"]).toBe("Approved after review");
+    // Legitimate form field still present
+    expect(vars["legitimateField"]).toBe("ok");
+  });
+
+  // -------------------------------------------------------------------------
+  // FV-9: when body.comment is absent, formValues.comment is evicted — the
+  // canonical comment path (body.comment) is the only valid source for "comment".
+  // A client cannot bypass the canonical path by putting comment in formValues.
+  // -------------------------------------------------------------------------
+  it("FV-9: formValues.comment is evicted when body.comment is absent", async () => {
+    const db = new FakeDb();
+    const taskId = await seedTask(db);
+    const { store, enqueued } = makeOutboxSpy();
+    await start({
+      pool: makeFakePool(db),
+      resolveActorTenant: async () => TENANT_ID,
+      outboxStore: store,
+    });
+
+    await httpReq(
+      "POST", `${base}/api/inbox/${taskId}/action`,
+      { "x-dev-user": APPROVER },
+      {
+        action: "approve",
+        // No body.comment — canonical comment is absent
+        formValues: {
+          comment: "SHOULD NOT PERSIST",
+          otherField: "value",
+        },
+      },
+    );
+
+    const stepApplied = enqueued.find((e) => e.eventType === "step_applied");
+    const vars = stepApplied?.payload["variables"] as Record<string, unknown>;
+    // formValues["comment"] must NOT appear as the persisted comment value.
+    // (comment key may be present with value undefined — JSON serialises it away.)
+    expect(vars["comment"]).toBeUndefined();
+    // Other fields still forwarded
+    expect(vars["otherField"]).toBe("value");
+  });
+
+  // -------------------------------------------------------------------------
+  // FV-10: prototype-pollution sentinel keys are stripped before storing
+  // Keys __proto__, constructor, prototype in formValues must never reach the
+  // persisted JSONB record data.
+  // -------------------------------------------------------------------------
+  it("FV-10: __proto__/constructor/prototype keys are stripped from formValues", async () => {
+    const db = new FakeDb();
+    const taskId = await seedTask(db);
+    const { store, enqueued } = makeOutboxSpy();
+    await start({
+      pool: makeFakePool(db),
+      resolveActorTenant: async () => TENANT_ID,
+      outboxStore: store,
+    });
+
+    // Build the body manually to include literal proto-sentinel keys
+    const formValues: Record<string, unknown> = {
+      legitimateField: "safe",
+      amount: 42,
+    };
+    // Assign sentinel keys via index access (not spread shorthand)
+    formValues["__proto__"] = { polluted: true };
+    formValues["constructor"] = "evil";
+    formValues["prototype"] = { hack: true };
+
+    await httpReq(
+      "POST", `${base}/api/inbox/${taskId}/action`,
+      { "x-dev-user": APPROVER },
+      { action: "approve", formValues },
+    );
+
+    const stepApplied = enqueued.find((e) => e.eventType === "step_applied");
+    const vars = stepApplied?.payload["variables"] as Record<string, unknown>;
+
+    // Sentinel keys must NOT be present in the persisted payload
+    expect(Object.prototype.hasOwnProperty.call(vars, "__proto__")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(vars, "constructor")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(vars, "prototype")).toBe(false);
+
+    // Legitimate fields are still forwarded
+    expect(vars["legitimateField"]).toBe("safe");
+    expect(vars["amount"]).toBe(42);
   });
 });

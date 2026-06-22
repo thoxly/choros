@@ -1254,14 +1254,26 @@ export function registerInboxRoutes(
           //   read outcomeName from the flow definition to determine routing when
           //   the process is extended to use named branches. For now, the action
           //   route records the entity — branch resolution is the engine's job.
+          // Fix 1 (review): strip prototype-pollution sentinel keys from client-supplied
+          // formValues before spreading. JSON.parse+spread is safe at runtime but
+          // literal keys `__proto__`, `constructor`, `prototype` have no valid business
+          // meaning and must not be stored in the JSONB record.
+          const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+          const safeFormValues: Record<string, unknown> = Object.fromEntries(
+            Object.entries(humanFormValues).filter(([k]) => !PROTO_KEYS.has(k)),
+          );
+
           const formData: Record<string, unknown> = {
-            ...humanFormValues,   // T-0396: user form values from the inbox card form
+            ...safeFormValues,    // T-0396: user form values from the inbox card form (proto-keys stripped)
             decision: outcomeName,
             approved_by: actor,
+            // Fix 2 (review): canonical comment ALWAYS wins. When outcomeComment is
+            // defined, it overwrites any client-supplied formValues["comment"].
+            // When undefined, explicitly set to undefined so that a client-supplied
+            // "comment" key in humanFormValues is evicted from the persisted record
+            // (the canonical path is body.comment → outcomeComment, not formValues).
+            comment: outcomeComment,
           };
-          if (outcomeComment !== undefined) {
-            formData["comment"] = outcomeComment;
-          }
 
           await applyStepResult(client, {
             tenantId,
