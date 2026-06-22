@@ -35,6 +35,8 @@ import RecordDetailScreen from '../screens/screen-record-detail.jsx';
 import AssistantScreen from '../screens/screen-assistant.jsx';
 // T-0382 (D5): LLM connection screen — per-tenant BYO LLM configuration.
 import LlmConfigScreen from '../screens/screen-llm-config.jsx';
+// T-0383 (D5/PD-6): assistant system prompt editor.
+import AssistantPromptScreen from '../screens/screen-assistant-prompt.jsx';
 
 export { Icon };
 
@@ -78,6 +80,8 @@ const SCREEN_META = {
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
   // T-0382 (D5): LLM connection screen.
   "llm-config": { crumb: ["Конфигурация", "LLM-подключение"] },
+  // T-0383 (D5/PD-6): assistant system prompt editor.
+  "assistant-prompt": { crumb: ["Конфигурация", "Промпт ассистента"] },
 };
 
 /**
@@ -736,6 +740,8 @@ function AppShell() {
             <Route path="/assistant/:threadId" element={<AssistantScreen />} />
             {/* T-0382 (D5): LLM connection screen — per-tenant BYO LLM configuration. */}
             <Route path="/llm-config" element={<LlmConfigScreen />} />
+            {/* T-0383 (D5/PD-6): assistant system prompt editor. */}
+            <Route path="/assistant-prompt" element={<AssistantPromptScreen />} />
           </Routes>
         </div>
       </main>
