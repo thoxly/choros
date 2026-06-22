@@ -1151,6 +1151,24 @@ export function registerInboxRoutes(
       const outcomeComment: string | undefined =
         typeof rawComment === "string" ? rawComment : undefined;
 
+      // T-0396: Optional human-filled form values from the inbox task card form.
+      // T-0376 sends these as formValues: { [fieldKey]: value } when a form is bound
+      // to the task. Minimal validation: must be a plain object (not null, not array).
+      // Unknown/extra keys not in the form binding are silently forwarded — the
+      // applier spreads them into the entity record under formData; the form binding
+      // schema is the authoring-time contract (D-061 no-new-table: no runtime
+      // re-validation against form_binding.fields here). Canonical provenance fields
+      // (decision, approved_by, comment) are applied AFTER the spread so they cannot
+      // be overridden by client-supplied values (security: formValues is untrusted).
+      const rawFormValues = body["formValues"];
+      const humanFormValues: Record<string, unknown> =
+        rawFormValues !== null &&
+        rawFormValues !== undefined &&
+        typeof rawFormValues === "object" &&
+        !Array.isArray(rawFormValues)
+          ? (rawFormValues as Record<string, unknown>)
+          : {};
+
       const taskId = params["id"] as string;
       const tenantId = await resolveActorTenantDep(actor);
 
@@ -1215,21 +1233,29 @@ export function registerInboxRoutes(
           // F1 step-class from form_binding (default-to-A; B → skipped/deferred).
           const stepClass = await readStepClass(client, tenantId, task.procKey);
 
-          // T-0353 [E16]: Build formData with the outcome decision.
+          // T-0353 [E16] + T-0396: Build formData with the outcome decision AND
+          // human-filled form field values from the inbox card form.
           // DOCTRINE (choros-data-ownership-doctrine + RECORD_IN_PAYLOAD guard):
-          //   The outcome decision + optional comment are STEP RESULT = ENTITY.
-          //   They go into the «Согласование» registry record via applyStepResult's
-          //   formData — NOT into process variables (Flowable).
+          //   The outcome decision + optional comment + human form values are all
+          //   STEP RESULT = ENTITY. They go into the «Согласование» registry record
+          //   via applyStepResult's formData — NOT into process variables (Flowable).
           //
-          //   outcomeName → "decision" field on the entity (e.g. "Согласовать")
-          //   outcomeComment → "comment" field on the entity (optional)
-          //   approved_by → actor slug (provenance)
+          //   humanFormValues — spread FIRST (user-supplied fields from the bound form)
+          //   decision       — outcomeName (e.g. "Согласовать"); applied AFTER spread so
+          //                    it cannot be overridden by client-submitted formValues
+          //   approved_by    — actor slug (provenance); applied AFTER spread (same reason)
+          //   comment        — outcomeComment (optional); applied AFTER spread (same reason)
+          //
+          //   Canonical provenance fields (decision, approved_by, comment) always win
+          //   over any identically-named key inside humanFormValues — the server is the
+          //   source of truth for provenance, not the client.
           //
           //   The outcome-branch resolver (outcome-branch-resolver.ts) can later
           //   read outcomeName from the flow definition to determine routing when
           //   the process is extended to use named branches. For now, the action
           //   route records the entity — branch resolution is the engine's job.
           const formData: Record<string, unknown> = {
+            ...humanFormValues,   // T-0396: user form values from the inbox card form
             decision: outcomeName,
             approved_by: actor,
           };
