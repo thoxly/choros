@@ -539,6 +539,254 @@ describe("SQL column guard — updated_at and granted_by in INSERT statements", 
 });
 
 // ---------------------------------------------------------------------------
+// T-0373 (PD-7): tenant-zero seeding — assistant-agent + authoring_draft grants
+//
+// Verifies that registerTenant seeds, for every new tenant:
+//   (a) an assistant-agent employee row (kind='agent', slug='assistant-agent')
+//   (b) a role-configurator role
+//   (c) owner → role-configurator role_assignment (CONFIRMED)
+//   (d) assistant-agent → role-configurator role_assignment (CONFIRMED)
+//   (e) authoring_draft/create grant for role-configurator (CONFIRMED, confirmed_by set)
+//   (f) authoring_draft/update grant for role-configurator (CONFIRMED, confirmed_by set)
+//
+// Uses the same CapturingClient pattern as the SQL column guard above.
+// These are unit tests (no live DB) — shape/presence checks only.
+// Live round-trip verification (grants actually unlock the configurator)
+// requires the DB-level fitness suite (see FF-4 / FF-6 section below, live PG).
+// ---------------------------------------------------------------------------
+
+describe("T-0373 (PD-7) — tenant-zero seeding: assistant-agent + authoring_draft grants", () => {
+  it("seeds an 'assistant-agent' employee row (kind='agent') for every new tenant", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    await registerTenant(
+      { pool: capturingPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "T0373Org", email: "t0373@test.com", password: "password123" },
+    );
+
+    // Must find an employee INSERT that seeds the assistant-agent slug.
+    // Note: slug='assistant-agent' and kind='agent' are hardcoded in the SQL string
+    // (not in the parameterized values array), so we check the SQL text directly.
+    const agentInsert = capturedQueries.find(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes("choros.employee") &&
+        q.text.includes("assistant-agent"),
+    );
+    expect(agentInsert).toBeDefined();
+    // Slug literal in SQL text
+    expect(agentInsert!.text).toContain("assistant-agent");
+    // kind literal in SQL text
+    expect(agentInsert!.text).toContain("'agent'");
+    // Must have updated_at (NOT-NULL guard)
+    expect(agentInsert!.text).toContain("updated_at");
+  });
+
+  it("seeds a 'role-configurator' role for every new tenant", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    await registerTenant(
+      { pool: capturingPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "T0373RoleOrg", email: "t0373role@test.com", password: "password123" },
+    );
+
+    const configuratorRoleInsert = capturedQueries.find(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes("choros.role") &&
+        !q.text.includes("role_assignment") &&
+        q.text.includes("role-configurator"),
+    );
+    expect(configuratorRoleInsert).toBeDefined();
+    expect(configuratorRoleInsert!.text).toContain("updated_at");
+    expect(configuratorRoleInsert!.text).toContain("ON CONFLICT DO NOTHING");
+  });
+
+  it("seeds authoring_draft/create and authoring_draft/update grants (CONFIRMED) for every new tenant", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    await registerTenant(
+      { pool: capturingPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "T0373GrantOrg", email: "t0373grant@test.com", password: "password123" },
+    );
+
+    // Note: resource_type='authoring_draft', operation='create'/'update', and
+    // confirmed_by='registration' are hardcoded SQL literals, not parameterized values.
+    const grantInserts = capturedQueries.filter(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes('choros."grant"') &&
+        q.text.includes("authoring_draft"),
+    );
+
+    // Must have 2 grant INSERTs (create + update)
+    expect(grantInserts).toHaveLength(2);
+
+    // operation literals are in the SQL text
+    const createGrant = grantInserts.find((q) => q.text.includes("'create'"));
+    const updateGrant = grantInserts.find((q) => q.text.includes("'update'"));
+    expect(createGrant).toBeDefined();
+    expect(updateGrant).toBeDefined();
+
+    // Both must be CONFIRMED: confirmed_by = 'registration' (NOT NULL literal in SQL)
+    for (const grantInsert of grantInserts) {
+      expect(grantInsert.text).toContain("confirmed_by");
+      expect(grantInsert.text).toContain("'registration'");
+      // ON CONFLICT DO NOTHING for idempotency
+      expect(grantInsert.text).toContain("ON CONFLICT DO NOTHING");
+    }
+  });
+
+  it("seeds 2 role_assignments for role-configurator (owner + assistant-agent)", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const capturedQueries: Array<{ text: string; values?: unknown[] }> = [];
+
+    class CapturingClient extends FakePoolClient {
+      override async query(textOrConfig: string | { text: string; values?: unknown[] }, values?: unknown[]) {
+        const text = typeof textOrConfig === "string" ? textOrConfig : textOrConfig.text;
+        const vals = typeof textOrConfig === "string" ? values : textOrConfig.values;
+        capturedQueries.push({ text, values: vals });
+        return super.query(textOrConfig, values);
+      }
+    }
+
+    const capturingPool: pg.Pool = {
+      connect: async () => new CapturingClient() as unknown as pg.PoolClient,
+    } as unknown as pg.Pool;
+
+    await registerTenant(
+      { pool: capturingPool, kc: kcLocal, nowMs: () => 1234567890000 },
+      { orgName: "T0373RAOrg", email: "t0373ra@test.com", password: "password123" },
+    );
+
+    // Count role_assignment INSERTs with ON CONFLICT DO NOTHING (the T-0373 ones)
+    // The original role_assignment (3d) does NOT have ON CONFLICT DO NOTHING
+    const configuratorRaInserts = capturedQueries.filter(
+      (q) =>
+        q.text.includes("INSERT") &&
+        q.text.includes("role_assignment") &&
+        q.text.includes("ON CONFLICT DO NOTHING"),
+    );
+    // Should have 2: owner→role-configurator + assistant-agent→role-configurator
+    expect(configuratorRaInserts).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0373 live DB fitness (requires DATABASE_URL against live Postgres)
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!process.env["DATABASE_URL"])("T-0373 (PD-7) — live DB: new tenant has assistant-agent + authoring_draft grants", () => {
+  let pool: pg.Pool;
+
+  beforeAll(() => {
+    pool = new pg.Pool({ connectionString: process.env["DATABASE_URL"] });
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it("newly registered tenant has 1 assistant-agent employee and 2 authoring_draft grants", async () => {
+    const kcLocal = new InMemoryKeycloakUserPort();
+    const req = {
+      orgName: `T0373LiveOrg-${Date.now()}`,
+      email: `t0373-live-${Date.now()}@example.com`,
+      password: "t0373-password-99",
+    };
+
+    const result = await registerTenant({ pool, kc: kcLocal, nowMs: () => Date.now() }, req);
+    const { tenantId } = result;
+
+    const client = await pool.connect();
+    try {
+      // (a) assistant-agent employee exists
+      const agents = await client.query(
+        `SELECT slug, kind FROM choros.employee WHERE tenant_id = $1 AND slug = 'assistant-agent'`,
+        [tenantId],
+      );
+      expect(agents.rows).toHaveLength(1);
+      expect(agents.rows[0].kind).toBe("agent");
+
+      // (b) authoring_draft grants (both create + update) exist and are confirmed
+      const grants = await client.query(
+        `SELECT operation, confirmed_by FROM choros."grant"
+          WHERE tenant_id = $1
+            AND resource_type = 'authoring_draft'
+            AND confirmed_by IS NOT NULL`,
+        [tenantId],
+      );
+      expect(grants.rows).toHaveLength(2);
+      const ops = grants.rows.map((r: { operation: string }) => r.operation);
+      expect(ops).toContain("create");
+      expect(ops).toContain("update");
+    } finally {
+      client.release();
+
+      // Cleanup: remove the test tenant (best-effort, deep delete to avoid FK violations)
+      const cleanClient = await pool.connect();
+      try {
+        await cleanClient.query("BEGIN");
+        await cleanClient.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+        await cleanClient.query("SET LOCAL search_path TO choros");
+        await cleanClient.query(`DELETE FROM choros."grant" WHERE tenant_id = $1`, [tenantId]);
+        await cleanClient.query(`DELETE FROM choros.role_assignment WHERE tenant_id = $1`, [tenantId]);
+        await cleanClient.query(`DELETE FROM choros.employee WHERE tenant_id = $1`, [tenantId]);
+        await cleanClient.query(`DELETE FROM choros.role WHERE tenant_id = $1`, [tenantId]);
+        await cleanClient.query(`DELETE FROM choros.tenant WHERE id = $1`, [tenantId]);
+        await cleanClient.query("COMMIT");
+      } catch {
+        await cleanClient.query("ROLLBACK");
+      } finally {
+        cleanClient.release();
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // slugifyOrgName — pure unit tests
 // ---------------------------------------------------------------------------
 
@@ -729,7 +977,9 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
     await pool.end();
   });
 
-  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 1 role(tenant-owner), 1 employee(slug=sub), 1 confirmed role_assignment", async () => {
+  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 2 roles, 2 employees, 3 confirmed role_assignments (T-0373 updated)", async () => {
+    // T-0373 (PD-7): registerTenant now also seeds role-configurator + assistant-agent.
+    // Updated counts: roles 1→2, employees 1→2, role_assignments 1→3.
     const kcLocal = new InMemoryKeycloakUserPort();
     const nowMs = () => Date.now();
     const req = {
@@ -766,38 +1016,48 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       );
       expect(tenants.rows).toHaveLength(1);
 
-      // Exactly 1 role with slug='tenant-owner'
+      // Exactly 2 roles: tenant-owner + role-configurator (T-0373)
       const roles = await client.query(
-        `SELECT slug FROM choros.role WHERE tenant_id = $1`,
+        `SELECT slug FROM choros.role WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      expect(roles.rows).toHaveLength(1);
-      expect(roles.rows[0].slug).toBe("tenant-owner");
+      expect(roles.rows).toHaveLength(2);
+      const roleSlugs = roles.rows.map((r: { slug: string }) => r.slug);
+      expect(roleSlugs).toContain("tenant-owner");
+      expect(roleSlugs).toContain("role-configurator");
 
-      // Exactly 1 employee with slug = KC sub
+      // Exactly 2 employees: the owner (slug=KC sub) + assistant-agent (T-0373)
       const employees = await client.query(
-        `SELECT slug FROM choros.employee WHERE tenant_id = $1`,
+        `SELECT slug, kind FROM choros.employee WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      expect(employees.rows).toHaveLength(1);
-      expect(employees.rows[0].slug).toBe(kcSub);
+      expect(employees.rows).toHaveLength(2);
+      const empSlugs = employees.rows.map((r: { slug: string }) => r.slug);
+      expect(empSlugs).toContain(kcSub);
+      expect(empSlugs).toContain("assistant-agent");
 
-      // Exactly 1 confirmed role_assignment
+      // Exactly 3 confirmed role_assignments (T-0373):
+      //   1. owner → tenant-owner
+      //   2. owner → role-configurator
+      //   3. assistant-agent → role-configurator
       const assignments = await client.query(
         `SELECT confirmed_by FROM choros.role_assignment WHERE tenant_id = $1`,
         [tenantId],
       );
-      expect(assignments.rows).toHaveLength(1);
-      expect(assignments.rows[0].confirmed_by).not.toBeNull();
+      expect(assignments.rows).toHaveLength(3);
+      for (const ra of assignments.rows) {
+        expect(ra.confirmed_by).not.toBeNull();
+      }
     } finally {
       client.release();
 
-      // Cleanup: remove the test tenant (best-effort)
+      // Cleanup: remove the test tenant (best-effort; delete grants first to avoid FK violations)
       const cleanClient = await pool.connect();
       try {
         await cleanClient.query("BEGIN");
         await cleanClient.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
         await cleanClient.query("SET LOCAL search_path TO choros");
+        await cleanClient.query(`DELETE FROM choros."grant" WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.role_assignment WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.employee WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.role WHERE tenant_id = $1`, [tenantId]);
@@ -831,12 +1091,13 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       const DEV_TENANT = process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
       expect(resolved).not.toBe(DEV_TENANT);
     } finally {
-      // Cleanup
+      // Cleanup (T-0373: delete grants first to avoid FK violations)
       const cleanClient = await pool.connect();
       try {
         await cleanClient.query("BEGIN");
         await cleanClient.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
         await cleanClient.query("SET LOCAL search_path TO choros");
+        await cleanClient.query(`DELETE FROM choros."grant" WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.role_assignment WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.employee WHERE tenant_id = $1`, [tenantId]);
         await cleanClient.query(`DELETE FROM choros.role WHERE tenant_id = $1`, [tenantId]);

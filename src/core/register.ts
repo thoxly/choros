@@ -12,9 +12,10 @@
  *   1. Validate orgName/email/password (throw VALIDATION on failure)
  *   2. kc.createHumanUser (throw EMAIL_TAKEN / AUTH_UNAVAILABLE on failure)
  *   3. DB transaction: tenant(self-ref) + role(tenant-owner) + employee(slug=sub) + confirmed role_assignment
+ *      + T-0373 (PD-7): assistant-agent employee + role-configurator + their role_assignments + authoring_draft grants
  *   4. On DB failure after KC create → best-effort kc.deleteUser (FF-2) then rethrow
  *
- * No new migrations: employee/role/role_assignment/tenant tables exist (ADR §3).
+ * No new migrations: employee/role/role_assignment/tenant/grant tables exist (ADR §3).
  * resolveActorTenant/extractActor signatures UNCHANGED (FF-7).
  */
 
@@ -209,6 +210,13 @@ export async function registerTenant(
   const roleId = randomUUID();
   const employeeId = randomUUID();
   const assignmentId = randomUUID();
+  // T-0373 (PD-7): IDs for per-tenant assistant-agent + configurator role + grants
+  const configuratorRoleId = randomUUID();
+  const agentEmployeeId = randomUUID();
+  const ownerRaConfiguratorId = randomUUID();
+  const agentRaConfiguratorId = randomUUID();
+  const grantCreateId = randomUUID();
+  const grantUpdateId = randomUUID();
   const ts = deps.nowMs();
 
   let tenantSlug: string | undefined;
@@ -270,6 +278,124 @@ export async function registerTenant(
           roleId,
           JSON.stringify({ kind: "set", members: [] }),
           employeeId,  // self-bootstrap: both granted_by and confirmed_by are the genesis owner employee
+          ts,
+        ],
+      );
+
+      // -----------------------------------------------------------------------
+      // T-0373 (PD-7): Tenant-zero seeding — every new tenant gets:
+      //   3e. role-configurator: the role that holds authoring_draft grants.
+      //   3f. assistant-agent employee (kind='agent', slug='assistant-agent'): the
+      //       agent side of the intersection check in assistant.ts. Without this row,
+      //       getGrantsForSubject returns [] for the agent → intersection always empty.
+      //   3g. role_assignment: owner (employeeId) → role-configurator (CONFIRMED).
+      //   3h. role_assignment: assistant-agent → role-configurator (CONFIRMED).
+      //   3i. grant: authoring_draft / create for role-configurator (CONFIRMED).
+      //   3j. grant: authoring_draft / update for role-configurator (CONFIRMED).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING on each INSERT (PK = (tenant_id, id)).
+      // For a fresh tenant these IDs are newly generated → no conflict possible.
+      // For existing seeded tenants (migration 088) with fixed UUIDs, this code
+      // path is never reached (registerTenant only runs for new self-registrations).
+      //
+      // Scope: {"kind":"set","members":[]} = ⊥ (bottom). Per grant-lattice.ts:
+      //   isNarrowerOrEqual(⊥, ⊥) → true (⊥ ⊑ anything).
+      // hasAuthoringDraftGrant (assistant-configurator.ts:300) only checks
+      // resourceType + operation on the intersection output — scope matching in
+      // makeIntersectionGrantSource uses isNarrowerOrEqual(agentScope, userScope)
+      // which returns true when agentScope = userScope = ⊥. So ⊥ scoped grants
+      // correctly unlock the configurator for the intersection check while remaining
+      // the least-authority scope possible.
+      // -----------------------------------------------------------------------
+
+      // 3e. Insert role-configurator (grants authoring_draft on this tenant)
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, 'role-configurator', 'Конфигуратор системы', $3, $3)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, configuratorRoleId, ts],
+      );
+
+      // 3f. Insert assistant-agent employee (kind='agent', slug='assistant-agent')
+      await client.query(
+        `INSERT INTO choros.employee
+           (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+         VALUES ($1, $2, 'assistant-agent', 'agent', 'Ассистент (AI-агент)', NULL, $3, $3)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, agentEmployeeId, ts],
+      );
+
+      // 3g. role_assignment: owner → role-configurator (CONFIRMED, self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          ownerRaConfiguratorId,
+          employeeId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3h. role_assignment: assistant-agent → role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          agentRaConfiguratorId,
+          agentEmployeeId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3i. grant: authoring_draft / create for role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'authoring_draft', NULL, 'create', $4::jsonb,
+                 NULL, false, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantCreateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          ts,
+        ],
+      );
+
+      // 3j. grant: authoring_draft / update for role-configurator (CONFIRMED)
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'authoring_draft', NULL, 'update', $4::jsonb,
+                 NULL, false, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantUpdateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
           ts,
         ],
       );
