@@ -58,6 +58,11 @@ import {
   type InstanceTargetResult,
 } from "./process-instance-resolver.js";
 import { getCrossAppRef } from "./cross-app-ref-dao.js";
+import type { BindingField } from "../core/binding-compat.js";
+import {
+  validateFormSubmit,
+  type FormSubmitValidationResult,
+} from "../core/form-submit-validator.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -255,6 +260,139 @@ export async function readStepClass(
     }
   }
   return "A";
+}
+
+// ---------------------------------------------------------------------------
+// T-0400 [D7-2]: form-submit validation — load binding + live schema
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0400 [D7-2]: Load form_binding.fields for a process (the authoring-time
+ * snapshot of binding fields for submit-time validation), and the live
+ * record_schema of the target registry (for schema-drift detection).
+ *
+ * Registry resolution: resolves the approvals («Согласование», slug=soglasovanie)
+ * registry for the procKey's application via process_app_binding, then fetches its
+ * record_schema. Falls back to null when no binding / no registry found.
+ *
+ * Runs on the caller's open tenant-tx client (RLS-scoped). Returns:
+ *   - `bindingFields`: BindingField[] — the snapshot (excludes __step_class marker).
+ *   - `liveRecordSchema`: the current registry_def.record_schema JSON (or null).
+ *
+ * Never throws: if any DB query fails, the relevant field is null and the
+ * validation step that depends on it is skipped gracefully.
+ */
+async function loadFormBindingForValidation(
+  client: pg.PoolClient,
+  tenantId: string,
+  procKey: string,
+): Promise<{ bindingFields: BindingField[] | null; liveRecordSchema: unknown }> {
+  if (!isUuid(tenantId)) {
+    return { bindingFields: null, liveRecordSchema: null };
+  }
+
+  let bindingFields: BindingField[] | null = null;
+  let liveRecordSchema: unknown = null;
+
+  try {
+    // Load form_binding.fields (the snapshot for procKey at the latest version).
+    const bindingRes = await client.query<{ fields: unknown }>(
+      `SELECT fields
+         FROM choros.form_binding
+        WHERE tenant_id = $1
+          AND process_key = $2
+        ORDER BY version DESC
+        LIMIT 1`,
+      [tenantId, procKey],
+    );
+    const bindingRow = bindingRes.rows[0];
+    if (bindingRow && Array.isArray(bindingRow.fields)) {
+      // Cast the raw JSONB array members to BindingField[]. The authoring-time
+      // write (binding.ts) validates the field structure; here we trust the DB.
+      bindingFields = bindingRow.fields as BindingField[];
+    }
+  } catch {
+    // Non-fatal: if the binding query fails, skip field-set validation.
+    bindingFields = null;
+  }
+
+  // Load the live record_schema from the approvals registry for this process's app.
+  // Path: procKey → process_app_binding → applicationId → registry_def (soglasovanie)
+  try {
+    const appBindingRes = await client.query<{ application_id: string }>(
+      `SELECT application_id
+         FROM choros.process_app_binding
+        WHERE tenant_id = $1
+          AND process_key = $2
+        LIMIT 1`,
+      [tenantId, procKey],
+    );
+    const appRow = appBindingRes.rows[0];
+    if (appRow && isUuid(appRow.application_id)) {
+      const schemaRes = await client.query<{ record_schema: unknown }>(
+        `SELECT record_schema
+           FROM choros.registry_def
+          WHERE tenant_id = $1
+            AND application_id = $2
+            AND slug = $3
+          LIMIT 1`,
+        [tenantId, appRow.application_id, SOGLASOVANIE_SLUG],
+      );
+      const schemaRow = schemaRes.rows[0];
+      if (schemaRow) {
+        liveRecordSchema = schemaRow.record_schema;
+      }
+    }
+  } catch {
+    // Non-fatal: if the schema query fails, skip drift detection.
+    liveRecordSchema = null;
+  }
+
+  return { bindingFields, liveRecordSchema };
+}
+
+/**
+ * T-0400 [D7-2]: Validate and filter human-submitted form values before writing
+ * to JSONB, enforcing the PD-9 invariant ("forms reference only existing variables")
+ * at runtime.
+ *
+ * Called from the approve handler (inbox.ts) on the open tenant-tx client, BEFORE
+ * provenance fields (decision, approved_by, comment) are merged into formData.
+ *
+ * Three validation rules (spec §3.2):
+ *   1. UNKNOWN-KEY REJECTION: keys not declared in form_binding.fields → rejected.
+ *   2. ENUM VALIDATION: enum fields checked against BindingField.options[].
+ *   3. SCHEMA-DRIFT: binding fields absent from live record_schema are flagged.
+ *
+ * Returns FormSubmitValidationResult:
+ *   ok=true  → safeValues (only validated keys; ready to spread into formData).
+ *   ok=false → violations (caller throws HttpError 422).
+ *
+ * Fail-open on LOAD: if form_binding cannot be loaded (no binding for procKey, or
+ * DB error), all submitted values pass through as safeValues. This preserves backward
+ * compat for processes without a form binding.
+ */
+export async function validateAndFilterFormValues(
+  client: pg.PoolClient,
+  tenantId: string,
+  procKey: string,
+  humanFormValues: Record<string, unknown>,
+): Promise<FormSubmitValidationResult> {
+  const { bindingFields, liveRecordSchema } = await loadFormBindingForValidation(
+    client,
+    tenantId,
+    procKey,
+  );
+
+  // No form binding for this process → skip validation, pass all values through.
+  // Backward compat: processes without a form binding are not affected (D7-2 is
+  // additive; only bindings that declare their field set are enforced).
+  if (bindingFields === null) {
+    return { ok: true, safeValues: { ...humanFormValues } };
+  }
+
+  // Run the pure validation core.
+  return validateFormSubmit(humanFormValues, bindingFields, liveRecordSchema);
 }
 
 // ---------------------------------------------------------------------------

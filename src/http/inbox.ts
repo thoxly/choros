@@ -50,6 +50,7 @@ import {
 import {
   applyStepResult,
   readStepClass,
+  validateAndFilterFormValues,
   type OutboxEnqueuePort,
 } from "../db/step-applier.js";
 import {
@@ -1254,17 +1255,44 @@ export function registerInboxRoutes(
           //   read outcomeName from the flow definition to determine routing when
           //   the process is extended to use named branches. For now, the action
           //   route records the entity — branch resolution is the engine's job.
-          // Fix 1 (review): strip prototype-pollution sentinel keys from client-supplied
+          // T-0396: Strip prototype-pollution sentinel keys from client-supplied
           // formValues before spreading. JSON.parse+spread is safe at runtime but
-          // literal keys `__proto__`, `constructor`, `prototype` have no valid business
-          // meaning and must not be stored in the JSONB record.
+          // literal keys `__proto__`, `constructor`, `prototype` have no valid
+          // business meaning and must not be stored in the JSONB record.
           const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-          const safeFormValues: Record<string, unknown> = Object.fromEntries(
+          const protoStrippedFormValues: Record<string, unknown> = Object.fromEntries(
             Object.entries(humanFormValues).filter(([k]) => !PROTO_KEYS.has(k)),
           );
 
+          // T-0400 [D7-2]: Runtime form-submit validation (PD-9 at runtime).
+          // Validate proto-stripped values against form_binding.fields AND the live
+          // registry_def.record_schema BEFORE writing to JSONB. Three rules enforced:
+          //   1. Unknown keys → REJECT (not written to JSONB).
+          //   2. Enum values → validated against BindingField.options[].
+          //   3. Schema drift → fields removed from live schema are flagged.
+          // Provenance fields (decision, approved_by, comment) are NOT in
+          // form_binding.fields and are appended AFTER this call, so they are never
+          // subject to these checks. Proto keys were already stripped above.
+          const validationResult = await validateAndFilterFormValues(
+            client,
+            tenantId,
+            task.procKey,
+            protoStrippedFormValues,
+          );
+          if (!validationResult.ok) {
+            // Build a readable error message listing all violations.
+            const msgs = validationResult.violations
+              .map((v) => `[${v.type}] ${v.message}`)
+              .join("; ");
+            throw new HttpError(
+              422,
+              "FORM_VALIDATION",
+              `form submit validation failed: ${msgs}`,
+            );
+          }
+
           const formData: Record<string, unknown> = {
-            ...safeFormValues,    // T-0396: user form values from the inbox card form (proto-keys stripped)
+            ...validationResult.safeValues, // T-0400: only validated keys (unknown keys rejected)
             decision: outcomeName,
             approved_by: actor,
             // Fix 2 (review): canonical comment ALWAYS wins. When outcomeComment is

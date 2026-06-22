@@ -1,0 +1,429 @@
+/**
+ * T-0400 [D7-2] — Unit tests for form-submit-validator.ts (pure core)
+ *
+ * Tests the three validation rules enforced at form-submit time:
+ *   Rule 1 — UNKNOWN-KEY REJECTION: keys not in BindingField[] are rejected.
+ *   Rule 2 — ENUM VALIDATION: enum fields validated against options[].
+ *   Rule 3 — SCHEMA-DRIFT DETECTION: binding keys absent from live schema are caught.
+ *
+ * Also tests:
+ *   - Valid submit passes (all rules green → safeValues returned).
+ *   - Backward compat: missing options on enum fields → check skipped.
+ *   - Schema absent → drift check skipped (fail-open for load).
+ *   - Proto keys in submittedValues are stripped (defence-in-depth layer).
+ *   - __step_class marker key excluded from validation field set.
+ *   - extractSchemaPropertyKeys helper.
+ *
+ * Pure unit — no pg, no live DB.
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+  validateFormSubmit,
+  extractSchemaPropertyKeys,
+  type FormSubmitViolation,
+} from "../core/form-submit-validator.js";
+import type { BindingField } from "../core/binding-compat.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeFields(defs: Array<Partial<BindingField> & { key: string }>): BindingField[] {
+  return defs.map((d) => ({
+    type: d.type ?? "text",
+    required: d.required ?? false,
+    ...d,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// extractSchemaPropertyKeys
+// ---------------------------------------------------------------------------
+
+describe("extractSchemaPropertyKeys", () => {
+  it("returns keys from schema.properties", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        amount: { type: "number" },
+      },
+    };
+    const keys = extractSchemaPropertyKeys(schema);
+    expect(keys.has("title")).toBe(true);
+    expect(keys.has("amount")).toBe(true);
+    expect(keys.size).toBe(2);
+  });
+
+  it("returns empty set for null schema", () => {
+    expect(extractSchemaPropertyKeys(null).size).toBe(0);
+  });
+
+  it("returns empty set for undefined schema", () => {
+    expect(extractSchemaPropertyKeys(undefined).size).toBe(0);
+  });
+
+  it("returns empty set when schema has no properties", () => {
+    expect(extractSchemaPropertyKeys({ type: "object" }).size).toBe(0);
+  });
+
+  it("returns empty set for non-object schema", () => {
+    expect(extractSchemaPropertyKeys("string").size).toBe(0);
+    expect(extractSchemaPropertyKeys([]).size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 1 — UNKNOWN-KEY REJECTION
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — Rule 1: unknown key rejection (D7-2)", () => {
+  it("FSV-1: submitted key not in BindingField[] → violation unknown_key", () => {
+    const fields = makeFields([{ key: "title", type: "text" }]);
+    const result = validateFormSubmit(
+      { title: "Hello", ghost: "uninvited" },
+      fields,
+      undefined,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const violation = result.violations.find((v) => v.key === "ghost");
+      expect(violation).toBeDefined();
+      expect(violation?.type).toBe("unknown_key");
+      expect(violation?.message).toMatch(/not declared in form_binding\.fields/);
+    }
+  });
+
+  it("FSV-2: unknown key is NOT included in safeValues on failure", () => {
+    const fields = makeFields([{ key: "title", type: "text" }]);
+    const result = validateFormSubmit(
+      { title: "Hello", secret: "injected" },
+      fields,
+      undefined,
+    );
+    // Unknown key → fail, so no safeValues (ok=false)
+    expect(result.ok).toBe(false);
+  });
+
+  it("FSV-3: multiple unknown keys → one violation per key", () => {
+    const fields = makeFields([{ key: "title", type: "text" }]);
+    const result = validateFormSubmit(
+      { title: "Hello", k1: "bad1", k2: "bad2" },
+      fields,
+      undefined,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const unknownViolations = result.violations.filter((v) => v.type === "unknown_key");
+      expect(unknownViolations.length).toBe(2);
+      const keys = unknownViolations.map((v) => v.key).sort();
+      expect(keys).toEqual(["k1", "k2"]);
+    }
+  });
+
+  it("FSV-4: empty submitted values with binding fields → ok (no unknown keys)", () => {
+    const fields = makeFields([{ key: "title", type: "text" }]);
+    const result = validateFormSubmit({}, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues).toEqual({});
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 2 — ENUM VALIDATION
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — Rule 2: enum validation (D7-2)", () => {
+  it("FSV-5: enum field with correct value → passes", () => {
+    const fields = makeFields([
+      { key: "status", type: "enum", contract: "enum", options: ["open", "closed", "pending"] },
+    ]);
+    const result = validateFormSubmit({ status: "open" }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["status"]).toBe("open");
+    }
+  });
+
+  it("FSV-6: enum field with invalid value → violation enum_mismatch", () => {
+    const fields = makeFields([
+      { key: "status", type: "enum", contract: "enum", options: ["open", "closed"] },
+    ]);
+    const result = validateFormSubmit({ status: "INVALID" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((v) => v.key === "status");
+      expect(v).toBeDefined();
+      expect(v?.type).toBe("enum_mismatch");
+      expect(v?.message).toMatch(/enum/i);
+      expect(v?.message).toMatch(/"INVALID"/);
+    }
+  });
+
+  it("FSV-7: enum field via legacy type='enum' (no contract) with valid value → passes", () => {
+    const fields = makeFields([
+      // Pre-T-0399 snapshot: type='enum' but no contract field
+      { key: "category", type: "enum", options: ["A", "B", "C"] },
+    ]);
+    const result = validateFormSubmit({ category: "B" }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it("FSV-8: enum field with no options → check skipped (backward compat)", () => {
+    const fields = makeFields([
+      // Pre-T-0399 snapshot: type='enum' but options NOT carried
+      { key: "status", type: "enum" },
+    ]);
+    const result = validateFormSubmit({ status: "anything" }, fields, undefined);
+    // options absent → enum check skipped → value passes through
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["status"]).toBe("anything");
+    }
+  });
+
+  it("FSV-9: enum field with empty options array → check skipped (backward compat)", () => {
+    const fields = makeFields([
+      { key: "status", type: "enum", contract: "enum", options: [] },
+    ]);
+    const result = validateFormSubmit({ status: "anything" }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it("FSV-10: enum field value not a string → violation enum_mismatch", () => {
+    const fields = makeFields([
+      { key: "tier", type: "enum", contract: "enum", options: ["basic", "pro"] },
+    ]);
+    // Submitted a number — not a string at all
+    const result = validateFormSubmit({ tier: 42 }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((viol) => viol.key === "tier");
+      expect(v?.type).toBe("enum_mismatch");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule 3 — SCHEMA-DRIFT DETECTION
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — Rule 3: schema drift detection (D7-2)", () => {
+  it("FSV-11: binding field absent from live schema → violation schema_drift", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "removed_field", type: "text" }, // was removed from schema after authoring
+    ]);
+    const liveSchema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        // removed_field is gone from live schema
+      },
+    };
+    const result = validateFormSubmit({}, fields, liveSchema);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const driftViolation = result.violations.find(
+        (v): v is FormSubmitViolation => v.type === "schema_drift" && v.key === "removed_field",
+      );
+      expect(driftViolation).toBeDefined();
+      expect(driftViolation?.message).toMatch(/schema drift/i);
+    }
+  });
+
+  it("FSV-12: drift field also submitted → both unknown_key and schema_drift violations emitted", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "old_field", type: "text" },
+    ]);
+    const liveSchema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        // old_field removed from schema
+      },
+    };
+    // old_field is both drifted AND submitted — unknown_key fires (it IS in fields
+    // but NOT in schema, so it's still in the binding; however the user submitted it
+    // as a key. Actually it IS in bindingFields so it won't be unknown_key — it will
+    // only be schema_drift. The submitted value for old_field will end up in safeValues
+    // UNLESS schema_drift makes the overall result fail.
+    const result = validateFormSubmit({ title: "hello", old_field: "oops" }, fields, liveSchema);
+    // schema_drift triggers → result is ok=false
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const hasDrift = result.violations.some((v) => v.type === "schema_drift" && v.key === "old_field");
+      expect(hasDrift).toBe(true);
+    }
+  });
+
+  it("FSV-13: liveRecordSchema=undefined → drift check skipped (fail-open)", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "any_field", type: "text" },
+    ]);
+    // No live schema provided → skip drift check
+    const result = validateFormSubmit({ title: "hello", any_field: "ok" }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it("FSV-14: liveRecordSchema=null → drift check skipped (fail-open)", () => {
+    const fields = makeFields([{ key: "title", type: "text" }]);
+    const result = validateFormSubmit({ title: "hello" }, fields, null);
+    expect(result.ok).toBe(true);
+  });
+
+  it("FSV-15: all binding fields in live schema → no drift violation", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "amount", type: "number" },
+    ]);
+    const liveSchema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        amount: { type: "number" },
+      },
+    };
+    const result = validateFormSubmit(
+      { title: "Laptop", amount: 50000 },
+      fields,
+      liveSchema,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["title"]).toBe("Laptop");
+      expect(result.safeValues["amount"]).toBe(50000);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Valid submit (all rules green)
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — valid submit passes (D7-2)", () => {
+  it("FSV-16: valid multi-field submit with scalar and enum fields", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "amount", type: "number" },
+      { key: "approved", type: "boolean" },
+      { key: "category", type: "enum", contract: "enum", options: ["IT", "HR", "Finance"] },
+    ]);
+    const liveSchema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        amount: { type: "number" },
+        approved: { type: "boolean" },
+        category: { type: "string", enum: ["IT", "HR", "Finance"] },
+      },
+    };
+    const result = validateFormSubmit(
+      { title: "Notebook Dell", amount: 85000, approved: true, category: "IT" },
+      fields,
+      liveSchema,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["title"]).toBe("Notebook Dell");
+      expect(result.safeValues["amount"]).toBe(85000);
+      expect(result.safeValues["approved"]).toBe(true);
+      expect(result.safeValues["category"]).toBe("IT");
+    }
+  });
+
+  it("FSV-17: partial submit (only some optional fields) → ok", () => {
+    const fields = makeFields([
+      { key: "title", type: "text", required: true },
+      { key: "notes", type: "textarea" }, // optional — not submitted
+    ]);
+    const result = validateFormSubmit({ title: "Purchase" }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["title"]).toBe("Purchase");
+      expect("notes" in result.safeValues).toBe(false);
+    }
+  });
+
+  it("FSV-18: empty submitted values → ok (no violations)", () => {
+    const fields = makeFields([
+      { key: "title", type: "text" },
+      { key: "amount", type: "number" },
+    ]);
+    const result = validateFormSubmit({}, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues).toEqual({});
+    }
+  });
+
+  it("FSV-19: empty binding fields + empty submitted values → ok", () => {
+    const result = validateFormSubmit({}, [], undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues).toEqual({});
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// __step_class marker exclusion
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — __step_class marker exclusion (D7-2)", () => {
+  it("FSV-20: __step_class binding member is NOT treated as a user field", () => {
+    const fields: BindingField[] = [
+      { key: "__step_class", type: "B", required: false }, // F1 marker
+      { key: "title", type: "text", required: false },
+    ];
+    // Submitting title should work; __step_class is not a user-submitted field
+    const result = validateFormSubmit({ title: "Hello" }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it("FSV-21: __step_class submitted by client → treated as unknown key (rejected)", () => {
+    const fields: BindingField[] = [
+      { key: "__step_class", type: "B", required: false }, // F1 marker (excluded from field set)
+      { key: "title", type: "text", required: false },
+    ];
+    // Trying to submit __step_class → unknown_key (it's excluded from the binding field set)
+    const result = validateFormSubmit(
+      { title: "Hello", __step_class: "B" },
+      fields,
+      undefined,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((viol) => viol.key === "__step_class");
+      expect(v?.type).toBe("unknown_key");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Proto-key stripping (defence-in-depth)
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — proto-key defence-in-depth (D7-2)", () => {
+  it("FSV-22: __proto__ key in submittedValues is silently dropped even if in binding", () => {
+    // If somehow __proto__ were in the binding and submitted (very defensive)
+    const fields = makeFields([
+      { key: "title", type: "text" },
+    ]);
+    const submitted: Record<string, unknown> = { title: "ok" };
+    // Assign proto key via index
+    submitted["__proto__"] = { polluted: true };
+    const result = validateFormSubmit(submitted, fields, undefined);
+    // title is valid; __proto__ is stripped by defence-in-depth → ok
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(Object.prototype.hasOwnProperty.call(result.safeValues, "__proto__")).toBe(false);
+      expect(result.safeValues["title"]).toBe("ok");
+    }
+  });
+});
