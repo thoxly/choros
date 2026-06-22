@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { Mono, Button, OpChip, KitIcon, Select, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
+import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { isKeycloakMode, getAuthConfig } from '../../app-shell/auth-mode.js';
@@ -666,7 +666,7 @@ function RoleEditorScreen() {
               <textarea className="chs-llmbox__ta" rows={3} value={llmText} onChange={(e) => setLlmText(e.target.value)} placeholder="Опишите роль словами: что сотрудник или агент должен уметь делать…" />
               <div className="chs-llmbox__bar">
                 <span className="chs-llmbox__hint">Предложения требуют явного подтверждения — <code>proposed_by&nbsp;llm → confirmed_by&nbsp;human</code></span>
-                <Button variant="secondary" size="sm" onClick={propose}>{proposedShown ? "Предложить заново" : "Предложить гранты"}</Button>
+                <Button variant="secondary" size="sm" onClick={propose} disabled={!EDITOR_ROLE_ID} title={!EDITOR_ROLE_ID ? "Выберите роль для редактирования" : undefined}>{proposedShown ? "Предложить заново" : "Предложить гранты"}</Button>
               </div>
             </div>
 
