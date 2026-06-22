@@ -16,6 +16,7 @@ import { runAgentStep, type RunAgentStepDeps, DEFAULT_AUTONOMY_THRESHOLD } from 
 import type { AgentStepContext } from "../agent-step-context.js";
 import { dormantLlmPort } from "../../../core/llm-port.js";
 import { StubLlmPort } from "../../../core/__tests__/stub-llm-port.js";
+import { MIN_AUTONOMY_THRESHOLD } from "../../../core/agent-hire.js";
 
 const TENANT = "a0000000-0000-0000-0000-000000000001";
 const AGENT = "d0000000-0000-0000-0000-000000000006";
@@ -259,7 +260,7 @@ describe("T-0381 F4 — autonomy_threshold: tenant default + per-agent override"
     if (outcome.kind === "defer-to-human") expect(outcome.signal).toBe("threshold");
   });
 
-  it("per-agent override (0.80) < DEFAULT (0.85); confidence (0.92) ≥ 0.80 → proceed (lower override respected)", async () => {
+  it("per-agent override (0.80) below floor: clamped to MIN_AUTONOMY_THRESHOLD (0.85); confidence (0.92) ≥ 0.85 → proceed", async () => {
     const stub = new StubLlmPort({ mode: "succeed" }); // confidence 0.92
     const outcome = await runAgentStep(
       makeCtx({ autonomyThreshold: 0.80, llm: liveLlm }),
@@ -339,5 +340,41 @@ describe("T-0381 F5 — escalation prefilled with agent draft + rationale", () =
       expect(outcome.agentDraft).toBeUndefined(); // no draft when dormant
     }
     expect(stub.calls.length).toBe(0); // zero LLM spend
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0398 — read-side floor clamp (defense-in-depth for pre-existing sub-floor rows)
+// ---------------------------------------------------------------------------
+
+describe("T-0398 — read-side MIN_AUTONOMY_THRESHOLD clamp in gate A", () => {
+  const liveLlm = { endpoint: "https://x", model: "m", secretHandle: "h" };
+
+  it("sub-floor stored value (0) → clamped to MIN_AUTONOMY_THRESHOLD; confidence (0.92) ≥ floor → proceed", async () => {
+    // Simulates a row written before T-0398 with autonomy_threshold=0.
+    // The read-side clamp must raise it to MIN_AUTONOMY_THRESHOLD (0.85).
+    // confidence 0.92 ≥ 0.85 → proceed.
+    const stub = new StubLlmPort({ mode: "succeed" });
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: 0, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("proceed");
+  });
+
+  it("sub-floor stored value (0) → clamped; confidence (0.45) < floor → defer", async () => {
+    // confidence 0.45 < clamped threshold 0.85 (also < CONFIDENCE_FLOOR) → defer.
+    const stub = new StubLlmPort({ mode: "low_confidence" });
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: 0, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+  });
+
+  it("MIN_AUTONOMY_THRESHOLD constant is consistent with DEFAULT_AUTONOMY_THRESHOLD", () => {
+    // The floor must be at least as strict as the global default.
+    // If this fails the constants have drifted — floor would be weaker than default.
+    expect(MIN_AUTONOMY_THRESHOLD).toBeGreaterThanOrEqual(DEFAULT_AUTONOMY_THRESHOLD);
   });
 });
