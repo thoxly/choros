@@ -26,7 +26,7 @@
 //   A4  AUDIT-PAIRING: a successfully committed sod.create leaves BOTH the
 //       constraint row AND a matching audit_event (subject == constraint id).
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   migratorUrl,
   appUrl,
@@ -41,6 +41,11 @@ import {
   deleteSodConstraintInTx,
   type SodTxClient,
 } from '../../../src/db/sod-dao.js';
+import {
+  GENESIS_PREV_HASH,
+  GENESIS_SEQ,
+  VOCAB_VERSION,
+} from '../../../src/core/audit-preimage.js';
 
 // ---------------------------------------------------------------------------
 // A1 — cross-tenant write is RLS-blocked
@@ -217,56 +222,85 @@ describe('Враг · SoD write — atomicity: no mute mutation (T-0409)', () =>
     });
   });
 
-  // SKIPPED (re-author pending — see follow-up): TENANT_A (11111111-…) is a
-  // synthetic tenant only A1/A2 use for RLS-forge checks; it is never provisioned
-  // with a tenant row + genesis audit_head. On a fresh DB the audit-append's
-  // seed-head path yields a non-32-byte prev_hash ("audit-preimage" error). The
-  // atomicity-pairing property is covered by A3 (rollback) + T-0409's own tests.
-  // Re-author with a properly provisioned tenant before re-enabling.
-  it.skip('A4: a committed sod.create leaves BOTH the constraint row AND a paired audit_event', async () => {
-    // Drive the route's atomic unit directly: constraint INSERT + audit_event INSERT
-    // in one tx, then COMMIT. Confirm both rows exist with subject == constraint id.
-    const { makePgAuditWriter } = await import('../../../src/db/audit-writer.js');
-    const { encodeSodMutationAuditEvent } = await import('../../../src/core/audit-grant-encoder.js');
-    const writer = makePgAuditWriter();
-
-    let newId = '';
-    // Use the migrator connection for the write: on a fresh DB TENANT_A has no
-    // audit_head row yet, and the writer's seed-head INSERT (GENESIS_PREV_HASH)
-    // needs a role that can establish it. The RLS/permission aspect is covered by
-    // A1/A2; A4 asserts the atomicity-pairing property (constraint + paired
-    // audit_event committed together), which is connection-agnostic.
-    await withClient(migratorUrl(), async (c) => {
-      await c.query('BEGIN');
-      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
-      await c.query('SET LOCAL search_path TO choros');
-      newId = await createSodConstraintInTx(c as unknown as SodTxClient, TENANT_A, {
-        kind: 'dynamic',
-        selfRecord: true,
-        scope: {},
+  // A4 lives in its own describe so its beforeAll (TENANT_A provisioning) is
+  // scoped here and does not affect A3.
+  describe('A4 — audit-pairing', () => {
+    // Provision TENANT_A (11111111-…) idempotently so A4 runs deterministically on
+    // a fresh database. TENANT_A is synthetic (used by A1/A2 for RLS-forge checks)
+    // and is never seeded by the migration set, so:
+    //   (a) a choros.tenant row is inserted (ON CONFLICT DO NOTHING);
+    //   (b) the genesis audit_head sentinel (seq=GENESIS_SEQ-1, row_hash=GENESIS_PREV_HASH)
+    //       is inserted (ON CONFLICT DO NOTHING), so appendAuditEvent finds a valid
+    //       32-byte prev_hash and does not hit the seed-head path mid-test.
+    // Both tables have FORCE RLS; we set the GUC inside the tx so the WITH CHECK
+    // policy (tenant_id = choros.tenant_id) is satisfied.
+    beforeAll(async () => {
+      const SEED_SEQ = GENESIS_SEQ - 1; // = 0 — the sentinel pre-genesis row
+      await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+        // (a) Tenant root row — tenant_id = id per T-0017 design invariant.
+        await c.query(
+          `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+           VALUES ($1, $1, 'tenant-a-test', 'Tenant A (adversarial test)', 0)
+           ON CONFLICT DO NOTHING`,
+          [TENANT_A],
+        );
+        // (b) Genesis audit_head sentinel — anchors the chain so appendAuditEvent
+        //     finds a valid 32-byte row_hash on the very first call for TENANT_A.
+        await c.query(
+          `INSERT INTO choros.audit_head (tenant_id, seq, row_hash, updated_at, vocab_version)
+           VALUES ($1, $2, $3, 0, $4)
+           ON CONFLICT (tenant_id) DO NOTHING`,
+          [TENANT_A, SEED_SEQ, GENESIS_PREV_HASH, VOCAB_VERSION],
+        );
+        await c.query('COMMIT');
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await writer.appendAuditEvent(c as any, encodeSodMutationAuditEvent(
-        { kind: 'sod.create', actor: 'e-owner', constraintId: newId, constraintKind: 'dynamic' },
-        Date.now(),
-      ));
-      await c.query('COMMIT');
     });
 
-    await withClient(migratorUrl(), async (c) => {
-      const constraint = await c.query(
-        `SELECT count(*)::int AS n FROM choros.sod_constraint WHERE id = $1`,
-        [newId],
-      );
-      expect(constraint.rows[0].n, 'committed constraint row must exist').toBe(1);
-      const audit = await c.query(
-        `SELECT count(*)::int AS n FROM choros.audit_event
-           WHERE tenant_id = $1 AND subject = $2 AND type = 'sod.create'`,
-        [TENANT_A, newId],
-      );
-      expect(audit.rows[0].n, 'paired sod.create audit_event must exist').toBe(1);
-      // Cleanup the constraint row (audit_event is append-only — leave it).
-      await c.query(`DELETE FROM choros.sod_constraint WHERE id = $1`, [newId]);
+    it('A4: a committed sod.create leaves BOTH the constraint row AND a paired audit_event', async () => {
+      // Drive the route's atomic unit directly: constraint INSERT + audit_event INSERT
+      // in one tx, then COMMIT. Confirm both rows exist with subject == constraint id.
+      const { makePgAuditWriter } = await import('../../../src/db/audit-writer.js');
+      const { encodeSodMutationAuditEvent } = await import('../../../src/core/audit-grant-encoder.js');
+      const writer = makePgAuditWriter();
+
+      let newId = '';
+      // Use the migrator connection: the RLS/permission aspect is covered by A1/A2;
+      // A4 asserts the atomicity-pairing property (constraint + paired audit_event
+      // committed together), which is connection-agnostic.
+      await withClient(migratorUrl(), async (c) => {
+        await c.query('BEGIN');
+        await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+        await c.query('SET LOCAL search_path TO choros');
+        newId = await createSodConstraintInTx(c as unknown as SodTxClient, TENANT_A, {
+          kind: 'dynamic',
+          selfRecord: true,
+          scope: {},
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await writer.appendAuditEvent(c as any, encodeSodMutationAuditEvent(
+          { kind: 'sod.create', actor: 'e-owner', constraintId: newId, constraintKind: 'dynamic' },
+          Date.now(),
+        ));
+        await c.query('COMMIT');
+      });
+
+      await withClient(migratorUrl(), async (c) => {
+        const constraint = await c.query(
+          `SELECT count(*)::int AS n FROM choros.sod_constraint WHERE id = $1`,
+          [newId],
+        );
+        expect(constraint.rows[0].n, 'committed constraint row must exist').toBe(1);
+        const audit = await c.query(
+          `SELECT count(*)::int AS n FROM choros.audit_event
+             WHERE tenant_id = $1 AND subject = $2 AND type = 'sod.create'`,
+          [TENANT_A, newId],
+        );
+        expect(audit.rows[0].n, 'paired sod.create audit_event must exist').toBe(1);
+        // Cleanup the constraint row (audit_event is append-only — leave it).
+        await c.query(`DELETE FROM choros.sod_constraint WHERE id = $1`, [newId]);
+      });
     });
   });
 });
