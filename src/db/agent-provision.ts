@@ -197,6 +197,54 @@ export async function readConfiguredAgentLlmConfig(
 }
 
 /**
+ * Per-job agent_card LLM-config row for the agent-dispatch context assembler
+ * (T-0378). Mirrors AgentLlmConfigRow but is keyed by an EXPLICIT
+ * (tenantId, employeeId) pair and additionally carries `autonomy_threshold`
+ * (gate A) — the dispatcher needs the config for ONE specific agent employee,
+ * not the slug-priority "primary" row.
+ *
+ * The secret-handle column is aliased to `secret_handle_ref` (same custody
+ * convention as AgentLlmConfigRow): the raw column name stays in this
+ * allow-listed DAO, and consumers reference only the OPAQUE handle.
+ */
+export interface AgentCardLlmConfigById {
+  llm_endpoint: string | null;
+  llm_model: string | null;
+  /** Opaque secret handle (RL-3), aliased from the handle column. NULL when unbound. */
+  secret_handle_ref: string | null;
+  autonomy_threshold: number | null;
+}
+
+/**
+ * Read the LLM config (endpoint/model/opaque secret-ref/autonomy) for ONE agent
+ * employee by explicit (tenantId, employeeId). Returns null when no agent_card
+ * row exists (the assembler degrades to a dormant LLM config → motor defers).
+ *
+ * Runs INSIDE the caller's open withTenantTx (RLS GUC choros.tenant_id already
+ * set; the tenant_id WHERE clause is a belt-and-braces scope pin). The opaque
+ * handle is aliased to `secret_handle_ref` and selected ONLY so the assembler
+ * can thread the dormancy reference toward the injected LlmPort — it is never
+ * logged, audited, or serialized to a response (same custody class as
+ * readPrimaryAgentLlmConfig / run-precheck.ts).
+ */
+export async function readAgentCardLlmConfigById(
+  tx: PgClientLike,
+  tenantId: string,
+  employeeId: string,
+): Promise<AgentCardLlmConfigById | null> {
+  const { rows } = await tx.query(
+    `SELECT llm_endpoint,
+            llm_model,
+            llm_secret_handle AS secret_handle_ref,
+            autonomy_threshold
+       FROM choros.agent_card
+      WHERE tenant_id = $1 AND employee_id = $2`,
+    [tenantId, employeeId],
+  );
+  return (rows[0] as AgentCardLlmConfigById | undefined) ?? null;
+}
+
+/**
  * UPDATE agent_card.(llm_endpoint, llm_model) for one agent within the current
  * tenant. The secret handle is managed separately via the T-0025 secret-handle
  * lifecycle routes — this reader/writer NEVER writes the handle column. Returns
