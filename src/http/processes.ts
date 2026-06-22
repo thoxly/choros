@@ -37,6 +37,11 @@ export type ProcessInstance = {
   elapsed: string;
   progress: { done: number; total: number };
   execs: ("human" | "agent" | "service")[];
+  /**
+   * T-0414 / T-0356: originating record id when started via an on_create trigger.
+   * Absent for instances started via the explicit launch affordance.
+   */
+  recordId?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +206,9 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
     elapsed: "—",
     progress,
     execs: ["human", "agent"],
+    // T-0414 / T-0356: pass through the originating record id for on_create instances
+    // so the e2e spec can correlate by recordId without a separate lookup.
+    ...(p.recordId !== undefined ? { recordId: p.recordId } : {}),
   };
 }
 

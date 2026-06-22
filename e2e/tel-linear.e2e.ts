@@ -66,42 +66,48 @@ test.describe("ТЭЛ deploy-acceptance — linear click-through U1→U5", () =>
     page,
   }) => {
     // ───────────────────────────────────────────────────────────── U1 · Запуск
-    // Initiator opens processes, clicks the ENABLED «Запустить процесс» button,
-    // launches the canonical ТЭЛ → 201 → instance appears in the list (AC-1).
+    // Initiator launches the canonical ТЭЛ via POST /api/processes/start → 201.
+    // T-0414 / T-0374: the generic «Запустить процесс» UI button was removed by T-0374
+    // (D2 de-hardcoding). Processes now start via configured business entry points
+    // (on_create / record_action / launcher / auto). The start API route itself is
+    // still FROZEN (§2.2) and exercised here directly so AC-1 still asserts the
+    // start-route liveness without depending on the removed UI launcher.
     await loginAs(page, INITIATOR);
-    await page.goto("/processes");
 
-    // The launch affordance must exist and be enabled (the very gap spec §1 found).
-    const launchBtn = page.getByRole("button", { name: "Запустить процесс" }).first();
-    await expect(launchBtn, "AC-1: enabled «Запустить процесс» button must exist").toBeVisible();
-    await expect(launchBtn).toBeEnabled();
-
-    // Capture the 201 from the frozen start-route (§2.2) as the launch is clicked.
-    const [startResp] = await Promise.all([
-      page.waitForResponse(
-        (r) => r.url().includes("/api/processes/start") && r.request().method() === "POST",
-      ),
-      (async () => {
-        await launchBtn.click();
-        const dialog = page.getByRole("dialog", { name: "Запустить процесс" });
-        await expect(dialog).toBeVisible();
-        await dialog.getByRole("button", { name: "Запустить" }).click();
-      })(),
-    ]);
-    expect(startResp.status(), "AC-1: start-route must return 201").toBe(201);
-    const startBody = (await startResp.json()) as {
+    // Fire the start-route directly (the same call the UI launcher previously made).
+    // This proves the route is live and returns 201 — the "non-read-only" assertion
+    // from spec §1 that the gate was introduced to enforce (AC-1).
+    const startResult = await page.evaluate(
+      async ({ tenant }: { tenant: string }) => {
+        const res = await fetch("/api/processes/start", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-dev-user": "e-orlov",
+            "x-tenant-id": tenant,
+          },
+          body: JSON.stringify({ processKey: "telLinear" }),
+        });
+        const body = await res.json().catch(() => null);
+        return { status: res.status, body };
+      },
+      { tenant: DEV_TENANT_ID },
+    );
+    expect(startResult.status, "AC-1: start-route must return 201").toBe(201);
+    const startBody = startResult.body as {
       instanceId: string;
       processKey: string;
       tenantId: string;
-    };
-    expect(startBody.processKey).toBe("telLinear");
-    expect(startBody.tenantId).toBe(DEV_TENANT_ID);
-    const instanceId = startBody.instanceId;
+    } | null;
+    expect(startBody?.processKey).toBe("telLinear");
+    expect(startBody?.tenantId).toBe(DEV_TENANT_ID);
+    const instanceId = startBody?.instanceId ?? "";
     expect(instanceId, "AC-1: a real Flowable instance id").toBeTruthy();
 
-    // On 201 the screen auto-reloads the processes list (handleLaunched → load()),
-    // so the started instance becomes visible in the table (AC-1). Assert the new
-    // instance row directly (the modal closes itself on success — no manual close).
+    // Navigate to /processes and assert the started instance is visible in the table.
+    // The projection writes to the audit_event log in the same tx as the engine start
+    // (T-0282), so it is visible immediately after the 201.
+    await page.goto("/processes");
     const startedRow = page.locator(`tr:has(:text("${instanceId}"))`).first();
     await expect(
       startedRow,
@@ -375,8 +381,12 @@ async function createPurchaseRecord(
   if (!recordId) throw new Error("createPurchaseRecord: no id in response body");
 
   // Poll the process projection (audit_event log) for the started instance whose
-  // payload.record_id matches our new record id. The projection writes in the same
-  // tx as the record insert, so it should be immediately visible.
+  // recordId matches our new record id. The projection writes in the same tx as the
+  // record insert, so it should be visible quickly; 30s covers CI cold-start lag.
+  // T-0414: the wire shape now exposes `recordId` (camelCase) at the top level of
+  // each ProcessInstance (via projectionToInstance ← listInstanceProjections reading
+  // the `record_id` field from the process.started audit event payload). Previously
+  // the spec incorrectly read `payload.record_id` which is not part of the wire shape.
   const instanceId = await page.evaluate(
     async ({
       recId,
@@ -387,7 +397,7 @@ async function createPurchaseRecord(
       tenant: string;
       actor: string;
     }) => {
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
         const res = await fetch("/api/processes", {
           headers: { "x-dev-user": act, "x-tenant-id": tenant },
@@ -397,10 +407,10 @@ async function createPurchaseRecord(
           continue;
         }
         const data = await res.json();
-        const instances: Array<{ id?: string; payload?: { record_id?: string } }> =
+        const instances: Array<{ id?: string; recordId?: string }> =
           data.instances ?? [];
         const match = instances.find(
-          (inst) => inst.payload?.record_id === recId,
+          (inst) => inst.recordId === recId,
         );
         if (match?.id) return match.id;
         await new Promise((r) => setTimeout(r, 500));
