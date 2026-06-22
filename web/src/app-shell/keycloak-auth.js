@@ -80,6 +80,15 @@ export function buildTokenRequestBody(config, p) {
   }).toString();
 }
 
+/** Build the token-endpoint POST body for a refresh_token grant. Pure. */
+export function buildRefreshRequestBody(config, refreshToken) {
+  return new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: config.clientId,
+    refresh_token: refreshToken,
+  }).toString();
+}
+
 /** Build the logout URL (front-channel). Pure. */
 export function buildLogoutUrl(config, p) {
   const url = new URL(endpoints(config).logout);
@@ -318,6 +327,43 @@ export function isAuthenticated() {
   if (!s || !s.accessToken) return false;
   if (typeof s.expiresAt === 'number' && s.expiresAt <= Date.now()) return false;
   return true;
+}
+
+/**
+ * Attempt a silent token refresh using the stored refresh token. Returns the
+ * refreshed user on success, or null when there is no usable refresh token or
+ * the refresh fails (in which case the stale session is CLEARED so the shell
+ * falls through to the login screen instead of rendering with a dead token).
+ * keycloak mode only.
+ */
+export async function tryRefresh(config) {
+  const s = getSession();
+  if (!s || !s.refreshToken) return null;
+  try {
+    const res = await fetch(endpoints(config).token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: buildRefreshRequestBody(config, s.refreshToken),
+    });
+    if (!res.ok) { clearSession(); return null; }
+    const tokens = await res.json();
+    const accessToken = tokens.access_token;
+    if (!accessToken) { clearSession(); return null; }
+    const claims = decodeJwtPayload(accessToken);
+    const expiresIn = Number(tokens.expires_in) || 0;
+    const session = {
+      accessToken,
+      idToken: tokens.id_token || s.idToken || null,
+      refreshToken: tokens.refresh_token || s.refreshToken || null,
+      expiresAt: expiresIn > 0 ? Date.now() + expiresIn * 1000 : null,
+      user: kcUserFromClaims(claims),
+    };
+    persistSession(session);
+    return session.user;
+  } catch {
+    clearSession();
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

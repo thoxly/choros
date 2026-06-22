@@ -12,6 +12,7 @@ import {
   redirectUri,
   buildAuthorizeUrl,
   buildTokenRequestBody,
+  buildRefreshRequestBody,
   buildLogoutUrl,
   parseCallbackParams,
   decodeJwtPayload,
@@ -68,6 +69,17 @@ describe('buildTokenRequestBody', () => {
     expect(p.get('code')).toBe('authcode');
     expect(p.get('redirect_uri')).toBe('http://localhost:3000/');
     expect(p.get('code_verifier')).toBe('verifier');
+    expect(p.get('client_secret')).toBeNull(); // public client — never a secret
+  });
+});
+
+describe('buildRefreshRequestBody', () => {
+  it('builds the refresh_token grant for the public client (no secret)', () => {
+    const body = buildRefreshRequestBody(CONFIG, 'the-refresh-token');
+    const p = new URLSearchParams(body);
+    expect(p.get('grant_type')).toBe('refresh_token');
+    expect(p.get('client_id')).toBe('choros-web');
+    expect(p.get('refresh_token')).toBe('the-refresh-token');
     expect(p.get('client_secret')).toBeNull(); // public client — never a secret
   });
 });

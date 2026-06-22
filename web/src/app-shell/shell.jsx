@@ -470,7 +470,22 @@ function AppShell() {
         try {
           const fromCallback = await kc.handleRedirectCallback(cfg.keycloak);
           if (cancelled) return;
-          setCurrentUser(fromCallback || kc.getKeycloakUser());
+          if (fromCallback) {
+            // Fresh login just completed (OIDC code→token exchange).
+            setCurrentUser(fromCallback);
+          } else if (kc.isAuthenticated()) {
+            // Stored session with a still-valid access token.
+            setCurrentUser(kc.getKeycloakUser());
+          } else {
+            // No session, or the access token expired. Adopting the stored user
+            // here (as before) rendered the app with a DEAD token → every
+            // protected API call 401'd while the gate thought we were logged in.
+            // Try a silent refresh; on failure tryRefresh clears the stale
+            // session so the gate falls through to the login screen.
+            const refreshed = await kc.tryRefresh(cfg.keycloak);
+            if (cancelled) return;
+            setCurrentUser(refreshed || null);
+          }
         } catch (err) {
           if (cancelled) return;
           setAuthError(err && err.message ? err.message : 'Ошибка входа');
