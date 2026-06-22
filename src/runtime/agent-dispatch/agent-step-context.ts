@@ -6,14 +6,16 @@
  * sibling of run-precheck.ts's inline context reads — domain-NEUTRAL: the objective
  * replaces `documentHandle` + `dealContext`.
  *
- * PLACEMENT (FF-COMP-6): this directory (src/runtime/agent-dispatch/) is NOT in the
- * agent-instruction-runtime-dormant.sh RUNTIME_PATHS (engine/worker/bridge/adapters),
- * so reading the published agent instruction here is allowed by that gate WITHOUT a
- * frozen-check edit (mirrors why src/runtime/legal-precheck/ is unparked). The read
- * still goes through the single authoring DAO `readPublished` (no second reader).
+ * PLACEMENT (FF-COMP-6 / FF-LP-4): this module does NOT import from the
+ * instruction store directly. Instead, the instruction read is abstracted
+ * behind the `InstructionSource` DI port (see AssembleDeps). The concrete
+ * implementation (which calls the real readPublished DAO) is wired at the
+ * composition root (src/server/agent-dispatch-loop.ts) — outside
+ * src/runtime/agent-dispatch/ — so FF-LP-4 (legal-precheck-unpark-narrow.sh)
+ * passes WITHOUT any frozen-check allowlist edit.
  *
  * Reuse map (ADR §1 / §9):
- *   - readPublished           — agent instruction (gated DAO, single reader).
+ *   - InstructionSource       — DI port for published competence instruction (composition root).
  *   - resolveInstanceTargetOnClient — record ref (registry/app/primaryRecordId).
  *   - resolveAgentToolset + McpToolSource — grants→tools (least privilege, may be []).
  *   - roleCriticality(RoleGrantSource) — gate B ceiling (critical → always defer).
@@ -26,7 +28,6 @@
 import type { PgClientLike } from "../../db/audit-writer.js";
 import type pg from "pg";
 import type { Job } from "../../core/types.js";
-import { readPublished } from "../../db/agent-instruction-store.js";
 import { resolveInstanceTargetOnClient } from "../../db/process-instance-resolver.js";
 import {
   resolveAgentToolset,
@@ -66,9 +67,9 @@ export interface AgentStepContext {
     readonly fields: Record<string, unknown>;
     /** Optional NL objective compiled by the configurator (F1; absent day-1). */
     readonly prompt?: string;
-    /** Published agent instruction text (read via the gated DAO); "" when absent. */
+    /** Published competence instruction text (from the instruction store via DI port); "" when absent. */
     readonly instruction: string;
-    /** Answer-form code (from agent_instruction.answerForm). */
+    /** Answer-form code (from the published instruction row; "agent_step_v1" default). */
     readonly answerForm: string;
     /** Whether a published instruction was found (absent ⇒ defer, ADR §4). */
     readonly hasInstruction: boolean;
@@ -152,6 +153,31 @@ export const stubBudgetPort: BudgetPort = {
 };
 
 // ---------------------------------------------------------------------------
+// InstructionSource — DI port for published competence instruction reads.
+//
+// The concrete impl (calls the real readPublished DAO) is wired at the
+// composition root (src/server/agent-dispatch-loop.ts) so this runtime dir
+// does NOT import from the store directly (FF-LP-4 / T-0233).
+// ---------------------------------------------------------------------------
+
+/** Minimal published-instruction shape the assembler needs from the port. */
+export interface PublishedInstructionResult {
+  readonly instructionText: string;
+  readonly answerForm: string | null;
+}
+
+export interface InstructionSource {
+  /**
+   * Read the published instruction for an agent. Returns null when absent
+   * (missing instruction → hasInstruction=false → motor defers, ADR §4).
+   */
+  readPublished(
+    tx: PgClientLike,
+    employeeId: string,
+  ): Promise<PublishedInstructionResult | null>;
+}
+
+// ---------------------------------------------------------------------------
 // AssembleDeps — injected ports for static-now unit testing.
 // ---------------------------------------------------------------------------
 
@@ -164,6 +190,8 @@ export interface AssembleDeps {
   readonly roleGrants: RoleGrantSource;
   /** Budget port (gate C); default stubBudgetPort. */
   readonly budget?: BudgetPort;
+  /** Instruction source port — reads the published competence text (FF-LP-4). */
+  readonly instruction: InstructionSource;
 }
 
 /**
@@ -226,9 +254,9 @@ export async function assembleAgentStepContext(
   const v = readJobVars(job);
   const budget = deps.budget ?? stubBudgetPort;
 
-  // --- Objective: published agent instruction (gated DAO, single reader). ---
+  // --- Objective: published competence text (via InstructionSource DI port). ---
   const instr =
-    v.agentEmployeeId !== "" ? await readPublished(tx, v.agentEmployeeId) : null;
+    v.agentEmployeeId !== "" ? await deps.instruction.readPublished(tx, v.agentEmployeeId) : null;
 
   // --- Record ref: resolve the instance's target registry/app/primary record. ---
   const target =

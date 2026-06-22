@@ -23,7 +23,9 @@ import type { Job } from "../core/types.js";
 import {
   assembleAgentStepContext,
   type AssembleDeps,
+  type InstructionSource,
 } from "../runtime/agent-dispatch/agent-step-context.js";
+import { readPublished } from "../db/agent-instruction-store.js";
 import {
   runAgentStep,
   type RunAgentStepDeps,
@@ -33,6 +35,15 @@ import {
   type ApplyOutcomeDeps,
 } from "../runtime/agent-dispatch/dispatch-outcome.js";
 import type pg from "pg";
+
+/**
+ * Concrete InstructionSource that delegates to the real agent-instruction-store DAO.
+ * Exported from the composition root (src/server/) so src/runtime/agent-dispatch/
+ * never imports agent-instruction-store directly (FF-LP-4 / T-0233 AC-11/NF-4).
+ */
+export const storeInstructionSource: InstructionSource = {
+  readPublished,
+};
 
 /** The default DEDICATED keystone agent topic (NOT the tel-intake DMN seam). */
 export const DEFAULT_AGENT_TOPIC = "agent-step";

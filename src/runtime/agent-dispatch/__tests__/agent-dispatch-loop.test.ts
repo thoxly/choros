@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type pg from "pg";
-import { assembleAgentStepContext, stubBudgetPort, type AssembleDeps } from "../agent-step-context.js";
+import { assembleAgentStepContext, stubBudgetPort, type AssembleDeps, type InstructionSource, type PublishedInstructionResult } from "../agent-step-context.js";
 import {
   runAgentDispatchOnce,
   startAgentDispatchLoop,
@@ -56,22 +56,35 @@ function fakeToolSource(tools: McpToolRow[]): McpToolSource {
 }
 
 /**
+ * Stub InstructionSource (the DI port that replaces the direct readPublished import).
+ * Returns a canned published instruction when hasInstruction=true (default), null otherwise.
+ */
+function fakeInstructionSource(opts: { hasInstruction?: boolean } = {}): InstructionSource {
+  const hasInstruction = opts.hasInstruction ?? true;
+  return {
+    async readPublished(_tx, _employeeId): Promise<PublishedInstructionResult | null> {
+      if (!hasInstruction) return null;
+      return {
+        instructionText: "Триаж",
+        answerForm: "agent_step_v1",
+      };
+    },
+  };
+}
+
+/**
  * Fake pg client for context assembly. Handles:
- *  - agent_instruction (readPublished) → one published row.
  *  - agent_card → one dormant row.
  *  - process.started (resolver step 1) → present, then no binding → no_app_binding.
+ *
+ * Note: agent_instruction is no longer queried via the pg client — it goes through
+ * the InstructionSource DI port (fakeInstructionSource). The SQL branch is removed.
  */
-function fakeContextClient(opts: { hasInstruction?: boolean; hasCard?: boolean } = {}): pg.PoolClient {
-  const hasInstruction = opts.hasInstruction ?? true;
+function fakeContextClient(opts: { hasCard?: boolean } = {}): pg.PoolClient {
   const hasCard = opts.hasCard ?? true;
   return {
     __tenantId: TENANT,
     query: async (sql: string) => {
-      if (sql.includes("FROM choros.agent_instruction")) {
-        return hasInstruction
-          ? { rows: [{ tenant_id: TENANT, id: "instr-1", employee_id: AGENT, employee_kind: "agent", tier: "published", instruction_text: "Триаж", answer_form: "agent_step_v1", instruction_meta: {}, bundle_id: null, created_at: NOW, updated_at: NOW }] }
-          : { rows: [] };
-      }
       if (sql.includes("FROM choros.agent_card")) {
         return hasCard
           ? { rows: [{ llm_endpoint: null, llm_model: null, llm_secret_handle: null, autonomy_threshold: null }] }
@@ -116,6 +129,7 @@ const assembleDeps = (over: Partial<AssembleDeps> = {}): AssembleDeps => ({
   tools: fakeToolSource([]),
   roleGrants: fakeRoleGrantSource([]),
   budget: stubBudgetPort,
+  instruction: fakeInstructionSource(),
   ...over,
 });
 
@@ -163,8 +177,13 @@ describe("assembleAgentStepContext", () => {
   });
 
   it("missing published instruction → hasInstruction=false", async () => {
-    const client = fakeContextClient({ hasInstruction: false });
-    const ctx = await assembleAgentStepContext(client, makeJob(), assembleDeps(), NOW);
+    const client = fakeContextClient();
+    const ctx = await assembleAgentStepContext(
+      client,
+      makeJob(),
+      assembleDeps({ instruction: fakeInstructionSource({ hasInstruction: false }) }),
+      NOW,
+    );
     expect(ctx.objective.hasInstruction).toBe(false);
     expect(ctx.objective.instruction).toBe("");
   });
