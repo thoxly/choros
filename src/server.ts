@@ -46,6 +46,7 @@ import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
 import { registerSodRoutes } from "./http/rights-sod.js";
+import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
@@ -386,6 +387,11 @@ function buildRouter(
     // /api/rights/sod-rules and /api/rights/sod-check are literal paths and would
     // otherwise be captured by the :roleId param slot (first-match-wins).
     registerSodRoutes(router, grantsPool);
+    // Register SoD write API (T-0386 D6): CRUD for sod_constraint rows.
+    // Must also precede registerRightsRoutes (/api/rights/:roleId catch-all).
+    // PUT/DELETE /api/rights/sod-rules/:id are distinct paths from the literal
+    // GET /api/rights/sod-rules registered by registerSodRoutes above.
+    registerSodAdminRoutes(router, grantsPool);
   }
 
   // Register rights endpoints (includes GET /api/rights/:roleId catch-all).
