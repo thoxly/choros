@@ -216,19 +216,32 @@ export function resolveFieldContract(field) {
   const hasOptions = Array.isArray(field?.options) && field.options.length > 0;
 
   let contractKind;
+  // When the contract is derived from the field type (not given explicitly), we
+  // also capture the type-specific presentation so that e.g. type="date" renders
+  // as "date" and not as the scalar contract's generic default ("text").
+  let typePresentation;
   if (typeof field?.contract === 'string') {
     contractKind = field.contract;
   } else if (hasOptions) {
     // Options present but no explicit contract → it's an enum (the snapshot bug fix).
     contractKind = 'enum';
   } else {
-    contractKind = deriveContractFromFieldType(
+    const derived = deriveContractFromFieldType(
       normaliseTypeToFieldType(field?.type),
-    ).kind;
+    );
+    contractKind = derived.kind;
+    typePresentation = derived.presentation;
   }
 
   const descriptor = getBindingContract(contractKind);
-  const presentation = resolvePresentation(contractKind, field?.presentation);
+  // Explicit presentation override wins; when deriving from type, use the
+  // type-specific presentation (e.g. "date", "number", "checkbox") rather than
+  // the contract's generic default ("text"); for explicit contracts fall back to
+  // the contract's defaultPresentation.
+  const presentation = resolvePresentation(
+    contractKind,
+    field?.presentation ?? typePresentation,
+  );
   return {
     contractKind: descriptor.kind,
     presentation,

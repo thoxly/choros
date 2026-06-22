@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint web/src --ext .jsx || true"
+    "lint": "eslint web/src --ext .jsx || true",
+    "test": "vitest run"
   },
   "dependencies": {
     "bpmn-js": "^17"
