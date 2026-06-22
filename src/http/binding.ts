@@ -36,7 +36,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthMode, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthMode, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   validateBindingFields,
@@ -103,19 +103,6 @@ export async function withTenantTx<T>(
   } finally {
     client.release();
   }
-}
-
-// ---------------------------------------------------------------------------
-// extractActor — reads caller identity (mirrors invoke.ts)
-// ---------------------------------------------------------------------------
-
-function extractActor(req: IncomingMessage): string {
-  let devUser = req.headers[DEV_USER_HEADER];
-  if (Array.isArray(devUser)) devUser = devUser[0];
-  if (!devUser || typeof devUser !== "string") {
-    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-  }
-  return devUser;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +218,10 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
   // constraint of the existing Router). For multi-param paths we extract remaining
   // segments from req.url directly.
 
-  router.register("GET", "/tenants/:tenantId/processes/:processKey/forms/:formKey/binding", async (req, res, _params) => {
+  // T-0418 [SECURITY] P0: all binding routes are withAuth-wrapped. keycloak mode
+  // REQUIRES a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev mode
+  // is a no-op pass-through (existing x-dev-user convention unchanged).
+  router.register("GET", "/tenants/:tenantId/processes/:processKey/forms/:formKey/binding", withAuth(async (req, res, _params) => {
     // Extract all path params from the URL directly (multi-param extraction).
     const urlParts = extractBindingUrlParts(req.url ?? "");
     if (!urlParts) {
@@ -256,13 +246,15 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
       fields: row.fields,
       version: row.version,
     }));
-  });
+  }));
 
   // ---------- POST /tenants/:tenantId/processes/:processKey/forms/:formKey/binding -----
 
-  router.register("POST", "/tenants/:tenantId/processes/:processKey/forms/:formKey/binding", async (req, res, _params) => {
-    // Extract actor identity (→ 401 if absent)
-    const actorId = extractActor(req);
+  router.register("POST", "/tenants/:tenantId/processes/:processKey/forms/:formKey/binding", withAuth(async (req, res, _params) => {
+    // T-0418 [SECURITY] P0: promote the legacy POST to the mode-aware extractActorSlug
+    // (was the dev-only extractActor). Identity now comes from the validated token in
+    // keycloak mode (→ 401 if no employee matches) and x-dev-user in dev mode.
+    const actorId = await extractActorSlug(req, pool);
 
     const urlParts = extractBindingUrlParts(req.url ?? "");
     if (!urlParts) {
@@ -328,7 +320,7 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
     res.statusCode = statusCode;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(responseBody));
-  });
+  }));
 
   // ---------------------------------------------------------------------------
   // T-0376 actor-scoped routes — only registered when deps (resolveActorTenant) provided
@@ -341,7 +333,8 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
     // Actor-scoped lookup: resolves tenantId from actor, returns the form_binding for
     // (processKey, stepKey). stepKey maps directly to form_binding.form_key.
     // Used by inbox task card to render the assignee's form. → 200 | 404
-    router.register("GET", "/api/forms/binding", async (req, res, _params) => {
+    // T-0418 [SECURITY] P0: withAuth-wrapped (keycloak REQUIRES a valid Bearer).
+    router.register("GET", "/api/forms/binding", withAuth(async (req, res, _params) => {
       const actor = await extractActorSlug(req, pool);
       const url = req.url ?? "";
       const qIdx = url.indexOf("?");
@@ -373,13 +366,14 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         processKey,
         stepKey,
       }));
-    });
+    }));
 
     // POST /api/forms/binding
     // Actor-scoped upsert: saves a form binding for (processKey, stepKey).
     // Body: { processKey: string, stepKey: string, fields: BindingField[] }
     // → 201 (created) | 200 (updated) | 400 | 401 | 403
-    router.register("POST", "/api/forms/binding", async (req, res, _params) => {
+    // T-0418 [SECURITY] P0: withAuth-wrapped (keycloak REQUIRES a valid Bearer).
+    router.register("POST", "/api/forms/binding", withAuth(async (req, res, _params) => {
       const actor = await extractActorSlug(req, pool);
 
       const rawBody = await readJsonBody(req);
@@ -441,7 +435,7 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
       res.statusCode = sc;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(responseBody));
-    });
+    }));
   }
 }
 

@@ -25,7 +25,8 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import type { FlowableClient } from "../core/flowable-client.js";
@@ -52,7 +53,21 @@ interface ProcessDefRow {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+// T-0418 [SECURITY] P0: mode-aware caller identity (mirrors binding.ts::extractActorSlug).
+// process-defs writes are an SPA human (process_designer) surface. The write routes are
+// now withAuth-wrapped (Bearer validated + getAuthContext populated BEFORE this runs).
+//   - keycloak: identity from the VALIDATED token (sub/preferred_username → slug); null
+//     → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+//   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -220,9 +235,11 @@ export function registerProcessDefsRoutes(
   // in the response as `assignedKey`. The frontend uses this to update the URL.
   // When present (editing existing), standard upsert-by-version semantics apply.
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/process-defs", async (req, res) => {
-    // Auth gate
-    extractActor(req);
+  // T-0418 [SECURITY] P0: withAuth-wrapped write — keycloak REQUIRES a valid Bearer
+  // (401 otherwise; no x-dev-user bypass); dev mode is a no-op pass-through.
+  router.register("POST", "/api/process-defs", withAuth(async (req, res) => {
+    // Auth gate — actor derived from the validated token (keycloak) or x-dev-user (dev).
+    await extractActor(req, pool);
     const tenantId = extractTenantId(req);
 
     const rawBody = await readJsonBody(req);
@@ -290,7 +307,7 @@ export function registerProcessDefsRoutes(
     res.statusCode = 201;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(result));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/process-defs — list latest version per process key
@@ -361,9 +378,10 @@ export function registerProcessDefsRoutes(
   //   4. UPDATE status='published', deployment_id=deploymentId, updated_at=now
   //   5. Return { id, processKey, version, status, deploymentId }
   // -------------------------------------------------------------------------
-  router.register("POST", "/api/process-defs/:key/publish", async (req, res, params) => {
-    // Auth gate — write operation
-    extractActor(req);
+  // T-0418 [SECURITY] P0: withAuth-wrapped write — keycloak REQUIRES a valid Bearer.
+  router.register("POST", "/api/process-defs/:key/publish", withAuth(async (req, res, params) => {
+    // Auth gate — write operation; actor from validated token (keycloak) or x-dev-user (dev).
+    await extractActor(req, pool);
     const tenantId = extractTenantId(req);
     const processKey = decodeURIComponent(params["key"] ?? "");
     if (!processKey) {
@@ -430,5 +448,5 @@ export function registerProcessDefsRoutes(
       // Additive: only present when there are role warnings (non-breaking).
       ...(roleWarnings.length > 0 ? { warnings: roleWarnings } : {}),
     }));
-  });
+  }));
 }
