@@ -29,7 +29,9 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 import { parseRecordSchema, FIELD_TYPES } from '../screens/apps-schema.js';
 // T-0399 [D7-K]: derive the binding contract so the snapshot carries it (+options)
 // into form_binding.fields — fixing the silent enum→text-input bug (spec §2).
-import { deriveContractFromFieldType } from '../../../src/core/binding-contract-catalog.js';
+// Uses the web-local mirror of the catalog (field-contract.js) — not the server
+// src/core/ module — to keep the vite build self-contained (layer boundary).
+import { deriveContractFromFieldType } from './field-contract.js';
 
 // Map an apps-schema field `type` (select/date/boolean/number/integer/string) to
 // the canonical FieldType the catalog speaks. A field with `options` is an enum.
