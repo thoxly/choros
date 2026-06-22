@@ -218,22 +218,31 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * Production `AgentJobFetcher`: two-phase cross-tenant pass (образец lockReclaimer
  * / outboxDispatcher pendingBuckets + claimBatch).
  *
- * Phase-1 (no GUC): discover distinct tenants with ELIGIBLE agent-topic jobs using a
- *   direct pool query (no SECURITY DEFINER function required — the job table is
- *   partitioned by tenant_id; the query is an aggregate-count-only discovery step
- *   with NO row-data payload, mirroring the safety of outbox_pending_buckets).
- * Phase-2 (per-tenant GUC): for each eligible tenant, open a tenant-scoped tx,
- *   SET LOCAL choros.tenant_id, then call pgJobStore.fetchAndLock.
+ * Phase-1 (cross-tenant discovery): find distinct tenants with ELIGIBLE agent-topic
+ *   jobs. This runs as a plain pool query that intentionally sees ALL tenants. The
+ *   safety mechanism here is NOT RLS and NOT table partitioning — `choros.job` is a
+ *   single non-partitioned table (migrations/002_job.sql) and the production pool
+ *   connects as `choros_migrator` (BYPASSRLS), so RLS would not scope this query in
+ *   any case. The real Phase-1 precedents (outbox_pending_buckets / job_locked_
+ *   expired_buckets) wrap the equivalent discovery in a SECURITY DEFINER aggregate;
+ *   here we inline the discovery directly on the BYPASSRLS pool. What keeps it safe
+ *   is that it SELECTs ONLY `DISTINCT tenant_id` — no id, payload, or other row data
+ *   ever escapes the discovery step (the cross-tenant tenant list is precisely what
+ *   we need to drive Phase-2 per-tenant).
+ * Phase-2 (per-tenant): for each eligible tenant, open a tx, SET LOCAL the GUC, and
+ *   run a lock CTE with an EXPLICIT `tenant_id = $N` predicate. Under the BYPASSRLS
+ *   migrator role the GUC is INERT for row filtering, so the predicate — not the GUC
+ *   — is what scopes the lock to one tenant (mirrors every other DAO).
  *
- * Tenant-scoping invariant: the returned jobs carry `variables.__tenantId` set by
- * the caller so `assembleAgentStepContext` reads it without a second DB query.
- * This field IS part of the job.variables threaded at fetch time (see below).
+ * Tenant-scoping invariant: the returned jobs carry `variables.__tenantId` set from
+ * the LOCKED ROW's real `tenant_id` (RETURNING j.tenant_id) so `assembleAgentStep
+ * Context` reads it without a second DB query. This field IS part of the
+ * job.variables threaded at fetch time (see below).
  *
- * Cross-tenant safety: Phase-1 returns ONLY (tenantId, count) — no row data.
- * Phase-2 fetchAndLock executes under the per-tenant GUC so RLS scopes every row
- * to the correct tenant. The thread of `__tenantId` onto `job.variables` happens
- * HERE (not in the job table) to satisfy assembleAgentStepContext's requirement
- * WITHOUT a second query.
+ * Cross-tenant safety: Phase-1 returns ONLY `tenant_id` — no row data. Phase-2's CTE
+ * filters on `tenant_id = $N` (the authoritative scope under BYPASSRLS) AND stamps
+ * `__tenantId` from each row's own `tenant_id`, so no job can be locked or stamped
+ * under a foreign tenant even though the GUC is inert.
  */
 export class PostgresAgentJobFetcher implements AgentJobFetcher {
   constructor(
@@ -250,10 +259,14 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
   }): Promise<readonly TenantJobBatch[]> {
     if (args.topics.length === 0 || args.maxJobs <= 0) return [];
 
-    // Phase-1: discover tenants with eligible jobs (no GUC, aggregate only).
+    // Phase-1: discover tenants with eligible jobs. Plain pool query on the
+    // BYPASSRLS migrator pool — it intentionally sees ALL tenants (that cross-tenant
+    // list is exactly what drives Phase-2). Safety = it SELECTs ONLY DISTINCT
+    // tenant_id; no id/payload/row-data escapes (the discovery analogue of the
+    // SECURITY DEFINER outbox_pending_buckets aggregate). NOT scoped by RLS (inert
+    // under BYPASSRLS) and `choros.job` is NOT partitioned.
     // Eligible = state='CREATED' AND available_at<=nowMs, OR
     //            state='LOCKED' AND lock_expiry<=nowMs (expired lock = re-eligible).
-    // Returns ONLY tenantId — no job row data escapes the aggregate.
     const { rows } = await this.pool.query<{ tenant_id: string }>(
       `SELECT DISTINCT tenant_id
          FROM choros.job
@@ -289,7 +302,19 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
         // fetchAndLock via the jobStore pool — pgJobStore.fetchAndLock calls
         // this.pool.query directly (no GUC awareness). We replicate the CTE here
         // using the GUC-scoped client instead, mirroring the pgJobStore implementation.
+        //
+        // EXPLICIT tenant predicate `AND tenant_id = $6` (NOT just the GUC):
+        // the production runtime pool connects as `choros_migrator`, which is
+        // BYPASSRLS (docker-compose / .env.prod.example / migrations/001). Under
+        // BYPASSRLS the RLS policy keyed on `choros.tenant_id` is NEVER applied, so
+        // `SET LOCAL choros.tenant_id` above is INERT for row filtering and the CTE
+        // would otherwise lock agent-step jobs across ALL tenants during one tenant's
+        // pass. The explicit `tenant_id = $6` is the authoritative scope under the
+        // migrator role — mirrors every other DAO (role-grant-dao.ts WHERE tenant_id
+        // = $1, org.ts:118, the outbox/timer/reaper stores). `tenant_id` is also
+        // RETURNED so __tenantId is stamped from the row, not the loop iterator.
         const { rows: jobRows } = await client.query<{
+          tenant_id: string;
           id: string;
           topic: string;
           variables: Record<string, unknown>;
@@ -302,7 +327,8 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
         }>(
           `WITH candidates AS (
              SELECT id FROM choros.job
-             WHERE topic = ANY($1::text[])
+             WHERE tenant_id = $6
+               AND topic = ANY($1::text[])
                AND (
                  (state = 'CREATED' AND available_at <= $2)
                  OR (state = 'LOCKED' AND lock_expiry  <= $2)
@@ -318,7 +344,8 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
              lock_expiry = $2 + $5
            FROM candidates
            WHERE j.id = candidates.id
-           RETURNING j.id, j.topic, j.variables, j.state, j.retries,
+             AND j.tenant_id = $6
+           RETURNING j.tenant_id, j.id, j.topic, j.variables, j.state, j.retries,
                      j.lock_owner, j.lock_expiry, j.created_at, j.available_at`,
           [
             args.topics,
@@ -326,16 +353,21 @@ export class PostgresAgentJobFetcher implements AgentJobFetcher {
             args.maxJobs,
             args.workerId,
             args.lockMs,
+            tenantId,
           ],
         );
         await client.query("COMMIT");
 
         // Thread __tenantId onto job.variables so assembleAgentStepContext can read it
         // without a second DB query (the job row has no TS-level tenantId field).
+        // __tenantId comes from the ROW's real tenant_id (RETURNING j.tenant_id), NOT
+        // the loop iterator — belt-and-suspenders: with the `tenant_id = $6` predicate
+        // they are equal, but the row value is the authoritative source of truth so a
+        // mis-scoped lock can never be stamped with the wrong tenant downstream.
         jobs = jobRows.map((r) => ({
           id: r.id,
           topic: r.topic,
-          variables: { ...r.variables, __tenantId: tenantId },
+          variables: { ...r.variables, __tenantId: r.tenant_id },
           state: r.state as Job["state"],
           retries: r.retries,
           lockOwner: r.lock_owner ?? undefined,
