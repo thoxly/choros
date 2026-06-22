@@ -2,24 +2,23 @@
    CHOROS — ra-sod.jsx
    ЭКРАН 3: РАЗДЕЛЕНИЕ ОБЯЗАННОСТЕЙ (SoD).
 
-   T-0391 [D2-FU]: wired to the real SoD API.
+   T-0391 [D2-FU]: wired to the real SoD read API.
+   T-0386 [D6]: CRUD write surface for sod_constraint authoring.
+
+   Read endpoints:
      GET  /api/rights/sod-rules                — tenant SoD constraint registry
      GET  /api/rights/sod-check?subjectId=:id  — held roles + conflict report
+
+   Write endpoints (T-0386, genesis-owner gated):
+     POST   /api/rights/sod-rules          — create a new SoD constraint
+     PUT    /api/rights/sod-rules/:id      — update a constraint
+     DELETE /api/rights/sod-rules/:id      — delete a constraint
 
    UX invariants:
      G2 — consumes design-system tokens only (no hardcoded colours).
      G5 — no dev-jargon in visible text.
      G6 — no new inline styles or raw colour literals.
    Honest states: loading / error / empty / list.
-
-   Data-model note (T-0391):
-     The `sod_constraint` table exists (migration 027) and holds static +
-     dynamic constraint DECLARATIONS. There is no authoring UI yet — rules
-     must be seeded via SQL. The sod-check endpoint reports static conflicts
-     (role-pair violations) and surfaces dynamic constraints as informational
-     notes (they are evaluated at action time, not statically here).
-     Full SoD authoring UI (CRUD for sod_constraint rows) is a follow-up
-     NEEDS-DESIGN task (T-0391-FU-sod-authoring).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -48,6 +47,31 @@ async function fetchSodCheck(subjectId) {
   return res.json();
 }
 
+async function createSodRule(body) {
+  const res = await fetch('/api/rights/sod-rules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...devHeaders() },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function deleteSodRule(id) {
+  const res = await fetch(`/api/rights/sod-rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: devHeaders(),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // SoD rules table
 // ---------------------------------------------------------------------------
@@ -58,7 +82,22 @@ function KindChip({ kind }) {
   return <span className={`chs-sodsev ${cls}`}>{label}</span>;
 }
 
-function SodRuleRow({ rule }) {
+function SodRuleRow({ rule, onDelete }) {
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+
+  const handleDelete = useCallback(async () => {
+    if (!window.confirm('Удалить правило разделения обязанностей?')) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDelete(rule.id);
+    } catch (err) {
+      setDeleteError(err.message);
+      setDeleting(false);
+    }
+  }, [rule.id, onDelete]);
+
   return (
     <div className="chs-sodrow">
       <div className="chs-sodrow__id">
@@ -67,9 +106,9 @@ function SodRuleRow({ rule }) {
         </span>
       </div>
       <div className="chs-sodrow__pair">
-        {rule.roleA && <span>{rule.roleA.name}</span>}
+        {rule.roleA && <span>{rule.roleA.name ?? rule.roleA.id}</span>}
         {rule.roleA && rule.roleB && <span className="chs-sodrow__vs">&times;</span>}
-        {rule.roleB && <span>{rule.roleB.name}</span>}
+        {rule.roleB && <span>{rule.roleB.name ?? rule.roleB.id}</span>}
         {!rule.roleA && !rule.roleB && (
           <span style={{ color: 'var(--chs-color-text-faint)' }}>Все роли</span>
         )}
@@ -82,11 +121,27 @@ function SodRuleRow({ rule }) {
             : 'Несовместимые роли'}
       </div>
       <KindChip kind={rule.kind} />
+      <div className="chs-sodrow__actions">
+        <button
+          type="button"
+          className="chs-btn chs-btn--ghost chs-btn--sm chs-btn--danger"
+          onClick={handleDelete}
+          disabled={deleting}
+          aria-label="Удалить правило"
+        >
+          {deleting ? '…' : 'Удалить'}
+        </button>
+        {deleteError && (
+          <span style={{ color: 'var(--chs-color-text-danger)', fontSize: 'var(--chs-text-xs)' }}>
+            {deleteError}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
 
-function SodRulesTable({ rules }) {
+function SodRulesTable({ rules, onDelete }) {
   if (rules.length === 0) {
     return (
       <EmptyState
@@ -104,11 +159,156 @@ function SodRulesTable({ rules }) {
         <span>Пара ролей</span>
         <span>Описание</span>
         <span>Тип</span>
+        <span>Действия</span>
       </div>
       {rules.map((rule) => (
-        <SodRuleRow key={rule.id} rule={rule} />
+        <SodRuleRow key={rule.id} rule={rule} onDelete={onDelete} />
       ))}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Create rule form
+// ---------------------------------------------------------------------------
+
+const EMPTY_SCOPE = { kind: 'set', members: [] };
+
+function CreateRuleForm({ onCreated, onCancel }) {
+  const [kind, setKind] = useState('static');
+  const [roleA, setRoleA] = useState('');
+  const [roleB, setRoleB] = useState('');
+  const [selfRecord, setSelfRecord] = useState(false);
+  const [scopeText, setScopeText] = useState(JSON.stringify(EMPTY_SCOPE));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = useCallback(async (e) => {
+    e.preventDefault();
+    setError(null);
+
+    let scope;
+    try {
+      scope = JSON.parse(scopeText);
+    } catch {
+      setError('Область применения (scope) должна быть корректным JSON.');
+      return;
+    }
+
+    const body = {
+      kind,
+      scope,
+      selfRecord,
+      roleA: roleA.trim() || null,
+      roleB: roleB.trim() || null,
+    };
+
+    setSaving(true);
+    try {
+      await createSodRule(body);
+      onCreated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }, [kind, roleA, roleB, selfRecord, scopeText, onCreated]);
+
+  return (
+    <form className="chs-sod-create-form" onSubmit={handleSubmit}>
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        <label className="chs-field__label">Тип правила</label>
+        <select
+          className="chs-field__input"
+          value={kind}
+          onChange={(e) => setKind(e.target.value)}
+        >
+          <option value="static">Статическое (несовместимые роли)</option>
+          <option value="dynamic">Динамическое (разделение этапов)</option>
+        </select>
+      </div>
+
+      {kind === 'static' && (
+        <>
+          <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+            <label className="chs-field__label">Роль A (UUID)</label>
+            <input
+              type="text"
+              className="chs-field__input"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={roleA}
+              onChange={(e) => setRoleA(e.target.value)}
+              required={kind === 'static'}
+            />
+          </div>
+          <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+            <label className="chs-field__label">Роль B (UUID)</label>
+            <input
+              type="text"
+              className="chs-field__input"
+              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={roleB}
+              onChange={(e) => setRoleB(e.target.value)}
+              required={kind === 'static'}
+            />
+          </div>
+        </>
+      )}
+
+      {kind === 'dynamic' && (
+        <div
+          className="chs-field"
+          style={{ marginBottom: 'var(--chs-space-4)', display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)' }}
+        >
+          <input
+            type="checkbox"
+            id="sod-self-record"
+            checked={selfRecord}
+            onChange={(e) => setSelfRecord(e.target.checked)}
+          />
+          <label htmlFor="sod-self-record" className="chs-field__label" style={{ marginBottom: 0 }}>
+            Запрет самоподтверждения записи
+          </label>
+        </div>
+      )}
+
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        <label className="chs-field__label">
+          Область применения (scope, JSON)
+        </label>
+        <textarea
+          className="chs-field__input"
+          rows={3}
+          value={scopeText}
+          onChange={(e) => setScopeText(e.target.value)}
+          style={{ fontFamily: 'var(--chs-font-mono)', fontSize: 'var(--chs-text-xs)' }}
+        />
+      </div>
+
+      {error && (
+        <p style={{ color: 'var(--chs-color-text-danger)', fontSize: 'var(--chs-text-sm)', marginBottom: 'var(--chs-space-4)' }}>
+          {error}
+        </p>
+      )}
+
+      <div style={{ display: 'flex', gap: 'var(--chs-space-3)' }}>
+        <button
+          type="submit"
+          className="chs-btn chs-btn--primary chs-btn--sm"
+          disabled={saving}
+        >
+          {saving ? 'Сохранение…' : 'Добавить правило'}
+        </button>
+        <button
+          type="button"
+          className="chs-btn chs-btn--ghost chs-btn--sm"
+          onClick={onCancel}
+          disabled={saving}
+        >
+          Отмена
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -152,6 +352,7 @@ function SoDScreen() {
   const [rulesState, setRulesState] = useState({ loading: true, error: null, data: null });
   const [checkState, setCheckState] = useState({ loading: false, error: null, data: null });
   const [subjectInput, setSubjectInput] = useState('');
+  const [showCreateForm, setShowCreateForm] = useState(false);
 
   const loadRules = useCallback(() => {
     setRulesState({ loading: true, error: null, data: null });
@@ -161,6 +362,16 @@ function SoDScreen() {
   }, []);
 
   useEffect(() => { loadRules(); }, [loadRules]);
+
+  const handleDelete = useCallback(async (id) => {
+    await deleteSodRule(id);
+    loadRules();
+  }, [loadRules]);
+
+  const handleCreated = useCallback(() => {
+    setShowCreateForm(false);
+    loadRules();
+  }, [loadRules]);
 
   const runCheck = useCallback(() => {
     const slug = subjectInput.trim() || undefined;
@@ -176,9 +387,33 @@ function SoDScreen() {
 
         {/* ── Rules registry ── */}
         <section style={{ marginBottom: 'var(--chs-space-10)' }}>
-          <h2 style={{ fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-semibold)', marginBottom: 'var(--chs-space-5)', color: 'var(--chs-color-text)' }}>
-            Реестр правил
-          </h2>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 'var(--chs-space-5)' }}>
+            <h2 style={{ fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>
+              Реестр правил
+            </h2>
+            {!showCreateForm && (
+              <button
+                type="button"
+                className="chs-btn chs-btn--primary chs-btn--sm"
+                onClick={() => setShowCreateForm(true)}
+              >
+                + Добавить правило
+              </button>
+            )}
+          </div>
+
+          {showCreateForm && (
+            <div style={{ marginBottom: 'var(--chs-space-6)', padding: 'var(--chs-space-5)', background: 'var(--chs-color-surface-raised)', borderRadius: 'var(--chs-radius-md)', border: '1px solid var(--chs-color-border)' }}>
+              <h3 style={{ fontSize: 'var(--chs-text-base)', fontWeight: 'var(--chs-weight-semibold)', marginBottom: 'var(--chs-space-4)', color: 'var(--chs-color-text)' }}>
+                Новое правило
+              </h3>
+              <CreateRuleForm
+                onCreated={handleCreated}
+                onCancel={() => setShowCreateForm(false)}
+              />
+            </div>
+          )}
+
           {rulesState.loading && <LoadingState label="Загрузка правил…" compact />}
           {rulesState.error && (
             <ErrorState
@@ -187,7 +422,9 @@ function SoDScreen() {
               onRetry={loadRules}
             />
           )}
-          {rulesState.data && <SodRulesTable rules={rulesState.data.rules} />}
+          {rulesState.data && (
+            <SodRulesTable rules={rulesState.data.rules} onDelete={handleDelete} />
+          )}
         </section>
 
         {/* ── Conflict check ── */}
