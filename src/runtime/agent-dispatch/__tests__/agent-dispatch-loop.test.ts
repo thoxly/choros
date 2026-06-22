@@ -86,8 +86,11 @@ function fakeContextClient(opts: { hasCard?: boolean } = {}): pg.PoolClient {
     __tenantId: TENANT,
     query: async (sql: string) => {
       if (sql.includes("FROM choros.agent_card")) {
+        // The custody DAO (readAgentCardLlmConfigById) aliases the handle column
+        // to the neutral `secret_handle_ref` — mirror that shape here (the raw
+        // column name lives ONLY in the allow-listed DAO, FF-25-3).
         return hasCard
-          ? { rows: [{ llm_endpoint: null, llm_model: null, llm_secret_handle: null, autonomy_threshold: null }] }
+          ? { rows: [{ llm_endpoint: null, llm_model: null, secret_handle_ref: null, autonomy_threshold: null }] }
           : { rows: [] };
       }
       if (sql.includes("audit_event") && sql.includes("payload->>'inst'")) {

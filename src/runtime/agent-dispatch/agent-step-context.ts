@@ -41,6 +41,7 @@ import {
   type RoleCriticalityLevel,
 } from "../../core/role-criticality.js";
 import { readStepDef, compileObjective } from "./objective-compiler.js";
+import { readAgentCardLlmConfigById } from "../../db/agent-provision.js";
 
 // Re-export for callers that need the step-def types and compiler directly.
 export type { BpmnStepDef, CompiledObjective } from "./objective-compiler.js";
@@ -117,29 +118,16 @@ export interface AgentStepContext {
 }
 
 // ---------------------------------------------------------------------------
-// agent_card row shape (subset; mirrors run-precheck.ts AgentCardLlmConfig).
+// agent_card LLM config (PD-5 BYO + gate A).
+//
+// CUSTODY (FF-25-3): this module does NOT name the secret-handle column.
+// The read is routed through the allow-listed custody DAO
+// (readAgentCardLlmConfigById in src/db/agent-provision.ts), which aliases the
+// handle column to the neutral OPAQUE field `secret_handle_ref`. The assembler
+// only ever sees that opaque reference (and threads it onto llm.secretHandle
+// for the injected LlmPort) — the raw column name lives ONLY in the allow-set,
+// keeping the custody surface auditable.
 // ---------------------------------------------------------------------------
-
-interface AgentCardRow {
-  readonly llm_endpoint: string | null;
-  readonly llm_model: string | null;
-  readonly llm_secret_handle: string | null;
-  readonly autonomy_threshold: number | null;
-}
-
-async function loadAgentCard(
-  tx: PgClientLike,
-  tenantId: string,
-  agentEmployeeId: string,
-): Promise<AgentCardRow | null> {
-  const res = (await tx.query(
-    `SELECT llm_endpoint, llm_model, llm_secret_handle, autonomy_threshold
-       FROM choros.agent_card
-      WHERE tenant_id = $1 AND employee_id = $2`,
-    [tenantId, agentEmployeeId],
-  )) as { rows: AgentCardRow[] };
-  return res.rows[0] ?? null;
-}
 
 // ---------------------------------------------------------------------------
 // Budget port — gate C is a stub day-1 (the gate is WIRED, the meter is stubbed).
@@ -300,7 +288,9 @@ export async function assembleAgentStepContext(
 
   // --- LLM config + autonomy (gate A) from agent_card. ---
   const card =
-    v.agentEmployeeId !== "" ? await loadAgentCard(tx, tenantId, v.agentEmployeeId) : null;
+    v.agentEmployeeId !== ""
+      ? await readAgentCardLlmConfigById(tx, tenantId, v.agentEmployeeId)
+      : null;
 
   // --- Gate B: criticality ceiling for the agent's role. ---
   // When the role is unknown we leave criticality "routine" (the role has no grants
@@ -349,7 +339,9 @@ export async function assembleAgentStepContext(
     llm: {
       endpoint: card?.llm_endpoint ?? null,
       model: card?.llm_model ?? null,
-      secretHandle: card?.llm_secret_handle ?? null,
+      // Opaque RL-3 reference (aliased from the handle column by the custody DAO);
+      // null ⇒ dormant. Never logged/audited — threaded only to the injected LlmPort.
+      secretHandle: card?.secret_handle_ref ?? null,
     },
     autonomyThreshold: card?.autonomy_threshold ?? null,
     criticalityLevel: criticality.level,
