@@ -71,25 +71,33 @@ function llmConfigured(llm: AgentStepContext["llm"]): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Neutral LlmRequest builder (ADR §3 / §10 Q3).
+// Neutral LlmRequest builder (ADR §3 / §10 Q3, T-0379 F1 integration).
 //
-// Day-1 reuses the existing LlmRequest shape (instruction + document + answerForm).
-// The `document` is the record-ref snapshot JSON; dealContext is a neutral
-// placeholder (the agent step is domain-neutral, not a legal deal). This keeps the
-// PURE core (LlmRequest) untouched and precheck-no-network-in-core.sh green.
+// Reuses the existing LlmRequest shape (instruction + document + answerForm).
+// The `document` is now the F1-compiled objective prompt (T-0379) — a structured
+// neutral string that includes step name, inputs/outputs, configurator NL hint,
+// and the published instruction text, produced by compileObjective in
+// objective-compiler.ts.  The record-ref snapshot is included as a supplementary
+// JSON block so the LLM has both the structured prose (prompt) and the raw field
+// values for precise reasoning.  dealContext is a neutral placeholder.
 // ---------------------------------------------------------------------------
 
 function buildNeutralLlmRequest(ctx: AgentStepContext): LlmRequest {
-  const documentParts: Record<string, unknown> = {
-    objective_fields: ctx.objective.fields,
+  // The compiled prompt (T-0379) is always present (non-empty string).
+  // Supplement it with the raw record snapshot for field-level precision.
+  const supplementaryData: Record<string, unknown> = {
     record_snapshot: ctx.recordRef.snapshot,
+    objective_fields: ctx.objective.fields,
   };
-  if (ctx.objective.prompt !== undefined) {
-    documentParts["objective_prompt"] = ctx.objective.prompt;
-  }
+  const document = [
+    ctx.objective.prompt,
+    "---",
+    JSON.stringify(supplementaryData),
+  ].join("\n");
+
   return {
     instruction: ctx.objective.instruction,
-    document: JSON.stringify(documentParts),
+    document,
     // Neutral placeholder — the agent step carries no deal amount/kind/direction.
     dealContext: { amount: 0, kind: ctx.procKey || "agent_step", direction: "" },
     answerForm: ctx.objective.answerForm,
