@@ -20,7 +20,7 @@
    ============================================================================ */
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
@@ -310,6 +310,7 @@ function EditorToolbar({
    -------------------------------------------------------------------------- */
 export default function ProcessEditorScreen() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const modelerWrapperRef = useRef(null);
 
   // T-0324: backend-load state
@@ -342,7 +343,15 @@ export default function ProcessEditorScreen() {
 
   // T-0324: process key — the :id param (never "new" — that triggers blank template)
   const isNew = !id || id === 'new';
-  const processKey = isNew ? null : id;
+
+  // T-0377 (B19): assignedKey tracks the definitive key after first save of a new process.
+  // For existing processes it equals the route :id immediately. For new processes it starts
+  // null and is set once the backend returns the auto-generated slug on first save.
+  const [assignedKey, setAssignedKey] = useState(isNew ? null : id);
+
+  // The effective key for save/publish calls — assignedKey wins (set after first save),
+  // falls back to route :id for existing, null for brand-new unsaved processes.
+  const processKey = assignedKey ?? (isNew ? null : id);
 
   // T-0324: derived process name from backendMeta or route param
   const processName = backendMeta?.name
@@ -464,6 +473,11 @@ export default function ProcessEditorScreen() {
 
   /* ------------------------------------------------------------------
      T-0324: Save handler — persist to backend, not browser download.
+     T-0377 (B19): For new processes (processKey = null) the backend
+     auto-generates a collision-safe slug from the process name and
+     returns it as `assignedKey`. We store it and replace the browser
+     URL so the editor transitions from /processes/new/edit to
+     /processes/<slug>/edit without a full remount.
      ------------------------------------------------------------------ */
   const handleSave = useCallback(async () => {
     const modeler = liveModeler;
@@ -472,19 +486,29 @@ export default function ProcessEditorScreen() {
     setIsBusy(true);
     try {
       const { xml } = await saveDiagram(modeler);
-      const key = processKey || 'process-new';
-      const name = processName || key;
-      const result = await saveProcessDef(key, name, xml);
+      // Pass null processKey for new processes — backend assigns the key.
+      const name = processName || 'Новый процесс';
+      const result = await saveProcessDef(processKey || null, name, xml);
+      const finalKey = result.assignedKey ?? result.processKey;
+
       setIsDirty(false);
       setBackendMeta((prev) => ({ ...prev, version: result.version, status: result.status }));
       setStatusMsg({ text: `Черновик сохранён (версия ${result.version})`, isError: false });
       setValidationResult(null);
+
+      // T-0377 (B19): If this was a new process and the backend assigned a key,
+      // update local state and replace the URL so the toolbar shows the real key
+      // and future saves/publishes use it — no full remount needed.
+      if (!processKey && finalKey) {
+        setAssignedKey(finalKey);
+        navigate(`/processes/${encodeURIComponent(finalKey)}/edit`, { replace: true });
+      }
     } catch (err) {
       setStatusMsg({ text: err.message || String(err), isError: true });
     } finally {
       setIsBusy(false);
     }
-  }, [liveModeler, isBusy, processKey, processName]);
+  }, [liveModeler, isBusy, processKey, processName, navigate]);
 
   /* ------------------------------------------------------------------
      T-0324: Export handler — secondary browser download (kept from T-0099).
@@ -556,29 +580,32 @@ export default function ProcessEditorScreen() {
 
   /* ------------------------------------------------------------------
      T-0324: Publish handler — lint + Flowable deploy via backend.
-     Honest: if Flowable is down or key is missing, shows real error.
+     T-0377 (B19): Seamless publish for new processes.
+       1. Save (auto-assigns key if new, returns assignedKey).
+       2. Navigate to real URL (replace) if key was just assigned.
+       3. Publish against the now-known key.
+     Honest: if Flowable is down, shows real error. No silent failures.
      ------------------------------------------------------------------ */
   const handlePublish = useCallback(async () => {
     const modeler = liveModeler;
     if (!modeler || isBusy) return;
 
-    if (!processKey) {
-      setStatusMsg({
-        text: 'Сначала сохраните черновик с ключом процесса, затем опубликуйте.',
-        isError: true,
-      });
-      return;
-    }
-
     setIsBusy(true);
     try {
-      // First save the current XML so the backend publishes the latest version.
+      // Step 1: Save current XML — auto-assigns key for new processes.
       const { xml } = await saveDiagram(modeler);
-      const name = processName || processKey;
-      const saved = await saveProcessDef(processKey, name, xml);
+      const name = processName || 'Новый процесс';
+      const saved = await saveProcessDef(processKey || null, name, xml);
+      const finalKey = saved.assignedKey ?? saved.processKey;
 
-      // Then publish (lint → deploy → persist deployment_id).
-      const pub = await publishProcessDef(processKey);
+      // Step 2: If this was a new process, update URL and state with the assigned key.
+      if (!processKey && finalKey) {
+        setAssignedKey(finalKey);
+        navigate(`/processes/${encodeURIComponent(finalKey)}/edit`, { replace: true });
+      }
+
+      // Step 3: Publish (lint → Flowable deploy → persist deployment_id).
+      const pub = await publishProcessDef(finalKey);
       setIsDirty(false);
       setBackendMeta((prev) => ({
         ...prev,
@@ -589,6 +616,14 @@ export default function ProcessEditorScreen() {
         text: `Опубликовано (версия ${pub.version ?? saved.version}, deployment: ${pub.deploymentId})`,
         isError: false,
       });
+      // T-0380: surface role warnings from publish response (non-blocking).
+      if (pub.warnings && pub.warnings.length > 0) {
+        setStatusMsg({
+          text: `Опубликовано с предупреждениями (версия ${pub.version ?? saved.version})`,
+          isError: false,
+          violations: pub.warnings,
+        });
+      }
       setValidationResult(null);
     } catch (err) {
       setStatusMsg({
@@ -599,7 +634,7 @@ export default function ProcessEditorScreen() {
     } finally {
       setIsBusy(false);
     }
-  }, [liveModeler, isBusy, processKey, processName]);
+  }, [liveModeler, isBusy, processKey, processName, navigate]);
 
   /* ------------------------------------------------------------------
      Render: loading / error / ready

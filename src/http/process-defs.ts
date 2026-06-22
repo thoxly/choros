@@ -2,9 +2,12 @@
  * src/http/process-defs.ts
  *
  * T-0252 E8 C2: Process-definition CRUD + publish routes.
+ * T-0377 (B19): Auto-assign process key on first save.
  *
  * Routes:
  *   POST   /api/process-defs            — upsert draft from XML (auth-gated write)
+ *                                         processKey is optional: when absent, a
+ *                                         collision-safe slug is auto-generated from name.
  *   GET    /api/process-defs            — list all definitions for the tenant
  *   GET    /api/process-defs/:key       — get latest version for a process key
  *   POST   /api/process-defs/:key/publish — lint → deployBpmn → persist deployment_id
@@ -23,6 +26,7 @@ import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
+import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import type { FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
@@ -208,7 +212,13 @@ export function registerProcessDefsRoutes(
 
   // -------------------------------------------------------------------------
   // POST /api/process-defs — upsert draft
-  // Body: { processKey: string, name: string, bpmnXml: string }
+  // Body: { processKey?: string, name: string, bpmnXml: string }
+  //
+  // T-0377 (B19): processKey is now OPTIONAL.
+  // When absent (new process), a collision-safe slug is auto-generated from `name`
+  // (Cyrillic-aware transliteration: "Согласование" → "soglasovanie") and returned
+  // in the response as `assignedKey`. The frontend uses this to update the URL.
+  // When present (editing existing), standard upsert-by-version semantics apply.
   // -------------------------------------------------------------------------
   router.register("POST", "/api/process-defs", async (req, res) => {
     // Auth gate
@@ -221,13 +231,11 @@ export function registerProcessDefsRoutes(
     }
     const body = rawBody as Record<string, unknown>;
 
-    const processKey = body["processKey"];
+    // processKey is optional — when absent, we auto-generate from name.
+    const requestedKey = body["processKey"];
     const name = body["name"];
     const bpmnXml = body["bpmnXml"];
 
-    if (typeof processKey !== "string" || !processKey.trim()) {
-      throw new HttpError(400, "VALIDATION", "processKey must be a non-empty string");
-    }
     if (typeof name !== "string" || !name.trim()) {
       throw new HttpError(400, "VALIDATION", "name must be a non-empty string");
     }
@@ -235,10 +243,36 @@ export function registerProcessDefsRoutes(
       throw new HttpError(400, "VALIDATION", "bpmnXml must be a non-empty string");
     }
 
+    // T-0377: resolve the final key — explicit or auto-generated.
+    let resolvedKey: string;
+    if (typeof requestedKey === "string" && requestedKey.trim()) {
+      // Caller provided a key — use as-is (editing existing process).
+      resolvedKey = requestedKey.trim();
+    } else {
+      // New process — generate a collision-safe slug from the name.
+      resolvedKey = await generateUniqueProcessKey(name, async (candidate) => {
+        // Check for collision inside a read-only transaction.
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          const existing = await getLatestVersion(client, tenantId, candidate);
+          await client.query("COMMIT");
+          return existing !== null;
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+      });
+    }
+
     const nowMs = Date.now();
 
     const result = await withTenantTx(pool, tenantId, async (client) => {
-      const existing = await getLatestVersion(client, tenantId, processKey);
+      const existing = await getLatestVersion(client, tenantId, resolvedKey);
       const newVersion = existing ? existing.version + 1 : 1;
       const newId = randomUUID();
 
@@ -247,9 +281,10 @@ export function registerProcessDefsRoutes(
            (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
             created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, 'draft', NULL, $7, $7)`,
-        [tenantId, newId, processKey, name, bpmnXml, newVersion, nowMs],
+        [tenantId, newId, resolvedKey, name, bpmnXml, newVersion, nowMs],
       );
-      return { id: newId, processKey, version: newVersion, status: "draft" };
+      // assignedKey is always returned (equals processKey for existing definitions).
+      return { id: newId, processKey: resolvedKey, assignedKey: resolvedKey, version: newVersion, status: "draft" };
     });
 
     res.statusCode = 201;

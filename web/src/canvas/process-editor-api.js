@@ -1,11 +1,15 @@
 /* ============================================================================
    CHOROS — process-editor-api.js
    T-0324: Backend API calls for the BPMN process editor.
+   T-0377 (B19): saveProcessDef accepts optional processKey — when absent the
+                 backend auto-generates a slug from the name and returns it as
+                 `assignedKey`. Callers must use the returned key for navigation.
 
    Exports:
-     fetchProcessDef(processKey)           → Promise<{ bpmnXml, version, status, id } | null>
-     saveProcessDef(processKey, name, xml) → Promise<{ id, processKey, version, status }>
-     publishProcessDef(processKey)         → Promise<{ id, processKey, version, status, deploymentId }>
+     fetchProcessDef(processKey)            → Promise<{ bpmnXml, version, status, id } | null>
+     saveProcessDef(processKey, name, xml)  → Promise<{ id, processKey, assignedKey, version, status }>
+       processKey may be null/undefined for new processes — backend assigns one.
+     publishProcessDef(processKey)          → Promise<{ id, processKey, version, status, deploymentId }>
 
    All functions:
    - Use authHeaders() + x-tenant-id (same convention as screen-org, screen-agents).
@@ -70,17 +74,27 @@ export async function fetchProcessDef(processKey) {
  * Save (upsert) a BPMN XML draft to the backend.
  * Creates a new version row each call (upsert-by-version semantics in process-defs.ts).
  *
- * @param {string} processKey
+ * T-0377 (B19): processKey is now optional (null/undefined for new processes).
+ * When absent, the backend auto-generates a collision-safe slug from `name` and
+ * returns it as `assignedKey`. Callers should use `assignedKey` (always present)
+ * rather than `processKey` to obtain the definitive key for the saved definition.
+ *
+ * @param {string|null|undefined} processKey — existing key, or null/undefined for new.
  * @param {string} name — display name for the process definition.
  * @param {string} bpmnXml
- * @returns {Promise<{ id: string, processKey: string, version: number, status: string }>}
+ * @returns {Promise<{ id: string, processKey: string, assignedKey: string, version: number, status: string }>}
  * @throws {Error} on HTTP errors or validation rejection.
  */
 export async function saveProcessDef(processKey, name, bpmnXml) {
+  // Build request body — omit processKey when null/undefined so the backend
+  // triggers auto-generation rather than treating "" as an invalid key.
+  const requestBody = { name, bpmnXml };
+  if (processKey) requestBody.processKey = processKey;
+
   const res = await fetch('/api/process-defs', {
     method: 'POST',
     headers: apiHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ processKey, name, bpmnXml }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!res.ok) {
@@ -92,7 +106,12 @@ export async function saveProcessDef(processKey, name, bpmnXml) {
     throw new Error(`Ошибка сохранения: ${detail}`);
   }
 
-  return res.json();
+  const data = await res.json();
+  // Normalise: assignedKey is always the canonical key (backend guarantees it).
+  return {
+    ...data,
+    assignedKey: data.assignedKey ?? data.processKey,
+  };
 }
 
 /**

@@ -280,11 +280,16 @@ describe("process-defs: POST /api/process-defs — upsert draft", () => {
     expect(body["status"]).toBe("draft");
   });
 
-  it("returns 400 when processKey is missing", async () => {
+  it("auto-assigns key (201) when processKey is omitted — T-0377 (B19)", async () => {
+    // processKey is now OPTIONAL — backend auto-generates slug from name.
     const r = await httpReq("POST", `${base}/api/process-defs`, AUTH_HEADERS, {
       name: "N", bpmnXml: CLEAN_BPMN,
     });
-    expect(r.status).toBe(400);
+    // Must succeed, not 400
+    expect(r.status).toBe(201);
+    const body = r.json as Record<string, unknown>;
+    expect(typeof body["processKey"]).toBe("string");
+    expect(body["assignedKey"]).toBe(body["processKey"]);
   });
 
   it("returns 400 when bpmnXml is missing", async () => {
@@ -467,5 +472,176 @@ describe("process-defs: POST /api/process-defs/:key/publish — success path", (
   it("returns 404 for unknown key", async () => {
     const r = await httpReq("POST", `${base}/api/process-defs/no-such-key/publish`, AUTH_HEADERS);
     expect(r.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0377 (B19): Auto-key assignment — POST /api/process-defs without processKey
+// ---------------------------------------------------------------------------
+
+describe("process-defs T-0377: auto-key assignment when processKey is absent", () => {
+  let server: http.Server;
+  let base: string;
+
+  beforeAll(async () => {
+    const pool = makeMemoryPool(); // empty store
+    const flowable = makeStubFlowableClient({ ok: true, deploymentId: "dep-autokey" });
+    const h = buildServer(pool, flowable);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("assigns a slug-based key when processKey is omitted", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs`, AUTH_HEADERS, {
+      // processKey intentionally absent — T-0377 new-process path
+      name: "Согласование заявки",
+      bpmnXml: CLEAN_BPMN,
+    });
+    expect(r.status).toBe(201);
+    const body = r.json as Record<string, unknown>;
+    // Backend must assign a key from the Cyrillic name
+    expect(typeof body["processKey"]).toBe("string");
+    expect(body["processKey"]).toBeTruthy();
+    // assignedKey must be present and equal processKey
+    expect(body["assignedKey"]).toBe(body["processKey"]);
+    // Slug should be derived from the name (Cyrillic → latin)
+    expect(body["processKey"]).toMatch(/^[a-z0-9-]+$/);
+    expect(body["version"]).toBe(1);
+    expect(body["status"]).toBe("draft");
+  });
+
+  it("assigns a Latin slug for a Latin name when processKey is omitted", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs`, AUTH_HEADERS, {
+      name: "Invoice Approval",
+      bpmnXml: CLEAN_BPMN,
+    });
+    expect(r.status).toBe(201);
+    const body = r.json as Record<string, unknown>;
+    expect(body["processKey"]).toBe("invoice-approval");
+    expect(body["assignedKey"]).toBe("invoice-approval");
+  });
+
+  it("still accepts explicit processKey (backwards-compatible)", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs`, AUTH_HEADERS, {
+      processKey: "explicit-key",
+      name: "Explicit Key Process",
+      bpmnXml: CLEAN_BPMN,
+    });
+    expect(r.status).toBe(201);
+    const body = r.json as Record<string, unknown>;
+    expect(body["processKey"]).toBe("explicit-key");
+    expect(body["assignedKey"]).toBe("explicit-key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0377 (B19): Collision handling — duplicate slug gets a numeric suffix
+// ---------------------------------------------------------------------------
+
+describe("process-defs T-0377: collision-safe slug — suffix on conflict", () => {
+  let server: http.Server;
+  let base: string;
+
+  beforeAll(async () => {
+    // Pre-seed: "invoice-approval" already exists so the second save must get "-2"
+    const pool = makeMemoryPool([
+      {
+        tenant_id: TENANT_ID, id: "eeee-0001-0001-0001-000000000001",
+        process_key: "invoice-approval", name: "Invoice Approval", bpmn_xml: CLEAN_BPMN,
+        version: 1, status: "draft", deployment_id: null,
+        created_at: 1000, updated_at: 1000,
+      },
+    ]);
+    const flowable = makeStubFlowableClient({ ok: true, deploymentId: "dep-coll" });
+    const h = buildServer(pool, flowable);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("appends -2 when base slug is taken", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs`, AUTH_HEADERS, {
+      name: "Invoice Approval",
+      bpmnXml: CLEAN_BPMN,
+    });
+    expect(r.status).toBe(201);
+    const body = r.json as Record<string, unknown>;
+    expect(body["processKey"]).toBe("invoice-approval-2");
+    expect(body["assignedKey"]).toBe("invoice-approval-2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0377 (B19): slugifyProcessName unit — pure function, no HTTP
+// ---------------------------------------------------------------------------
+
+import { slugifyProcessName, generateUniqueProcessKey } from "../core/slugify-process-key.js";
+
+describe("slugifyProcessName (T-0377)", () => {
+  it("converts Cyrillic to latin slug", () => {
+    expect(slugifyProcessName("Согласование заявки")).toBe("soglasovanie-zayavki");
+  });
+
+  it("converts Latin name to dash-slug", () => {
+    expect(slugifyProcessName("Invoice Approval")).toBe("invoice-approval");
+  });
+
+  it("collapses multiple spaces/dashes", () => {
+    // "Приём" → п=p, р=r, и=i, ё=e (maps to 'e' per Cyrillic map), м=m → "priem"
+    // "Заявки" → з=z, а=a, я=ya, в=v, к=k, и=i → "zayavki"
+    expect(slugifyProcessName("Приём  Заявки")).toBe("priem-zayavki");
+  });
+
+  it("strips leading/trailing dashes", () => {
+    expect(slugifyProcessName("  --Test--  ")).toBe("test");
+  });
+
+  it("returns 'process' for empty / whitespace input", () => {
+    expect(slugifyProcessName("")).toBe("process");
+    expect(slugifyProcessName("   ")).toBe("process");
+  });
+
+  it("truncates to 60 chars max", () => {
+    const long = "A".repeat(100);
+    expect(slugifyProcessName(long).length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("generateUniqueProcessKey (T-0377)", () => {
+  it("returns base slug when no collision", async () => {
+    const key = await generateUniqueProcessKey("Договор", async () => false);
+    expect(key).toBe("dogovor");
+  });
+
+  it("appends -2 on first collision", async () => {
+    let calls = 0;
+    const key = await generateUniqueProcessKey("Договор", async () => {
+      calls++;
+      return calls === 1; // first call (base) → taken; second call → free
+    });
+    expect(key).toBe("dogovor-2");
+  });
+
+  it("appends -3 when both base and -2 are taken", async () => {
+    let calls = 0;
+    const key = await generateUniqueProcessKey("Договор", async () => {
+      calls++;
+      return calls <= 2; // base and -2 taken; -3 free
+    });
+    expect(key).toBe("dogovor-3");
+  });
+
+  it("falls back to uuid suffix when 1–10 are all taken", async () => {
+    // Always return true (all taken) for 11 calls, then free
+    let calls = 0;
+    const key = await generateUniqueProcessKey("Договор", async () => {
+      calls++;
+      return calls <= 11;
+    });
+    // Should contain the base slug + a uuid-derived suffix
+    expect(key).toMatch(/^dogovor(-\S+)?$/);
+    expect(key).not.toBe("dogovor"); // must not be plain base
+    expect(key.length).toBeGreaterThan("dogovor".length);
   });
 });
