@@ -32,14 +32,24 @@ async function loginAs(page: Page, id: string): Promise<void> {
 }
 
 test.describe("ТЭЛ deploy-acceptance — fail-honest invariants (NF5 / AC-8)", () => {
-  // The launch affordance MUST be present + enabled. The whole gate exists because
-  // this button was previously hard-`disabled` (spec §1). If it ever regresses to
-  // disabled/absent the gate goes red here — it cannot pass while the product is a
-  // read-only витрина.
+  // The processes screen MUST offer a real write affordance and be enabled (not a
+  // read-only витрина — spec §1). T-0374 removed the generic hardcoded «Запустить
+  // процесс» launcher button (D2 de-hardcoding): processes now start via configured
+  // business entry points (on_create / record_action / launcher / auto). The gate
+  // still asserts that the screen is actionable: the «Новый процесс» button in the
+  // ProcessCatalogSection is always present + enabled and opens the modeler where an
+  // admin can design a launchable process — the prerequisite for any «Запустить
+  // процесс» entry point to exist. If this regresses to disabled/absent the product
+  // is again a read-only витрина and the gate must go red.
   test("launch affordance is present and clickable (else gate is red)", async ({ page }) => {
     await loginAs(page, "e-orlov");
     await page.goto("/processes");
-    const launchBtn = page.getByRole("button", { name: "Запустить процесс" }).first();
+    // «Новый процесс» is the always-present process-creation entry point on the
+    // processes screen (ProcessCatalogSection, T-0323). It is always enabled regardless
+    // of whether any definitions or applications exist yet. A disabled or absent button
+    // means the screen regressed to a read-only state — the very «Запустить процесс»
+    // gap this gate was introduced to catch (spec §1, AC-1).
+    const launchBtn = page.getByRole("button", { name: "Новый процесс" }).first();
     await expect(launchBtn, "launch button must exist").toBeVisible();
     await expect(launchBtn, "launch button must be ENABLED (not the old disabled stub)").toBeEnabled();
   });

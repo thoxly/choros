@@ -116,6 +116,14 @@ export interface InstanceProjection {
    * taskId instead of returning the first-done-wins arbitrary match.
    */
   readonly inboxTaskId: string;
+  /**
+   * T-0414 / T-0356: originating record id when this instance was started by an
+   * on_create trigger. Absent (undefined) for instances started via the explicit
+   * launch affordance (/api/processes/start). Surfaced on the wire so the e2e
+   * acceptance spec can correlate a create=start instance back to the record that
+   * triggered it without a separate query.
+   */
+  readonly recordId?: string;
 }
 
 /** The waiting user-task surfaced to inbox, addressed to a ROLE (not a person). */
@@ -519,6 +527,9 @@ export async function listInstanceProjections(
     const role = strField(payload, "task_role", APPROVER_ROLE);
     const step = strField(payload, "task_step", APPROVE_STEP);
     const done = approvedTaskIds.has(row.id);
+    // T-0414 / T-0356: read originating record_id (present when started via on_create).
+    const rawRecordId = payload["record_id"];
+    const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
     return {
       inst,
       procKey,
@@ -529,6 +540,7 @@ export async function listInstanceProjections(
       // row.id == process.started event id == inbox_task_id (self-referential back-link).
       // Surfaces on the projection so callers can correlate by taskId without a separate lookup.
       inboxTaskId: row.id,
+      ...(recordId !== undefined ? { recordId } : {}),
     };
   });
 }
