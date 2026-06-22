@@ -29,13 +29,76 @@
      <BpmnPropertiesPanel modeler={modelerRef.current?.modeler} />
    ============================================================================ */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { applyExecMarkerToElement } from './bpmn-exec-markers.js';
 import {
   OUTCOME_PRESETS,
   CUSTOM_PRESET_ID,
   defaultOutcomesFor,
 } from './outcome-presets.js';
+import { authHeaders } from '../app-shell/dev-auth.js';
+import { Field, Select } from '../components/components.jsx';
+
+/* --------------------------------------------------------------------------
+   Dev tenant UUID — same constant used throughout the codebase (screen-agents,
+   screen-org, ra-intents). Scopes the tenant-state fetch.
+   -------------------------------------------------------------------------- */
+const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+
+/* --------------------------------------------------------------------------
+   useRoles — loads org roles once (panel lifetime).
+   Returns { roles, loading, error }
+   roles = [{ value: '<uuid>', label: '<slug>' }, ...]  or []
+
+   Mirrors the fetch pattern in screen-agents.jsx:loadPositions:
+     GET /api/org/tenant-state?tenant_id=…  (genesis-owner gated)
+     403 → empty list (honest: dropdown stays unpopulated, description explains)
+   -------------------------------------------------------------------------- */
+function useRoles() {
+  const [roles, setRoles] = useState(null);   // null = not yet fetched
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const fetchedRef = useRef(false);
+
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`,
+          { headers: authHeaders() },
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          // 403 = no owner access → honest empty (not an error)
+          setRoles([]);
+          setLoading(false);
+          return;
+        }
+        const data = await res.json();
+        const list = (data.roles || []).map((r) => ({
+          value: r.id,
+          label: r.slug || r.id,
+        }));
+        setRoles(list);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err?.message || 'Ошибка загрузки ролей');
+          setRoles([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  return { roles: roles || [], loading, error };
+}
 
 /* --------------------------------------------------------------------------
    Step type → executor type mapping (T-0098 spec)
@@ -646,6 +709,14 @@ export default function BpmnPropertiesPanel({ modeler }) {
   // Element name (editable)
   const [elemName, setElemName] = useState('');
 
+  // T-0325: assignment + BYO-LLM — controlled local state, written to moddle on change
+  const [assignedRoleId, setAssignedRoleId] = useState('');
+  const [byoEndpoint, setByoEndpoint] = useState('');
+  const [byoModel, setByoModel] = useState('');
+
+  // T-0325: real org roles from /api/org/tenant-state (fetched once on mount)
+  const { roles, loading: rolesLoading, error: rolesError } = useRoles();
+
   /* ------------------------------------------------------------------
      Subscribe to modeler events once the modeler is available.
      Cleanup on unmount or modeler change.
@@ -661,6 +732,9 @@ export default function BpmnPropertiesPanel({ modeler }) {
         setSelected(null);
         setExecType(null);
         setElemName('');
+        setAssignedRoleId('');
+        setByoEndpoint('');
+        setByoModel('');
         return;
       }
 
@@ -669,12 +743,32 @@ export default function BpmnPropertiesPanel({ modeler }) {
         setSelected(null);
         setExecType(null);
         setElemName('');
+        setAssignedRoleId('');
+        setByoEndpoint('');
+        setByoModel('');
         return;
       }
 
       setSelected({ element: newElement, bo });
       setExecType(effectiveExecType(bo));
       setElemName(bo.name || '');
+      // T-0325: read persisted assignment + BYO-LLM from bo (primary moddle
+      // property first, $attrs fallback for compatibility with imported XML).
+      setAssignedRoleId(
+        bo.assignedRoleId
+          ?? (bo.$attrs && bo.$attrs['choros:assignedRoleId'])
+          ?? '',
+      );
+      setByoEndpoint(
+        bo.byoEndpoint
+          ?? (bo.$attrs && bo.$attrs['choros:byoEndpoint'])
+          ?? '',
+      );
+      setByoModel(
+        bo.byoModel
+          ?? (bo.$attrs && bo.$attrs['choros:byoModel'])
+          ?? '',
+      );
     }
 
     function onElementChanged(event) {
@@ -698,6 +792,22 @@ export default function BpmnPropertiesPanel({ modeler }) {
       eventBus.off('element.changed', onElementChanged);
     };
   }, [modeler]);
+
+  /* ------------------------------------------------------------------
+     Helper: write an attribute to both the registered moddle property
+     (round-trip via saveXML) and the $attrs fallback (importXML compat).
+     ------------------------------------------------------------------ */
+  const writeBoAttr = useCallback((bo, propName, attrName, value) => {
+    if (!bo.$attrs) bo.$attrs = {};
+    if (value) {
+      bo[propName] = value;
+      bo.$attrs[attrName] = value;
+    } else {
+      // Clear: delete both so saveXML omits the attribute
+      delete bo[propName];
+      delete bo.$attrs[attrName];
+    }
+  }, []);
 
   /* ------------------------------------------------------------------
      Handle executor-type dropdown change.
@@ -757,6 +867,43 @@ export default function BpmnPropertiesPanel({ modeler }) {
   );
 
   /* ------------------------------------------------------------------
+     T-0325: Handle assigned role change — persists to moddle extension.
+     ------------------------------------------------------------------ */
+  const handleRoleChange = useCallback(
+    (newRoleId) => {
+      setAssignedRoleId(newRoleId);
+      if (!selected) return;
+      const { bo } = selected;
+      writeBoAttr(bo, 'assignedRoleId', 'choros:assignedRoleId', newRoleId);
+    },
+    [selected, writeBoAttr],
+  );
+
+  /* ------------------------------------------------------------------
+     T-0325: Handle BYO endpoint change — persists to moddle extension.
+     ------------------------------------------------------------------ */
+  const handleByoEndpointChange = useCallback(
+    (val) => {
+      setByoEndpoint(val);
+      if (!selected) return;
+      writeBoAttr(selected.bo, 'byoEndpoint', 'choros:byoEndpoint', val);
+    },
+    [selected, writeBoAttr],
+  );
+
+  /* ------------------------------------------------------------------
+     T-0325: Handle BYO model change — persists to moddle extension.
+     ------------------------------------------------------------------ */
+  const handleByoModelChange = useCallback(
+    (val) => {
+      setByoModel(val);
+      if (!selected) return;
+      writeBoAttr(selected.bo, 'byoModel', 'choros:byoModel', val);
+    },
+    [selected, writeBoAttr],
+  );
+
+  /* ------------------------------------------------------------------
      Render
      ------------------------------------------------------------------ */
   if (!selected) return <EmptyState />;
@@ -772,6 +919,12 @@ export default function BpmnPropertiesPanel({ modeler }) {
   // Choose displayed executor label for header
   const execOption = EXEC_OPTIONS.find((o) => o.value === execType);
   const execLabel = execOption ? execOption.label : typeLabel;
+
+  // T-0325: role select options with sentinel "not assigned" entry
+  const roleOptions = [
+    { value: '', label: '— не назначено —' },
+    ...roles,
+  ];
 
   return (
     <div
@@ -871,48 +1024,63 @@ export default function BpmnPropertiesPanel({ modeler }) {
             )}
           </PanelGroup>
 
-          {/* Agent-specific properties — shown when executor is agent */}
+          {/* T-0325: Agent-specific BYO LLM properties — wired to moddle (persisted) */}
           {isTask && execType === 'agent' && (
             <PanelGroup title="Модель — BYO LLM" defaultOpen>
-              <PPEntry label="Endpoint (BYO)" mono>
-                <div className="bio-properties-panel-textfield">
-                  <input
-                    className="bio-properties-panel-input chs-mono"
-                    placeholder="https://llm.internal/v1"
-                    defaultValue=""
-                  />
-                </div>
+              {/* kit Field: .chs-input / .chs-label / .chs-field — light-theme readable */}
+              <PPEntry>
+                <Field
+                  label="Endpoint (BYO)"
+                  mono
+                  value={byoEndpoint}
+                  placeholder="https://llm.internal/v1"
+                  onChange={(e) => handleByoEndpointChange(e.target.value)}
+                  aria-label="BYO LLM endpoint URL"
+                />
               </PPEntry>
-              <PPEntry label="Модель">
-                <div className="bio-properties-panel-select">
-                  <select defaultValue="">
-                    <option value="">— выбрать —</option>
-                    <option value="qwen2.5-72b">qwen2.5-72b</option>
-                    <option value="llama-3.1-70b">llama-3.1-70b</option>
-                    <option value="gpt-4o">gpt-4o</option>
-                  </select>
-                </div>
+              <PPEntry>
+                {/* Free-text model id so client can BYO any endpoint/model string */}
+                <Field
+                  label="Модель"
+                  value={byoModel}
+                  placeholder="qwen2.5-72b"
+                  onChange={(e) => handleByoModelChange(e.target.value)}
+                  aria-label="BYO LLM model identifier"
+                />
               </PPEntry>
               <PPEntry>
                 <p className="bio-properties-panel-description">
-                  Клиент хостит LLM-эндпоинт самостоятельно (BYO). Бюджет и автономия задаются на уровне агента в Оргструктуре.
+                  Клиент хостит LLM-эндпоинт самостоятельно (BYO). Endpoint и модель сохраняются вместе с процессом. Бюджет и автономия задаются на уровне агента в Оргструктуре.
                 </p>
               </PPEntry>
             </PanelGroup>
           )}
 
-          {/* Executor assignment note */}
+          {/* T-0325: Executor assignment — real org roles from /api/org/tenant-state */}
           {isTask && (
             <PanelGroup title="Назначение" defaultOpen={false}>
-              <PPEntry label="Назначенная роль">
-                <div className="bio-properties-panel-select">
-                  <select defaultValue="">
-                    <option value="">— не назначено —</option>
-                    <option value="r1">Контролёр платежей</option>
-                    <option value="r2">Бухгалтер-оператор</option>
-                    <option value="r3">Владелец процесса</option>
-                  </select>
-                </div>
+              <PPEntry>
+                {/* kit Select: .chs-input.chs-select / .chs-select-wrap / .chs-label */}
+                {rolesLoading ? (
+                  <p className="bio-properties-panel-description">Загрузка ролей…</p>
+                ) : rolesError ? (
+                  <p className="bio-properties-panel-description" style={{ color: 'var(--chs-color-danger)' }}>
+                    Ошибка загрузки ролей
+                  </p>
+                ) : (
+                  <Select
+                    label="Назначенная роль"
+                    options={roleOptions}
+                    value={assignedRoleId}
+                    onChange={(e) => handleRoleChange(e.target.value)}
+                    aria-label="Назначенная роль"
+                    hint={
+                      roles.length === 0
+                        ? 'Роли недоступны — проверьте доступ или создайте их в Оргструктуре'
+                        : undefined
+                    }
+                  />
+                )}
               </PPEntry>
               <PPEntry>
                 <p className="bio-properties-panel-description">
