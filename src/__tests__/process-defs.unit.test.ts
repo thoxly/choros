@@ -256,18 +256,27 @@ describe("process-defs routes (unit, no DB)", () => {
   // -------------------------------------------------------------------------
 
   describe("POST /api/process-defs", () => {
-    it("400 if processKey missing", async () => {
-      const pool = makePool(async () => ({ rows: [] }));
+    it("T-0377 (B19): auto-assigns key (201) when processKey is omitted", async () => {
+      // processKey is now optional — backend generates a slug from name.
+      const pool = makePool(async (sql) => {
+        if (/BEGIN|COMMIT|ROLLBACK/.test(sql)) return { rows: [] };
+        if (/SET LOCAL/.test(sql)) return { rows: [] };
+        if (/ORDER BY version DESC.*LIMIT 1/.test(sql)) return { rows: [] }; // no collision
+        if (/INSERT/.test(sql)) return { rows: [] };
+        return { rows: [] };
+      });
       registerProcessDefsRoutes(router as any, pool as any, flowable);
       const route = router.find("POST", "/api/process-defs");
       expect(route).not.toBeNull();
 
-      const req = makeReq({ body: JSON.stringify({ name: "N", bpmnXml: "<x/>" }) });
+      const req = makeReq({ body: JSON.stringify({ name: "Invoice Approval", bpmnXml: "<x/>" }) });
       const res = makeRes();
 
-      await expect(
-        route!.handler(req as any, res as any, {}),
-      ).rejects.toMatchObject({ statusCode: 400 });
+      await route!.handler(req as any, res as any, {});
+      expect(res.statusCode).toBe(201);
+      // Slug derived from name: "Invoice Approval" → "invoice-approval"
+      expect(res.json.processKey).toBe("invoice-approval");
+      expect(res.json.assignedKey).toBe("invoice-approval");
     });
 
     it("201 with id/version on valid body (first insert → version=1)", async () => {
