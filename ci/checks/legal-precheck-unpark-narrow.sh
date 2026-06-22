@@ -22,7 +22,15 @@ ERRORS=0
 
 # Files/paths that are ALLOWED to reference agent_instruction (authoring + allowlist).
 # Tests and the runtime legal-precheck path are allowed.
-ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|src/http/artifacts\.ts|src/runtime/legal-precheck/|__tests__|\.test\.ts'
+# T-0378 [D4] (ADDITIVE, founder-class sanction): src/runtime/agent-dispatch/ is the
+# PD-2 agent-dispatcher runtime path — the second sanctioned runtime reader of the
+# PUBLISHED agent instruction (via the SAME authoring DAO readPublished, single
+# reader). This is catalog-bound (a named runtime dir) + purely additive (a path is
+# ADDED; nothing removed/weakened — the negative self-test still detects src/worker/
+# violations, and the dormant-gate FF-COMP-6 is UNAFFECTED). It mirrors the original
+# legal-precheck unpark: a domain-neutral motor needs the agent's published competence
+# text to form its objective, exactly as legal_precheck does.
+ALLOWED_RE='src/db/agent-instruction-store\.ts|src/core/agent-instruction\.ts|src/http/artifacts\.ts|src/runtime/legal-precheck/|src/runtime/agent-dispatch/|__tests__|\.test\.ts'
 
 if [[ "${1:-}" == "--self-test" ]]; then
   # Negative self-test: a hit in src/worker/ must be detected as a violation.
