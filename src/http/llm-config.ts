@@ -30,7 +30,10 @@ import { SEED_ORACLE } from "./seed-ancestry.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
-import { saveTenantLlmEndpointModel } from "../db/agent-card-llm.js";
+import {
+  readPrimaryAgentLlmConfig,
+  updateAgentLlmEndpointModel,
+} from "../db/agent-provision.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,11 +156,6 @@ async function appendAudit(
 // DB helpers
 // ---------------------------------------------------------------------------
 
-// The secret handle column name is split to avoid literal-string grep scans.
-// This file is the same custody class as src/http/agents-list.ts (FF-25-3
-// allow-set). The handle is never returned to clients (only secret_bound:bool).
-const SEC_HANDLE_COL = "llm_" + "secret_handle";
-
 interface AgentCardRow {
   employee_id: string;
   slug: string;
@@ -172,34 +170,24 @@ interface AgentCardRow {
  * Priority: slug = 'assistant-agent' first, then first agent row by slug.
  * Returns null if no agent_card rows exist for the tenant.
  *
- * Security: the secret handle is collapsed to a boolean in SQL — the raw value
- * never travels to TypeScript (same pattern as agents-list.ts::serializeAgent).
+ * Security (T-0382 MAJOR-3): the secret-handle column is read EXCLUSIVELY via
+ * the allow-listed custody DAO (readPrimaryAgentLlmConfig in agent-provision.ts).
+ * This file never names the column — the raw opaque handle is collapsed here to
+ * a boolean `secret_bound` (handle IS NOT NULL) and never reaches a response.
  */
 async function findPrimaryAgent(
   client: pg.PoolClient,
-  tenantId: string,
 ): Promise<AgentCardRow | null> {
-  // SQL selects a boolean `secret_bound` (handle IS NOT NULL) rather than the
-  // raw handle value. The raw column is referenced only via the runtime string
-  // SEC_HANDLE_COL so the literal does not appear verbatim here.
-  const q = [
-    `SELECT ac.employee_id,`,
-    `       e.slug,`,
-    `       ac.llm_endpoint,`,
-    `       ac.llm_model,`,
-    `       (ac.${SEC_HANDLE_COL} IS NOT NULL) AS secret_bound`,
-    `  FROM choros.agent_card ac`,
-    `  JOIN choros.employee e`,
-    `       ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id`,
-    ` WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid`,
-    ` ORDER BY CASE WHEN e.slug = 'assistant-agent' THEN 0 ELSE 1 END, e.slug`,
-    ` LIMIT 1`,
-  ].join(" ");
-
-  // tenantId is used via SET LOCAL choros.tenant_id (RLS), not as a parameter.
-  void tenantId;
-  const { rows } = await client.query<AgentCardRow>(q);
-  return rows[0] ?? null;
+  const row = await readPrimaryAgentLlmConfig(client as unknown as PgClientLike);
+  if (!row) return null;
+  return {
+    employee_id: row.employee_id,
+    slug: row.slug,
+    llm_endpoint: row.llm_endpoint,
+    llm_model: row.llm_model,
+    // Collapse the opaque handle to a boolean — the raw value never travels on.
+    secret_bound: row.secret_handle_ref !== null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -227,9 +215,15 @@ async function handleGetLlmConfig(
 ): Promise<void> {
   const actor = extractActor(req);
   const tenantId = await resolveActorTenant(actor);
+  const nowMs = Date.now();
+
+  // MINOR (T-0382): admin-gate GET to match the PUT route — the LLM connection
+  // config (provider/endpoint/model + bound-state) is management-tier metadata,
+  // not general-read. Same predicate as PUT (genesis-owner OR mgmt_object:agent/update).
+  const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
 
   const result = await withTenantTx(pool, tenantId, async (client) => {
-    const row = await findPrimaryAgent(client, tenantId);
+    const row = await findPrimaryAgent(client);
     if (!row) {
       return {
         agent_id: null,
@@ -239,12 +233,16 @@ async function handleGetLlmConfig(
         secret_bound: false,
       };
     }
+    const orgScope = await loadAgentOrgScope(client, row.employee_id, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, orgScope)) {
+      throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
+    }
     return {
       agent_id: row.employee_id,
       agent_slug: row.slug,
       llm_endpoint: row.llm_endpoint,
       llm_model: row.llm_model,
-      // secret_bound is computed in SQL as (handle IS NOT NULL) — raw value never travels here.
+      // secret_bound is computed from (handle IS NOT NULL) — raw value never travels here.
       secret_bound: row.secret_bound,
     };
   });
@@ -298,11 +296,21 @@ async function handlePutLlmConfig(
     throw new HttpError(400, "VALIDATION", "llm_model must not be empty");
   }
 
-  // Basic URL shape check for endpoint (not secret — just format validation).
+  // Endpoint URL + scheme policy. The endpoint receives the resolved LLM key as
+  // an Authorization: Bearer header, so it MUST be https — an http:// endpoint
+  // would ship the bearer over plaintext (T-0382 BLOCKER-1 hardening).
+  let parsedEndpoint: URL;
   try {
-    new URL(llmEndpoint);
+    parsedEndpoint = new URL(llmEndpoint);
   } catch {
     throw new HttpError(400, "VALIDATION", "llm_endpoint must be a valid URL");
+  }
+  if (parsedEndpoint.protocol !== "https:") {
+    throw new HttpError(
+      400,
+      "VALIDATION",
+      "llm_endpoint must use https (the LLM key is sent as a bearer token)",
+    );
   }
 
   const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
@@ -310,7 +318,7 @@ async function handlePutLlmConfig(
   let agentId: string | null = null;
 
   await withTenantTx(pool, tenantId, async (client) => {
-    const row = await findPrimaryAgent(client, tenantId);
+    const row = await findPrimaryAgent(client);
     if (!row) {
       throw new HttpError(
         404,
@@ -325,12 +333,15 @@ async function handlePutLlmConfig(
       throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
     }
 
-    const updated = await saveTenantLlmEndpointModel(
-      pool,
-      tenantId,
+    // BLOCKER-2 (T-0382): the UPDATE runs on connection A (this client) INSIDE
+    // the outer withTenantTx, so the audit append below and the endpoint/model
+    // write commit/rollback ATOMICALLY together.
+    const updated = await updateAgentLlmEndpointModel(
+      client as unknown as PgClientLike,
       row.employee_id,
       llmEndpoint,
       llmModel,
+      nowMs,
     );
     if (!updated) {
       throw new HttpError(404, "AGENT_NOT_FOUND", "agent card not found");
