@@ -1,5 +1,6 @@
 /**
  * src/http/rights-sod-admin.ts — T-0386 [D6]: SoD constraint CRUD write API
+ *                                 T-0409 [D6-FU]: audit-chain hardening
  *
  * Registers the write-surface for SoD constraint authoring:
  *   POST   /api/rights/sod-rules          — create a new sod_constraint row
@@ -10,11 +11,11 @@
  *   1. Authenticate via withAuth (Keycloak JWT or x-dev-user header).
  *   2. Resolve actor → tenant via resolveActorTenant.
  *   3. Gate on isGenesisOwner (loadAdminContext) — the same owner gate that
- *      guards org-write endpoints (seed-write.ts). SoD constraint authoring is a
- *      tenant-level structural write, not a scoped-admin mgmt_object action.
- *      A non-owner actor receives 403 NOT_OWNER.
- *   4. Execute the CRUD operation via sod-dao.ts helpers (RLS-scoped to the
- *      actor's own tenant; tenant_id is NEVER trusted from the request body).
+ *      guards org-write endpoints (seed-write.ts). Authz decision: owner-only.
+ *      See docs/design/T-0409-sod-authz.md for rationale.
+ *   4. Execute the CRUD operation + audit_event append in ONE atomic transaction
+ *      (T-0409: the sod_constraint write and the hash-chained audit_event row
+ *      are COMMITTED together so a rollback never leaves a mute mutation).
  *
  * Response shapes:
  *   POST  201  { id: string }
@@ -47,13 +48,17 @@ import {
   loadAdminContext,
 } from "../db/org.js";
 import {
-  createSodConstraint,
-  updateSodConstraint,
-  deleteSodConstraint,
+  createSodConstraintInTx,
+  updateSodConstraintInTx,
+  deleteSodConstraintInTx,
   SodValidationError,
   type CreateSodConstraintInput,
   type UpdateSodConstraintInput,
 } from "../db/sod-dao.js";
+import {
+  encodeSodMutationAuditEvent,
+} from "../core/audit-grant-encoder.js";
+import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
@@ -67,6 +72,39 @@ const UUID_RE =
 function assertUuidParam(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical audit writer — single write path for all SoD mutation events.
+// Mirrors the grantAuditWriter in grants.ts (T-0068 FF-11: single write path).
+// ---------------------------------------------------------------------------
+
+const sodAuditWriter = makePgAuditWriter();
+
+// ---------------------------------------------------------------------------
+// withTenantTx — tenant-scoped transaction (mirrors grants.ts pattern)
+// ---------------------------------------------------------------------------
+
+async function withTenantTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  assertUuidParam(tenantId, "tenantId");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -108,6 +146,8 @@ async function extractActorFromReq(
 
 // ---------------------------------------------------------------------------
 // Authz gate — isGenesisOwner (mirrors seed-write.ts org-write pattern)
+// See docs/design/T-0409-sod-authz.md for the rationale (owner-only vs
+// scoped-admin alignment decision).
 // ---------------------------------------------------------------------------
 
 async function requireGenesisOwner(
@@ -230,9 +270,31 @@ export function registerSodAdminRoutes(router: Router, pool: pg.Pool): void {
         throw new HttpError(400, "VALIDATION", String(err));
       }
 
+      // Atomic: INSERT sod_constraint + audit_event in one transaction.
       let id: string;
       try {
-        id = await createSodConstraint(pool, tenantId, input);
+        id = await withTenantTx(pool, tenantId, async (client) => {
+          const newId = await createSodConstraintInTx(client, tenantId, input);
+          const nowMs = Date.now();
+          await sodAuditWriter.appendAuditEvent(
+            client as unknown as PgClientLike,
+            encodeSodMutationAuditEvent(
+              {
+                kind: "sod.create",
+                actor: actorId,
+                constraintId: newId,
+                constraintKind: input.kind,
+                payload: {
+                  roleA: input.roleA ?? null,
+                  roleB: input.roleB ?? null,
+                  selfRecord: input.selfRecord ?? false,
+                },
+              },
+              nowMs,
+            ),
+          );
+          return newId;
+        });
       } catch (err) {
         if (err instanceof SodValidationError) {
           throw new HttpError(400, "VALIDATION", err.message);
@@ -270,9 +332,34 @@ export function registerSodAdminRoutes(router: Router, pool: pg.Pool): void {
         throw new HttpError(400, "VALIDATION", String(err));
       }
 
+      // Atomic: UPDATE sod_constraint + audit_event in one transaction.
       let found: boolean;
       try {
-        found = await updateSodConstraint(pool, tenantId, constraintId, input);
+        const result = await withTenantTx(pool, tenantId, async (client) => {
+          const updateResult = await updateSodConstraintInTx(
+            client,
+            tenantId,
+            constraintId,
+            input,
+          );
+          if (!updateResult.found) return { found: false };
+          const nowMs = Date.now();
+          await sodAuditWriter.appendAuditEvent(
+            client as unknown as PgClientLike,
+            encodeSodMutationAuditEvent(
+              {
+                kind: "sod.update",
+                actor: actorId,
+                constraintId,
+                constraintKind: updateResult.kind,
+                payload: input as Record<string, unknown>,
+              },
+              nowMs,
+            ),
+          );
+          return { found: true };
+        });
+        found = result.found;
       } catch (err) {
         if (err instanceof SodValidationError) {
           throw new HttpError(400, "VALIDATION", err.message);
@@ -308,8 +395,31 @@ export function registerSodAdminRoutes(router: Router, pool: pg.Pool): void {
       const tenantId = await resolveActorTenant(pool, actorId);
       await requireGenesisOwner(pool, tenantId, actorId);
 
-      const found = await deleteSodConstraint(pool, tenantId, constraintId);
-      if (!found) {
+      // Atomic: DELETE sod_constraint + audit_event in one transaction.
+      const result = await withTenantTx(pool, tenantId, async (client) => {
+        const deleteResult = await deleteSodConstraintInTx(
+          client,
+          tenantId,
+          constraintId,
+        );
+        if (!deleteResult.found) return { found: false };
+        const nowMs = Date.now();
+        await sodAuditWriter.appendAuditEvent(
+          client as unknown as PgClientLike,
+          encodeSodMutationAuditEvent(
+            {
+              kind: "sod.delete",
+              actor: actorId,
+              constraintId,
+              constraintKind: deleteResult.kind,
+            },
+            nowMs,
+          ),
+        );
+        return { found: true };
+      });
+
+      if (!result.found) {
         throw new HttpError(
           404,
           "NOT_FOUND",

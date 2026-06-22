@@ -378,6 +378,16 @@ export class PgSodSource implements SodSource {
   async effectiveAssignmentsOf(
     principal: string,
   ): Promise<EffectiveAssignment[]> {
+    // ⚠️ LATENT-TRAP GUARD (T-0409): `principal` MUST be an employee SLUG
+    // (e.g. "e-orlov"), NOT a bare UUID id.
+    //
+    // The DAO resolves principal → employee.id via
+    //   SELECT id FROM choros.employee WHERE slug = $2
+    // A UUID passed here will silently return [] (no employee has slug == UUID),
+    // bypassing every SoD constraint. The call-site in grant-resolver.ts passes
+    // `actorEventPrincipal({ actor, onBehalfOf })` which is the employee slug
+    // from guardCtx — correct. When wiring PgSodSource into a new call-site,
+    // ALWAYS verify that the value passed is guardian.actor (slug), not guardian.id.
     const nowMs = this.nowMs();
     return withTenantTx(this.pool, this.tenantId, async (client) => {
       // Resolve employee id: principal is an employee slug.
@@ -647,4 +657,155 @@ export class SodValidationError extends Error {
     this.name = "SodValidationError";
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+// ---------------------------------------------------------------------------
+// In-transaction variants — for callers that wrap CRUD + audit in ONE outer tx.
+//
+// These accept an open pg.PoolClient (already inside BEGIN + SET LOCAL) and do
+// NOT open their own transaction. The caller is responsible for COMMIT/ROLLBACK.
+// Used by rights-sod-admin.ts so that the sod_constraint write and the
+// audit_event append are atomically committed (ADR §2.4 — audit atomicity).
+// ---------------------------------------------------------------------------
+
+/** Minimal pg client surface accepted by the in-transaction helpers (subset of pg.PoolClient). */
+export interface SodTxClient {
+  query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; rowCount?: number | null }>;
+}
+
+/**
+ * createSodConstraintInTx — INSERT a sod_constraint row inside an existing
+ * transaction. Returns the generated UUID.
+ *
+ * Throws SodValidationError if the static-shape invariant is violated.
+ * The caller must have set `SET LOCAL choros.tenant_id` before calling.
+ */
+export async function createSodConstraintInTx(
+  client: SodTxClient,
+  tenantId: string,
+  input: CreateSodConstraintInput,
+): Promise<string> {
+  // Mirror the DB CHECK: static requires role_a AND role_b non-null.
+  if (input.kind === "static" && (input.roleA == null || input.roleB == null)) {
+    throw new SodValidationError(
+      "static SoD constraint requires both roleA and roleB (incompatible role pair)",
+    );
+  }
+  if (input.roleA != null) assertUuid(input.roleA, "roleA");
+  if (input.roleB != null) assertUuid(input.roleB, "roleB");
+
+  const id = randomUUID();
+  const createdAt = Date.now();
+
+  await client.query(
+    `INSERT INTO choros.sod_constraint
+       (tenant_id, id, kind, role_a, role_b, self_record, scope, detail, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      tenantId,
+      id,
+      input.kind,
+      input.roleA ?? null,
+      input.roleB ?? null,
+      input.selfRecord ?? false,
+      JSON.stringify(input.scope),
+      input.detail ? JSON.stringify(input.detail) : null,
+      createdAt,
+    ],
+  );
+
+  return id;
+}
+
+/**
+ * updateSodConstraintInTx — partial UPDATE of a sod_constraint row inside an
+ * existing transaction. Returns false if the row was not found, true otherwise.
+ *
+ * Throws SodValidationError if the merged row would violate the static-shape.
+ * The caller must have set `SET LOCAL choros.tenant_id` before calling.
+ */
+export async function updateSodConstraintInTx(
+  client: SodTxClient,
+  tenantId: string,
+  constraintId: string,
+  input: UpdateSodConstraintInput,
+): Promise<{ found: boolean; kind: "static" | "dynamic" }> {
+  if (input.roleA != null) assertUuid(input.roleA, "roleA");
+  if (input.roleB != null) assertUuid(input.roleB, "roleB");
+
+  // Load + lock current row.
+  const { rows } = await client.query(
+    `SELECT kind, role_a, role_b
+       FROM choros.sod_constraint
+      WHERE tenant_id = $1 AND id = $2
+      FOR UPDATE`,
+    [tenantId, constraintId],
+  ) as { rows: Array<{ kind: string; role_a: string | null; role_b: string | null }> };
+
+  if (rows.length === 0) return { found: false, kind: "static" };
+
+  const current = rows[0]!;
+  const mergedRoleA = "roleA" in input ? (input.roleA ?? null) : current.role_a;
+  const mergedRoleB = "roleB" in input ? (input.roleB ?? null) : current.role_b;
+
+  if (current.kind === "static" && (mergedRoleA == null || mergedRoleB == null)) {
+    throw new SodValidationError(
+      "static SoD constraint requires both roleA and roleB",
+    );
+  }
+
+  // Build SET clause for provided fields only.
+  const setClauses: string[] = [];
+  const params: unknown[] = [tenantId, constraintId];
+
+  function addField(col: string, val: unknown): void {
+    params.push(val);
+    setClauses.push(`${col} = $${params.length}`);
+  }
+
+  if ("roleA" in input) addField("role_a", input.roleA ?? null);
+  if ("roleB" in input) addField("role_b", input.roleB ?? null);
+  if ("selfRecord" in input) addField("self_record", input.selfRecord);
+  if ("scope" in input && input.scope !== undefined)
+    addField("scope", JSON.stringify(input.scope));
+  if ("detail" in input)
+    addField(
+      "detail",
+      input.detail != null ? JSON.stringify(input.detail) : null,
+    );
+
+  if (setClauses.length > 0) {
+    await client.query(
+      `UPDATE choros.sod_constraint
+          SET ${setClauses.join(", ")}
+        WHERE tenant_id = $1 AND id = $2`,
+      params,
+    );
+  }
+
+  return { found: true, kind: current.kind as "static" | "dynamic" };
+}
+
+/**
+ * deleteSodConstraintInTx — hard-DELETE a sod_constraint row inside an
+ * existing transaction. Returns false if the row was not found.
+ *
+ * The caller must have set `SET LOCAL choros.tenant_id` before calling.
+ * Also returns the constraint kind so the caller can embed it in the audit event.
+ */
+export async function deleteSodConstraintInTx(
+  client: SodTxClient,
+  tenantId: string,
+  constraintId: string,
+): Promise<{ found: boolean; kind: "static" | "dynamic" }> {
+  // Fetch kind before deletion so we can carry it in the audit payload.
+  const { rows } = await client.query(
+    `DELETE FROM choros.sod_constraint
+      WHERE tenant_id = $1 AND id = $2
+      RETURNING kind`,
+    [tenantId, constraintId],
+  ) as { rows: Array<{ kind: string }>; rowCount?: number | null };
+
+  if (rows.length === 0) return { found: false, kind: "static" };
+  return { found: true, kind: rows[0]!.kind as "static" | "dynamic" };
 }

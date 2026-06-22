@@ -131,6 +131,58 @@ export function encodeAssignmentAuditEvent(
 }
 
 // ---------------------------------------------------------------------------
+// SodMutationAuditEvent — shape for SoD constraint write events (T-0409).
+//
+// Emitted by src/http/rights-sod-admin.ts on every create/update/delete of a
+// sod_constraint row. The audit trail must capture who/what/when for every
+// structural change to a compliance-critical control (SoD).
+//
+// subject: the sod_constraint id (the row being created/updated/deleted).
+// payload: the full mutation context so a verifier can reconstruct the change.
+// ---------------------------------------------------------------------------
+
+export type SodMutationAuditEvent = {
+  kind: "sod.create" | "sod.update" | "sod.delete";
+  actor: string;            // authenticated employee slug
+  constraintId: string;     // sod_constraint.id (subject)
+  constraintKind: "static" | "dynamic";
+  payload?: Record<string, unknown>; // mutation context (partial update fields, etc.)
+};
+
+// ---------------------------------------------------------------------------
+// encodeSodMutationAuditEvent — pure encoder for SoD constraint mutation events.
+//
+// Parameters:
+//   e          — the SodMutationAuditEvent shape
+//   nowMs      — epoch-ms timestamp supplied by caller (Date.now() at call site)
+//   idOverride — optional deterministic UUID for tests; omit in production
+//
+// Returns an AuditEventInput ready to pass verbatim to appendAuditEvent(tx, input).
+// ---------------------------------------------------------------------------
+
+export function encodeSodMutationAuditEvent(
+  e: SodMutationAuditEvent,
+  nowMs: number,
+  idOverride?: string,
+): AuditEventInput {
+  return {
+    id: idOverride ?? randomUUID(),
+    type: e.kind,
+    actor: e.actor,
+    subject: e.constraintId,
+    scope: null,
+    via: null,
+    proposed_by: null,
+    confirmed_by: null,
+    payload: {
+      constraintKind: e.constraintKind,
+      ...(e.payload ?? {}),
+    },
+    occurred_at: nowMs,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // InvokeAuditEvent — shape for invoke request/command audit events (T-0024).
 // Exported so src/http/invoke.ts can pass the correct shape to
 // encodeInvokeAuditEvent.
