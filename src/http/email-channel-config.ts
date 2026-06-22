@@ -27,7 +27,8 @@
 
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { loadAdminContext } from "../db/org.js";
 import type { Operation } from "../core/grant-lattice.js";
@@ -216,7 +217,27 @@ function txEmailConfigStore(client: pg.PoolClient): EmailConfigWritePort {
 // Actor extraction
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+// T-0420 [SECURITY] P1: mode-aware caller identity (mirrors binding.ts::extractActorSlug
+// and the T-0418 P0 process-defs::extractActor). email-channel-config is an SPA
+// tenant-admin surface gated by a real PDP check (loadAdminContext / mgmt_object:email_config).
+// The routes are now withAuth-wrapped (Bearer validated + getAuthContext populated BEFORE
+// this runs), so the identity feeding that PDP gate is the VALIDATED token in keycloak mode,
+// not an unauthenticated x-dev-user header.
+//   - keycloak: identity from the validated token (sub/preferred_username → employee.slug);
+//     null → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+//   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -274,8 +295,10 @@ export function registerEmailChannelConfigRoutes(
   // -------------------------------------------------------------------------
   // GET /api/email-channel-config — status view (handle REDACTED)
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/email-channel-config", async (req, res) => {
-    const actorId = extractActor(req);
+  // T-0420 [SECURITY] P1: withAuth-wrapped — keycloak mode REQUIRES a valid Bearer
+  // (401 otherwise; no x-dev-user bypass); dev mode is a no-op pass-through.
+  router.register("GET", "/api/email-channel-config", withAuth(async (req, res) => {
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     // PDP gate: mgmt_object:email_config / read (FF-PREF-AUTHZ pattern).
@@ -292,13 +315,14 @@ export function registerEmailChannelConfigRoutes(
     res.setHeader("Content-Type", "application/json");
     // status.handleRedacted is the redacted form; raw smtp_handle is never serialized.
     res.end(JSON.stringify({ config: status }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // PUT /api/email-channel-config — set/update (RL-3 shape-guard + audit)
   // -------------------------------------------------------------------------
-  router.register("PUT", "/api/email-channel-config", async (req, res) => {
-    const actorId = extractActor(req);
+  // T-0420 [SECURITY] P1: withAuth-wrapped write — keycloak REQUIRES a valid Bearer.
+  router.register("PUT", "/api/email-channel-config", withAuth(async (req, res) => {
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     const gate = await deps.checkAdminGrant(pool, tenantId, actorId, "update", Date.now());
@@ -330,13 +354,14 @@ export function registerEmailChannelConfigRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // DELETE /api/email-channel-config — revoke + audit
   // -------------------------------------------------------------------------
-  router.register("DELETE", "/api/email-channel-config", async (req, res) => {
-    const actorId = extractActor(req);
+  // T-0420 [SECURITY] P1: withAuth-wrapped write — keycloak REQUIRES a valid Bearer.
+  router.register("DELETE", "/api/email-channel-config", withAuth(async (req, res) => {
+    const actorId = await extractActor(req, pool);
     const tenantId = DEV_TENANT_ID;
 
     const gate = await deps.checkAdminGrant(pool, tenantId, actorId, "update", Date.now());
@@ -365,5 +390,5 @@ export function registerEmailChannelConfigRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ ok: true }));
-  });
+  }));
 }

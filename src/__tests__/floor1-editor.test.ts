@@ -41,10 +41,12 @@
  * No DATABASE_URL, no network.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "node:http";
+import * as crypto from "node:crypto";
 import { AddressInfo } from "node:net";
 import type pg from "pg";
+import { _resetJwksCache } from "../http/auth.js";
 import {
   applyFloor1Edit,
   validateFloor1Request,
@@ -713,7 +715,8 @@ async function postEdit(
   pk: string,
   fk: string,
   body: unknown,
-  devUser = "alice",
+  devUser: string | undefined = "alice",
+  bearer?: string,
 ): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -727,6 +730,7 @@ async function postEdit(
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(payload),
           ...(devUser ? { "x-dev-user": devUser } : {}),
+          ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
         },
       },
       (res) => {
@@ -929,12 +933,123 @@ function makeStubPool(roleCount: number): pg.Pool {
       if (typeof text === "string" && text.includes("role_assignment")) {
         return { rows: [{ cnt: roleCount }] };
       }
+      // T-0420: resolveActorSlugFromAuth existence check (keycloak identity path).
+      // Resolve the token's sub to a real human employee so the wrapped route
+      // reaches authorizeEditor (then checkRole decides 403/200).
+      if (typeof text === "string" && text.includes("FROM choros.employee")) {
+        return { rows: [{ exists: true }] };
+      }
       return { rows: [] };
     },
     release: () => {},
   };
   return { connect: async () => client } as unknown as pg.Pool;
 }
+
+// ---------------------------------------------------------------------------
+// T-0420: keycloak-mode JWT/JWKS harness (mirrors workerAuth.test.ts).
+//
+// After T-0420 the floor1-editor route is withAuth-wrapped: in keycloak mode it
+// REQUIRES a valid Bearer (the x-dev-user-only path is the closed bypass). So the
+// AC-27/AC-28/503 keycloak tests must present a real signed token. We stand up a
+// local JWKS server + RSA keypair so verifyJwt validates the token offline — no
+// live Keycloak. The token's sub resolves to a human employee via the stub pool
+// (employeeSlugExists → true), then checkRole decides 403/200.
+// ---------------------------------------------------------------------------
+
+const KID = "floor1-test-key-1";
+let kcPrivateKey: crypto.KeyObject;
+let kcPublicJwk: crypto.JsonWebKey & { kid: string; alg: string; use: string };
+let jwksServer: http.Server;
+let jwksPort: number;
+const savedAuthEnv: Record<string, string | undefined> = {};
+
+function base64urlJson(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj))
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+}
+
+/** Sign a Bearer JWT whose sub resolves to a human employee (stub pool). */
+function bearerToken(sub = "e-designer"): string {
+  const claims = {
+    iss: `http://127.0.0.1:${jwksPort}/realms/choros`,
+    aud: "choros-api",
+    exp: Math.floor(Date.now() / 1000) + 300,
+    sub,
+    preferred_username: sub,
+    actor_type: "human",
+  };
+  const header = base64urlJson({ alg: "RS256", kid: KID, typ: "JWT" });
+  const payload = base64urlJson(claims);
+  const signingInput = `${header}.${payload}`;
+  const sig = crypto
+    .sign("RSA-SHA256", Buffer.from(signingInput, "utf8"), kcPrivateKey)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=/g, "");
+  return `${signingInput}.${sig}`;
+}
+
+beforeAll(async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  kcPrivateKey = privateKey;
+  kcPublicJwk = {
+    ...publicKey.export({ format: "jwk" }),
+    kid: KID,
+    alg: "RS256",
+    use: "sig",
+  };
+
+  await new Promise<void>((resolve) => {
+    jwksServer = http.createServer((req, res) => {
+      if (req.url === "/realms/choros/.well-known/openid-configuration") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            issuer: `http://127.0.0.1:${jwksPort}/realms/choros`,
+            jwks_uri: `http://127.0.0.1:${jwksPort}/realms/choros/protocol/openid-connect/certs`,
+          }),
+        );
+      } else if (req.url === "/realms/choros/protocol/openid-connect/certs") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ keys: [kcPublicJwk] }));
+      } else {
+        res.statusCode = 404;
+        res.end();
+      }
+    });
+    jwksServer.listen(0, "127.0.0.1", () => {
+      jwksPort = (jwksServer.address() as AddressInfo).port;
+      resolve();
+    });
+  });
+
+  for (const k of ["KEYCLOAK_URL", "KEYCLOAK_REALM", "KEYCLOAK_AUDIENCE", "KC_ISSUER"]) {
+    savedAuthEnv[k] = process.env[k];
+  }
+  process.env["KEYCLOAK_URL"] = `http://127.0.0.1:${jwksPort}`;
+  process.env["KEYCLOAK_REALM"] = "choros";
+  process.env["KEYCLOAK_AUDIENCE"] = "choros-api";
+  delete process.env["KC_ISSUER"];
+  _resetJwksCache();
+});
+
+afterAll(async () => {
+  for (const [k, v] of Object.entries(savedAuthEnv)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  _resetJwksCache();
+  await new Promise<void>((resolve) => jwksServer.close(() => resolve()));
+});
 
 async function withKeycloakMode<T>(fn: () => Promise<T>): Promise<T> {
   const prev = process.env["CHOROS_AUTH_MODE"];
@@ -961,12 +1076,16 @@ describe("HTTP AC-27 — keycloak mode, actor without process_designer → 403 F
     await withKeycloakMode(async () => {
       const { port, close } = await startTestServer(makeStubPool(0));
       try {
+        // T-0420: identity from the validated Bearer (no x-dev-user) — the actor
+        // resolves to a human employee but lacks the process_designer role → 403.
         const resp = await postEdit(
           port,
           DEV_TENANT_ID,
           "purchase-approval",
           "purchase-form",
           VALID_EDIT_BODY,
+          undefined,
+          bearerToken(),
         );
         expect(resp.status).toBe(403);
         expect((resp.body as { error: { code: string } }).error.code).toBe("FORBIDDEN");
@@ -980,12 +1099,16 @@ describe("HTTP AC-27 — keycloak mode, actor without process_designer → 403 F
     await withKeycloakMode(async () => {
       const { port, close } = await startTestServer(null);
       try {
+        // T-0420: Bearer validated by withAuth, but identity resolution needs a
+        // pool in keycloak mode — absent → fail-closed 503 (no x-dev-user fallthrough).
         const resp = await postEdit(
           port,
           DEV_TENANT_ID,
           "purchase-approval",
           "purchase-form",
           VALID_EDIT_BODY,
+          undefined,
+          bearerToken(),
         );
         expect(resp.status).toBe(503);
       } finally {
@@ -1000,16 +1123,39 @@ describe("HTTP AC-28 — keycloak mode, actor with process_designer → 200 (all
     await withKeycloakMode(async () => {
       const { port, close } = await startTestServer(makeStubPool(1));
       try {
+        // T-0420: identity from the validated Bearer (no x-dev-user); the actor
+        // resolves to a human employee WITH the process_designer role → 200.
         const resp = await postEdit(
           port,
           DEV_TENANT_ID,
           "purchase-approval",
           "purchase-form",
           VALID_EDIT_BODY,
+          undefined,
+          bearerToken(),
         );
         expect(resp.status).toBe(200);
         const body = resp.body as { fields: BindingField[] };
         expect(body.fields.find((f) => f.key === "supplier")?.label).toBe("Поставщик");
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  it("T-0420: keycloak mode — x-dev-user without Bearer → 401 (bypass dead)", async () => {
+    await withKeycloakMode(async () => {
+      const { port, close } = await startTestServer(makeStubPool(1));
+      try {
+        const resp = await postEdit(
+          port,
+          DEV_TENANT_ID,
+          "purchase-approval",
+          "purchase-form",
+          VALID_EDIT_BODY,
+          "alice", // x-dev-user present, NO Bearer
+        );
+        expect(resp.status).toBe(401);
       } finally {
         await close();
       }
