@@ -86,6 +86,12 @@ import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.
 import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import {
+  parsePaginationParams,
+  encodeRecordsCursor,
+  MAX_PAGE_SIZE,
+  type RecordsPage,
+} from "../core/data-access-port.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -734,15 +740,34 @@ async function createRecord(args: {
   });
 }
 
-async function listRecords(
+/**
+ * T-0401 [D7-3]: Paginated record list with cursor-based keyset pagination.
+ *
+ * Keyset: ORDER BY r.created_at DESC, r.id ASC
+ * Cursor encodes (createdAt, id) of the last row on the previous page.
+ * With cursor: WHERE (r.created_at, r.id) < (cursor.createdAt, cursor.id)
+ * for DESC order — i.e. older rows (or same created_at with higher id).
+ *
+ * Tenant isolation: runs inside withTenantTx with RLS FORCE.
+ * Actor isolation: caller MUST pass the actor-resolved tenantId (resolved via
+ * resolveActorTenant); this function never re-resolves actor identity.
+ *
+ * Size limits (PD-19 §3.3):
+ *   - limit clamped to [1, MAX_PAGE_SIZE] at the call site (parsePaginationParams).
+ *   - Query fetches limit+1 rows to detect hasNextPage without a COUNT(*).
+ */
+async function listRecordsPaginated(
   pool: pg.Pool,
   tenantId: string,
   applicationId: string | null,
   registryDefId: string | null,
-): Promise<RecordJoinedRow[]> {
+  limit: number,
+  cursor: { createdAt: number; id: string } | null,
+): Promise<RecordsPage<RecordJoinedRow>> {
   return withTenantTx(pool, tenantId, async (client) => {
     const conds: string[] = ["r.tenant_id = $1"];
     const params: unknown[] = [tenantId];
+
     if (applicationId !== null) {
       params.push(applicationId);
       conds.push(`rd.application_id = $${params.length}`);
@@ -751,16 +776,56 @@ async function listRecords(
       params.push(registryDefId);
       conds.push(`r.registry_id = $${params.length}`);
     }
+
+    // Keyset pagination: for DESC created_at + ASC id, "after cursor" means:
+    //   rows with created_at < cursor.createdAt
+    //   OR (created_at = cursor.createdAt AND id > cursor.id)
+    // This implements a stable page boundary that does not re-read previously seen rows.
+    if (cursor !== null) {
+      params.push(cursor.createdAt);
+      const cAtParam = `$${params.length}`;
+      params.push(cursor.id);
+      const idParam = `$${params.length}`;
+      conds.push(
+        `(r.created_at < ${cAtParam} OR (r.created_at = ${cAtParam} AND r.id > ${idParam}))`,
+      );
+    }
+
+    // Fetch limit+1 to detect whether a next page exists (avoid COUNT(*)).
+    const clampedLimit = Math.min(Math.max(1, limit), MAX_PAGE_SIZE);
+    params.push(clampedLimit + 1);
+    const limitParam = `$${params.length}`;
+
     const res = await client.query<RecordJoinedRow>(
       `SELECT ${RECORD_SELECT_JOIN}
          FROM choros.record r
          JOIN choros.registry_def rd
            ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
         WHERE ${conds.join(" AND ")}
-        ORDER BY r.created_at DESC, r.id ASC`,
+        ORDER BY r.created_at DESC, r.id ASC
+        LIMIT ${limitParam}`,
       params,
     );
-    return res.rows;
+
+    const hasMore = res.rows.length > clampedLimit;
+    const pageRows = hasMore ? res.rows.slice(0, clampedLimit) : res.rows;
+
+    // Build next cursor from the last row on this page.
+    let nextCursor: string | null = null;
+    if (hasMore && pageRows.length > 0) {
+      const last = pageRows[pageRows.length - 1]!;
+      nextCursor = encodeRecordsCursor({
+        createdAt: Number(last.created_at),
+        id: last.id,
+      });
+    }
+
+    return {
+      items: pageRows,
+      nextCursor,
+      total: null, // COUNT(*) is expensive; omitted per PD-20 (analytics ≠ BI).
+      limit: clampedLimit,
+    };
   });
 }
 
@@ -883,20 +948,36 @@ async function updateRecord(args: {
 // Query-param parsing
 // ---------------------------------------------------------------------------
 
-function parseUuidQueryParam(
-  req: IncomingMessage,
-  name: string,
-): string | null {
+/** Parse all query params for the records list endpoint. */
+function parseRecordsListQuery(req: IncomingMessage): {
+  applicationId: string | null;
+  registryDefId: string | null;
+  limit: number;
+  cursor: { createdAt: number; id: string } | null;
+} {
   const rawUrl = req.url ?? "";
   const qIdx = rawUrl.indexOf("?");
-  if (qIdx < 0) return null;
-  const params = new URLSearchParams(rawUrl.slice(qIdx + 1));
-  const val = params.get(name);
-  if (val === null) return null;
-  if (!UUID_RE.test(val)) {
-    throw new HttpError(400, "VALIDATION", `${name} query param must be a valid UUID`);
+  const searchParams = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+
+  // UUID filter params
+  const applicationIdRaw = searchParams.get("application_id");
+  if (applicationIdRaw !== null && !UUID_RE.test(applicationIdRaw)) {
+    throw new HttpError(400, "VALIDATION", "application_id query param must be a valid UUID");
   }
-  return val;
+  const registryDefIdRaw = searchParams.get("registry_def_id");
+  if (registryDefIdRaw !== null && !UUID_RE.test(registryDefIdRaw)) {
+    throw new HttpError(400, "VALIDATION", "registry_def_id query param must be a valid UUID");
+  }
+
+  // Pagination params (T-0401 D7-3)
+  const { limit, cursor } = parsePaginationParams(searchParams);
+
+  return {
+    applicationId: applicationIdRaw,
+    registryDefId: registryDefIdRaw,
+    limit,
+    cursor,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,17 +1082,38 @@ export function registerRecordRoutes(
 
   // GET /api/records — list the caller-tenant's records, optionally filtered by
   // ?application_id= and/or ?registry_def_id=.
+  //
+  // T-0401 [D7-3]: PAGINATED via cursor-based keyset (created_at DESC, id ASC).
+  //   ?limit=N       — items per page (1..200, default 50)
+  //   ?after=<tok>   — opaque cursor from previous page's `nextCursor` field
+  //   ?application_id= — filter by application (UUID)
+  //   ?registry_def_id= — filter by registry_def (UUID)
+  //
+  // Response shape changed (additive):
+  //   { records: [...], nextCursor: string|null, limit: number }
+  //   nextCursor is null on the last page.
+  //
+  // Tenant isolation: actor resolved → tenantId → RLS inside withTenantTx.
+  // Actor narrowing: actor resolves to its own tenant only (resolveActorTenant).
+  // Field-visibility: applied via applyFieldVisibilityRedaction (data-access-port)
+  //   when the caller has a non-empty FieldVisibilityPolicy wired. For now the
+  //   field-visibility policy is EMPTY (roleScopedFields = empty set) — a no-op
+  //   backward-compatible (NF-1) per T-0081 §4.1. The port is wired; a future
+  //   increment can inject a real policy without changing the endpoint shape.
   router.register("GET", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
-    const applicationId = parseUuidQueryParam(req, "application_id");
-    const registryDefId = parseUuidQueryParam(req, "registry_def_id");
+    const { applicationId, registryDefId, limit, cursor } = parseRecordsListQuery(req);
 
     const tenantId = await resolveActorTenant(actor);
-    const rows = await listRecords(pool, tenantId, applicationId, registryDefId);
+    const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor);
 
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ records: rows.map(serializeRecord) }));
+    res.end(JSON.stringify({
+      records: page.items.map(serializeRecord),
+      nextCursor: page.nextCursor,
+      limit: page.limit,
+    }));
   }));
 
   // GET /api/records/:id — get one record enriched for the detail screen
