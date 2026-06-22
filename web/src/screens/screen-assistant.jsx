@@ -32,7 +32,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Button, EmptyState, LoadingState, ErrorState, Skeleton,
+  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -42,7 +42,7 @@ import { authHeaders } from '../app-shell/dev-auth.js';
    Структуры данных фиксируют контракт между shell (T-0358) и impl (T-0359+).
    --------------------------------------------------------------------------- */
 
-// T-0359: REAL threads hook — GET/POST /api/assistant/threads
+// T-0359 / T-0384: threads hook — GET/POST/PATCH/DELETE /api/assistant/threads
 function useThreadsStub() {
   const [threads, setThreads] = useState(null);
   const [error, setError] = useState(null);
@@ -60,26 +60,59 @@ function useThreadsStub() {
 
   useEffect(() => { load(); }, [load]);
 
-  const createThread = useCallback(async ({ title, contextRef }) => {
+  const createThread = useCallback(async ({ contextRef } = {}) => {
+    // T-0384 lazy-create: title omitted — thread is invisible in list until first
+    // message fires auto-title. We pass context_ref only.
     const r = await fetch('/api/assistant/threads', {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title || 'Новый разговор', context_ref: contextRef || null }),
+      body: JSON.stringify({ context_ref: contextRef || null }),
     });
     if (!r.ok) {
       const msg = await r.text().catch(() => `HTTP ${r.status}`);
       throw new Error(msg);
     }
     const thread = await r.json();
-    setThreads((prev) => [thread, ...(prev || [])]);
+    // Don't push to list yet — thread is hidden until first message (lazy-create).
     return thread;
   }, []);
 
-  return { threads, error, load, createThread };
+  // T-0384: rename / pin a thread via PATCH
+  const patchThread = useCallback(async (id, patch) => {
+    const r = await fetch(`/api/assistant/threads/${id}`, {
+      method: 'PATCH',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => `HTTP ${r.status}`);
+      throw new Error(msg);
+    }
+    // Refresh list to reflect updated title / pin state.
+    load();
+  }, [load]);
+
+  // T-0384: delete a thread via DELETE
+  const deleteThread = useCallback(async (id) => {
+    const r = await fetch(`/api/assistant/threads/${id}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => `HTTP ${r.status}`);
+      throw new Error(msg);
+    }
+    // Remove from local state immediately; server tombstone takes care of the rest.
+    setThreads((prev) => (prev ? prev.filter((t) => t.id !== id) : prev));
+  }, []);
+
+  return { threads, error, load, createThread, patchThread, deleteThread };
 }
 
-// T-0359: REAL messages hook — GET/POST /api/assistant/threads/:id/messages
-function useMessagesStub(threadId) {
+// T-0359 / T-0384: messages hook — GET/POST /api/assistant/threads/:id/messages
+// onFirstMessage callback lets the parent reload the thread list to pick up
+// the auto-title event appended on the first message (T-0384 lazy-create).
+function useMessagesStub(threadId, onFirstMessage) {
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
@@ -98,6 +131,10 @@ function useMessagesStub(threadId) {
 
   const send = useCallback(async (text, contextRef) => {
     if (!text.trim()) return;
+
+    // T-0384: track whether this is the first message so we can fire onFirstMessage
+    // callback after a successful send (triggers thread list reload for auto-title).
+    const isFirst = messages.length === 0;
 
     // Optimistic: добавляем сообщение пользователя сразу в UI.
     const userMsg = {
@@ -149,6 +186,8 @@ function useMessagesStub(threadId) {
           streaming_done: assistantMsg.streaming_done ?? true,
         },
       ]);
+      // T-0384: after first message, reload thread list to surface auto-title.
+      if (isFirst && onFirstMessage) onFirstMessage();
     } catch (err) {
       setError(err.message ?? 'Не удалось отправить сообщение. Проверьте подключение.');
     } finally {
@@ -179,10 +218,48 @@ function useBudgetStub(threadId) {
    --------------------------------------------------------------------------- */
 
 /**
+ * Встроенный инпут для переименования треда (T-0384).
+ * Подтверждение: Enter или blur; отмена: Escape.
+ */
+function RenameInput({ initialTitle, onConfirm, onCancel }) {
+  const [value, setValue] = useState(initialTitle);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.select();
+  }, []);
+
+  const confirm = () => {
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== initialTitle) onConfirm(trimmed);
+    else onCancel();
+  };
+
+  return (
+    <input
+      ref={inputRef}
+      className="chs-asst__rename-input"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={confirm}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') { e.preventDefault(); confirm(); }
+        if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      }}
+      aria-label="Переименовать разговор"
+      maxLength={120}
+    />
+  );
+}
+
+/**
  * Левая панель: список тредов.
  * Пустое, загрузочное, ошибочное состояния — через kit-компоненты.
+ * T-0384: каждый тред имеет кнопки «закрепить», «переименовать», «удалить».
  */
-function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onRetry }) {
+function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onRetry, onRename, onPin, onDelete }) {
+  const [renamingId, setRenamingId] = useState(null);
+
   if (loading) {
     return (
       <div className="chs-asst__list-body">
@@ -208,21 +285,64 @@ function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onR
       ) : (
         <ul className="chs-asst__threads" role="listbox" aria-label="Разговоры">
           {threads.map((t) => (
-            <li key={t.id} role="presentation">
-              <button
-                type="button"
-                role="option"
-                aria-selected={t.id === activeId}
-                className={`chs-asst__thread ${t.id === activeId ? 'chs-asst__thread--active' : ''}`}
-                onClick={() => onSelect(t)}
-              >
-                <span className="chs-asst__thread-title">{t.title}</span>
-                <span className="chs-asst__thread-meta">
-                  {t.message_count > 0
-                    ? `${t.message_count} сообщ.`
-                    : 'пусто'}
-                </span>
-              </button>
+            <li key={t.id} role="presentation" className={`chs-asst__thread-item${t.pinned ? ' chs-asst__thread-item--pinned' : ''}`}>
+              {renamingId === t.id ? (
+                <RenameInput
+                  initialTitle={t.title}
+                  onConfirm={(newTitle) => { setRenamingId(null); onRename(t.id, newTitle); }}
+                  onCancel={() => setRenamingId(null)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={t.id === activeId}
+                  className={`chs-asst__thread ${t.id === activeId ? 'chs-asst__thread--active' : ''}`}
+                  onClick={() => onSelect(t)}
+                >
+                  {t.pinned && (
+                    <span className="chs-asst__thread-pin-mark" aria-label="Закреплён" title="Закреплён" />
+                  )}
+                  <span className="chs-asst__thread-title">{t.title}</span>
+                  <span className="chs-asst__thread-meta">
+                    {t.message_count > 0
+                      ? `${t.message_count} сообщ.`
+                      : 'пусто'}
+                  </span>
+                </button>
+              )}
+              {/* Thread action buttons: pin / rename / delete */}
+              {renamingId !== t.id && (
+                <div className="chs-asst__thread-actions" role="group" aria-label="Действия с разговором">
+                  <button
+                    type="button"
+                    className={`chs-asst__thread-action${t.pinned ? ' chs-asst__thread-action--active' : ''}`}
+                    aria-label={t.pinned ? 'Открепить разговор' : 'Закрепить разговор'}
+                    title={t.pinned ? 'Открепить' : 'Закрепить'}
+                    onClick={(e) => { e.stopPropagation(); onPin(t.id, !t.pinned); }}
+                  >
+                    {t.pinned ? '★' : '☆'}
+                  </button>
+                  <button
+                    type="button"
+                    className="chs-asst__thread-action"
+                    aria-label="Переименовать разговор"
+                    title="Переименовать"
+                    onClick={(e) => { e.stopPropagation(); setRenamingId(t.id); }}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="chs-asst__thread-action chs-asst__thread-action--danger"
+                    aria-label="Удалить разговор"
+                    title="Удалить"
+                    onClick={(e) => { e.stopPropagation(); onDelete(t.id); }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -529,24 +649,34 @@ export default function AssistantScreen() {
     () => location.state?.contextRef || null,
   );
 
-  const { threads, error: threadsError, load: loadThreads, createThread } = useThreadsStub();
+  const { threads, error: threadsError, load: loadThreads, createThread, patchThread, deleteThread } = useThreadsStub();
   const loading = threads === null;
 
   // Активный тред — из URL-параметра или стейта
   const [activeThread, setActiveThread] = useState(null);
 
-  // Синхронизация активного треда с URL
+  // Синхронизация активного треда с URL.
+  // ВАЖНО: если paramThreadId совпадает с уже активным тредом (который мог быть
+  // lazy-create-hidden — 0 сообщений, поэтому не попал в список), НЕ обнуляем
+  // activeThread. Это предотвращает race, при котором handleCreate ставит
+  // activeThread сразу после navigate(`/assistant/<id>`), а useEffect сбрасывает
+  // его в null, потому что новый тред ещё скрыт (нет сообщений → не в списке).
   useEffect(() => {
     if (!threads) return;
     if (paramThreadId) {
       const found = threads.find((t) => t.id === paramThreadId);
-      setActiveThread(found || null);
+      // If the thread isn't in the visible list but matches the current activeThread,
+      // keep the current activeThread (e.g. lazy-create: 0 messages, not yet visible).
+      setActiveThread((prev) => found ?? (prev?.id === paramThreadId ? prev : null));
     } else {
       setActiveThread(null);
     }
   }, [paramThreadId, threads]);
 
-  const { messages, streaming, error: msgError, send } = useMessagesStub(activeThread?.id || null);
+  // T-0384: after first message is sent, reload thread list to surface auto-title.
+  const handleFirstMessage = useCallback(() => { loadThreads(); }, [loadThreads]);
+
+  const { messages, streaming, error: msgError, send } = useMessagesStub(activeThread?.id || null, handleFirstMessage);
   const budget = useBudgetStub(activeThread?.id || null);
 
   const handleSelectThread = (thread) => {
@@ -554,12 +684,53 @@ export default function AssistantScreen() {
     navigate(`/assistant/${thread.id}`);
   };
 
-  const handleCreate = useCallback(() => {
-    const thread = createThread({ title: 'Новый разговор', contextRef });
-    setActiveThread(thread);
-    navigate(`/assistant/${thread.id}`);
-    // Сбрасываем контекст-ref после открытия треда (он будет в первом сообщении)
+  // T-0384 lazy-create: create thread without title; thread stays hidden in list
+  // until first message is sent (auto-title fires, thread becomes visible).
+  const handleCreate = useCallback(async () => {
+    try {
+      const thread = await createThread({ contextRef });
+      setActiveThread(thread);
+      navigate(`/assistant/${thread.id}`);
+      // Контекст-ref используется в composer; очищать будем после первого send.
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to create thread:', err);
+    }
   }, [createThread, contextRef, navigate]);
+
+  // T-0384: rename thread
+  const handleRename = useCallback((id, newTitle) => {
+    patchThread(id, { title: newTitle });
+    // Optimistically update active thread title in local state if it's active.
+    setActiveThread((prev) => (prev && prev.id === id ? { ...prev, title: newTitle } : prev));
+  }, [patchThread]);
+
+  // T-0384: pin/unpin thread
+  const handlePin = useCallback((id, pinned) => {
+    patchThread(id, { pinned });
+  }, [patchThread]);
+
+  // T-0384: delete confirmation state.
+  // Stores the thread id pending deletion (null = dialog closed).
+  const [pendingDeleteId, setPendingDeleteId] = useState(null);
+  const pendingDeleteThread = threads?.find((t) => t.id === pendingDeleteId) || null;
+
+  // Called when the user clicks ✕ — opens the confirmation dialog.
+  const handleDeleteRequest = useCallback((id) => {
+    setPendingDeleteId(id);
+  }, []);
+
+  // Called when the user confirms deletion in the dialog.
+  const handleDeleteConfirm = useCallback(() => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
+    deleteThread(id);
+    if (activeThread?.id === id) {
+      setActiveThread(null);
+      navigate('/assistant');
+    }
+  }, [pendingDeleteId, deleteThread, activeThread, navigate]);
 
   const handleSend = useCallback((text, ctxRef) => {
     send(text, ctxRef);
@@ -594,6 +765,9 @@ export default function AssistantScreen() {
           loading={loading}
           error={threadsError}
           onRetry={loadThreads}
+          onRename={handleRename}
+          onPin={handlePin}
+          onDelete={handleDeleteRequest}
         />
 
         {/* Контекст-aware вход: если есть contextRef в state, показываем баннер */}
@@ -645,6 +819,22 @@ export default function AssistantScreen() {
           <NothingSelected onCreate={handleCreate} />
         )}
       </section>
+
+      {/* T-0384: подтверждение удаления разговора */}
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title="Удалить разговор?"
+        message={
+          pendingDeleteThread
+            ? `Разговор «${pendingDeleteThread.title}» будет удалён. Это действие нельзя отменить.`
+            : 'Разговор будет удалён. Это действие нельзя отменить.'
+        }
+        confirmLabel="Удалить"
+        cancelLabel="Отмена"
+        tone="danger"
+        onConfirm={handleDeleteConfirm}
+        onClose={() => setPendingDeleteId(null)}
+      />
     </div>
   );
 }
