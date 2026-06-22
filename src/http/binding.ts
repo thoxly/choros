@@ -2,12 +2,25 @@
  * src/http/binding.ts
  *
  * T-0072 E11.1: Named-Binding Contract — HTTP routes.
+ * T-0376: actor-scoped form-binding lookup API.
  *
  * Routes:
  *   GET  /tenants/:tenantId/processes/:processKey/forms/:formKey/binding
  *        → 200 {fields, version} | 404
  *   POST /tenants/:tenantId/processes/:processKey/forms/:formKey/binding
  *        → 201 (created) | 200 (updated, version+=1) | 400 | 401 | 403
+ *
+ *   GET  /api/forms/binding?processKey=...&stepKey=...
+ *        → 200 {fields, version, processKey, stepKey} | 404
+ *        Actor-scoped shortcut: resolves tenantId from the authenticated actor,
+ *        fetches the form_binding row for (processKey, stepKey). Used by the
+ *        inbox task card to render the bound form. stepKey maps to form_binding.form_key.
+ *
+ *   POST /api/forms/binding
+ *        body { processKey, stepKey, fields }
+ *        → 201 (created) | 200 (updated) | 400 | 401 | 403
+ *        Actor-scoped form-binding upsert: resolves tenantId from actor, persists
+ *        the form binding for (processKey, stepKey). Used by the form builder UI.
  *
  * DESIGN INVARIANTS (ADR §4):
  *  - Auth via existing withAuth + x-dev-user convention (no new auth system).
@@ -23,11 +36,24 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthMode } from "./auth.js";
+import { DEV_USER_HEADER, getAuthMode, getAuthContext } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   validateBindingFields,
   type BindingField,
 } from "../core/binding-compat.js";
+
+// ---------------------------------------------------------------------------
+// Injected deps for actor-scoped routes (T-0376)
+// ---------------------------------------------------------------------------
+
+/** Resolve the tenant the actor belongs to (same type as ActorTenantResolver). */
+export type BindingActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+export interface BindingRoutesDeps {
+  pool: pg.Pool;
+  resolveActorTenant: BindingActorTenantResolver;
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,6 +119,31 @@ function extractActor(req: IncomingMessage): string {
 }
 
 // ---------------------------------------------------------------------------
+// extractActorSlug — mode-aware: keycloak → resolve slug; dev → x-dev-user
+// Mirrors inbox.ts extractActorSlug (T-0372).
+// ---------------------------------------------------------------------------
+
+async function extractActorSlug(
+  req: IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
+
+// ---------------------------------------------------------------------------
 // checkRole — conventional process_designer check (ADR §4)
 //
 // In dev auth mode, role check is softened to «authenticated»
@@ -106,19 +157,24 @@ function extractActor(req: IncomingMessage): string {
 export async function checkRole(
   client: pg.PoolClient,
   tenantId: string,
-  actorId: string,
+  actorSlug: string,
 ): Promise<void> {
   const authMode = getAuthMode();
   if (authMode !== "dev") {
-    // keycloak mode: check role_assignment for process_designer
+    // keycloak mode: check role_assignment for process_designer.
+    // role_assignment.employee_id is a UUID FK; actorSlug is the employee slug.
+    // Join through employee to resolve slug → UUID so the check works correctly.
+    // Without the join, passing a slug directly against a UUID column returns 0
+    // rows and silently yields a spurious 403 for all actors.
     const { rows } = await client.query<{ cnt: number }>(
       `SELECT count(*)::int AS cnt
          FROM choros.role_assignment ra
          JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+         JOIN choros.employee e ON e.tenant_id = ra.tenant_id AND e.id = ra.employee_id
         WHERE ra.tenant_id = $1
-          AND ra.employee_id = $2
+          AND e.slug = $2
           AND r.slug = 'process_designer'`,
-      [tenantId, actorId],
+      [tenantId, actorSlug],
     );
     if (!rows[0] || rows[0].cnt === 0) {
       throw new HttpError(403, "FORBIDDEN", "role process_designer required");
@@ -162,7 +218,7 @@ async function getBinding(
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerBindingRoutes(router: Router, pool: pg.Pool): void {
+export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: BindingRoutesDeps): void {
 
   // ---------- GET /tenants/:tenantId/processes/:processKey/forms/:formKey/binding ------
   // The router supports one param segment. We work around this by building a custom
@@ -273,6 +329,120 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool): void {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(responseBody));
   });
+
+  // ---------------------------------------------------------------------------
+  // T-0376 actor-scoped routes — only registered when deps (resolveActorTenant) provided
+  // ---------------------------------------------------------------------------
+
+  if (deps) {
+    const { resolveActorTenant } = deps;
+
+    // GET /api/forms/binding?processKey=...&stepKey=...
+    // Actor-scoped lookup: resolves tenantId from actor, returns the form_binding for
+    // (processKey, stepKey). stepKey maps directly to form_binding.form_key.
+    // Used by inbox task card to render the assignee's form. → 200 | 404
+    router.register("GET", "/api/forms/binding", async (req, res, _params) => {
+      const actor = await extractActorSlug(req, pool);
+      const url = req.url ?? "";
+      const qIdx = url.indexOf("?");
+      const qs = qIdx === -1 ? "" : url.slice(qIdx + 1);
+      const params = new URLSearchParams(qs);
+      const processKey = params.get("processKey") ?? "";
+      const stepKey = params.get("stepKey") ?? "";
+
+      if (!processKey || !stepKey) {
+        throw new HttpError(400, "VALIDATION", "processKey and stepKey are required query parameters");
+      }
+
+      const tenantId = await resolveActorTenant(actor);
+      assertUuidShape(tenantId, "tenantId");
+
+      const row = await withTenantTx(pool, tenantId, async (client) => {
+        return getBinding(client, tenantId, processKey, stepKey);
+      });
+
+      if (!row) {
+        throw new HttpError(404, "NOT_FOUND", "no form bound to this process step");
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        fields: row.fields,
+        version: row.version,
+        processKey,
+        stepKey,
+      }));
+    });
+
+    // POST /api/forms/binding
+    // Actor-scoped upsert: saves a form binding for (processKey, stepKey).
+    // Body: { processKey: string, stepKey: string, fields: BindingField[] }
+    // → 201 (created) | 200 (updated) | 400 | 401 | 403
+    router.register("POST", "/api/forms/binding", async (req, res, _params) => {
+      const actor = await extractActorSlug(req, pool);
+
+      const rawBody = await readJsonBody(req);
+      if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+        throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+      }
+      const body = rawBody as Record<string, unknown>;
+
+      const processKey = typeof body["processKey"] === "string" ? body["processKey"].trim() : "";
+      const stepKey = typeof body["stepKey"] === "string" ? body["stepKey"].trim() : "";
+
+      if (!processKey) {
+        throw new HttpError(400, "VALIDATION", "processKey must be a non-empty string");
+      }
+      if (!stepKey) {
+        throw new HttpError(400, "VALIDATION", "stepKey must be a non-empty string");
+      }
+
+      const validation = validateBindingFields(body["fields"]);
+      if (!validation.ok) {
+        throw new HttpError(400, "VALIDATION",
+          `invalid fields: ${validation.errors.map((e) => `[${e.index}] ${e.reason}`).join("; ")}`
+        );
+      }
+      const fields: BindingField[] = validation.fields;
+
+      const tenantId = await resolveActorTenant(actor);
+      assertUuidShape(tenantId, "tenantId");
+      const nowMs = Date.now();
+
+      const { statusCode: sc, body: responseBody } = await withTenantTx(pool, tenantId, async (client) => {
+        await checkRole(client, tenantId, actor);
+        const existing = await getBinding(client, tenantId, processKey, stepKey);
+        if (!existing) {
+          const newId = randomUUID();
+          await client.query(
+            `INSERT INTO choros.form_binding
+               (tenant_id, id, process_key, form_key, fields, version, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6, $6)`,
+            [tenantId, newId, processKey, stepKey, JSON.stringify(fields), nowMs],
+          );
+          return { statusCode: 201, body: { id: newId, version: 1 } };
+        } else {
+          const newVersion = existing.version + 1;
+          await client.query(
+            `UPDATE choros.form_binding
+                SET fields = $1::jsonb,
+                    version = $2,
+                    updated_at = $3
+              WHERE tenant_id = $4
+                AND process_key = $5
+                AND form_key = $6`,
+            [JSON.stringify(fields), newVersion, nowMs, tenantId, processKey, stepKey],
+          );
+          return { statusCode: 200, body: { id: existing.id, version: newVersion } };
+        }
+      });
+
+      res.statusCode = sc;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(responseBody));
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

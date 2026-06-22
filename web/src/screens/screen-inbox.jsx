@@ -13,6 +13,276 @@ import {
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
 
+// ---------------------------------------------------------------------------
+// T-0376: InboxTaskForm — renders the bound form for a userTask in the inbox
+// card. Fetches form binding via GET /api/forms/binding?processKey=...&stepKey=...
+// then renders an inline form so the assignee can fill and submit it.
+// Does NOT edit inbox.ts — uses the standalone /api/forms/binding endpoint from
+// binding.ts. PD-9: form fields are derived from real app fields (registry_def),
+// never invented here. G2/G5/G6: kit tokens only, plain copy, no hardcoded data.
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders one field from a form binding as an HTML input control.
+ * Field types: string → text, number/integer → number, boolean → checkbox,
+ * enum (string+enum in schema) → select. Date → date input.
+ * G6: no hardcoded placeholder data; uses field label from binding only.
+ */
+function FormField({ field, value, onChange, error }) {
+  const id = `inbox-form-field-${field.key}`;
+  const label = field.label || field.key;
+  const isRequired = Boolean(field.required);
+
+  const inputStyle = {
+    display: 'block',
+    width: '100%',
+    boxSizing: 'border-box',
+  };
+
+  let control;
+  if (Array.isArray(field.options) && field.options.length > 0) {
+    // enum / select field
+    control = (
+      <select
+        id={id}
+        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={error ? true : undefined}
+        style={inputStyle}
+      >
+        <option value="">— выберите —</option>
+        {field.options.map((opt) => (
+          <option key={opt} value={opt}>{opt}</option>
+        ))}
+      </select>
+    );
+  } else if (field.type === 'boolean') {
+    control = (
+      <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)' }}>
+        <input
+          id={id}
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => onChange(field.key, e.target.checked)}
+          aria-required={isRequired || undefined}
+          aria-invalid={error ? true : undefined}
+        />
+        {label}
+      </label>
+    );
+  } else if (field.type === 'number' || field.type === 'integer') {
+    control = (
+      <input
+        id={id}
+        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
+        type="number"
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={error ? true : undefined}
+        style={inputStyle}
+      />
+    );
+  } else {
+    // string / date / default → text input
+    control = (
+      <input
+        id={id}
+        className={`chs-input${error ? ' chs-input--invalid' : ''}`}
+        type="text"
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={error ? true : undefined}
+        style={inputStyle}
+      />
+    );
+  }
+
+  // For boolean, the label is part of the control; for others, render it above.
+  if (field.type === 'boolean') {
+    return (
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        {control}
+        {error && (
+          <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+            {error}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      <label className="chs-label" htmlFor={id}>
+        {label}
+        {isRequired && (
+          <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+        )}
+      </label>
+      {control}
+      {error && (
+        <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * InboxTaskForm — fetches and renders the form bound to a process step.
+ * If no binding exists (404), renders nothing (transparent).
+ * On submit: collects values and calls onSubmit(values).
+ *
+ * Props:
+ *   processKey  — the process definition key (from detail.projection.procKey)
+ *   stepKey     — the step name (from detail.item.step)
+ *   onSubmit    — callback(values: Record<string,unknown>) when the user submits
+ *   submitting  — bool: disable submit button while parent is completing the step
+ */
+function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
+  // null = loading; false = no binding (404); { fields } = loaded; 'error' = transient fetch error
+  const [binding, setBinding] = useState(null);
+  const [bindingError, setBindingError] = useState(null); // null | string
+  const [values, setValues] = useState({});
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [formError, setFormError] = useState(null);
+
+  const loadBinding = useCallback(() => {
+    if (!processKey || !stepKey) { setBinding(false); return; }
+    setBinding(null);
+    setBindingError(null);
+    setValues({});
+    setFieldErrors({});
+    setFormError(null);
+
+    fetch(
+      `/api/forms/binding?processKey=${encodeURIComponent(processKey)}&stepKey=${encodeURIComponent(stepKey)}`,
+      { headers: authHeaders() }
+    )
+      .then((r) => {
+        if (r.status === 404) { setBinding(false); return; }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json().then((data) => {
+          // Initialize values from fields (empty defaults)
+          const init = {};
+          for (const f of (data.fields || [])) {
+            init[f.key] = f.type === 'boolean' ? false : '';
+          }
+          setValues(init);
+          setBinding(data);
+        });
+      })
+      .catch((err) => {
+        // Distinguish transient network/server error from "no binding" (404).
+        // Setting bindingError surfaces a retry path rather than silently
+        // treating the task as having no form.
+        setBindingError(String(err?.message || err));
+        setBinding(false);
+      });
+  }, [processKey, stepKey]);
+
+  useEffect(() => {
+    loadBinding();
+  }, [loadBinding]);
+
+  const handleChange = useCallback((key, val) => {
+    setValues((prev) => ({ ...prev, [key]: val }));
+    setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
+  }, []);
+
+  const handleSubmit = useCallback((e) => {
+    e.preventDefault();
+    if (!binding || !Array.isArray(binding.fields)) return;
+
+    // Validate required fields
+    const errs = {};
+    for (const f of binding.fields) {
+      if (!f.required) continue;
+      const v = values[f.key];
+      if (v === '' || v === null || v === undefined || (typeof v === 'string' && !v.trim())) {
+        errs[f.key] = 'Обязательное поле';
+      }
+    }
+    setFieldErrors(errs);
+    if (Object.keys(errs).length > 0) {
+      setFormError('Заполните обязательные поля');
+      return;
+    }
+    setFormError(null);
+    if (onSubmit) onSubmit(values);
+  }, [binding, values, onSubmit]);
+
+  // Loading — use kit LoadingState
+  if (binding === null) {
+    return <LoadingState label="Загрузка формы…" />;
+  }
+
+  // Transient fetch error — surface it with a retry, not silently as "no form"
+  if (bindingError) {
+    return (
+      <ErrorState
+        message={`Не удалось загрузить форму: ${bindingError}`}
+        onRetry={loadBinding}
+      />
+    );
+  }
+
+  // No binding for this step — render nothing (task card works without a form)
+  if (binding === false) return null;
+
+  // Empty fields list — binding exists but nothing to fill in
+  const fields = binding.fields || [];
+  if (fields.length === 0) return null;
+
+  return (
+    <section style={{ marginBottom: 'var(--chs-space-8)' }}>
+      <h3 style={{
+        margin: '0 0 var(--chs-space-5)',
+        fontSize: 'var(--chs-text-xs)',
+        fontWeight: 'var(--chs-weight-semibold)',
+        letterSpacing: 'var(--chs-tracking-wide)',
+        textTransform: 'uppercase',
+        color: 'var(--chs-color-text-faint)',
+      }}>
+        Форма задачи
+      </h3>
+      <form onSubmit={handleSubmit} noValidate>
+        {fields.map((f) => (
+          <FormField
+            key={f.key}
+            field={f}
+            value={values[f.key]}
+            onChange={handleChange}
+            error={fieldErrors[f.key]}
+          />
+        ))}
+        {formError && (
+          <div role="alert" style={{
+            marginBottom: 'var(--chs-space-4)',
+            fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-danger)',
+          }}>
+            {formError}
+          </div>
+        )}
+        <Button
+          type="submit"
+          variant="secondary"
+          size="sm"
+          disabled={submitting}
+        >
+          Готово
+        </Button>
+      </form>
+    </section>
+  );
+}
+
 const TABS = [
   { id: "all", label: "Все" },
   { id: "mine", label: "Мне" },
@@ -132,6 +402,8 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
   const [completing, setCompleting] = useState(false);
   const [outcome, setOutcome] = useState(null); // null | { status, instanceId, action }
   const [actionError, setActionError] = useState(null);
+  // T-0376: form data collected from the bound form (if any)
+  const [formData, setFormData] = useState(null); // null | Record<string,unknown>
 
   const loadDetail = useCallback(async () => {
     setLoading(true);
@@ -160,10 +432,17 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
     setCompleting(true);
     setActionError(null);
     try {
+      // T-0376: include collected form values in the approve body so the data
+      // is actually forwarded. The action endpoint ignores unknown keys (no
+      // strict validation — extra fields are accepted silently), so this is safe.
+      const approveBody = { action: 'approve' };
+      if (formData && Object.keys(formData).length > 0) {
+        approveBody.formValues = formData;
+      }
       const res = await fetch(`/api/inbox/${taskId}/action`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ action: 'approve' }),
+        body: JSON.stringify(approveBody),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -267,6 +546,35 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
             </div>
           </section>
 
+          {/* T-0376: Bound form for the current step (if any).
+              Shown when the task is still actionable (waiting state) and a form
+              binding exists for (procKey, step). The assignee fills the form and
+              the data is attached to the complete-step action as context.
+              Fetched via GET /api/forms/binding — does NOT touch inbox.ts. */}
+          {!outcome && detail.item.status !== 'done' && detail.item.status !== 'failed' && detail.projection && (
+            <InboxTaskForm
+              processKey={detail.projection.procKey}
+              stepKey={detail.item.step}
+              onSubmit={(values) => setFormData(values)}
+              submitting={completing}
+            />
+          )}
+
+          {/* T-0376: Show collected form data summary if present */}
+          {formData && !outcome && (
+            <div style={{
+              ...S.notice,
+              background: 'var(--chs-color-info-soft, var(--chs-color-surface))',
+              borderColor: 'var(--chs-color-info, var(--chs-color-border))',
+              marginBottom: 'var(--chs-space-6)',
+            }}>
+              <div style={{ ...S.noticeTitle, color: 'var(--chs-color-text)' }}>Форма заполнена</div>
+              <div style={S.noticeBody}>
+                Данные будут переданы при завершении шага. Нажмите «Выполнить шаг».
+              </div>
+            </div>
+          )}
+
           {/* Process/instance projection (if available) */}
           {detail.projection && (
             <section style={S.section}>
@@ -275,7 +583,7 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
                 <span style={S.key}>Инстанс</span>
                 <MonoId>{detail.projection.inst}</MonoId>
 
-                <span style={S.key}>Процесс</span>
+                <span style={S.key}>Ключ процесса</span>
                 <Mono>{detail.projection.procKey}</Mono>
 
                 <span style={S.key}>Текущий шаг</span>

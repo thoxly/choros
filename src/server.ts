@@ -427,9 +427,14 @@ function buildRouter(
     });
   }
 
-  // Register named-binding endpoints (T-0072 E11.1 — additive)
+  // Register named-binding endpoints (T-0072 E11.1 — additive).
+  // T-0376: actor-scoped /api/forms/binding routes require resolveActorTenant deps.
   if (grantsPool) {
-    registerBindingRoutes(router, grantsPool);
+    registerBindingRoutes(router, grantsPool, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // Register the REAL process catalog + process↔application binding (T-0270 E13).
