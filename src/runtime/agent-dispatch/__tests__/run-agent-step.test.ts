@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { runAgentStep, type RunAgentStepDeps } from "../run-agent-step.js";
+import { runAgentStep, type RunAgentStepDeps, DEFAULT_AUTONOMY_THRESHOLD } from "../run-agent-step.js";
 import type { AgentStepContext } from "../agent-step-context.js";
 import { dormantLlmPort } from "../../../core/llm-port.js";
 import { StubLlmPort } from "../../../core/__tests__/stub-llm-port.js";
@@ -179,5 +179,165 @@ describe("runAgentStep — determinism", () => {
     const a = await runAgentStep(makeCtx(), dormantDeps);
     const b = await runAgentStep(makeCtx(), dormantDeps);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0381: F3 / F4 / F5 tests
+// ---------------------------------------------------------------------------
+
+describe("T-0381 F3 — criticality ceiling: critical op → ALWAYS defer, regardless of confidence", () => {
+  const liveLlm = { endpoint: "https://x", model: "m", secretHandle: "h" };
+
+  it("critical role + high-confidence LLM → defer (gate B fires before LLM call)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    const outcome = await runAgentStep(
+      makeCtx({ criticalityLevel: "critical", llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      expect(outcome.signal).toBe("threshold");
+      // Gate B must short-circuit: no LLM call made.
+      expect(stub.calls.length).toBe(0);
+      expect(outcome.doubtReason).toMatch(/critical/i);
+    }
+  });
+
+  it("critical role + dormant LLM → defer (gate B still fires, zero LLM spend)", async () => {
+    const outcome = await runAgentStep(
+      makeCtx({ criticalityLevel: "critical" }),
+      dormantDeps,
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      // Gate B fires before live-gate, signal stays threshold (not dormant).
+      expect(outcome.signal).toBe("threshold");
+    }
+  });
+
+  it("routine role + high-confidence LLM → proceed (F3 gate does not fire)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed" });
+    const outcome = await runAgentStep(
+      makeCtx({ criticalityLevel: "routine", llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("proceed");
+  });
+});
+
+describe("T-0381 F4 — autonomy_threshold: tenant default + per-agent override", () => {
+  const liveLlm = { endpoint: "https://x", model: "m", secretHandle: "h" };
+
+  it("null autonomy_threshold → falls back to DEFAULT_AUTONOMY_THRESHOLD; succeed-stub (0.92) ≥ default (0.85) → proceed", async () => {
+    const stub = new StubLlmPort({ mode: "succeed" });
+    // autonomyThreshold: null → gate uses DEFAULT_AUTONOMY_THRESHOLD = 0.85; confidence 0.92 ≥ 0.85
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: null, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("proceed");
+  });
+
+  it("null autonomy_threshold → DEFAULT; confidence 0.45 (low_confidence stub) < default → defer", async () => {
+    const stub = new StubLlmPort({ mode: "low_confidence" });
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: null, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") expect(outcome.signal).toBe("threshold");
+  });
+
+  it("per-agent override (0.95) > DEFAULT (0.85) > confidence (0.92) → defer (agent override takes effect)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed" }); // confidence 0.92
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: 0.95, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") expect(outcome.signal).toBe("threshold");
+  });
+
+  it("per-agent override (0.80) < DEFAULT (0.85); confidence (0.92) ≥ 0.80 → proceed (lower override respected)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed" }); // confidence 0.92
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: 0.80, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("proceed");
+  });
+
+  it("DEFAULT_AUTONOMY_THRESHOLD is exported and above CONFIDENCE_FLOOR (policy > structural floor)", async () => {
+    // Confirms the constant is set to a value stricter than CONFIDENCE_FLOOR (0.70).
+    expect(DEFAULT_AUTONOMY_THRESHOLD).toBeGreaterThan(0.7);
+    expect(DEFAULT_AUTONOMY_THRESHOLD).toBeLessThanOrEqual(1.0);
+  });
+});
+
+describe("T-0381 F5 — escalation prefilled with agent draft + rationale", () => {
+  const liveLlm = { endpoint: "https://x", model: "m", secretHandle: "h" };
+
+  it("threshold defer (low confidence) → agentDraft carries the LLM answer for human prefill", async () => {
+    const stub = new StubLlmPort({ mode: "low_confidence" });
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: null, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      expect(outcome.agentDraft).toBeDefined();
+      // The draft must be the LLM's answer (not empty).
+      expect(outcome.agentDraft?.summary).toBeTruthy();
+    }
+  });
+
+  it("high-autonomy threshold defer (confidence below per-agent override) → agentDraft present", async () => {
+    const stub = new StubLlmPort({ mode: "succeed" }); // confidence 0.92
+    const outcome = await runAgentStep(
+      makeCtx({ autonomyThreshold: 0.95, llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      expect(outcome.agentDraft).toBeDefined();
+      // The proceed answer was available — it should be in the draft.
+      expect(outcome.agentDraft?.redFlags).toBeInstanceOf(Array);
+    }
+  });
+
+  it("dormant defer → agentDraft is absent (no LLM call, no draft to carry)", async () => {
+    const outcome = await runAgentStep(makeCtx(), dormantDeps);
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      // Dormant path: no LLM answer exists → draft must be absent.
+      expect(outcome.agentDraft).toBeUndefined();
+    }
+  });
+
+  it("critical gate B defer → agentDraft is absent (no LLM call before gate)", async () => {
+    const stub = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    const outcome = await runAgentStep(
+      makeCtx({ criticalityLevel: "critical", llm: liveLlm }),
+      { llm: stub, liveEnabled: true },
+    );
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      // Gate B fires before LLM → no draft.
+      expect(outcome.agentDraft).toBeUndefined();
+      expect(stub.calls.length).toBe(0);
+    }
+  });
+
+  it("dormant path still defers with zero LLM spend (dormant-safety preserved)", async () => {
+    // Even with liveEnabled=false and a stub that would succeed, the dormant path is taken.
+    const stub = new StubLlmPort({ mode: "succeed", recordCalls: true });
+    const outcome = await runAgentStep(makeCtx(), { llm: stub, liveEnabled: false });
+    expect(outcome.kind).toBe("defer-to-human");
+    if (outcome.kind === "defer-to-human") {
+      expect(outcome.signal).toBe("dormant");
+      expect(outcome.agentDraft).toBeUndefined(); // no draft when dormant
+    }
+    expect(stub.calls.length).toBe(0); // zero LLM spend
   });
 });

@@ -55,6 +55,14 @@ export type PrecheckOutcome =
        * separate task table. Read-projection: src/db/deferred-inbox-store.ts.
        */
       readonly inboxTaskRef: string;
+      /**
+       * F5 — agent draft for prefilled human escalation. When the LLM completed
+       * but fell below the autonomy threshold (or confidence floor), the agent's
+       * partial answer is carried here so the human reviewer can accept/edit/reject
+       * it rather than starting from scratch. Absent when the LLM was dormant or
+       * errored (no draft available).
+       */
+      readonly agentDraft?: import("./llm-port.js").PrecheckAnswer;
     }
   | {
       readonly kind: "fail-closed";

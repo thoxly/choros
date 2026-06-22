@@ -23,6 +23,7 @@ import type { PrecheckOutcome } from "../../../core/agent-precheck-motor.js";
 import type { PrecheckAnswer } from "../../../core/llm-port.js";
 import { InMemoryAuditWriter, inMemoryTx } from "../../../db/audit-writer.js";
 
+
 const TENANT = "a0000000-0000-0000-0000-000000000001";
 const AGENT = "d0000000-0000-0000-0000-000000000006";
 const NOW = 1_700_000_000_000;
@@ -197,6 +198,70 @@ describe("applyAgentOutcome — proceed (result-entity weld, no live DB)", () =>
     // The load-bearing trigger half: task_completed outbox + jobStore.complete.
     expect(outbox.rows.some((r) => r.eventType === "task_completed" && r.idempotencyKey === `complete:${ctx.jobId}`)).toBe(true);
     expect(jobStore.completed).toEqual([ctx.jobId]);
+  });
+});
+
+describe("T-0381 F5 — defer-to-human with agentDraft: prefilled escalation payload", () => {
+  it("defer outcome with agentDraft → agent_draft appears in agent.deferred audit payload", async () => {
+    const audit = new InMemoryAuditWriter();
+    const outbox = new FakeOutbox();
+    const jobStore = new FakeJobStore();
+    const ctx = makeCtx();
+
+    const draft: PrecheckAnswer = {
+      answerForm: "agent_step_v1",
+      redFlags: [{ clause: "§3.1", risk: "contract risk", severity: "high" }],
+      summary: "Partial analysis completed — requires human review",
+    };
+
+    const outcome: PrecheckOutcome = {
+      kind: "defer-to-human",
+      signal: "threshold",
+      doubtReason: "confidence 0.72 below autonomy threshold 0.85",
+      inboxTaskRef: "pending",
+      agentDraft: draft,
+    };
+
+    const tx = inMemoryTx(TENANT) as unknown as pg.PoolClient;
+    const result = await applyAgentOutcome(tx, ctx, outcome, baseDeps(audit, outbox, jobStore));
+
+    expect(result.outcome).toBe("defer-to-human");
+    expect(result.stepClosed).toBe(true);
+
+    const events = audit.rows(TENANT);
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("agent.deferred");
+
+    const payload = events[0].payload as Record<string, unknown>;
+    // F5: agent_draft must appear in the audit payload.
+    expect(payload["agent_draft"]).toBeDefined();
+    const storedDraft = payload["agent_draft"] as PrecheckAnswer;
+    expect(storedDraft.summary).toBe(draft.summary);
+    expect(Array.isArray(storedDraft.redFlags)).toBe(true);
+    expect((storedDraft.redFlags as Array<unknown>).length).toBe(1);
+  });
+
+  it("defer outcome WITHOUT agentDraft → agent_draft is null in payload (dormant path)", async () => {
+    const audit = new InMemoryAuditWriter();
+    const outbox = new FakeOutbox();
+    const jobStore = new FakeJobStore();
+    const ctx = makeCtx();
+
+    const outcome: PrecheckOutcome = {
+      kind: "defer-to-human",
+      signal: "dormant",
+      doubtReason: "llm runtime dormant — inference not available",
+      inboxTaskRef: "pending",
+      // agentDraft: absent (no LLM call happened)
+    };
+
+    const tx = inMemoryTx(TENANT) as unknown as pg.PoolClient;
+    await applyAgentOutcome(tx, ctx, outcome, baseDeps(audit, outbox, jobStore));
+
+    const events = audit.rows(TENANT);
+    const payload = events[0].payload as Record<string, unknown>;
+    // No draft in dormant path: agent_draft must be null (not undefined — serialised cleanly).
+    expect(payload["agent_draft"]).toBeNull();
   });
 });
 
