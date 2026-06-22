@@ -176,12 +176,13 @@ async function makeLlmPortFactory(
   // 1. Attempt per-tenant DB config.
   const tenantCfg = await loadTenantLlmConfig(grantsPool, tenantId);
   if (tenantCfg) {
-    const verdict = validateSecretHandleShape(tenantCfg.llm_secret_handle);
+    // TenantLlmConfig.secretHandle is the aliased opaque handle (RL-3: not raw key).
+    const verdict = validateSecretHandleShape(tenantCfg.secretHandle);
     if (verdict.ok) {
       return new OpenAILlmPort({
-        endpoint: tenantCfg.llm_endpoint,
-        model:    tenantCfg.llm_model,
-        secretHandle: tenantCfg.llm_secret_handle,
+        endpoint:     tenantCfg.llmEndpoint,
+        model:        tenantCfg.llmModel,
+        secretHandle: tenantCfg.secretHandle,
         tenantId,
         secretResolver: tenantSecretResolver,
       });
