@@ -1,20 +1,48 @@
 /**
  * src/http/assistant.ts — T-0359 (E17): AI-assistant API routes.
+ *                         T-0384 (D5): thread UX — auto-title, lazy-create,
+ *                                      delete/rename/pin via tombstone events.
  *
  * registerAssistantRoutes(router, { pool, resolveActorTenant, llmPortFactory })
  *
  * Routes:
  *   GET    /api/assistant/threads
  *   POST   /api/assistant/threads
+ *   PATCH  /api/assistant/threads/:id        ← T-0384: rename / pin
+ *   DELETE /api/assistant/threads/:id        ← T-0384: tombstone delete
  *   GET    /api/assistant/threads/:id/messages
  *   POST   /api/assistant/threads/:id/messages  ← LLM dispatch entry
  *   GET    /api/assistant/threads/:id/budget
  *
  * THREAD/MESSAGE PERSISTENCE: NO NEW TABLE (founder constraint).
  * Threads and messages are persisted as audit_event rows:
- *   type: "assistant.thread"  — one row per thread (on creation)
- *   type: "assistant.message" — one row per user turn + one per assistant reply
+ *   type: "assistant.thread"          — one row per thread (on creation)
+ *   type: "assistant.thread.renamed"  — T-0384: rename event (tombstone-event approach)
+ *   type: "assistant.thread.deleted"  — T-0384: delete tombstone (logical delete)
+ *   type: "assistant.thread.pinned"   — T-0384: pin/unpin event
+ *   type: "assistant.message"         — one row per user turn + one per assistant reply
  * Reconstruction (GET) is done by querying audit_event for these types.
+ *
+ * TOMBSTONE-EVENT MODEL (T-0384):
+ *   The audit_event table is append-only (no UPDATE/DELETE). So thread management
+ *   uses event-projection: the fetchThreads projection reads all thread-lifecycle
+ *   events and applies them in occurrence order:
+ *     - Last "assistant.thread.renamed" for a thread wins → effective title
+ *     - Any "assistant.thread.deleted" → thread excluded from list
+ *     - Last "assistant.thread.pinned" → effective pin state (pinned threads first)
+ *   This keeps the audit chain intact and requires no schema migration.
+ *
+ * LAZY-CREATE (T-0384):
+ *   Threads with zero messages are hidden from GET /api/assistant/threads
+ *   (they are created eagerly but only surface in the list after the first
+ *   message is sent). This avoids cluttering the list with empty threads from
+ *   accidental "New" clicks.
+ *
+ * AUTO-TITLE (T-0384):
+ *   When the first user message is sent to a thread (message_count was 0),
+ *   a "assistant.thread.renamed" event is appended with a title derived from
+ *   the first 60 chars of the user message text. The projection then uses this
+ *   as the effective title instead of the creation-time default.
  *
  * SECURITY INVARIANTS:
  *   1. Grants intersection: resolveFor uses makeIntersectionGrantSource so the
@@ -444,6 +472,25 @@ interface ThreadPayload {
   agent_subject: string;
 }
 
+/** T-0384: Payload for assistant.thread.renamed events. */
+interface ThreadRenamedPayload {
+  thread_id: string;
+  title: string;
+  /** True when the title was auto-derived from the first message (lower priority than user renames). */
+  auto?: boolean;
+}
+
+/** T-0384: Payload for assistant.thread.deleted events (tombstone). */
+interface ThreadDeletedPayload {
+  thread_id: string;
+}
+
+/** T-0384: Payload for assistant.thread.pinned events. */
+interface ThreadPinnedPayload {
+  thread_id: string;
+  pinned: boolean;
+}
+
 interface MessagePayload {
   thread_id: string;
   role: "user" | "assistant";
@@ -459,6 +506,8 @@ interface ThreadRow {
   created_at: string;
   context_ref: unknown | null;
   message_count: number;
+  /** T-0384: pin state derived from tombstone-event projection. */
+  pinned: boolean;
 }
 
 interface MessageRow {
@@ -473,6 +522,16 @@ interface MessageRow {
 // ---------------------------------------------------------------------------
 // DB helpers — reconstruct threads/messages from audit_event
 // ---------------------------------------------------------------------------
+
+/**
+ * T-0384: Derive a short thread title from the first user message text.
+ * Takes the first 60 characters, strips newlines, and trims whitespace.
+ */
+export function deriveThreadTitle(firstMessageText: string): string {
+  const cleaned = firstMessageText.replace(/\s+/g, " ").trim();
+  // "…" counts as 1 character, so slice(0, 59) + "…" = 60 chars total.
+  return cleaned.length <= 60 ? cleaned : cleaned.slice(0, 59) + "…";
+}
 
 async function fetchThreads(
   client: pg.PoolClient,
@@ -492,7 +551,7 @@ async function fetchThreads(
     [userSubject],
   );
 
-  // Count messages per thread.
+  // T-0384: Count messages per thread.
   const threadIds = rows.map((r) => r.id);
   if (threadIds.length === 0) return [];
 
@@ -515,16 +574,81 @@ async function fetchThreads(
     countMap.set(r.thread_id, Number(r.cnt));
   }
 
-  return rows.map((r) => {
+  // T-0384: Fetch lifecycle events (rename/delete/pin) for tombstone-event projection.
+  // We query for all three event types in one pass, ordered by occurrence time
+  // so we can apply them in order (last-rename-wins, any-delete tombstones).
+  const { rows: lifecycleRows } = await client.query<{
+    type: string;
+    occurred_at: string;
+    payload: unknown;
+  }>(
+    `SELECT type, occurred_at, payload
+       FROM choros.audit_event
+      WHERE type IN ('assistant.thread.renamed', 'assistant.thread.deleted', 'assistant.thread.pinned')
+        AND subject = $1
+        AND payload->>'thread_id' = ANY($2::text[])
+      ORDER BY occurred_at ASC`,
+    [userSubject, threadIds],
+  );
+
+  // Build projection maps from lifecycle events.
+  // T-0384: Two-level title priority:
+  //   1. User renames (auto !== true) — highest priority, last one wins.
+  //   2. Auto-titles (auto === true)  — lower priority, only used if no user rename exists.
+  const deletedSet = new Set<string>();
+  const titleOverrides = new Map<string, string>(); // thread_id → last user rename title
+  const autoTitles = new Map<string, string>();      // thread_id → last auto-title
+  const pinnedMap = new Map<string, boolean>();      // thread_id → last pin state
+
+  for (const ev of lifecycleRows) {
+    const payload = ev.payload as Record<string, unknown>;
+    const tid = typeof payload["thread_id"] === "string" ? payload["thread_id"] : null;
+    if (!tid) continue;
+    if (ev.type === "assistant.thread.deleted") {
+      deletedSet.add(tid);
+    } else if (ev.type === "assistant.thread.renamed") {
+      const title = typeof payload["title"] === "string" ? payload["title"] : null;
+      const isAuto = payload["auto"] === true;
+      if (title) {
+        if (isAuto) {
+          autoTitles.set(tid, title);
+        } else {
+          // User rename — always beats auto-title regardless of occurred_at.
+          titleOverrides.set(tid, title);
+        }
+      }
+    } else if (ev.type === "assistant.thread.pinned") {
+      const pinned = payload["pinned"] === true;
+      pinnedMap.set(tid, pinned);
+    }
+  }
+
+  // Build result: exclude deleted threads and threads with 0 messages (lazy-create).
+  const result: ThreadRow[] = [];
+  for (const r of rows) {
+    if (deletedSet.has(r.id)) continue; // T-0384: tombstone — exclude deleted
+    const msgCount = countMap.get(r.id) ?? 0;
+    if (msgCount === 0) continue; // T-0384: lazy-create — hide empty threads
     const p = r.payload as ThreadPayload;
-    return {
+    // T-0384: title priority: user rename > auto-title > creation title > fallback
+    const effectiveTitle = titleOverrides.get(r.id) ?? autoTitles.get(r.id) ?? p.title ?? "Разговор";
+    result.push({
       id: r.id,
-      title: p.title ?? "Разговор",
+      title: effectiveTitle,
       created_at: new Date(Number(r.occurred_at)).toISOString(),
       context_ref: p.context_ref ?? null,
-      message_count: countMap.get(r.id) ?? 0,
-    };
+      message_count: msgCount,
+      pinned: pinnedMap.get(r.id) ?? false,
+    });
+  }
+
+  // T-0384: Sort pinned threads first, then by creation time (ASC).
+  result.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return a.created_at < b.created_at ? -1 : 1;
   });
+
+  return result;
 }
 
 async function fetchThread(
@@ -549,13 +673,57 @@ async function fetchThread(
   const row = rows[0];
   // Tenant + ownership check: the thread subject must match the requesting user.
   if (row.subject !== userSubject) return null;
+
+  // T-0384: Apply tombstone-event projection for this thread.
+  const { rows: lifecycleRows } = await client.query<{
+    type: string;
+    payload: unknown;
+  }>(
+    `SELECT type, payload
+       FROM choros.audit_event
+      WHERE type IN ('assistant.thread.renamed', 'assistant.thread.deleted', 'assistant.thread.pinned')
+        AND subject = $1
+        AND payload->>'thread_id' = $2
+      ORDER BY occurred_at ASC`,
+    [userSubject, threadId],
+  );
+
+  let deleted = false;
+  let userTitleOverride: string | null = null; // from user-explicit rename events
+  let autoTitleOverride: string | null = null;  // from auto-title events
+  let pinned = false;
+
+  for (const ev of lifecycleRows) {
+    const payload = ev.payload as Record<string, unknown>;
+    if (ev.type === "assistant.thread.deleted") {
+      deleted = true;
+    } else if (ev.type === "assistant.thread.renamed") {
+      const title = typeof payload["title"] === "string" ? payload["title"] : null;
+      const isAuto = payload["auto"] === true;
+      if (title) {
+        if (isAuto) {
+          autoTitleOverride = title;
+        } else {
+          userTitleOverride = title;
+        }
+      }
+    } else if (ev.type === "assistant.thread.pinned") {
+      pinned = payload["pinned"] === true;
+    }
+  }
+
+  if (deleted) return null; // T-0384: tombstone — treat as not found
+
   const p = row.payload as ThreadPayload;
+  // T-0384: title priority: user rename > auto-title > creation title > fallback
+  const effectiveTitle = userTitleOverride ?? autoTitleOverride ?? p.title ?? "Разговор";
   return {
     id: row.id,
-    title: p.title ?? "Разговор",
+    title: effectiveTitle,
     created_at: new Date(Number(row.occurred_at)).toISOString(),
     context_ref: p.context_ref ?? null,
     message_count: 0, // caller fills if needed
+    pinned,
   };
 }
 
@@ -729,6 +897,129 @@ export function registerAssistantRoutes(
   );
 
   // =========================================================================
+  // PATCH /api/assistant/threads/:id — T-0384: rename and/or pin a thread
+  //
+  // Body: { title?: string, pinned?: boolean }
+  // Appends "assistant.thread.renamed" and/or "assistant.thread.pinned" events.
+  // Projection in fetchThreads/fetchThread applies them (last event wins).
+  // =========================================================================
+  router.register(
+    "PATCH",
+    "/api/assistant/threads/:id",
+    withAuth(async (req, res, params) => {
+      const threadId = params["id"] ?? "";
+      if (!threadId) throw new HttpError(400, "VALIDATION", "thread id required");
+
+      const actorSlug = await extractActorSlug(req, pool);
+      const tenantId = await resolveActorTenant(actorSlug);
+
+      const body = (await readJsonBody(req)) as {
+        title?: string;
+        pinned?: boolean;
+      };
+
+      const hasTitle = body.title !== undefined;
+      const hasPinned = body.pinned !== undefined;
+      if (!hasTitle && !hasPinned) {
+        throw new HttpError(400, "VALIDATION", "at least one of title or pinned must be provided");
+      }
+
+      const newTitle = hasTitle ? String(body.title ?? "").slice(0, 256).trim() : null;
+      if (hasTitle && !newTitle) {
+        throw new HttpError(400, "VALIDATION", "title must be a non-empty string");
+      }
+
+      await withTenantTx(pool, tenantId, async (client) => {
+        // Verify thread ownership (fetchThread returns null for deleted threads).
+        const thread = await fetchThread(client, threadId, actorSlug);
+        if (!thread) throw new HttpError(404, "NOT_FOUND", "thread not found");
+
+        const now = Date.now();
+
+        if (hasTitle && newTitle) {
+          // Append a thread.renamed event (tombstone-event projection).
+          const renamedPayload: ThreadRenamedPayload = { thread_id: threadId, title: newTitle };
+          await auditWriter.appendAuditEvent(client, {
+            id: randomUUID(),
+            type: "assistant.thread.renamed",
+            actor: actorSlug,
+            subject: actorSlug,
+            scope: null,
+            via: null,
+            proposed_by: null,
+            confirmed_by: null,
+            payload: renamedPayload,
+            occurred_at: now,
+          });
+        }
+
+        if (hasPinned) {
+          // Append a thread.pinned event (tombstone-event projection).
+          const pinnedPayload: ThreadPinnedPayload = { thread_id: threadId, pinned: Boolean(body.pinned) };
+          await auditWriter.appendAuditEvent(client, {
+            id: randomUUID(),
+            type: "assistant.thread.pinned",
+            actor: actorSlug,
+            subject: actorSlug,
+            scope: null,
+            via: null,
+            proposed_by: null,
+            confirmed_by: null,
+            payload: pinnedPayload,
+            occurred_at: hasPinned && hasTitle ? now + 1 : now, // avoid same-ms ordering ambiguity
+          });
+        }
+      });
+
+      res.statusCode = 204;
+      res.end();
+    }),
+  );
+
+  // =========================================================================
+  // DELETE /api/assistant/threads/:id — T-0384: logical delete (tombstone)
+  //
+  // Appends "assistant.thread.deleted" event. The thread is excluded from
+  // GET /api/assistant/threads projections. Messages are NOT deleted — they
+  // remain in audit_event (append-only invariant).
+  // =========================================================================
+  router.register(
+    "DELETE",
+    "/api/assistant/threads/:id",
+    withAuth(async (req, res, params) => {
+      const threadId = params["id"] ?? "";
+      if (!threadId) throw new HttpError(400, "VALIDATION", "thread id required");
+
+      const actorSlug = await extractActorSlug(req, pool);
+      const tenantId = await resolveActorTenant(actorSlug);
+
+      await withTenantTx(pool, tenantId, async (client) => {
+        // Verify thread ownership (fetchThread returns null for already-deleted threads).
+        const thread = await fetchThread(client, threadId, actorSlug);
+        if (!thread) throw new HttpError(404, "NOT_FOUND", "thread not found");
+
+        // Append a thread.deleted tombstone event.
+        const deletedPayload: ThreadDeletedPayload = { thread_id: threadId };
+        await auditWriter.appendAuditEvent(client, {
+          id: randomUUID(),
+          type: "assistant.thread.deleted",
+          actor: actorSlug,
+          subject: actorSlug,
+          scope: null,
+          via: null,
+          proposed_by: null,
+          confirmed_by: null,
+          payload: deletedPayload,
+          occurred_at: Date.now(),
+        });
+      });
+
+      res.statusCode = 204;
+      res.end();
+    }),
+  );
+
+  // =========================================================================
   // GET /api/assistant/threads/:id/messages — list messages in a thread
   // =========================================================================
   router.register(
@@ -777,11 +1068,24 @@ export function registerAssistantRoutes(
       const contextRef = body.context_ref ?? null;
 
       // -----------------------------------------------------------------------
-      // 1. Verify thread ownership (inside tenant tx).
+      // 1. Verify thread ownership + check if this is the first message.
       // -----------------------------------------------------------------------
+      let isFirstMessage = false;
       await withTenantTx(pool, tenantId, async (client) => {
+        // fetchThread returns null for deleted threads (tombstone-event projection).
         const thread = await fetchThread(client, threadId, actorSlug);
         if (!thread) throw new HttpError(404, "NOT_FOUND", "thread not found");
+
+        // T-0384: Check message count to detect first message for auto-title.
+        const { rows: cntRows } = await client.query<{ cnt: string }>(
+          `SELECT COUNT(*) AS cnt
+             FROM choros.audit_event
+            WHERE type = 'assistant.message'
+              AND payload->>'thread_id' = $1
+              AND subject = $2`,
+          [threadId, actorSlug],
+        );
+        isFirstMessage = (Number(cntRows[0]?.cnt ?? 0)) === 0;
       });
 
       // -----------------------------------------------------------------------
@@ -792,6 +1096,8 @@ export function registerAssistantRoutes(
 
       // -----------------------------------------------------------------------
       // 3. Persist the user message (outside LLM call — do not lose it if LLM fails).
+      //    T-0384: If this is the first message, also append a thread.renamed event
+      //    with a title derived from the message text (auto-title).
       // -----------------------------------------------------------------------
       const userMsgId = randomUUID();
       const userMsgTs = Date.now();
@@ -814,6 +1120,30 @@ export function registerAssistantRoutes(
           payload,
           occurred_at: userMsgTs,
         });
+
+        // T-0384: Auto-title — fire a thread.renamed event on the first message.
+        // auto: true marks it as system-generated (lower priority than user renames
+        // in the projection, regardless of occurred_at ordering).
+        if (isFirstMessage) {
+          const autoTitle = deriveThreadTitle(userText);
+          const renamedPayload: ThreadRenamedPayload = {
+            thread_id: threadId,
+            title: autoTitle,
+            auto: true,
+          };
+          await auditWriter.appendAuditEvent(client, {
+            id: randomUUID(),
+            type: "assistant.thread.renamed",
+            actor: actorSlug,
+            subject: actorSlug,
+            scope: null,
+            via: null,
+            proposed_by: null,
+            confirmed_by: null,
+            payload: renamedPayload,
+            occurred_at: userMsgTs + 1, // +1ms so it sorts after the message
+          });
+        }
       });
 
       // -----------------------------------------------------------------------
