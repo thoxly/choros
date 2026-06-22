@@ -38,8 +38,12 @@ import {
 } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+import { DEV_USER_HEADER, getAuthContext, getAuthMode, withAuth } from "./auth.js";
+import {
+  resolveActorSlugFromAuth,
+  resolveAgentSlugFromAuth,
+  resolveActorTenant,
+} from "../db/org.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
 export { SEED_ORACLE };
 
@@ -102,13 +106,29 @@ async function withTenantTx<T>(
 //     fall through to x-dev-user when an identity was authenticated.
 //   - dev: getAuthContext is undefined (withAuth is a no-op) → x-dev-user, the
 //     existing dev convention. Dev tests + the SPA dev path are unchanged.
+//
+// T-0424 [SECURITY] P0 — DISJOINT agent path: invoke is an AGENT-RUNTIME surface,
+// so its callers may be agents (Keycloak service-accounts presenting
+// actor_type=agent), not just humans. The keycloak branch selects the resolution
+// path on the VALIDATED `actor_type` claim (never a header/body):
+//   - actor_type === 'agent' → resolveAgentSlugFromAuth (service-account-<clientId>
+//     → agent_card.kc_client_id → kind='agent' employee.slug). This is the SEPARATE
+//     bridge; it can ONLY ever return an agent slug.
+//   - else (human) → resolveActorSlugFromAuth, UNTOUCHED, with its kind='human'
+//     T-0372 anti-impersonation guard intact.
+// The two paths query disjoint kind partitions and each fails closed (null → 401);
+// an agent token cannot ride the human path or vice-versa (ADR §2-3).
 // ---------------------------------------------------------------------------
 
 async function extractCallerId(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
     // keycloak path: the identity is the validated token, NOT a request header.
-    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    // Branch on the validated actor_type claim → disjoint agent vs human bridge.
+    const slug =
+      ctx.actorType === "agent"
+        ? await resolveAgentSlugFromAuth(pool, ctx)
+        : await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
     if (slug === null) {
       throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
     }
@@ -121,6 +141,29 @@ async function extractCallerId(req: IncomingMessage, pool: pg.Pool): Promise<str
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// resolveInvokeTenant — T-0424 [SECURITY] §4: derive the invoke tenant from the
+// resolved caller, replacing the DEV_TENANT_ID pin in keycloak mode.
+//
+// The DEV_TENANT_ID pin was acceptable while the caller was also dev-pinned, but
+// with a real (agent or human) identity it is a cross-tenant correctness gap: a
+// multi-tenant caller's token would still operate against DEV_TENANT_ID's cards/
+// grants. In keycloak mode the tenant is derived from the caller's OWN employee
+// row (resolveActorTenant), exactly as the human surfaces already do — so invoke
+// becomes single-tenant per call, keyed off the caller's own tenant, and the
+// target agent is then validated WITHIN that tenant under its RLS GUC. Dev mode
+// keeps the single-silo pin (getAuthContext is undefined / no token).
+// ---------------------------------------------------------------------------
+
+async function resolveInvokeTenant(
+  pool: pg.Pool,
+  callerSlug: string,
+): Promise<string> {
+  return getAuthMode() === "keycloak"
+    ? resolveActorTenant(pool, callerSlug)
+    : DEV_TENANT_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +347,7 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
   // (401 otherwise; x-dev-user no longer bypasses); dev mode is a no-op pass-through.
   router.register("POST", "/api/invoke/request", withAuth(async (req, res) => {
     const callerId = await extractCallerId(req, pool);
-    const tenantId = DEV_TENANT_ID;
+    const tenantId = await resolveInvokeTenant(pool, callerId);
     const nowMs = Date.now();
 
     const rawBody = await readJsonBody(req);
@@ -374,7 +417,7 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
   // T-0418 [SECURITY] P0: withAuth-wrapped — caller derived from validated token.
   router.register("POST", "/api/invoke/command", withAuth(async (req, res) => {
     const callerId = await extractCallerId(req, pool);
-    const tenantId = DEV_TENANT_ID;
+    const tenantId = await resolveInvokeTenant(pool, callerId);
     const nowMs = Date.now();
 
     const rawBody = await readJsonBody(req);
