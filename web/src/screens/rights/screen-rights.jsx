@@ -138,7 +138,9 @@ function RightsScreen({ initialRole }) {
             </div>
             <div className="chs-roledetail__actions">
               <span className="chs-readmode"><span className="chs-readmode__dot" />только чтение</span>
-              <Button variant="secondary" size="sm">Запросить изменение</Button>
+              {/* "Запросить изменение": no POST /api/rights/change-requests endpoint exists yet.
+                   Degrade honestly — disabled with tooltip. Follow-up: T-0387-FU-change-request. */}
+              <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — эндпойнт ещё не реализован (следующий слой)">Запросить изменение</Button>
             </div>
           </div>
 

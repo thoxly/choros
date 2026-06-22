@@ -12,7 +12,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Select, Modal, ConfirmDialog,
-  RoleAssignment, ReservationMeter, BudgetMeter,
   EmptyState, LoadingState, ErrorState, ToastViewport, useToasts, KitIcon,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
@@ -51,77 +50,11 @@ const ENTITY_LABEL = {
 };
 
 /* ---- Карточки исполнителей ----
-   roles → assignments (read); грант-атомы живут в П1R (screen-rights).
-   NOTE: detail panel remains mock — /api/org exposes only the tree; rich executor detail is a future slice. */
-const EXEC_DETAIL = {
-  "a-invoice": {
-    type: "agent", name: "Счёт-агент", position: "Согласующий счетов", dept: "Финансы",
-    id: "AG-0042", autonomyLevel: "L2 — частичная автономия",
-    state: { "Статус": "Активен", "В очереди": "4 задачи", "Подчинён": "Е. Ларина · человек", "Активен с": "11.03.2026" },
-    llm: {
-      endpoint: "https://llm.fin.choros.internal/v1",
-      model: "claude-sonnet-4", build: "invoice-v4",
-      ctx: "200K токенов", region: "ru-central-1a", billing: "по токенам",
-    },
-    assignments: [
-      { roleId: "role-fin-approve-50", role: "Согласующий счетов ≤ ₽50 000", scope: "Финансы · Согласование счёта", validity: "до 31.12.2026" },
-      { roleId: "role-fin-recon", role: "Сверка платежей", scope: "Финансы · Закрытие месяца", validity: "бессрочно" },
-    ],
-    reservation: [
-      { label: "Токены LLM", used: 148920, instanceCap: 250000, agentCap: 2000000, unit: "ткн" },
-      { label: "Стоимость вывода", used: 11800, instanceCap: 12480, agentCap: 80000, unit: "₽", money: true },
-      { label: "Вызовы инструментов", used: 142, instanceCap: 300, agentCap: 4000, unit: "" },
-    ],
-    autonomy: { auto: 50, review: 80, autoLabel: "Автономно", reviewLabel: "Соглас. человеком", blockLabel: "Блок", t1: "₽0", t2: "₽50 000", t3: "₽250 000", esc: "А. Кравцова → Е. Ларина", escType: "human" },
-  },
-  "e-kravtsova": {
-    type: "human", name: "А. Кравцова", position: "Контролёр расчётов", dept: "Финансы",
-    id: "HU-0118", autonomyLevel: "Полные права в роли",
-    state: { "Статус": "На смене", "В работе": "3 задачи", "Руководитель": "Е. Ларина", "Часовой пояс": "MSK (UTC+3)" },
-    assignments: [
-      { roleId: "role-fin-control", role: "Контролёр расчётов", scope: "Финансы", validity: "бессрочно" },
-      { roleId: "role-fin-approve-250", role: "Согласование ≤ ₽250 000", scope: "Финансы · Согласование счёта", validity: "до 30.06.2026", expiring: true },
-      { roleId: "role-fin-escrcv", role: "Приёмник эскалаций агентов", scope: "Финансы", validity: "бессрочно" },
-    ],
-    limits: [
-      { label: "Согласований / сутки", used: 23, total: 60, unit: "" },
-      { label: "Лимит согласования", used: 184000, total: 250000, unit: "₽", money: true },
-    ],
-    autonomy: { auto: 70, review: 100, autoLabel: "Утверждает сама", reviewLabel: "Совет директоров", blockLabel: "", t1: "₽0", t2: "₽250 000", t3: "₽1 000 000", esc: "Совет директоров", escType: "human" },
-  },
-  "a-triage": {
-    type: "agent", name: "Триаж-агент", position: "Линия поддержки L1", dept: "Клиентский сервис",
-    id: "AG-0017", autonomyLevel: "L1 — узкая автономия",
-    state: { "Статус": "Активен", "В очереди": "12 обращений", "Подчинён": "И. Петров · человек", "Активен с": "02.01.2026" },
-    llm: {
-      endpoint: "https://llm.cs.choros.internal/v1",
-      model: "claude-haiku-4", build: "triage-v2",
-      ctx: "100K токенов", region: "ru-central-1a", billing: "по токенам",
-    },
-    assignments: [
-      { roleId: "role-cs-l1", role: "Линия поддержки L1", scope: "Клиентский сервис · Поддержка", validity: "бессрочно" },
-    ],
-    reservation: [
-      { label: "Токены LLM", used: 38400, instanceCap: 60000, agentCap: 1500000, unit: "ткн" },
-      { label: "Стоимость вывода", used: 640, instanceCap: 1200, agentCap: 24000, unit: "₽", money: true },
-      { label: "Авто-ответы", used: 7, instanceCap: 12, agentCap: 900, unit: "" },
-    ],
-    autonomy: { auto: 60, review: 100, autoLabel: "Авто-ответ", reviewLabel: "Эскалация L2", blockLabel: "", t1: "FAQ", t2: "Стандарт", t3: "Спор / возврат", esc: "И. Петров (L2)", escType: "human" },
-  },
-  "s-ledger": {
-    type: "service", name: "ledger-sync", position: "Сервисный коннектор", dept: "Платформа",
-    id: "SV-0003", autonomyLevel: "Детерминированный — без автономии",
-    state: { "Статус": "Здоров", "Аптайм": "99.98%", "Владелец": "С. Белов", "Регион": "ru-central-1" },
-    assignments: [
-      { roleId: "role-plat-ledger", role: "Коннектор реестра", scope: "Платформа", validity: "бессрочно" },
-    ],
-    limits: [
-      { label: "RPS, средний", used: 42, total: 200, unit: "rps" },
-      { label: "Бюджет ошибок / сутки", used: 3, total: 50, unit: "" },
-    ],
-    autonomy: { auto: 100, review: 100, autoLabel: "Детерминированный — порог не применяется", reviewLabel: "", blockLabel: "", t1: "", t2: "", t3: "", esc: "Дежурный платформы (при сбое)", escType: "human" },
-  },
-};
+   Live data: /api/org returns the tree with name+type per person.
+   Rich detail (LLM config, budget, autonomy thresholds) is not exposed by any
+   existing API endpoint — those fields are a future slice. We show an honest card
+   with the live org data (name, type, slug) and a clear note about what is pending.
+   No dummy data is rendered (D2 honest-empty / UX-G6). */
 
 /* ---- CRUD modal (shared) ----
    Migrated to the kit (T-0312): the modal surface is the kit <Modal> (tokenised
@@ -426,8 +359,6 @@ function OrgTree({ org, selectedId, onSelect, canWrite, idMaps, onCreate, onDele
   );
 }
 
-function fmtRu(n) { return n.toLocaleString("ru-RU"); }
-const moneyFmt = (n) => "₽" + fmtRu(n);
 
 /* ---- Explain-PDP в карточке сотрудника (T-0223 · инвариант I-3) ----
    «Почему Вася не видит X» = трасса PDP, ВСТРОЕНА в карточку, ЗА mgmt-грантом.
@@ -529,182 +460,32 @@ function ExplainPanel({ subjectSlug }) {
   );
 }
 
-function ExecutorDetail({ data, onOpenRights, subjectSlug }) {
-  const isAgent = data.type === "agent";
-  const isService = data.type === "service";
-  const primaryRole = data.assignments[0]?.roleId;
+/**
+ * ExecutorDetail — live card from org tree data.
+ * Shows real name, type, position, and slug from GET /api/org.
+ * Rich per-executor fields (LLM config, budget, autonomy thresholds) are not
+ * exposed by any existing API — those are a future slice. We show them honestly
+ * absent rather than fabricating placeholder values (D2 honest-empty / UX-G6).
+ * The explain-PDP panel (T-0223 · I-3) is always included and calls a live endpoint.
+ */
+function ExecutorDetail({ person, position, dept, onOpenRights }) {
   return (
     <div className="chs-org__detail">
       <div className="chs-detail">
-        {/* HONESTY (T-0269): this rich executor card is illustrative — /api/org exposes
-            only the tree; per-executor LLM/budget/autonomy detail is a future slice. */}
-        <div style={{
-          margin: '0 0 var(--chs-space-4) 0', padding: 'var(--chs-space-3) var(--chs-space-4)',
-          background: 'var(--chs-color-warning-soft)',
-          border: '1px solid var(--chs-color-border)', borderRadius: 'var(--chs-radius-3)',
-          fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)',
-        }}>
-          Карточка исполнителя — иллюстративные данные. Реальны: дерево, создание/удаление и назначение ролей (слева).
-        </div>
         <div className="chs-detail__head">
-          <div className={`chs-detail__avatar chs-detail__avatar--${data.type}`}>
-            <ExecGlyph type={data.type} size={22} />
+          <div className={`chs-detail__avatar chs-detail__avatar--${person.type}`}>
+            <ExecGlyph type={person.type} size={22} />
           </div>
           <div className="chs-detail__headmain">
             <h2 className="chs-detail__name">
-              {data.name}
-              <ExecutorBadge type={data.type} />
+              {person.name}
+              <ExecutorBadge type={person.type} />
             </h2>
             <div className="chs-detail__meta">
-              <span>{data.position}</span>
-              <span className="chs-crumbs__sep">/</span>
-              <span>{data.dept}</span>
-              <span className="chs-crumbs__sep">/</span>
-              <MonoId>{data.id}</MonoId>
+              {position && <><span>{position}</span><span className="chs-crumbs__sep">/</span></>}
+              {dept && <><span>{dept}</span><span className="chs-crumbs__sep">/</span></>}
+              <MonoId>{person.id}</MonoId>
             </div>
-          </div>
-          <div className="chs-detail__headactions">
-            <Button variant="ghost" size="sm" disabled title="Журнал событий исполнителя — следующий слой (API ещё не подключён)">Журнал</Button>
-            <Button variant="secondary" size="sm" onClick={() => onOpenRights && onOpenRights(primaryRole)}
-              glyph={<Icon name="rights" className="chs-btn__glyph" />}>Права и доступ</Button>
-          </div>
-        </div>
-
-        {/* Состояние */}
-        <div className="chs-detail__statline">
-          {Object.entries(data.state).map(([k, v]) => (
-            <div className="chs-statcell" key={k}>
-              <span className="chs-statcell__k">{k}</span>
-              <span className="chs-statcell__v">{v}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Назначения ролей (read) */}
-        <section className="chs-section2">
-          <div className="chs-section2__head">
-            <h3 className="chs-section2__title">Назначенные роли</h3>
-            <span className="chs-section2__aux">{data.assignments.length} назначено · права от роли</span>
-          </div>
-          <div className="chs-asgns">
-            <div className="chs-asgns__colhead">
-              <span>Роль</span><span>Орг-охват</span><span>Срок действия</span>
-            </div>
-            {data.assignments.map((a) => (
-              <RoleAssignment key={a.roleId} role={a.role} scope={a.scope} validity={a.validity}
-                expiring={a.expiring} onOpen={() => onOpenRights && onOpenRights(a.roleId)} />
-            ))}
-          </div>
-          <p className="chs-section2__note">
-            Доступные инструменты и видимые поля форм — <b>производные от грантов роли</b>.
-            Гранты не редактируются здесь:&nbsp;
-            <button className="chs-inlinelink" onClick={() => onOpenRights && onOpenRights(primaryRole)}>открыть «Права и доступ» →</button>
-          </p>
-        </section>
-
-        {/* Своя модель (BYO) — только агент */}
-        {isAgent && data.llm && (
-          <section className="chs-section2">
-            <div className="chs-section2__head">
-              <h3 className="chs-section2__title">Своя модель (LLM)</h3>
-              <span className="chs-byo">BYO · клиент хостит</span>
-            </div>
-            <div className="chs-llm">
-              <div className="chs-llm__endpointrow">
-                <span className="chs-llm__k">Эндпойнт</span>
-                <Mono className="chs-llm__endpoint">{data.llm.endpoint}</Mono>
-              </div>
-              <div className="chs-llm__grid">
-                <div className="chs-statcell"><span className="chs-statcell__k">Модель</span><span className="chs-statcell__v"><Mono>{data.llm.model}</Mono></span></div>
-                <div className="chs-statcell"><span className="chs-statcell__k">Сборка</span><span className="chs-statcell__v"><Mono>{data.llm.build}</Mono></span></div>
-                <div className="chs-statcell"><span className="chs-statcell__k">Контекст</span><span className="chs-statcell__v"><Mono>{data.llm.ctx}</Mono></span></div>
-                <div className="chs-statcell"><span className="chs-statcell__k">Регион / тариф</span><span className="chs-statcell__v"><Mono>{data.llm.region}</Mono> · {data.llm.billing}</span></div>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* Бюджет с резервированием (агент) / Лимиты (человек, сервис) */}
-        {isAgent ? (
-          <section className="chs-section2">
-            <div className="chs-section2__head">
-              <h3 className="chs-section2__title">Бюджет и резервирование</h3>
-              <span className="chs-section2__aux">две крыши: на инстанс · на агента</span>
-            </div>
-            <div className="chs-resvs">
-              {data.reservation.map((b) => (
-                <ReservationMeter key={b.label} label={b.label} used={b.used} instanceCap={b.instanceCap}
-                  agentCap={b.agentCap} unit={b.unit} fmt={b.money ? moneyFmt : fmtRu} />
-              ))}
-            </div>
-          </section>
-        ) : (
-          <section className="chs-section2">
-            <div className="chs-section2__head">
-              <h3 className="chs-section2__title">{isService ? "Сервисные лимиты" : "Лимиты в роли"}</h3>
-              <span className="chs-section2__aux">сброс в 00:00 MSK</span>
-            </div>
-            <div className="chs-budgets">
-              {data.limits.map((b) => (
-                <BudgetMeter key={b.label} label={b.label} used={b.used} total={b.total} unit={b.unit}
-                  fmt={b.money ? moneyFmt : fmtRu} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* Автономия / эскалация */}
-        <section className="chs-section2">
-          <div className="chs-section2__head">
-            <h3 className="chs-section2__title">Порог автономии и эскалации</h3>
-            <span className="chs-section2__aux">{data.autonomyLevel}</span>
-          </div>
-          <div className="chs-autonomy">
-            {isService ? (
-              <div className="chs-autonomy__track">
-                <div className="chs-autonomy__zone chs-autonomy__zone--auto" style={{ flex: 1 }}>{data.autonomy.autoLabel}</div>
-              </div>
-            ) : (
-              <>
-                <div className="chs-autonomy__track">
-                  <div className="chs-autonomy__zone chs-autonomy__zone--auto" style={{ flex: data.autonomy.auto }}>{data.autonomy.autoLabel}</div>
-                  <div className="chs-autonomy__zone chs-autonomy__zone--review" style={{ flex: data.autonomy.review - data.autonomy.auto }}>{data.autonomy.reviewLabel}</div>
-                  {data.autonomy.blockLabel && (
-                    <div className="chs-autonomy__zone chs-autonomy__zone--block" style={{ flex: Math.max(12, 100 - data.autonomy.review) }}>{data.autonomy.blockLabel}</div>
-                  )}
-                </div>
-                <div className="chs-autonomy__ticks">
-                  <span>{data.autonomy.t1}</span>
-                  <span>{data.autonomy.t2}</span>
-                  <span>{data.autonomy.t3}</span>
-                </div>
-              </>
-            )}
-            <div className="chs-autonomy__esc">
-              <span>Эскалация:</span>
-              <span className="chs-autonomy__arrow">→</span>
-              <ExecutorBadge type={data.autonomy.escType} name={data.autonomy.esc} />
-            </div>
-          </div>
-        </section>
-
-        {/* Explain-PDP (T-0223 · I-3): встроен в карточку, за mgmt-грантом */}
-        <ExplainPanel subjectSlug={subjectSlug} />
-      </div>
-    </div>
-  );
-}
-
-// Honest minimal detail for an executor we have no rich (mock) card for — e.g. a
-// freshly created employee. We never fabricate LLM/budget/autonomy data here.
-function PlainExecutorDetail({ slug, onOpenRights }) {
-  return (
-    <div className="chs-org__detail">
-      <div className="chs-detail">
-        <div className="chs-detail__head">
-          <div className="chs-detail__headmain">
-            <h2 className="chs-detail__name"><MonoId>{slug}</MonoId></h2>
-            <div className="chs-detail__meta"><span>Сотрудник оргструктуры</span></div>
           </div>
           <div className="chs-detail__headactions">
             <Button variant="secondary" size="sm" onClick={() => onOpenRights && onOpenRights(undefined)}
@@ -712,10 +493,10 @@ function PlainExecutorDetail({ slug, onOpenRights }) {
           </div>
         </div>
         <p style={{ padding: 'var(--chs-space-4)', color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-          Подробная карточка (модель, бюджет, автономия) для этого исполнителя ещё не подключена к API.
-          Назначить роль и управлять оргструктурой можно слева; назначения ролей применяются реально.
+          Подробная карточка (модель, бюджет, автономия) не подключена к API — детальные данные исполнителя
+          являются следующим слоем. Назначить роль и управлять оргструктурой можно слева.
         </p>
-        <ExplainPanel subjectSlug={slug} />
+        <ExplainPanel subjectSlug={person.id} />
       </div>
     </div>
   );
@@ -823,7 +604,26 @@ function OrgScreen({ onOpenRights }) {
     }
   }, [pendingDelete, reload, selected, push]);
 
-  const data = selected ? EXEC_DETAIL[selected] : null;
+  // Resolve selected person from the live org tree (GET /api/org).
+  // The tree keys people by slug (person.id = slug). We find the person
+  // and their position/department context so ExecutorDetail can show real metadata.
+  let selectedPerson = null;
+  let selectedPosition = null;
+  let selectedDept = null;
+  if (selected && departments) {
+    outer: for (const dept of departments) {
+      for (const pos of dept.positions) {
+        for (const person of pos.people) {
+          if (person.id === selected) {
+            selectedPerson = person;
+            selectedPosition = pos.title;
+            selectedDept = dept.name;
+            break outer;
+          }
+        }
+      }
+    }
+  }
 
   return (
     <div className="chs-org">
@@ -860,10 +660,10 @@ function OrgScreen({ onOpenRights }) {
             onCreate={(kind) => setModalKind(kind)}
             onDelete={requestDelete}
           />
-          {data
-            ? <ExecutorDetail data={data} onOpenRights={onOpenRights} subjectSlug={selected} />
+          {selectedPerson
+            ? <ExecutorDetail person={selectedPerson} position={selectedPosition} dept={selectedDept} onOpenRights={onOpenRights} />
             : selected
-              ? <PlainExecutorDetail slug={selected} onOpenRights={onOpenRights} />
+              ? <ExecutorDetail person={{ id: selected, name: selected, type: 'human' }} position={null} dept={null} onOpenRights={onOpenRights} />
               : (
                 <div className="chs-org__detail">
                   {departments.length === 0 ? (

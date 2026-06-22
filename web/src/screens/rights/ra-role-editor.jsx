@@ -3,8 +3,8 @@
    ЭКРАН 1: РЕДАКТОР РОЛИ.
    ============================================================================ */
 
-import React, { useState } from 'react';
-import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
+import React, { useState, useEffect } from 'react';
+import { Mono, Button, OpChip, KitIcon, Select, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { isKeycloakMode, getAuthConfig } from '../../app-shell/auth-mode.js';
@@ -228,6 +228,38 @@ async function postSecondConfirm(changeRef, actorId) {
   }
 }
 
+// Dev tenant UUID — same constant as screen-org.jsx and ra-intents.jsx use.
+const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+
+/**
+ * useRoleList — fetch live roles from GET /api/org/tenant-state.
+ * Returns { roles: [{id, slug}], loading, error }.
+ * roles is an empty array (not null) on empty org or 403 (non-owner),
+ * so callers can always map over it.
+ */
+function useRoleList() {
+  const [roles, setRoles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { ...authHeaders() } })
+      .then((r) => {
+        if (r.status === 403) return { roles: [] }; // non-owner: honest empty
+        if (!r.ok) return Promise.reject(new Error(`HTTP ${r.status}`));
+        return r.json();
+      })
+      .then((d) => {
+        if (!alive) return;
+        setRoles(Array.isArray(d.roles) ? d.roles : []);
+        setLoading(false);
+      })
+      .catch((e) => { if (alive) { setError(e.message); setLoading(false); } });
+    return () => { alive = false; };
+  }, []);
+  return { roles, loading, error };
+}
+
 /* ---------------- Экран ---------------- */
 function RoleEditorScreen() {
   const [mode, setMode] = useState("advanced");
@@ -248,9 +280,20 @@ function RoleEditorScreen() {
   const [confirmActor, setConfirmActor] = useState("e-owner2");
   const [confirmResult, setConfirmResult] = useState(null); // null | "loading" | { ok, reason? }
 
-  // Static role UUID for the dev silo "Согласующий счетов ≤ ₽50 000" (seed role).
-  // In a DB-backed scenario this would come from the selected role context.
-  const EDITOR_ROLE_ID = "e0000000-0000-0000-0000-000000000002";
+  // Live roles from GET /api/org/tenant-state.
+  // selectedRoleId: the UUID used in all grant submissions (replaces hardcoded EDITOR_ROLE_ID).
+  const { roles: liveRoles, loading: rolesLoading, error: rolesError } = useRoleList();
+  const [selectedRoleId, setSelectedRoleId] = useState(null);
+
+  // Auto-select first role once the list loads.
+  useEffect(() => {
+    if (liveRoles.length > 0 && !selectedRoleId) {
+      setSelectedRoleId(liveRoles[0].id);
+    }
+  }, [liveRoles, selectedRoleId]);
+
+  // EDITOR_ROLE_ID is now the live-selected role UUID (or null while loading).
+  const EDITOR_ROLE_ID = selectedRoleId;
   const ACTOR_ID = "e-owner"; // dev silo actor (genesis owner, confirmed by seed)
 
   const axes = axesFromGrants(grants);
@@ -442,10 +485,19 @@ function RoleEditorScreen() {
 
   const pendingCount = proposed.filter((p) => p.status === "pending").length;
 
+  // Find the selected role's slug for display in the header.
+  const selectedRole = liveRoles.find((r) => r.id === selectedRoleId) || null;
+
   return (
     <div className="chs-rights">
-      {/* левый рейл — выбор роли для редактирования (статичный для прототипа) */}
-      <RoleEditRail />
+      {/* левый рейл — выбор роли для редактирования (live from /api/org/tenant-state) */}
+      <RoleEditRail
+        roles={liveRoles}
+        loading={rolesLoading}
+        error={rolesError}
+        selectedRoleId={selectedRoleId}
+        onSelect={(id) => { setSelectedRoleId(id); setSubmitResult(null); setProposed([]); setProposedShown(false); }}
+      />
 
       <div className="chs-rights__main">
         <div className="chs-roledetail chs-roledetail--editor">
@@ -453,21 +505,33 @@ function RoleEditorScreen() {
           <div className="chs-roledetail__head">
             <div className="chs-roledetail__titlewrap">
               <div className="chs-editbadge">режим редактирования</div>
-              <h2 className="chs-roledetail__title">Согласующий счетов ≤ ₽50 000</h2>
-              <div className="chs-roledetail__sub">
-                <span className="chs-scopepill"><span className="chs-scopepill__glyph" />Финансы · Согласование</span>
-                <span className="chs-crumbs__sep">/</span>
-                <Mono style={{ color: "var(--chs-color-text-faint)" }}>role-fin-approve-50</Mono>
-                <CriticalityBadge axes={axes} />
-              </div>
+              {selectedRole
+                ? (
+                  <>
+                    <h2 className="chs-roledetail__title">{selectedRole.slug}</h2>
+                    <div className="chs-roledetail__sub">
+                      <Mono style={{ color: "var(--chs-color-text-faint)" }}>{selectedRole.id}</Mono>
+                      <CriticalityBadge axes={axes} />
+                    </div>
+                  </>
+                )
+                : !rolesLoading && !rolesError && (
+                  <h2 className="chs-roledetail__title" style={{ color: 'var(--chs-color-text-muted)' }}>
+                    Выберите роль для редактирования
+                  </h2>
+                )
+              }
+              {rolesLoading && <h2 className="chs-roledetail__title" style={{ color: 'var(--chs-color-text-muted)' }}>Загрузка ролей…</h2>}
+              {rolesError && <h2 className="chs-roledetail__title" style={{ color: 'var(--chs-color-danger)' }}>Ошибка загрузки ролей: {rolesError}</h2>}
             </div>
             <div className="chs-roledetail__actions">
               <Button variant="ghost" size="sm" onClick={() => setSubmitResult(null)}>Отмена</Button>
               <Button
                 variant="primary"
                 size="sm"
-                disabled={submitResult === "loading"}
+                disabled={submitResult === "loading" || !EDITOR_ROLE_ID}
                 onClick={handleSubmit}
+                title={!EDITOR_ROLE_ID ? "Выберите роль для редактирования" : undefined}
               >
                 {submitResult === "loading" ? "Отправка…" : "Запросить применение"}
               </Button>
@@ -650,28 +714,47 @@ function RoleEditorScreen() {
   );
 }
 
-/* статичный рейл выбора роли (визуальная согласованность с read-экраном) */
-const RE_GROUPS = [
-  { dept: "Финансы", roles: [["Контролёр расчётов", false], ["Согласование ≤ ₽250 000", false], ["Согласующий счетов ≤ ₽50 000", true], ["Сверка платежей", false], ["Приёмник эскалаций агентов", false]] },
-  { dept: "Клиентский сервис", roles: [["Линия поддержки L1", false], ["Эскалации L2", false]] },
-  { dept: "Платформа", roles: [["Коннектор реестра", false]] },
-];
-function RoleEditRail() {
+/**
+ * RoleEditRail — live role list from GET /api/org/tenant-state.
+ * Roles are shown as a flat list keyed by slug (tenant-state does not group by
+ * department). On load error or empty org, shows an honest state rather than
+ * a hardcoded list. The selected role drives the EDITOR_ROLE_ID used in grant submissions.
+ */
+function RoleEditRail({ roles, loading, error, selectedRoleId, onSelect }) {
   return (
     <div className="chs-rights__rail">
-      <div className="chs-rights__railhead"><span>Роли</span><span className="chs-rights__railcount">8</span></div>
+      <div className="chs-rights__railhead">
+        <span>Роли</span>
+        {!loading && !error && <span className="chs-rights__railcount">{roles.length}</span>}
+      </div>
       <div className="chs-rights__search"><Icon name="search" /><span>Поиск роли</span></div>
       <div className="chs-rights__roles">
-        {RE_GROUPS.map((grp) => (
-          <div className="chs-rights__rgroup" key={grp.dept}>
-            <div className="chs-rights__rgrouplabel">{grp.dept}</div>
-            {grp.roles.map(([name, active]) => (
-              <button key={name} type="button" className="chs-rolerow" aria-current={active ? "true" : undefined}>
-                <span className="chs-rolerow__main"><span className="chs-rolerow__name">{name}</span></span>
-                {active && <span className="chs-rolerow__editing">ред.</span>}
-              </button>
-            ))}
+        {loading && (
+          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+            Загрузка ролей…
           </div>
+        )}
+        {!loading && error && (
+          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-danger)' }}>
+            Ошибка загрузки ролей: {error}
+          </div>
+        )}
+        {!loading && !error && roles.length === 0 && (
+          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+            Ролей нет. Создайте роль в «Оргструктуре».
+          </div>
+        )}
+        {!loading && !error && roles.map((role) => (
+          <button
+            key={role.id}
+            type="button"
+            className="chs-rolerow"
+            aria-current={selectedRoleId === role.id ? "true" : undefined}
+            onClick={() => onSelect(role.id)}
+          >
+            <span className="chs-rolerow__main"><span className="chs-rolerow__name">{role.slug}</span></span>
+            {selectedRoleId === role.id && <span className="chs-rolerow__editing">ред.</span>}
+          </button>
         ))}
       </div>
     </div>
