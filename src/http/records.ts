@@ -1095,11 +1095,10 @@ export function registerRecordRoutes(
   //
   // Tenant isolation: actor resolved → tenantId → RLS inside withTenantTx.
   // Actor narrowing: actor resolves to its own tenant only (resolveActorTenant).
-  // Field-visibility: applied via applyFieldVisibilityRedaction (data-access-port)
-  //   when the caller has a non-empty FieldVisibilityPolicy wired. For now the
-  //   field-visibility policy is EMPTY (roleScopedFields = empty set) — a no-op
-  //   backward-compatible (NF-1) per T-0081 §4.1. The port is wired; a future
-  //   increment can inject a real policy without changing the endpoint shape.
+  // Field-visibility: applyFieldVisibilityRedaction is imported from the
+  //   data-access port but is NOT invoked on this list endpoint. Redaction is
+  //   deferred to a follow-up increment. A future change can call it here and
+  //   inject a real FieldVisibilityPolicy without altering the response shape.
   router.register("GET", "/api/records", withAuth(async (req: IncomingMessage, res: ServerResponse) => {
     const actor = await extractActor(req, pool);
     const { applicationId, registryDefId, limit, cursor } = parseRecordsListQuery(req);
