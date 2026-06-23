@@ -46,6 +46,12 @@ services:
   # Readiness probe: GET /health/ready on management port (24 × 5s retries = 120 s — AC-1).
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
+    # tini as PID 1 reaps the zombie sh/cat children the CMD-SHELL healthcheck
+    # (process-substitution below) spawns every 5s — without it PID 1 (the JVM)
+    # never reaps them and ~13k zombies fill the cgroup pids in ~22h, exhausting
+    # threads → JVM `pthread_create EAGAIN` → keycloak unhealthy → login down.
+    # Incident + diagnosis: T-0431 (2026-06-23).
+    init: true
     command: start-dev --import-realm
     environment:
       KEYCLOAK_ADMIN:          ${KEYCLOAK_ADMIN:-choros_kc_admin}              # DEV default (RL-1)
