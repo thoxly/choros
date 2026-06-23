@@ -5,8 +5,9 @@
 #
 # Default mode (static): assert the fail-honest CONTRACT is encoded in the harness:
 #   FF-5-1 — a negative spec exists (e2e/tel-linear-negative.e2e.ts) and asserts the
-#            launch affordance is present+enabled and that the start-route returns a
-#            2xx — so a regressed/disabled affordance turns the gate red.
+#            «Новый процесс» launch affordance is present+enabled (via a real Playwright
+#            role-locator binding, not a bare comment token) and that the start-route
+#            returns a 2xx — so a regressed/disabled affordance turns the gate red.
 #   FF-5-2 — playwright.config.ts sets retries: 0 (a flaky-masking retry would let a
 #            broken affordance slip through) — the gate fails on the first red.
 #   FF-5-3 — the happy spec asserts a concrete status (toBe(201)/toBe(200)) on the
@@ -44,12 +45,16 @@ assert_static_contract() {
   [[ ${ERRORS} -ne ${before} ]] && return
 
   # FF-5-1: negative spec asserts the launch affordance present+enabled.
+  # Anchor to the real Playwright role-locator that binds the button name — a bare
+  # affordance-name grep is satisfied by a comment token and would stay green even if
+  # the locator were removed.  A getByRole(…) call cannot appear in a comment and
+  # survive as a real assertion, so this pattern is proof of a live binding.
   if ! grep -qE "toBeEnabled\(\)" "${NEG_SPEC}"; then
     echo "FAIL [FF-5-1]: negative spec does not assert the launch affordance is ENABLED"
     ERRORS=$((ERRORS + 1))
   fi
-  if ! grep -qE "Запустить процесс" "${NEG_SPEC}"; then
-    echo "FAIL [FF-5-1]: negative spec does not exercise the «Запустить процесс» affordance"
+  if ! grep -qE 'getByRole\("button",.*"Новый процесс"' "${NEG_SPEC}"; then
+    echo "FAIL [FF-5-1]: negative spec does not contain a real role-locator binding the «Новый процесс» button (comment-only token is insufficient)"
     ERRORS=$((ERRORS + 1))
   fi
 
