@@ -59,6 +59,8 @@ import {
   validateRecordValues,
   serializeRecordData,
   formatCellValue,
+  RELATION_CELL_ASYNC,
+  deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
 } from './records-form.js';
@@ -79,26 +81,6 @@ import { FieldControl } from '../forms/field-renderer.jsx';
 // Only the create-form picker is implemented here. Display of an existing
 // relation value as a label in list/detail views is T-0447.
 // ---------------------------------------------------------------------------
-
-/**
- * Derive a human-readable display label from a target record's data object.
- * Returns the first non-empty string value found, or a short id prefix.
- * Never surfaces a raw UUID to the user as a label (G5/honest UI rule).
- *
- * @param {object} record  a record row from GET /api/records
- * @returns {string}
- */
-function deriveRecordLabel(record) {
-  if (!record) return '—';
-  const data = record.data && typeof record.data === 'object' ? record.data : {};
-  for (const key of Object.keys(data)) {
-    const v = data[key];
-    if (typeof v === 'string' && v.trim().length > 0) return v.trim();
-    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
-  }
-  // Fallback: first 8 chars of id (unambiguous short ref, not a raw placeholder)
-  return typeof record.id === 'string' ? record.id.slice(0, 8) + '…' : '—';
-}
 
 /**
  * RelationPicker renders a field wrapper (label + control + error) for a
@@ -252,6 +234,85 @@ function RelationPicker({ field, value, onChange, error, idPrefix = 'field' }) {
       </select>
       {errorNode}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0447: RelationCell — async table cell that resolves a UUID to a label+link.
+//
+// formatCellValue returns RELATION_CELL_ASYNC for a non-empty relation value
+// (UUID string). The list renders this component instead of a plain <td> string.
+// Resolution: GET /api/records/:targetId — fetches the target record directly
+// and derives the label via deriveRecordLabel (first non-empty string/number).
+//
+// Honest states:
+//   loading  → subtle italic placeholder (no spinner — avoids visual noise in lists)
+//   resolved → label + navigable link to /apps/:targetAppId/records/:targetId
+//   dangling/denied (404/403/error) → «— / Нет доступа» redacted sentinel (G5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Async table cell for a relation field value.
+ *
+ * @param {string} targetId   The UUID stored as the relation value.
+ * @param {string} appId      The current app's id (used to build the link).
+ */
+function RelationCell({ targetId, appId }) {
+  const [state, setState] = React.useState('loading'); // 'loading'|'resolved'|'denied'
+  const [label, setLabel] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!targetId) { setState('denied'); return; }
+    let cancelled = false;
+    setState('loading');
+    fetch(`/api/records/${encodeURIComponent(targetId)}`, {
+      headers: devHeaders(),
+    })
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.status === 404 || res.status === 403) {
+          setState('denied');
+          return;
+        }
+        if (!res.ok) { setState('denied'); return; }
+        const data = await res.json();
+        if (cancelled) return;
+        // The target record may belong to a different app; use its application_id
+        // (present on the enriched GET /api/records/:id response) to build the link.
+        const targetAppId = data.application_id || appId;
+        setLabel({ text: deriveRecordLabel(data), targetAppId });
+        setState('resolved');
+      })
+      .catch(() => { if (!cancelled) setState('denied'); });
+    return () => { cancelled = true; };
+  }, [targetId, appId]);
+
+  if (state === 'loading') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-xs)' }}>
+        …
+      </span>
+    );
+  }
+
+  if (state === 'denied' || !label) {
+    // Redacted sentinel — mirrors CrossAppLinksPanel's denied-hop sentinel (T-0352).
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        — / Нет доступа
+      </span>
+    );
+  }
+
+  // Resolved: label + link to the target record's detail page.
+  return (
+    <Link
+      to={`/apps/${label.targetAppId}/records/${targetId}`}
+      style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
+      title={`Открыть запись ${targetId}`}
+    >
+      {label.text}
+    </Link>
   );
 }
 
@@ -641,9 +702,18 @@ function AppRecordsScreen() {
                       key={rec.id}
                       style={rec.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
                     >
-                      {columns.map((c) => (
-                        <td key={c.key}>{formatCellValue(data[c.key], c.type)}</td>
-                      ))}
+                      {columns.map((c) => {
+                        const rendered = formatCellValue(data[c.key], c.type);
+                        // T-0447: relation cells resolve async — use RelationCell.
+                        if (rendered === RELATION_CELL_ASYNC) {
+                          return (
+                            <td key={c.key}>
+                              <RelationCell targetId={String(data[c.key])} appId={appId} />
+                            </td>
+                          );
+                        }
+                        return <td key={c.key}>{rendered}</td>;
+                      })}
                       <td>
                         <Mono style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
                           {fmtTs(rec.created_at)}
