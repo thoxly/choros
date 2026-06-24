@@ -261,7 +261,7 @@ function makeFakePool(db: FakeAuditDb): import("pg").Pool {
 }
 
 const TENANT = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-const INST = "flowable-inst-001";
+const INST = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const PROC_KEY = "telLinear";
 const ACTOR = "e-larina";
 
@@ -274,6 +274,7 @@ describe("projection fold: done IFF instance.ended (T-0443)", () => {
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     // Write process.started
@@ -313,6 +314,7 @@ describe("projection fold: done IFF instance.ended (T-0443)", () => {
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     const taskId = await appendProcessStarted(tx, {
@@ -357,6 +359,7 @@ describe("projection fold: done IFF instance.ended (T-0443)", () => {
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     const taskId = await appendProcessStarted(tx, {
@@ -386,6 +389,7 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     // Start instance + approve base task
@@ -407,7 +411,7 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
     client.release();
 
     // Engine did NOT end the instance (6M branch active) → emit next_task
-    const nextTaskId = "next-task-uuid-001";
+    const nextTaskId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
     await appendNextTaskEvent(pool, TENANT, {
       instanceId: INST,
       procKey: PROC_KEY,
@@ -439,6 +443,7 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     const taskId = await appendProcessStarted(tx, {
@@ -458,7 +463,7 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
     });
     client.release();
 
-    const nextTaskId = "next-task-uuid-002";
+    const nextTaskId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
     await appendNextTaskEvent(pool, TENANT, {
       instanceId: INST,
       procKey: PROC_KEY,
@@ -473,6 +478,7 @@ describe("process.next_task surfaced in listInstanceInboxTasks (T-0443)", () => 
 
     // Extra-approve also done → engine ends instance
     const client2 = await pool.connect();
+    await client2.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx2 = client2 as unknown as PgClientLike;
     await appendInstanceEnded(tx2, {
       taskId: nextTaskId,
@@ -503,6 +509,7 @@ describe("appendTaskApproved does NOT emit instance.ended (T-0443)", () => {
     const db = new FakeAuditDb();
     const pool = makeFakePool(db);
     const client = await pool.connect();
+    await client.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     const tx = client as unknown as PgClientLike;
 
     const taskId = await appendProcessStarted(tx, {

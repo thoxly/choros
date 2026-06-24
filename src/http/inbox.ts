@@ -26,6 +26,7 @@
  * write to a DB claim-lock table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
@@ -1456,8 +1457,7 @@ export function registerInboxRoutes(
                 // candidateGroups from Flowable → role slug for inbox pool addressing.
                 // Use first group if available; fallback to the original approver role.
                 const nextRole = nextTask.candidateGroups[0] ?? task.role;
-                const { randomUUID: newUUID } = await import("node:crypto");
-                const nextInboxTaskId = newUUID();
+                const nextInboxTaskId = randomUUID();
 
                 try {
                   await appendNextTaskEvent(pool, tenantId, {
