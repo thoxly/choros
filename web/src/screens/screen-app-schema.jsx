@@ -36,12 +36,26 @@ import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
 import {
   FIELD_TYPES,
+  COLLECTION_SUB_FIELD_TYPES,
   validateFields,
   buildRecordSchema,
   parseRecordSchema,
   mapSchemaError,
   blankField,
+  blankSubField,
 } from './apps-schema.js';
+
+// Scalar types permitted inside a «Список строк» column — label map for the
+// column-type dropdown. Mirrors COLLECTION_SUB_FIELD_TYPES (depth cap 1: no
+// collection / relation nesting). Labels are product-language (no dev jargon).
+const COLUMN_TYPE_LABELS = {
+  string: 'Текст',
+  number: 'Число',
+  integer: 'Целое',
+  boolean: 'Да/Нет',
+  select: 'Список (select)',
+  date: 'Дата',
+};
 
 // .chs-input carries a FIXED control height; textareas/selects need it relaxed.
 const textareaStyle = {
@@ -78,6 +92,131 @@ const colHeadStyle = {
   letterSpacing: '0.04em',
 };
 
+// Sub-field (column) grid — narrower than the top-level field grid because the
+// sub-editor is inset (no separate reorder column; add/remove only).
+const subFieldGridCols = 'minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.4fr) auto auto';
+const subFieldRowGrid = {
+  display: 'grid',
+  gridTemplateColumns: subFieldGridCols,
+  gap: 'var(--chs-space-3)',
+  alignItems: 'center',
+  padding: 'var(--chs-space-2) 0',
+  borderBottom: '1px solid var(--chs-color-border)',
+};
+
+/**
+ * CollectionSubFieldEditor — nested editor for the sub-fields (columns) of a
+ * «Список строк» (collection) field. Rendered inside FieldRow when type is
+ * «collection». Uses the same .chs-input / token conventions as the top-level
+ * editor so inputs are visible in both themes (G2, G6).
+ *
+ * Product-language labels:  «Колонки» / «Колонка» — no «sub-field»/«collection».
+ *
+ * @param {{ key, type, label, required, options? }[]} subFields current list
+ * @param {string|undefined} subFieldsError top-level error from validateField
+ * @param {(next: typeof subFields) => void} onChange
+ */
+function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
+  const addCol = () => onChange([...subFields, blankSubField()]);
+  const removeCol = (i) => onChange(subFields.filter((_, idx) => idx !== i));
+  const updateCol = (i, patch) =>
+    onChange(subFields.map((sf, idx) => (idx === i ? { ...sf, ...patch } : sf)));
+
+  return (
+    <div
+      style={{
+        marginTop: 'var(--chs-space-4)',
+        paddingLeft: 'var(--chs-space-5)',
+        borderLeft: '3px solid var(--chs-color-border)',
+      }}
+      aria-label="Колонки списка строк"
+    >
+      <span style={{ display: 'block', marginBottom: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+        Колонки списка строк
+      </span>
+
+      {subFields.length > 0 && (
+        <>
+          {/* Column header */}
+          <div style={{ display: 'grid', gridTemplateColumns: subFieldGridCols, gap: 'var(--chs-space-3)', padding: '0 0 var(--chs-space-2) 0', borderBottom: '1px solid var(--chs-color-border)' }}>
+            <span style={colHeadStyle}>Ключ</span>
+            <span style={colHeadStyle}>Тип</span>
+            <span style={colHeadStyle}>Название</span>
+            <span style={{ ...colHeadStyle, textAlign: 'center' }}>Обяз.</span>
+            <span />
+          </div>
+          {subFields.map((sf, i) => (
+            <div key={i} role="group" aria-label={`Колонка ${i + 1}`} style={subFieldRowGrid}>
+              {/* sub-field key */}
+              <input
+                className={`${inputCls(false)} chs-input--mono`}
+                value={sf.key}
+                onChange={(e) => updateCol(i, { key: e.target.value })}
+                placeholder="col_key"
+                aria-label="Ключ колонки"
+              />
+              {/* sub-field type (scalars only — depth cap 1) */}
+              <select
+                className={inputCls(false)}
+                value={sf.type}
+                onChange={(e) => updateCol(i, { type: e.target.value })}
+                aria-label="Тип колонки"
+              >
+                {COLLECTION_SUB_FIELD_TYPES.map((t) => (
+                  <option key={t} value={t}>{COLUMN_TYPE_LABELS[t] || t}</option>
+                ))}
+              </select>
+              {/* sub-field label */}
+              <input
+                className={inputCls(false)}
+                value={sf.label}
+                onChange={(e) => updateCol(i, { label: e.target.value })}
+                placeholder="Название (опц.)"
+                aria-label="Название колонки"
+              />
+              {/* required */}
+              <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(sf.required)}
+                  onChange={(e) => updateCol(i, { required: e.target.checked })}
+                  aria-label="Обязательная колонка"
+                />
+              </label>
+              {/* remove */}
+              <Button
+                type="button" variant="ghost" size="sm"
+                onClick={() => removeCol(i)} title="Удалить колонку" aria-label="Удалить колонку"
+              >
+                <KitIcon name="close" />
+              </Button>
+            </div>
+          ))}
+        </>
+      )}
+
+      {subFields.length === 0 && (
+        <p style={{ margin: 'var(--chs-space-2) 0', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+          Пока нет колонок. Добавьте первую.
+        </p>
+      )}
+
+      <div style={{ marginTop: 'var(--chs-space-3)' }}>
+        <Button type="button" variant="ghost" size="sm" glyph={<KitIcon name="plus" />} onClick={addCol}>
+          Добавить колонку
+        </Button>
+      </div>
+
+      {/* Surface validateField sub-field errors (key/type/dup errors from T-0450 fix) */}
+      {subFieldsError && (
+        <span style={{ ...errStyle, marginTop: 'var(--chs-space-2)' }}>
+          {subFieldsError}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
@@ -104,6 +243,7 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
   };
 
   const hasSubRow = field.type === 'select' || field.type === 'relation'
+    || field.type === 'collection'
     || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
     || Boolean(errors.options) || Boolean(errors.targetRegistryId);
 
@@ -222,6 +362,18 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
                 <span style={errStyle}>{errors.targetRegistryId}</span>
               )}
             </div>
+          )}
+          {/* T-0450: sub-field (column) editor for «Список строк» (collection) type.
+              Each column has key / label / type (scalar only) / required.
+              Reuses the same field-row grid conventions as the top-level editor.
+              Product language: «Колонки», «Колонка» — no «sub-field»/«collection» jargon.
+              Errors from validateField.subFields are surfaced inline. */}
+          {field.type === 'collection' && (
+            <CollectionSubFieldEditor
+              subFields={Array.isArray(field.subFields) ? field.subFields : []}
+              subFieldsError={errors.subFields}
+              onChange={(nextSubFields) => set({ subFields: nextSubFields })}
+            />
           )}
         </div>
       )}
