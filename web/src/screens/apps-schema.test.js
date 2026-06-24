@@ -19,15 +19,18 @@
 
 import { describe, it, expect } from 'vitest';
 import { Ajv } from 'ajv';
+import { validateRecordSchemaDefinition } from '../../../src/core/record-schema-validator.ts';
 import {
   FIELD_TYPES,
   FIELD_TYPE_VALUES,
+  COLLECTION_SUB_FIELD_TYPES,
   validateField,
   validateFields,
   buildRecordSchema,
   parseRecordSchema,
   mapSchemaError,
   blankField,
+  blankSubField,
 } from './apps-schema.js';
 
 // Mirror of src/core/record-schema-validator.ts::validateRecordSchemaDefinition.
@@ -478,6 +481,386 @@ describe('apps-schema T-0444 · relation field type', () => {
     ]);
     expect(r.valid).toBe(false);
     expect(r.fieldErrors[0].targetRegistryId).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0448: collection field type
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0448 · collection field type — FIELD_TYPES / constants', () => {
+  it('FIELD_TYPES includes collection with label "Список строк"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'collection');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Список строк');
+  });
+
+  it('FIELD_TYPE_VALUES includes "collection"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('collection');
+  });
+
+  it('COLLECTION_SUB_FIELD_TYPES contains scalars but NOT collection/relation (depth cap 1)', () => {
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('string');
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('number');
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('integer');
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('boolean');
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('select');
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain('date');
+    expect(COLLECTION_SUB_FIELD_TYPES).not.toContain('collection');
+    expect(COLLECTION_SUB_FIELD_TYPES).not.toContain('relation');
+  });
+});
+
+describe('apps-schema T-0448 · collection field type — buildRecordSchema', () => {
+  // Shared fixture: a collection field for «позиции» with 3 sub-fields.
+  const positionsField = {
+    key: 'positions',
+    type: 'collection',
+    title: 'Позиции',
+    required: true,
+    subFields: [
+      { key: 'tovar', type: 'string', label: 'Товар', required: true },
+      { key: 'kolichestvo', type: 'integer', label: 'Количество', required: true },
+      { key: 'tsena', type: 'number', label: 'Цена', required: false },
+    ],
+  };
+
+  it('emits a native array sub-schema (no x-* extensions)', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const prop = schema.properties.positions;
+    expect(prop.type).toBe('array');
+    expect(prop.items.type).toBe('object');
+    expect(prop.items.additionalProperties).toBe(false);
+    expect(prop.items.properties).toMatchObject({
+      tovar: { type: 'string', title: 'Товар' },
+      kolichestvo: { type: 'integer', title: 'Количество' },
+      tsena: { type: 'number', title: 'Цена' },
+    });
+    expect(prop.items.required).toEqual(['tovar', 'kolichestvo']);
+    // No x-* keys anywhere in the emitted prop
+    expect(JSON.stringify(prop)).not.toContain('x-');
+  });
+
+  it('validateRecordSchemaDefinition(emitted) returns valid===true (AJV strict native compile)', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('collection field is included in required[] of the outer schema when required:true', () => {
+    const schema = buildRecordSchema([positionsField]);
+    expect(schema.required).toContain('positions');
+  });
+
+  it('collection field omits required key when required:false', () => {
+    const schema = buildRecordSchema([{ ...positionsField, required: false }]);
+    expect(schema.required).toBeUndefined();
+  });
+
+  it('collection title is emitted as prop.title', () => {
+    const schema = buildRecordSchema([positionsField]);
+    expect(schema.properties.positions.title).toBe('Позиции');
+  });
+
+  it('sub-field with no label → title is omitted from items.properties[key]', () => {
+    const schema = buildRecordSchema([{
+      key: 'items_col',
+      type: 'collection',
+      required: false,
+      subFields: [{ key: 'val', type: 'string', label: '', required: false }],
+    }]);
+    const subProp = schema.properties.items_col.items.properties.val;
+    expect('title' in subProp).toBe(false);
+  });
+
+  it('collection with 0 subFields emits empty items.properties and no items.required', () => {
+    const schema = buildRecordSchema([{
+      key: 'empty_col',
+      type: 'collection',
+      required: false,
+      subFields: [],
+    }]);
+    const prop = schema.properties.empty_col;
+    expect(prop.type).toBe('array');
+    expect(prop.items.properties).toEqual({});
+    expect('required' in prop.items).toBe(false);
+  });
+
+  it('sub-field type select → emits string+enum inside items.properties', () => {
+    const schema = buildRecordSchema([{
+      key: 'orders',
+      type: 'collection',
+      required: false,
+      subFields: [
+        { key: 'status', type: 'select', label: 'Статус', options: ['new', 'done'], required: false },
+      ],
+    }]);
+    const sfProp = schema.properties.orders.items.properties.status;
+    expect(sfProp.type).toBe('string');
+    expect(sfProp.enum).toEqual(['new', 'done']);
+    expect(sfProp.title).toBe('Статус');
+  });
+
+  it('sub-field type date → emits string (no format) inside items.properties', () => {
+    const schema = buildRecordSchema([{
+      key: 'schedule',
+      type: 'collection',
+      required: false,
+      subFields: [
+        { key: 'due_date', type: 'date', label: 'Дата', required: false },
+      ],
+    }]);
+    const sfProp = schema.properties.schedule.items.properties.due_date;
+    expect(sfProp.type).toBe('string');
+    expect('enum' in sfProp).toBe(false);
+    expect('format' in sfProp).toBe(false);
+  });
+
+  it('collection alongside scalar field — both compile and outer schema is AJV-valid', () => {
+    const schema = buildRecordSchema([
+      { key: 'title', type: 'string', required: true },
+      positionsField,
+    ]);
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(Object.keys(schema.properties)).toEqual(['title', 'positions']);
+  });
+
+  it('emitted collection schema validates a conforming data row', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const ajv = new Ajv();
+    const validate = ajv.compile(schema);
+    // Valid: positions is an array of objects with required keys
+    expect(validate({
+      positions: [
+        { tovar: 'Laptop', kolichestvo: 2, tsena: 999.99 },
+        { tovar: 'Mouse', kolichestvo: 1 }, // tsena not required
+      ],
+    })).toBe(true);
+  });
+
+  it('emitted collection schema rejects a row with missing required sub-field', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const ajv = new Ajv();
+    const validate = ajv.compile(schema);
+    // Missing required 'kolichestvo' in first item
+    expect(validate({ positions: [{ tovar: 'Laptop' }] })).toBe(false);
+  });
+
+  it('emitted collection schema rejects extra properties in items (additionalProperties:false)', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const ajv = new Ajv();
+    const validate = ajv.compile(schema);
+    expect(validate({ positions: [{ tovar: 'x', kolichestvo: 1, extra_key: 'bad' }] })).toBe(false);
+  });
+});
+
+describe('apps-schema T-0448 · collection field type — parseRecordSchema (round-trip)', () => {
+  const positionsField = {
+    key: 'positions',
+    type: 'collection',
+    title: 'Позиции',
+    required: true,
+    subFields: [
+      { key: 'tovar', type: 'string', label: 'Товар', required: true },
+      { key: 'kolichestvo', type: 'integer', label: 'Количество', required: true },
+      { key: 'tsena', type: 'number', label: 'Цена', required: false },
+    ],
+  };
+
+  it('round-trips a collection field (buildRecordSchema → parseRecordSchema ≈ original)', () => {
+    const schema = buildRecordSchema([positionsField]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed).toHaveLength(1);
+    const f = parsed[0];
+    expect(f.type).toBe('collection');
+    expect(f.key).toBe('positions');
+    expect(f.title).toBe('Позиции');
+    expect(f.required).toBe(true);
+    expect(f.subFields).toHaveLength(3);
+    expect(f.subFields[0]).toMatchObject({ key: 'tovar', type: 'string', label: 'Товар', required: true });
+    expect(f.subFields[1]).toMatchObject({ key: 'kolichestvo', type: 'integer', label: 'Количество', required: true });
+    expect(f.subFields[2]).toMatchObject({ key: 'tsena', type: 'number', label: 'Цена', required: false });
+  });
+
+  it('parseRecordSchema detects persisted array+object schema as collection', () => {
+    const raw = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        positions: {
+          type: 'array',
+          title: 'Позиции',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              tovar: { type: 'string', title: 'Товар' },
+              tsena: { type: 'number', title: 'Цена' },
+            },
+            required: ['tovar'],
+          },
+        },
+      },
+      required: ['positions'],
+    };
+    const parsed = parseRecordSchema(raw);
+    expect(parsed).toHaveLength(1);
+    const f = parsed[0];
+    expect(f.type).toBe('collection');
+    expect(f.key).toBe('positions');
+    expect(f.title).toBe('Позиции');
+    expect(f.required).toBe(true);
+    expect(f.subFields).toHaveLength(2);
+    expect(f.subFields[0]).toMatchObject({ key: 'tovar', type: 'string', label: 'Товар', required: true });
+    expect(f.subFields[1]).toMatchObject({ key: 'tsena', type: 'number', label: 'Цена', required: false });
+  });
+
+  it('round-trips a collection with a select sub-field', () => {
+    const original = {
+      key: 'orders',
+      type: 'collection',
+      title: '',
+      required: false,
+      subFields: [
+        { key: 'status', type: 'select', label: 'Статус', options: ['new', 'done'], required: false },
+      ],
+    };
+    const schema = buildRecordSchema([original]);
+    const parsed = parseRecordSchema(schema);
+    const sf = parsed[0].subFields[0];
+    expect(sf.type).toBe('select');
+    expect(sf.options).toEqual(['new', 'done']);
+    expect(sf.label).toBe('Статус');
+  });
+
+  it('collection does NOT interfere with scalar field parsing', () => {
+    const schema = buildRecordSchema([
+      { key: 'name', type: 'string', title: 'Имя', required: true },
+      {
+        key: 'items',
+        type: 'collection',
+        title: 'Строки',
+        required: false,
+        subFields: [{ key: 'val', type: 'string', label: 'Значение', required: false }],
+      },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'name', type: 'string', title: 'Имя', required: true });
+    expect(parsed[1]).toMatchObject({ key: 'items', type: 'collection', required: false });
+  });
+});
+
+describe('apps-schema T-0448 · collection field type — validateField', () => {
+  it('rejects a collection with 0 sub-fields', () => {
+    const err = validateField({ key: 'items', type: 'collection', subFields: [] });
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a collection with undefined subFields (treated as 0)', () => {
+    const err = validateField({ key: 'items', type: 'collection' });
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a collection whose sub-field type is "collection" (depth cap 1)', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'nested', type: 'collection' }],
+    });
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/collection/);
+  });
+
+  it('rejects a collection whose sub-field type is "relation" (depth cap 1)', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'ref', type: 'relation' }],
+    });
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/relation/);
+  });
+
+  it('rejects a collection with an unknown sub-field type', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'x', type: 'object' }],
+    });
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('accepts a collection with valid scalar sub-fields (no error)', () => {
+    const err = validateField({
+      key: 'positions',
+      type: 'collection',
+      subFields: [
+        { key: 'tovar', type: 'string' },
+        { key: 'kolichestvo', type: 'integer' },
+        { key: 'tsena', type: 'number' },
+      ],
+    });
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a collection with a select sub-field (scalar)', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'status', type: 'select', options: ['a', 'b'] }],
+    });
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a collection with a date sub-field (scalar)', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'due', type: 'date' }],
+    });
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('validateFields: accepts a valid collection field in a list', () => {
+    const r = validateFields([{
+      key: 'positions',
+      type: 'collection',
+      subFields: [{ key: 'val', type: 'string' }],
+      required: false,
+    }]);
+    expect(r.valid).toBe(true);
+  });
+
+  it('validateFields: rejects a collection with 0 sub-fields', () => {
+    const r = validateFields([{
+      key: 'positions',
+      type: 'collection',
+      subFields: [],
+      required: false,
+    }]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].subFields).toBeTruthy();
+  });
+});
+
+describe('apps-schema T-0448 · collection field type — blankField / blankSubField', () => {
+  it('blankField includes subFields:[] (collection-ready)', () => {
+    const b = blankField();
+    expect(Array.isArray(b.subFields)).toBe(true);
+    expect(b.subFields).toHaveLength(0);
+  });
+
+  it('blankSubField returns a valid sub-field stub', () => {
+    const sf = blankSubField();
+    expect(sf.key).toBe('');
+    expect(sf.type).toBe('string');
+    expect(sf.label).toBe('');
+    expect(sf.required).toBe(false);
+    expect(Array.isArray(sf.options)).toBe(true);
+    // Sub-field type must be a valid scalar
+    expect(COLLECTION_SUB_FIELD_TYPES).toContain(sf.type);
   });
 });
 
