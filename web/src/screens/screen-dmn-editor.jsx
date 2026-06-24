@@ -30,7 +30,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Button, Field, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
+import { Button, Field, Select, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { listRuleTables, getRuleTable, saveRuleTable, publishRuleTable } from '../canvas/dmn-editor-api.js';
 
@@ -38,8 +38,12 @@ import { listRuleTables, getRuleTable, saveRuleTable, publishRuleTable } from '.
 // Константы
 // ---------------------------------------------------------------------------
 
-/** Имя переменной маршрутизации (routing-outcome), используется во всех правилах. */
-const ROUTING_NAME = 'маршрут';
+/**
+ * Имя переменной маршрутизации по умолчанию.
+ * ДОЛЖНО совпадать с дефолтом choros:routingVar в gateway-condition-panel.jsx
+ * (readRoutingVar fallback = 'approvalRequired').
+ */
+const DEFAULT_ROUTING_NAME = 'approvalRequired';
 
 /**
  * Операторы в продуктовом языке.
@@ -101,8 +105,8 @@ function defaultRule() {
  * Условия для «иначе»-строки (isDefault=true, пустой массив) → пустой conditions в API.
  * Это допустимо: при FIRST-политике правило без условий всегда срабатывает (fallthrough).
  */
-function rulesToApiBody(rules, name, processKey) {
-  return {
+function rulesToApiBody(rules, name, processKey, routingName, tableId) {
+  const body = {
     name,
     processKey: processKey || undefined,
     hitPolicy: 'FIRST',
@@ -119,24 +123,35 @@ function rulesToApiBody(rules, name, processKey) {
       effects: [
         {
           kind: 'set_routing_outcome',
-          name: ROUTING_NAME,
+          name: routingName,
           value: r.outcome,
         },
       ],
     })),
   };
+  // Fix 2: include id when re-saving an existing table so the backend UPSERTs
+  // in-place rather than inserting a new row.
+  if (tableId) {
+    body.id = tableId;
+  }
+  return body;
 }
 
 /**
  * Конвертирует ответ API в UI-состояние.
  * Если rules пустые или нет данных — возвращает null (покажем EmptyState).
+ * Также возвращает routingName из первого set_routing_outcome эффекта.
  */
 function apiRulesToUiState(tableRow) {
   if (!tableRow?.definition?.rules?.length) return null;
-  return tableRow.definition.rules.map((r, i) => {
+  let extractedRoutingName = null;
+  const rules = tableRow.definition.rules.map((r, i) => {
     const routingEffect = (r.effects || []).find(
       (e) => e.kind === 'set_routing_outcome',
     );
+    if (routingEffect && !extractedRoutingName) {
+      extractedRoutingName = routingEffect.name || null;
+    }
     const isDefault = !r.conditions || r.conditions.length === 0;
     return {
       id: String(i),
@@ -151,13 +166,14 @@ function apiRulesToUiState(tableRow) {
       isDefault,
     };
   });
+  return { rules, routingName: extractedRoutingName };
 }
 
 // ---------------------------------------------------------------------------
 // Компонент строки правила
 // ---------------------------------------------------------------------------
 
-function RuleRow({ rule, index, fields, onChange, onRemove, total }) {
+function RuleRow({ rule, index, fields, onChange, onRemove }) {
   const isDefault = rule.isDefault;
 
   function updateCondition(ci, key, val) {
@@ -196,7 +212,7 @@ function RuleRow({ rule, index, fields, onChange, onRemove, total }) {
         border: '1px solid var(--chs-border)',
         borderRadius: 'var(--chs-radius-3)',
         background: isDefault
-          ? 'var(--chs-color-surface-alt, var(--chs-surface-alt, #f8f8f8))'
+          ? 'var(--chs-color-surface-2)'
           : 'var(--chs-color-surface)',
       }}
     >
@@ -260,49 +276,23 @@ function RuleRow({ rule, index, fields, onChange, onRemove, total }) {
               }}
             >
               {/* Поле */}
-              <div className="chs-field">
-                <label
-                  className="chs-label"
-                  htmlFor={`dmn-field-${rule.id}-${ci}`}
-                >
-                  Поле
-                </label>
-                <select
-                  id={`dmn-field-${rule.id}-${ci}`}
-                  className="chs-input"
-                  value={cond.field}
-                  onChange={(e) => updateCondition(ci, 'field', e.target.value)}
-                >
-                  <option value="">— выберите поле —</option>
-                  {fields.map((f) => (
-                    <option key={f.key} value={f.key}>
-                      {f.label || f.key}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <Select
+                id={`dmn-field-${rule.id}-${ci}`}
+                label="Поле"
+                value={cond.field}
+                options={fields.map((f) => ({ value: f.key, label: f.label || f.key }))}
+                placeholder="— выберите поле —"
+                onChange={(e) => updateCondition(ci, 'field', e.target.value)}
+              />
 
               {/* Условие */}
-              <div className="chs-field">
-                <label
-                  className="chs-label"
-                  htmlFor={`dmn-op-${rule.id}-${ci}`}
-                >
-                  Условие
-                </label>
-                <select
-                  id={`dmn-op-${rule.id}-${ci}`}
-                  className="chs-input"
-                  value={cond.operator}
-                  onChange={(e) => updateCondition(ci, 'operator', e.target.value)}
-                >
-                  {OPERATORS.map((op) => (
-                    <option key={op.value} value={op.value}>
-                      {op.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <Select
+                id={`dmn-op-${rule.id}-${ci}`}
+                label="Условие"
+                value={cond.operator}
+                options={OPERATORS}
+                onChange={(e) => updateCondition(ci, 'operator', e.target.value)}
+              />
 
               {/* Значение */}
               {NO_VALUE_OPS.has(cond.operator) ? (
@@ -352,7 +342,7 @@ function RuleRow({ rule, index, fields, onChange, onRemove, total }) {
                 border: 'none',
                 cursor: 'pointer',
                 fontSize: 'var(--chs-text-sm)',
-                color: 'var(--chs-color-primary)',
+                color: 'var(--chs-color-accent)',
                 padding: '0',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -412,6 +402,7 @@ function DmnEditorScreen() {
   const [tableId, setTableId] = useState(null);           // id последнего сохранённого
   const [tableStatus, setTableStatus] = useState(null);   // 'draft' | 'published'
   const [tableName, setTableName] = useState('');          // название таблицы
+  const [routingName, setRoutingName] = useState(DEFAULT_ROUTING_NAME); // переменная шлюза
   const [rules, setRules] = useState(null);               // null = не загружено / never created
 
   // Состояние действий
@@ -463,8 +454,13 @@ function DmnEditorScreen() {
         setTableName(best.name || 'Правила ветвления');
         // Загружаем полную запись (definition)
         const full = await getRuleTable(best.id);
-        const uiRules = apiRulesToUiState(full);
-        setRules(uiRules || []);
+        const parsed = apiRulesToUiState(full);
+        if (parsed) {
+          setRules(parsed.rules || []);
+          if (parsed.routingName) setRoutingName(parsed.routingName);
+        } else {
+          setRules([]);
+        }
       } else {
         // Ещё нет правил → пустой редактор
         setTableId(null);
@@ -522,7 +518,8 @@ function DmnEditorScreen() {
     setActionError(null);
     setSuccessMsg(null);
     try {
-      const body = rulesToApiBody(rules, tableName || 'Правила ветвления', processKey);
+      // Fix 2: pass tableId so re-saves UPDATE the same row (not insert new).
+      const body = rulesToApiBody(rules, tableName || 'Правила ветвления', processKey, routingName, tableId);
       const result = await saveRuleTable(body);
       setTableId(result.id);
       setTableStatus('draft');
@@ -532,7 +529,7 @@ function DmnEditorScreen() {
     } finally {
       setSaving(false);
     }
-  }, [rules, tableName, processKey]);
+  }, [rules, tableName, processKey, routingName, tableId]);
 
   // Опубликовать
   const handlePublish = useCallback(async () => {
@@ -610,7 +607,7 @@ function DmnEditorScreen() {
                   background: 'none',
                   border: 'none',
                   cursor: 'pointer',
-                  color: 'var(--chs-color-primary)',
+                  color: 'var(--chs-color-accent)',
                   padding: '0',
                   fontSize: 'var(--chs-text-sm)',
                 }}
@@ -747,6 +744,17 @@ function DmnEditorScreen() {
                 placeholder="Правила ветвления"
               />
 
+              {/* Fix 1: переменная шлюза — должна совпадать с полем шлюза в схеме процесса */}
+              <Field
+                label="Поле, которое определяет ветку"
+                id="dmn-routing-name"
+                type="text"
+                value={routingName}
+                onChange={(e) => setRoutingName(e.target.value || DEFAULT_ROUTING_NAME)}
+                placeholder={DEFAULT_ROUTING_NAME}
+                hint="Должно совпадать с полем шлюза в схеме процесса"
+              />
+
               {/* Пояснение */}
               <p
                 style={{
@@ -786,7 +794,6 @@ function DmnEditorScreen() {
                     fields={bindingFields}
                     onChange={updateRule}
                     onRemove={removeRule}
-                    total={rules.length}
                   />
                 ))}
               </div>

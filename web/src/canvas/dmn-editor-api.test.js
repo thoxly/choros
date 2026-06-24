@@ -15,6 +15,9 @@
  *      Backend returns 201 { id }.
  *   4. publishRuleTable — POST /api/dmn-rule-tables/:id/publish → 200 { id, status }
  *   5. Error paths: non-2xx responses throw with a Russian error message.
+ *   6. (Fix 1) routing variable name comes from the editable field, default = 'approvalRequired'
+ *      to match gateway-condition-panel.jsx readRoutingVar fallback.
+ *   7. (Fix 2) second save carries existing id in the body so backend UPSERTs in-place.
  *
  * Pattern mirrors outcome-presets.test.js (pure vitest, no DOM, no RTL).
  * fetch and dev-auth are stubbed with globalThis overrides.
@@ -142,6 +145,8 @@ describe('saveRuleTable — body shape', () => {
     // These are the two rules from the acceptance scenario:
     //   Rule 1: сумма больше 5000000 → доп.согласование
     //   Rule 2 (иначе — no conditions): → стандарт
+    // Fix 1: routing name is 'approvalRequired' (matches gateway-condition-panel default),
+    //        not the old hardcoded 'маршрут'.
     const draft = {
       name: 'Правила ветвления',
       processKey: 'tel-linear',
@@ -152,7 +157,7 @@ describe('saveRuleTable — body shape', () => {
           effects: [
             {
               kind: 'set_routing_outcome',
-              name: 'маршрут',
+              name: 'approvalRequired',
               value: 'доп.согласование',
             },
           ],
@@ -162,7 +167,7 @@ describe('saveRuleTable — body shape', () => {
           effects: [
             {
               kind: 'set_routing_outcome',
-              name: 'маршрут',
+              name: 'approvalRequired',
               value: 'стандарт',
             },
           ],
@@ -199,7 +204,9 @@ describe('saveRuleTable — body shape', () => {
     });
     const effect1 = rule1.effects.find((e) => e.kind === 'set_routing_outcome');
     expect(effect1).toBeDefined();
-    expect(effect1.name).toBe('маршрут');
+    // Fix 1: routing name must be the editable field value (default 'approvalRequired'),
+    // matching gateway-condition-panel.jsx readRoutingVar fallback.
+    expect(effect1.name).toBe('approvalRequired');
     expect(effect1.value).toBe('доп.согласование');
 
     // Rule 2: иначе (no conditions) → стандарт
@@ -207,7 +214,7 @@ describe('saveRuleTable — body shape', () => {
     expect(rule2.conditions).toHaveLength(0);
     const effect2 = rule2.effects.find((e) => e.kind === 'set_routing_outcome');
     expect(effect2).toBeDefined();
-    expect(effect2.name).toBe('маршрут');
+    expect(effect2.name).toBe('approvalRequired');
     expect(effect2.value).toBe('стандарт');
 
     // All routing effects share the same name (T-0433 INCONSISTENT_ROUTING_NAME invariant)
@@ -218,6 +225,36 @@ describe('saveRuleTable — body shape', () => {
     );
     const uniqueNames = new Set(allRoutingNames);
     expect(uniqueNames.size).toBe(1);
+  });
+
+  it('(Fix 2) second save includes id in body so backend updates in place', async () => {
+    // First save: no id in body → backend allocates new row
+    setMockResponse(201, { id: 'existing-table-id' });
+    const draftFirst = {
+      name: 'Правила ветвления',
+      processKey: 'tel-linear',
+      hitPolicy: 'FIRST',
+      rules: [
+        {
+          conditions: [],
+          effects: [{ kind: 'set_routing_outcome', name: 'approvalRequired', value: 'стандарт' }],
+        },
+      ],
+    };
+    const first = await saveRuleTable(draftFirst);
+    expect(first.id).toBe('existing-table-id');
+    const firstBody = JSON.parse(lastFetchOptions.body);
+    expect(firstBody.id).toBeUndefined(); // no id on first save
+
+    // Second save: caller includes id → body carries it → backend UPSERTs
+    setMockResponse(201, { id: 'existing-table-id' });
+    const draftSecond = { ...draftFirst, id: 'existing-table-id' };
+    const second = await saveRuleTable(draftSecond);
+    expect(second.id).toBe('existing-table-id');
+    const secondBody = JSON.parse(lastFetchOptions.body);
+    expect(secondBody.id).toBe('existing-table-id');
+    // Verify same URL (POST /api/dmn-rule-tables in both cases — backend handles upsert)
+    expect(lastFetchUrl).toBe('/api/dmn-rule-tables');
   });
 
   it('returns { id } on 201', async () => {
