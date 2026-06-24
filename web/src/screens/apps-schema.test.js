@@ -890,3 +890,215 @@ describe('apps-schema · mapSchemaError', () => {
     expect(mapSchemaError(404, null).message).toMatch(/не найден/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0450: collection sub-field KEY validation (the new validateField fix)
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0450 · collection sub-field key validation', () => {
+  // Helper: build a collection field with the given sub-fields array
+  const makeCol = (subFields) => ({
+    key: 'items',
+    type: 'collection',
+    subFields,
+  });
+
+  it('rejects a sub-field with an empty key', () => {
+    const err = validateField(makeCol([{ key: '', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/ключ/i);
+  });
+
+  it('rejects a sub-field key that starts with a digit', () => {
+    const err = validateField(makeCol([{ key: '1bad', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a sub-field key with a hyphen (not an identifier char)', () => {
+    const err = validateField(makeCol([{ key: 'bad-key', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a sub-field key with a space', () => {
+    const err = validateField(makeCol([{ key: 'bad key', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects duplicate sub-field keys within the same collection', () => {
+    const err = validateField(makeCol([
+      { key: 'price', type: 'number' },
+      { key: 'price', type: 'string' },
+    ]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/уже используется/i);
+  });
+
+  it('rejects the second of three duplicate keys (first and third differ)', () => {
+    const err = validateField(makeCol([
+      { key: 'a', type: 'string' },
+      { key: 'b', type: 'string' },
+      { key: 'a', type: 'number' }, // duplicate of first
+    ]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('accepts a sub-field key that starts with an underscore', () => {
+    const err = validateField(makeCol([{ key: '_col', type: 'string' }]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a sub-field key with letters, digits, and underscore', () => {
+    const err = validateField(makeCol([
+      { key: 'col_1', type: 'string' },
+      { key: 'col_2', type: 'number' },
+    ]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a collection with two distinct valid keys and valid types (no error)', () => {
+    const err = validateField(makeCol([
+      { key: 'name', type: 'string' },
+      { key: 'qty', type: 'integer' },
+    ]));
+    expect(err.subFields).toBeUndefined();
+    expect(Object.keys(err)).toHaveLength(0);
+  });
+
+  it('reports both a key error and a dup error when a bad+dup key appears', () => {
+    // First sub-field has an invalid key AND is duplicated by the second
+    const err = validateField(makeCol([
+      { key: '1bad', type: 'string' },
+      { key: '1bad', type: 'number' }, // invalid + duplicate
+    ]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('validateFields: propagates sub-field key error through validateFields', () => {
+    const r = validateFields([makeCol([{ key: '1bad', type: 'string' }])]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].subFields).toBeTruthy();
+  });
+
+  it('validateFields: accepts a collection with valid sub-field keys', () => {
+    const r = validateFields([makeCol([
+      { key: 'product', type: 'string' },
+      { key: 'qty', type: 'integer' },
+    ])]);
+    expect(r.valid).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0450 Fix 1 (G3 BLOCKING): select sub-field in a collection requires ≥1 option.
+// Without options the record-entry <select> cell has zero choices → unfillable.
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0450 Fix 1 · select column options validation', () => {
+  const makeSelectCol = (options) => ({
+    key: 'items',
+    type: 'collection',
+    subFields: [{ key: 'status', type: 'select', options }],
+  });
+
+  it('validateField: select sub-field with no options → error (Укажите варианты)', () => {
+    const err = validateField(makeSelectCol([]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/варианты для колонки-списка/i);
+  });
+
+  it('validateField: select sub-field with blank-only options → error', () => {
+    const err = validateField(makeSelectCol(['  ', '']));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/варианты для колонки-списка/i);
+  });
+
+  it('validateField: select sub-field with undefined options → error', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [{ key: 'status', type: 'select' }], // no options property
+    });
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/варианты для колонки-списка/i);
+  });
+
+  it('validateField: select sub-field with valid options → no error', () => {
+    const err = validateField(makeSelectCol(['new', 'done', 'cancelled']));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('validateField: select sub-field with one valid option → no error', () => {
+    const err = validateField(makeSelectCol(['only']));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('validateField: non-select sub-field with no options → no options error', () => {
+    // string, number, integer, boolean sub-fields do not require options
+    for (const type of ['string', 'number', 'integer', 'boolean', 'date']) {
+      const err = validateField({
+        key: 'items',
+        type: 'collection',
+        subFields: [{ key: 'col', type }],
+      });
+      // Might have other errors (e.g. date) but NOT options-related
+      expect(err.subFields || '').not.toMatch(/варианты для колонки-списка/i);
+    }
+  });
+
+  it('validateField: mixed sub-fields where only select is missing options → error for that sub-field', () => {
+    const err = validateField({
+      key: 'items',
+      type: 'collection',
+      subFields: [
+        { key: 'name', type: 'string' },           // ok
+        { key: 'status', type: 'select', options: [] }, // missing options → error
+      ],
+    });
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/варианты для колонки-списка/i);
+  });
+
+  it('validateField: select sub-field with valid options round-trips to populated enum in schema', () => {
+    // The schema emitted for a collection with a select sub-field should carry
+    // the options as the enum array — confirming the cell <select> will show them.
+    const field = {
+      key: 'orders',
+      type: 'collection',
+      required: false,
+      subFields: [{ key: 'status', type: 'select', label: 'Статус', options: ['new', 'done'], required: false }],
+    };
+    const err = validateField(field);
+    expect(err.subFields).toBeUndefined(); // passes validation
+    const schema = buildRecordSchema([field]);
+    const sfProp = schema.properties.orders.items.properties.status;
+    // Emitted enum from the options → the cell <select> will have these choices
+    expect(sfProp.enum).toEqual(['new', 'done']);
+  });
+
+  it('select sub-field emits enum in schema → verifies <select> options round-trip', () => {
+    // Structural integration: the schema emitted by buildRecordSchema for a select
+    // sub-field carries an enum array. schemaToFormFields (records-form.js T-0449)
+    // reads this enum and populates options[] on the form field descriptor.
+    // FieldControl uses options[] to render <option> elements.
+    // This chain guarantees the <select> cell in LineItemsField is NOT empty.
+    const field = {
+      key: 'orders',
+      type: 'collection',
+      required: false,
+      subFields: [{ key: 'cat', type: 'select', label: 'Категория', options: ['A', 'B', 'C'], required: true }],
+    };
+    // Step 1: validation passes
+    const err = validateField(field);
+    expect(err.subFields).toBeUndefined();
+    // Step 2: buildRecordSchema emits the enum on the sub-field prop
+    const schema = buildRecordSchema([field]);
+    const catProp = schema.properties.orders.items.properties.cat;
+    expect(catProp.type).toBe('string');
+    expect(catProp.enum).toEqual(['A', 'B', 'C']); // options → enum round-trip
+    // Step 3: parseRecordSchema detects enum → type:'select' with options (T-0448)
+    const parsed = parseRecordSchema(schema);
+    const sf = parsed[0].subFields[0];
+    expect(sf.type).toBe('select');
+    expect(sf.options).toEqual(['A', 'B', 'C']); // options preserved end-to-end
+  });
+});

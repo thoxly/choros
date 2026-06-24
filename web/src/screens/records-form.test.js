@@ -849,3 +849,247 @@ describe('T-0449: formatCellValue — collection field', () => {
     expect(formatCellValue('', 'relation')).toBe('—');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0450: LineItemsField logic — tests for the data/error model the row-table UI
+// component consumes. Tests are pure-logic (node env, no DOM/RTL): they cover the
+// helpers that LineItemsField depends on in records-form.js.
+// Terminology: "add-row" → blank row appended to values array; "remove-row" →
+// row dropped by index; "cell-edit" → value updated via onChange(fieldKey, rows).
+// These are the three actions LineItemsField wires to its add/remove/setCellValue.
+// ---------------------------------------------------------------------------
+
+// A minimal collection field schema for test use
+const COL_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    lines: {
+      type: 'array',
+      title: 'Позиции',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', title: 'Товар' },
+          qty:  { type: 'integer', title: 'Кол-во' },
+          active: { type: 'boolean', title: 'Активен' },
+        },
+        required: ['name', 'qty'],
+      },
+    },
+  },
+  required: ['lines'],
+};
+
+describe('T-0450 LineItemsField · blankRecordValues — add-row model', () => {
+  it('collection field starts as an empty array (no rows)', () => {
+    const fields = schemaToFormFields(COL_SCHEMA);
+    const values = blankRecordValues(fields);
+    expect(values.lines).toEqual([]);
+  });
+
+  it('schemaToFormFields: collection descriptor carries inputKind "collection" and subFields', () => {
+    const fields = schemaToFormFields(COL_SCHEMA);
+    const f = fields.find((x) => x.key === 'lines');
+    expect(f).toBeDefined();
+    expect(f.inputKind).toBe('collection');
+    expect(Array.isArray(f.subFields)).toBe(true);
+    expect(f.subFields.map((sf) => sf.key)).toEqual(['name', 'qty', 'active']);
+    expect(f.subFields.find((sf) => sf.key === 'name').required).toBe(true);
+    expect(f.subFields.find((sf) => sf.key === 'qty').required).toBe(true);
+    expect(f.subFields.find((sf) => sf.key === 'active').required).toBe(false);
+  });
+
+  it('add-row simulation: appending a blank row and then another', () => {
+    // Simulates what LineItemsField.addRow does: append a blank row object.
+    const fields = schemaToFormFields(COL_SCHEMA);
+    const f = fields.find((x) => x.key === 'lines');
+    let rows = [];
+
+    // Add first row (blank)
+    const blankRow = {};
+    for (const sf of f.subFields) blankRow[sf.key] = sf.type === 'boolean' ? false : '';
+    rows = [...rows, blankRow];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ name: '', qty: '', active: false });
+
+    // Add second row
+    rows = [...rows, { ...blankRow }];
+    expect(rows).toHaveLength(2);
+  });
+
+  it('remove-row simulation: dropping a row by index', () => {
+    let rows = [
+      { name: 'A', qty: '1', active: false },
+      { name: 'B', qty: '2', active: true },
+      { name: 'C', qty: '3', active: false },
+    ];
+    // Remove index 1 (simulates LineItemsField.removeRow(1))
+    rows = rows.filter((_, i) => i !== 1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].name).toBe('A');
+    expect(rows[1].name).toBe('C');
+  });
+
+  it('cell-edit simulation: updating a cell flows through to the rows array', () => {
+    let rows = [
+      { name: '', qty: '', active: false },
+      { name: '', qty: '', active: false },
+    ];
+    // Edit row 0, cell 'name' (simulates LineItemsField.setCellValue(0, 'name', 'Laptop'))
+    rows = rows.map((row, i) => i === 0 ? { ...row, name: 'Laptop' } : row);
+    expect(rows[0].name).toBe('Laptop');
+    expect(rows[1].name).toBe('');
+  });
+});
+
+describe('T-0450 LineItemsField · validateRecordValues — per-row error shape', () => {
+  const fields = schemaToFormFields(COL_SCHEMA);
+
+  it('no error when rows are all valid', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [
+        { name: 'Laptop', qty: '2', active: false },
+        { name: 'Mouse',  qty: '1', active: true  },
+      ],
+    });
+    expect(valid).toBe(true);
+    expect(errors.lines).toBeUndefined();
+  });
+
+  it('_collection error when collection is required but rows are empty', () => {
+    const { valid, errors } = validateRecordValues(fields, { lines: [] });
+    expect(valid).toBe(false);
+    expect(errors.lines._collection).toBeTruthy();
+    // rows array is empty (no per-row errors)
+    expect(errors.lines.rows).toEqual([]);
+  });
+
+  it('per-row error for a row missing a required string sub-field (name)', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [{ name: '', qty: '2', active: false }],
+    });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows).toHaveLength(1);
+    expect(errors.lines.rows[0].name).toBeTruthy();
+    expect(errors.lines.rows[0].qty).toBeUndefined(); // qty is valid
+  });
+
+  it('per-row error for a row with a non-numeric integer sub-field (qty)', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [{ name: 'X', qty: 'abc', active: false }],
+    });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows[0].qty).toBeTruthy();
+    expect(errors.lines.rows[0].name).toBeUndefined(); // name is valid
+  });
+
+  it('per-row error for a fractional integer sub-field (qty=1.5)', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [{ name: 'X', qty: '1.5', active: false }],
+    });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows[0].qty).toBeTruthy();
+  });
+
+  it('row index alignment: row[0] valid, row[1] has error → rows[0]=undefined, rows[1]=error', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [
+        { name: 'Good', qty: '1', active: false },
+        { name: '',     qty: '1', active: true  }, // name missing
+      ],
+    });
+    expect(valid).toBe(false);
+    const rows = errors.lines.rows;
+    expect(rows[0]).toBeUndefined();     // first row is valid
+    expect(rows[1].name).toBeTruthy();  // second row has name error
+  });
+
+  it('boolean sub-field never produces a per-cell error', () => {
+    const { valid, errors } = validateRecordValues(fields, {
+      lines: [{ name: 'X', qty: '1', active: false }],
+    });
+    expect(valid).toBe(true);
+    expect(errors.lines).toBeUndefined();
+  });
+});
+
+describe('T-0450 LineItemsField · serializeRecordData — row array emitted', () => {
+  const fields = schemaToFormFields(COL_SCHEMA);
+
+  it('serializes a valid collection as a typed array', () => {
+    const data = serializeRecordData(fields, {
+      lines: [
+        { name: 'Laptop', qty: '2', active: false },
+        { name: 'Mouse',  qty: '1', active: true  },
+      ],
+    });
+    expect(data.lines).toEqual([
+      { name: 'Laptop', qty: 2, active: false },
+      { name: 'Mouse',  qty: 1, active: true  },
+    ]);
+  });
+
+  it('drops fully-blank trailing rows from the emitted array', () => {
+    // NOTE: the blank-trailing-row check uses "hasContent" — a boolean sub-field
+    // always counts as having content (checkbox state is definite). So to get a
+    // truly blank trailing row we need a schema WITHOUT boolean sub-fields.
+    // Use a simpler 2-sub-field schema (name+qty) for this test.
+    const twoFieldSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        lines: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              qty:  { type: 'integer' },
+            },
+            required: ['name'],
+          },
+        },
+      },
+      required: ['lines'],
+    };
+    const twoFields = schemaToFormFields(twoFieldSchema);
+    const data = serializeRecordData(twoFields, {
+      lines: [
+        { name: 'Laptop', qty: '1' },
+        { name: '', qty: '' }, // fully blank trailing row (no boolean sub-fields)
+      ],
+    });
+    expect(data.lines).toHaveLength(1);
+    expect(data.lines[0].name).toBe('Laptop');
+  });
+
+  it('integer sub-field typed as JS number in the output', () => {
+    const data = serializeRecordData(fields, {
+      lines: [{ name: 'X', qty: '42', active: false }],
+    });
+    expect(typeof data.lines[0].qty).toBe('number');
+    expect(data.lines[0].qty).toBe(42);
+  });
+
+  it('boolean sub-field emitted as real boolean regardless of checkbox state', () => {
+    const data = serializeRecordData(fields, {
+      lines: [
+        { name: 'Y', qty: '1', active: true  },
+        { name: 'N', qty: '2', active: false },
+      ],
+    });
+    expect(data.lines[0].active).toBe(true);
+    expect(data.lines[1].active).toBe(false);
+  });
+
+  it('empty array with required collection is emitted as [] (blank lines[] fails AJV required min, caught at validate)', () => {
+    // serializeRecordData does not re-validate; it emits whatever the rows array contains.
+    // (Blank-required is rejected by validateRecordValues before submit.)
+    const data = serializeRecordData(fields, { lines: [] });
+    // Required collection → still emitted (not omitted) because f.required=true
+    expect(data.lines).toEqual([]);
+  });
+});
