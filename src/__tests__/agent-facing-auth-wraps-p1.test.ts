@@ -106,6 +106,9 @@ function makeStubFlowable(): FlowableClient {
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+    // T-0443: engine-reconcile stubs
+    getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+    isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
   };
 }
 
