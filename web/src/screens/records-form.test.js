@@ -552,3 +552,307 @@ describe('T-0446: relation fields in records-form', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0449: collection (line-items) field type in records-form
+// ---------------------------------------------------------------------------
+
+// A collection schema as emitted by buildRecordSchema (T-0448).
+// items is a typed object schema; sub-fields are scalars.
+const COLLECTION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    order_name: { type: 'string', title: 'Название заказа' },
+    lines: {
+      type: 'array',
+      title: 'Позиции',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          product: { type: 'string', title: 'Товар' },
+          qty: { type: 'integer', title: 'Кол-во' },
+          price: { type: 'number', title: 'Цена' },
+          category: { type: 'string', enum: ['food', 'drink', 'other'], title: 'Категория' },
+        },
+        required: ['product', 'qty'],
+      },
+    },
+  },
+  required: ['lines'],
+};
+
+// Use the validateRecordAgainstSchema function from the real validator (T-0085).
+// This proves the serialized data passes the actual server-side validator.
+import { validateRecordAgainstSchema } from '../../../src/core/record-schema-validator.ts';
+
+describe('T-0449: collection INPUT_KIND', () => {
+  it('maps collection to "collection"', () => {
+    expect(INPUT_KIND.collection).toBe('collection');
+  });
+});
+
+describe('T-0449: schemaToFormFields — collection field', () => {
+  const fields = schemaToFormFields(COLLECTION_SCHEMA);
+
+  it('detects collection from type:"array"+items.type:"object"', () => {
+    const linesField = fields.find((f) => f.key === 'lines');
+    expect(linesField).toBeDefined();
+    expect(linesField).toMatchObject({
+      key: 'lines',
+      type: 'collection',
+      label: 'Позиции',
+      required: true,
+      inputKind: 'collection',
+    });
+    expect(Array.isArray(linesField.subFields)).toBe(true);
+  });
+
+  it('maps sub-fields to correct types and inputKinds', () => {
+    const linesField = fields.find((f) => f.key === 'lines');
+    const sf = Object.fromEntries(linesField.subFields.map((s) => [s.key, s]));
+    // string sub-field
+    expect(sf.product).toMatchObject({ type: 'string', inputKind: 'text', required: true });
+    // integer sub-field
+    expect(sf.qty).toMatchObject({ type: 'integer', inputKind: 'number', required: true });
+    // number sub-field
+    expect(sf.price).toMatchObject({ type: 'number', inputKind: 'number', required: false });
+    // select sub-field (enum)
+    expect(sf.category).toMatchObject({
+      type: 'select',
+      inputKind: 'select',
+      options: ['food', 'drink', 'other'],
+      required: false,
+    });
+  });
+
+  it('non-collection fields remain unaffected', () => {
+    const nameField = fields.find((f) => f.key === 'order_name');
+    expect(nameField).toMatchObject({ type: 'string', inputKind: 'text' });
+    expect(nameField).not.toHaveProperty('subFields');
+  });
+
+  it('tolerates collection with no sub-fields (empty items.properties)', () => {
+    const emptySchema = {
+      type: 'object',
+      properties: {
+        tags: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {} } },
+      },
+    };
+    const [f] = schemaToFormFields(emptySchema);
+    expect(f).toMatchObject({ key: 'tags', type: 'collection', inputKind: 'collection' });
+    expect(f.subFields).toEqual([]);
+  });
+});
+
+describe('T-0449: blankRecordValues — collection field', () => {
+  it('initializes a collection field to []', () => {
+    const fields = schemaToFormFields(COLLECTION_SCHEMA);
+    const vals = blankRecordValues(fields);
+    expect(vals.lines).toEqual([]);
+    expect(Array.isArray(vals.lines)).toBe(true);
+    expect(vals.order_name).toBe(''); // non-collection unchanged
+  });
+});
+
+describe('T-0449: validateRecordValues — collection field', () => {
+  const fields = schemaToFormFields(COLLECTION_SCHEMA);
+
+  it('required collection empty → error with _collection message', () => {
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'Test', lines: [] });
+    expect(valid).toBe(false);
+    expect(errors.lines).toBeDefined();
+    expect(errors.lines._collection).toMatch(/строк/i);
+  });
+
+  it('required collection with a valid 2-row payload → no error', () => {
+    const rows = [
+      { product: 'Яблоко', qty: '3', price: '150.5', category: 'food' },
+      { product: 'Кола', qty: '2', price: '', category: '' },
+    ];
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'Заказ', lines: rows });
+    expect(valid).toBe(true);
+    expect(errors).toEqual({});
+  });
+
+  it('a row with a non-numeric value in an integer sub-field → per-cell error', () => {
+    const rows = [{ product: 'Яблоко', qty: 'abc', price: '', category: '' }];
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'X', lines: rows });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows).toBeDefined();
+    expect(errors.lines.rows[0].qty).toMatch(/число/i);
+  });
+
+  it('a row with a fractional value in an integer sub-field → per-cell error', () => {
+    const rows = [{ product: 'Яблоко', qty: '1.5', price: '', category: '' }];
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'X', lines: rows });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows[0].qty).toMatch(/целое/i);
+  });
+
+  it('a row with a required string sub-field missing → per-cell error', () => {
+    const rows = [{ product: '', qty: '1', price: '', category: '' }];
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'X', lines: rows });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows[0].product).toMatch(/обязательн/i);
+  });
+
+  it('a row with a select value outside options → per-cell error', () => {
+    const rows = [{ product: 'A', qty: '1', price: '', category: 'bogus' }];
+    const { valid, errors } = validateRecordValues(fields, { order_name: 'X', lines: rows });
+    expect(valid).toBe(false);
+    expect(errors.lines.rows[0].category).toMatch(/списка/i);
+  });
+
+  it('error shape: rows array index corresponds to data row (valid rows are undefined)', () => {
+    // Row 0 valid, row 1 invalid
+    const rows = [
+      { product: 'Яблоко', qty: '3', price: '', category: '' },
+      { product: '', qty: 'bad', price: '', category: '' }, // two cell errors
+    ];
+    const { errors } = validateRecordValues(fields, { order_name: 'X', lines: rows });
+    expect(errors.lines.rows[0]).toBeUndefined(); // row 0 valid
+    expect(errors.lines.rows[1].product).toBeTruthy(); // required missing
+    expect(errors.lines.rows[1].qty).toBeTruthy();    // non-numeric
+  });
+
+  it('optional collection empty → no error', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        attachments: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: false, properties: { url: { type: 'string' } } },
+        },
+      },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const { valid } = validateRecordValues(optFields, { attachments: [] });
+    expect(valid).toBe(true);
+  });
+});
+
+describe('T-0449: serializeRecordData — collection field', () => {
+  const fields = schemaToFormFields(COLLECTION_SCHEMA);
+
+  it('emits an array of typed row objects (numbers as numbers)', () => {
+    const rows = [
+      { product: 'Яблоко', qty: '3', price: '150.5', category: 'food' },
+      { product: 'Кола', qty: '2', price: '', category: '' },
+    ];
+    const data = serializeRecordData(fields, { order_name: 'Заказ 1', lines: rows });
+    expect(Array.isArray(data.lines)).toBe(true);
+    expect(data.lines).toHaveLength(2);
+    expect(data.lines[0]).toMatchObject({ product: 'Яблоко', qty: 3, price: 150.5, category: 'food' });
+    expect(typeof data.lines[0].qty).toBe('number');
+    expect(typeof data.lines[0].price).toBe('number');
+    // Blank optional cells omitted
+    expect('price' in data.lines[1]).toBe(false);
+    expect('category' in data.lines[1]).toBe(false);
+    expect(data.lines[1]).toMatchObject({ product: 'Кола', qty: 2 });
+  });
+
+  it('drops fully-blank trailing rows', () => {
+    const rows = [
+      { product: 'Яблоко', qty: '1', price: '', category: '' },
+      { product: '', qty: '', price: '', category: '' }, // trailing blank
+    ];
+    const data = serializeRecordData(fields, { order_name: 'X', lines: rows });
+    expect(data.lines).toHaveLength(1);
+  });
+
+  it('optional empty collection → omit', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tags: {
+          type: 'array',
+          items: { type: 'object', additionalProperties: false, properties: { label: { type: 'string' } } },
+        },
+      },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const data = serializeRecordData(optFields, { tags: [] });
+    expect('tags' in data).toBe(false);
+  });
+
+  it('required empty collection → emits [] (required-empty is caught by validateRecordValues)', () => {
+    const data = serializeRecordData(fields, { order_name: '', lines: [] });
+    // Required empty collection: serialized as [] (validation would have caught this)
+    expect(data.lines).toEqual([]);
+  });
+});
+
+describe('T-0449: serializeRecordData → validateRecordAgainstSchema round-trip', () => {
+  const fields = schemaToFormFields(COLLECTION_SCHEMA);
+
+  it('a 2-row collection serialized by serializeRecordData is accepted by the real validator', () => {
+    const rows = [
+      { product: 'Яблоко', qty: '5', price: '99', category: 'food' },
+      { product: 'Кола', qty: '2', price: '', category: '' },
+    ];
+    const data = serializeRecordData(fields, { order_name: 'Заказ', lines: rows });
+
+    // Use the real validator (same as the backend — T-0085).
+    const schemaHistory = new Map([[1, COLLECTION_SCHEMA]]);
+    const result = validateRecordAgainstSchema({ data, schema_version: 1 }, schemaHistory);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('serialized data with numbers as numbers passes; a string number would fail', () => {
+    const schemaHistory = new Map([[1, COLLECTION_SCHEMA]]);
+
+    // Hand-craft a BAD payload (qty as string) to prove AJV rejects it.
+    const badData = { lines: [{ product: 'A', qty: '3' }] }; // qty string → should fail
+    const badResult = validateRecordAgainstSchema({ data: badData, schema_version: 1 }, schemaHistory);
+    expect(badResult.valid).toBe(false);
+
+    // Our serializer produces the correct numeric type.
+    const rows = [{ product: 'A', qty: '3', price: '', category: '' }];
+    const goodData = serializeRecordData(fields, { order_name: '', lines: rows });
+    const goodResult = validateRecordAgainstSchema({ data: goodData, schema_version: 1 }, schemaHistory);
+    expect(goodResult.valid).toBe(true);
+  });
+});
+
+describe('T-0449: formatCellValue — collection field', () => {
+  it('returns «N позиций» style summary for a non-empty collection', () => {
+    const twoRows = [{ product: 'A' }, { product: 'B' }];
+    const result = formatCellValue(twoRows, 'collection');
+    // Must contain the count and a «позиц*» word
+    expect(result).toMatch(/^2\s+позиц/);
+  });
+
+  it('returns «—» for an empty collection array', () => {
+    expect(formatCellValue([], 'collection')).toBe('—');
+  });
+
+  it('returns «—» for null collection value', () => {
+    expect(formatCellValue(null, 'collection')).toBe('—');
+  });
+
+  it('returns «—» for undefined collection value', () => {
+    expect(formatCellValue(undefined, 'collection')).toBe('—');
+  });
+
+  it('Russian grammatical forms: 1→позиция, 2→позиции, 5→позиций, 11→позиций, 21→позиция', () => {
+    const arr = (n) => Array.from({ length: n }, () => ({}));
+    expect(formatCellValue(arr(1), 'collection')).toBe('1 позиция');
+    expect(formatCellValue(arr(2), 'collection')).toBe('2 позиции');
+    expect(formatCellValue(arr(4), 'collection')).toBe('4 позиции');
+    expect(formatCellValue(arr(5), 'collection')).toBe('5 позиций');
+    expect(formatCellValue(arr(11), 'collection')).toBe('11 позиций');
+    expect(formatCellValue(arr(21), 'collection')).toBe('21 позиция');
+    expect(formatCellValue(arr(22), 'collection')).toBe('22 позиции');
+  });
+
+  it('is ADDITIVE: relation branch still returns RELATION_CELL_ASYNC (unchanged)', () => {
+    const uuid = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+    expect(formatCellValue(uuid, 'relation')).toBe(RELATION_CELL_ASYNC);
+    expect(formatCellValue('', 'relation')).toBe('—');
+  });
+});
