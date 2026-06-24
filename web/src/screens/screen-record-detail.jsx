@@ -20,10 +20,10 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
-import { schemaToFormFields, formatCellValue } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel } from './records-form.js';
 import {
   groupLinksByLabel,
   isHopAllowed,
@@ -279,6 +279,125 @@ function CrossAppLinksPanel({ recordId }) {
 }
 
 // ---------------------------------------------------------------------------
+// T-0447: RelationFieldValue — resolves a UUID relation value to label + link.
+//
+// Used in the record detail card for each relation field. Resolution path:
+//   1. First try GET /api/records/:id/links (fast path when a cross_app_ref def
+//      exists — T-0445 registers these for user-authored relations). If the
+//      links response contains a hop whose hop.targetRecordId === targetId and
+//      hop.allowed === true, derive the label from hop.fields.
+//   2. Fallback: GET /api/records/:targetId directly (always works, whether or
+//      not a cross_app_ref def row exists yet). Derive label via deriveRecordLabel.
+//
+// Resolution is done directly via fetch — the detail card already loads the
+// record; this component is called per-field after the card loads.
+//
+// Honest states:
+//   loading  → subtle placeholder (not a full spinner — field layout stays stable)
+//   resolved → label + navigable Link to /apps/:targetAppId/records/:targetId
+//   dangling/denied (404/403/error/null value) → «— / Нет доступа» sentinel
+//
+// Token-only colors (G6); no hardcoded hex.
+// ---------------------------------------------------------------------------
+
+/**
+ * Inline async relation value for the record detail card.
+ *
+ * @param {string} targetId   UUID stored as the relation value.
+ * @param {string} recordId   Current record's id (for the links endpoint fast path).
+ * @param {string} appId      Current app id (fallback link construction).
+ */
+function RelationFieldValue({ targetId, recordId, appId }) {
+  const [state, setState] = useState('loading'); // 'loading'|'resolved'|'denied'
+  const [resolved, setResolved] = useState(null); // { text, targetAppId }
+
+  useEffect(() => {
+    if (!targetId) { setState('denied'); return; }
+    let cancelled = false;
+    setState('loading');
+
+    // Fast path: check the links projection for this record — if a cross_app_ref
+    // def exists the hop already has the resolved fields.
+    const fastPath = fetch(
+      `/api/records/${encodeURIComponent(recordId)}/links`,
+      { headers: devHeaders() },
+    ).then(async (res) => {
+      if (cancelled) return null;
+      if (!res.ok) return null;
+      const body = await res.json();
+      const links = Array.isArray(body.links) ? body.links : [];
+      for (const link of links) {
+        const hop = link.hop;
+        if (!hop) continue;
+        // Match the hop whose target is our targetId.
+        if (hop.targetRecordId === targetId && hop.allowed === true) {
+          const data = hop.fields && typeof hop.fields === 'object' ? hop.fields : {};
+          // Derive label from the hop's field projection.
+          const fakeRecord = { id: targetId, data };
+          return { text: deriveRecordLabel(fakeRecord), targetAppId: appId };
+        }
+      }
+      return null;
+    }).catch(() => null);
+
+    fastPath.then(async (hit) => {
+      if (cancelled) return;
+      if (hit) {
+        setResolved(hit);
+        setState('resolved');
+        return;
+      }
+      // Fallback: fetch the target record directly.
+      try {
+        const res = await fetch(
+          `/api/records/${encodeURIComponent(targetId)}`,
+          { headers: devHeaders() },
+        );
+        if (cancelled) return;
+        if (res.status === 404 || res.status === 403) { setState('denied'); return; }
+        if (!res.ok) { setState('denied'); return; }
+        const data = await res.json();
+        if (cancelled) return;
+        const targetAppId = data.application_id || appId;
+        setResolved({ text: deriveRecordLabel(data), targetAppId });
+        setState('resolved');
+      } catch {
+        if (!cancelled) setState('denied');
+      }
+    });
+
+    return () => { cancelled = true; };
+  }, [targetId, recordId, appId]);
+
+  if (state === 'loading') {
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        …
+      </span>
+    );
+  }
+
+  if (state === 'denied' || !resolved) {
+    // Redacted sentinel — mirrors CrossAppLinksPanel's denied-hop treatment (T-0352).
+    return (
+      <span style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+        — / Нет доступа
+      </span>
+    );
+  }
+
+  return (
+    <Link
+      to={`/apps/${resolved.targetAppId}/records/${targetId}`}
+      style={{ color: 'var(--chs-color-accent)', textDecoration: 'none' }}
+      title={`Открыть запись ${targetId}`}
+    >
+      {resolved.text}
+    </Link>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // RecordDetailScreen
 // ---------------------------------------------------------------------------
 
@@ -406,16 +525,32 @@ function RecordDetailScreen() {
                 </div>
               ) : (
                 <div>
-                  {formFields.map((f) => (
-                    <div key={f.key} style={fieldRowStyle}>
-                      <span style={labelStyle}>{f.label}</span>
-                      <span style={valueStyle}>
-                        {data[f.key] === undefined || data[f.key] === null
-                          ? '—'
-                          : formatCellValue(data[f.key], f.type)}
-                      </span>
-                    </div>
-                  ))}
+                  {formFields.map((f) => {
+                    const val = data[f.key];
+                    // T-0447: relation fields render async label+link, not raw UUID.
+                    const isRelation = f.type === 'relation';
+                    const hasValue = val !== undefined && val !== null;
+                    const isAsyncRelation = isRelation && hasValue &&
+                      formatCellValue(val, f.type) === RELATION_CELL_ASYNC;
+                    return (
+                      <div key={f.key} style={fieldRowStyle}>
+                        <span style={labelStyle}>{f.label}</span>
+                        <span style={valueStyle}>
+                          {!hasValue
+                            ? '—'
+                            : isAsyncRelation
+                              ? (
+                                <RelationFieldValue
+                                  targetId={String(val)}
+                                  recordId={record.id}
+                                  appId={appId}
+                                />
+                              )
+                              : formatCellValue(val, f.type)}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

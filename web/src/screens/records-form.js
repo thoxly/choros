@@ -359,18 +359,60 @@ export function schemaToColumns(recordSchema) {
 }
 
 /**
+ * Derive a human-readable display label from a target record's data object.
+ * Returns the first non-empty string or finite-number value found in data
+ * (schema-order), or a short id prefix as fallback. Never surfaces a raw UUID.
+ *
+ * This is the canonical label-derivation for relation fields — T-0447 exports
+ * it so both the list (RelationCell) and the detail card can reuse the same
+ * logic without duplication. Also used by RelationPicker (T-0446) in
+ * screen-app-records.jsx — that copy should be removed in favour of this one.
+ *
+ * @param {object|null|undefined} record  a record row from GET /api/records
+ * @returns {string}
+ */
+export function deriveRecordLabel(record) {
+  if (!record) return "—";
+  const data = record.data && typeof record.data === "object" ? record.data : {};
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  }
+  // Fallback: first 8 chars of id — unambiguous short ref, not a raw placeholder.
+  return typeof record.id === "string" ? record.id.slice(0, 8) + "…" : "—";
+}
+
+/**
  * Render a single record-data cell value for the list (display-only). Booleans
  * become «Да»/«Нет»; null/undefined become «—»; objects are JSON-stringified
  * (defensive — the flat schema never nests, but a hand-inserted seed might).
  *
+ * T-0447: relation fields (type === "relation") store a UUID string as their
+ * value. Because resolving the UUID to a label is async, formatCellValue cannot
+ * do it directly. It returns the sentinel symbol RELATION_CELL_ASYNC so the
+ * caller (screen-app-records.jsx / screen-record-detail.jsx) knows to render
+ * an async <RelationCell> / resolve via fetch. The caller must check
+ *   typeof result === 'symbol' && result === RELATION_CELL_ASYNC
+ * before rendering. When the value is null/undefined the normal "—" path fires.
+ *
  * @param {unknown} value
  * @param {string} type the field's JSON-Schema type
- * @returns {string}
+ * @returns {string|symbol}  string in all cases except relation with a value
  */
+export const RELATION_CELL_ASYNC = Symbol("relation_cell_async");
+
 export function formatCellValue(value, type) {
   if (value === null || value === undefined) return "—";
   if (type === "boolean" || typeof value === "boolean") {
     return value ? "Да" : "Нет";
+  }
+  // T-0447: relation value is a UUID — label resolution is async.
+  // Return the sentinel so callers can render an async cell component.
+  // Empty string means no target was picked (blank optional) → render "—".
+  if (type === "relation") {
+    if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
+    return "—"; // blank or unexpected non-string → absent
   }
   if (typeof value === "object") {
     try {
