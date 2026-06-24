@@ -174,7 +174,7 @@ function ProcessCatalogSection() {
                     <td className="chs-r">
                       <Mono style={{ color: 'var(--chs-color-text-muted)' }}>{d.instance_count}</Mono>
                     </td>
-                    <td className="chs-r">
+                    <td className="chs-r" style={{ display: 'flex', gap: 'var(--chs-space-2)', justifyContent: 'flex-end' }}>
                       {/* T-0323: open the REAL bpmn-js modeler for this definition. */}
                       <Button
                         variant="ghost"
@@ -184,6 +184,19 @@ function ProcessCatalogSection() {
                       >
                         В конструкторе
                       </Button>
+                      {/* T-0437: open the branch-rules editor for this definition.
+                          G3: only render when process_key is a non-empty string — a
+                          row without a valid key has no editor to navigate to. */}
+                      {d.process_key ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => navigate(`/processes/${d.process_key}/branch-rules`)}
+                          title="Редактор правил ветвления"
+                        >
+                          Правила ветвления
+                        </Button>
+                      ) : null}
                     </td>
                   </tr>
                 ))}

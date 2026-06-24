@@ -192,6 +192,9 @@ function EditorToolbar({
   onLoad,
   onValidate,
   onPublish,
+  // T-0437: optional entry point to the branch-rules editor. Only supplied when
+  // a real processKey exists (not for unsaved new processes).
+  onBranchRules,
 }) {
   const statusLabel = processStatus === 'published' ? 'Опубликован' : 'Черновик';
   const statusVal = processStatus === 'published' ? 'done' : 'paused';
@@ -273,6 +276,19 @@ function EditorToolbar({
       >
         Экспорт
       </Button>
+
+      {/* T-0437: Правила ветвления — only shown when a real processKey exists. */}
+      {onBranchRules && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onBranchRules}
+          disabled={isBusy}
+          title="Редактор правил ветвления для этого процесса"
+        >
+          Правила ветвления
+        </Button>
+      )}
 
       {/* T-0324: Save = persist to backend */}
       <Button
@@ -681,6 +697,9 @@ export default function ProcessEditorScreen() {
         onLoad={handleLoad}
         onValidate={handleValidate}
         onPublish={handlePublish}
+        // T-0437: navigate to branch-rules editor. Only provided when a real
+        // processKey is known (not for unsaved new processes — G3: no dead affordance).
+        onBranchRules={processKey ? () => navigate(`/processes/${encodeURIComponent(processKey)}/branch-rules`) : undefined}
       />
 
       {/* T-0099: Validation result banner */}
