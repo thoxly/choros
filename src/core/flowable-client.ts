@@ -91,6 +91,39 @@ export type CompleteUserTaskResult =
   | { ok: true }
   | { ok: false; code: FlowableErrorCode };
 
+/**
+ * T-0443: A live active user task from the Flowable engine.
+ * Maps the GET /runtime/tasks?processInstanceId wire shape.
+ */
+export interface ActiveUserTask {
+  /** Flowable task id (the engine's runtime task id). */
+  readonly id: string;
+  /** BPMN taskDefinitionKey (e.g. "task-approve", "task-extra-approve"). */
+  readonly taskDefinitionKey: string;
+  /** Human-readable task name. */
+  readonly name: string;
+  /** candidateGroups as resolved by Flowable (may be empty). */
+  readonly candidateGroups: readonly string[];
+}
+
+/**
+ * T-0443: result of getActiveUserTasks — all active user tasks for an instance,
+ * mapped from the Flowable wire shape.
+ */
+export type GetActiveUserTasksResult =
+  | { ok: true; tasks: ActiveUserTask[] }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
+ * T-0443: result of isInstanceEnded — whether the given process instance has
+ * ended (all paths reached endEvent). Returns { ok: true, ended: true } when
+ * the instance is gone from runtime (404 on runtime endpoint) or its history
+ * record shows endTime != null. Returns { ok: false } on engine error.
+ */
+export type IsInstanceEndedResult =
+  | { ok: true; ended: boolean }
+  | { ok: false; code: FlowableErrorCode };
+
 /** Wire shape from Flowable /runtime/external-jobs/acquire (FR-3). */
 export interface ExternalTask {
   readonly id: string;
@@ -158,6 +191,28 @@ export interface FlowableClient {
    * Success: 200 (Flowable 7 returns the task JSON on PUT complete).
    */
   completeUserTask(taskId: string): Promise<CompleteUserTaskResult>;
+  /**
+   * T-0443: Get ALL active user tasks for a process instance.
+   * Unlike getFirstActiveUserTask (size=1), this returns the full list so the
+   * caller can resolve by taskDefinitionKey (e.g. "task-approve") rather than
+   * taking whatever is first. Used by the approve engine-drive seam in inbox.ts.
+   *
+   * Flowable endpoint: GET {baseUrl}/runtime/tasks?processInstanceId={id}
+   * Maps each task to { id, taskDefinitionKey, name, candidateGroups }.
+   */
+  getActiveUserTasks(instanceId: string): Promise<GetActiveUserTasksResult>;
+  /**
+   * T-0443: Check whether a process instance has ended.
+   * Strategy: GET /runtime/process-instances/{id} → 404 ⇒ ended (Flowable
+   * removes completed instances from the runtime table). If present, also
+   * checks /history/historic-process-instances/{id} for endTime != null.
+   * Returns { ok: true, ended } or { ok: false, code } on engine error.
+   *
+   * Used by the inbox approve engine-reconciliation seam to distinguish
+   * "engine ended" (emit instance.ended) from "engine has more steps" (emit
+   * process.next_task with the live next task's defKey/name/role).
+   */
+  isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +655,108 @@ export function makeFlowableClient(
     }, resolved) as Promise<CompleteUserTaskResult>;
   }
 
+  // -------------------------------------------------------------------------
+  // FR-8: getActiveUserTasks — T-0443 defKey-resolution seam
+  //
+  // GET {baseUrl}/runtime/tasks?processInstanceId={id}
+  // Returns ALL active USER tasks for an instance (not just the first one).
+  // Maps each task to { id, taskDefinitionKey, name, candidateGroups } so the
+  // approve handler can resolve the correct engine task by taskDefinitionKey
+  // (e.g. "task-approve") rather than blindly taking whatever is first.
+  // -------------------------------------------------------------------------
+  async function getActiveUserTasks(instanceId: string): Promise<GetActiveUserTasksResult> {
+    return withRetry(async () => {
+      const url = `${resolved.baseUrl}/runtime/tasks?processInstanceId=${encodeURIComponent(instanceId)}`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        const items = data["data"] as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(items)) {
+          return { ok: true as const, tasks: [] };
+        }
+        const tasks: ActiveUserTask[] = items.map((t) => {
+          // candidateGroups: Flowable returns an array of objects {url, groupId} or strings.
+          // Normalize to a string array of group identifiers.
+          const rawGroups = t["involvedPeople"] ?? t["candidateGroups"] ?? [];
+          let candidateGroups: string[] = [];
+          if (Array.isArray(rawGroups)) {
+            candidateGroups = (rawGroups as unknown[]).map((g) => {
+              if (typeof g === "string") return g;
+              if (g !== null && typeof g === "object") {
+                const obj = g as Record<string, unknown>;
+                return String(obj["groupId"] ?? obj["id"] ?? "");
+              }
+              return String(g);
+            }).filter((s) => s.length > 0);
+          }
+          return {
+            id: String(t["id"] ?? ""),
+            taskDefinitionKey: String(t["taskDefinitionKey"] ?? ""),
+            name: String(t["name"] ?? ""),
+            candidateGroups,
+          };
+        });
+        return { ok: true as const, tasks };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<GetActiveUserTasksResult>;
+  }
+
+  // -------------------------------------------------------------------------
+  // FR-9: isInstanceEnded — T-0443 engine-reconcile seam
+  //
+  // Strategy:
+  //   1. GET {baseUrl}/runtime/process-instances/{id} → 200 (still running) or
+  //      404 (Flowable removed it from runtime — means ended).
+  //   2. If 200, also check /history/historic-process-instances/{id} endTime field.
+  //      A running instance with no history end-time is NOT ended.
+  //   3. If the runtime query returns any non-404/non-200 error, propagate as
+  //      { ok: false, code } so the caller can honest-degrade.
+  // -------------------------------------------------------------------------
+  async function isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult> {
+    return withRetry(async () => {
+      const runtimeUrl = `${resolved.baseUrl}/runtime/process-instances/${encodeURIComponent(instanceId)}`;
+      const runtimeResp = await globalThis.fetch(runtimeUrl, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+
+      if (runtimeResp.status === 404) {
+        // Flowable deletes runtime records when an instance completes — 404 means ended.
+        return { ok: true as const, ended: true };
+      }
+
+      if (runtimeResp.status === 200) {
+        // Instance is still in the runtime table — check history for endTime just
+        // to be thorough (a suspended instance with no active tasks is still running).
+        // Primary signal: 200 on /runtime/ = not yet ended.
+        // We do a best-effort history check; on any failure we conservatively say
+        // "not ended" (safe default: avoid falsely ending an instance).
+        try {
+          const histUrl = `${resolved.baseUrl}/history/historic-process-instances/${encodeURIComponent(instanceId)}`;
+          const histResp = await globalThis.fetch(histUrl, {
+            method: "GET",
+            headers: { Authorization: auth },
+          });
+          if (histResp.status === 200) {
+            const histData = (await histResp.json()) as Record<string, unknown>;
+            const endTime = histData["endTime"];
+            const ended = endTime !== null && endTime !== undefined;
+            return { ok: true as const, ended };
+          }
+        } catch {
+          // History endpoint unreachable → conservatively say not ended.
+        }
+        return { ok: true as const, ended: false };
+      }
+
+      return { ok: false, code: httpStatusToCode(runtimeResp.status) };
+    }, resolved) as Promise<IsInstanceEndedResult>;
+  }
+
   return {
     deployBpmn,
     startInstance,
@@ -608,5 +765,7 @@ export function makeFlowableClient(
     failTask,
     getFirstActiveUserTask,
     completeUserTask,
+    getActiveUserTasks,
+    isInstanceEnded,
   };
 }
