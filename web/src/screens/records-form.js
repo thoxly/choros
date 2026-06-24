@@ -57,6 +57,7 @@
 //   date       → <input type="date">      (date — T-0294)
 //   relation   → searchable picker of target registry records (T-0446)
 //   collection → repeatable-rows table (line-items — T-0448/T-0449)
+//   computed   → read-only rollup readout (NEVER a writable control — T-0453)
 export const INPUT_KIND = {
   string: "text",
   number: "number",
@@ -66,7 +67,100 @@ export const INPUT_KIND = {
   date: "date",
   relation: "relation",
   collection: "collection",
+  computed: "computed",
 };
+
+/**
+ * T-0453: Compute the rollup value for a computed/«Итог» field from a data object.
+ *
+ * PURE function — no side effects, no throws. Returns a JS number or null.
+ *
+ * @param {{ rollupSource: string, rollupOp: string, rollupValueField?: string,
+ *           rollupFactorField?: string }} field  form-field descriptor for a computed field
+ * @param {Record<string, unknown>} data  record.data or live form values
+ * @returns {number | null}
+ *
+ * Semantics:
+ *   source: data[field.rollupSource] must be an array of row objects (a collection).
+ *     If absent or not an array → null (source missing; no error).
+ *
+ *   For each row, read value_field (and factor_field for op:"sum" when set) as numbers.
+ *   Non-numeric or missing cells:
+ *     - sum/avg/min/max : skip the cell entirely (treat as if the row doesn't exist
+ *       for that aggregation). This is the honest choice: a blank optional price cell
+ *       should not make the total zero, nor should it error.
+ *     - count : all rows counted regardless of cell contents.
+ *
+ *   Empty source array (0 rows) or all cells non-numeric → returns null (not 0),
+ *   because "no data" should display as «—», not as 0, which would be misleading.
+ *   Exception: count on an empty array → null (zero rows → no meaningful count to show).
+ *
+ *   Operations:
+ *     sum   : Σ value × factor (factor defaults to 1 when factor_field absent/non-numeric)
+ *     count : total row count (ignores value_field)
+ *     avg   : mean of numeric value cells
+ *     min   : minimum numeric value cell
+ *     max   : maximum numeric value cell
+ */
+export function computeRollup(field, data) {
+  if (!field || typeof field !== "object") return null;
+  const source = typeof field.rollupSource === "string" ? field.rollupSource : "";
+  const op = typeof field.rollupOp === "string" ? field.rollupOp : "";
+  const valueField = typeof field.rollupValueField === "string" ? field.rollupValueField : "";
+  const factorField = typeof field.rollupFactorField === "string" ? field.rollupFactorField : "";
+
+  if (source.length === 0 || op.length === 0) return null;
+
+  const dataObj = data && typeof data === "object" ? data : {};
+  const rows = dataObj[source];
+  if (!Array.isArray(rows)) return null;
+
+  // count: just the row count, value_field irrelevant
+  if (op === "count") {
+    return rows.length === 0 ? null : rows.length;
+  }
+
+  // For all other ops, collect numeric values (and optional factors for sum)
+  const values = [];
+  for (const row of rows) {
+    const rowObj = row && typeof row === "object" ? row : {};
+    const raw = rowObj[valueField];
+    const rawStr = typeof raw === "number" ? raw : (typeof raw === "string" ? raw.trim() : null);
+    if (rawStr === null || rawStr === "") continue;
+    const v = Number(rawStr);
+    if (!Number.isFinite(v)) continue;
+
+    if (op === "sum" && factorField.length > 0) {
+      const rawF = rowObj[factorField];
+      const rawFStr = typeof rawF === "number" ? rawF : (typeof rawF === "string" ? rawF.trim() : null);
+      let factor = 1;
+      if (rawFStr !== null && rawFStr !== "") {
+        const f = Number(rawFStr);
+        if (Number.isFinite(f)) factor = f;
+      }
+      values.push(v * factor);
+    } else {
+      values.push(v);
+    }
+  }
+
+  if (values.length === 0) return null;
+
+  if (op === "sum") {
+    return values.reduce((acc, x) => acc + x, 0);
+  }
+  if (op === "avg") {
+    return values.reduce((acc, x) => acc + x, 0) / values.length;
+  }
+  if (op === "min") {
+    return Math.min(...values);
+  }
+  if (op === "max") {
+    return Math.max(...values);
+  }
+
+  return null; // unknown op: degrade silently
+}
 
 /**
  * Derive an ordered list of form-field descriptors from a record_schema.
@@ -166,6 +260,26 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0453: detect computed (rollup) fields by the presence of x-rollup extension.
+    // Shape: { type: "number", "x-rollup": { source, op, value_field, factor_field? } }.
+    // These fields are NEVER required and NEVER appear in the submitted data
+    // (serializeRecordData omits them; the value is computed at display time).
+    const xRollup = def && typeof def === "object" ? def["x-rollup"] : undefined;
+    if (xRollup && typeof xRollup === "object" && !Array.isArray(xRollup) && typeof xRollup.source === "string") {
+      return {
+        key,
+        type: "computed",
+        title,
+        label: title || key,
+        required: false, // computed fields are NEVER required
+        inputKind: "computed",
+        rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
+        rollupOp: typeof xRollup.op === "string" ? xRollup.op : "",
+        rollupValueField: typeof xRollup.value_field === "string" ? xRollup.value_field : "",
+        rollupFactorField: typeof xRollup.factor_field === "string" ? xRollup.factor_field : "",
+      };
+    }
+
     // T-0446: detect relation fields by the presence of the x-relation extension
     // (emitted by apps-schema.buildRecordSchema for "relation" type fields — T-0444).
     // Shape: { type: "string", "x-relation": { target_registry_id: "<uuid>" } }.
@@ -223,6 +337,12 @@ export function schemaToFormFields(recordSchema) {
 export function blankRecordValues(formFields) {
   const values = {};
   for (const f of Array.isArray(formFields) ? formFields : []) {
+    if (f.type === "computed") {
+      // T-0453: computed fields have no user-editable state — they are derived
+      // at display time via computeRollup. Do NOT add a key to the values map
+      // so serializeRecordData never sees it and can never accidentally emit it.
+      continue;
+    }
     if (f.type === "boolean") {
       values[f.key] = false;
     } else if (f.type === "collection") {
@@ -265,6 +385,12 @@ export function validateRecordValues(formFields, values) {
 
     if (f.type === "boolean") {
       continue; // a checkbox is always a valid boolean
+    }
+
+    // T-0453: computed fields are never user-input — skip validation entirely.
+    // The value is derived at display time; no validation error is ever appropriate.
+    if (f.type === "computed") {
+      continue;
     }
 
     // T-0449: collection — validate each row cell by its sub-field rules.
@@ -422,6 +548,16 @@ export function serializeRecordData(formFields, values) {
 
   for (const f of Array.isArray(formFields) ? formFields : []) {
     const raw = vals[f.key];
+
+    // T-0453: THE KEY TRAP — computed fields MUST NEVER appear in the output `data`.
+    // The field IS declared in the schema `properties` (type:"number" with x-rollup),
+    // but it is NEVER stored (value is derived at display time). If a computed key
+    // ends up in `data`, every record POST 400s on AJV `additionalProperties:false`
+    // because the schema strips x-rollup before AJV compile, leaving the key as an
+    // extra property that the validator rejects. OMIT unconditionally.
+    if (f.type === "computed") {
+      continue; // never write computed fields to the record data payload
+    }
 
     if (f.type === "boolean") {
       // A checkbox always has a definite state; emit a real boolean.
@@ -601,6 +737,20 @@ export function formatCellValue(value, type) {
     if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
     return "—"; // blank or unexpected non-string → absent
   }
+  // T-0453: computed field value is a number (pre-computed before call) or null.
+  // Format as a string number (locale-neutral — consistent with number fields) or «—».
+  // This branch is ADDITIVE — the relation and collection branches above are NOT modified.
+  // Callers pass the already-computed number (from computeRollup) as `value`, not raw data.
+  if (type === "computed") {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      // Round to at most 10 decimal places to avoid float display noise (e.g. 0.1+0.2)
+      // while still supporting legitimate fractional results (avg, factor multiplication).
+      const rounded = Math.round(value * 1e10) / 1e10;
+      return String(rounded);
+    }
+    return "—";
+  }
+
   // T-0449: collection value is an array of row objects.
   // Summarize as «N позиций» (or «—» when empty/absent).
   // This branch is ADDITIVE — the relation branch above is NOT modified.

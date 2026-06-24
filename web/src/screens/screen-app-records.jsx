@@ -63,6 +63,7 @@ import {
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
+  computeRollup,
 } from './records-form.js';
 // T-0399 [D7-K]: record-entry fields render through the ONE unified renderer
 // (catalog-driven), replacing the bespoke inline checkbox/number/text map below.
@@ -537,6 +538,78 @@ function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-0453: ComputedReadout — read-only live readout for a computed/«Итог» field.
+//
+// Computes the rollup from the live form values (the source collection's current
+// rows) and displays the result. Updates in real-time as the user edits the
+// source line-items rows — no submit needed to see the aggregate.
+//
+// Contract:
+//   - NEVER renders an editable input (G3: no dead affordances / misleading controls).
+//   - Recomputes from `currentValues[field.rollupSource]` on every render.
+//   - Displays «—» when no rows exist or all cells are non-numeric (null from computeRollup).
+//   - Token-only colors (G2, G6); no hardcoded hex.
+//
+// Additive: a single `f.inputKind === 'computed'` branch in formFields.map routes
+// here; RelationPicker and LineItemsField branches are NOT touched.
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only aggregate readout for a computed field in the record-entry drawer.
+ *
+ * @param {{ key, label, rollupSource, rollupOp, rollupValueField, rollupFactorField }} field
+ * @param {Record<string, unknown>} currentValues  live form values (includes collection rows)
+ */
+function ComputedReadout({ field, currentValues }) {
+  const label = field.label || field.title || field.key;
+  const computed = computeRollup(field, currentValues);
+  const display = formatCellValue(computed, 'computed');
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      <span
+        className="chs-label"
+        style={{ display: 'block', marginBottom: 'var(--chs-space-2)' }}
+      >
+        {label}
+        {/* Distinguish computed from editable fields visually */}
+        <span
+          aria-hidden="true"
+          style={{
+            marginLeft: 'var(--chs-space-2)',
+            fontSize: 'var(--chs-text-xs)',
+            color: 'var(--chs-color-text-muted)',
+            fontWeight: 'normal',
+          }}
+        >
+          (вычисляется)
+        </span>
+      </span>
+      <div
+        aria-live="polite"
+        aria-readonly="true"
+        style={{
+          display: 'block',
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: 'var(--chs-space-2) var(--chs-space-3)',
+          border: '1px solid var(--chs-color-border)',
+          borderRadius: 'var(--chs-radius-2)',
+          background: 'var(--chs-color-surface)',
+          color: display === '—' ? 'var(--chs-color-text-muted)' : 'var(--chs-color-text)',
+          fontSize: 'var(--chs-text-sm)',
+          fontStyle: display === '—' ? 'italic' : 'normal',
+          cursor: 'default',
+          userSelect: 'text',
+        }}
+      >
+        {display}
+      </div>
+    </div>
+  );
+}
+
 // Anything at/below this is a seed/unset created_at, not a real date — render a
 // dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
 const EPOCH_FLOOR_MS = 24 * 60 * 60 * 1000; // ~1970-01-02
@@ -660,9 +733,18 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
             T-0446: relation fields route to RelationPicker (async fetch of
             target records) rather than the catalog renderer (which lacks fetch).
             T-0450: collection fields route to LineItemsField (repeatable row
-            table). Additive branch — RelationPicker and FieldControl unchanged. */}
+            table).
+            T-0453: computed fields route to ComputedReadout (read-only live
+            aggregate from the current collection rows). Additive branch —
+            RelationPicker, LineItemsField and FieldControl branches unchanged. */}
         {formFields.map((f) => (
-          f.inputKind === 'collection' ? (
+          f.inputKind === 'computed' ? (
+            <ComputedReadout
+              key={f.key}
+              field={f}
+              currentValues={values}
+            />
+          ) : f.inputKind === 'collection' ? (
             <LineItemsField
               key={f.key}
               field={f}
