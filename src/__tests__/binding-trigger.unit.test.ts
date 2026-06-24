@@ -428,7 +428,9 @@ describe("T-0351 savepoint: projection failure does not lose the committed recor
       updated_at: "2000",
     };
 
-    // Track SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT calls
+    // Track SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT calls.
+    // Each entry is "<verb> <savepoint_name>" so assertions can scope to a specific savepoint.
+    // e.g. "SAVEPOINT proc_proj", "ROLLBACK_TO proc_proj", "RELEASE dmn_precompute"
     const savepointLog: string[] = [];
     // The first UPDATE choros.audit_head is the record.create audit event (must succeed).
     // The second UPDATE choros.audit_head is inside appendProcessStarted (must throw
@@ -438,17 +440,20 @@ describe("T-0351 savepoint: projection failure does not lose the committed recor
     const throwingClient = {
       query: vi.fn(async (sql: string, _params?: unknown[]) => {
         const trimmed = sql.trim();
-        // Track SAVEPOINT control commands
-        if (/^SAVEPOINT\s/i.test(trimmed)) {
-          savepointLog.push("SAVEPOINT");
+        // Track SAVEPOINT control commands — capture name so assertions can be scoped.
+        const savepointMatch = trimmed.match(/^SAVEPOINT\s+(\S+)/i);
+        if (savepointMatch) {
+          savepointLog.push(`SAVEPOINT ${savepointMatch[1]!.toLowerCase()}`);
           return { rows: [] };
         }
-        if (/^RELEASE SAVEPOINT\s/i.test(trimmed)) {
-          savepointLog.push("RELEASE");
+        const releaseMatch = trimmed.match(/^RELEASE SAVEPOINT\s+(\S+)/i);
+        if (releaseMatch) {
+          savepointLog.push(`RELEASE ${releaseMatch[1]!.toLowerCase()}`);
           return { rows: [] };
         }
-        if (/^ROLLBACK TO SAVEPOINT\s/i.test(trimmed)) {
-          savepointLog.push("ROLLBACK_TO");
+        const rollbackMatch = trimmed.match(/^ROLLBACK TO SAVEPOINT\s+(\S+)/i);
+        if (rollbackMatch) {
+          savepointLog.push(`ROLLBACK_TO ${rollbackMatch[1]!.toLowerCase()}`);
           return { rows: [] };
         }
         // Standard tx control
@@ -525,10 +530,15 @@ describe("T-0351 savepoint: projection failure does not lose the committed recor
       // Record must be committed (201) even though projection failed
       expect(res.status).toBe(201);
 
-      // SAVEPOINT was issued and then rolled back (not released) — projection failure
-      expect(savepointLog).toContain("SAVEPOINT");
-      expect(savepointLog).toContain("ROLLBACK_TO");
-      expect(savepointLog).not.toContain("RELEASE");
+      // proc_proj savepoint was issued and rolled back (not released) — projection failure
+      // contained so the outer tx is not poisoned.
+      expect(savepointLog).toContain("SAVEPOINT proc_proj");
+      expect(savepointLog).toContain("ROLLBACK_TO proc_proj");
+      expect(savepointLog).not.toContain("RELEASE proc_proj");
+
+      // dmn_precompute savepoint succeeded (RELEASE, not ROLLBACK) — new T-0439 behavior.
+      expect(savepointLog).toContain("SAVEPOINT dmn_precompute");
+      expect(savepointLog).toContain("RELEASE dmn_precompute");
 
       // startInstance was called (engine succeeded)
       expect(flowable.startInstance).toHaveBeenCalledOnce();
