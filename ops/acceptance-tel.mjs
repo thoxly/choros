@@ -53,6 +53,20 @@ const FLOWABLE_REST_BASE_URL =
   `http://localhost:${FLOWABLE_PORT}/flowable-rest/service`;
 const FLOWABLE_PASS =
   process.env.FLOWABLE_REST_APP_ADMIN_PASSWORD ?? "choros_flowable_dev_pw";
+const FLOWABLE_USER =
+  process.env.FLOWABLE_REST_APP_ADMIN_USER_ID ?? "admin";
+
+// T-0273: the lifecycle bridge (src/server/lifecycle-bridge.ts → externalTaskBridge.ts)
+// is GATED on FLOWABLE_BASE_URL (degrades to a no-op handle when absent) and only polls
+// the topics in FLOWABLE_TOPICS. Without these, the `tel-intake` external (triage) task
+// is never fetched-and-locked/completed, so the DMN gateway never injects
+// `approvalRequired` and the «Доп. согласование» extra-approval task never spawns
+// (CS-1 / T-0368). The bridge's makeFlowableClient expects the SAME `.../flowable-rest/service`
+// base as the REST client, so derive FLOWABLE_BASE_URL from FLOWABLE_REST_BASE_URL.
+// Bridge admin creds use the FLOWABLE_ADMIN_USER/PASSWORD names (lifecycle-bridge.ts),
+// distinct from the FLOWABLE_REST_APP_ADMIN_* names the start-route reads — map both.
+const FLOWABLE_BASE_URL = process.env.FLOWABLE_BASE_URL ?? FLOWABLE_REST_BASE_URL;
+const FLOWABLE_TOPICS = process.env.FLOWABLE_TOPICS ?? "tel-intake";
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { stdio: "inherit", cwd: ROOT, ...opts });
@@ -99,8 +113,13 @@ async function main() {
     FLOWABLE_REST_BASE_URL,
     FLOWABLE_PORT,
     FLOWABLE_REST_APP_ADMIN_PASSWORD: FLOWABLE_PASS,
-    FLOWABLE_REST_APP_ADMIN_USER_ID:
-      process.env.FLOWABLE_REST_APP_ADMIN_USER_ID ?? "admin",
+    FLOWABLE_REST_APP_ADMIN_USER_ID: FLOWABLE_USER,
+    // T-0273: wake the lifecycle bridge (gated on FLOWABLE_BASE_URL) and tell it which
+    // topics to poll (tel-intake triage). Admin creds under the bridge's env var names.
+    FLOWABLE_BASE_URL,
+    FLOWABLE_TOPICS,
+    FLOWABLE_ADMIN_USER: FLOWABLE_USER,
+    FLOWABLE_ADMIN_PASSWORD: FLOWABLE_PASS,
     DEMO_TENANT_SLUG: process.env.DEMO_TENANT_SLUG ?? "dev",
     CHOROS_WEB_DIST: resolve(ROOT, "web/dist"),
   };
