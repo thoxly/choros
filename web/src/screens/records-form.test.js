@@ -26,6 +26,8 @@ import {
   serializeRecordData,
   schemaToColumns,
   formatCellValue,
+  RELATION_CELL_ASYNC,
+  deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
 } from './records-form.js';
@@ -190,6 +192,78 @@ describe('formatCellValue', () => {
     expect(formatCellValue({ a: 1 }, 'string')).toBe('{"a":1}');
     // a stray boolean value under a non-boolean column still reads sanely
     expect(formatCellValue(true, 'string')).toBe('Да');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0447: formatCellValue — relation branch + deriveRecordLabel
+// ---------------------------------------------------------------------------
+
+const SAMPLE_UUID = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+
+describe('T-0447: formatCellValue relation field', () => {
+  it('returns RELATION_CELL_ASYNC for a non-empty UUID value with type="relation"', () => {
+    const result = formatCellValue(SAMPLE_UUID, 'relation');
+    // Must be the sentinel symbol — callers render an async component.
+    expect(result).toBe(RELATION_CELL_ASYNC);
+    expect(typeof result).toBe('symbol');
+  });
+
+  it('returns "—" for null relation value (no target selected)', () => {
+    expect(formatCellValue(null, 'relation')).toBe('—');
+  });
+
+  it('returns "—" for undefined relation value', () => {
+    expect(formatCellValue(undefined, 'relation')).toBe('—');
+  });
+
+  it('returns "—" for empty string relation value (blank optional)', () => {
+    // An empty string means no record was picked — treat as absent.
+    expect(formatCellValue('', 'relation')).toBe('—');
+  });
+
+  it('RELATION_CELL_ASYNC is a stable symbol identity (not recreated each call)', () => {
+    const a = formatCellValue(SAMPLE_UUID, 'relation');
+    const b = formatCellValue(SAMPLE_UUID, 'relation');
+    expect(a).toBe(b); // same symbol reference
+  });
+});
+
+describe('T-0447: deriveRecordLabel', () => {
+  it('returns the first non-empty string value from data', () => {
+    const rec = { id: SAMPLE_UUID, data: { name: 'Acme Corp', code: 'ACM' } };
+    expect(deriveRecordLabel(rec)).toBe('Acme Corp');
+  });
+
+  it('returns a finite number value as a string when the first field is a number', () => {
+    const rec = { id: SAMPLE_UUID, data: { amount: 42, note: 'hi' } };
+    expect(deriveRecordLabel(rec)).toBe('42');
+  });
+
+  it('skips blank strings and finds the next non-empty value', () => {
+    const rec = { id: SAMPLE_UUID, data: { empty: '', name: 'Filled' } };
+    expect(deriveRecordLabel(rec)).toBe('Filled');
+  });
+
+  it('falls back to short id prefix when data has no usable string/number', () => {
+    const rec = { id: '12345678-abcd-0000-0000-000000000000', data: { flag: true } };
+    const label = deriveRecordLabel(rec);
+    expect(label).toBe('12345678…');
+  });
+
+  it('returns "—" for null record', () => {
+    expect(deriveRecordLabel(null)).toBe('—');
+  });
+
+  it('returns "—" for record with missing id and no data', () => {
+    expect(deriveRecordLabel({ data: {} })).toBe('—');
+  });
+
+  it('ignores NaN and Infinity numeric values, falls back to id prefix', () => {
+    const rec = { id: 'abcdef12-0000-0000-0000-000000000000', data: { val: NaN } };
+    const label = deriveRecordLabel(rec);
+    // NaN is not finite → skip; no other fields → id prefix
+    expect(label).toBe('abcdef12…');
   });
 });
 
