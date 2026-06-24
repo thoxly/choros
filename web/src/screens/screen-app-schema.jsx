@@ -91,7 +91,7 @@ const colHeadStyle = {
  * FieldEditor and passed down) for the target selector. targetRegistryId stored
  * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError }) {
   const set = (patch) => onChange({ ...field, ...patch });
 
   // T-0294: convert options array ↔ newline-separated string for the textarea.
@@ -194,12 +194,30 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
                 value={field.targetRegistryId || ''}
                 onChange={(e) => set({ targetRegistryId: e.target.value })}
                 invalid={Boolean(errors.targetRegistryId)}
-                placeholder="Выберите набор полей…"
+                placeholder={
+                  registryDefsLoading
+                    ? 'Загрузка наборов полей…'
+                    : (registryDefs || []).length === 0
+                      ? 'Нет доступных наборов полей'
+                      : 'Выберите набор полей…'
+                }
+                disabled={registryDefsLoading || registryDefsError || (registryDefs || []).length === 0}
                 options={(registryDefs || []).map((d) => ({
                   value: d.id,
                   label: d.display_name || d.slug,
                 }))}
               />
+              {/* G4 honest empty/error states — shown inline below the disabled control */}
+              {!registryDefsLoading && registryDefsError && (
+                <span style={{ ...errStyle, color: 'var(--chs-color-text-muted)' }}>
+                  Не удалось загрузить наборы полей
+                </span>
+              )}
+              {!registryDefsLoading && !registryDefsError && (registryDefs || []).length === 0 && (
+                <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                  Пока не создано ни одного набора полей, на который можно сослаться — создайте его первым
+                </span>
+              )}
               {errors.targetRegistryId && (
                 <span style={errStyle}>{errors.targetRegistryId}</span>
               )}
@@ -236,17 +254,29 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const [allRegistryDefs, setAllRegistryDefs] = useState([]);
 
   // T-0444: fetch all tenant registry_defs once (no application_id → tenant-wide).
-  // Best-effort: errors are non-fatal (the dropdown stays empty — user sees no options).
+  // G4 honest-state: track loading/error so the dropdown gives an honest explanation
+  // instead of a silently empty enabled control.
+  const [allRegistryDefsLoading, setAllRegistryDefsLoading] = useState(true);
+  const [allRegistryDefsError, setAllRegistryDefsError] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
+    setAllRegistryDefsLoading(true);
+    setAllRegistryDefsError(false);
     fetch('/api/registry-defs', { headers: devHeaders() })
-      .then((r) => r.ok ? r.json() : null)
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((data) => {
-        if (!cancelled && data && Array.isArray(data.registry_defs)) {
-          setAllRegistryDefs(data.registry_defs);
+        if (!cancelled) {
+          setAllRegistryDefs(Array.isArray(data?.registry_defs) ? data.registry_defs : []);
+          setAllRegistryDefsLoading(false);
         }
       })
-      .catch(() => { /* non-fatal: dropdown stays empty */ });
+      .catch(() => {
+        if (!cancelled) {
+          setAllRegistryDefsError(true);
+          setAllRegistryDefsLoading(false);
+        }
+      });
     return () => { cancelled = true; };
   }, []);
 
@@ -394,6 +424,8 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               onMove={moveField}
               onRemove={removeField}
               registryDefs={allRegistryDefs}
+              registryDefsLoading={allRegistryDefsLoading}
+              registryDefsError={allRegistryDefsError}
             />
           ))}
         </div>
