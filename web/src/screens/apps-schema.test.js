@@ -890,3 +890,100 @@ describe('apps-schema · mapSchemaError', () => {
     expect(mapSchemaError(404, null).message).toMatch(/не найден/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0450: collection sub-field KEY validation (the new validateField fix)
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0450 · collection sub-field key validation', () => {
+  // Helper: build a collection field with the given sub-fields array
+  const makeCol = (subFields) => ({
+    key: 'items',
+    type: 'collection',
+    subFields,
+  });
+
+  it('rejects a sub-field with an empty key', () => {
+    const err = validateField(makeCol([{ key: '', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/ключ/i);
+  });
+
+  it('rejects a sub-field key that starts with a digit', () => {
+    const err = validateField(makeCol([{ key: '1bad', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a sub-field key with a hyphen (not an identifier char)', () => {
+    const err = validateField(makeCol([{ key: 'bad-key', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects a sub-field key with a space', () => {
+    const err = validateField(makeCol([{ key: 'bad key', type: 'string' }]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('rejects duplicate sub-field keys within the same collection', () => {
+    const err = validateField(makeCol([
+      { key: 'price', type: 'number' },
+      { key: 'price', type: 'string' },
+    ]));
+    expect(err.subFields).toBeTruthy();
+    expect(err.subFields).toMatch(/уже используется/i);
+  });
+
+  it('rejects the second of three duplicate keys (first and third differ)', () => {
+    const err = validateField(makeCol([
+      { key: 'a', type: 'string' },
+      { key: 'b', type: 'string' },
+      { key: 'a', type: 'number' }, // duplicate of first
+    ]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('accepts a sub-field key that starts with an underscore', () => {
+    const err = validateField(makeCol([{ key: '_col', type: 'string' }]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a sub-field key with letters, digits, and underscore', () => {
+    const err = validateField(makeCol([
+      { key: 'col_1', type: 'string' },
+      { key: 'col_2', type: 'number' },
+    ]));
+    expect(err.subFields).toBeUndefined();
+  });
+
+  it('accepts a collection with two distinct valid keys and valid types (no error)', () => {
+    const err = validateField(makeCol([
+      { key: 'name', type: 'string' },
+      { key: 'qty', type: 'integer' },
+    ]));
+    expect(err.subFields).toBeUndefined();
+    expect(Object.keys(err)).toHaveLength(0);
+  });
+
+  it('reports both a key error and a dup error when a bad+dup key appears', () => {
+    // First sub-field has an invalid key AND is duplicated by the second
+    const err = validateField(makeCol([
+      { key: '1bad', type: 'string' },
+      { key: '1bad', type: 'number' }, // invalid + duplicate
+    ]));
+    expect(err.subFields).toBeTruthy();
+  });
+
+  it('validateFields: propagates sub-field key error through validateFields', () => {
+    const r = validateFields([makeCol([{ key: '1bad', type: 'string' }])]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].subFields).toBeTruthy();
+  });
+
+  it('validateFields: accepts a collection with valid sub-field keys', () => {
+    const r = validateFields([makeCol([
+      { key: 'product', type: 'string' },
+      { key: 'qty', type: 'integer' },
+    ])]);
+    expect(r.valid).toBe(true);
+  });
+});
