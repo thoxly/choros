@@ -314,21 +314,23 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
 
   // T-0436: collect gateway info during the token walk (only when ruleTables supplied).
   // gateways: map from gateway elementId (or generated key) to GatewayInfo.
-  // currentCondExprGatewayVar: when inside a conditionExpression on a sequenceFlow,
-  // track which gateway variable (if any) it corresponds to (resolved by referencing
-  // the most-recently-seen exclusiveGateway when flow sourceRef matches — best-effort:
-  // we do NOT track sourceRef in the tokenizer since we only have a flat token stream).
-  // Strategy: collect ALL conditionExpression texts + their parsed varName/literal pairs;
-  // then match them to gateways by varName (same routingVar key).
+  //
+  // Fix (review finding): conditions are associated to gateways by sequenceFlow sourceRef,
+  // NOT by variable name. When two gateways share the same routingVar, keying by varName
+  // would merge their branch literals and cause false-positive 422 / misattribution.
+  // Correct design: each <sequenceFlow sourceRef="<gatewayId>"> owns its condition;
+  // we build literalsByGatewayId keyed by the gateway element id.
   const collectGateways = opts?.ruleTables !== undefined;
   const gatewayMap = new Map<string, GatewayInfo>(); // key = elementId or index
   let gatewayIndex = 0;
-  // conditionExpressions collected as { varName, literal } during the walk.
-  // These are keyed by varName so we can attach them to matching gateways.
-  const conditionsByVar = new Map<string, string[]>(); // varName → literal[]
+  // literalsByGatewayId: maps gateway element id → array of {varName, literal} pairs
+  // collected from the sequenceFlows whose sourceRef points at that gateway id.
+  const literalsByGatewayId = new Map<string, Array<{ varName: string; literal: string }>>();
   // State for collecting conditionExpression text in this scan.
+  // currentSeqFlowSourceRef: sourceRef of the sequenceFlow currently being parsed.
   let inCondExprForGateway = false;
   let condExprBuffer = "";
+  let currentSeqFlowSourceRef = "";
 
   // Validate UTF-8 by checking for replacement characters that Node may have
   // inserted for invalid byte sequences. We operate on a JS string, so we
@@ -446,11 +448,18 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         gatewayMap.set(gwKey, { id: elementId, routingVar, branchLiterals: [] });
       }
 
+      // T-0436: track sequenceFlow sourceRef so conditionExpression can be associated
+      // to the correct owning gateway by gateway id, NOT by variable name.
+      if (collectGateways && localName === "sequenceFlow") {
+        const sourceRefAttr = attrs.find((a) => a.name === "sourceRef");
+        currentSeqFlowSourceRef = sourceRefAttr?.value ?? "";
+      }
+
       // T-0436: conditionExpression gateway collection.
       // When we encounter a <conditionExpression> element (already tracked by
       // SCOPED_ELEMENTS → contextStack), we also track it in our parallel
       // gateway buffer. After the close-tag, we parse the condition and add
-      // the literal to the matching gateway (by varName from the expression).
+      // the literal to the owning gateway via the sequenceFlow's sourceRef.
       if (collectGateways && localName === "conditionExpression") {
         inCondExprForGateway = true;
         condExprBuffer = "";
@@ -532,19 +541,26 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       }
 
       // T-0436: flush gateway conditionExpression buffer on </conditionExpression>.
+      // Associate the parsed literal to the owning gateway by sourceRef (gateway id),
+      // NOT by variable name — fixes false-positive when two gateways share routingVar.
       if (collectGateways && localName === "conditionExpression" && inCondExprForGateway) {
         inCondExprForGateway = false;
         const parsed = parseGatewayCondition(condExprBuffer);
-        if (parsed !== null) {
-          // Accumulate literal under its varName for later matching with gateways.
-          let literals = conditionsByVar.get(parsed.varName);
-          if (literals === undefined) {
-            literals = [];
-            conditionsByVar.set(parsed.varName, literals);
+        if (parsed !== null && currentSeqFlowSourceRef) {
+          // Accumulate literal under the owning gateway's id (sourceRef of the flow).
+          let entries = literalsByGatewayId.get(currentSeqFlowSourceRef);
+          if (entries === undefined) {
+            entries = [];
+            literalsByGatewayId.set(currentSeqFlowSourceRef, entries);
           }
-          literals.push(parsed.literal);
+          entries.push(parsed);
         }
         condExprBuffer = "";
+      }
+
+      // T-0436: clear sequenceFlow tracking state when the sequenceFlow closes.
+      if (collectGateways && localName === "sequenceFlow") {
+        currentSeqFlowSourceRef = "";
       }
 
       continue;
@@ -587,28 +603,24 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   // Runs AFTER the raw-object walk so parse errors short-circuit above.
   // Only activated when opts.ruleTables is supplied.
   if (collectGateways && opts?.ruleTables !== undefined) {
-    // Attach collected condition literals to gateways by matching routingVar → varName.
+    // Attach collected condition literals to each gateway by its element id.
+    // literalsByGatewayId is keyed by the sequenceFlow's sourceRef (= gateway id),
+    // so each gateway only receives literals from its OWN outgoing flows —
+    // no cross-gateway merge even when two gateways share the same routingVar.
     for (const gw of gatewayMap.values()) {
-      if (gw.routingVar) {
-        const literals = conditionsByVar.get(gw.routingVar);
-        if (literals !== undefined) {
+      const gwId = gw.id;
+      if (gwId) {
+        const entries = literalsByGatewayId.get(gwId);
+        if (entries !== undefined) {
           // Merge literals into gw.branchLiterals (deduplicate).
-          for (const lit of literals) {
-            if (!gw.branchLiterals.includes(lit)) {
-              gw.branchLiterals.push(lit);
+          for (const entry of entries) {
+            if (!gw.branchLiterals.includes(entry.literal)) {
+              gw.branchLiterals.push(entry.literal);
             }
           }
         }
       }
     }
-
-    // When there are no gateways in the gatewayMap but there are conditionsByVar entries,
-    // those conditions still need to be checked (some BPMN documents use gateways without
-    // choros:routingVar but with matching conditionExpression vars). Create synthetic gateway
-    // entries for each unique varName found in conditionsByVar that didn't match any gateway.
-    // However, to keep it simple and avoid false positives: only check gateways that have
-    // BOTH a declared routingVar AND are in the gatewayMap. Unmatched conditionsByVar entries
-    // are silently skipped (no false positives on non-choros BPMN).
 
     checkGatewayRuleCoherence(Array.from(gatewayMap.values()), opts.ruleTables, violations);
   }

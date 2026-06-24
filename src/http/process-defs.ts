@@ -408,10 +408,14 @@ export function registerProcessDefsRoutes(
         return loadPublishedRuleTables(client, tenantId, processKey);
       });
       ruleTables = tables;
-    } catch {
+    } catch (err) {
       // Degrade gracefully: if rule table load fails (e.g. table not yet migrated
       // on older deployment), skip the coherence check rather than blocking publish.
       // The coherence check is advisory at this stage of rollout.
+      console.warn(
+        `[process-defs] publish ${processKey}: loadPublishedRuleTables failed — ` +
+        `skipping gateway coherence check. Reason: ${err instanceof Error ? err.message : String(err)}`,
+      );
       ruleTables = undefined;
     }
 
