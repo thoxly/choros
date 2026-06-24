@@ -86,6 +86,7 @@ import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.
 import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 import {
   parsePaginationParams,
   encodeRecordsCursor,
@@ -689,7 +690,42 @@ async function createRecord(args: {
       if (binding !== null) {
         // Project SCALAR variables from record data via field_mapping.
         // RECORD_IN_PAYLOAD: only primitives pass through; objects/arrays are dropped.
-        const variables = projectEngineVariables(data, binding.field_mapping);
+        let variables = projectEngineVariables(data, binding.field_mapping);
+
+        // T-0439: pre-compute DMN gateway routing variable at launch.
+        // Evaluates the published rule table (if any) for this process and injects
+        // the routing variable + version pins into the startInstance variables map
+        // so the exclusiveGateway in authored processes can route at start time.
+        // Degrades gracefully: no published rule table → no injection, no throw.
+        try {
+          const dmnResult = await preComputeGatewayVariable(client, {
+            tenantId,
+            instanceId: id,      // record id as proxy instance id for audit (best-effort)
+            processKey: binding.process_key,
+            procDefId: binding.process_key,
+            actor,
+            nowMs,
+            bindings: variables,
+            gatewayId: `gw-${binding.process_key}`, // generic gateway id for audit event
+          });
+          if (dmnResult.gatewayVar !== null) {
+            variables = {
+              ...variables,
+              [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+              ...dmnResult.versionVars,
+            };
+          } else if (Object.keys(dmnResult.versionVars).length > 0) {
+            variables = { ...variables, ...dmnResult.versionVars };
+          }
+        } catch (dmnErr) {
+          // Non-fatal: a DMN evaluation failure must NOT block the process launch.
+          // The gateway will fall through to the default flow (engine-side safety net).
+          console.warn(
+            `[on_create dmn-precompute] non-fatal DMN pre-compute error for process ` +
+              `${binding.process_key}:`,
+            dmnErr,
+          );
+        }
 
         // Start the process inside the SAME tenant tx (create = start atomically).
         // If startInstance fails the whole tx rolls back (no orphan record).

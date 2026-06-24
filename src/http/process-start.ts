@@ -41,6 +41,7 @@ import { DEV_USER_HEADER } from "./auth.js";
 import type { FlowableClient } from "../core/flowable-client.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
+import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -181,7 +182,48 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
     //    turn a created instance into a 502 — it degrades to "started but unprojected"
     //    rather than rolling back the (already engine-side) start.
     const startResult = await withTenantTx(pool, tenantId, async (client) => {
-      const result = await flowable.startInstance(processKey, variables);
+      // T-0439: pre-compute DMN gateway routing variable at launch.
+      // Evaluates the published rule table (if any) for this process and injects
+      // the routing variable + version pins into the startInstance variables map
+      // so the exclusiveGateway in authored processes can route at start time.
+      // Degrades gracefully: no published rule table → no injection, no throw.
+      let launchVariables = variables;
+      try {
+        const dmnResult = await preComputeGatewayVariable(client, {
+          tenantId,
+          instanceId: `launch-${processKey}-${Date.now()}`, // synthetic id for audit event
+          processKey,
+          procDefId: processKey,
+          actor,
+          nowMs: Date.now(),
+          bindings: variables ?? {},
+          gatewayId: `gw-${processKey}`, // generic gateway id for audit event
+        });
+        if (dmnResult.gatewayVar !== null) {
+          launchVariables = {
+            ...(variables ?? {}),
+            [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+            ...dmnResult.versionVars,
+          };
+        } else if (Object.keys(dmnResult.versionVars).length > 0) {
+          launchVariables = { ...(variables ?? {}), ...dmnResult.versionVars };
+        }
+      } catch (dmnErr) {
+        // Non-fatal: a DMN evaluation failure must NOT block the process launch.
+        // The gateway will fall through to the default flow (engine-side safety net).
+        console.warn(
+          `[process-start dmn-precompute] non-fatal DMN pre-compute error for process ` +
+            `${processKey}:`,
+          dmnErr,
+        );
+      }
+
+      const result = await flowable.startInstance(
+        processKey,
+        launchVariables !== undefined && Object.keys(launchVariables).length > 0
+          ? launchVariables
+          : undefined,
+      );
       if (result.ok) {
         try {
           await appendProcessStarted(client as unknown as PgClientLike, {

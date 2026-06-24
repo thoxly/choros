@@ -133,13 +133,29 @@ async function emitGatewayEvaluated(
 // PreComputeGatewayResult — returned by preComputeGatewayVariable
 // ---------------------------------------------------------------------------
 
+/**
+ * The evaluated routing outcome — the Flowable variable NAME to set and its VALUE.
+ * The name equals the routing-outcome name declared in the DMN rule table
+ * (e.g. "approvalRequired") and equals the BPMN gateway's choros:routingVar
+ * (publish-coherence guard, T-0436).  The caller merges { [name]: value }
+ * into the startInstance variables map so the engine can route the gateway.
+ */
+export interface GatewayVarPair {
+  readonly name: string;
+  readonly value: string;
+}
+
 export interface PreComputeGatewayResult {
   /**
-   * The evaluated gateway variable value (the routing outcome from DMN evaluate()).
-   * e.g. "standard" or "needs-approval" for the ТЭЛ threshold gate.
-   * null when no rule tables are found (no gateway variable to write).
+   * The evaluated gateway variable — name + value — or null when no rule
+   * tables are found for the process.  The caller sets variables[name] = value
+   * before calling startInstance so the exclusiveGateway can route correctly.
+   *
+   * BEFORE T-0439: gatewayVar was `string | null` (value only, name discarded).
+   * AFTER  T-0439: gatewayVar is `GatewayVarPair | null` so the caller knows
+   *                WHICH Flowable variable to set.
    */
-  readonly gatewayVar: string | null;
+  readonly gatewayVar: GatewayVarPair | null;
   /**
    * Serialized version variables to merge into the completeTask variables map.
    * These pin the rule table version so in-flight instances re-evaluate on the
@@ -202,11 +218,16 @@ export async function preComputeGatewayVariable(
   const evalResult = evaluate(tables, args.bindings);
   const routingOutcomes = evalResult.routingOutcomes;
 
-  // Pick the first routing outcome as the gateway variable value.
+  // Pick the first routing outcome as the gateway variable name+value pair.
   // (The ТЭЛ seed has exactly one routing outcome: "approvalRequired".)
+  // T-0439: capture BOTH name and value so the caller knows which Flowable
+  // variable to set (name = choros:routingVar by publish-coherence invariant).
   const outcomeEntries = Object.entries(routingOutcomes);
-  const gatewayVar = outcomeEntries.length > 0 ? outcomeEntries[0][1] : null;
-  const verdict = gatewayVar ?? "no-rule-matched";
+  const gatewayVar: GatewayVarPair | null =
+    outcomeEntries.length > 0
+      ? { name: outcomeEntries[0][0], value: outcomeEntries[0][1] }
+      : null;
+  const verdict = gatewayVar !== null ? gatewayVar.value : "no-rule-matched";
 
   // Emit gateway.evaluated (canonical audit event — T-0339 gateway-journal.ts).
   await emitGatewayEvaluated(client as unknown as PgClientLike, {

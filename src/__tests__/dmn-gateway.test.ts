@@ -43,6 +43,7 @@ import {
   TEL_GATEWAY_ID,
   preComputeGatewayVariable,
   evaluateGatewayAtTriage,
+  type GatewayVarPair,
 } from "../core/dmn-gateway.js";
 
 import {
@@ -338,7 +339,7 @@ describe("DG-5: evaluate() — FIRST hit-policy stops at first matching row", ()
 // ---------------------------------------------------------------------------
 
 describe("DG-6: preComputeGatewayVariable (A pre-compute path)", () => {
-  it("DG-6a: high-value purchase → gatewayVar = 'needs-approval' + versionVars contains dmn_rtv_ key", async () => {
+  it("DG-6a: high-value purchase → gatewayVar.name='approvalRequired', gatewayVar.value='needs-approval' + versionVars contains dmn_rtv_ key", async () => {
     const { client } = makeCapturingClient();
     const result = await preComputeGatewayVariable(client, {
       tenantId: TENANT_ID,
@@ -350,12 +351,15 @@ describe("DG-6: preComputeGatewayVariable (A pre-compute path)", () => {
       gatewayId: TEL_GATEWAY_ID,
     });
 
-    expect(result.gatewayVar).toBe("needs-approval");
+    // T-0439: gatewayVar is now { name, value } not a bare string
+    expect(result.gatewayVar).not.toBeNull();
+    expect(result.gatewayVar?.name).toBe("approvalRequired");
+    expect(result.gatewayVar?.value).toBe("needs-approval");
     expect(Object.keys(result.versionVars).some((k) => k.startsWith(DMN_VERSION_VAR_PREFIX))).toBe(true);
     expect(result.versions.length).toBeGreaterThan(0);
   });
 
-  it("DG-6b: standard purchase → gatewayVar = 'standard'", async () => {
+  it("DG-6b: standard purchase → gatewayVar.name='approvalRequired', gatewayVar.value='standard'", async () => {
     const { client } = makeCapturingClient();
     const result = await preComputeGatewayVariable(client, {
       tenantId: TENANT_ID,
@@ -367,7 +371,8 @@ describe("DG-6: preComputeGatewayVariable (A pre-compute path)", () => {
       gatewayId: TEL_GATEWAY_ID,
     });
 
-    expect(result.gatewayVar).toBe("standard");
+    expect(result.gatewayVar?.name).toBe("approvalRequired");
+    expect(result.gatewayVar?.value).toBe("standard");
   });
 
   it("DG-6c: no rule tables → gatewayVar = null, empty versionVars", async () => {
@@ -384,6 +389,31 @@ describe("DG-6: preComputeGatewayVariable (A pre-compute path)", () => {
 
     expect(result.gatewayVar).toBeNull();
     expect(Object.keys(result.versionVars)).toHaveLength(0);
+  });
+
+  it("DG-6d: T-0439 — caller can merge gatewayVar into startInstance variables map", async () => {
+    // Verify the new name+value shape enables the call-site merge pattern.
+    const { client } = makeCapturingClient();
+    const result = await preComputeGatewayVariable(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY,
+      actor: ACTOR,
+      nowMs: NOW_MS,
+      bindings: { amount: 7_000_000 },
+      gatewayId: TEL_GATEWAY_ID,
+    });
+
+    // Simulate the call-site merge: { [name]: value, ...versionVars }
+    const baseVariables: Record<string, unknown> = { amount: 7_000_000 };
+    const merged: Record<string, unknown> = result.gatewayVar !== null
+      ? { ...baseVariables, [result.gatewayVar.name]: result.gatewayVar.value, ...result.versionVars }
+      : baseVariables;
+
+    expect(merged["approvalRequired"]).toBe("needs-approval");
+    expect(merged["amount"]).toBe(7_000_000);
+    // versionVars pins are also present
+    expect(Object.keys(merged).some((k) => k.startsWith(DMN_VERSION_VAR_PREFIX))).toBe(true);
   });
 });
 
@@ -777,5 +807,132 @@ describe("DG-15: triage-seam smoke — evaluateGatewayAtTriage called with amoun
       existingVariables: instanceVars,
     });
     expect(result.gatewayVar).toBe("standard");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-16: T-0439 — preComputeGatewayVariable generic launch routing
+//         Validates the new name+value return shape for both branches of a
+//         generic authored process (start→userTask→exclusiveGateway[routingVar=X]→2 flows)
+// ---------------------------------------------------------------------------
+
+// A generic (non-ТЭЛ) process rule table: maps `score` to "high" or "low".
+const GENERIC_SCORE_TABLE: DmnRuleTable = {
+  id: "d0de0002-e150-0005-d4f4-000000000001",
+  name: "Generic score routing",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "High score → premium branch",
+      conditions: [{ field: "score", operator: "gt", value: 80 }],
+      effects: [{ kind: "set_routing_outcome", name: "scoreBranch", value: "high" }],
+    },
+    {
+      annotation: "Default → standard branch",
+      conditions: [],
+      effects: [{ kind: "set_routing_outcome", name: "scoreBranch", value: "low" }],
+    },
+  ],
+};
+
+describe("DG-16: T-0439 — preComputeGatewayVariable generic launch routing", () => {
+  it("DG-16a: score=90 (>80) → gatewayVar.name='scoreBranch', gatewayVar.value='high'", async () => {
+    const { client } = makeCapturingClient([GENERIC_SCORE_TABLE]);
+    const result = await preComputeGatewayVariable(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "generic-score-process",
+      actor: ACTOR,
+      nowMs: NOW_MS,
+      bindings: { score: 90 },
+      gatewayId: "gw-score",
+    });
+
+    // High binding → "high" branch
+    expect(result.gatewayVar).not.toBeNull();
+    const pair = result.gatewayVar as GatewayVarPair;
+    expect(pair.name).toBe("scoreBranch");
+    expect(pair.value).toBe("high");
+    expect(Object.keys(result.versionVars).some((k) => k.startsWith(DMN_VERSION_VAR_PREFIX))).toBe(true);
+
+    // Caller merge pattern (call-site #1 / #2):
+    const merged = { score: 90, [pair.name]: pair.value, ...result.versionVars };
+    expect(merged["scoreBranch"]).toBe("high");
+  });
+
+  it("DG-16b: score=40 (≤80) → gatewayVar.name='scoreBranch', gatewayVar.value='low'", async () => {
+    const { client } = makeCapturingClient([GENERIC_SCORE_TABLE]);
+    const result = await preComputeGatewayVariable(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "generic-score-process",
+      actor: ACTOR,
+      nowMs: NOW_MS,
+      bindings: { score: 40 },
+      gatewayId: "gw-score",
+    });
+
+    // Low binding → "low" branch
+    expect(result.gatewayVar).not.toBeNull();
+    const pair = result.gatewayVar as GatewayVarPair;
+    expect(pair.name).toBe("scoreBranch");
+    expect(pair.value).toBe("low");
+
+    // Caller merge pattern:
+    const merged = { score: 40, [pair.name]: pair.value, ...result.versionVars };
+    expect(merged["scoreBranch"]).toBe("low");
+  });
+
+  it("DG-16c: graceful degrade — process with NO published rule table → gatewayVar null, no throw", async () => {
+    const { client } = makeCapturingClient([]);
+    // No tables → should return null gracefully, not throw
+    let threw = false;
+    let result;
+    try {
+      result = await preComputeGatewayVariable(client, {
+        tenantId: TENANT_ID,
+        instanceId: INSTANCE_ID,
+        processKey: "process-with-no-dmn",
+        actor: ACTOR,
+        nowMs: NOW_MS,
+        bindings: { score: 90 },
+        gatewayId: "gw-x",
+      });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+    expect(result?.gatewayVar).toBeNull();
+    expect(Object.keys(result?.versionVars ?? {})).toHaveLength(0);
+  });
+
+  it("DG-16d: startInstance variables are unchanged when no rule table exists (graceful degrade)", async () => {
+    // Simulates the call-site pattern: if gatewayVar is null, original variables pass through.
+    const { client } = makeCapturingClient([]);
+    const baseVariables: Record<string, unknown> = { score: 90, userId: "u-1" };
+
+    const dmnResult = await preComputeGatewayVariable(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "process-with-no-dmn",
+      actor: ACTOR,
+      nowMs: NOW_MS,
+      bindings: baseVariables,
+      gatewayId: "gw-x",
+    });
+
+    // Call-site merge: when gatewayVar is null, variables are NOT modified.
+    let launchVariables = baseVariables;
+    if (dmnResult.gatewayVar !== null) {
+      launchVariables = {
+        ...baseVariables,
+        [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+        ...dmnResult.versionVars,
+      };
+    }
+
+    // Must be identical to the original variables
+    expect(launchVariables).toEqual(baseVariables);
+    expect(Object.keys(launchVariables)).not.toContain("scoreBranch");
   });
 });
