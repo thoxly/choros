@@ -28,7 +28,7 @@
  *
  * SUPPORTED FIELD TYPES — derived from what AJV strict mode actually compiles
  * (probed against the installed ajv) AND from the leaf types the seeds use:
- *   string · number · integer · boolean · select · date
+ *   string · number · integer · boolean · select · date · relation
  *   (object/array/null compile too but need sub-schemas to mean anything for a
  *    flat record form, so they are intentionally NOT offered — no dead options.)
  *
@@ -37,13 +37,22 @@
  *            in the record_schema. The `enum` array is AJV-strict-compilable (unlike
  *            `format`). At least one option is required; each option is a non-empty
  *            string, unique within the field.
- *   date   — an ISO 8601 date string. AJV strict REJECTS `format: "date"` (unknown
- *            format — throws on compile), so this emits as { type: "string" } in the
- *            record_schema; the UI renders <input type="date"> to constrain input.
- *            Round-trip note: parseRecordSchema cannot distinguish a plain "string"
- *            from a "date" in the persisted schema (no AJV-compliant annotation
- *            exists). A persisted date field loads back as "string" — acceptable per
- *            the constructor's read-back contract.
+ *   date     — an ISO 8601 date string. AJV strict REJECTS `format: "date"` (unknown
+ *              format — throws on compile), so this emits as { type: "string" } in the
+ *              record_schema; the UI renders <input type="date"> to constrain input.
+ *              Round-trip note: parseRecordSchema cannot distinguish a plain "string"
+ *              from a "date" in the persisted schema (no AJV-compliant annotation
+ *              exists). A persisted date field loads back as "string" — acceptable per
+ *              the constructor's read-back contract.
+ *
+ * T-0444 ADDITION:
+ *   relation — a pointer to a record in another набор полей (registry_def). Emitted
+ *              as { type: "string", "x-relation": { target_registry_id: <uuid> } }.
+ *              The `x-` prefix is a JSON Schema extension convention; AJV strict
+ *              REJECTS unknown keywords (including x-prefixed ones), so
+ *              validateRecordSchemaDefinition strips x-* keys before compiling and
+ *              re-attaches them after (additive, non-destructive). The x-relation
+ *              contract is PINNED (T-0445 depends on it).
  *
  * IMPORTANT — `format` is NOT emitted. AJV strict THROWS on an unknown format
  * (e.g. "email"/"date"), so `validateRecordSchemaDefinition` would reject it.
@@ -71,6 +80,7 @@ export const FIELD_TYPES = [
   { value: "boolean", label: "Да/Нет" },
   { value: "select", label: "Список (select)" },
   { value: "date", label: "Дата" },
+  { value: "relation", label: "Ссылка на запись" },
 ];
 
 export const FIELD_TYPE_VALUES = FIELD_TYPES.map((t) => t.value);
@@ -125,6 +135,14 @@ export function validateField(field) {
         }
         seen.add(o.trim());
       }
+    }
+  }
+
+  // T-0444: validate relation target
+  if (type === "relation") {
+    const target = typeof field?.targetRegistryId === "string" ? field.targetRegistryId.trim() : "";
+    if (target.length === 0) {
+      errors.targetRegistryId = "Выберите целевой набор полей";
     }
   }
 
@@ -205,6 +223,12 @@ export function buildRecordSchema(fields) {
       // date → type: string (no format; AJV strict rejects format:date).
       // The UI renders <input type="date"> which constrains values to ISO dates.
       prop = { type: "string" };
+    } else if (f.type === "relation") {
+      // T-0444: relation → type: string + x-relation extension (PINNED contract; T-0445 depends on this shape).
+      // AJV strict rejects x-* keywords — validateRecordSchemaDefinition strips them before compile.
+      // The value stored in the record is the referenced record's UUID (string).
+      const targetId = typeof f.targetRegistryId === "string" ? f.targetRegistryId.trim() : "";
+      prop = { type: "string", "x-relation": { target_registry_id: targetId } };
     } else {
       prop = { type: f.type };
     }
@@ -256,6 +280,14 @@ export function parseRecordSchema(recordSchema) {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
 
+    // T-0444: detect relation fields by the presence of x-relation extension.
+    const xRelation = def && typeof def === "object" ? def["x-relation"] : undefined;
+    if (xRelation && typeof xRelation === "object" && !Array.isArray(xRelation)) {
+      const targetRegistryId = typeof xRelation.target_registry_id === "string" ? xRelation.target_registry_id : "";
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "relation", title, required: requiredSet.has(key), targetRegistryId };
+    }
+
     // T-0294: detect select fields by the presence of an enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -265,11 +297,11 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "select", title, required: requiredSet.has(key), options };
     }
 
-    // If the persisted type isn't one we offer (excluding select which is handled
+    // If the persisted type isn't one we offer (excluding select/relation which are handled
     // above), fall back to "string" so the dropdown stays valid; the user can re-pick.
     // (Honest: never show a type option the backend wouldn't accept.)
-    const nonSelectTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select");
-    const type = nonSelectTypes.includes(rawType) ? rawType : "string";
+    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation");
+    const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =
       def && typeof def === "object" && typeof def.title === "string" ? def.title : "";
     return { key, type, title, required: requiredSet.has(key) };

@@ -30,7 +30,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, StatusChip, Field, EmptyState, ErrorState, LoadingState, KitIcon,
+  Button, MonoId, StatusChip, Field, Select, EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
@@ -85,8 +85,13 @@ const colHeadStyle = {
  * T-0294: when type="select", a textarea for entering option values (one per line)
  * is rendered below the type dropdown. When type changes away from "select", the
  * options state is preserved but hidden (non-destructive — lets user switch back).
+ *
+ * T-0444: when type="relation", a «Целевой набор полей» dropdown is rendered
+ * below the type dropdown. registryDefs = tenant's набор полей list (fetched by
+ * FieldEditor and passed down) for the target selector. targetRegistryId stored
+ * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError }) {
   const set = (patch) => onChange({ ...field, ...patch });
 
   // T-0294: convert options array ↔ newline-separated string for the textarea.
@@ -98,8 +103,9 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
     set({ options: text.split('\n') });
   };
 
-  const hasSubRow = field.type === 'select'
-    || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title) || Boolean(errors.options);
+  const hasSubRow = field.type === 'select' || field.type === 'relation'
+    || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
+    || Boolean(errors.options) || Boolean(errors.targetRegistryId);
 
   return (
     <div role="group" aria-label={`Поле ${index + 1}`} style={fieldRowGrid}>
@@ -153,8 +159,9 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
         </Button>
       </div>
 
-      {/* Full-width sub-row: per-field errors + the select-options editor.
-          Spans all grid columns so controls above keep the dense single-line row. */}
+      {/* Full-width sub-row: per-field errors + the select-options editor or
+          relation target picker. Spans all grid columns so controls above keep
+          the dense single-line row. */}
       {hasSubRow && (
         <div style={{ gridColumn: '1 / -1', marginTop: 'var(--chs-space-2)' }}>
           {errors.key && <span style={errStyle}>Ключ: {errors.key}</span>}
@@ -179,6 +186,43 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
               {errors.options && <span style={errStyle}>{errors.options}</span>}
             </div>
           )}
+          {/* T-0444: target набор полей picker for relation type */}
+          {field.type === 'relation' && (
+            <div style={{ marginTop: 'var(--chs-space-3)', maxWidth: '420px' }}>
+              <Select
+                label="На какой набор ссылается"
+                value={field.targetRegistryId || ''}
+                onChange={(e) => set({ targetRegistryId: e.target.value })}
+                invalid={Boolean(errors.targetRegistryId)}
+                placeholder={
+                  registryDefsLoading
+                    ? 'Загрузка наборов полей…'
+                    : (registryDefs || []).length === 0
+                      ? 'Нет доступных наборов полей'
+                      : 'Выберите набор полей…'
+                }
+                disabled={registryDefsLoading || registryDefsError || (registryDefs || []).length === 0}
+                options={(registryDefs || []).map((d) => ({
+                  value: d.id,
+                  label: d.display_name || d.slug,
+                }))}
+              />
+              {/* G4 honest empty/error states — shown inline below the disabled control */}
+              {!registryDefsLoading && registryDefsError && (
+                <span style={{ ...errStyle, color: 'var(--chs-color-text-muted)' }}>
+                  Не удалось загрузить наборы полей
+                </span>
+              )}
+              {!registryDefsLoading && !registryDefsError && (registryDefs || []).length === 0 && (
+                <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                  Пока не создано ни одного набора полей, на который можно сослаться — создайте его первым
+                </span>
+              )}
+              {errors.targetRegistryId && (
+                <span style={errStyle}>{errors.targetRegistryId}</span>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -189,6 +233,9 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove }) {
  * FieldEditor — the field list + add/save. Editing target:
  *   - editingDef === null  → CREATE a new registry_def (needs slug + display_name) → POST.
  *   - editingDef object    → EDIT its record_schema → PUT (slug/name read-only here).
+ *
+ * T-0444: fetches all tenant registry_defs (tenant-wide, no application_id filter) to
+ * populate the «На какой набор ссылается» dropdown in relation FieldRows.
  */
 function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const isEdit = Boolean(editingDef);
@@ -203,6 +250,35 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const [submitErr, setSubmitErr] = useState(null);  // general API error
   const [warnings, setWarnings] = useState(null);    // PUT soft warnings
   const [submitting, setSubmitting] = useState(false);
+  // T-0444: tenant-wide набор полей list for the relation target dropdown.
+  const [allRegistryDefs, setAllRegistryDefs] = useState([]);
+
+  // T-0444: fetch all tenant registry_defs once (no application_id → tenant-wide).
+  // G4 honest-state: track loading/error so the dropdown gives an honest explanation
+  // instead of a silently empty enabled control.
+  const [allRegistryDefsLoading, setAllRegistryDefsLoading] = useState(true);
+  const [allRegistryDefsError, setAllRegistryDefsError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAllRegistryDefsLoading(true);
+    setAllRegistryDefsError(false);
+    fetch('/api/registry-defs', { headers: devHeaders() })
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((data) => {
+        if (!cancelled) {
+          setAllRegistryDefs(Array.isArray(data?.registry_defs) ? data.registry_defs : []);
+          setAllRegistryDefsLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAllRegistryDefsError(true);
+          setAllRegistryDefsLoading(false);
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const updateField = useCallback((i, next) => {
     setFields((prev) => prev.map((f, idx) => (idx === i ? next : f)));
@@ -347,6 +423,9 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               onChange={(next) => updateField(i, next)}
               onMove={moveField}
               onRemove={removeField}
+              registryDefs={allRegistryDefs}
+              registryDefsLoading={allRegistryDefsLoading}
+              registryDefsError={allRegistryDefsError}
             />
           ))}
         </div>

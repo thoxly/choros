@@ -259,4 +259,65 @@ describe('record-schema-validator', () => {
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes('additionalProperties'))).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // T-0444: validateRecordAgainstSchema — relation field (x-* strip)
+  // -------------------------------------------------------------------------
+
+  it('T-0444 record-write: relation schema validates a UUID string (valid:true)', () => {
+    // Persisted schema retains x-relation (as stored in registry_schema_history).
+    // validateRecordAgainstSchema must strip x-* before AJV compile so it does NOT
+    // throw "unknown keyword x-relation" — every record write into a relation-bearing
+    // registry_def was previously returning 400.
+    const relationSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kontragent: {
+          type: 'string',
+          'x-relation': { target_registry_id: '550e8400-e29b-41d4-a716-446655440000' },
+          title: 'Контрагент',
+        },
+      },
+      required: ['kontragent'],
+    };
+
+    const schemaHistory: SchemaHistoryMap = new Map([[1, relationSchema]]);
+
+    const record = {
+      data: { kontragent: '550e8400-e29b-41d4-a716-446655440001' },
+      schema_version: 1,
+    };
+
+    const result = validateRecordAgainstSchema(record, schemaHistory);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('T-0444 record-write: relation schema rejects a non-string value (valid:false)', () => {
+    // After stripping x-relation the property is { type: "string" } — a numeric
+    // value must still be rejected (string type enforcement remains).
+    const relationSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kontragent: {
+          type: 'string',
+          'x-relation': { target_registry_id: '550e8400-e29b-41d4-a716-446655440000' },
+        },
+      },
+      required: ['kontragent'],
+    };
+
+    const schemaHistory: SchemaHistoryMap = new Map([[1, relationSchema]]);
+
+    const recordWithNumber = {
+      data: { kontragent: 42 },
+      schema_version: 1,
+    };
+
+    const result = validateRecordAgainstSchema(recordWithNumber, schemaHistory);
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+  });
 });
