@@ -54,6 +54,17 @@
  *              re-attaches them after (additive, non-destructive). The x-relation
  *              contract is PINNED (T-0445 depends on it).
  *
+ * T-0448 ADDITION:
+ *   collection — a «Список строк» (line-items) field: an array of sub-records, each
+ *               row having one or more SCALAR sub-fields (string/number/integer/boolean/
+ *               select/date — NOT collection or relation; depth cap = 1). Emitted as a
+ *               NATIVE JSON-Schema array:
+ *                 { type: "array", title, items: { type: "object",
+ *                   additionalProperties: false,
+ *                   properties: { <sub-fields via scalar emit logic> },
+ *                   required: [ <required sub-fields> ] } }
+ *               No x-* extensions → AJV strict compiles this natively without stripping.
+ *
  * IMPORTANT — `format` is NOT emitted. AJV strict THROWS on an unknown format
  * (e.g. "email"/"date"), so `validateRecordSchemaDefinition` would reject it.
  * The seeds carry `format` only because they are inserted via raw SQL, bypassing
@@ -81,6 +92,7 @@ export const FIELD_TYPES = [
   { value: "select", label: "Список (select)" },
   { value: "date", label: "Дата" },
   { value: "relation", label: "Ссылка на запись" },
+  { value: "collection", label: "Список строк" },
 ];
 
 export const FIELD_TYPE_VALUES = FIELD_TYPES.map((t) => t.value);
@@ -89,6 +101,10 @@ export const FIELD_TYPE_VALUES = FIELD_TYPES.map((t) => t.value);
 export const FIELD_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 export const FIELD_TITLE_MAX = 256;
+
+// T-0448: Scalar types permitted as collection sub-fields (depth cap 1: no collection/relation).
+// Declared before validateField (which references it) — `const` is not hoisted.
+export const COLLECTION_SUB_FIELD_TYPES = ["string", "number", "integer", "boolean", "select", "date"];
 
 /**
  * Validate a single field row for the editor.
@@ -146,6 +162,33 @@ export function validateField(field) {
     }
   }
 
+  // T-0448: validate collection sub-fields
+  if (type === "collection") {
+    const subList = Array.isArray(field?.subFields) ? field.subFields : [];
+    if (subList.length === 0) {
+      errors.subFields = "Добавьте хотя бы одно подполе";
+    } else {
+      const subErrors = [];
+      let hasSubError = false;
+      for (const sf of subList) {
+        const sfType = typeof sf?.type === "string" ? sf.type : "";
+        // Depth cap 1: reject nested collection or relation sub-fields.
+        if (sfType === "collection" || sfType === "relation") {
+          subErrors.push(`Тип «${sfType}» недопустим в подполях (глубина = 1)`);
+          hasSubError = true;
+        } else if (!COLLECTION_SUB_FIELD_TYPES.includes(sfType)) {
+          subErrors.push("Недопустимый тип подполя");
+          hasSubError = true;
+        } else {
+          subErrors.push(null);
+        }
+      }
+      if (hasSubError) {
+        errors.subFields = subErrors.filter(Boolean).join("; ");
+      }
+    }
+  }
+
   return errors;
 }
 
@@ -187,6 +230,36 @@ export function validateFields(fields) {
   return { valid, fieldErrors, formError };
 }
 
+// ---------------------------------------------------------------------------
+// T-0448: Scalar-emit sub-helper (shared by top-level fields and collection sub-fields)
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit a single scalar field prop object (the value for properties[key] in a JSON
+ * Schema). Does NOT mutate the field. title is set as a separate step by the caller.
+ *
+ * Handles: string/number/integer/boolean → { type }, select → { type:"string", enum },
+ * date → { type:"string" }. Does NOT handle relation or collection (depth cap 1).
+ *
+ * @param {{ type: string, options?: string[] }} f - scalar field descriptor
+ * @returns {object} JSON Schema property definition (without title)
+ */
+function emitScalarProp(f) {
+  if (f.type === "select") {
+    const rawOpts = Array.isArray(f.options) ? f.options : [];
+    const opts = [...new Set(
+      rawOpts.filter((o) => typeof o === "string" && o.trim().length > 0).map((o) => o.trim())
+    )];
+    return { type: "string", enum: opts.length > 0 ? opts : [""] };
+  }
+  if (f.type === "date") {
+    // date → type: string (no format; AJV strict rejects format:date).
+    return { type: "string" };
+  }
+  // string/number/integer/boolean → pass through
+  return { type: f.type };
+}
+
 /**
  * Assemble a record_schema object from the ordered field list. Field ORDER is
  * preserved by JS object insertion order in `properties` (V8/JS preserves string
@@ -200,7 +273,13 @@ export function validateFields(fields) {
  *   select → { type: "string", enum: [...options] }  (AJV strict compiles enum)
  *   date   → { type: "string" }                       (no format — AJV rejects it)
  *
- * @param {Array<{ key: string, type: string, title?: string, required?: boolean, options?: string[] }>} fields
+ * T-0448 collection type mapping:
+ *   collection → { type: "array", items: { type: "object", additionalProperties: false,
+ *                  properties: {…sub-fields…}, required: [… required sub-fields …] } }
+ *   Sub-fields use emitScalarProp (scalars only; depth cap 1).
+ *   NATIVE JSON Schema — no x-* extensions → AJV strict compiles without stripping.
+ *
+ * @param {Array<{ key: string, type: string, title?: string, required?: boolean, options?: string[], subFields?: Array<{key,label,type,required,options?}> }>} fields
  * @returns {object} record_schema (passes validateRecordSchemaDefinition)
  */
 export function buildRecordSchema(fields) {
@@ -213,16 +292,31 @@ export function buildRecordSchema(fields) {
     if (key.length === 0) continue;
 
     let prop;
-    if (f.type === "select") {
-      // select → type: string + enum array (AJV strict compiles this correctly).
-      // Deduplicate and filter blank options.
-      const rawOpts = Array.isArray(f.options) ? f.options : [];
-      const opts = [...new Set(rawOpts.filter((o) => typeof o === "string" && o.trim().length > 0).map((o) => o.trim()))];
-      prop = { type: "string", enum: opts.length > 0 ? opts : [""] };
-    } else if (f.type === "date") {
-      // date → type: string (no format; AJV strict rejects format:date).
-      // The UI renders <input type="date"> which constrains values to ISO dates.
-      prop = { type: "string" };
+    if (f.type === "collection") {
+      // T-0448: collection → native JSON Schema array with typed sub-record items.
+      // Sub-fields are scalars only (depth cap 1; no collection/relation sub-fields).
+      const subList = Array.isArray(f.subFields) ? f.subFields : [];
+      const subProperties = {};
+      const subRequired = [];
+
+      for (const sf of subList) {
+        const sfKey = typeof sf?.key === "string" ? sf.key : "";
+        if (sfKey.length === 0) continue;
+        const sfProp = emitScalarProp(sf);
+        const sfLabel = typeof sf?.label === "string" ? sf.label.trim() : "";
+        if (sfLabel.length > 0) sfProp.title = sfLabel;
+        subProperties[sfKey] = sfProp;
+        if (sf.required) subRequired.push(sfKey);
+      }
+
+      const itemsSchema = {
+        type: "object",
+        additionalProperties: false,
+        properties: subProperties,
+      };
+      if (subRequired.length > 0) itemsSchema.required = subRequired;
+
+      prop = { type: "array", items: itemsSchema };
     } else if (f.type === "relation") {
       // T-0444: relation → type: string + x-relation extension (PINNED contract; T-0445 depends on this shape).
       // AJV strict rejects x-* keywords — validateRecordSchemaDefinition strips them before compile.
@@ -230,7 +324,7 @@ export function buildRecordSchema(fields) {
       const targetId = typeof f.targetRegistryId === "string" ? f.targetRegistryId.trim() : "";
       prop = { type: "string", "x-relation": { target_registry_id: targetId } };
     } else {
-      prop = { type: f.type };
+      prop = emitScalarProp(f);
     }
 
     const title = typeof f?.title === "string" ? f.title.trim() : "";
@@ -261,8 +355,11 @@ export function buildRecordSchema(fields) {
  * cannot be distinguished from a plain string field — it parses back as "string"
  * (see header for rationale).
  *
+ * T-0448: a property with type:"array" + items.type:"object" is detected as a
+ * "collection" field; its sub-fields are parsed from items.properties.
+ *
  * @param {unknown} recordSchema
- * @returns {Array<{ key: string, type: string, title: string, required: boolean, options?: string[] }>}
+ * @returns {Array<{ key: string, type: string, title: string, required: boolean, options?: string[], subFields?: Array }>}
  */
 export function parseRecordSchema(recordSchema) {
   if (recordSchema === null || typeof recordSchema !== "object" || Array.isArray(recordSchema)) {
@@ -279,6 +376,39 @@ export function parseRecordSchema(recordSchema) {
   return Object.keys(props).map((key) => {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
+
+    // T-0448: detect collection fields by type:"array" + items being a typed object schema.
+    if (
+      def && typeof def === "object" && !Array.isArray(def) &&
+      rawType === "array" &&
+      def.items && typeof def.items === "object" && !Array.isArray(def.items) &&
+      def.items.type === "object"
+    ) {
+      const title = typeof def.title === "string" ? def.title : "";
+      const itemProps = (def.items.properties && typeof def.items.properties === "object" && !Array.isArray(def.items.properties))
+        ? def.items.properties
+        : {};
+      const itemRequired = Array.isArray(def.items.required) ? new Set(def.items.required.filter((k) => typeof k === "string")) : new Set();
+
+      const subFields = Object.keys(itemProps).map((sfKey) => {
+        const sfDef = itemProps[sfKey];
+        const sfLabel = sfDef && typeof sfDef === "object" && typeof sfDef.title === "string" ? sfDef.title : "";
+        // Detect sub-field type (select by enum, else primitive)
+        const sfHasEnum = sfDef && Array.isArray(sfDef.enum) && sfDef.enum.length > 0;
+        let sfType;
+        if (sfHasEnum) {
+          sfType = "select";
+        } else {
+          const sfRawType = sfDef && typeof sfDef.type === "string" ? sfDef.type : "string";
+          sfType = COLLECTION_SUB_FIELD_TYPES.includes(sfRawType) ? sfRawType : "string";
+        }
+        const sfField = { key: sfKey, type: sfType, label: sfLabel, required: itemRequired.has(sfKey) };
+        if (sfHasEnum) sfField.options = sfDef.enum.filter((o) => typeof o === "string");
+        return sfField;
+      });
+
+      return { key, type: "collection", title, required: requiredSet.has(key), subFields };
+    }
 
     // T-0444: detect relation fields by the presence of x-relation extension.
     const xRelation = def && typeof def === "object" ? def["x-relation"] : undefined;
@@ -297,10 +427,10 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "select", title, required: requiredSet.has(key), options };
     }
 
-    // If the persisted type isn't one we offer (excluding select/relation which are handled
+    // If the persisted type isn't one we offer (excluding select/relation/collection which are handled
     // above), fall back to "string" so the dropdown stays valid; the user can re-pick.
     // (Honest: never show a type option the backend wouldn't accept.)
-    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation");
+    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation" && v !== "collection");
     const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =
       def && typeof def === "object" && typeof def.title === "string" ? def.title : "";
@@ -351,7 +481,18 @@ export function mapSchemaError(status, body) {
 /**
  * A blank field row (used by the editor's "add field" action).
  * T-0294: includes `options` (empty array — populated when type is "select").
+ * T-0448: includes `subFields` (empty array — populated when type is "collection").
  */
 export function blankField() {
-  return { key: "", type: "string", title: "", required: false, options: [] };
+  return { key: "", type: "string", title: "", required: false, options: [], subFields: [] };
+}
+
+/**
+ * A blank sub-field descriptor for a collection field's sub-field list.
+ * Sub-fields use `label` (displayed in rows) instead of `title` (top-level field
+ * convention) to avoid confusion. `key` must be set by the user; `type` defaults
+ * to "string" (simplest scalar). T-0448.
+ */
+export function blankSubField() {
+  return { key: "", type: "string", label: "", required: false, options: [] };
 }
