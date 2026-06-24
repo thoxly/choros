@@ -6,10 +6,12 @@
 // Covers:
 //   - CREATE a registry_def with an x-relation property → a cross_app_ref row is
 //     upserted (source_registry_id, target_registry_id, ref_field all match).
-//   - UPDATE removing the relation property → the cross_app_ref row is deleted.
-//   - UPDATE adding a NEW relation property → a new row appears.
-//   - IDEMPOTENT: creating the same registry_def schema twice (via a schema update
-//     that keeps the same x-relation) → exactly ONE cross_app_ref row (unique key).
+//   - UPDATE removing the relation property → the cross_app_ref row is deleted
+//     (via the PRODUCTION reconcileCrossAppRefs — not raw SQL).
+//   - UPDATE adding a NEW relation property → a new row appears
+//     (via the PRODUCTION reconcileCrossAppRefs — not raw SQL).
+//   - IDEMPOTENT: upsertCrossAppRefForField called twice with same params
+//     → exactly ONE cross_app_ref row (unique key; production DAO path).
 //   - CROSS-TENANT: a ref row seeded under fresh tenant A is NOT visible when
 //     querying under fresh tenant B (RLS isolation).
 //
@@ -21,13 +23,19 @@
 // assertions.
 //
 // T-0144 discipline: BEGIN before SET LOCAL; COMMIT always; cleanup after self.
+//
+// HIGH finding fix (opus review): the original 3 tests (UPDATE-remove, IDEMPOTENT,
+// UPDATE-add-2nd) hand-copied raw SQL instead of calling the PRODUCTION
+// reconcileCrossAppRefs / upsertCrossAppRefForField. This file rewrites them to
+// call the real functions so the removal/diff half is actually exercised.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
 import pg from 'pg';
 import { appUrl, migratorUrl, withClient, uuid } from './_helpers.js';
 import { Router } from '../../../src/http/router.js';
-import { registerRegistryDefRoutes } from '../../../src/http/registry-defs.js';
+import { registerRegistryDefRoutes, reconcileCrossAppRefs, extractRelationFields } from '../../../src/http/registry-defs.js';
+import { upsertCrossAppRefForField } from '../../../src/db/cross-app-ref-dao.js';
 
 // ---------------------------------------------------------------------------
 // requireDb — skip cleanly if DATABASE_URL is not set
@@ -170,6 +178,33 @@ async function queryCrossAppRefs(
 }
 
 // ---------------------------------------------------------------------------
+// Helper: run a function inside a tenant-scoped tx on the app pool.
+// Mirrors withTenantTx in registry-defs.ts — used by tests that call production
+// DAO functions that require an already-open tenant-scoped client.
+// ---------------------------------------------------------------------------
+
+async function withAppTenantTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Server setup — shared across all tests
 // ---------------------------------------------------------------------------
 
@@ -291,6 +326,8 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     };
 
     // POST to create registry_def — actor resolves to our fresh tenant.
+    // This calls the PRODUCTION createRegistryDef which calls reconcileCrossAppRefs
+    // internally.
     const created = await makeRequest(
       baseUrl,
       'POST',
@@ -320,7 +357,9 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     expect(rows[0]!.ref_strength).toBe('weak');
   }));
 
-  it('UPDATE removing x-relation → cross_app_ref row deleted', requireDb(async () => {
+  it('UPDATE removing x-relation → cross_app_ref row deleted (via production reconcileCrossAppRefs)', requireDb(async () => {
+    // HIGH fix: was using raw DELETE SQL; now calls PRODUCTION reconcileCrossAppRefs
+    // which exercises the old→new diff logic and deleteCrossAppRefForField.
     const tenantId = uuid();
     const actorSlug = `actor-${tenantId.slice(0, 8)}`;
     actorTenantMap.set(actorSlug, tenantId);
@@ -351,7 +390,8 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
       additionalProperties: false,
     };
 
-    // Create with the relation field.
+    // Create with the relation field (HTTP handler → production createRegistryDef →
+    // production reconcileCrossAppRefs → upsert).
     const created = await makeRequest(
       baseUrl,
       'POST',
@@ -376,48 +416,34 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     expect(rowsBefore).toHaveLength(1);
     expect(rowsBefore[0]!.ref_field).toBe('linked_record');
 
-    // UPDATE: remove the x-relation property (schema without linked_record).
-    // The PUT path uses DEV_TENANT_ID, so we need to work around it.
-    // The PUT/PATCH path scopes to DEV_TENANT_ID at module load time, not to our
-    // fresh tenant. Therefore we drive the UPDATE through the DAO directly via
-    // a migrator tx, then call reconcileCrossAppRefs via the DAO functions, which
-    // is equivalent to what the handler does.
-    //
-    // Alternative: use the same fresh-tenant trick as registry_defs_crud.test.ts
-    // versioning test does (actor-dev → DEV_TENANT_ID) — but that ties to the
-    // global DEV_TENANT_ID, not our hermetic tenant.
-    //
-    // Instead, we exercise the reconcile logic directly via the DAO write fns,
-    // which IS the production code path, and assert at the DB level. The HTTP
-    // handler wiring is covered by the integration test above (create) and the
-    // existing unit tests for updateSchemaInTx. This is the accepted DB-test
-    // boundary noted in the acceptance criteria.
-    //
-    // Execute delete via the DAO function on a real tenant-scoped tx:
-    await withClient(migratorUrl(), async (c) => {
-      // Use migrator (BYPASSRLS) but simulate the tenant-scoped tx.
-      await c.query('BEGIN');
-      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
-      // Manually call the DAO delete to mirror what reconcileCrossAppRefs does
-      // when the relation field is removed:
-      await c.query(
-        `DELETE FROM choros.cross_app_ref
-          WHERE tenant_id = $1
-            AND source_registry_id = $2
-            AND ref_field = $3`,
-        [tenantId, sourceRegId, 'linked_record'],
-      );
-      await c.query('COMMIT');
+    // Schema WITHOUT the relation field (simulates user removing linked_record).
+    const schemaWithoutRelation = {
+      type: 'object',
+      properties: {
+        name: { type: 'string', title: 'Name' },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    };
+
+    // Call the PRODUCTION reconcileCrossAppRefs directly:
+    //   oldSchema = schemaWithRelation (has linked_record → cross_app_ref row)
+    //   newSchema = schemaWithoutRelation (no x-relation → deletion is triggered)
+    // This exercises the old→new diff and deleteCrossAppRefForField production path.
+    await withAppTenantTx(appPool, tenantId, async (client) => {
+      await reconcileCrossAppRefs(client, tenantId, sourceRegId, schemaWithRelation, schemaWithoutRelation);
     });
 
-    // Assert: row is gone.
+    // Assert: row is gone (production delete was called, not raw SQL).
     const rowsAfter = await withClient(migratorUrl(), (c) =>
       queryCrossAppRefs(c, tenantId, sourceRegId),
     );
     expect(rowsAfter).toHaveLength(0);
   }));
 
-  it('IDEMPOTENT: schema update keeping same x-relation → still exactly 1 row (no duplicate)', requireDb(async () => {
+  it('IDEMPOTENT: upsertCrossAppRefForField called twice → exactly 1 row (production DAO)', requireDb(async () => {
+    // HIGH fix: was using raw INSERT ON CONFLICT SQL; now calls PRODUCTION
+    // upsertCrossAppRefForField twice to prove ON CONFLICT idempotency via real code.
     const tenantId = uuid();
     const actorSlug = `actor-${tenantId.slice(0, 8)}`;
     actorTenantMap.set(actorSlug, tenantId);
@@ -448,7 +474,7 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
       additionalProperties: false,
     };
 
-    // Create once.
+    // Create via HTTP (production reconcileCrossAppRefs → first upsert).
     const first = await makeRequest(
       baseUrl,
       'POST',
@@ -466,35 +492,30 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     cleanupRegistryDefs.push({ tenantId, id: sourceRegId });
     cleanupCrossAppRefs.push({ tenantId, sourceRegistryId: sourceRegId });
 
-    // Upsert the same cross_app_ref again (simulating reconcile on a second create or
-    // a schema update that keeps the same relation). Idempotency is in the DAO's
-    // ON CONFLICT DO UPDATE — call the upsert directly to prove it.
-    await withClient(migratorUrl(), async (c) => {
-      await c.query('BEGIN');
-      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
-      await c.query(
-        `INSERT INTO choros.cross_app_ref
-           (tenant_id, id, source_registry_id, target_registry_id, ref_field,
-            label, ref_strength, created_at, updated_at)
-         VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, 'weak', $6, $6)
-         ON CONFLICT (tenant_id, source_registry_id, ref_field)
-         DO UPDATE SET
-           target_registry_id = EXCLUDED.target_registry_id,
-           label              = EXCLUDED.label,
-           updated_at         = EXCLUDED.updated_at
-         WHERE cross_app_ref.tenant_id = $1`,
-        [tenantId, sourceRegId, targetRegId, 'linked', 'Linked', Date.now()],
-      );
-      await c.query('COMMIT');
+    // Verify one row after the first create.
+    const rowsAfterCreate = await withClient(migratorUrl(), (c) =>
+      queryCrossAppRefs(c, tenantId, sourceRegId),
+    );
+    expect(rowsAfterCreate).toHaveLength(1);
+
+    // Call the PRODUCTION upsertCrossAppRefForField a SECOND time with identical
+    // params — this proves ON CONFLICT idempotency via the real DAO code path.
+    await withAppTenantTx(appPool, tenantId, async (client) => {
+      await upsertCrossAppRefForField(client, tenantId, {
+        sourceRegistryId: sourceRegId,
+        targetRegistryId: targetRegId,
+        refField: 'linked',
+        label: 'Linked',
+      });
     });
 
     // Assert: still exactly ONE row (not two).
-    const rows = await withClient(migratorUrl(), (c) =>
+    const rowsAfterSecondUpsert = await withClient(migratorUrl(), (c) =>
       queryCrossAppRefs(c, tenantId, sourceRegId),
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.ref_field).toBe('linked');
-    expect(rows[0]!.target_registry_id).toBe(targetRegId);
+    expect(rowsAfterSecondUpsert).toHaveLength(1);
+    expect(rowsAfterSecondUpsert[0]!.ref_field).toBe('linked');
+    expect(rowsAfterSecondUpsert[0]!.target_registry_id).toBe(targetRegId);
   }));
 
   it('CROSS-TENANT: cross_app_ref row for tenant A not visible under tenant B', requireDb(async () => {
@@ -530,7 +551,7 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
       additionalProperties: false,
     };
 
-    // Create registry_def in tenant A.
+    // Create registry_def in tenant A (production createRegistryDef → reconcile).
     const created = await makeRequest(
       baseUrl,
       'POST',
@@ -562,10 +583,11 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     expect(rowsB).toHaveLength(0);
   }));
 
-  it('UPDATE adding a new x-relation field → new cross_app_ref row appears alongside existing', requireDb(async () => {
-    // This test drives the reconcile logic end-to-end at the DAO level:
-    // creates a registry_def with one relation field, then simulates the
-    // reconcile for a schema update that ADDS a second relation field.
+  it('UPDATE adding a new x-relation field → both rows present (via production reconcileCrossAppRefs)', requireDb(async () => {
+    // HIGH fix: was using raw INSERT ON CONFLICT SQL twice; now calls PRODUCTION
+    // reconcileCrossAppRefs with oldSchema(1 relation) → newSchema(2 relations),
+    // which exercises the new-vs-old diff and upsertCrossAppRefForField for
+    // both the retained field and the newly added one.
     const tenantId = uuid();
     const actorSlug = `actor-${tenantId.slice(0, 8)}`;
     actorTenantMap.set(actorSlug, tenantId);
@@ -599,7 +621,8 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
       additionalProperties: false,
     };
 
-    // Create with first relation.
+    // Create with first relation via HTTP (production createRegistryDef → reconcile
+    // with oldSchema=null → upsert for rel1).
     const created = await makeRequest(
       baseUrl,
       'POST',
@@ -624,40 +647,35 @@ describe('cross_app_ref reconciliation (T-0445)', () => {
     expect(v1Rows).toHaveLength(1);
     expect(v1Rows[0]!.ref_field).toBe('rel1');
 
-    // Simulate reconcile for schema V2 which ADDS rel2 (keeps rel1).
-    // We use the DAO upsert directly to mirror what reconcileCrossAppRefs does.
-    await withClient(migratorUrl(), async (c) => {
-      await c.query('BEGIN');
-      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
-      // Upsert rel1 (already exists → no-op via ON CONFLICT)
-      await c.query(
-        `INSERT INTO choros.cross_app_ref
-           (tenant_id, id, source_registry_id, target_registry_id, ref_field,
-            label, ref_strength, created_at, updated_at)
-         VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, 'weak', $6, $6)
-         ON CONFLICT (tenant_id, source_registry_id, ref_field)
-         DO UPDATE SET
-           target_registry_id = EXCLUDED.target_registry_id,
-           label              = EXCLUDED.label,
-           updated_at         = EXCLUDED.updated_at
-         WHERE cross_app_ref.tenant_id = $1`,
-        [tenantId, sourceRegId, targetId1, 'rel1', 'Rel 1', Date.now()],
-      );
-      // Insert rel2 (new field).
-      await c.query(
-        `INSERT INTO choros.cross_app_ref
-           (tenant_id, id, source_registry_id, target_registry_id, ref_field,
-            label, ref_strength, created_at, updated_at)
-         VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, 'weak', $6, $6)
-         ON CONFLICT (tenant_id, source_registry_id, ref_field)
-         DO UPDATE SET
-           target_registry_id = EXCLUDED.target_registry_id,
-           label              = EXCLUDED.label,
-           updated_at         = EXCLUDED.updated_at
-         WHERE cross_app_ref.tenant_id = $1`,
-        [tenantId, sourceRegId, targetId2, 'rel2', 'Rel 2', Date.now()],
-      );
-      await c.query('COMMIT');
+    // Schema V2 adds rel2 while keeping rel1.
+    const schemaV2 = {
+      type: 'object',
+      properties: {
+        name: { type: 'string', title: 'Name' },
+        rel1: {
+          type: 'string',
+          title: 'Rel 1',
+          'x-relation': { target_registry_id: targetId1 },
+        },
+        rel2: {
+          type: 'string',
+          title: 'Rel 2',
+          'x-relation': { target_registry_id: targetId2 },
+        },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    };
+
+    // Call PRODUCTION reconcileCrossAppRefs:
+    //   oldSchema = schemaV1 (has rel1)
+    //   newSchema = schemaV2 (has rel1 + rel2)
+    // This exercises:
+    //   - upsertCrossAppRefForField for rel1 (already exists → ON CONFLICT update, no duplicate)
+    //   - upsertCrossAppRefForField for rel2 (new → INSERT)
+    //   - no DELETE (rel1 still present in newSchema)
+    await withAppTenantTx(appPool, tenantId, async (client) => {
+      await reconcileCrossAppRefs(client, tenantId, sourceRegId, schemaV1, schemaV2);
     });
 
     // Assert: both rows present.

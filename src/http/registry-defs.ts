@@ -226,7 +226,7 @@ function assertUuidShape(value: string, label: string): void {
 // Pure function — no I/O. Called in-tx after every schema write.
 // ---------------------------------------------------------------------------
 
-interface RelationFieldSpec {
+export interface RelationFieldSpec {
   /** The JSON Schema property key — the field name in source record data. */
   refField: string;
   /** The registry_def UUID this field points to. */
@@ -235,7 +235,7 @@ interface RelationFieldSpec {
   label: string;
 }
 
-function extractRelationFields(schema: unknown): RelationFieldSpec[] {
+export function extractRelationFields(schema: unknown): RelationFieldSpec[] {
   if (
     schema === null ||
     typeof schema !== "object" ||
@@ -287,7 +287,7 @@ function extractRelationFields(schema: unknown): RelationFieldSpec[] {
 // newSchema: the schema AFTER the write.
 // ---------------------------------------------------------------------------
 
-async function reconcileCrossAppRefs(
+export async function reconcileCrossAppRefs(
   client: pg.PoolClient,
   tenantId: string,
   sourceRegistryId: string,
