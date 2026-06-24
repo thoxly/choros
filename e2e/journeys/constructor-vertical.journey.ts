@@ -116,26 +116,26 @@ export const journey: Journey = {
       path: "/app-schema/{{appId}}",
     },
     {
-      name: "«Новый реестр» button is present",
+      name: "«Новый набор полей» button is present",
       action: "expectVisible",
-      target: { role: { role: "button", name: "Новый реестр" }, first: true },
+      target: { role: { role: "button", name: "Новый набор полей" }, first: true },
     },
     {
-      name: "open the new-registry field editor",
+      name: "open the new field-set editor",
       action: "click",
-      target: { role: { role: "button", name: "Новый реестр" }, first: true },
+      target: { role: { role: "button", name: "Новый набор полей" }, first: true },
     },
     {
-      name: "fill the registry slug (unique per run)",
+      name: "fill the field-set slug (unique per run)",
       action: "fill",
       target: { css: 'input[placeholder="my-registry"]' },
       value: "acc-reg-{{nonce}}",
     },
     {
-      name: "fill the registry display name",
+      name: "fill the field-set display name",
       action: "fill",
-      target: { css: 'input[placeholder="Мой реестр"]' },
-      value: "Приёмочный реестр",
+      target: { css: 'input[placeholder="Мой набор полей"]' },
+      value: "Приёмочный набор полей",
     },
     {
       name: "name the first field key",
@@ -158,9 +158,9 @@ export const journey: Journey = {
     },
     {
       // REAL submit click → POST /api/registry-defs → 201. Capture the registry id.
-      name: "click «Создать реестр» → registry-defs POST returns 201",
+      name: "click «Создать набор» → registry-defs POST returns 201",
       action: "click",
-      target: { role: { role: "button", name: "Создать реестр" } },
+      target: { role: { role: "button", name: "Создать набор" } },
       awaitResponse: {
         urlIncludes: "/api/registry-defs",
         method: "POST",
@@ -169,7 +169,7 @@ export const journey: Journey = {
       },
     },
     {
-      name: "the new registry appears in the application's registry list",
+      name: "the new field-set appears in the application's field-set list",
       action: "expectVisible",
       target: { css: 'tr:has(:text("acc-reg-{{nonce}}"))', first: true },
     },
@@ -211,9 +211,11 @@ export const journey: Journey = {
       target: { role: { role: "button", name: "Создать запись" }, first: true },
     },
     {
-      name: "the create-record dialog is visible",
+      // The Drawer uses role=dialog with the title «Новая запись» (T-0319 OBLIK:
+      // create-record was moved from Modal → Drawer; title changed to «Новая запись»).
+      name: "the create-record drawer is visible",
       action: "expectVisible",
-      target: { role: { role: "dialog", name: "Создать запись" } },
+      target: { role: { role: "dialog", name: "Новая запись" } },
     },
     {
       // The form is GENERATED from the registry_def schema — one input per field,
@@ -222,7 +224,7 @@ export const journey: Journey = {
       action: "fill",
       target: {
         role: { role: "textbox", name: FIELD_TITLE },
-        within: { role: { role: "dialog", name: "Создать запись" } },
+        within: { role: { role: "dialog", name: "Новая запись" } },
       },
       value: RECORD_VALUE,
     },
@@ -232,7 +234,7 @@ export const journey: Journey = {
       action: "click",
       target: {
         role: { role: "button", name: "Создать запись" },
-        within: { role: { role: "dialog", name: "Создать запись" } },
+        within: { role: { role: "dialog", name: "Новая запись" } },
       },
       awaitResponse: {
         urlIncludes: "/api/records",

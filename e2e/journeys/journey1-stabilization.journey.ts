@@ -84,24 +84,33 @@ export const journey: Journey = {
     },
     {
       // Specifically assert the «Формы задач» nav item carries its demo badge
-      // (nav-config.js: { id: "forms", status: "demo" }). This is a developer-sandbox
-      // screen and is stable as demo — it is not on the path to flipping live soon.
+      // (nav-config.js: { id: "forms", status: "demo" }). NavItem renders
+      // <button class="chs-navitem"> with no title attribute; the label is a
+      // child <span class="chs-navitem__label">. We narrow the button using the
+      // `has` filter, then assert the demo badge span is visible inside it.
       // «Оргструктура» was here before but correctly flipped to live in T-0269.
       name: "S2 · «Формы задач» nav item has the «демо» badge (nav-config status=demo)",
       action: "expectVisible",
       target: {
         css: ".chs-navitem__demo",
-        within: { css: 'button.chs-navitem[title="Формы задач (демо)"]' },
+        within: {
+          css: "button.chs-navitem",
+          has: { css: '.chs-navitem__label:text("Формы задач")' },
+        },
       },
     },
     {
       // Specifically assert the «Бюджеты» nav item carries its «скоро» badge
-      // (nav-config.js: { id: "budgets", status: "soon" }).
+      // (nav-config.js: { id: "budgets", status: "soon" }). Same selector
+      // pattern: no title attribute, narrow by label text using `has`.
       name: "S2 · «Бюджеты» nav item has the «скоро» badge (nav-config status=soon)",
       action: "expectVisible",
       target: {
         css: ".chs-navitem__soon",
-        within: { css: 'button.chs-navitem[title="Скоро"]' },
+        within: {
+          css: "button.chs-navitem",
+          has: { css: '.chs-navitem__label:text("Бюджеты")' },
+        },
       },
     },
 
@@ -150,17 +159,19 @@ export const journey: Journey = {
       action: "expectVisible",
       target: { role: { role: "button", name: "/^Мне/" }, first: true },
     },
-    // Navigate to Процессы and assert the «Запустить процесс» button is present.
-    // This button was confirmed live by the ТЭЛ journey (T-0257 tel-linear).
+    // Navigate to Процессы and assert the process-catalog section is present.
+    // T-0374 removed the generic «Запустить процесс» launcher — processes now
+    // start via configured trigger bindings. The catalog section always renders
+    // the «Настроить триггер» button (T-0351/T-0270 E16) as the live affordance.
     {
       name: "S4 · navigate to /processes",
       action: "goto",
       path: "/processes",
     },
     {
-      name: "S4 · «Запустить процесс» button visible on the processes screen (screen live)",
+      name: "S4 · «Настроить триггер» button visible on the processes screen (catalog live, T-0374)",
       action: "expectVisible",
-      target: { role: { role: "button", name: "Запустить процесс" }, first: true },
+      target: { role: { role: "button", name: "Настроить триггер" }, first: true },
     },
   ],
 };
