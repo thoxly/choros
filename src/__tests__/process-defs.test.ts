@@ -645,3 +645,226 @@ describe("generateUniqueProcessKey (T-0377)", () => {
     expect(key.length).toBeGreaterThan("dogovor".length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0436: gateway_rule_mismatch — HTTP 422 from publish endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * BPMN with an exclusiveGateway that uses choros:routingVar = "approvalRequired"
+ * and two conditioned outgoing flows: "yes" and "no".
+ */
+const GATEWAY_BPMN_WITH_ROUTING_VAR = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn"
+             targetNamespace="http://flowable.org/test">
+  <process id="gatewayProcess" name="Gateway Process" isExecutable="true">
+    <startEvent id="start"/>
+    <exclusiveGateway id="gw1" routingVar="approvalRequired"/>
+    <endEvent id="end1"/>
+    <endEvent id="end2"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="gw1"/>
+    <sequenceFlow id="f1" sourceRef="gw1" targetRef="end1">
+      <conditionExpression>\${approvalRequired == 'yes'}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f2" sourceRef="gw1" targetRef="end2">
+      <conditionExpression>\${approvalRequired == 'no'}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>`;
+
+/**
+ * A serialized DmnRuleTable definition blob for use in fake dmn_rule_table rows.
+ * This table sets routing outcome "approvalRequired" to either "yes" or "no".
+ */
+const COHERENT_RULE_TABLE_DEFINITION = JSON.stringify({
+  id: "rt-coherent-1",
+  name: "Approval routing",
+  hitPolicy: "FIRST",
+  rules: [
+    { conditions: [], effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "yes" }] },
+    { conditions: [], effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "no" }] },
+  ],
+});
+
+/**
+ * A rule table definition that ONLY covers "yes" — missing "no". This will
+ * cause a gateway_rule_mismatch violation for the BPMN above.
+ */
+const INCOHERENT_RULE_TABLE_DEFINITION = JSON.stringify({
+  id: "rt-incoherent-1",
+  name: "Partial approval routing",
+  hitPolicy: "FIRST",
+  rules: [
+    { conditions: [], effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "yes" }] },
+  ],
+});
+
+/**
+ * Make a memory pool that serves process_definition rows AND dmn_rule_table rows.
+ * The `ruleTableDefinition` (stringified JSON) is returned for dmn_rule_table queries.
+ * Pass `null` to simulate no published rule tables (empty dmn_rule_table result).
+ */
+function makeMemoryPoolWithRuleTables(
+  processDefs: DefRecord[],
+  ruleTableDefinition: string | null,
+): import("pg").Pool {
+  const store: DefRecord[] = [...processDefs];
+
+  const fakeClient = {
+    query: async (sql: string, params?: unknown[]) => {
+      const s = sql.trim().replace(/\s+/g, " ");
+
+      // BEGIN / COMMIT / ROLLBACK / SET LOCAL
+      if (/^(BEGIN|COMMIT|ROLLBACK)$/i.test(s)) return { rows: [] };
+      if (/^SET LOCAL/i.test(s)) return { rows: [] };
+
+      // INSERT
+      if (/^INSERT INTO choros\.process_definition/i.test(s)) {
+        const p = params as [string, string, string, string, string, number, number];
+        store.push({
+          tenant_id: p[0]!, id: p[1]!, process_key: p[2]!, name: p[3]!,
+          bpmn_xml: p[4]!, version: p[5]!, status: "draft",
+          deployment_id: null, created_at: p[6]!, updated_at: p[6]!,
+        });
+        return { rows: [] };
+      }
+
+      // UPDATE status='published'
+      if (/^UPDATE choros\.process_definition/i.test(s)) {
+        const p = params as [string, number, string, string];
+        const idx = store.findIndex((r) => r.tenant_id === p[2] && r.id === p[3]);
+        if (idx >= 0) {
+          store[idx]!.status = "published";
+          store[idx]!.deployment_id = p[0]!;
+          store[idx]!.updated_at = p[1]!;
+        }
+        return { rows: [] };
+      }
+
+      // SELECT latest version by process_key
+      if (/SELECT.*FROM choros\.process_definition.*ORDER BY version DESC.*LIMIT 1/is.test(s)) {
+        const p = params as [string, string];
+        const matching = store
+          .filter((r) => r.tenant_id === p[0] && r.process_key === p[1])
+          .sort((a, b) => b.version - a.version);
+        return { rows: matching.slice(0, 1) };
+      }
+
+      // SELECT DISTINCT ON (process_key) — list all
+      if (/SELECT DISTINCT ON \(process_key\)/is.test(s)) {
+        const p = params as [string];
+        const byKey = new Map<string, DefRecord>();
+        for (const r of store.filter((r) => r.tenant_id === p[0]).sort((a, b) => b.version - a.version)) {
+          if (!byKey.has(r.process_key)) byKey.set(r.process_key, r);
+        }
+        return { rows: Array.from(byKey.values()) };
+      }
+
+      // SELECT dmn_rule_table rows (called by loadPublishedRuleTables at publish)
+      if (/FROM choros\.dmn_rule_table/i.test(s)) {
+        if (ruleTableDefinition === null) return { rows: [] };
+        // Return one published rule table row
+        return {
+          rows: [{
+            id: "rt-test-uuid-1111-1111-1111-111111111111",
+            name: "Test rule table",
+            definition: JSON.parse(ruleTableDefinition),
+            process_def_id: null,
+            status: "published",
+            updated_at: 1000000,
+          }],
+        };
+      }
+
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+
+  return {
+    connect: async () => fakeClient as unknown as import("pg").PoolClient,
+  } as unknown as import("pg").Pool;
+}
+
+describe("T-0436: process-defs publish — gateway_rule_mismatch 422 (HTTP level)", () => {
+  let server: http.Server;
+  let base: string;
+
+  beforeAll(async () => {
+    const pool = makeMemoryPoolWithRuleTables(
+      [
+        {
+          tenant_id: TENANT_ID,
+          id: "ffff-0001-0001-0001-000000000001",
+          process_key: "gatewayProc",
+          name: "Gateway Process",
+          bpmn_xml: GATEWAY_BPMN_WITH_ROUTING_VAR,
+          version: 1,
+          status: "draft",
+          deployment_id: null,
+          created_at: 1000,
+          updated_at: 1000,
+        },
+      ],
+      INCOHERENT_RULE_TABLE_DEFINITION, // "no" literal missing → mismatch
+    );
+    const flowable = makeStubFlowableClient({ ok: true, deploymentId: "should-not-reach" });
+    const h = buildServer(pool, flowable);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("returns 422 with gateway_rule_mismatch when table doesn't cover all branch literals", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs/gatewayProc/publish`, AUTH_HEADERS);
+    expect(r.status).toBe(422);
+    const body = r.json as Record<string, unknown>;
+    const err = body["error"] as Record<string, unknown>;
+    expect(err["code"]).toBe("BPMN_LINT_FAILED");
+    const violations = err["violations"] as Array<Record<string, unknown>>;
+    expect(Array.isArray(violations)).toBe(true);
+    const mismatch = violations.find((v) => v["type"] === "gateway_rule_mismatch");
+    expect(mismatch).toBeDefined();
+    expect(mismatch?.["elementKind"]).toBe("exclusiveGateway");
+    expect(typeof mismatch?.["message"]).toBe("string");
+  });
+});
+
+describe("T-0436: process-defs publish — coherent gateway → 200 (HTTP level)", () => {
+  let server: http.Server;
+  let base: string;
+  let flowable: FlowableClient;
+
+  beforeAll(async () => {
+    const pool = makeMemoryPoolWithRuleTables(
+      [
+        {
+          tenant_id: TENANT_ID,
+          id: "aaaa-1111-1111-1111-000000000001",
+          process_key: "coherentGateway",
+          name: "Coherent Gateway Process",
+          bpmn_xml: GATEWAY_BPMN_WITH_ROUTING_VAR,
+          version: 1,
+          status: "draft",
+          deployment_id: null,
+          created_at: 1000,
+          updated_at: 1000,
+        },
+      ],
+      COHERENT_RULE_TABLE_DEFINITION, // covers both "yes" and "no" → coherent
+    );
+    flowable = makeStubFlowableClient({ ok: true, deploymentId: "deployment-gateway-ok" });
+    const h = buildServer(pool, flowable);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("returns 200 when gateway routingVar matches table outcomes covering all branch literals", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs/coherentGateway/publish`, AUTH_HEADERS);
+    expect(r.status).toBe(200);
+    const body = r.json as Record<string, unknown>;
+    expect(body["status"]).toBe("published");
+    expect(body["deploymentId"]).toBe("deployment-gateway-ok");
+  });
+});
