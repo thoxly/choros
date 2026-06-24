@@ -316,6 +316,222 @@ function RelationCell({ targetId, appId }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// T-0450: LineItemsField — row-table editor for a «Список строк» (collection)
+// field in the record-entry form.
+//
+// Renders the current value (an array of row objects) as a table with:
+//   • one column header per sub-field (its label);
+//   • one editable cell per sub-field per row, rendered via FieldControl;
+//   • an «Добавить строку» button (appends a blank row);
+//   • a per-row «✕» remove button (drops the row by index);
+//   • an honest Empty state when no rows exist yet (G4 no-dead-affordance).
+//
+// Consumes the T-0449 per-row error shape produced by validateRecordValues:
+//   errors[fieldKey] = { rows: [ { [subKey]: "message" }, undefined, … ], _collection? }
+// Each element of `rows` aligns to the same row index; `undefined` = no error.
+// _collection carries a field-level message (e.g. «required but empty»).
+//
+// Product language: «Добавить строку», «Строк пока нет — добавьте первую».
+// No «collection»/«sub-field»/«registry» jargon (G5).
+// Token-only styling: all colors from --chs-color-* (G2, G6).
+//
+// Additive route: a single `f.inputKind === 'collection'` branch in formFields.map
+// routes to this component; RelationPicker and FieldControl branches are unchanged.
+// ---------------------------------------------------------------------------
+
+/**
+ * LineItemsField — repeatable-rows table for a collection field in record entry.
+ *
+ * @param {{ key, label, required, subFields: Array }} field  form-field descriptor (T-0449)
+ * @param {Array<Record<string,unknown>>} value  current rows (may be empty)
+ * @param {(key, value) => void} onChange  called with (field.key, nextRows)
+ * @param {{ rows?: Array<Record<string,string>|undefined>, _collection?: string } | undefined} error
+ * @param {string} [idPrefix]
+ */
+function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
+  const rows = Array.isArray(value) ? value : [];
+  const subFields = Array.isArray(field.subFields) ? field.subFields : [];
+  const label = field.label || field.title || field.key;
+  const isRequired = Boolean(field.required);
+
+  // error shape: { rows?: Array<{[subKey]:string}|undefined>, _collection?: string }
+  const rowErrors = (error && Array.isArray(error.rows)) ? error.rows : [];
+  const collectionError = error && typeof error._collection === 'string' ? error._collection : null;
+
+  const addRow = () => {
+    // Append a blank row: boolean sub-fields start as false, others as ''.
+    const blank = {};
+    for (const sf of subFields) {
+      blank[sf.key] = sf.type === 'boolean' ? false : '';
+    }
+    onChange(field.key, [...rows, blank]);
+  };
+
+  const removeRow = (rowIdx) => {
+    onChange(field.key, rows.filter((_, i) => i !== rowIdx));
+  };
+
+  const setCellValue = (rowIdx, subKey, cellVal) => {
+    const nextRows = rows.map((row, i) => {
+      if (i !== rowIdx) return row;
+      return { ...row, [subKey]: cellVal };
+    });
+    onChange(field.key, nextRows);
+  };
+
+  const labelStyle = {
+    display: 'block',
+    marginBottom: 'var(--chs-space-2)',
+    fontSize: 'var(--chs-text-sm)',
+    fontWeight: 'var(--chs-weight-semibold)',
+    color: 'var(--chs-color-text)',
+  };
+  const errorStyle = {
+    display: 'block',
+    marginTop: 'var(--chs-space-1)',
+    fontSize: 'var(--chs-text-xs)',
+    color: 'var(--chs-color-danger)',
+  };
+
+  return (
+    <div style={{ marginBottom: 'var(--chs-space-4)' }} aria-label={label}>
+      {/* Field label */}
+      <span style={labelStyle}>
+        {label}
+        {isRequired && (
+          <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+        )}
+      </span>
+
+      {/* Field-level collection error (e.g. required but no rows) */}
+      {collectionError && <span style={errorStyle}>{collectionError}</span>}
+
+      {/* Row table — only rendered when there are rows OR sub-fields defined */}
+      {rows.length > 0 && subFields.length > 0 && (
+        <div style={{ overflowX: 'auto', marginBottom: 'var(--chs-space-3)' }}>
+          <table
+            style={{
+              width: '100%',
+              borderCollapse: 'collapse',
+              fontSize: 'var(--chs-text-sm)',
+            }}
+            aria-label={`Строки: ${label}`}
+          >
+            <thead>
+              <tr>
+                {subFields.map((sf) => (
+                  <th
+                    key={sf.key}
+                    style={{
+                      textAlign: 'left',
+                      padding: 'var(--chs-space-2) var(--chs-space-3)',
+                      fontSize: 'var(--chs-text-xs)',
+                      fontWeight: 'var(--chs-weight-semibold)',
+                      color: 'var(--chs-color-text-muted)',
+                      borderBottom: '1px solid var(--chs-color-border)',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {sf.label || sf.key}
+                    {sf.required && (
+                      <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+                    )}
+                  </th>
+                ))}
+                {/* remove-row button column */}
+                <th style={{ width: '36px', borderBottom: '1px solid var(--chs-color-border)' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIdx) => {
+                const rowErr = rowErrors[rowIdx];
+                return (
+                  <tr key={rowIdx}>
+                    {subFields.map((sf) => {
+                      const cellError = rowErr && rowErr[sf.key];
+                      // Build a minimal field descriptor for FieldControl:
+                      // it only needs key / label / type / required / options.
+                      const cellField = {
+                        key: sf.key,
+                        label: sf.label || sf.key,
+                        type: sf.type,
+                        required: sf.required,
+                        inputKind: sf.inputKind,
+                        options: sf.options,
+                      };
+                      return (
+                        <td
+                          key={sf.key}
+                          style={{
+                            padding: 'var(--chs-space-2) var(--chs-space-3)',
+                            verticalAlign: 'top',
+                            borderBottom: '1px solid var(--chs-color-border)',
+                          }}
+                        >
+                          <FieldControl
+                            field={cellField}
+                            value={row[sf.key] !== undefined ? row[sf.key] : (sf.type === 'boolean' ? false : '')}
+                            onChange={(subKey, cellVal) => setCellValue(rowIdx, subKey, cellVal)}
+                            error={cellError}
+                            idPrefix={`${idPrefix}-${field.key}-row${rowIdx}`}
+                          />
+                        </td>
+                      );
+                    })}
+                    <td
+                      style={{
+                        padding: 'var(--chs-space-2)',
+                        verticalAlign: 'top',
+                        borderBottom: '1px solid var(--chs-color-border)',
+                        textAlign: 'right',
+                      }}
+                    >
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => removeRow(rowIdx)}
+                        title="Удалить строку"
+                        aria-label={`Удалить строку ${rowIdx + 1}`}
+                      >
+                        <KitIcon name="close" />
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Honest empty state — G4: if there are no rows, tell the user + keep add button live */}
+      {rows.length === 0 && (
+        <p style={{
+          margin: '0 0 var(--chs-space-3) 0',
+          fontSize: 'var(--chs-text-xs)',
+          color: 'var(--chs-color-text-muted)',
+          fontStyle: 'italic',
+        }}>
+          Строк пока нет — добавьте первую
+        </p>
+      )}
+
+      {/* Add-row button — always live (G3: no dead affordances) */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        glyph={<KitIcon name="plus" />}
+        onClick={addRow}
+      >
+        Добавить строку
+      </Button>
+    </div>
+  );
+}
+
 // Anything at/below this is a seed/unset created_at, not a real date — render a
 // dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
 const EPOCH_FLOOR_MS = 24 * 60 * 60 * 1000; // ~1970-01-02
@@ -437,9 +653,20 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
             resolves the contract from the field's `type` + `options`, so select
             (enum) and date now render their proper controls here too.
             T-0446: relation fields route to RelationPicker (async fetch of
-            target records) rather than the catalog renderer (which lacks fetch). */}
+            target records) rather than the catalog renderer (which lacks fetch).
+            T-0450: collection fields route to LineItemsField (repeatable row
+            table). Additive branch — RelationPicker and FieldControl unchanged. */}
         {formFields.map((f) => (
-          f.inputKind === 'relation' ? (
+          f.inputKind === 'collection' ? (
+            <LineItemsField
+              key={f.key}
+              field={f}
+              value={values[f.key]}
+              onChange={setVal}
+              error={fieldErrors[f.key]}
+              idPrefix="record-field"
+            />
+          ) : f.inputKind === 'relation' ? (
             <RelationPicker
               key={f.key}
               field={f}
