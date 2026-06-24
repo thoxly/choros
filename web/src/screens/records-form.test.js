@@ -30,6 +30,7 @@ import {
   deriveRecordLabel,
   mapRecordError,
   extractFieldErrors,
+  computeRollup,
 } from './records-form.js';
 
 // A representative record_schema exactly like the field-constructor emits.
@@ -1091,5 +1092,341 @@ describe('T-0450 LineItemsField · serializeRecordData — row array emitted', (
     const data = serializeRecordData(fields, { lines: [] });
     // Required collection → still emitted (not omitted) because f.required=true
     expect(data.lines).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0453: computeRollup — pure aggregate fn + omit-on-serialize + round-trip
+// ---------------------------------------------------------------------------
+
+// A schema that includes a collection field and a computed (rollup) field.
+// Emitted by buildRecordSchema (apps-schema.js) for a computed field.
+const SCHEMA_WITH_COMPUTED = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    order_name: { type: 'string', title: 'Название заказа' },
+    // collection source
+    lines: {
+      type: 'array',
+      title: 'Позиции',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          product: { type: 'string', title: 'Товар' },
+          qty: { type: 'number', title: 'Кол-во' },
+          price: { type: 'number', title: 'Цена' },
+        },
+        required: ['product'],
+      },
+    },
+    // computed field: sum of (price × qty)
+    total: {
+      type: 'number',
+      title: 'Итого',
+      'x-rollup': { source: 'lines', op: 'sum', value_field: 'price', factor_field: 'qty' },
+    },
+    // computed field: count of rows
+    row_count: {
+      type: 'number',
+      title: 'Строк',
+      'x-rollup': { source: 'lines', op: 'count', value_field: 'price' },
+    },
+  },
+  required: ['order_name', 'lines'],
+};
+
+describe('T-0453: INPUT_KIND', () => {
+  it('maps computed to "computed"', () => {
+    expect(INPUT_KIND.computed).toBe('computed');
+  });
+});
+
+describe('T-0453: schemaToFormFields — computed field', () => {
+  const fields = schemaToFormFields(SCHEMA_WITH_COMPUTED);
+
+  it('detects computed field from x-rollup, emits descriptor', () => {
+    const totalField = fields.find((f) => f.key === 'total');
+    expect(totalField).toBeDefined();
+    expect(totalField).toMatchObject({
+      key: 'total',
+      type: 'computed',
+      label: 'Итого',
+      required: false, // computed fields are NEVER required
+      inputKind: 'computed',
+      rollupSource: 'lines',
+      rollupOp: 'sum',
+      rollupValueField: 'price',
+      rollupFactorField: 'qty',
+    });
+  });
+
+  it('non-computed fields remain unaffected', () => {
+    const nameField = fields.find((f) => f.key === 'order_name');
+    expect(nameField).toMatchObject({ type: 'string', inputKind: 'text' });
+    expect(nameField).not.toHaveProperty('rollupSource');
+    const linesField = fields.find((f) => f.key === 'lines');
+    expect(linesField).toMatchObject({ type: 'collection', inputKind: 'collection' });
+  });
+
+  it('computed field without factor_field has empty rollupFactorField', () => {
+    const rowCountField = fields.find((f) => f.key === 'row_count');
+    expect(rowCountField).toMatchObject({ rollupFactorField: '' });
+  });
+});
+
+describe('T-0453: computeRollup — op sum', () => {
+  const field = {
+    rollupSource: 'lines',
+    rollupOp: 'sum',
+    rollupValueField: 'price',
+    rollupFactorField: '',
+  };
+  const data = {
+    lines: [
+      { price: 100, qty: 2 },
+      { price: 50,  qty: 3 },
+      { price: 200, qty: 1 },
+    ],
+  };
+
+  it('sums value_field across rows', () => {
+    expect(computeRollup(field, data)).toBe(350);
+  });
+
+  it('sum with factor_field: Σ value × factor (price × qty)', () => {
+    const f = { ...field, rollupFactorField: 'qty' };
+    // 100×2 + 50×3 + 200×1 = 200 + 150 + 200 = 550
+    expect(computeRollup(f, data)).toBe(550);
+  });
+
+  it('empty source array → null', () => {
+    expect(computeRollup(field, { lines: [] })).toBeNull();
+  });
+
+  it('missing source key → null', () => {
+    expect(computeRollup(field, {})).toBeNull();
+  });
+
+  it('source is not an array → null', () => {
+    expect(computeRollup(field, { lines: null })).toBeNull();
+    expect(computeRollup(field, { lines: 'bad' })).toBeNull();
+  });
+
+  it('all cells non-numeric → null (not 0)', () => {
+    expect(computeRollup(field, { lines: [{ price: 'n/a' }, { price: '' }] })).toBeNull();
+  });
+
+  it('skips non-numeric cells, sums the rest', () => {
+    const d = { lines: [{ price: 10 }, { price: 'bad' }, { price: 20 }] };
+    expect(computeRollup(field, d)).toBe(30);
+  });
+
+  it('numeric string values are coerced and included', () => {
+    const d = { lines: [{ price: '100' }, { price: '50' }] };
+    expect(computeRollup(field, d)).toBe(150);
+  });
+});
+
+describe('T-0453: computeRollup — op count', () => {
+  const field = { rollupSource: 'lines', rollupOp: 'count', rollupValueField: '', rollupFactorField: '' };
+
+  it('counts all rows regardless of cell contents', () => {
+    const data = { lines: [{ price: 1 }, { price: 'bad' }, { price: null }] };
+    expect(computeRollup(field, data)).toBe(3);
+  });
+
+  it('empty array → null', () => {
+    expect(computeRollup(field, { lines: [] })).toBeNull();
+  });
+});
+
+describe('T-0453: computeRollup — op avg', () => {
+  const field = { rollupSource: 'lines', rollupOp: 'avg', rollupValueField: 'price', rollupFactorField: '' };
+
+  it('avg of 3 rows', () => {
+    const data = { lines: [{ price: 10 }, { price: 20 }, { price: 30 }] };
+    expect(computeRollup(field, data)).toBe(20);
+  });
+
+  it('skips non-numeric; avg of 2 out of 3 rows', () => {
+    const data = { lines: [{ price: 10 }, { price: 'n/a' }, { price: 30 }] };
+    expect(computeRollup(field, data)).toBe(20);
+  });
+
+  it('empty source → null', () => {
+    expect(computeRollup(field, { lines: [] })).toBeNull();
+  });
+});
+
+describe('T-0453: computeRollup — op min/max', () => {
+  const minField = { rollupSource: 'v', rollupOp: 'min', rollupValueField: 'x', rollupFactorField: '' };
+  const maxField = { rollupSource: 'v', rollupOp: 'max', rollupValueField: 'x', rollupFactorField: '' };
+
+  const data = { v: [{ x: 30 }, { x: 5 }, { x: 20 }] };
+
+  it('min over 3 rows', () => {
+    expect(computeRollup(minField, data)).toBe(5);
+  });
+
+  it('max over 3 rows', () => {
+    expect(computeRollup(maxField, data)).toBe(30);
+  });
+
+  it('all non-numeric → null', () => {
+    expect(computeRollup(minField, { v: [{ x: '' }, { x: 'bad' }] })).toBeNull();
+  });
+});
+
+describe('T-0453: computeRollup — edge cases', () => {
+  it('null data → null', () => {
+    const field = { rollupSource: 'lines', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '' };
+    expect(computeRollup(field, null)).toBeNull();
+  });
+
+  it('null field → null', () => {
+    expect(computeRollup(null, { lines: [{ price: 1 }] })).toBeNull();
+  });
+
+  it('unknown op → null (degrade silently)', () => {
+    const field = { rollupSource: 'lines', rollupOp: 'median', rollupValueField: 'x', rollupFactorField: '' };
+    expect(computeRollup(field, { lines: [{ x: 1 }] })).toBeNull();
+  });
+
+  it('empty rollupSource → null', () => {
+    const field = { rollupSource: '', rollupOp: 'sum', rollupValueField: 'x', rollupFactorField: '' };
+    expect(computeRollup(field, { x: [1, 2, 3] })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0453: serializeRecordData — computed field OMIT (THE KEY TRAP)
+// ---------------------------------------------------------------------------
+
+describe('T-0453: serializeRecordData — computed field omit', () => {
+  const fields = schemaToFormFields(SCHEMA_WITH_COMPUTED);
+
+  it('computed key is ABSENT from the serialized data', () => {
+    const vals = { order_name: 'Заказ 1', lines: [{ product: 'A', qty: '2', price: '100' }] };
+    const data = serializeRecordData(fields, vals);
+    // The computed key must NEVER appear in the output
+    expect('total' in data).toBe(false);
+    expect('row_count' in data).toBe(false);
+  });
+
+  it('non-computed fields are still emitted correctly alongside computed', () => {
+    const vals = { order_name: 'Заказ 1', lines: [{ product: 'A', qty: '2', price: '50' }] };
+    const data = serializeRecordData(fields, vals);
+    expect(data.order_name).toBe('Заказ 1');
+    expect(Array.isArray(data.lines)).toBe(true);
+  });
+
+  it('serialized data passes the REAL validator (additionalProperties:false safe)', () => {
+    // Prove that omitting the computed key keeps the record valid against the schema.
+    // The schema has type:"number" for the computed field; AJV would reject a number
+    // value under additionalProperties:false IF it weren't declared. It IS declared,
+    // but it is also in properties — so omitting it is valid (it's not in required[]).
+    // The critical test: AJV must not see the computed key in data, ever.
+    const schemaHistory = new Map([[1, SCHEMA_WITH_COMPUTED]]);
+    const vals = { order_name: 'Заказ 1', lines: [{ product: 'Товар', qty: '1', price: '100' }] };
+    const data = serializeRecordData(fields, vals);
+    expect('total' in data).toBe(false);   // computed OMITTED
+    expect('row_count' in data).toBe(false); // computed OMITTED
+    const result = validateRecordAgainstSchema({ data, schema_version: 1 }, schemaHistory);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('if someone incorrectly put a computed key in values, it is still omitted', () => {
+    // Even if a caller passes total: 999 in the values (should never happen, but
+    // guard-by-design), serializeRecordData must silently drop it.
+    const vals = { order_name: 'X', lines: [], total: 999, row_count: 1 };
+    const data = serializeRecordData(fields, vals);
+    expect('total' in data).toBe(false);
+    expect('row_count' in data).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0453: blankRecordValues — computed fields excluded
+// ---------------------------------------------------------------------------
+
+describe('T-0453: blankRecordValues — computed fields excluded', () => {
+  const fields = schemaToFormFields(SCHEMA_WITH_COMPUTED);
+
+  it('computed keys are absent from blank values (no user state for derived fields)', () => {
+    const vals = blankRecordValues(fields);
+    expect('total' in vals).toBe(false);
+    expect('row_count' in vals).toBe(false);
+  });
+
+  it('non-computed fields are still initialized', () => {
+    const vals = blankRecordValues(fields);
+    expect(vals.order_name).toBe('');
+    expect(vals.lines).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0453: validateRecordValues — computed fields skipped
+// ---------------------------------------------------------------------------
+
+describe('T-0453: validateRecordValues — computed fields skipped', () => {
+  const fields = schemaToFormFields(SCHEMA_WITH_COMPUTED);
+
+  it('computed fields produce no validation error even with missing/undefined value', () => {
+    // Simulates the real flow: blank values do not include computed keys
+    const vals = { order_name: 'Заказ', lines: [{ product: 'A', qty: '1', price: '50' }] };
+    const { valid, errors } = validateRecordValues(fields, vals);
+    expect(valid).toBe(true);
+    expect(errors.total).toBeUndefined();
+    expect(errors.row_count).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0453: formatCellValue — computed branch
+// ---------------------------------------------------------------------------
+
+describe('T-0453: formatCellValue — computed branch', () => {
+  it('formats a finite number as string', () => {
+    expect(formatCellValue(42, 'computed')).toBe('42');
+    expect(formatCellValue(3.14, 'computed')).toBe('3.14');
+    expect(formatCellValue(0, 'computed')).toBe('0');
+  });
+
+  it('returns «—» for null (no data / source empty)', () => {
+    expect(formatCellValue(null, 'computed')).toBe('—');
+  });
+
+  it('returns «—» for undefined', () => {
+    expect(formatCellValue(undefined, 'computed')).toBe('—');
+  });
+
+  it('returns «—» for NaN', () => {
+    expect(formatCellValue(NaN, 'computed')).toBe('—');
+  });
+
+  it('returns «—» for Infinity', () => {
+    expect(formatCellValue(Infinity, 'computed')).toBe('—');
+  });
+
+  it('rounds float display noise (0.1+0.2 float artifact)', () => {
+    // 0.1 + 0.2 = 0.30000000000000004 in JS float; should display as "0.3"
+    const raw = 0.1 + 0.2;
+    const display = formatCellValue(raw, 'computed');
+    expect(display).toBe('0.3');
+  });
+
+  it('is ADDITIVE: relation branch still returns RELATION_CELL_ASYNC (unchanged)', () => {
+    const uuid = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+    expect(formatCellValue(uuid, 'relation')).toBe(RELATION_CELL_ASYNC);
+    expect(formatCellValue('', 'relation')).toBe('—');
+  });
+
+  it('is ADDITIVE: collection branch still returns «N позиций» (unchanged)', () => {
+    expect(formatCellValue([{}, {}], 'collection')).toBe('2 позиции');
+    expect(formatCellValue([], 'collection')).toBe('—');
   });
 });
