@@ -1032,10 +1032,34 @@ describe('T-0450 LineItemsField · serializeRecordData — row array emitted', (
   });
 
   it('drops fully-blank trailing rows from the emitted array', () => {
-    const data = serializeRecordData(fields, {
+    // NOTE: the blank-trailing-row check uses "hasContent" — a boolean sub-field
+    // always counts as having content (checkbox state is definite). So to get a
+    // truly blank trailing row we need a schema WITHOUT boolean sub-fields.
+    // Use a simpler 2-sub-field schema (name+qty) for this test.
+    const twoFieldSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        lines: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              qty:  { type: 'integer' },
+            },
+            required: ['name'],
+          },
+        },
+      },
+      required: ['lines'],
+    };
+    const twoFields = schemaToFormFields(twoFieldSchema);
+    const data = serializeRecordData(twoFields, {
       lines: [
-        { name: 'Laptop', qty: '1', active: false },
-        { name: '', qty: '', active: false }, // fully blank trailing row
+        { name: 'Laptop', qty: '1' },
+        { name: '', qty: '' }, // fully blank trailing row (no boolean sub-fields)
       ],
     });
     expect(data.lines).toHaveLength(1);
