@@ -62,6 +62,10 @@ import {
 import { validateRecordSchemaDefinition } from "../core/record-schema-validator.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
+import {
+  upsertCrossAppRefForField,
+  deleteCrossAppRefForField,
+} from "../db/cross-app-ref-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -199,6 +203,119 @@ export interface RegistryDefCrudDeps {
 function assertUuidShape(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// extractRelationFields — parse x-relation from a record_schema (T-0445)
+//
+// Walks the schema's `properties` map and returns one entry per property whose
+// value carries `x-relation.target_registry_id` (the PINNED contract from T-0444).
+// The schema shape assumed:
+//   {
+//     type: "object",
+//     properties: {
+//       <fieldKey>: {
+//         type: "string",
+//         "x-relation": { target_registry_id: "<uuid>" },
+//         title?: "<label>"
+//       }
+//     }
+//   }
+// Returns an empty array when the schema has no properties or no x-relation fields.
+// Pure function — no I/O. Called in-tx after every schema write.
+// ---------------------------------------------------------------------------
+
+interface RelationFieldSpec {
+  /** The JSON Schema property key — the field name in source record data. */
+  refField: string;
+  /** The registry_def UUID this field points to. */
+  targetRegistryId: string;
+  /** Human-readable label (field title or empty string). */
+  label: string;
+}
+
+function extractRelationFields(schema: unknown): RelationFieldSpec[] {
+  if (
+    schema === null ||
+    typeof schema !== "object" ||
+    Array.isArray(schema)
+  ) {
+    return [];
+  }
+  const s = schema as Record<string, unknown>;
+  const props = s["properties"];
+  if (props === null || typeof props !== "object" || Array.isArray(props)) {
+    return [];
+  }
+  const propsMap = props as Record<string, unknown>;
+  const result: RelationFieldSpec[] = [];
+  for (const [fieldKey, fieldDef] of Object.entries(propsMap)) {
+    if (fieldDef === null || typeof fieldDef !== "object" || Array.isArray(fieldDef)) {
+      continue;
+    }
+    const fd = fieldDef as Record<string, unknown>;
+    const xRelation = fd["x-relation"];
+    if (xRelation === null || typeof xRelation !== "object" || Array.isArray(xRelation)) {
+      continue;
+    }
+    const xr = xRelation as Record<string, unknown>;
+    const targetRegistryId = xr["target_registry_id"];
+    if (typeof targetRegistryId !== "string" || !UUID_RE.test(targetRegistryId)) {
+      continue;
+    }
+    const title = fd["title"];
+    const label = typeof title === "string" ? title : fieldKey;
+    result.push({ refField: fieldKey, targetRegistryId, label });
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// reconcileCrossAppRefs — upsert/delete cross_app_ref rows in-tx (T-0445)
+//
+// Called after every registry_def schema write (create or update) to keep
+// cross_app_ref in sync with the schema's x-relation fields:
+//   - For each x-relation property in newSchema: upsert a row.
+//   - For each x-relation property present in oldSchema but absent in newSchema:
+//     delete its row (mirrors destructive-schema discipline in updateSchemaInTx).
+//
+// Must be called inside an ALREADY-OPEN tenant-scoped tx (same tx as the schema
+// write — atomic). The DAO fns carry explicit WHERE tenant_id guards.
+//
+// oldSchema: the schema BEFORE the write (null on create — no deletes needed).
+// newSchema: the schema AFTER the write.
+// ---------------------------------------------------------------------------
+
+async function reconcileCrossAppRefs(
+  client: pg.PoolClient,
+  tenantId: string,
+  sourceRegistryId: string,
+  oldSchema: unknown,
+  newSchema: unknown,
+): Promise<void> {
+  const newRelations = extractRelationFields(newSchema);
+  const oldRelations = extractRelationFields(oldSchema);
+
+  // Build a set of relation field keys present in the NEW schema (for fast lookup).
+  const newRefFields = new Set(newRelations.map((r) => r.refField));
+
+  // Upsert each relation field found in the new schema.
+  for (const rel of newRelations) {
+    await upsertCrossAppRefForField(client, tenantId, {
+      sourceRegistryId,
+      targetRegistryId: rel.targetRegistryId,
+      refField: rel.refField,
+      label: rel.label,
+    });
+  }
+
+  // Delete cross_app_ref rows for relation fields REMOVED in this update.
+  // (On create, oldRelations is always empty — no deletes.)
+  for (const oldRel of oldRelations) {
+    if (!newRefFields.has(oldRel.refField)) {
+      await deleteCrossAppRefForField(client, tenantId, sourceRegistryId, oldRel.refField);
+    }
   }
 }
 
@@ -442,6 +559,11 @@ async function updateSchemaInTx(args: {
       [JSON.stringify(newSchema), nowMs, tenantId, registryDefId],
     );
 
+    // 5b. T-0445: reconcile cross_app_ref from x-relation fields — same tx,
+    // atomic with the schema update. oldSchema = existing (pre-update); newSchema
+    // = incoming. Removed relation fields get their cross_app_ref row deleted.
+    await reconcileCrossAppRefs(client, tenantId, registryDefId, oldSchema, newSchema);
+
     // 6. Soft path: only soft warnings — done, return warnings (no tier changes needed)
     if (destructiveDeps.length === 0) {
       return { kind: "soft", warnings: softWarnings };
@@ -663,7 +785,13 @@ async function createRegistryDef(args: {
           nowMs,
         ],
       );
-      return res.rows[0]!;
+      const row = res.rows[0]!;
+
+      // T-0445: reconcile cross_app_ref from x-relation fields in the new schema.
+      // On create, oldSchema is null — only upserts happen (no deletes).
+      await reconcileCrossAppRefs(client, tenantId, id, null, recordSchema);
+
+      return row;
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
       // 23505 = unique_violation → (tenant_id, application_id, slug) taken (migration 004).
