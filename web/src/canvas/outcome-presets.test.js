@@ -170,11 +170,13 @@ describe('choros-moddle-extension — T-0353 descriptor shape', () => {
     });
   });
 
-  it('has exactly 3 types: ExecutorTypeActivity + UserTaskOutcomes + SequenceFlowOutcome', () => {
+  it('has ExecutorTypeActivity + UserTaskOutcomes + SequenceFlowOutcome types (T-0353 regression)', () => {
+    // T-0434 additive: GatewayConditionExtension added as 4th type — count updated there.
     const names = descriptor.types.map((t) => t.name);
     expect(names).toContain('ExecutorTypeActivity');
     expect(names).toContain('UserTaskOutcomes');
     expect(names).toContain('SequenceFlowOutcome');
-    expect(descriptor.types).toHaveLength(3);
+    // At least 3; additive extensions may add more (T-0434 adds GatewayConditionExtension).
+    expect(descriptor.types.length).toBeGreaterThanOrEqual(3);
   });
 });
