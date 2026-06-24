@@ -50,12 +50,13 @@
  */
 
 // The input control a given JSON-Schema primitive type maps to in the form.
-//   text     → <input type="text">      (string)
-//   number   → <input type="number">    (number / integer)
-//   checkbox → <input type="checkbox">  (boolean)
-//   select   → <select> dropdown        (select — T-0294)
-//   date     → <input type="date">      (date — T-0294)
-//   relation → searchable picker of target registry records (T-0446)
+//   text       → <input type="text">      (string)
+//   number     → <input type="number">    (number / integer)
+//   checkbox   → <input type="checkbox">  (boolean)
+//   select     → <select> dropdown        (select — T-0294)
+//   date       → <input type="date">      (date — T-0294)
+//   relation   → searchable picker of target registry records (T-0446)
+//   collection → repeatable-rows table (line-items — T-0448/T-0449)
 export const INPUT_KIND = {
   string: "text",
   number: "number",
@@ -64,6 +65,7 @@ export const INPUT_KIND = {
   select: "select",
   date: "date",
   relation: "relation",
+  collection: "collection",
 };
 
 /**
@@ -101,6 +103,68 @@ export function schemaToFormFields(recordSchema) {
       def && typeof def === "object" && typeof def.title === "string" && def.title.trim().length > 0
         ? def.title
         : "";
+
+    // T-0449: detect collection fields (T-0448 wire shape):
+    //   { type: "array", title?, items: { type: "object", additionalProperties: false,
+    //     properties: { <sub-fields> }, required?: [...] } }
+    // Sub-fields are scalars (select by enum, date/number/integer/boolean by type).
+    if (
+      def && typeof def === "object" && !Array.isArray(def) &&
+      rawType === "array" &&
+      def.items && typeof def.items === "object" && !Array.isArray(def.items) &&
+      def.items.type === "object"
+    ) {
+      const itemProps =
+        def.items.properties && typeof def.items.properties === "object" && !Array.isArray(def.items.properties)
+          ? def.items.properties
+          : {};
+      const itemRequired = Array.isArray(def.items.required)
+        ? new Set(def.items.required.filter((k) => typeof k === "string"))
+        : new Set();
+
+      const subFields = Object.keys(itemProps).map((sfKey) => {
+        const sfDef = itemProps[sfKey];
+        const sfTitle =
+          sfDef && typeof sfDef === "object" && typeof sfDef.title === "string" && sfDef.title.trim().length > 0
+            ? sfDef.title
+            : "";
+        const sfHasEnum =
+          sfDef && typeof sfDef === "object" && Array.isArray(sfDef.enum) && sfDef.enum.length > 0;
+        if (sfHasEnum) {
+          const sfOptions = sfDef.enum.filter((o) => typeof o === "string");
+          return {
+            key: sfKey,
+            type: "select",
+            label: sfTitle || sfKey,
+            required: itemRequired.has(sfKey),
+            inputKind: "select",
+            options: sfOptions,
+          };
+        }
+        const sfRawType = sfDef && typeof sfDef === "object" ? sfDef.type : undefined;
+        const sfType =
+          sfRawType === "string" || sfRawType === "number" || sfRawType === "integer" || sfRawType === "boolean"
+            ? sfRawType
+            : "string";
+        return {
+          key: sfKey,
+          type: sfType,
+          label: sfTitle || sfKey,
+          required: itemRequired.has(sfKey),
+          inputKind: INPUT_KIND[sfType] || "text",
+        };
+      });
+
+      return {
+        key,
+        type: "collection",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "collection",
+        subFields,
+      };
+    }
 
     // T-0446: detect relation fields by the presence of the x-relation extension
     // (emitted by apps-schema.buildRecordSchema for "relation" type fields — T-0444).
@@ -159,7 +223,14 @@ export function schemaToFormFields(recordSchema) {
 export function blankRecordValues(formFields) {
   const values = {};
   for (const f of Array.isArray(formFields) ? formFields : []) {
-    values[f.key] = f.type === "boolean" ? false : "";
+    if (f.type === "boolean") {
+      values[f.key] = false;
+    } else if (f.type === "collection") {
+      // T-0449: a collection starts as an empty row array; T-0450 renders the row table.
+      values[f.key] = [];
+    } else {
+      values[f.key] = "";
+    }
   }
   return values;
 }
@@ -194,6 +265,70 @@ export function validateRecordValues(formFields, values) {
 
     if (f.type === "boolean") {
       continue; // a checkbox is always a valid boolean
+    }
+
+    // T-0449: collection — validate each row cell by its sub-field rules.
+    // Error shape: { [fieldKey]: { rows: [ { [subKey]: "error message" }, … ] } }
+    // Each index in `rows` corresponds to a data row (undefined = no errors for that row).
+    // This shape is consumed by the T-0450 row-table UI component.
+    if (f.type === "collection") {
+      const rows = Array.isArray(raw) ? raw : [];
+      if (f.required && rows.length === 0) {
+        errors[f.key] = { rows: [], _collection: "Добавьте хотя бы одну строку" };
+        continue;
+      }
+      const subFields = Array.isArray(f.subFields) ? f.subFields : [];
+      const rowErrors = [];
+      let hasRowError = false;
+      for (const row of rows) {
+        const rowObj = row && typeof row === "object" ? row : {};
+        const cellErrors = {};
+        for (const sf of subFields) {
+          const cellRaw = rowObj[sf.key];
+          if (sf.type === "boolean") continue;
+          if (sf.type === "number" || sf.type === "integer") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else {
+              const n = Number(str);
+              if (!Number.isFinite(n)) {
+                cellErrors[sf.key] = "Введите число";
+              } else if (sf.type === "integer" && !Number.isInteger(n)) {
+                cellErrors[sf.key] = "Введите целое число";
+              }
+            }
+            continue;
+          }
+          if (sf.type === "select") {
+            const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else {
+              const opts = Array.isArray(sf.options) ? sf.options : [];
+              if (opts.length > 0 && !opts.includes(str)) cellErrors[sf.key] = "Выберите значение из списка";
+            }
+            continue;
+          }
+          if (sf.type === "date") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw).trim();
+            if (str.length === 0) {
+              if (sf.required) cellErrors[sf.key] = "Обязательное поле";
+            } else if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+              cellErrors[sf.key] = "Введите дату в формате ГГГГ-ММ-ДД";
+            }
+            continue;
+          }
+          // string
+          const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+          if (sf.required && str.trim().length === 0) cellErrors[sf.key] = "Обязательное поле";
+        }
+        const hasCellError = Object.keys(cellErrors).length > 0;
+        rowErrors.push(hasCellError ? cellErrors : undefined);
+        if (hasCellError) hasRowError = true;
+      }
+      if (hasRowError) errors[f.key] = { rows: rowErrors };
+      continue;
     }
 
     if (f.type === "number" || f.type === "integer") {
@@ -291,6 +426,58 @@ export function serializeRecordData(formFields, values) {
     if (f.type === "boolean") {
       // A checkbox always has a definite state; emit a real boolean.
       data[f.key] = Boolean(raw);
+      continue;
+    }
+
+    // T-0449: collection — emit an ARRAY of typed row objects.
+    // Each cell is coerced by its sub-field type (mirrors the scalar per-type logic).
+    // Fully-blank trailing rows are dropped (a row is "fully blank" when EVERY
+    // non-boolean cell is an empty string or null/undefined).
+    if (f.type === "collection") {
+      const rows = Array.isArray(raw) ? raw : [];
+      const subFields = Array.isArray(f.subFields) ? f.subFields : [];
+
+      // Drop fully-blank trailing rows (from the end).
+      let lastNonBlankIdx = -1;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
+        const hasContent = subFields.some((sf) => {
+          if (sf.type === "boolean") return true; // checkbox always has state
+          const v = row[sf.key];
+          const str = typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim();
+          return str.length > 0;
+        });
+        if (hasContent) { lastNonBlankIdx = i; break; }
+      }
+      const trimmedRows = rows.slice(0, lastNonBlankIdx + 1);
+
+      const serialized = trimmedRows.map((row) => {
+        const rowObj = row && typeof row === "object" ? row : {};
+        const out = {};
+        for (const sf of subFields) {
+          const cellRaw = rowObj[sf.key];
+          if (sf.type === "boolean") {
+            out[sf.key] = Boolean(cellRaw);
+            continue;
+          }
+          if (sf.type === "number" || sf.type === "integer") {
+            const str = typeof cellRaw === "string" ? cellRaw.trim() : cellRaw == null ? "" : String(cellRaw);
+            if (str.length === 0) continue; // omit blank optional cell
+            const n = Number(str);
+            if (Number.isFinite(n)) out[sf.key] = n;
+            continue;
+          }
+          // string, select, date
+          const str = typeof cellRaw === "string" ? cellRaw : cellRaw == null ? "" : String(cellRaw);
+          if (str.length === 0 && !sf.required) continue; // omit blank optional cell
+          out[sf.key] = str;
+        }
+        return out;
+      });
+
+      // Optional empty collection → omit (consistent with optional-handling for scalars).
+      if (serialized.length === 0 && !f.required) continue;
+      data[f.key] = serialized;
       continue;
     }
 
@@ -413,6 +600,30 @@ export function formatCellValue(value, type) {
   if (type === "relation") {
     if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
     return "—"; // blank or unexpected non-string → absent
+  }
+  // T-0449: collection value is an array of row objects.
+  // Summarize as «N позиций» (or «—» when empty/absent).
+  // This branch is ADDITIVE — the relation branch above is NOT modified.
+  if (type === "collection") {
+    if (!Array.isArray(value) || value.length === 0) return "—";
+    const n = value.length;
+    // Russian grammatical agreement for «позиция»:
+    //   1, 21, 31…  → позиция
+    //   2-4, 22-24… → позиции
+    //   5-20, 25-29… → позиций
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    let word;
+    if (mod100 >= 11 && mod100 <= 19) {
+      word = "позиций";
+    } else if (mod10 === 1) {
+      word = "позиция";
+    } else if (mod10 >= 2 && mod10 <= 4) {
+      word = "позиции";
+    } else {
+      word = "позиций";
+    }
+    return `${n} ${word}`;
   }
   if (typeof value === "object") {
     try {
