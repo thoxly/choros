@@ -55,6 +55,7 @@
 //   checkbox → <input type="checkbox">  (boolean)
 //   select   → <select> dropdown        (select — T-0294)
 //   date     → <input type="date">      (date — T-0294)
+//   relation → searchable picker of target registry records (T-0446)
 export const INPUT_KIND = {
   string: "text",
   number: "number",
@@ -62,6 +63,7 @@ export const INPUT_KIND = {
   boolean: "checkbox",
   select: "select",
   date: "date",
+  relation: "relation",
 };
 
 /**
@@ -99,6 +101,22 @@ export function schemaToFormFields(recordSchema) {
       def && typeof def === "object" && typeof def.title === "string" && def.title.trim().length > 0
         ? def.title
         : "";
+
+    // T-0446: detect relation fields by the presence of the x-relation extension
+    // (emitted by apps-schema.buildRecordSchema for "relation" type fields — T-0444).
+    // Shape: { type: "string", "x-relation": { target_registry_id: "<uuid>" } }.
+    const xRelation = def && typeof def === "object" ? def["x-relation"] : undefined;
+    if (xRelation && typeof xRelation === "object" && typeof xRelation.target_registry_id === "string") {
+      return {
+        key,
+        type: "relation",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "relation",
+        targetRegistryId: xRelation.target_registry_id,
+      };
+    }
 
     // T-0294: detect select fields by the presence of a non-empty enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
@@ -193,6 +211,20 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
+    // T-0446: relation — required → must be a non-empty UUID string.
+    if (f.type === "relation") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      // The stored value must be a valid UUID (the referenced record's id).
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)) {
+        errors[f.key] = "Выберите запись из списка";
+      }
+      continue;
+    }
+
     // T-0294: select — must be non-empty if required; must be one of the options.
     if (f.type === "select") {
       const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
@@ -272,6 +304,18 @@ export function serializeRecordData(formFields, values) {
       const n = Number(str);
       if (!Number.isFinite(n)) continue; // guard — should be unreachable post-validate
       data[f.key] = n; // a JS number, NOT a string → passes AJV type:number/integer
+      continue;
+    }
+
+    // T-0446: relation — the picked value IS the referenced record's UUID string.
+    // Emitted as a plain string (the schema stores it as type:"string"). Blank
+    // optional ⇒ omit; blank required is caught by validateRecordValues.
+    if (f.type === "relation") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) {
+        continue; // omit blank optional relation
+      }
+      data[f.key] = str; // the UUID string — passes AJV type:"string"
       continue;
     }
 
