@@ -32,6 +32,9 @@ function makeStubFlowable(result: StartResult): FlowableClient {
     // T-0368: skip-submit stubs — return no active user task so auto-complete is a no-op in unit tests.
     getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+    // T-0443: engine-reconcile stubs — not exercised by binding-trigger tests.
+    getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+    isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
   };
 }
 
