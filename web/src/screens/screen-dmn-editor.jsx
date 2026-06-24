@@ -32,7 +32,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, Field, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
-import { listRuleTables, saveRuleTable, publishRuleTable } from '../canvas/dmn-editor-api.js';
+import { listRuleTables, getRuleTable, saveRuleTable, publishRuleTable } from '../canvas/dmn-editor-api.js';
 
 // ---------------------------------------------------------------------------
 // Константы
@@ -462,7 +462,6 @@ function DmnEditorScreen() {
         setTableStatus(best.status);
         setTableName(best.name || 'Правила ветвления');
         // Загружаем полную запись (definition)
-        const { getRuleTable } = await import('../canvas/dmn-editor-api.js');
         const full = await getRuleTable(best.id);
         const uiRules = apiRulesToUiState(full);
         setRules(uiRules || []);
