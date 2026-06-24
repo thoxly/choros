@@ -71,8 +71,12 @@ export function validateRecordAgainstSchema(
   const ajv = new Ajv();
 
   try {
+    // T-0444: Strip x-* extensions before compile (same as validateRecordSchemaDefinition).
+    // The persisted schema retains x-relation; the strip is compile-local only.
+    const compilableSchema = stripXExtensions(schema as Record<string, unknown>);
+
     // Compile the schema for this version.
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(compilableSchema);
 
     // Validate the record data against the schema.
     const valid = validate(record.data);
