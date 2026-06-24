@@ -162,7 +162,10 @@ export function validateField(field) {
     }
   }
 
-  // T-0448: validate collection sub-fields
+  // T-0448 + T-0450: validate collection sub-fields.
+  // T-0450 LOW fix: validate each sub-field KEY with FIELD_KEY_RE (same guard as
+  // top-level keys) AND reject duplicate sub-field keys. Previously only sub-field
+  // TYPES were validated — malformed or duplicate sub-keys leaked into the schema.
   if (type === "collection") {
     const subList = Array.isArray(field?.subFields) ? field.subFields : [];
     if (subList.length === 0) {
@@ -170,14 +173,32 @@ export function validateField(field) {
     } else {
       const subErrors = [];
       let hasSubError = false;
+      const seenSubKeys = new Set();
       for (const sf of subList) {
         const sfType = typeof sf?.type === "string" ? sf.type : "";
-        // Depth cap 1: reject nested collection or relation sub-fields.
+        const sfKey = typeof sf?.key === "string" ? sf.key : "";
+        const sfErrs = [];
+
+        // Key validation (mirrors top-level FIELD_KEY_RE guard).
+        if (sfKey.length === 0) {
+          sfErrs.push("Укажите ключ колонки");
+        } else if (!FIELD_KEY_RE.test(sfKey)) {
+          sfErrs.push("Ключ: латинская буква/подчёркивание, затем буквы/цифры/_ (1–64)");
+        } else if (seenSubKeys.has(sfKey)) {
+          sfErrs.push("Ключ уже используется в этом списке");
+        } else {
+          seenSubKeys.add(sfKey);
+        }
+
+        // Type validation (depth cap 1: no nested collection or relation).
         if (sfType === "collection" || sfType === "relation") {
-          subErrors.push(`Тип «${sfType}» недопустим в подполях (глубина = 1)`);
-          hasSubError = true;
+          sfErrs.push(`Тип «${sfType}» недопустим в колонках (глубина = 1)`);
         } else if (!COLLECTION_SUB_FIELD_TYPES.includes(sfType)) {
-          subErrors.push("Недопустимый тип подполя");
+          sfErrs.push("Недопустимый тип колонки");
+        }
+
+        if (sfErrs.length > 0) {
+          subErrors.push(sfErrs.join("; "));
           hasSubError = true;
         } else {
           subErrors.push(null);
