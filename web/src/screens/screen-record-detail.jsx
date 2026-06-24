@@ -23,7 +23,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
-import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel } from './records-form.js';
+import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
 import {
   groupLinksByLabel,
   isHopAllowed,
@@ -526,6 +526,38 @@ function RecordDetailScreen() {
               ) : (
                 <div>
                   {formFields.map((f) => {
+                    // T-0453: computed fields derive their value from the collection
+                    // field in the same record (data[rollupSource]). The value is
+                    // NEVER stored in data[f.key] — compute it on the fly here.
+                    if (f.type === 'computed') {
+                      const computed = computeRollup(f, data);
+                      const display = formatCellValue(computed, 'computed');
+                      return (
+                        <div key={f.key} style={fieldRowStyle}>
+                          <span style={labelStyle}>
+                            {f.label}
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                marginLeft: 'var(--chs-space-2)',
+                                fontSize: 'var(--chs-text-xs)',
+                                opacity: 0.7,
+                              }}
+                            >
+                              (вычисляется)
+                            </span>
+                          </span>
+                          <span style={{
+                            ...valueStyle,
+                            color: display === '—' ? 'var(--chs-color-text-muted)' : 'var(--chs-color-text)',
+                            fontStyle: display === '—' ? 'italic' : 'normal',
+                          }}>
+                            {display}
+                          </span>
+                        </div>
+                      );
+                    }
+
                     const val = data[f.key];
                     // T-0447: relation fields render async label+link, not raw UUID.
                     const isRelation = f.type === 'relation';
