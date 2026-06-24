@@ -362,3 +362,119 @@ describe('T-0294: date fields in records-form', () => {
     expect('due' in data).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0446: relation field type in records-form
+// ---------------------------------------------------------------------------
+
+const VALID_UUID = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+
+// A record_schema with a relation field (as emitted by buildRecordSchema for a
+// "relation" type field — T-0444 contract, PINNED shape).
+const SCHEMA_WITH_RELATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    name: { type: 'string', title: 'Название' },
+    target: {
+      type: 'string',
+      title: 'Связанная запись',
+      'x-relation': { target_registry_id: 'aaaaaaaa-0000-0000-0000-000000000001' },
+    },
+  },
+  required: ['target'],
+};
+
+describe('T-0446: relation fields in records-form', () => {
+  it('INPUT_KIND: relation maps to "relation"', () => {
+    expect(INPUT_KIND.relation).toBe('relation');
+  });
+
+  it('schemaToFormFields: detects relation from x-relation, emits inputKind and targetRegistryId', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_RELATION);
+    const rel = fields.find((f) => f.key === 'target');
+    expect(rel).toMatchObject({
+      key: 'target',
+      type: 'relation',
+      label: 'Связанная запись',
+      required: true,
+      inputKind: 'relation',
+      targetRegistryId: 'aaaaaaaa-0000-0000-0000-000000000001',
+    });
+    // Non-relation field must remain unaffected.
+    const name = fields.find((f) => f.key === 'name');
+    expect(name).toMatchObject({ type: 'string', inputKind: 'text' });
+    expect(name).not.toHaveProperty('targetRegistryId');
+  });
+
+  it('schemaToFormFields: field without x-relation stays string/text', () => {
+    const plain = { type: 'object', properties: { x: { type: 'string' } } };
+    const [f] = schemaToFormFields(plain);
+    expect(f.inputKind).toBe('text');
+    expect(f).not.toHaveProperty('targetRegistryId');
+  });
+
+  describe('validateRecordValues — relation field', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_RELATION);
+
+    it('rejects empty required relation', () => {
+      const { valid, errors } = validateRecordValues(fields, { name: 'X', target: '' });
+      expect(valid).toBe(false);
+      expect(errors.target).toBeTruthy();
+    });
+
+    it('rejects a non-UUID value', () => {
+      const { valid, errors } = validateRecordValues(fields, { name: 'X', target: 'not-a-uuid' });
+      expect(valid).toBe(false);
+      expect(errors.target).toBeTruthy();
+    });
+
+    it('accepts a valid UUID', () => {
+      const { valid, errors } = validateRecordValues(fields, { name: 'X', target: VALID_UUID });
+      expect(valid).toBe(true);
+      expect(errors).toEqual({});
+    });
+
+    it('accepts blank optional relation (omit)', () => {
+      const optionalSchema = {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ref: { type: 'string', 'x-relation': { target_registry_id: 'bbbbbbbb-0000-0000-0000-000000000002' } },
+        },
+      };
+      const optFields = schemaToFormFields(optionalSchema);
+      const { valid, errors } = validateRecordValues(optFields, { ref: '' });
+      expect(valid).toBe(true);
+      expect(errors.ref).toBeUndefined();
+    });
+  });
+
+  describe('serializeRecordData — relation field', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_RELATION);
+
+    it('emits the UUID string under the key', () => {
+      const data = serializeRecordData(fields, { name: 'Товар', target: VALID_UUID });
+      expect(data.target).toBe(VALID_UUID);
+      expect(typeof data.target).toBe('string');
+      // The plain-string schema is AJV-valid for the persisted value.
+      const relSchema = {
+        type: 'object', additionalProperties: false,
+        properties: { name: { type: 'string' }, target: { type: 'string' } },
+        required: ['target'],
+      };
+      expect(backendValidate(relSchema, data).valid).toBe(true);
+    });
+
+    it('omits blank optional relation', () => {
+      const optionalSchema = {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ref: { type: 'string', 'x-relation': { target_registry_id: 'bbbbbbbb-0000-0000-0000-000000000002' } },
+        },
+      };
+      const optFields = schemaToFormFields(optionalSchema);
+      const data = serializeRecordData(optFields, { ref: '' });
+      expect('ref' in data).toBe(false);
+    });
+  });
+});
