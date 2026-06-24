@@ -114,6 +114,15 @@ export function validateRecordAgainstSchema(
  * definitions (e.g. an unknown `type`, a non-object `properties`, a non-array
  * `required`), which surface as ValidationResult.errors for a 400 response.
  *
+ * T-0444: AJV strict mode rejects ALL unknown keywords, including the x-* extension
+ * convention (JSON Schema §6.4: "x-" prefixed keywords SHOULD be ignored by validators
+ * that don't know them, but AJV strict enforces the stricter "error on unknown" policy).
+ * We strip x-* keys from each property definition before compiling, then treat the
+ * stripped schema as the AJV-compilable structural skeleton. The original schema (with
+ * x-relation) is persisted and returned as-is; only compilation uses the stripped form.
+ * This is additive and non-destructive: the x-relation contract (PINNED for T-0445)
+ * is preserved in the database.
+ *
  * Pure: no pg/fs/net/http/child_process/import.meta/process.env.
  *
  * @param schema - the candidate record_schema (caller has already confirmed it is
@@ -128,12 +137,16 @@ export function validateRecordSchemaDefinition(schema: unknown): ValidationResul
     };
   }
 
+  // T-0444: Strip x-* keywords from each property definition so AJV strict mode
+  // can compile the structural skeleton. The persisted schema retains x-* keys.
+  const strippedSchema = stripXExtensions(schema as Record<string, unknown>);
+
   // Fresh AJV instance (no state leak) — strict mode (default) is the field-def guard.
   const ajv = new Ajv();
   try {
     // compile() throws in strict mode if the schema definition is malformed
     // (unknown type, properties not an object, required not an array, …).
-    ajv.compile(schema as object);
+    ajv.compile(strippedSchema);
     return { valid: true, errors: [] };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -142,4 +155,32 @@ export function validateRecordSchemaDefinition(schema: unknown): ValidationResul
       errors: [`invalid record_schema definition: ${message}`],
     };
   }
+}
+
+/**
+ * T-0444: Produce a shallow-stripped copy of a record_schema where every
+ * property definition has its `x-*` keys removed (AJV strict rejects them).
+ * Only strips at the properties[key] level (where x-relation lives) — top-level
+ * and nested sub-schemas are not recursed (record schemas are flat).
+ *
+ * Returns a new object; the original is not mutated.
+ */
+function stripXExtensions(schema: Record<string, unknown>): Record<string, unknown> {
+  const props = schema['properties'];
+  if (props === null || typeof props !== 'object' || Array.isArray(props)) {
+    return schema; // no properties to strip → return as-is (shallow copy not needed)
+  }
+  const strippedProps: Record<string, unknown> = {};
+  for (const [key, propDef] of Object.entries(props as Record<string, unknown>)) {
+    if (propDef !== null && typeof propDef === 'object' && !Array.isArray(propDef)) {
+      const stripped: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(propDef as Record<string, unknown>)) {
+        if (!k.startsWith('x-')) stripped[k] = v;
+      }
+      strippedProps[key] = stripped;
+    } else {
+      strippedProps[key] = propDef;
+    }
+  }
+  return { ...schema, properties: strippedProps };
 }
