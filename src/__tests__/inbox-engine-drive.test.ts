@@ -23,7 +23,6 @@ import {
   INSTANCE_ENDED_TYPE,
   NEXT_TASK_TYPE,
   TASK_APPROVED_TYPE,
-  PROCESS_STARTED_TYPE,
 } from "../http/process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 
