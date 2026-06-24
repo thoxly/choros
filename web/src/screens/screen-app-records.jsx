@@ -66,6 +66,195 @@ import {
 // (catalog-driven), replacing the bespoke inline checkbox/number/text map below.
 import { FieldControl } from '../forms/field-renderer.jsx';
 
+// ---------------------------------------------------------------------------
+// T-0446: RelationPicker — searchable picker for a relation field.
+//
+// Fetches GET /api/records?registry_def_id=<targetRegistryId> and renders a
+// filterable <select> whose options are the target registry's records. The
+// stored value is the target record's UUID. Label derivation: the first
+// non-empty string value found in record.data (schema-order); if none, falls
+// back to the first 8 chars of the id. Honest states: Loading / Error / Empty
+// ("В целевом наборе пока нет записей") per OBLIK principles.
+//
+// Only the create-form picker is implemented here. Display of an existing
+// relation value as a label in list/detail views is T-0447.
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive a human-readable display label from a target record's data object.
+ * Returns the first non-empty string value found, or a short id prefix.
+ * Never surfaces a raw UUID to the user as a label (G5/honest UI rule).
+ *
+ * @param {object} record  a record row from GET /api/records
+ * @returns {string}
+ */
+function deriveRecordLabel(record) {
+  if (!record) return '—';
+  const data = record.data && typeof record.data === 'object' ? record.data : {};
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  }
+  // Fallback: first 8 chars of id (unambiguous short ref, not a raw placeholder)
+  return typeof record.id === 'string' ? record.id.slice(0, 8) + '…' : '—';
+}
+
+/**
+ * RelationPicker renders a field wrapper (label + control + error) for a
+ * relation field. It owns the async fetch of the target registry's records and
+ * renders honest Loading / Error / Empty states. The control itself is a
+ * text-filtered select so the user can search by typing.
+ *
+ * @param {{ key, label, required }} field
+ * @param {string} value  current value (record UUID or "")
+ * @param {(key, value) => void} onChange
+ * @param {string|undefined} error  per-field validation error
+ * @param {string} idPrefix
+ */
+function RelationPicker({ field, value, onChange, error, idPrefix = 'field' }) {
+  const id = `${idPrefix}-${field.key}`;
+  const label = field.label || field.title || field.key;
+  const isRequired = Boolean(field.required);
+  const invalid = Boolean(error);
+
+  const [candidates, setCandidates] = useState(null); // null=loading, []=empty, [...]
+  const [fetchError, setFetchError] = useState(null);
+  const [filter, setFilter] = useState('');
+
+  useEffect(() => {
+    if (!field.targetRegistryId) {
+      setCandidates([]);
+      return;
+    }
+    let cancelled = false;
+    setCandidates(null);
+    setFetchError(null);
+    fetch(
+      `/api/records?registry_def_id=${encodeURIComponent(field.targetRegistryId)}`,
+      { headers: devHeaders() },
+    )
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) setCandidates(Array.isArray(data.records) ? data.records : []);
+      })
+      .catch((err) => {
+        if (!cancelled) setFetchError(String(err?.message || err));
+      });
+    return () => { cancelled = true; };
+  }, [field.targetRegistryId]);
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+  const inputClass = `chs-input${invalid ? ' chs-input--invalid' : ''}`;
+
+  const labelNode = (
+    <label className="chs-label" htmlFor={id}>
+      {label}
+      {isRequired && (
+        <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+      )}
+    </label>
+  );
+  const errorNode = error ? (
+    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {error}
+    </span>
+  ) : null;
+
+  if (fetchError) {
+    return (
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        {labelNode}
+        <div
+          className="chs-input"
+          style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}
+          aria-live="polite"
+        >
+          Не удалось загрузить связанные записи
+        </div>
+        {errorNode}
+      </div>
+    );
+  }
+
+  if (candidates === null) {
+    return (
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        {labelNode}
+        <div
+          className="chs-input"
+          style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}
+          aria-live="polite"
+        >
+          Загрузка…
+        </div>
+        {errorNode}
+      </div>
+    );
+  }
+
+  if (candidates.length === 0) {
+    return (
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        {labelNode}
+        <div
+          className="chs-input"
+          style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}
+        >
+          В целевом наборе пока нет записей
+        </div>
+        {errorNode}
+      </div>
+    );
+  }
+
+  // Build display labels for all candidates.
+  const labeled = candidates.map((rec) => ({
+    id: rec.id,
+    display: deriveRecordLabel(rec),
+  }));
+
+  // Filter candidates by the user's search text (case-insensitive, matches label or id prefix).
+  const filterLower = filter.toLowerCase();
+  const filtered = filterLower
+    ? labeled.filter((c) => c.display.toLowerCase().includes(filterLower) || c.id.toLowerCase().startsWith(filterLower))
+    : labeled;
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {labelNode}
+      {/* Filter input for searching candidates — no raw id/UUID shown to users */}
+      <input
+        type="text"
+        className="chs-input"
+        placeholder="Поиск…"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        aria-label={`Поиск: ${label}`}
+        style={{ ...inputStyle, marginBottom: 'var(--chs-space-2)' }}
+      />
+      <select
+        id={id}
+        className={inputClass}
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        style={inputStyle}
+        size={Math.min(filtered.length + 1, 6)}
+      >
+        <option value="">— выберите запись —</option>
+        {filtered.map((c) => (
+          <option key={c.id} value={c.id}>{c.display}</option>
+        ))}
+      </select>
+      {errorNode}
+    </div>
+  );
+}
+
 // Anything at/below this is a seed/unset created_at, not a real date — render a
 // dash instead of fabricating "1970-01-01" (principles.md §3, audit #7).
 const EPOCH_FLOOR_MS = 24 * 60 * 60 * 1000; // ~1970-01-02
@@ -185,17 +374,29 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
 
         {/* T-0399 [D7-K]: one catalog-driven control per field. FieldControl
             resolves the contract from the field's `type` + `options`, so select
-            (enum) and date now render their proper controls here too — the
-            previous inline map only knew checkbox vs text/number. */}
+            (enum) and date now render their proper controls here too.
+            T-0446: relation fields route to RelationPicker (async fetch of
+            target records) rather than the catalog renderer (which lacks fetch). */}
         {formFields.map((f) => (
-          <FieldControl
-            key={f.key}
-            field={f}
-            value={values[f.key]}
-            onChange={setVal}
-            error={fieldErrors[f.key]}
-            idPrefix="record-field"
-          />
+          f.inputKind === 'relation' ? (
+            <RelationPicker
+              key={f.key}
+              field={f}
+              value={values[f.key]}
+              onChange={setVal}
+              error={fieldErrors[f.key]}
+              idPrefix="record-field"
+            />
+          ) : (
+            <FieldControl
+              key={f.key}
+              field={f}
+              value={values[f.key]}
+              onChange={setVal}
+              error={fieldErrors[f.key]}
+              idPrefix="record-field"
+            />
+          )
         ))}
 
         {submitErr && (
