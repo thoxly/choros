@@ -20,13 +20,15 @@ import {
   KEY_RE,
   type BindingField,
 } from "./binding-compat.js";
+import type { DmnRuleTable } from "./dmn-middle.js";
 
 // ---------------------------------------------------------------------------
 // Exported types (frozen public surface — T-0058/T-0064 wire against this)
 // ---------------------------------------------------------------------------
 
 // T-0072: "binding_mismatch" added additively (NF-4 / AC-13 — no existing tests broken).
-export type LintViolationType = "raw_object_binding" | "malformed_xml" | "binding_mismatch";
+// T-0436: "gateway_rule_mismatch" added additively — publish-time coherence guard.
+export type LintViolationType = "raw_object_binding" | "malformed_xml" | "binding_mismatch" | "gateway_rule_mismatch";
 
 export interface LintViolation {
   type: LintViolationType;
@@ -251,9 +253,17 @@ function hasRawObjectKey(obj: Record<string, unknown>): boolean {
  * bindingSchema: if supplied, triggers binding_mismatch check using
  *   checkBindingCompat(bindingSchema, bpmnVarNames).
  * Absent (undefined) → identical behavior to T-0027 (NF-4 / AC-13).
+ *
+ * T-0436: ruleTables — if supplied, triggers gateway_rule_mismatch check.
+ * For every exclusiveGateway with ≥2 conditioned outgoing flows, the gateway's
+ * choros:routingVar is matched against the routing-outcome name of published
+ * rule tables. A mismatch (no table for the variable, or a flow literal not
+ * covered by any rule) produces a gateway_rule_mismatch violation → 422.
+ * Absent (undefined) → no gateway coherence check (identical T-0072 behavior).
  */
 export interface LintOpts {
   bindingSchema?: BindingField[];
+  ruleTables?: DmnRuleTable[];
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +311,24 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   const bpmnVarNames: Set<string> | null = opts?.bindingSchema !== undefined
     ? new Set<string>()
     : null;
+
+  // T-0436: collect gateway info during the token walk (only when ruleTables supplied).
+  // gateways: map from gateway elementId (or generated key) to GatewayInfo.
+  // currentCondExprGatewayVar: when inside a conditionExpression on a sequenceFlow,
+  // track which gateway variable (if any) it corresponds to (resolved by referencing
+  // the most-recently-seen exclusiveGateway when flow sourceRef matches — best-effort:
+  // we do NOT track sourceRef in the tokenizer since we only have a flat token stream).
+  // Strategy: collect ALL conditionExpression texts + their parsed varName/literal pairs;
+  // then match them to gateways by varName (same routingVar key).
+  const collectGateways = opts?.ruleTables !== undefined;
+  const gatewayMap = new Map<string, GatewayInfo>(); // key = elementId or index
+  let gatewayIndex = 0;
+  // conditionExpressions collected as { varName, literal } during the walk.
+  // These are keyed by varName so we can attach them to matching gateways.
+  const conditionsByVar = new Map<string, string[]>(); // varName → literal[]
+  // State for collecting conditionExpression text in this scan.
+  let inCondExprForGateway = false;
+  let condExprBuffer = "";
 
   // Validate UTF-8 by checking for replacement characters that Node may have
   // inserted for invalid byte sequences. We operate on a JS string, so we
@@ -406,6 +434,28 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         extractVarNameFromToken(localName, attrs, bpmnVarNames);
       }
 
+      // T-0436: gateway collection — track exclusiveGateway elements for coherence check.
+      // The routingVar attribute is written by gateway-condition-panel.jsx as
+      // choros:routingVar; after namespace prefix stripping by the tokenizer,
+      // the attribute local name is "routingVar".
+      if (collectGateways && localName === "exclusiveGateway") {
+        const routingVarAttr = attrs.find((a) => a.name === "routingVar");
+        const routingVar = routingVarAttr?.value ?? "";
+        const gwKey = elementId || `__gw_${gatewayIndex}`;
+        gatewayIndex++;
+        gatewayMap.set(gwKey, { id: elementId, routingVar, branchLiterals: [] });
+      }
+
+      // T-0436: conditionExpression gateway collection.
+      // When we encounter a <conditionExpression> element (already tracked by
+      // SCOPED_ELEMENTS → contextStack), we also track it in our parallel
+      // gateway buffer. After the close-tag, we parse the condition and add
+      // the literal to the matching gateway (by varName from the expression).
+      if (collectGateways && localName === "conditionExpression") {
+        inCondExprForGateway = true;
+        condExprBuffer = "";
+      }
+
       // Self-close: immediately pop the scoped context if it was just pushed
       if (token.kind === "self-close-tag") {
         elementStack.pop();
@@ -433,6 +483,10 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         if (ctx.isConditionExpression || ctx.isDataObject || ctx.inExtension) {
           ctx.textBuffer += token.value;
         }
+      }
+      // T-0436: accumulate text for gateway conditionExpression buffer in parallel.
+      if (inCondExprForGateway) {
+        condExprBuffer += token.value;
       }
       continue;
     }
@@ -477,6 +531,22 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         }
       }
 
+      // T-0436: flush gateway conditionExpression buffer on </conditionExpression>.
+      if (collectGateways && localName === "conditionExpression" && inCondExprForGateway) {
+        inCondExprForGateway = false;
+        const parsed = parseGatewayCondition(condExprBuffer);
+        if (parsed !== null) {
+          // Accumulate literal under its varName for later matching with gateways.
+          let literals = conditionsByVar.get(parsed.varName);
+          if (literals === undefined) {
+            literals = [];
+            conditionsByVar.set(parsed.varName, literals);
+          }
+          literals.push(parsed.literal);
+        }
+        condExprBuffer = "";
+      }
+
       continue;
     }
   }
@@ -513,6 +583,36 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
     }
   }
 
+  // T-0436: gateway coherence check.
+  // Runs AFTER the raw-object walk so parse errors short-circuit above.
+  // Only activated when opts.ruleTables is supplied.
+  if (collectGateways && opts?.ruleTables !== undefined) {
+    // Attach collected condition literals to gateways by matching routingVar → varName.
+    for (const gw of gatewayMap.values()) {
+      if (gw.routingVar) {
+        const literals = conditionsByVar.get(gw.routingVar);
+        if (literals !== undefined) {
+          // Merge literals into gw.branchLiterals (deduplicate).
+          for (const lit of literals) {
+            if (!gw.branchLiterals.includes(lit)) {
+              gw.branchLiterals.push(lit);
+            }
+          }
+        }
+      }
+    }
+
+    // When there are no gateways in the gatewayMap but there are conditionsByVar entries,
+    // those conditions still need to be checked (some BPMN documents use gateways without
+    // choros:routingVar but with matching conditionExpression vars). Create synthetic gateway
+    // entries for each unique varName found in conditionsByVar that didn't match any gateway.
+    // However, to keep it simple and avoid false positives: only check gateways that have
+    // BOTH a declared routingVar AND are in the gatewayMap. Unmatched conditionsByVar entries
+    // are silently skipped (no false positives on non-choros BPMN).
+
+    checkGatewayRuleCoherence(Array.from(gatewayMap.values()), opts.ruleTables, violations);
+  }
+
   if (violations.length === 0) {
     return { ok: true };
   }
@@ -520,7 +620,131 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
 }
 
 // ---------------------------------------------------------------------------
-// T-0072: varName extraction helper (ADR §2.4)
+// T-0436: Gateway coherence check (publish-time rule-table link by routing-var)
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes one exclusive gateway found in the BPMN XML, along with the
+ * branch literals collected from its outgoing conditionExpression elements.
+ * Pure data; collected during the token walk (lintBpmn collects these when
+ * opts.ruleTables is provided).
+ */
+interface GatewayInfo {
+  /** Element id of the exclusiveGateway (may be empty string if absent). */
+  id: string;
+  /** choros:routingVar attribute value (after namespace prefix stripping → "routingVar"). */
+  routingVar: string;
+  /** Outgoing flow literal values extracted from ${routingVar == 'value'} conditions. */
+  branchLiterals: string[];
+}
+
+/**
+ * Regex to parse a conditionExpression body in canonical gateway form:
+ * ${varName == 'value'}
+ * Captures: [1] = varName, [2] = value string.
+ * Matches the form written by buildConditionBody() in gateway-condition-panel.jsx.
+ */
+const GATEWAY_CONDITION_RE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\s*==\s*'([^']*)'\}$/;
+
+/**
+ * Extract the routing variable name and branch literal from a conditionExpression
+ * body string in the canonical gateway form `${varName == 'value'}`.
+ * Returns null if the expression does not match (e.g. non-gateway EL expressions).
+ */
+function parseGatewayCondition(body: string): { varName: string; literal: string } | null {
+  const m = GATEWAY_CONDITION_RE.exec(body.trim());
+  if (!m) return null;
+  return { varName: m[1]!, literal: m[2]! };
+}
+
+/**
+ * Given the collected GatewayInfo[] and the published rule tables, emit
+ * gateway_rule_mismatch violations for any gateway whose routingVar either:
+ *  a) has no published rule table whose routing-outcome name matches it, OR
+ *  b) has a branch literal that cannot be produced by any rule in that table.
+ *
+ * Link strategy (T-0436 architect note): gateway.routingVar === ruleTable's
+ * routing-outcome name. The routing-outcome name of a table is the `name`
+ * field of any `set_routing_outcome` effect across its rules (all rules in a
+ * validated table share one name — enforced by validateDmnRuleTable's
+ * INCONSISTENT_ROUTING_NAME check).
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkGatewayRuleCoherence(
+  gateways: GatewayInfo[],
+  ruleTables: DmnRuleTable[],
+  violations: LintViolation[],
+): void {
+  // Build a map: routingOutcomeName → Set<string> of producible values.
+  // A table's routing-outcome name is derived from set_routing_outcome effects.
+  const tableOutcomeValues = new Map<string, Set<string>>();
+
+  for (const table of ruleTables) {
+    for (const rule of table.rules) {
+      for (const effect of rule.effects) {
+        if (effect.kind === "set_routing_outcome") {
+          let valueSet = tableOutcomeValues.get(effect.name);
+          if (valueSet === undefined) {
+            valueSet = new Set<string>();
+            tableOutcomeValues.set(effect.name, valueSet);
+          }
+          valueSet.add(effect.value);
+        }
+      }
+    }
+  }
+
+  for (const gw of gateways) {
+    // Skip gateways that have fewer than 2 branch literals (0 or 1 conditioned
+    // flows — nothing to validate: no table link needed for unconditional flows
+    // or single-branch gateways without conditions).
+    if (gw.branchLiterals.length < 2) continue;
+
+    const varName = gw.routingVar;
+    const elemDesc = gw.id ? `exclusiveGateway id="${gw.id}"` : "exclusiveGateway";
+
+    if (!varName) {
+      // No routingVar declared — cannot link to any table. Skip (no violation:
+      // a gateway without choros:routingVar may be using non-table routing logic).
+      continue;
+    }
+
+    const valueSet = tableOutcomeValues.get(varName);
+
+    if (valueSet === undefined) {
+      // No published rule table whose routing-outcome name matches this variable.
+      violations.push({
+        type: "gateway_rule_mismatch",
+        elementId: gw.id,
+        elementKind: "exclusiveGateway",
+        message:
+          `<${elemDesc}> uses routing variable "${varName}" but no published ` +
+          `rule table declares a routing outcome with that name; ` +
+          `publish a rule table that sets routing outcome "${varName}" before publishing this process`,
+      });
+      continue;
+    }
+
+    // Check each branch literal is producible by the table.
+    for (const literal of gw.branchLiterals) {
+      if (!valueSet.has(literal)) {
+        violations.push({
+          type: "gateway_rule_mismatch",
+          elementId: gw.id,
+          elementKind: "exclusiveGateway",
+          message:
+            `<${elemDesc}> has a branch condition "${varName} == '${literal}'" ` +
+            `but the rule table for routing outcome "${varName}" does not produce ` +
+            `the value "${literal}"; update the rule table or remove the branch condition`,
+        });
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0436: varName extraction helper (ADR §2.4)
 // ---------------------------------------------------------------------------
 
 /**

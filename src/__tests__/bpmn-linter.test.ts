@@ -664,3 +664,204 @@ describe("Additional coverage", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0436: gateway_rule_mismatch — publish-time coherence guard
+// ---------------------------------------------------------------------------
+
+import type { DmnRuleTable } from "../core/dmn-middle.js";
+
+/** Build a minimal published DmnRuleTable with one routing outcome name and values. */
+function makeRuleTable(outcomeName: string, outcomeValues: string[]): DmnRuleTable {
+  return {
+    id: "rt-test-1",
+    name: `Rule table for ${outcomeName}`,
+    hitPolicy: "FIRST",
+    rules: outcomeValues.map((val) => ({
+      conditions: [],
+      effects: [{ kind: "set_routing_outcome" as const, name: outcomeName, value: val }],
+    })),
+  };
+}
+
+/** Build a 2-branch BPMN with an exclusiveGateway using choros:routingVar. */
+function makeGatewayBpmn(routingVar: string, branch1Value: string, branch2Value: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn"
+             targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <exclusiveGateway id="gw1" routingVar="${routingVar}"/>
+    <endEvent id="end1"/>
+    <endEvent id="end2"/>
+    <sequenceFlow id="f1" sourceRef="gw1" targetRef="end1">
+      <conditionExpression>\${${routingVar} == '${branch1Value}'}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f2" sourceRef="gw1" targetRef="end2">
+      <conditionExpression>\${${routingVar} == '${branch2Value}'}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>`;
+}
+
+describe("T-0436 — gateway_rule_mismatch: coherent process publishes 200", () => {
+  it("coherent 2-branch gateway with matching rule table → ok: true", () => {
+    const xml = makeGatewayBpmn("approvalRequired", "yes", "no");
+    const ruleTables = [makeRuleTable("approvalRequired", ["yes", "no"])];
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(true);
+  });
+
+  it("coherent: table has MORE outcome values than branch literals → ok: true", () => {
+    // Table covers yes/no/maybe but only yes/no are used in BPMN → still coherent
+    const xml = makeGatewayBpmn("decision", "yes", "no");
+    const ruleTables = [makeRuleTable("decision", ["yes", "no", "maybe"])];
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(true);
+  });
+
+  it("no ruleTables opt → no gateway check (identical to prior behavior)", () => {
+    const xml = makeGatewayBpmn("approvalRequired", "yes", "no");
+    // No opts at all
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+
+    // Empty ruleTables array
+    const result2 = lintBpmn(xml, { ruleTables: [] });
+    // No matching table → violation for gateway with routingVar
+    // (empty ruleTables = no tables published; gateway with routingVar declared → should flag)
+    expect(result2.ok).toBe(false);
+    if (!result2.ok) {
+      expect(result2.violations[0]?.type).toBe("gateway_rule_mismatch");
+    }
+  });
+
+  it("process with no exclusiveGateway elements → ok: true (no gateways, nothing to check)", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="end"/>
+  </process>
+</definitions>`;
+    const ruleTables = [makeRuleTable("approvalRequired", ["yes", "no"])];
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("T-0436 — gateway_rule_mismatch: missing table → 422 violation", () => {
+  it("gateway routingVar has NO matching rule table → gateway_rule_mismatch violation", () => {
+    const xml = makeGatewayBpmn("approvalRequired", "yes", "no");
+    // Rule table covers a DIFFERENT variable — no table for "approvalRequired"
+    const ruleTables = [makeRuleTable("otherVar", ["yes", "no"])];
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "gateway_rule_mismatch");
+      expect(v).toBeDefined();
+      expect(v?.elementKind).toBe("exclusiveGateway");
+      expect(v?.elementId).toBe("gw1");
+      expect(v?.message).toContain("approvalRequired");
+      expect(v?.message).toContain("no published rule table");
+    }
+  });
+
+  it("empty ruleTables → gateway_rule_mismatch (no table for any variable)", () => {
+    const xml = makeGatewayBpmn("approvalRequired", "yes", "no");
+    const result = lintBpmn(xml, { ruleTables: [] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations[0]?.type).toBe("gateway_rule_mismatch");
+    }
+  });
+});
+
+describe("T-0436 — gateway_rule_mismatch: literal not covered → 422 violation", () => {
+  it("flow literal 'maybe' not in table outcomes → gateway_rule_mismatch violation", () => {
+    // Table only produces "yes" and "no" — but BPMN has a "maybe" branch
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn"
+             targetNamespace="t">
+  <process id="p1">
+    <exclusiveGateway id="gw2" routingVar="decision"/>
+    <endEvent id="end1"/>
+    <endEvent id="end2"/>
+    <endEvent id="end3"/>
+    <sequenceFlow id="f1" sourceRef="gw2" targetRef="end1">
+      <conditionExpression>\${decision == 'yes'}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f2" sourceRef="gw2" targetRef="end2">
+      <conditionExpression>\${decision == 'no'}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f3" sourceRef="gw2" targetRef="end3">
+      <conditionExpression>\${decision == 'maybe'}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>`;
+    const ruleTables = [makeRuleTable("decision", ["yes", "no"])]; // "maybe" not covered
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "gateway_rule_mismatch");
+      expect(v).toBeDefined();
+      expect(v?.elementId).toBe("gw2");
+      expect(v?.message).toContain("maybe");
+      expect(v?.message).toContain("decision");
+    }
+  });
+
+  it("one literal covered, one missing → violation only for the missing one", () => {
+    const xml = makeGatewayBpmn("outcome", "approved", "rejected");
+    // Table only covers "approved" — "rejected" is missing
+    const ruleTables = [makeRuleTable("outcome", ["approved"])];
+    const result = lintBpmn(xml, { ruleTables });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "gateway_rule_mismatch");
+      expect(v).toBeDefined();
+      expect(v?.message).toContain("rejected");
+      expect(v?.message).not.toContain("approved");
+    }
+  });
+});
+
+describe("T-0436 — gateway_rule_mismatch: shape of violation", () => {
+  it("violation has correct type, elementKind, elementId, message fields", () => {
+    const xml = makeGatewayBpmn("routeVar", "a", "b");
+    const result = lintBpmn(xml, { ruleTables: [] });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations[0]!;
+      expect(v.type).toBe("gateway_rule_mismatch");
+      expect(v.elementKind).toBe("exclusiveGateway");
+      expect(v.elementId).toBe("gw1");
+      expect(typeof v.message).toBe("string");
+      expect(v.message.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("gateway without routingVar attr + conditions → no violation (non-choros gateway)", () => {
+    // A gateway without choros:routingVar is not a choros-managed routing gateway.
+    // The linter should not emit gateway_rule_mismatch for it.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <exclusiveGateway id="gw-plain"/>
+    <endEvent id="end1"/>
+    <endEvent id="end2"/>
+    <sequenceFlow id="f1" sourceRef="gw-plain" targetRef="end1">
+      <conditionExpression>\${someCondition == 'true'}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f2" sourceRef="gw-plain" targetRef="end2">
+      <conditionExpression>\${someCondition == 'false'}</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>`;
+    const ruleTables = [makeRuleTable("approvalRequired", ["yes", "no"])];
+    const result = lintBpmn(xml, { ruleTables });
+    // No gateway_rule_mismatch because this gateway has no routingVar attr
+    expect(result.ok).toBe(true);
+  });
+});

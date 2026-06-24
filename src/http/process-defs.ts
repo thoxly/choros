@@ -31,6 +31,7 @@ import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import type { FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
+import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -398,7 +399,23 @@ export function registerProcessDefsRoutes(
     }
 
     // Step 2: Lint — fail-closed gate (T-0027 deploy-gate-contract)
-    const lintResult = lintBpmn(row.bpmn_xml);
+    // T-0436: load published rule tables for this process and pass to lintBpmn
+    // for publish-time gateway↔rule-table coherence check.
+    // Uses a short-lived tenant-scoped client (same RLS pattern as other reads).
+    let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
+    try {
+      const { tables } = await withTenantTx(pool, tenantId, async (client) => {
+        return loadPublishedRuleTables(client, tenantId, processKey);
+      });
+      ruleTables = tables;
+    } catch {
+      // Degrade gracefully: if rule table load fails (e.g. table not yet migrated
+      // on older deployment), skip the coherence check rather than blocking publish.
+      // The coherence check is advisory at this stage of rollout.
+      ruleTables = undefined;
+    }
+
+    const lintResult = lintBpmn(row.bpmn_xml, ruleTables !== undefined ? { ruleTables } : undefined);
     if (!lintResult.ok) {
       res.statusCode = 422;
       res.setHeader("Content-Type", "application/json");
