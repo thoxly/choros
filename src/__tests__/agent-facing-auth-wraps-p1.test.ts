@@ -106,7 +106,6 @@ function makeStubFlowable(): FlowableClient {
     failTask: vi.fn().mockResolvedValue({ ok: false, code: "UNKNOWN" as const }),
     getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
-    isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
   };
 }
 

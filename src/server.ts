@@ -397,10 +397,26 @@ function buildRouter(
   // Register org structure endpoints
   registerOrgRoutes(router, store as JobStore);
 
-  // NOTE: registerInboxRoutes is called AFTER the flowableClient is constructed
-  // (below at the processes-route block) so the approve handler can be wired
-  // with the Flowable engine drive (T-0440). See the registerInboxRoutes call
-  // at the processes-route section below.
+  // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
+  // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)
+  // alongside the existing claim path — tenant-scoped, actor→tenant resolved from
+  // the dev-user slug (the same resolver the start-route uses). Absent ⇒ read +
+  // claim only (memory-mode unchanged).
+  registerInboxRoutes(
+    router,
+    store as JobStore,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          // T-0335 (E15-S1b): thread the outbox store so the approve route's
+          // step-applier can enqueue the `step_applied` row in the approve tx.
+          // Absent (memory-mode) ⇒ applier seam not engaged (honest-degrade).
+          outboxStore,
+        }
+      : undefined,
+  );
 
   // Register form-submission endpoints (T-0102 / T-0337 E15-S4 / T-0345).
   // T-0345: when grantsPool is available, the FormDefResolver port is wired so
@@ -496,36 +512,6 @@ function buildRouter(
           adminPassword: flowablePassword,
         })
       : null;
-
-  // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
-  // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)
-  // alongside the existing claim path — tenant-scoped, actor→tenant resolved from
-  // the dev-user slug (the same resolver the start-route uses). Absent ⇒ read +
-  // claim only (memory-mode unchanged).
-  //
-  // T-0440: flowableClient wired here so the approve handler can drive the engine
-  // (complete the Flowable user-task, surface post-gateway task if one appears).
-  // The registration is intentionally placed AFTER flowableClient is constructed
-  // (above) so the dependency is resolved at server-build time.
-  registerInboxRoutes(
-    router,
-    store as JobStore,
-    grantsPool
-      ? {
-          pool: grantsPool,
-          resolveActorTenant: (actorSlug: string) =>
-            resolveActorTenant(getOrgPool(), actorSlug),
-          // T-0335 (E15-S1b): thread the outbox store so the approve route's
-          // step-applier can enqueue the `step_applied` row in the approve tx.
-          // Absent (memory-mode) ⇒ applier seam not engaged (honest-degrade).
-          outboxStore,
-          // T-0440: engine-drive client for post-approve gateway evaluation.
-          // When absent (no FLOWABLE_REST_APP_ADMIN_PASSWORD), approve degrades
-          // to audit-only (same as pre-T-0440 linear behaviour).
-          flowableClient: flowableClient ?? undefined,
-        }
-      : undefined,
-  );
 
   // Register processes endpoints. The GET display plane is always registered; the
   // POST /api/processes/start write-route (T-0280, FROZEN ADR §2.2) is wired only

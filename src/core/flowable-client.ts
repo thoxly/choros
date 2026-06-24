@@ -76,15 +76,9 @@ export type FailTaskResult =
 /**
  * T-0368 (E16): result of getFirstActiveUserTask — the task id of the first
  * active user task for an instance, or null when no active user task exists.
- *
- * T-0440 (genericity): additive fields `taskName` and `taskRole` carry the
- * REAL Flowable task name and candidateGroups value. Both are `null` when no
- * task exists (taskId === null) and may be `null` even when taskId is present
- * if the engine does not surface those fields — callers must fall back to
- * their own constants in that case.
  */
 export type GetFirstUserTaskResult =
-  | { ok: true; taskId: string | null; taskName: string | null; taskRole: string | null }
+  | { ok: true; taskId: string | null }
   | { ok: false; code: FlowableErrorCode };
 
 /**
@@ -95,16 +89,6 @@ export type GetFirstUserTaskResult =
  */
 export type CompleteUserTaskResult =
   | { ok: true }
-  | { ok: false; code: FlowableErrorCode };
-
-/**
- * T-0440: result of isInstanceEnded — true when the Flowable process instance
- * has completed (no longer present in the runtime /process-instances endpoint),
- * false when it is still active (waiting at a task or executing a service step).
- * { ok: false } on engine error.
- */
-export type IsInstanceEndedResult =
-  | { ok: true; ended: boolean }
   | { ok: false; code: FlowableErrorCode };
 
 /** Wire shape from Flowable /runtime/external-jobs/acquire (FR-3). */
@@ -165,31 +149,15 @@ export interface FlowableClient {
    */
   getFirstActiveUserTask(instanceId: string): Promise<GetFirstUserTaskResult>;
   /**
-   * T-0368 (E16) / T-0440: complete a Flowable USER task (not an external/service task)
+   * T-0368 (E16): complete a Flowable USER task (not an external/service task)
    * by id. Used by the on_create trigger path to auto-complete the
    * «Подача заявки» (task-submit) user task so the instance advances past
    * the submit step without waiting for a human.
    *
-   * T-0440: optional `variables` map (backward-compatible addition). When provided,
-   * the variables are sent as the `variables` array in the PUT body so the engine
-   * can evaluate gateways that depend on them. The existing on_create caller
-   * (records.ts) passes no variables — unaffected.
-   *
    * Flowable endpoint: PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
    * Success: 200 (Flowable 7 returns the task JSON on PUT complete).
    */
-  completeUserTask(taskId: string, variables?: Record<string, unknown>): Promise<CompleteUserTaskResult>;
-  /**
-   * T-0440: check whether a Flowable process instance has ended (i.e. is no longer
-   * present in the runtime /process-instances endpoint). Used by the approve handler
-   * to decide whether to mark the instance done or surface a post-gateway task.
-   *
-   * Flowable endpoint: GET {baseUrl}/runtime/process-instances/{instanceId}
-   *   200 → instance is still active (running/waiting) → { ok: true, ended: false }
-   *   404 → instance ended (moved to history) → { ok: true, ended: true }
-   *   other → { ok: false, code }
-   */
-  isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult>;
+  completeUserTask(taskId: string): Promise<CompleteUserTaskResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -594,26 +562,10 @@ export function makeFlowableClient(
         const data = (await resp.json()) as Record<string, unknown>;
         const items = data["data"] as Array<Record<string, unknown>> | undefined;
         if (!Array.isArray(items) || items.length === 0) {
-          return { ok: true as const, taskId: null, taskName: null, taskRole: null };
+          return { ok: true as const, taskId: null };
         }
-        const task = items[0]!;
-        const taskId = String(task["id"] ?? "");
-        // T-0440 (genericity): extract the REAL task name and candidateGroups.
-        // Flowable /runtime/tasks returns "name" as the BPMN task name and
-        // "candidateGroups" as the first candidate group (string in Flowable 7
-        // single-group tasks). Both may be absent — callers fall back to constants.
-        const rawName = task["name"];
-        const taskName = rawName !== undefined && rawName !== null ? String(rawName) || null : null;
-        // candidateGroups comes as a comma-separated string or an array in some
-        // Flowable versions. Normalise to the first entry or null.
-        const rawGroups = task["candidateGroups"];
-        let taskRole: string | null = null;
-        if (typeof rawGroups === "string" && rawGroups.trim() !== "") {
-          taskRole = rawGroups.split(",")[0]!.trim() || null;
-        } else if (Array.isArray(rawGroups) && rawGroups.length > 0) {
-          taskRole = String(rawGroups[0]).trim() || null;
-        }
-        return { ok: true as const, taskId: taskId || null, taskName, taskRole };
+        const taskId = String(items[0]!["id"] ?? "");
+        return { ok: true as const, taskId: taskId || null };
       }
       return { ok: false, code: httpStatusToCode(resp.status) };
     }, resolved) as Promise<GetFirstUserTaskResult>;
@@ -622,24 +574,13 @@ export function makeFlowableClient(
   // -------------------------------------------------------------------------
   // FR-7: completeUserTask — T-0368 (E16) on_create skip-submit seam
   //
-  // PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"[,"variables":[...]]}
+  // PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
   // Flowable 7 returns 200 with the task JSON on a successful complete.
-  //
-  // T-0440 (backward-compatible extension): optional `variables` map.
-  // When provided, the variables are serialised to Flowable wire format and
-  // included in the body so the engine can evaluate gateways that read them.
-  // The existing on_create caller (records.ts) passes no variables — the body
-  // shape stays { action: "complete" } in that path, fully backward-compatible.
+  // No variables are passed (task-submit has no output variables — the
+  // field_mapping already injected amount at startInstance time).
   // -------------------------------------------------------------------------
-  async function completeUserTask(
-    taskId: string,
-    variables?: Record<string, unknown>,
-  ): Promise<CompleteUserTaskResult> {
+  async function completeUserTask(taskId: string): Promise<CompleteUserTaskResult> {
     return withRetry(async () => {
-      const bodyPayload: Record<string, unknown> = { action: "complete" };
-      if (variables !== undefined && Object.keys(variables).length > 0) {
-        bodyPayload["variables"] = toFlowableVars(variables);
-      }
       const resp = await globalThis.fetch(
         `${resolved.baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`,
         {
@@ -648,7 +589,7 @@ export function makeFlowableClient(
             Authorization: auth,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify(bodyPayload),
+          body: JSON.stringify({ action: "complete" }),
         },
       );
       // Flowable 7 returns 200 with the completed task body on success.
@@ -659,40 +600,6 @@ export function makeFlowableClient(
     }, resolved) as Promise<CompleteUserTaskResult>;
   }
 
-  // -------------------------------------------------------------------------
-  // FR-8: isInstanceEnded — T-0440 post-gateway projection decision
-  //
-  // GET {baseUrl}/runtime/process-instances/{instanceId}
-  //   200 → instance is still active (running/waiting/at service task)
-  //   404 → instance ended and moved to history (Flowable removes from runtime)
-  //   5xx → engine unavailable
-  //
-  // Used by the inbox approve handler to decide whether to emit a next-task
-  // event (post-gateway branch still waiting) or leave the instance marked
-  // done (engine has finished the process). NOT retried on 404 (NOT_FOUND is
-  // not retryable in withRetry), so 404 correctly surfaces as ended=true.
-  // -------------------------------------------------------------------------
-  async function isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult> {
-    return withRetry(async () => {
-      const resp = await globalThis.fetch(
-        `${resolved.baseUrl}/runtime/process-instances/${encodeURIComponent(instanceId)}`,
-        {
-          method: "GET",
-          headers: { Authorization: auth },
-        },
-      );
-      if (resp.status === 200) {
-        // Instance is still in the runtime pool — not ended.
-        return { ok: true as const, ended: false };
-      }
-      if (resp.status === 404) {
-        // Instance has ended and moved to history (Flowable removes runtime record).
-        return { ok: true as const, ended: true };
-      }
-      return { ok: false, code: httpStatusToCode(resp.status) };
-    }, resolved) as Promise<IsInstanceEndedResult>;
-  }
-
   return {
     deployBpmn,
     startInstance,
@@ -701,6 +608,5 @@ export function makeFlowableClient(
     failTask,
     getFirstActiveUserTask,
     completeUserTask,
-    isInstanceEnded,
   };
 }

@@ -43,14 +43,11 @@ import { parsePaginationParams, paginateInMemory } from "../core/data-access-por
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
-  APPROVER_ROLE,
   appendTaskApproved,
-  appendNextEngineTask,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
   listInstanceProjections,
 } from "./process-projection.js";
-import type { FlowableClient } from "../core/flowable-client.js";
 import {
   applyStepResult,
   readStepClass,
@@ -284,18 +281,6 @@ export interface InboxWriteDeps {
    * ⇒ the applier runs in the same tx and the fail-closed contract holds.
    */
   outboxStore?: OutboxEnqueuePort;
-  /**
-   * T-0440: optional Flowable client for driving the engine after the PG approve
-   * tx commits. When present, the approve handler calls getFirstActiveUserTask +
-   * completeUserTask so the engine evaluates the gateway and advances to the
-   * post-gateway branch. Then inspects whether a new user task appeared and emits
-   * a `process.next_task` event if so (surfacing «Доп. согласование» in the inbox).
-   *
-   * When absent (no-DB / memory-mode / missing FLOWABLE env): the approve route
-   * still commits the PG approve tx and marks the instance done in the projection
-   * (single-step linear behaviour, no engine branching). Honest degrade.
-   */
-  flowableClient?: FlowableClient;
 }
 
 const UUID_RE =
@@ -1139,23 +1124,9 @@ export function registerInboxRoutes(
   // grant (role-eligibility — the actor holds the ROLE the task is addressed to,
   // the same deny-by-default invariant the claim path uses), writes ONE
   // task.approved audit_event via the canonical writer, and the projection
-  // advances the instance to `done`.
-  //
-  // T-0440 (engine-drive): AFTER the PG tx commits, if flowableClient is wired,
-  // the handler drives the real Flowable engine so the gateway is evaluated:
-  //   1. getFirstActiveUserTask(inst) → finds the live Flowable user-task id
-  //   2. completeUserTask(flowableTaskId) → engine evaluates gateway + advances
-  //   3. getFirstActiveUserTask(inst) again → sees if a NEW task appeared
-  //   4a. New task → emit process.next_task to the audit track (surfaces in inbox)
-  //   4b. No new task → isInstanceEnded(inst) confirms the instance finished
-  //       (no emission needed — existing task.approved already marks done)
-  // Engine calls are best-effort: a transient engine error is logged but does NOT
-  // roll back the committed PG approve — the instance projection degrades to done
-  // (same as the pre-T-0440 linear behaviour) rather than crashing the approve.
-  //
-  // Idempotency: if the handler is called twice for the same taskId, the second
-  // call fails at findWaitingInstanceTask (task already approved → 404 NOT_FOUND)
-  // BEFORE the engine call — no risk of double-completing the Flowable task.
+  // advances the instance to `done`. It is NOT a broad mutator: it only acts on a
+  // waiting instance user-task it can resolve, and reaches NO engine transport of
+  // its own — the audit write is the projection's source of truth (ADR §2.3).
   //
   // Registered only when writeDeps are present (DB-backed). Absent ⇒ 404.
   //
@@ -1166,7 +1137,7 @@ export function registerInboxRoutes(
   //   - actor must hold the role the task is addressed to (approve grant): 403 NOT_ELIGIBLE
   // Success: 200 { instanceId, status: "done", action: "approve" }
   if (writeDeps) {
-    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore, flowableClient } = writeDeps;
+    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore } = writeDeps;
 
     router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
       // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
@@ -1369,118 +1340,6 @@ export function registerInboxRoutes(
           });
         }
       });
-
-      // T-0440: Engine-drive — best-effort, AFTER the PG tx has committed.
-      //
-      // The PG tx above committed the task.approved audit event (projection
-      // advances the instance). Now we drive the real Flowable engine so the
-      // gateway is evaluated and the process advances to the next branch.
-      //
-      // Two-phase window (mirrors records.ts ~696 on_create path):
-      //   Phase 1: PG tx committed above (task.approved durable in audit_event).
-      //   Phase 2: Engine call + optional process.next_task emit (below).
-      //
-      // If Phase 2 fails transiently: the projection shows the instance as `done`
-      // (task.approved already committed, no next_task event emitted yet). This is
-      // a recoverable degrade — the engine task stays orphaned in Flowable until
-      // a manual replay or a future re-drive. NOT a data-loss risk.
-      //
-      // Idempotency guard: the outer findWaitingInstanceTask check (above) prevents
-      // a second approve call from reaching this code (task already approved → 404
-      // before this point). So no risk of double-completing the Flowable task.
-      if (flowableClient) {
-        try {
-          // Step 1: find the live Flowable user-task id for this instance.
-          const taskLookup = await flowableClient.getFirstActiveUserTask(task.inst);
-          if (!taskLookup.ok || taskLookup.taskId === null) {
-            // No active user task found — either engine unavailable or instance
-            // already advanced (possible if Flowable processed a previous attempt).
-            // Log and continue — projection already shows done.
-            if (!taskLookup.ok) {
-              console.warn(
-                `[inbox-approve] getFirstActiveUserTask failed for instance ${task.inst}: ${taskLookup.code}`,
-              );
-            }
-            // If taskLookup.ok && taskId === null: instance at a service task or
-            // already ended — engine is ahead of projection; no action needed.
-          } else {
-            const flowableUserTaskId = taskLookup.taskId;
-
-            // Step 2: complete the Flowable user-task so the engine evaluates the
-            // gateway. No variables needed — approvalRequired was set at launch
-            // (T-0439 preComputeGatewayVariable) and again by the triage bridge.
-            const completeResult = await flowableClient.completeUserTask(flowableUserTaskId);
-            if (!completeResult.ok) {
-              console.warn(
-                `[inbox-approve] completeUserTask failed for instance ${task.inst}, ` +
-                  `flowableTaskId ${flowableUserTaskId}: ${completeResult.code}`,
-              );
-              // Engine error is non-fatal: projection already shows done (task.approved
-              // committed). Log and fall through without surfacing a next_task.
-            } else {
-              // Step 3: check whether a NEW user-task appeared after the gateway.
-              const nextLookup = await flowableClient.getFirstActiveUserTask(task.inst);
-              if (nextLookup.ok && nextLookup.taskId !== null) {
-                // The gateway routed to a post-gateway branch (e.g. «Доп. согласование»).
-                // Emit a process.next_task event so the projection surfaces the new task.
-                // The Flowable user-task id is NOT stored in the audit event — the approve
-                // handler re-queries getFirstActiveUserTask at next approve time.
-                //
-                // T-0440 (genericity): use the REAL task name/role from the engine so
-                // UI-authored processes with arbitrary post-gateway task names are labelled
-                // correctly. Fall back to the telLinear constants when the engine does not
-                // return those fields (defensive: keeps ТЭЛ acceptance unchanged).
-                const liveStep = nextLookup.taskName ?? "Доп. согласование";
-                const liveTaskName = nextLookup.taskName ?? "Дополнительное согласование";
-                const liveRole = nextLookup.taskRole ?? APPROVER_ROLE;
-                const nextTaskNowMs = Date.now();
-                await withTenantTx(pool, tenantId, async (nextClient) => {
-                  await appendNextEngineTask(
-                    nextClient as unknown as import("../db/audit-writer.js").PgClientLike,
-                    {
-                      instanceId: task.inst,
-                      procKey: task.procKey,
-                      actor,
-                      nowMs: nextTaskNowMs,
-                      tenantId,
-                      approverRole: liveRole,
-                      step: liveStep,
-                      taskName: liveTaskName,
-                    },
-                  );
-                });
-              } else if (nextLookup.ok && nextLookup.taskId === null) {
-                // No new user task — engine either moved to a service task or ended.
-                // Check definitively whether the instance ended.
-                const endedResult = await flowableClient.isInstanceEnded(task.inst);
-                if (!endedResult.ok) {
-                  console.warn(
-                    `[inbox-approve] isInstanceEnded failed for instance ${task.inst}: ${endedResult.code}`,
-                  );
-                }
-                // If ended: projection already shows done (task.approved committed). Good.
-                // If not ended: engine at a service task (temporary). No action — the bridge
-                // will eventually complete the service task and advance to a user task; at
-                // that point we have no mechanism to re-poll here. This is a known gap for
-                // process shapes with service tasks between human steps (not present in telLinear).
-              } else if (!nextLookup.ok) {
-                console.warn(
-                  `[inbox-approve] getFirstActiveUserTask (post-complete) failed for instance ` +
-                    `${task.inst}: ${nextLookup.code}`,
-                );
-              }
-            }
-          }
-        } catch (engineErr) {
-          // Engine call threw unexpectedly — log and continue (best-effort, non-fatal).
-          // The PG approve tx is already committed; the degrade is that the engine
-          // task is orphaned in Flowable until manual replay.
-          console.warn(
-            `[inbox-approve] unexpected engine-drive error for instance ${task.inst}:`,
-            engineErr,
-          );
-        }
-      }
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
