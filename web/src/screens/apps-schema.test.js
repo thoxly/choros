@@ -24,6 +24,8 @@ import {
   FIELD_TYPES,
   FIELD_TYPE_VALUES,
   COLLECTION_SUB_FIELD_TYPES,
+  ROLLUP_OPS,
+  ROLLUP_OP_VALUES,
   validateField,
   validateFields,
   buildRecordSchema,
@@ -1100,5 +1102,376 @@ describe('apps-schema T-0450 Fix 1 · select column options validation', () => {
     const sf = parsed[0].subFields[0];
     expect(sf.type).toBe('select');
     expect(sf.options).toEqual(['A', 'B', 'C']); // options preserved end-to-end
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0452: computed (Итог / rollup) field type
+// ---------------------------------------------------------------------------
+
+// Shared fixture: a collection field with numeric sub-fields (used as rollup source)
+const positionsWithNumbers = {
+  key: 'positions',
+  type: 'collection',
+  title: 'Позиции',
+  required: false,
+  subFields: [
+    { key: 'name', type: 'string', label: 'Товар', required: false },
+    { key: 'qty', type: 'integer', label: 'Кол-во', required: false },
+    { key: 'price', type: 'number', label: 'Цена', required: false },
+  ],
+};
+
+// A valid computed field referencing the positionsWithNumbers fixture
+const validComputedSum = {
+  key: 'total',
+  type: 'computed',
+  title: 'Итого',
+  required: false,
+  rollupSource: 'positions',
+  rollupOp: 'sum',
+  rollupValueField: 'price',
+  rollupFactorField: '',
+};
+
+describe('apps-schema T-0452 · computed field type — constants', () => {
+  it('FIELD_TYPES includes computed with label "Итог"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'computed');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Итог');
+  });
+
+  it('FIELD_TYPE_VALUES includes "computed"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('computed');
+  });
+
+  it('ROLLUP_OPS has all expected operations', () => {
+    expect(ROLLUP_OP_VALUES).toEqual(['sum', 'count', 'avg', 'min', 'max']);
+    for (const op of ROLLUP_OPS) {
+      expect(op.label).toBeTruthy();
+    }
+  });
+});
+
+describe('apps-schema T-0452 · computed field type — buildRecordSchema', () => {
+  it('emits {type:"number","x-rollup":{source,op,value_field}} for a sum field', () => {
+    const schema = buildRecordSchema([positionsWithNumbers, validComputedSum]);
+    const prop = schema.properties.total;
+    expect(prop.type).toBe('number');
+    expect(prop['x-rollup']).toEqual({ source: 'positions', op: 'sum', value_field: 'price' });
+    expect(prop.title).toBe('Итого');
+    // factor_field absent when rollupFactorField is empty
+    expect('factor_field' in prop['x-rollup']).toBe(false);
+  });
+
+  it('emits factor_field in x-rollup when rollupFactorField is non-empty', () => {
+    const withFactor = { ...validComputedSum, rollupFactorField: 'qty' };
+    const schema = buildRecordSchema([positionsWithNumbers, withFactor]);
+    const xr = schema.properties.total['x-rollup'];
+    expect(xr.factor_field).toBe('qty');
+  });
+
+  it('count op emits x-rollup with empty value_field', () => {
+    const countField = { ...validComputedSum, rollupOp: 'count', rollupValueField: '' };
+    const schema = buildRecordSchema([positionsWithNumbers, countField]);
+    const xr = schema.properties.total['x-rollup'];
+    expect(xr.op).toBe('count');
+    expect(xr.value_field).toBe(''); // empty but present in the shape
+  });
+
+  it('computed field is NEVER added to schema.required even when required:true is passed (build-layer guard)', () => {
+    // T-0452 MEDIUM fix: a computed field with required:true must NOT appear in
+    // schema.required — the value is never written to record.data (T-0453), so AJV
+    // would reject every record save with "required" error if the key were listed.
+    // buildRecordSchema skips computed fields when populating schema.required.
+    const requiredComputed = { ...validComputedSum, required: true };
+    const schema = buildRecordSchema([positionsWithNumbers, requiredComputed]);
+    // The computed key must NOT be in schema.required
+    expect(schema.required).toBeUndefined(); // only 'positions' is a candidate; it's required:false
+    // Verify with a scalar required field present: only the scalar ends up in required
+    const withScalar = buildRecordSchema([
+      { key: 'name', type: 'string', required: true },
+      positionsWithNumbers,
+      requiredComputed,
+    ]);
+    expect(withScalar.required).toEqual(['name']); // computed key 'total' is NOT present
+    expect(withScalar.required).not.toContain('total');
+    // The schema still compiles through validateRecordSchemaDefinition (x-* stripped)
+    const result = validateRecordSchemaDefinition(withScalar);
+    expect(result.valid).toBe(true);
+  });
+
+  it('x-rollup schema does NOT compile with raw AJV strict (strip required)', () => {
+    const schema = buildRecordSchema([positionsWithNumbers, validComputedSum]);
+    // Proves the validator must strip x-* before AJV compile (same as x-relation)
+    expect(backendAccepts(schema)).toBe(false);
+  });
+
+  it('validateRecordSchemaDefinition accepts the emitted schema (x-* strip works)', () => {
+    const schema = buildRecordSchema([positionsWithNumbers, validComputedSum]);
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('computed alongside collection + scalar — all AJV-valid after strip', () => {
+    const fields = [
+      { key: 'name', type: 'string', required: true },
+      positionsWithNumbers,
+      validComputedSum,
+    ];
+    const schema = buildRecordSchema(fields);
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(Object.keys(schema.properties)).toEqual(['name', 'positions', 'total']);
+  });
+});
+
+describe('apps-schema T-0452 · computed field type — parseRecordSchema (round-trip)', () => {
+  it('round-trips a computed field (buildRecordSchema → parseRecordSchema ≈ original)', () => {
+    const schema = buildRecordSchema([positionsWithNumbers, validComputedSum]);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((x) => x.key === 'total');
+    expect(f).toBeDefined();
+    expect(f.type).toBe('computed');
+    expect(f.title).toBe('Итого');
+    expect(f.required).toBe(false);
+    expect(f.rollupSource).toBe('positions');
+    expect(f.rollupOp).toBe('sum');
+    expect(f.rollupValueField).toBe('price');
+    expect(f.rollupFactorField).toBe('');
+  });
+
+  it('round-trips a computed field with factor_field', () => {
+    const withFactor = { ...validComputedSum, rollupFactorField: 'qty' };
+    const schema = buildRecordSchema([positionsWithNumbers, withFactor]);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((x) => x.key === 'total');
+    expect(f.rollupFactorField).toBe('qty');
+  });
+
+  it('round-trips a count op computed field (no value_field)', () => {
+    const countField = { ...validComputedSum, rollupOp: 'count', rollupValueField: '' };
+    const schema = buildRecordSchema([positionsWithNumbers, countField]);
+    const parsed = parseRecordSchema(schema);
+    const f = parsed.find((x) => x.key === 'total');
+    expect(f.rollupOp).toBe('count');
+    expect(f.rollupValueField).toBe('');
+    expect(f.rollupFactorField).toBe('');
+  });
+
+  it('computed does not interfere with adjacent scalar/collection field parsing', () => {
+    const schema = buildRecordSchema([
+      { key: 'name', type: 'string', title: 'Имя', required: true },
+      positionsWithNumbers,
+      validComputedSum,
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'name', type: 'string', required: true });
+    expect(parsed[1]).toMatchObject({ key: 'positions', type: 'collection' });
+    expect(parsed[2]).toMatchObject({ key: 'total', type: 'computed' });
+  });
+
+  it('detects persisted x-rollup directly from a raw schema object', () => {
+    const raw = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        total: {
+          type: 'number',
+          title: 'Итого',
+          'x-rollup': { source: 'items', op: 'avg', value_field: 'score' },
+        },
+      },
+    };
+    const parsed = parseRecordSchema(raw);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({
+      key: 'total',
+      type: 'computed',
+      title: 'Итого',
+      required: false,
+      rollupSource: 'items',
+      rollupOp: 'avg',
+      rollupValueField: 'score',
+      rollupFactorField: '',
+    });
+  });
+});
+
+describe('apps-schema T-0452 · computed field type — validateField', () => {
+  // Helper — builds field list [positionsWithNumbers, computed_field]
+  const withContext = (computedPatch) => ({
+    field: { key: 'total', type: 'computed', ...computedPatch },
+    allFields: [positionsWithNumbers, { key: 'total', type: 'computed', ...computedPatch }],
+  });
+
+  it('accepts a valid computed field (sum with numeric value_field)', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupSource).toBeUndefined();
+    expect(err.rollupOp).toBeUndefined();
+    expect(err.rollupValueField).toBeUndefined();
+    expect(err.rollupFactorField).toBeUndefined();
+  });
+
+  it('accepts count op without value_field', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'count', rollupValueField: '', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupSource).toBeUndefined();
+    expect(err.rollupOp).toBeUndefined();
+    expect(err.rollupValueField).toBeUndefined();
+  });
+
+  it('accepts valid factor_field (numeric sub-field of source)', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'qty',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupFactorField).toBeUndefined();
+  });
+
+  it('rejects missing rollupSource', () => {
+    const { field, allFields } = withContext({
+      rollupSource: '', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupSource).toBeTruthy();
+  });
+
+  it('rejects rollupSource that does not reference a collection field', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'nonexistent', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupSource).toBeTruthy();
+  });
+
+  it('rejects rollupSource that matches a non-collection sibling key', () => {
+    // Add a sibling 'name' field of type 'string' — should NOT be a valid source
+    const f = { key: 'total', type: 'computed', rollupSource: 'name', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: '' };
+    const siblings = [
+      { key: 'name', type: 'string' },
+      f,
+    ];
+    const err = validateField(f, siblings);
+    expect(err.rollupSource).toBeTruthy();
+  });
+
+  it('rejects missing op (empty string)', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: '', rollupValueField: 'price', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupOp).toBeTruthy();
+  });
+
+  it('rejects unknown op value', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'median', rollupValueField: 'price', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupOp).toBeTruthy();
+  });
+
+  it('rejects missing value_field for sum op', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: '', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupValueField).toBeTruthy();
+  });
+
+  it('rejects missing value_field for avg op', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'avg', rollupValueField: '', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupValueField).toBeTruthy();
+  });
+
+  it('rejects value_field that references a non-numeric sub-field (string type)', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'name', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupValueField).toBeTruthy(); // 'name' is type:string, not numeric
+  });
+
+  it('rejects value_field that does not exist in source sub-fields', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'nonexistent', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupValueField).toBeTruthy();
+  });
+
+  it('rejects factor_field that references a non-numeric sub-field', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'name',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupFactorField).toBeTruthy(); // 'name' is type:string
+  });
+
+  it('rejects factor_field that does not exist in source sub-fields', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'ghost',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupFactorField).toBeTruthy();
+  });
+
+  it('accepts integer sub-field as a valid value_field (numeric)', () => {
+    // qty is type:integer — should be accepted as value_field
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'qty', rollupFactorField: '',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupValueField).toBeUndefined();
+  });
+
+  it('accepts integer sub-field as a valid factor_field', () => {
+    const { field, allFields } = withContext({
+      rollupSource: 'positions', rollupOp: 'sum', rollupValueField: 'price', rollupFactorField: 'qty',
+    });
+    const err = validateField(field, allFields);
+    expect(err.rollupFactorField).toBeUndefined();
+  });
+});
+
+describe('apps-schema T-0452 · computed field type — validateFields integration', () => {
+  it('validateFields accepts a valid [collection, computed] pair', () => {
+    const r = validateFields([positionsWithNumbers, validComputedSum]);
+    expect(r.valid).toBe(true);
+    expect(r.formError).toBeNull();
+  });
+
+  it('validateFields rejects computed with no source (no collection in list)', () => {
+    // Only the computed field, no collection sibling
+    const r = validateFields([validComputedSum]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].rollupSource).toBeTruthy();
+  });
+
+  it('validateFields rejects computed with invalid op', () => {
+    const bad = { ...validComputedSum, rollupOp: 'bad-op' };
+    const r = validateFields([positionsWithNumbers, bad]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[1].rollupOp).toBeTruthy();
+  });
+});
+
+describe('apps-schema T-0452 · computed field type — blankField defaults', () => {
+  it('blankField includes rollup defaults', () => {
+    const b = blankField();
+    expect(b.rollupSource).toBe('');
+    expect(b.rollupOp).toBe('sum');
+    expect(b.rollupValueField).toBe('');
+    expect(b.rollupFactorField).toBe('');
   });
 });

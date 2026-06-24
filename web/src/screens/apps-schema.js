@@ -65,6 +65,23 @@
  *                   required: [ <required sub-fields> ] } }
  *               No x-* extensions → AJV strict compiles this natively without stripping.
  *
+ * T-0452 ADDITION:
+ *   computed — an «Итог» (rollup/aggregate) field: a READ-ONLY computed value derived
+ *              from a sibling collection field at display time (NEVER stored in record.data;
+ *              T-0453 handles the omit-on-write side). Emitted as:
+ *                { type: "number", title, "x-rollup": {
+ *                    source: <collection field key>,
+ *                    op: sum|count|avg|min|max,
+ *                    value_field: <numeric sub-field key of source>,  // optional for count
+ *                    factor_field: <numeric sub-field key of source>  // optional; only for op:sum
+ *                  } }
+ *              The `x-rollup` key is a JSON Schema extension (same convention as `x-relation`).
+ *              AJV strict rejects x-* keys — validateRecordSchemaDefinition strips them before
+ *              compile (existing stripXExtensions covers ALL x-* prefixes). The `type:"number"`
+ *              is the shape-hint for the display widget; the field is NEVER required and NEVER
+ *              written to record.data. Compute-on-read: the actual aggregation is produced at
+ *              display time (T-0453). This task = authoring + schema round-trip only.
+ *
  * IMPORTANT — `format` is NOT emitted. AJV strict THROWS on an unknown format
  * (e.g. "email"/"date"), so `validateRecordSchemaDefinition` would reject it.
  * The seeds carry `format` only because they are inserted via raw SQL, bypassing
@@ -93,7 +110,18 @@ export const FIELD_TYPES = [
   { value: "date", label: "Дата" },
   { value: "relation", label: "Ссылка на запись" },
   { value: "collection", label: "Список строк" },
+  { value: "computed", label: "Итог" },
 ];
+
+// T-0452: valid rollup operations for a computed field.
+export const ROLLUP_OPS = [
+  { value: "sum", label: "Сумма" },
+  { value: "count", label: "Количество строк" },
+  { value: "avg", label: "Среднее" },
+  { value: "min", label: "Минимум" },
+  { value: "max", label: "Максимум" },
+];
+export const ROLLUP_OP_VALUES = ROLLUP_OPS.map((o) => o.value);
 
 export const FIELD_TYPE_VALUES = FIELD_TYPES.map((t) => t.value);
 
@@ -113,10 +141,17 @@ export const COLLECTION_SUB_FIELD_TYPES = ["string", "number", "integer", "boole
  * unique strings (these become the JSON Schema `enum` array). The validation
  * sets `errors.options` when the constraint is violated.
  *
+ * T-0452: for computed fields, `rollupSource` must reference an existing sibling
+ * collection field key in `allFields` (the full field list context).  `rollupOp`
+ * must be a known op. For non-count ops, `rollupValueField` must reference a
+ * numeric (number/integer) sub-field of the source collection. `rollupFactorField`
+ * if set must also be a numeric sub-field of the source.
+ *
  * @param {{ key?: string, type?: string, title?: string, options?: string[] }} field
+ * @param {Array=} allFields  Full in-memory field list (required for computed validation)
  * @returns {{ key?: string, type?: string, title?: string, options?: string }} per-field error map (empty = ok)
  */
-export function validateField(field) {
+export function validateField(field, allFields) {
   const errors = {};
   const key = typeof field?.key === "string" ? field.key : "";
   const type = typeof field?.type === "string" ? field.type : "";
@@ -159,6 +194,55 @@ export function validateField(field) {
     const target = typeof field?.targetRegistryId === "string" ? field.targetRegistryId.trim() : "";
     if (target.length === 0) {
       errors.targetRegistryId = "Выберите целевой набор полей";
+    }
+  }
+
+  // T-0452: validate computed (rollup) fields.
+  if (type === "computed") {
+    const source = typeof field?.rollupSource === "string" ? field.rollupSource.trim() : "";
+    const op = typeof field?.rollupOp === "string" ? field.rollupOp.trim() : "";
+    const valueField = typeof field?.rollupValueField === "string" ? field.rollupValueField.trim() : "";
+    const factorField = typeof field?.rollupFactorField === "string" ? field.rollupFactorField.trim() : "";
+
+    // source must reference an existing sibling collection field.
+    if (source.length === 0) {
+      errors.rollupSource = "Выберите поле «Список строк», по которому считать";
+    } else {
+      const siblings = Array.isArray(allFields) ? allFields : [];
+      const sourceField = siblings.find((f) => f && f.key === source && f.type === "collection");
+      if (!sourceField) {
+        errors.rollupSource = "Поле «Список строк» с таким ключом не найдено";
+      } else {
+        // op must be a known value.
+        if (!ROLLUP_OP_VALUES.includes(op)) {
+          errors.rollupOp = "Выберите операцию";
+        } else {
+          // For non-count ops, value_field must name a numeric sub-field of the source.
+          const numericSubTypes = ["number", "integer"];
+          const subFields = Array.isArray(sourceField.subFields) ? sourceField.subFields : [];
+          if (op !== "count") {
+            if (valueField.length === 0) {
+              errors.rollupValueField = "Укажите поле значения для этой операции";
+            } else {
+              const sfMatch = subFields.find((sf) => sf && sf.key === valueField);
+              if (!sfMatch) {
+                errors.rollupValueField = "Поле значения не найдено в колонках источника";
+              } else if (!numericSubTypes.includes(sfMatch.type)) {
+                errors.rollupValueField = "Поле значения должно быть числовым (Число или Целое)";
+              }
+            }
+          }
+          // factor_field (optional): if provided, must be a numeric sub-field.
+          if (factorField.length > 0) {
+            const sfFactor = subFields.find((sf) => sf && sf.key === factorField);
+            if (!sfFactor) {
+              errors.rollupFactorField = "Поле множителя не найдено в колонках источника";
+            } else if (!numericSubTypes.includes(sfFactor.type)) {
+              errors.rollupFactorField = "Поле множителя должно быть числовым (Число или Целое)";
+            }
+          }
+        }
+      }
     }
   }
 
@@ -234,7 +318,8 @@ export function validateField(field) {
  */
 export function validateFields(fields) {
   const list = Array.isArray(fields) ? fields : [];
-  const fieldErrors = list.map((f) => validateField(f));
+  // T-0452: pass the full field list so computed fields can validate their rollupSource.
+  const fieldErrors = list.map((f) => validateField(f, list));
 
   let formError = null;
   if (list.length === 0) {
@@ -355,6 +440,18 @@ export function buildRecordSchema(fields) {
       // The value stored in the record is the referenced record's UUID (string).
       const targetId = typeof f.targetRegistryId === "string" ? f.targetRegistryId.trim() : "";
       prop = { type: "string", "x-relation": { target_registry_id: targetId } };
+    } else if (f.type === "computed") {
+      // T-0452: computed (Итог/rollup) → type:number + x-rollup extension.
+      // Same x-* strip convention as x-relation — AJV strips x-rollup before compile.
+      // The field is NEVER stored in record.data (T-0453); type:number is a display hint.
+      // factor_field is optional: omit from x-rollup when absent/empty.
+      const rollupSource = typeof f.rollupSource === "string" ? f.rollupSource.trim() : "";
+      const rollupOp = typeof f.rollupOp === "string" ? f.rollupOp.trim() : "";
+      const rollupValueField = typeof f.rollupValueField === "string" ? f.rollupValueField.trim() : "";
+      const rollupFactorField = typeof f.rollupFactorField === "string" ? f.rollupFactorField.trim() : "";
+      const xRollup = { source: rollupSource, op: rollupOp, value_field: rollupValueField };
+      if (rollupFactorField.length > 0) xRollup.factor_field = rollupFactorField;
+      prop = { type: "number", "x-rollup": xRollup };
     } else {
       prop = emitScalarProp(f);
     }
@@ -362,7 +459,11 @@ export function buildRecordSchema(fields) {
     const title = typeof f?.title === "string" ? f.title.trim() : "";
     if (title.length > 0) prop.title = title;
     properties[key] = prop;
-    if (f.required) required.push(key);
+    // T-0452 guard: computed fields are NEVER required (value is never written to
+    // record.data — T-0453). Even if the in-memory field carries required:true
+    // (e.g. loaded from a stale persisted schema), we must never push the key into
+    // the required array, or every subsequent record save will fail AJV validation.
+    if (f.required && f.type !== "computed") required.push(key);
   }
 
   const schema = {
@@ -442,6 +543,22 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "collection", title, required: requiredSet.has(key), subFields };
     }
 
+    // T-0452: detect computed (rollup) fields by the presence of x-rollup extension.
+    const xRollup = def && typeof def === "object" ? def["x-rollup"] : undefined;
+    if (xRollup && typeof xRollup === "object" && !Array.isArray(xRollup)) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return {
+        key,
+        type: "computed",
+        title,
+        required: false, // computed fields are NEVER required (never written to data)
+        rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
+        rollupOp: typeof xRollup.op === "string" ? xRollup.op : "",
+        rollupValueField: typeof xRollup.value_field === "string" ? xRollup.value_field : "",
+        rollupFactorField: typeof xRollup.factor_field === "string" ? xRollup.factor_field : "",
+      };
+    }
+
     // T-0444: detect relation fields by the presence of x-relation extension.
     const xRelation = def && typeof def === "object" ? def["x-relation"] : undefined;
     if (xRelation && typeof xRelation === "object" && !Array.isArray(xRelation)) {
@@ -514,9 +631,14 @@ export function mapSchemaError(status, body) {
  * A blank field row (used by the editor's "add field" action).
  * T-0294: includes `options` (empty array — populated when type is "select").
  * T-0448: includes `subFields` (empty array — populated when type is "collection").
+ * T-0452: includes rollup config defaults (populated when type is "computed").
  */
 export function blankField() {
-  return { key: "", type: "string", title: "", required: false, options: [], subFields: [] };
+  return {
+    key: "", type: "string", title: "", required: false,
+    options: [], subFields: [],
+    rollupSource: "", rollupOp: "sum", rollupValueField: "", rollupFactorField: "",
+  };
 }
 
 /**

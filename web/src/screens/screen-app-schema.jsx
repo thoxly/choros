@@ -37,6 +37,7 @@ import { validateAppForm } from './apps-validate.js';
 import {
   FIELD_TYPES,
   COLLECTION_SUB_FIELD_TYPES,
+  ROLLUP_OPS,
   validateFields,
   buildRecordSchema,
   parseRecordSchema,
@@ -253,6 +254,184 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
 }
 
 /**
+ * RollupConfigEditor — sub-row config for an «Итог» (computed/rollup) field.
+ *
+ * T-0452: allows the author to choose:
+ *   - Считать по (source): a sibling collection field from the in-memory field list.
+ *   - Операция (op): sum / count / avg / min / max.
+ *   - Поле значения (value_field): numeric sub-field of the source (hidden for count).
+ *   - Множитель (factor_field): optional numeric sub-field of the source.
+ *
+ * Honest empty: if no collection field exists in the list yet, a guide message
+ * replaces the broken dropdowns (no collection = no rollup source = nothing to pick).
+ *
+ * All state is pushed up through onChange(patch) — same controlled pattern as
+ * FieldRow / CollectionSubFieldEditor. No fetch — purely in-memory field list.
+ *
+ * Product language: no «rollup»/«computed» jargon — «Считать по»/«Операция»/«Множитель».
+ * Kit: .chs-input, token vars only (G2, G6).
+ *
+ * @param {{ field, errors, allFields, onChange }} props
+ */
+function RollupConfigEditor({ field, errors, allFields, onChange }) {
+  const set = (patch) => onChange({ ...field, ...patch });
+
+  // Sibling collection fields available as sources (exclude self by key).
+  const collectionFields = (Array.isArray(allFields) ? allFields : []).filter(
+    (f) => f && f.type === 'collection' && f.key && f.key !== field.key,
+  );
+
+  // If no collection field exists yet — honest empty state.
+  if (collectionFields.length === 0) {
+    return (
+      <div style={{
+        marginTop: 'var(--chs-space-4)',
+        padding: 'var(--chs-space-4)',
+        border: '1px solid var(--chs-color-border)',
+        borderRadius: 'var(--chs-radius-3)',
+        background: 'var(--chs-color-surface-raised)',
+      }}>
+        <span style={{
+          fontSize: 'var(--chs-text-xs)',
+          color: 'var(--chs-color-text-muted)',
+        }}>
+          Сначала добавьте поле «Список строк», по которому считать
+        </span>
+      </div>
+    );
+  }
+
+  // The selected source field (to derive numeric sub-field options).
+  const sourceField = collectionFields.find((f) => f.key === field.rollupSource);
+  const numericSubFields = sourceField && Array.isArray(sourceField.subFields)
+    ? sourceField.subFields.filter((sf) => sf && (sf.type === 'number' || sf.type === 'integer'))
+    : [];
+
+  // When source changes, reset value_field and factor_field (stale keys would fail validation).
+  const handleSourceChange = (newSource) => {
+    set({ rollupSource: newSource, rollupValueField: '', rollupFactorField: '' });
+  };
+
+  // When op changes to 'count', clear value_field (not required for count).
+  const handleOpChange = (newOp) => {
+    const patch = { rollupOp: newOp };
+    if (newOp === 'count') patch.rollupValueField = '';
+    set(patch);
+  };
+
+  const needsValueField = field.rollupOp && field.rollupOp !== 'count';
+
+  return (
+    <div style={{
+      marginTop: 'var(--chs-space-4)',
+      paddingLeft: 'var(--chs-space-5)',
+      borderLeft: '3px solid var(--chs-color-border)',
+    }}
+      aria-label="Настройка поля «Итог»"
+    >
+      <span style={{
+        display: 'block', marginBottom: 'var(--chs-space-3)',
+        fontSize: 'var(--chs-text-xs)', fontWeight: 'var(--chs-weight-semibold)',
+        color: 'var(--chs-color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em',
+      }}>
+        Настройка итога
+      </span>
+
+      {/* Считать по — source collection field */}
+      <div style={{ marginBottom: 'var(--chs-space-4)', maxWidth: '380px' }}>
+        <Select
+          label="Считать по"
+          value={field.rollupSource || ''}
+          onChange={(e) => handleSourceChange(e.target.value)}
+          invalid={Boolean(errors.rollupSource)}
+          placeholder="Выберите поле «Список строк»…"
+          options={collectionFields.map((f) => ({
+            value: f.key,
+            label: f.title ? `${f.title} (${f.key})` : f.key,
+          }))}
+        />
+        {errors.rollupSource && (
+          <span style={errStyle}>{errors.rollupSource}</span>
+        )}
+      </div>
+
+      {/* Операция — sum/count/avg/min/max */}
+      <div style={{ marginBottom: 'var(--chs-space-4)', maxWidth: '380px' }}>
+        <Select
+          label="Операция"
+          value={field.rollupOp || ''}
+          onChange={(e) => handleOpChange(e.target.value)}
+          invalid={Boolean(errors.rollupOp)}
+          placeholder="Выберите операцию…"
+          options={ROLLUP_OPS.map((o) => ({ value: o.value, label: o.label }))}
+        />
+        {errors.rollupOp && (
+          <span style={errStyle}>{errors.rollupOp}</span>
+        )}
+      </div>
+
+      {/* Поле значения — numeric sub-field of source (hidden for count) */}
+      {needsValueField && (
+        <div style={{ marginBottom: 'var(--chs-space-4)', maxWidth: '380px' }}>
+          <Select
+            label="Поле значения"
+            value={field.rollupValueField || ''}
+            onChange={(e) => set({ rollupValueField: e.target.value })}
+            invalid={Boolean(errors.rollupValueField)}
+            placeholder={
+              !field.rollupSource
+                ? 'Сначала выберите поле-источник'
+                : numericSubFields.length === 0
+                  ? 'Нет числовых колонок в источнике'
+                  : 'Выберите числовую колонку…'
+            }
+            disabled={!field.rollupSource || numericSubFields.length === 0}
+            options={numericSubFields.map((sf) => ({
+              value: sf.key,
+              label: sf.label ? `${sf.label} (${sf.key})` : sf.key,
+            }))}
+          />
+          {errors.rollupValueField && (
+            <span style={errStyle}>{errors.rollupValueField}</span>
+          )}
+        </div>
+      )}
+
+      {/* Множитель (опц.) — optional numeric sub-field; only shown when source is chosen */}
+      {field.rollupSource && (
+        <div style={{ marginBottom: 'var(--chs-space-2)', maxWidth: '380px' }}>
+          {/* Fix 2 (LOW): no placeholder prop here — placeholder renders a DISABLED
+              <option value=""> which would conflict with the explicit
+              {value:'', label:'— не использовать —'} option below (two value=""
+              options; the default binds to the disabled one). The explicit empty
+              option is selectable and is the correct «not set» affordance. */}
+          <Select
+            label="Множитель (необязательно)"
+            value={field.rollupFactorField || ''}
+            onChange={(e) => set({ rollupFactorField: e.target.value })}
+            invalid={Boolean(errors.rollupFactorField)}
+            disabled={numericSubFields.length === 0}
+            options={numericSubFields.length === 0
+              ? [{ value: '', label: 'Нет числовых колонок в источнике' }]
+              : [
+                { value: '', label: '— не использовать —' },
+                ...numericSubFields.map((sf) => ({
+                  value: sf.key,
+                  label: sf.label ? `${sf.label} (${sf.key})` : sf.key,
+                })),
+              ]
+            }
+          />
+          {errors.rollupFactorField && (
+            <span style={errStyle}>{errors.rollupFactorField}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * FieldRow — one editable field: key · type · title · required · reorder/remove.
  * Controlled entirely by the parent (FieldEditor) via onChange/onMove/onRemove.
  *
@@ -265,7 +444,7 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
  * FieldEditor and passed down) for the target selector. targetRegistryId stored
  * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields }) {
   const set = (patch) => onChange({ ...field, ...patch });
 
   // T-0294: convert options array ↔ newline-separated string for the textarea.
@@ -278,9 +457,11 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
   };
 
   const hasSubRow = field.type === 'select' || field.type === 'relation'
-    || field.type === 'collection'
+    || field.type === 'collection' || field.type === 'computed'
     || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
-    || Boolean(errors.options) || Boolean(errors.targetRegistryId);
+    || Boolean(errors.options) || Boolean(errors.targetRegistryId)
+    || Boolean(errors.rollupSource) || Boolean(errors.rollupOp)
+    || Boolean(errors.rollupValueField) || Boolean(errors.rollupFactorField);
 
   return (
     <div role="group" aria-label={`Поле ${index + 1}`} style={fieldRowGrid}>
@@ -313,15 +494,20 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
         aria-label="Название поля"
         aria-invalid={Boolean(errors.title) || undefined}
       />
-      {/* required */}
-      <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
-        <input
-          type="checkbox"
-          checked={Boolean(field.required)}
-          onChange={(e) => set({ required: e.target.checked })}
-          aria-label="Обязательное поле"
-        />
-      </label>
+      {/* required — hidden for computed fields (a computed value is never stored
+          in record.data so it can never satisfy a required constraint; T-0452). */}
+      {field.type !== 'computed' ? (
+        <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
+          <input
+            type="checkbox"
+            checked={Boolean(field.required)}
+            onChange={(e) => set({ required: e.target.checked })}
+            aria-label="Обязательное поле"
+          />
+        </label>
+      ) : (
+        <span style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }} />
+      )}
       {/* reorder / remove */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', whiteSpace: 'nowrap' }}>
         <Button type="button" variant="ghost" size="sm" disabled={index === 0}
@@ -408,6 +594,20 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
               subFields={Array.isArray(field.subFields) ? field.subFields : []}
               subFieldsError={errors.subFields}
               onChange={(nextSubFields) => set({ subFields: nextSubFields })}
+            />
+          )}
+          {/* T-0452: rollup config for «Итог» (computed) type.
+              Shows source (sibling collection field), op (sum/count/avg/min/max),
+              value field (numeric sub-field of source), and optional factor field.
+              All derived from the in-memory field list (no fetch).
+              Honest empty: if no collection field exists yet, show a guide message
+              instead of a broken config with no options. */}
+          {field.type === 'computed' && (
+            <RollupConfigEditor
+              field={field}
+              errors={errors}
+              allFields={Array.isArray(allFields) ? allFields : []}
+              onChange={set}
             />
           )}
         </div>
@@ -613,6 +813,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               registryDefs={allRegistryDefs}
               registryDefsLoading={allRegistryDefsLoading}
               registryDefsError={allRegistryDefsError}
+              allFields={fields}
             />
           ))}
         </div>
