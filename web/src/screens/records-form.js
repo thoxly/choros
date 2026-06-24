@@ -409,8 +409,10 @@ export function formatCellValue(value, type) {
   }
   // T-0447: relation value is a UUID — label resolution is async.
   // Return the sentinel so callers can render an async cell component.
-  if (type === "relation" && typeof value === "string" && value.length > 0) {
-    return RELATION_CELL_ASYNC;
+  // Empty string means no target was picked (blank optional) → render "—".
+  if (type === "relation") {
+    if (typeof value === "string" && value.length > 0) return RELATION_CELL_ASYNC;
+    return "—"; // blank or unexpected non-string → absent
   }
   if (typeof value === "object") {
     try {
