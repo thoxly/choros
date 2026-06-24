@@ -459,7 +459,11 @@ export function buildRecordSchema(fields) {
     const title = typeof f?.title === "string" ? f.title.trim() : "";
     if (title.length > 0) prop.title = title;
     properties[key] = prop;
-    if (f.required) required.push(key);
+    // T-0452 guard: computed fields are NEVER required (value is never written to
+    // record.data — T-0453). Even if the in-memory field carries required:true
+    // (e.g. loaded from a stale persisted schema), we must never push the key into
+    // the required array, or every subsequent record save will fail AJV validation.
+    if (f.required && f.type !== "computed") required.push(key);
   }
 
   const schema = {

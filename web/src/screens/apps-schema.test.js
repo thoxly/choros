@@ -24,6 +24,8 @@ import {
   FIELD_TYPES,
   FIELD_TYPE_VALUES,
   COLLECTION_SUB_FIELD_TYPES,
+  ROLLUP_OPS,
+  ROLLUP_OP_VALUES,
   validateField,
   validateFields,
   buildRecordSchema,
@@ -1107,8 +1109,6 @@ describe('apps-schema T-0450 Fix 1 · select column options validation', () => {
 // T-0452: computed (Итог / rollup) field type
 // ---------------------------------------------------------------------------
 
-import { ROLLUP_OPS, ROLLUP_OP_VALUES } from './apps-schema.js';
-
 // Shared fixture: a collection field with numeric sub-fields (used as rollup source)
 const positionsWithNumbers = {
   key: 'positions',
@@ -1179,17 +1179,26 @@ describe('apps-schema T-0452 · computed field type — buildRecordSchema', () =
     expect(xr.value_field).toBe(''); // empty but present in the shape
   });
 
-  it('computed field is NEVER added to schema.required (always false)', () => {
+  it('computed field is NEVER added to schema.required even when required:true is passed (build-layer guard)', () => {
+    // T-0452 MEDIUM fix: a computed field with required:true must NOT appear in
+    // schema.required — the value is never written to record.data (T-0453), so AJV
+    // would reject every record save with "required" error if the key were listed.
+    // buildRecordSchema skips computed fields when populating schema.required.
     const requiredComputed = { ...validComputedSum, required: true };
     const schema = buildRecordSchema([positionsWithNumbers, requiredComputed]);
-    // required:true on a computed field is ignored (computed is never stored)
-    // validateField never allows required:true; buildRecordSchema does not put
-    // computed keys in schema.required (field.required is NOT checked for computed)
-    // NOTE: our buildRecordSchema pushes f.required as-is; if caller passes required:true
-    // the schema.required could contain it, but validateField prevents this in the editor.
-    // For the schema-build layer we only verify the x-rollup shape is correct:
-    expect(schema.properties.total.type).toBe('number');
-    expect(schema.properties.total['x-rollup']).toBeDefined();
+    // The computed key must NOT be in schema.required
+    expect(schema.required).toBeUndefined(); // only 'positions' is a candidate; it's required:false
+    // Verify with a scalar required field present: only the scalar ends up in required
+    const withScalar = buildRecordSchema([
+      { key: 'name', type: 'string', required: true },
+      positionsWithNumbers,
+      requiredComputed,
+    ]);
+    expect(withScalar.required).toEqual(['name']); // computed key 'total' is NOT present
+    expect(withScalar.required).not.toContain('total');
+    // The schema still compiles through validateRecordSchemaDefinition (x-* stripped)
+    const result = validateRecordSchemaDefinition(withScalar);
+    expect(result.valid).toBe(true);
   });
 
   it('x-rollup schema does NOT compile with raw AJV strict (strip required)', () => {

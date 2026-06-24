@@ -400,24 +400,27 @@ function RollupConfigEditor({ field, errors, allFields, onChange }) {
       {/* Множитель (опц.) — optional numeric sub-field; only shown when source is chosen */}
       {field.rollupSource && (
         <div style={{ marginBottom: 'var(--chs-space-2)', maxWidth: '380px' }}>
+          {/* Fix 2 (LOW): no placeholder prop here — placeholder renders a DISABLED
+              <option value=""> which would conflict with the explicit
+              {value:'', label:'— не использовать —'} option below (two value=""
+              options; the default binds to the disabled one). The explicit empty
+              option is selectable and is the correct «not set» affordance. */}
           <Select
             label="Множитель (необязательно)"
             value={field.rollupFactorField || ''}
             onChange={(e) => set({ rollupFactorField: e.target.value })}
             invalid={Boolean(errors.rollupFactorField)}
-            placeholder={
-              numericSubFields.length === 0
-                ? 'Нет числовых колонок в источнике'
-                : '— не использовать —'
-            }
             disabled={numericSubFields.length === 0}
-            options={[
-              { value: '', label: '— не использовать —' },
-              ...numericSubFields.map((sf) => ({
-                value: sf.key,
-                label: sf.label ? `${sf.label} (${sf.key})` : sf.key,
-              })),
-            ]}
+            options={numericSubFields.length === 0
+              ? [{ value: '', label: 'Нет числовых колонок в источнике' }]
+              : [
+                { value: '', label: '— не использовать —' },
+                ...numericSubFields.map((sf) => ({
+                  value: sf.key,
+                  label: sf.label ? `${sf.label} (${sf.key})` : sf.key,
+                })),
+              ]
+            }
           />
           {errors.rollupFactorField && (
             <span style={errStyle}>{errors.rollupFactorField}</span>
@@ -491,15 +494,20 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
         aria-label="Название поля"
         aria-invalid={Boolean(errors.title) || undefined}
       />
-      {/* required */}
-      <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
-        <input
-          type="checkbox"
-          checked={Boolean(field.required)}
-          onChange={(e) => set({ required: e.target.checked })}
-          aria-label="Обязательное поле"
-        />
-      </label>
+      {/* required — hidden for computed fields (a computed value is never stored
+          in record.data so it can never satisfy a required constraint; T-0452). */}
+      {field.type !== 'computed' ? (
+        <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
+          <input
+            type="checkbox"
+            checked={Boolean(field.required)}
+            onChange={(e) => set({ required: e.target.checked })}
+            aria-label="Обязательное поле"
+          />
+        </label>
+      ) : (
+        <span style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }} />
+      )}
       {/* reorder / remove */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', whiteSpace: 'nowrap' }}>
         <Button type="button" variant="ghost" size="sm" disabled={index === 0}
