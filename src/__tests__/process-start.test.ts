@@ -42,6 +42,8 @@ function makeStubFlowableClient(startResult: StartResult): FlowableClient {
     // T-0368: skip-submit stubs — not exercised by process-start tests.
     getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null }),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+    // T-0440: isInstanceEnded stub — not exercised by process-start tests.
+    isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
   };
 }
 

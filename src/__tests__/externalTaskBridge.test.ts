@@ -119,6 +119,11 @@ class MockFlowableClient implements FlowableClient {
   async completeUserTask(_taskId: string): Promise<CompleteUserTaskResult> {
     return { ok: true };
   }
+
+  // T-0440: isInstanceEnded stub — not exercised by externalTaskBridge tests.
+  async isInstanceEnded(_instanceId: string): Promise<import("../core/flowable-client.js").IsInstanceEndedResult> {
+    return { ok: true, ended: true };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,19 @@ import {
 export const PROCESS_STARTED_TYPE = "process.started";
 /** Emitted once on card-action approve: advances the instance to `done`. */
 export const TASK_APPROVED_TYPE = "task.approved";
+/**
+ * T-0440: emitted by the approve handler AFTER the engine advances past the
+ * approval gateway AND a new user task is waiting on the post-gateway branch
+ * (e.g. «Доп. согласование»). Carries the same shape as `process.started`
+ * (task_role, task_step, task_name, inst, proc_key, inbox_task_id = the new
+ * projection task id) so the read fold can surface it as a SECOND waiting
+ * inbox task for the same instance without a new table (D-061 no-new-table).
+ *
+ * The inbox_task_id in THIS event is a NEW UUID (not the original process.started
+ * task id), so the approve path for the post-gateway task emits a `task.approved`
+ * back-linked to the new id — the fold handles both generations identically.
+ */
+export const PROCESS_NEXT_TASK_TYPE = "process.next_task";
 
 // ---------------------------------------------------------------------------
 // T-0339 [E15-S3]: Canonical 6-event transition journal event-type constants.
@@ -427,9 +440,75 @@ export async function appendTaskApproved(
   }
 }
 
+/**
+ * T-0440: Emit a `process.next_task` event when the engine advances past the
+ * approval gateway and a NEW user task is waiting on the post-gateway branch
+ * (e.g. «Доп. согласование»). This makes the projection surface the second
+ * waiting task in the inbox pool without adding a new table (D-061).
+ *
+ * The returned taskId is a NEW UUID that serves as the inbox task id for the
+ * post-gateway approval step. It is NOT the Flowable user-task id (the engine
+ * id is not needed in the projection — the approve handler re-queries
+ * getFirstActiveUserTask(inst) at approve time to drive the engine).
+ *
+ * Runs OUTSIDE the original approve tx (best-effort, post-commit). The caller
+ * (inbox.ts approve handler) emits this only after the PG tx has committed and
+ * the engine call succeeded. If this write fails the audit track is
+ * momentarily inconsistent (approved task gone, no next task visible) — the
+ * operator can replay by re-calling the engine-drive path. This is the same
+ * two-phase window accepted for the external-task bridge.
+ *
+ * The write goes through the canonical audit writer (appendAuditEvent) inside
+ * its own tenant-scoped tx (withTenantTx is called by the caller in inbox.ts;
+ * this function accepts the already-established tx client to stay inside that
+ * tx — fail-closed against partial writes).
+ */
+export async function appendNextEngineTask(
+  tx: PgClientLike,
+  args: {
+    readonly instanceId: string;
+    readonly procKey: string;
+    readonly actor: string;
+    readonly nowMs: number;
+    readonly tenantId: string;
+    /** Role the new waiting user-task is addressed to; defaults to role-approver. */
+    readonly approverRole?: string;
+    /** Step/node label of the new waiting user-task. */
+    readonly step: string;
+    /** Display name of the new waiting inbox task. */
+    readonly taskName: string;
+  },
+): Promise<string> {
+  const taskId = randomUUID();
+  const role = args.approverRole ?? APPROVER_ROLE;
+
+  const input: AuditEventInput = {
+    id: taskId,
+    type: PROCESS_NEXT_TASK_TYPE,
+    actor: args.actor,
+    subject: `instance:${args.instanceId}`,
+    scope: { proc_key: args.procKey },
+    via: "inbox-approve",
+    proposed_by: null,
+    confirmed_by: null,
+    payload: {
+      inst: args.instanceId,
+      proc_key: args.procKey,
+      task_role: role,
+      task_step: args.step,
+      task_name: args.taskName,
+      inbox_task_id: taskId, // self-referential: approve of this task back-links here
+    },
+    occurred_at: args.nowMs,
+  };
+  await writer.appendAuditEvent(tx, input);
+  return taskId;
+}
+
 // ---------------------------------------------------------------------------
 // READ half — projection. Mirrors deferred-inbox-store.ts withTenant pattern.
-// Reads ONLY choros.audit_event (process.started + task.approved). NO writes here.
+// Reads ONLY choros.audit_event (process.started + task.approved + process.next_task).
+// NO writes here.
 // ---------------------------------------------------------------------------
 
 async function withTenant<T>(
@@ -462,14 +541,20 @@ interface StartedRow {
 }
 
 /**
- * Read the raw started + approved events for a tenant, ordered oldest-first so the
- * fold is deterministic. Single tx, two scoped SELECTs over audit_event only.
+ * Read the raw started + approved + next-task events for a tenant, ordered
+ * oldest-first so the fold is deterministic. Single tx, three scoped SELECTs
+ * over audit_event only.
+ *
+ * T-0440: `nextTaskRows` are `process.next_task` events emitted by the approve
+ * handler after the engine advances past the gateway. They carry the same shape
+ * as `process.started` rows and are folded into the inbox pool as additional
+ * waiting tasks for multi-step processes (e.g. «Доп. согласование»).
  */
 async function readEvents(
   pool: pg.Pool,
   tenantId: string,
   limit: number,
-): Promise<{ started: StartedRow[]; approvedTaskIds: Set<string> }> {
+): Promise<{ started: StartedRow[]; nextTaskRows: StartedRow[]; approvedTaskIds: Set<string> }> {
   return withTenant(pool, tenantId, async (client) => {
     const startedRes = await client.query<StartedRow>(
       `SELECT id, actor, payload, occurred_at::float8 AS occurred_at
@@ -479,6 +564,17 @@ async function readEvents(
         ORDER BY occurred_at ASC
         LIMIT $3`,
       [PROCESS_STARTED_TYPE, tenantId, limit],
+    );
+
+    // T-0440: read post-gateway task events (process.next_task).
+    const nextTaskRes = await client.query<StartedRow>(
+      `SELECT id, actor, payload, occurred_at::float8 AS occurred_at
+         FROM choros.audit_event
+        WHERE type = $1
+          AND tenant_id = $2
+        ORDER BY occurred_at ASC
+        LIMIT $3`,
+      [PROCESS_NEXT_TASK_TYPE, tenantId, limit],
     );
 
     const approvedRes = await client.query<{ payload: Record<string, unknown> }>(
@@ -498,7 +594,7 @@ async function readEvents(
       if (typeof tid === "string" && tid.length > 0) approvedTaskIds.add(tid);
     }
 
-    return { started: startedRes.rows, approvedTaskIds };
+    return { started: startedRes.rows, nextTaskRows: nextTaskRes.rows, approvedTaskIds };
   });
 }
 
@@ -510,7 +606,16 @@ function strField(payload: Record<string, unknown>, key: string, fallback: strin
 /**
  * Fold the audit track into InstanceProjection[]. A started instance is `waiting`
  * (its user-task awaits a human) until a matching `task.approved` (back-linked by
- * inbox_task_id) is observed, which advances it to `done` (ADR §2.3 / AC-6).
+ * inbox_task_id) is observed.
+ *
+ * T-0440 multi-step update: an instance is `done` only when BOTH the initial
+ * process.started task AND any post-gateway process.next_task tasks have been
+ * approved. If the initial task is approved but a next_task exists and is NOT yet
+ * approved, the instance is still `waiting` (on the post-gateway branch).
+ *
+ * The returned projection uses the MOST RECENT unapproved task (or the initial
+ * task id if all approved) as the `inboxTaskId` so callers can correlate to the
+ * currently-active inbox row.
  */
 export async function listInstanceProjections(
   pool: pg.Pool,
@@ -518,7 +623,22 @@ export async function listInstanceProjections(
   opts?: { limit?: number },
 ): Promise<InstanceProjection[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+  const { started, nextTaskRows, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+
+  // Index next_task rows by instanceId so we can look them up per started row.
+  // An instance may have at most one pending next_task at any point in time
+  // (single-branch linear process). If multiple exist, the last (highest
+  // occurred_at) wins — that is the current waiting task.
+  const nextTaskByInst = new Map<string, StartedRow>();
+  for (const row of nextTaskRows) {
+    const p = (row.payload ?? {}) as Record<string, unknown>;
+    const inst = strField(p, "inst", "");
+    if (!inst) continue;
+    const existing = nextTaskByInst.get(inst);
+    if (!existing || row.occurred_at > existing.occurred_at) {
+      nextTaskByInst.set(inst, row);
+    }
+  }
 
   return started.map((row): InstanceProjection => {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
@@ -526,19 +646,42 @@ export async function listInstanceProjections(
     const procKey = strField(payload, "proc_key", "telLinear");
     const role = strField(payload, "task_role", APPROVER_ROLE);
     const step = strField(payload, "task_step", APPROVE_STEP);
-    const done = approvedTaskIds.has(row.id);
     // T-0414 / T-0356: read originating record_id (present when started via on_create).
     const rawRecordId = payload["record_id"];
     const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
+
+    // T-0440: check whether this instance has a pending next_task (post-gateway branch).
+    const nextTask = nextTaskByInst.get(inst);
+    const initialApproved = approvedTaskIds.has(row.id);
+
+    if (nextTask !== undefined) {
+      // Instance has a post-gateway task. Done only when that task is also approved.
+      const nextApproved = approvedTaskIds.has(nextTask.id);
+      const nextPayload = (nextTask.payload ?? {}) as Record<string, unknown>;
+      const currentStep = nextApproved
+        ? "Завершено"
+        : strField(nextPayload, "task_step", APPROVE_STEP);
+      return {
+        inst,
+        procKey,
+        role: nextApproved ? role : strField(nextPayload, "task_role", role),
+        step: currentStep,
+        status: nextApproved ? "done" : "waiting",
+        startedAt: row.occurred_at,
+        inboxTaskId: nextTask.id,
+        ...(recordId !== undefined ? { recordId } : {}),
+      };
+    }
+
+    // No post-gateway task: done when initial task is approved.
     return {
       inst,
       procKey,
       role,
-      step: done ? "Завершено" : step,
-      status: done ? "done" : "waiting",
+      step: initialApproved ? "Завершено" : step,
+      status: initialApproved ? "done" : "waiting",
       startedAt: row.occurred_at,
       // row.id == process.started event id == inbox_task_id (self-referential back-link).
-      // Surfaces on the projection so callers can correlate by taskId without a separate lookup.
       inboxTaskId: row.id,
       ...(recordId !== undefined ? { recordId } : {}),
     };
@@ -550,6 +693,12 @@ export async function listInstanceProjections(
  * to the ROLE (candidateGroups → role), NOT to a person (ADR §2.3 / AC-3). A task
  * whose instance is already `done` (matching task.approved) is dropped — there is
  * nothing left to act on.
+ *
+ * T-0440 multi-step update: also surfaces post-gateway tasks from
+ * `process.next_task` events. An instance may have BOTH the initial task
+ * (process.started) and a post-gateway task (process.next_task) in the pool;
+ * only the UNAPPROVED ones are visible. The initial task disappears once approved;
+ * the post-gateway task appears when emitted and disappears when approved.
  */
 export async function listInstanceInboxTasks(
   pool: pg.Pool,
@@ -557,9 +706,11 @@ export async function listInstanceInboxTasks(
   opts?: { limit?: number },
 ): Promise<InstanceInboxTask[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+  const { started, nextTaskRows, approvedTaskIds } = await readEvents(pool, tenantId, limit);
 
   const tasks: InstanceInboxTask[] = [];
+
+  // Surface unapproved process.started tasks (initial approval step).
   for (const row of started) {
     if (approvedTaskIds.has(row.id)) continue; // already approved → no waiting task.
     const payload = (row.payload ?? {}) as Record<string, unknown>;
@@ -573,6 +724,22 @@ export async function listInstanceInboxTasks(
       occurredAt: row.occurred_at,
     });
   }
+
+  // T-0440: surface unapproved process.next_task tasks (post-gateway branch tasks).
+  for (const row of nextTaskRows) {
+    if (approvedTaskIds.has(row.id)) continue; // post-gateway task already approved → skip.
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    tasks.push({
+      id: row.id,
+      role: strField(payload, "task_role", APPROVER_ROLE),
+      name: strField(payload, "task_name", APPROVE_TASK_NAME),
+      step: strField(payload, "task_step", APPROVE_STEP),
+      inst: strField(payload, "inst", `instance:${row.id}`),
+      procKey: strField(payload, "proc_key", "telLinear"),
+      occurredAt: row.occurred_at,
+    });
+  }
+
   return tasks;
 }
 
