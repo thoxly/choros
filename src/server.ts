@@ -397,6 +397,22 @@ function buildRouter(
   // Register org structure endpoints
   registerOrgRoutes(router, store as JobStore);
 
+  // T-0443: FlowableClient must be created BEFORE registerInboxRoutes so it can be
+  // threaded into inbox deps (additive-optional; honest-degrade when absent).
+  // Also used by registerProcessesRoutes below (start-instance + process-def publish).
+  // Moved earlier than original position; functionally identical (same env reads).
+  const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
+  const flowableClient =
+    grantsPool && flowablePassword
+      ? makeFlowableClient({
+          baseUrl:
+            process.env["FLOWABLE_REST_BASE_URL"] ??
+            "http://flowable:8082/flowable-rest/service",
+          adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
+          adminPassword: flowablePassword,
+        })
+      : null;
+
   // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
   // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)
   // alongside the existing claim path — tenant-scoped, actor→tenant resolved from
@@ -414,6 +430,9 @@ function buildRouter(
           // step-applier can enqueue the `step_applied` row in the approve tx.
           // Absent (memory-mode) ⇒ applier seam not engaged (honest-degrade).
           outboxStore,
+          // T-0443: optional FlowableClient for engine-drive post-approve (defKey resolution
+          // + reconcile). Absent ⇒ linear audit-only behaviour unchanged (honest-degrade).
+          flowableClient: flowableClient ?? undefined,
         }
       : undefined,
   );
@@ -496,22 +515,6 @@ function buildRouter(
   // static literal paths under /api/rights/* are already bound and first-match-wins
   // routing never reaches the :roleId parameter slot for those paths.
   registerRightsRoutes(router, store as JobStore);
-
-  // FlowableClient for engine write-paths (start-instance + process-def publish).
-  // Composed here from env at call time — NO env reads in core (NF-1). Shared by
-  // the processes start-route (T-0280) and process-defs publish (T-0252) so the
-  // engine binding is allocated once. null when grantsPool or password is absent.
-  const flowablePassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
-  const flowableClient =
-    grantsPool && flowablePassword
-      ? makeFlowableClient({
-          baseUrl:
-            process.env["FLOWABLE_REST_BASE_URL"] ??
-            "http://flowable:8082/flowable-rest/service",
-          adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
-          adminPassword: flowablePassword,
-        })
-      : null;
 
   // Register processes endpoints. The GET display plane is always registered; the
   // POST /api/processes/start write-route (T-0280, FROZEN ADR §2.2) is wired only
