@@ -76,9 +76,15 @@ export type FailTaskResult =
 /**
  * T-0368 (E16): result of getFirstActiveUserTask — the task id of the first
  * active user task for an instance, or null when no active user task exists.
+ *
+ * T-0440 (genericity): additive fields `taskName` and `taskRole` carry the
+ * REAL Flowable task name and candidateGroups value. Both are `null` when no
+ * task exists (taskId === null) and may be `null` even when taskId is present
+ * if the engine does not surface those fields — callers must fall back to
+ * their own constants in that case.
  */
 export type GetFirstUserTaskResult =
-  | { ok: true; taskId: string | null }
+  | { ok: true; taskId: string | null; taskName: string | null; taskRole: string | null }
   | { ok: false; code: FlowableErrorCode };
 
 /**
@@ -588,10 +594,26 @@ export function makeFlowableClient(
         const data = (await resp.json()) as Record<string, unknown>;
         const items = data["data"] as Array<Record<string, unknown>> | undefined;
         if (!Array.isArray(items) || items.length === 0) {
-          return { ok: true as const, taskId: null };
+          return { ok: true as const, taskId: null, taskName: null, taskRole: null };
         }
-        const taskId = String(items[0]!["id"] ?? "");
-        return { ok: true as const, taskId: taskId || null };
+        const task = items[0]!;
+        const taskId = String(task["id"] ?? "");
+        // T-0440 (genericity): extract the REAL task name and candidateGroups.
+        // Flowable /runtime/tasks returns "name" as the BPMN task name and
+        // "candidateGroups" as the first candidate group (string in Flowable 7
+        // single-group tasks). Both may be absent — callers fall back to constants.
+        const rawName = task["name"];
+        const taskName = rawName !== undefined && rawName !== null ? String(rawName) || null : null;
+        // candidateGroups comes as a comma-separated string or an array in some
+        // Flowable versions. Normalise to the first entry or null.
+        const rawGroups = task["candidateGroups"];
+        let taskRole: string | null = null;
+        if (typeof rawGroups === "string" && rawGroups.trim() !== "") {
+          taskRole = rawGroups.split(",")[0]!.trim() || null;
+        } else if (Array.isArray(rawGroups) && rawGroups.length > 0) {
+          taskRole = String(rawGroups[0]).trim() || null;
+        }
+        return { ok: true as const, taskId: taskId || null, taskName, taskRole };
       }
       return { ok: false, code: httpStatusToCode(resp.status) };
     }, resolved) as Promise<GetFirstUserTaskResult>;

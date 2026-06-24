@@ -1425,6 +1425,14 @@ export function registerInboxRoutes(
                 // Emit a process.next_task event so the projection surfaces the new task.
                 // The Flowable user-task id is NOT stored in the audit event — the approve
                 // handler re-queries getFirstActiveUserTask at next approve time.
+                //
+                // T-0440 (genericity): use the REAL task name/role from the engine so
+                // UI-authored processes with arbitrary post-gateway task names are labelled
+                // correctly. Fall back to the telLinear constants when the engine does not
+                // return those fields (defensive: keeps ТЭЛ acceptance unchanged).
+                const liveStep = nextLookup.taskName ?? "Доп. согласование";
+                const liveTaskName = nextLookup.taskName ?? "Дополнительное согласование";
+                const liveRole = nextLookup.taskRole ?? APPROVER_ROLE;
                 const nextTaskNowMs = Date.now();
                 await withTenantTx(pool, tenantId, async (nextClient) => {
                   await appendNextEngineTask(
@@ -1435,13 +1443,9 @@ export function registerInboxRoutes(
                       actor,
                       nowMs: nextTaskNowMs,
                       tenantId,
-                      // Post-gateway task defaults: same role/step as the initial task
-                      // unless the engine provides richer metadata. For telLinear the
-                      // BPMN names the post-gateway task «Доп. согласование»; we surface
-                      // a generic label here (the e2e spec just checks that A task exists).
-                      approverRole: APPROVER_ROLE,
-                      step: "Доп. согласование",
-                      taskName: "Дополнительное согласование",
+                      approverRole: liveRole,
+                      step: liveStep,
+                      taskName: liveTaskName,
                     },
                   );
                 });

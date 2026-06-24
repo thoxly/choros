@@ -19,7 +19,7 @@
  * field of InboxWriteDeps).
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerInboxRoutes, _resetClaimStateForTests, type InboxWriteDeps } from "../http/inbox.js";
@@ -211,7 +211,7 @@ function makeFlowable(overrides: Partial<FlowableClient> = {}): FlowableClient {
     fetchAndLock: vi.fn(),
     completeTask: vi.fn(),
     failTask: vi.fn(),
-    getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null } satisfies GetFirstUserTaskResult),
+    getFirstActiveUserTask: vi.fn().mockResolvedValue({ ok: true, taskId: null, taskName: null, taskRole: null } satisfies GetFirstUserTaskResult),
     completeUserTask: vi.fn().mockResolvedValue({ ok: true } satisfies CompleteUserTaskResult),
     isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true } satisfies IsInstanceEndedResult),
     ...overrides,
@@ -252,10 +252,11 @@ describe("T-0440 inbox approve → engine-drive (multi-step process)", () => {
 
     // Simulate: first getFirstActiveUserTask returns the initial Flowable user-task,
     // second call (post-complete) returns the post-gateway task.
+    // TC-1 is the ТЭЛ-shaped case: live name IS «Доп. согласование» (telLinear BPMN).
     const flowable = makeFlowable({
       getFirstActiveUserTask: vi.fn()
-        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-initial" } satisfies GetFirstUserTaskResult)
-        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-extra" } satisfies GetFirstUserTaskResult),
+        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-initial", taskName: "Согласование", taskRole: "role-approver" } satisfies GetFirstUserTaskResult)
+        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-extra", taskName: "Доп. согласование", taskRole: "role-approver" } satisfies GetFirstUserTaskResult),
       completeUserTask: vi.fn().mockResolvedValue({ ok: true } satisfies CompleteUserTaskResult),
     });
 
@@ -285,6 +286,41 @@ describe("T-0440 inbox approve → engine-drive (multi-step process)", () => {
     const proj = projections.find((p) => p.inst === instanceId);
     expect(proj, "TC-1: instance projection must exist").toBeDefined();
     expect(proj!.status, "TC-1: instance must NOT be done after first approve").toBe("waiting");
+  });
+
+  // ── TC-8 (genericity): generic UI-authored process — live task name surfaces ─
+  it("TC-8: generic process — post-gateway task uses REAL Flowable name, not hardcoded constant", async () => {
+    const db = new FakeDb();
+    const { taskId, instanceId } = await seedStartedTask(db, "flw-generic-1");
+
+    // UI-authored process whose post-gateway task is named something arbitrary.
+    // The engine returns this name; the inbox projection must surface it verbatim.
+    const LIVE_TASK_NAME = "Финальное одобрение директора";
+    const LIVE_TASK_ROLE = "role-director";
+
+    const flowable = makeFlowable({
+      getFirstActiveUserTask: vi.fn()
+        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-initial-g", taskName: "Первичная проверка", taskRole: "role-approver" } satisfies GetFirstUserTaskResult)
+        .mockResolvedValueOnce({ ok: true, taskId: "flw-task-generic", taskName: LIVE_TASK_NAME, taskRole: LIVE_TASK_ROLE } satisfies GetFirstUserTaskResult),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true } satisfies CompleteUserTaskResult),
+    });
+
+    await startServer(makeDeps(db, flowable));
+
+    const r = await httpReq(
+      "POST",
+      `${base}/api/inbox/${taskId}/action`,
+      { "x-dev-user": APPROVER },
+      { action: "approve" },
+    );
+    expect(r.status).toBe(200);
+
+    // The second task in the inbox must carry the LIVE name, not the hardcoded constant.
+    const inboxTasks = await listInstanceInboxTasks(makeFakePool(db), TENANT_ID);
+    const extraTask = inboxTasks.find((t) => t.inst === instanceId);
+    expect(extraTask, "TC-8: second task must appear in inbox pool").toBeDefined();
+    expect(extraTask!.step, "TC-8: step must be the REAL live task name, not «Доп. согласование»").toBe(LIVE_TASK_NAME);
+    expect(extraTask!.role, "TC-8: role must be the REAL live candidateGroups, not APPROVER_ROLE").toBe(LIVE_TASK_ROLE);
   });
 
   // ── TC-2: approve#2 on the second task → engine ends → instance done ───────
