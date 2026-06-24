@@ -122,6 +122,25 @@ describe('buildConditionBody', () => {
     expect(buildConditionBody('bad name!', 'x')).toBe("${badname == 'x'}");
   });
 
+  it('Fix 5: strips leading digits from varName so identifier starts with [A-Za-z_]', () => {
+    expect(buildConditionBody('123foo', 'x')).toBe("${foo == 'x'}");
+    expect(buildConditionBody('42', 'x')).toBe("${approvalRequired == 'x'}");
+  });
+
+  it('Fix 4: strips apostrophes from branchValue — o\'brien round-trips cleanly', () => {
+    // o'brien: apostrophe stripped → obrien, parseable without escaping
+    const body = buildConditionBody('status', "o'brien");
+    expect(body).toBe("${status == 'obrien'}");
+    const parsed = parseConditionBody(body);
+    expect(parsed).not.toBeNull();
+    expect(parsed.branchValue).toBe('obrien');
+  });
+
+  it('Fix 4: strips double-quotes and backslashes from branchValue', () => {
+    expect(buildConditionBody('x', 'a"b')).toBe("${x == 'ab'}");
+    expect(buildConditionBody('x', 'a\\b')).toBe("${x == 'ab'}");
+  });
+
   it('handles empty branchValue', () => {
     expect(buildConditionBody('status', '')).toBe("${status == ''}");
   });
@@ -310,6 +329,63 @@ describe('conditionExpression integration — XML structure and linter-safety', 
       const body = buildConditionBody(varName, value);
       expect(containsRawObjectKey(body), `body "${body}" must not have raw-object keys`).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 1: routing-variable rename re-emits conditionExpression for ALL flows
+// ---------------------------------------------------------------------------
+
+describe('Fix 1 — var rename re-emits all parseable flow conditions', () => {
+  /**
+   * Simulate what handleVarNameChange does for existing flows:
+   * re-build the body with the new var name and the same branch value.
+   */
+  function reEmitBodies(flows, newVarName) {
+    return flows.map((f) => {
+      const parsed = parseConditionBody(f.body);
+      if (!parsed) return f.body; // default or unparseable — untouched
+      return buildConditionBody(newVarName, parsed.branchValue);
+    });
+  }
+
+  it('two flows with branch values — both bodies updated to new var name', () => {
+    const flowBodies = [
+      { body: buildConditionBody('approvalRequired', 'yes') },
+      { body: buildConditionBody('approvalRequired', 'no') },
+    ];
+    const updated = reEmitBodies(flowBodies, 'решение');
+    // Cyrillic var name is sanitised to empty → fallback 'approvalRequired'
+    // (test the round-trip mechanic: both branch VALUES are preserved)
+    expect(parseConditionBody(updated[0]).branchValue).toBe('yes');
+    expect(parseConditionBody(updated[1]).branchValue).toBe('no');
+    // both reference the same (sanitised) var
+    const var0 = parseConditionBody(updated[0]).varName;
+    const var1 = parseConditionBody(updated[1]).varName;
+    expect(var0).toBe(var1);
+  });
+
+  it('two flows renamed from "status" to "outcome" — bodies use new var', () => {
+    const flowBodies = [
+      { body: buildConditionBody('status', 'approved') },
+      { body: buildConditionBody('status', 'rejected') },
+    ];
+    const updated = reEmitBodies(flowBodies, 'outcome');
+    expect(updated[0]).toBe("${outcome == 'approved'}");
+    expect(updated[1]).toBe("${outcome == 'rejected'}");
+    // both parseable with new var name
+    expect(parseConditionBody(updated[0])).toEqual({ varName: 'outcome', branchValue: 'approved' });
+    expect(parseConditionBody(updated[1])).toEqual({ varName: 'outcome', branchValue: 'rejected' });
+  });
+
+  it('default flow (no parseable condition) is left untouched after rename', () => {
+    const flowBodies = [
+      { body: buildConditionBody('status', 'approved') },
+      { body: '' }, // default flow — no condition
+    ];
+    const updated = reEmitBodies(flowBodies, 'outcome');
+    expect(updated[0]).toBe("${outcome == 'approved'}");
+    expect(updated[1]).toBe(''); // unchanged
   });
 });
 

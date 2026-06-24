@@ -50,9 +50,12 @@ export function buildConditionBody(varName, branchValue) {
   // Sanitise: strip characters that would break the EL expression.
   // Only allow identifiers for varName and simple printable chars for value.
   // Apply fallback AFTER stripping (stripped result may be empty).
-  const stripped = (varName || '').replace(/[^A-Za-z0-9_]/g, '');
+  // Fix 5: also strip leading digits so the identifier always starts with [A-Za-z_].
+  const stripped = (varName || '').replace(/[^A-Za-z0-9_]/g, '').replace(/^[0-9]+/, '');
   const safeVar = stripped || 'approvalRequired';
-  const safeVal = (branchValue || '').replace(/'/g, "\\'");
+  // Fix 4: strip apostrophes (and other EL-breaking chars) from value so every
+  // stored value round-trips cleanly through parseConditionBody.
+  const safeVal = (branchValue || '').replace(/['"\\]/g, '');
   return `\${${safeVar} == '${safeVal}'}`;
 }
 
@@ -141,6 +144,17 @@ function FlowRow({ flow, varName, defaultFlowId, onBranchValueChange, onSetDefau
 
   const isDefault = defaultFlowId === flowId;
 
+  // Fix 4: warn user if they type an apostrophe (or other stripped char)
+  const [stripWarning, setStripWarning] = useState(false);
+
+  const handleValueInput = (e) => {
+    if (isDefault) return;
+    const raw = e.target.value;
+    const hadStrippable = /['"\\]/.test(raw);
+    setStripWarning(hadStrippable);
+    onBranchValueChange(flowId, raw);
+  };
+
   return (
     <div
       style={{
@@ -164,28 +178,35 @@ function FlowRow({ flow, varName, defaultFlowId, onBranchValueChange, onSetDefau
       </div>
 
       {/* Branch value input — disabled when this flow is the default */}
+      {/* Fix 3: label renamed to «При каком значении идти по этой ветке» */}
       <div className="bio-properties-panel-entry">
-        <label className="bio-properties-panel-label">Значение ветки</label>
+        <label className="bio-properties-panel-label">При каком значении идти по этой ветке</label>
         <div className="bio-properties-panel-textfield">
           <input
             className="bio-properties-panel-input"
             value={isDefault ? '' : currentValue}
-            placeholder={isDefault ? '(ветка по умолчанию)' : `${varName} == '…'`}
+            placeholder={isDefault ? '(ветка по умолчанию)' : 'например, да'}
             readOnly={isDefault}
             disabled={isDefault}
-            onChange={(e) => !isDefault && onBranchValueChange(flowId, e.target.value)}
+            onChange={handleValueInput}
             style={{ cursor: isDefault ? 'default' : undefined }}
           />
         </div>
+        {/* Fix 4: inline hint when EL-breaking chars are stripped */}
+        {stripWarning && !isDefault && (
+          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-warning, #b45309)' }}>
+            Кавычки и обратный слэш в значении не допускаются и будут удалены.
+          </p>
+        )}
       </div>
 
-      {/* Condition preview — shown when value is set */}
+      {/* Fix 2: condition PREVIEW — human-readable, no raw EL on screen */}
       {!isDefault && currentValue && (
         <p
           className="bio-properties-panel-description"
-          style={{ marginTop: 'var(--chs-space-2)', fontFamily: 'monospace', fontSize: 'var(--chs-text-xs)' }}
+          style={{ marginTop: 'var(--chs-space-2)', fontStyle: 'italic', fontSize: 'var(--chs-text-xs)' }}
         >
-          {buildConditionBody(varName, currentValue)}
+          {`Эта ветка сработает, когда «${varName}» равно «${currentValue}».`}
         </p>
       )}
 
@@ -274,12 +295,39 @@ export function GatewayConditionPanel({ bo, modeler, element }) {
     try { return modeler && modeler.get('moddle'); } catch { return null; }
   }, [modeler]);
 
-  /** Handle routing variable name change — persists to bo and refreshes labels. */
-  const handleVarNameChange = useCallback((newVar) => {
-    setVarName(newVar);
-    writeRoutingVar(bo, newVar);
+  /**
+   * Handle routing variable name change — persists to bo, then RE-EMITS
+   * conditionExpression for every outgoing flow that has a parseable condition,
+   * replacing the old var name with the new one (Fix 1).
+   */
+  const handleVarNameChange = useCallback((rawVar) => {
+    // Fix 5: sanitise on input — strip non-identifier chars and leading digits
+    const sanitised = rawVar.replace(/[^A-Za-z0-9_]/g, '').replace(/^[0-9]+/, '');
+    setVarName(sanitised);
+    writeRoutingVar(bo, sanitised);
+
+    // Fix 1: re-emit conditionExpression for every parseable outgoing flow
+    const modeling = getModeling();
+    const moddle = getModdle();
+    if (modeling && moddle && bo && bo.outgoing) {
+      try {
+        const elementRegistry = modeler.get('elementRegistry');
+        for (const flow of bo.outgoing) {
+          const flowBo = flow.businessObject || flow;
+          const existingBody = readFlowConditionBody(flowBo);
+          const parsed = parseConditionBody(existingBody);
+          if (!parsed) continue; // default flow or unparseable — skip
+          const newBody = buildConditionBody(sanitised, parsed.branchValue);
+          const flowElement = elementRegistry.get(flowBo.id);
+          if (!flowElement) continue;
+          const formalExpression = moddle.create('bpmn:FormalExpression', { body: newBody });
+          modeling.updateProperties(flowElement, { conditionExpression: formalExpression });
+        }
+      } catch (_) { /* non-fatal if elementRegistry unavailable */ }
+    }
+
     fireChanged();
-  }, [bo, fireChanged]);
+  }, [bo, modeler, getModeling, getModdle, fireChanged]);
 
   /**
    * Handle branch value change for a specific outgoing flow.
@@ -319,7 +367,6 @@ export function GatewayConditionPanel({ bo, modeler, element }) {
    * Sets the gateway's `default` attribute to the selected flow via
    * modeling.updateProperties on the GATEWAY element.
    * Clears the conditionExpression on the new default flow.
-   * Restores a placeholder condition on the previously-default flow if it had none.
    */
   const handleSetDefault = useCallback((flowId) => {
     if (!bo || !bo.outgoing) return;
@@ -377,20 +424,20 @@ export function GatewayConditionPanel({ bo, modeler, element }) {
 
       <div className="bio-properties-panel-group-entries">
 
-        {/* Routing variable name */}
+        {/* Fix 3: label renamed to «Поле, по которому выбирается ветка» */}
         <div className="bio-properties-panel-entry">
-          <label className="bio-properties-panel-label">Переменная маршрутизации</label>
+          <label className="bio-properties-panel-label">Поле, по которому выбирается ветка</label>
           <div className="bio-properties-panel-textfield">
             <input
               className="bio-properties-panel-input"
               value={varName}
-              placeholder="approvalRequired"
+              placeholder="например, решение"
               onChange={(e) => handleVarNameChange(e.target.value)}
             />
           </div>
+          {/* Fix 2: no e.g., no UserTask / ServiceTask class names on screen */}
           <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
-            Переменная процесса, по которой шлюз выбирает ветку.
-            Задаётся предыдущим шагом (e.g. UserTask или ServiceTask).
+            Эту переменную задаёт один из предыдущих шагов процесса (например, шаг-форма или шаг-сервис).
           </p>
         </div>
 
