@@ -41,6 +41,7 @@ import { DEV_USER_HEADER } from "./auth.js";
 import type { FlowableClient } from "../core/flowable-client.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
+import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -181,7 +182,61 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
     //    turn a created instance into a 502 — it degrades to "started but unprojected"
     //    rather than rolling back the (already engine-side) start.
     const startResult = await withTenantTx(pool, tenantId, async (client) => {
-      const result = await flowable.startInstance(processKey, variables);
+      // T-0439: pre-compute DMN gateway routing variable at launch.
+      // Evaluates the published rule table (if any) for this process and injects
+      // the routing variable + version pins into the startInstance variables map
+      // so the exclusiveGateway in authored processes can route at start time.
+      // Degrades gracefully: no published rule table → no injection, no throw.
+      //
+      // SAVEPOINT isolation: preComputeGatewayVariable writes an audit event
+      // (emitGatewayEvaluated → appendAuditEvent) on this same client.  A DB
+      // error inside that INSERT would leave the outer tx in an aborted state
+      // (25P02) even though the JS catch swallows the JS error, causing every
+      // subsequent query to fail.  Wrapping in a SAVEPOINT ensures that on any
+      // DB error the tx is rolled back only to the savepoint — the outer tx
+      // remains clean and launch proceeds with the original variables.
+      // Same idiom as proc_proj SAVEPOINT in records.ts.
+      let launchVariables = variables;
+      await client.query('SAVEPOINT dmn_precompute');
+      try {
+        const dmnResult = await preComputeGatewayVariable(client, {
+          tenantId,
+          instanceId: `launch-${processKey}-${Date.now()}`, // synthetic id for audit event
+          processKey,
+          procDefId: processKey,
+          actor,
+          nowMs: Date.now(),
+          bindings: variables ?? {},
+          gatewayId: `gw-${processKey}`, // generic gateway id for audit event
+        });
+        if (dmnResult.gatewayVar !== null) {
+          launchVariables = {
+            ...(variables ?? {}),
+            [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+            ...dmnResult.versionVars,
+          };
+        } else if (Object.keys(dmnResult.versionVars).length > 0) {
+          launchVariables = { ...(variables ?? {}), ...dmnResult.versionVars };
+        }
+        await client.query('RELEASE SAVEPOINT dmn_precompute');
+      } catch (dmnErr) {
+        // Non-fatal: a DMN evaluation failure must NOT block the process launch.
+        // Roll back to the savepoint so the tx is clean, then proceed with
+        // the original variables (gateway falls through to default flow).
+        await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
+        console.warn(
+          `[process-start dmn-precompute] non-fatal DMN pre-compute error for process ` +
+            `${processKey}:`,
+          dmnErr,
+        );
+      }
+
+      const result = await flowable.startInstance(
+        processKey,
+        launchVariables !== undefined && Object.keys(launchVariables).length > 0
+          ? launchVariables
+          : undefined,
+      );
       if (result.ok) {
         try {
           await appendProcessStarted(client as unknown as PgClientLike, {

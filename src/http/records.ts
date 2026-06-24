@@ -86,6 +86,7 @@ import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.
 import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 import {
   parsePaginationParams,
   encodeRecordsCursor,
@@ -689,7 +690,55 @@ async function createRecord(args: {
       if (binding !== null) {
         // Project SCALAR variables from record data via field_mapping.
         // RECORD_IN_PAYLOAD: only primitives pass through; objects/arrays are dropped.
-        const variables = projectEngineVariables(data, binding.field_mapping);
+        let variables = projectEngineVariables(data, binding.field_mapping);
+
+        // T-0439: pre-compute DMN gateway routing variable at launch.
+        // Evaluates the published rule table (if any) for this process and injects
+        // the routing variable + version pins into the startInstance variables map
+        // so the exclusiveGateway in authored processes can route at start time.
+        // Degrades gracefully: no published rule table → no injection, no throw.
+        //
+        // SAVEPOINT isolation: preComputeGatewayVariable writes an audit event
+        // (emitGatewayEvaluated → appendAuditEvent) on this same client.  A DB
+        // error inside that INSERT would leave the outer tx in an aborted state
+        // (25P02) even though the JS catch swallows the JS error, causing every
+        // subsequent query to fail.  Wrapping in a SAVEPOINT ensures that on any
+        // DB error the tx is rolled back only to the savepoint — the outer tx
+        // remains clean and launch proceeds with the original variables.
+        // Mirrors the proc_proj SAVEPOINT pattern directly below (~line 791).
+        await client.query('SAVEPOINT dmn_precompute');
+        try {
+          const dmnResult = await preComputeGatewayVariable(client, {
+            tenantId,
+            instanceId: id,      // record id as proxy instance id for audit (best-effort)
+            processKey: binding.process_key,
+            procDefId: binding.process_key,
+            actor,
+            nowMs,
+            bindings: variables,
+            gatewayId: `gw-${binding.process_key}`, // generic gateway id for audit event
+          });
+          if (dmnResult.gatewayVar !== null) {
+            variables = {
+              ...variables,
+              [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+              ...dmnResult.versionVars,
+            };
+          } else if (Object.keys(dmnResult.versionVars).length > 0) {
+            variables = { ...variables, ...dmnResult.versionVars };
+          }
+          await client.query('RELEASE SAVEPOINT dmn_precompute');
+        } catch (dmnErr) {
+          // Non-fatal: a DMN evaluation failure must NOT block the process launch.
+          // Roll back to the savepoint so the tx is clean, then proceed with
+          // the original variables (gateway falls through to default flow).
+          await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
+          console.warn(
+            `[on_create dmn-precompute] non-fatal DMN pre-compute error for process ` +
+              `${binding.process_key}:`,
+            dmnErr,
+          );
+        }
 
         // Start the process inside the SAME tenant tx (create = start atomically).
         // If startInstance fails the whole tx rolls back (no orphan record).
