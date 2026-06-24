@@ -43,6 +43,7 @@ import { registerReportPageRoutes } from "./http/report-pages.js";
 import { registerReportPageRenderRoutes } from "./http/report-page-render.js";
 import { registerPdpExplainRoutes } from "./http/pdp-explain.js";
 import { registerFloor1EditorRoutes } from "./http/floor1-editor.js";
+import { registerDmnRuleTableRoutes } from "./http/dmn-rule-table.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
@@ -661,6 +662,14 @@ function buildRouter(
   // Pool is used solely for the keycloak-mode process_designer authz lookup
   // (review R-1); dev mode works without it, so wiring stays unconditional.
   registerFloor1EditorRoutes(router, grantsPool ?? null);
+
+  // Register DMN rule table WRITE API (T-0433).
+  // Endpoints: GET/POST /api/dmn-rule-tables, POST /api/dmn-rule-tables/:id/publish.
+  // Deps-gated on grantsPool — honest-degrade when no DATABASE_URL.
+  // D-056: rows land in choros.dmn_rule_table (same table loadPublishedRuleTables reads).
+  if (grantsPool) {
+    registerDmnRuleTableRoutes(router, grantsPool);
+  }
 
   // Register vendor activation + vendor-service endpoints (T-0127 / T-0198).
   // The ONLY HTTP surface that reads activation/entitlement state. GET /vendor/activation

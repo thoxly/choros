@@ -26,6 +26,7 @@
  *           already-running instances (in-flight rule-change safety).
  */
 
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { DmnRuleTable } from "../core/dmn-middle.js";
 
@@ -330,4 +331,238 @@ export function deserializeVersionsFromVariables(
     versions.push({ id, updatedAt });
   }
   return versions;
+}
+
+// ---------------------------------------------------------------------------
+// T-0433 Write functions — upsert / get / list / publish
+// ---------------------------------------------------------------------------
+
+/**
+ * Full row shape returned by the write API (includes status and process_def_id).
+ */
+export interface DmnRuleTableRow {
+  id: string;
+  name: string;
+  definition: DmnRuleTable;
+  process_def_id: string | null;
+  status: "draft" | "published";
+  updated_at: number; // epoch ms
+}
+
+/**
+ * upsertRuleTableDraft — INSERT or UPDATE a DMN rule table in 'draft' status.
+ *
+ * - If `table.id` is a valid UUID and a row with that id already exists in the
+ *   tenant, it is updated (name + definition + updated_at bumped, status reset
+ *   to 'draft').
+ * - Otherwise a fresh UUID is generated and a new row is inserted as 'draft'.
+ *
+ * @param tx          Open tenant-scoped pg.PoolClient (RLS enforced via withTenantTx).
+ * @param tenantId    UUID of the current tenant (explicit WHERE predicate).
+ * @param table       Validated DmnRuleTable (from validateDmnRuleTable).
+ * @param processDefId Optional process definition key to scope the table.
+ * @returns           The id of the upserted row.
+ */
+export async function upsertRuleTableDraft(
+  tx: pg.PoolClient,
+  tenantId: string,
+  table: DmnRuleTable,
+  processDefId?: string | null,
+): Promise<string> {
+  if (!isUuid(tenantId)) {
+    throw new Error(`upsertRuleTableDraft: tenantId must be a UUID, got: ${JSON.stringify(tenantId)}`);
+  }
+
+  // Determine id: use supplied id if it's a valid UUID and exists in this tenant;
+  // otherwise allocate a fresh UUID.
+  let id: string;
+  if (table.id && isUuid(table.id)) {
+    const check = await tx.query<{ id: string }>(
+      `SELECT id FROM choros.dmn_rule_table WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, table.id],
+    );
+    if (check.rows.length > 0) {
+      id = table.id;
+    } else {
+      // Supplied id not found in this tenant — treat as new row with the same id
+      // (allows callers to supply deterministic UUIDs for idempotent creation).
+      id = isUuid(table.id) ? table.id : randomUUID();
+    }
+  } else {
+    id = randomUUID();
+  }
+
+  // Build definition blob: the serialized DmnRuleTable stored in the definition column.
+  // The id in the blob matches the DB row id (canonical authority: DB row id).
+  const definition: DmnRuleTable = { ...table, id };
+
+  const existsResult = await tx.query<{ id: string }>(
+    `SELECT id FROM choros.dmn_rule_table WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, id],
+  );
+
+  if (existsResult.rows.length === 0) {
+    // INSERT
+    await tx.query(
+      `INSERT INTO choros.dmn_rule_table
+         (tenant_id, id, name, definition, process_def_id, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5, 'draft', now(), now())`,
+      [tenantId, id, definition.name, JSON.stringify(definition), processDefId ?? null],
+    );
+  } else {
+    // UPDATE — bump updated_at, reset status to 'draft'
+    await tx.query(
+      `UPDATE choros.dmn_rule_table
+          SET name          = $1,
+              definition    = $2::jsonb,
+              process_def_id = $3,
+              status        = 'draft',
+              updated_at    = now()
+        WHERE tenant_id = $4
+          AND id        = $5`,
+      [definition.name, JSON.stringify(definition), processDefId ?? null, tenantId, id],
+    );
+  }
+
+  return id;
+}
+
+/**
+ * getRuleTableById — fetch a single DMN rule table row by id, tenant-scoped.
+ *
+ * Returns null if the row does not exist OR belongs to a different tenant
+ * (RLS enforces this, but the explicit WHERE predicate is a belt-and-suspenders guard).
+ *
+ * @param tx       Open tenant-scoped pg.PoolClient.
+ * @param tenantId UUID of the current tenant.
+ * @param id       UUID of the rule table row.
+ */
+export async function getRuleTableById(
+  tx: pg.PoolClient,
+  tenantId: string,
+  id: string,
+): Promise<DmnRuleTableRow | null> {
+  if (!isUuid(tenantId)) {
+    throw new Error(`getRuleTableById: tenantId must be a UUID`);
+  }
+  if (!isUuid(id)) {
+    return null; // non-UUID id → cannot exist
+  }
+
+  const res = await tx.query<DmnRuleTableDbRow>(
+    `SELECT id, name, definition, process_def_id, status,
+            (EXTRACT(EPOCH FROM updated_at) * 1000)::float8 AS updated_at
+       FROM choros.dmn_rule_table
+      WHERE tenant_id = $1
+        AND id        = $2`,
+    [tenantId, id],
+  );
+
+  if (res.rows.length === 0) return null;
+  const row = res.rows[0];
+  const table = deserializeDefinition(row.id, row.definition);
+  if (table === null) return null;
+
+  return {
+    id: row.id,
+    name: row.name,
+    definition: table,
+    process_def_id: row.process_def_id,
+    status: row.status as "draft" | "published",
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * listRuleTables — list all DMN rule tables for a tenant, including drafts.
+ *
+ * Optionally filtered by processKey (process_def_id). Returns tables scoped to
+ * that processKey AND tables with process_def_id = NULL (global scope).
+ *
+ * @param tx          Open tenant-scoped pg.PoolClient.
+ * @param tenantId    UUID of the current tenant.
+ * @param processKey  Optional process definition key to filter by.
+ */
+export async function listRuleTables(
+  tx: pg.PoolClient,
+  tenantId: string,
+  processKey?: string,
+): Promise<DmnRuleTableRow[]> {
+  if (!isUuid(tenantId)) {
+    throw new Error(`listRuleTables: tenantId must be a UUID`);
+  }
+
+  let rows: DmnRuleTableDbRow[];
+
+  if (processKey && processKey.trim().length > 0) {
+    const res = await tx.query<DmnRuleTableDbRow>(
+      `SELECT id, name, definition, process_def_id, status,
+              (EXTRACT(EPOCH FROM updated_at) * 1000)::float8 AS updated_at
+         FROM choros.dmn_rule_table
+        WHERE tenant_id = $1
+          AND (process_def_id IS NULL OR process_def_id = $2)
+        ORDER BY name ASC`,
+      [tenantId, processKey],
+    );
+    rows = res.rows;
+  } else {
+    const res = await tx.query<DmnRuleTableDbRow>(
+      `SELECT id, name, definition, process_def_id, status,
+              (EXTRACT(EPOCH FROM updated_at) * 1000)::float8 AS updated_at
+         FROM choros.dmn_rule_table
+        WHERE tenant_id = $1
+        ORDER BY name ASC`,
+      [tenantId],
+    );
+    rows = res.rows;
+  }
+
+  const result: DmnRuleTableRow[] = [];
+  for (const row of rows) {
+    const table = deserializeDefinition(row.id, row.definition);
+    if (table === null) continue;
+    result.push({
+      id: row.id,
+      name: row.name,
+      definition: table,
+      process_def_id: row.process_def_id,
+      status: row.status as "draft" | "published",
+      updated_at: row.updated_at,
+    });
+  }
+  return result;
+}
+
+/**
+ * publishRuleTable — flip a DMN rule table from 'draft' to 'published'.
+ *
+ * Only operates within the tenant scope. Returns true if a row was updated,
+ * false if no matching draft was found (caller should return 404).
+ *
+ * @param tx       Open tenant-scoped pg.PoolClient.
+ * @param tenantId UUID of the current tenant.
+ * @param id       UUID of the rule table row to publish.
+ */
+export async function publishRuleTable(
+  tx: pg.PoolClient,
+  tenantId: string,
+  id: string,
+): Promise<boolean> {
+  if (!isUuid(tenantId)) {
+    throw new Error(`publishRuleTable: tenantId must be a UUID`);
+  }
+  if (!isUuid(id)) {
+    return false;
+  }
+
+  const res = await tx.query(
+    `UPDATE choros.dmn_rule_table
+        SET status     = 'published',
+            updated_at = now()
+      WHERE tenant_id = $1
+        AND id        = $2`,
+    [tenantId, id],
+  );
+
+  return (res.rowCount ?? 0) > 0;
 }
