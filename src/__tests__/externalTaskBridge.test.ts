@@ -119,6 +119,15 @@ class MockFlowableClient implements FlowableClient {
   async completeUserTask(_taskId: string): Promise<CompleteUserTaskResult> {
     return { ok: true };
   }
+
+  // T-0443: engine-reconcile stubs — not exercised by externalTaskBridge tests.
+  async getActiveUserTasks(_instanceId: string): Promise<import("../core/flowable-client.js").GetActiveUserTasksResult> {
+    return { ok: true, tasks: [] };
+  }
+
+  async isInstanceEnded(_instanceId: string): Promise<import("../core/flowable-client.js").IsInstanceEndedResult> {
+    return { ok: true, ended: false };
+  }
 }
 
 // ---------------------------------------------------------------------------

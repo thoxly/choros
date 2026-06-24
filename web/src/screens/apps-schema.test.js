@@ -354,6 +354,133 @@ describe('apps-schema T-0294 · date field type', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// T-0444: relation field type
+// ---------------------------------------------------------------------------
+
+const TEST_UUID = '550e8400-e29b-41d4-a716-446655440000';
+
+describe('apps-schema T-0444 · relation field type', () => {
+  it('buildRecordSchema: relation emits { type:"string","x-relation":{target_registry_id:<uuid>} }', () => {
+    const schema = buildRecordSchema([
+      { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
+    ]);
+    expect(schema.properties.kontragent).toEqual({
+      type: 'string',
+      'x-relation': { target_registry_id: TEST_UUID },
+    });
+  });
+
+  it('buildRecordSchema: relation with required → included in required array', () => {
+    const schema = buildRecordSchema([
+      { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: true },
+    ]);
+    expect(schema.required).toEqual(['kontragent']);
+  });
+
+  it('buildRecordSchema: relation with title emits title in property', () => {
+    const schema = buildRecordSchema([
+      { key: 'kontragent', type: 'relation', title: 'Контрагент', targetRegistryId: TEST_UUID, required: false },
+    ]);
+    expect(schema.properties.kontragent.title).toBe('Контрагент');
+    expect(schema.properties.kontragent['x-relation']).toEqual({ target_registry_id: TEST_UUID });
+  });
+
+  it('buildRecordSchema: x-relation schema does NOT compile with raw AJV strict (strip needed)', () => {
+    // Confirms the validator strip is required — AJV strict rejects x-* keywords.
+    const schema = buildRecordSchema([
+      { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
+    ]);
+    expect(backendAccepts(schema)).toBe(false); // raw schema fails AJV strict
+  });
+
+  it('buildRecordSchema: x-relation schema compiles after x-* strip (mirrors validator)', () => {
+    const schema = buildRecordSchema([
+      { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
+    ]);
+    // Simulate the strip done by validateRecordSchemaDefinition.
+    const strippedProps = {};
+    for (const [k, v] of Object.entries(schema.properties)) {
+      const stripped = {};
+      for (const [pk, pv] of Object.entries(v)) {
+        if (!pk.startsWith('x-')) stripped[pk] = pv;
+      }
+      strippedProps[k] = stripped;
+    }
+    const stripped = { ...schema, properties: strippedProps };
+    expect(backendAccepts(stripped)).toBe(true);
+  });
+
+  it('parseRecordSchema: detects x-relation → type relation + targetRegistryId', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        kontragent: {
+          type: 'string',
+          'x-relation': { target_registry_id: TEST_UUID },
+          title: 'Контрагент',
+        },
+      },
+      required: ['kontragent'],
+    };
+    const fields = parseRecordSchema(schema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'kontragent',
+      type: 'relation',
+      title: 'Контрагент',
+      required: true,
+      targetRegistryId: TEST_UUID,
+    });
+  });
+
+  it('parseRecordSchema: round-trips a relation field', () => {
+    const fields = [
+      { key: 'kontragent', type: 'relation', title: 'Контрагент', targetRegistryId: TEST_UUID, required: true },
+    ];
+    const schema = buildRecordSchema(fields);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({
+      key: 'kontragent',
+      type: 'relation',
+      title: 'Контрагент',
+      targetRegistryId: TEST_UUID,
+      required: true,
+    });
+  });
+
+  it('validateField: relation without targetRegistryId → error', () => {
+    const err = validateField({ key: 'kontragent', type: 'relation' });
+    expect(err.targetRegistryId).toBeTruthy();
+  });
+
+  it('validateField: relation with empty targetRegistryId → error', () => {
+    const err = validateField({ key: 'kontragent', type: 'relation', targetRegistryId: '   ' });
+    expect(err.targetRegistryId).toBeTruthy();
+  });
+
+  it('validateField: relation with valid targetRegistryId → no targetRegistryId error', () => {
+    const err = validateField({ key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID });
+    expect(err.targetRegistryId).toBeUndefined();
+  });
+
+  it('validateFields: accepts a relation field with valid targetRegistryId', () => {
+    const r = validateFields([
+      { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
+    ]);
+    expect(r.valid).toBe(true);
+  });
+
+  it('validateFields: rejects a relation field with no targetRegistryId', () => {
+    const r = validateFields([
+      { key: 'kontragent', type: 'relation', required: false },
+    ]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].targetRegistryId).toBeTruthy();
+  });
+});
+
 describe('apps-schema · mapSchemaError', () => {
   it('400 → server message surfaced', () => {
     const m = mapSchemaError(400, { error: { code: 'VALIDATION', message: 'invalid record_schema: bad' } });

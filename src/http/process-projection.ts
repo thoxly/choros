@@ -52,6 +52,13 @@ import {
 export const PROCESS_STARTED_TYPE = "process.started";
 /** Emitted once on card-action approve: advances the instance to `done`. */
 export const TASK_APPROVED_TYPE = "task.approved";
+/**
+ * T-0443: Emitted when the engine surfaces a NEW waiting user-task post-gateway
+ * (e.g. task-extra-approve in the 6M branch). Carries task_def_key, proc_key,
+ * task_role, task_step, task_name, inbox_task_id so the projection read can
+ * surface the next pool task addressed to the right role.
+ */
+export const NEXT_TASK_TYPE = "process.next_task";
 
 // ---------------------------------------------------------------------------
 // T-0339 [E15-S3]: Canonical 6-event transition journal event-type constants.
@@ -142,6 +149,14 @@ export interface InstanceInboxTask {
   readonly procKey: string;
   /** Epoch-ms the task became available. */
   readonly occurredAt: number;
+  /**
+   * T-0443: BPMN task definition key for the engine user-task this inbox row maps to.
+   * Base process.started rows default to "task-approve"; process.next_task rows carry
+   * their own defKey (e.g. "task-extra-approve" for the 6M branch).
+   * Used by the approve handler to complete the RIGHT engine task instead of always
+   * targeting the hardcoded "task-approve" defKey.
+   */
+  readonly taskDefKey: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,38 +408,111 @@ export async function appendTaskApproved(
 
   await writer.appendAuditEvent(tx, input);
 
-  // T-0339 (E15-S3): emit instance.ended for the transition journal (F2 Phase 1).
-  // The linear ТЭЛ path: approve → end → done (one task, one instance lifecycle end).
-  // Only emitted when tenantId is supplied (S3 callers; backward-compat with T-0332/T-0335).
-  if (args.tenantId) {
-    await writer.appendAuditEvent(tx, {
-      id: randomUUID(),
-      type: INSTANCE_ENDED_TYPE,
+  // T-0443: instance.ended is NO LONGER emitted unconditionally here.
+  // It is emitted from the inbox approve handler AFTER the engine confirms
+  // (isInstanceEnded) so that a 2-step approval (task-approve → gateway →
+  // task-extra-approve) does NOT falsely signal instance done.
+  // Callers that want the engine-gated done signal must call appendInstanceEnded.
+}
+
+/**
+ * T-0443: Standalone `instance.ended` emitter — called by the inbox approve
+ * handler AFTER the engine confirms the instance has ended (isInstanceEnded).
+ * Separated from appendTaskApproved so a 2-step process doesn't falsely end.
+ *
+ * Runs INSIDE the caller's already-open tenant-scoped tx (same pattern as
+ * appendTaskApproved — atomic with any surrounding audit writes).
+ */
+export async function appendInstanceEnded(
+  tx: PgClientLike,
+  args: {
+    readonly taskId: string;
+    readonly instanceId: string;
+    readonly procKey: string;
+    readonly actor: string;
+    readonly nowMs: number;
+    readonly tenantId: string;
+  },
+): Promise<void> {
+  const actorType = projectActorType("human", "user-task");
+  await writer.appendAuditEvent(tx, {
+    id: randomUUID(),
+    type: INSTANCE_ENDED_TYPE,
+    actor: args.actor,
+    subject: `instance:${args.instanceId}`,
+    scope: { proc_key: args.procKey },
+    via: "inbox-approve",
+    proposed_by: null,
+    confirmed_by: args.actor,
+    payload: {
+      inst: args.instanceId,
+      proc_key: args.procKey,
+      inbox_task_id: args.taskId,
+      [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
+        tenantId: args.tenantId,
+        instanceId: args.instanceId,
+        processKey: args.procKey,
+        activity: INSTANCE_ENDED_TYPE,
+        actor: args.actor,
+        actorType,
+        ts: args.nowMs,
+        durationMs: null,
+        verdict: "end",
+      }),
+    },
+    occurred_at: args.nowMs,
+  });
+}
+
+/**
+ * T-0443: Emit a `process.next_task` event when the engine surfaces a new
+ * waiting user-task post-gateway (e.g. task-extra-approve in the 6M branch).
+ *
+ * The payload carries task_def_key, proc_key, task_role, task_step, task_name,
+ * inbox_task_id (a fresh UUID) so the projection read can surface the next
+ * pool task addressed to the right role without any new DB tables.
+ *
+ * Runs OUTSIDE any TX (called after the approve tx committed — best-effort,
+ * non-fatal on failure). Uses a standalone pool connection.
+ */
+export async function appendNextTaskEvent(
+  pool: pg.Pool,
+  tenantId: string,
+  args: {
+    readonly instanceId: string;
+    readonly procKey: string;
+    readonly actor: string;
+    readonly nowMs: number;
+    readonly taskDefKey: string;
+    readonly taskName: string;
+    readonly taskRole: string;
+    readonly taskStep: string;
+    /** New inbox task id for the next waiting task (fresh UUID from caller). */
+    readonly inboxTaskId: string;
+  },
+): Promise<void> {
+  await withTenant(pool, tenantId, async (client) => {
+    await writer.appendAuditEvent(client as unknown as PgClientLike, {
+      id: args.inboxTaskId,
+      type: NEXT_TASK_TYPE,
       actor: args.actor,
       subject: `instance:${args.instanceId}`,
       scope: { proc_key: args.procKey },
       via: "inbox-approve",
       proposed_by: null,
-      confirmed_by: args.actor,
+      confirmed_by: null,
       payload: {
         inst: args.instanceId,
         proc_key: args.procKey,
-        inbox_task_id: args.taskId,
-        [TRANSITION_PAYLOAD_KEY]: buildTransitionPayload({
-          tenantId: args.tenantId,
-          instanceId: args.instanceId,
-          processKey: args.procKey,
-          activity: INSTANCE_ENDED_TYPE,
-          actor: args.actor,
-          actorType,
-          ts: args.nowMs,
-          durationMs: null, // instance total duration not computed here (can be derived from journal)
-          verdict: "end",
-        }),
+        task_def_key: args.taskDefKey,
+        task_role: args.taskRole,
+        task_step: args.taskStep,
+        task_name: args.taskName,
+        inbox_task_id: args.inboxTaskId,
       },
       occurred_at: args.nowMs,
     });
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -461,15 +549,38 @@ interface StartedRow {
   occurred_at: number;
 }
 
+interface NextTaskRow {
+  id: string;
+  payload: Record<string, unknown>;
+  occurred_at: number;
+}
+
 /**
- * Read the raw started + approved events for a tenant, ordered oldest-first so the
- * fold is deterministic. Single tx, two scoped SELECTs over audit_event only.
+ * T-0443: Read the raw started + ended + next_task events for a tenant.
+ *
+ * done fold (T-0443): instance is `done` IFF an `instance.ended` event exists
+ * whose payload.inst matches the started instance. This is engine-gated — the
+ * ended event is emitted ONLY when isInstanceEnded() confirms, preventing false
+ * done on multi-step (6M) gateway branches.
+ *
+ * next_task fold: `process.next_task` events surface additional pool tasks
+ * for post-gateway waiting steps (e.g. task-extra-approve on 6M branch).
+ * A next_task row is hidden once any started instance referencing it is ended.
+ *
+ * backward-compat: still also reads task.approved for listInstanceInboxTasks
+ * filtering (a task.approved without a following instance.ended means the 6M
+ * branch is now active — the base task is done but the instance is not).
  */
 async function readEvents(
   pool: pg.Pool,
   tenantId: string,
   limit: number,
-): Promise<{ started: StartedRow[]; approvedTaskIds: Set<string> }> {
+): Promise<{
+  started: StartedRow[];
+  endedInstanceIds: Set<string>;
+  approvedTaskIds: Set<string>;
+  nextTaskRows: NextTaskRow[];
+}> {
   return withTenant(pool, tenantId, async (client) => {
     const startedRes = await client.query<StartedRow>(
       `SELECT id, actor, payload, occurred_at::float8 AS occurred_at
@@ -481,6 +592,18 @@ async function readEvents(
       [PROCESS_STARTED_TYPE, tenantId, limit],
     );
 
+    // T-0443: instance.ended → engine-gated done signal.
+    const endedRes = await client.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload
+         FROM choros.audit_event
+        WHERE type = $1
+          AND tenant_id = $2
+        ORDER BY occurred_at ASC
+        LIMIT $3`,
+      [INSTANCE_ENDED_TYPE, tenantId, limit],
+    );
+
+    // task.approved: kept for the listInstanceInboxTasks "hide base task after approve" logic.
     const approvedRes = await client.query<{ payload: Record<string, unknown> }>(
       `SELECT payload
          FROM choros.audit_event
@@ -491,6 +614,24 @@ async function readEvents(
       [TASK_APPROVED_TYPE, tenantId, limit],
     );
 
+    // T-0443: process.next_task → post-gateway waiting task surfaced to inbox.
+    const nextTaskRes = await client.query<NextTaskRow>(
+      `SELECT id, payload, occurred_at::float8 AS occurred_at
+         FROM choros.audit_event
+        WHERE type = $1
+          AND tenant_id = $2
+        ORDER BY occurred_at ASC
+        LIMIT $3`,
+      [NEXT_TASK_TYPE, tenantId, limit],
+    );
+
+    const endedInstanceIds = new Set<string>();
+    for (const r of endedRes.rows) {
+      const p = (r.payload ?? {}) as Record<string, unknown>;
+      const inst = p["inst"];
+      if (typeof inst === "string" && inst.length > 0) endedInstanceIds.add(inst);
+    }
+
     const approvedTaskIds = new Set<string>();
     for (const r of approvedRes.rows) {
       const p = (r.payload ?? {}) as Record<string, unknown>;
@@ -498,7 +639,12 @@ async function readEvents(
       if (typeof tid === "string" && tid.length > 0) approvedTaskIds.add(tid);
     }
 
-    return { started: startedRes.rows, approvedTaskIds };
+    return {
+      started: startedRes.rows,
+      endedInstanceIds,
+      approvedTaskIds,
+      nextTaskRows: nextTaskRes.rows,
+    };
   });
 }
 
@@ -508,9 +654,15 @@ function strField(payload: Record<string, unknown>, key: string, fallback: strin
 }
 
 /**
- * Fold the audit track into InstanceProjection[]. A started instance is `waiting`
- * (its user-task awaits a human) until a matching `task.approved` (back-linked by
- * inbox_task_id) is observed, which advances it to `done` (ADR §2.3 / AC-6).
+ * Fold the audit track into InstanceProjection[].
+ *
+ * T-0443: A started instance is `done` IFF an `instance.ended` event exists
+ * for its instance id — engine-gated, prevents false-done on 6M gateway branch.
+ * Until then, it is `waiting` (its user-task awaits a human action).
+ *
+ * Backward-compat: for instances approved before T-0443 was deployed (no
+ * `instance.ended` event recorded), the approvedTaskIds fallback ensures they
+ * show as `done` rather than stuck in `waiting`.
  */
 export async function listInstanceProjections(
   pool: pg.Pool,
@@ -518,7 +670,22 @@ export async function listInstanceProjections(
   opts?: { limit?: number },
 ): Promise<InstanceProjection[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+  const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(pool, tenantId, limit);
+
+  // T-0443 Fix D: compute which instances have a PENDING (unapproved) next_task.
+  // The backward-compat fallback (approvedTaskIds.has(row.id)) must NOT fire while
+  // task-extra-approve is still waiting — that would falsely mark the 6M instance done.
+  // A next_task is pending when its row.id is NOT yet in approvedTaskIds.
+  const pendingNextTaskInstanceIds = new Set<string>();
+  for (const ntRow of nextTaskRows) {
+    if (!approvedTaskIds.has(ntRow.id)) {
+      const p = (ntRow.payload ?? {}) as Record<string, unknown>;
+      const ntInst = p["inst"];
+      if (typeof ntInst === "string" && ntInst.length > 0) {
+        pendingNextTaskInstanceIds.add(ntInst);
+      }
+    }
+  }
 
   return started.map((row): InstanceProjection => {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
@@ -526,7 +693,13 @@ export async function listInstanceProjections(
     const procKey = strField(payload, "proc_key", "telLinear");
     const role = strField(payload, "task_role", APPROVER_ROLE);
     const step = strField(payload, "task_step", APPROVE_STEP);
-    const done = approvedTaskIds.has(row.id);
+    // T-0443: done IFF engine-gated instance.ended event exists for this instance.
+    // Backward-compat fallback: task.approved exists (pre-T-0443 rows with no instance.ended)
+    // BUT only when there is no pending next_task — a pending next_task means the 6M branch
+    // is active and the instance is genuinely still waiting (Fix D).
+    const done =
+      endedInstanceIds.has(inst) ||
+      (approvedTaskIds.has(row.id) && !pendingNextTaskInstanceIds.has(inst));
     // T-0414 / T-0356: read originating record_id (present when started via on_create).
     const rawRecordId = payload["record_id"];
     const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
@@ -548,8 +721,15 @@ export async function listInstanceProjections(
 /**
  * Project the WAITING user-tasks of started instances into inbox rows, addressed
  * to the ROLE (candidateGroups → role), NOT to a person (ADR §2.3 / AC-3). A task
- * whose instance is already `done` (matching task.approved) is dropped — there is
- * nothing left to act on.
+ * whose instance is `done` (engine-gated instance.ended event) is dropped.
+ *
+ * T-0443: Also surfaces `process.next_task` rows for post-gateway waiting tasks
+ * (e.g. task-extra-approve on the 6M branch). A next_task row is hidden once
+ * the instance has ended (endedInstanceIds check).
+ *
+ * Base task (process.started) is hidden once task.approved exists for it — the
+ * base approve step is done regardless of whether the instance itself ended
+ * (the 6M extra-approve step is then exposed via process.next_task).
  */
 export async function listInstanceInboxTasks(
   pool: pg.Pool,
@@ -557,22 +737,52 @@ export async function listInstanceInboxTasks(
   opts?: { limit?: number },
 ): Promise<InstanceInboxTask[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+  const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(pool, tenantId, limit);
 
   const tasks: InstanceInboxTask[] = [];
+
+  // 1. Base process.started rows (hide once approved OR instance ended).
   for (const row of started) {
-    if (approvedTaskIds.has(row.id)) continue; // already approved → no waiting task.
     const payload = (row.payload ?? {}) as Record<string, unknown>;
+    const inst = strField(payload, "inst", `instance:${row.id}`);
+    if (approvedTaskIds.has(row.id)) continue; // base approve done → hide base task.
+    if (endedInstanceIds.has(inst)) continue; // instance ended → no more tasks.
     tasks.push({
       id: row.id,
       role: strField(payload, "task_role", APPROVER_ROLE),
       name: strField(payload, "task_name", APPROVE_TASK_NAME),
       step: strField(payload, "task_step", APPROVE_STEP),
-      inst: strField(payload, "inst", `instance:${row.id}`),
+      inst,
       procKey: strField(payload, "proc_key", "telLinear"),
       occurredAt: row.occurred_at,
+      // T-0443: base process.started rows always map to the primary approve BPMN task.
+      taskDefKey: "task-approve",
     });
   }
+
+  // 2. T-0443: process.next_task rows (post-gateway waiting steps).
+  // Hide once the instance has ended or if the next_task itself was approved.
+  for (const row of nextTaskRows) {
+    const payload = (row.payload ?? {}) as Record<string, unknown>;
+    const inst = strField(payload, "inst", "");
+    if (!inst) continue;
+    if (endedInstanceIds.has(inst)) continue; // instance ended → no more tasks.
+    if (approvedTaskIds.has(row.id)) continue; // this next_task was approved → hide.
+    tasks.push({
+      id: row.id,
+      role: strField(payload, "task_role", APPROVER_ROLE),
+      name: strField(payload, "task_name", APPROVE_TASK_NAME),
+      step: strField(payload, "task_step", APPROVE_STEP),
+      inst,
+      procKey: strField(payload, "proc_key", "telLinear"),
+      occurredAt: row.occurred_at,
+      // T-0443 Fix A: process.next_task payload carries task_def_key set by the engine-drive
+      // handler (appendNextTaskEvent writes it). Use it so the approve handler can complete
+      // the RIGHT engine user-task (e.g. "task-extra-approve" on the 6M branch).
+      taskDefKey: strField(payload, "task_def_key", "task-approve"),
+    });
+  }
+
   return tasks;
 }
 

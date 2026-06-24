@@ -251,6 +251,39 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
         } catch {
           // Projection is additive; never fail the start on a projection write error.
         }
+
+        // T-0443: explicit-start → drive task-submit user task so the instance
+        // advances past the submit gate without waiting for a second human action.
+        // Best-effort only: NEVER roll back the already-started instance on failure.
+        // The 201 response shape is FROZEN (ADR §2.2) — this is purely engine-internal.
+        try {
+          const tasksResult = await flowable.getActiveUserTasks(result.instanceId);
+          if (tasksResult.ok) {
+            const submitTask = tasksResult.tasks.find(
+              (t) => t.taskDefinitionKey === "task-submit",
+            );
+            if (submitTask) {
+              const completeResult = await flowable.completeUserTask(submitTask.id);
+              if (!completeResult.ok) {
+                console.warn(
+                  `[process-start T-0443] task-submit auto-complete failed for instance ` +
+                    `${result.instanceId}: ${completeResult.code} (non-fatal, instance still started)`,
+                );
+              }
+            }
+          } else {
+            console.warn(
+              `[process-start T-0443] getActiveUserTasks failed for instance ` +
+                `${result.instanceId}: ${tasksResult.code} (non-fatal)`,
+            );
+          }
+        } catch (submitErr) {
+          console.warn(
+            `[process-start T-0443] task-submit drive error for instance ` +
+              `${result.instanceId} (non-fatal):`,
+            submitErr,
+          );
+        }
       }
       return result;
     });

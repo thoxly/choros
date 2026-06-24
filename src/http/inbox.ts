@@ -26,6 +26,7 @@
  * write to a DB claim-lock table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
@@ -44,6 +45,8 @@ import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
   appendTaskApproved,
+  appendInstanceEnded,
+  appendNextTaskEvent,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
   listInstanceProjections,
@@ -61,6 +64,7 @@ import {
   loadClaimsFromAudit,
   type ClaimState,
 } from "./claim-projection.js";
+import type { FlowableClient } from "../core/flowable-client.js";
 
 // ---------------------------------------------------------------------------
 // extractActorSlug — mode-aware, resolves the authenticated request → the
@@ -281,6 +285,14 @@ export interface InboxWriteDeps {
    * ⇒ the applier runs in the same tx and the fail-closed contract holds.
    */
   outboxStore?: OutboxEnqueuePort;
+  /**
+   * T-0443: optional FlowableClient for engine-drive post-approve.
+   * When present, the approve handler resolves the engine task by taskDefinitionKey,
+   * completes it, and reconciles (isInstanceEnded → emit instance.ended or
+   * emit process.next_task with live defKey/name/role). Absent ⇒ unchanged
+   * linear audit-only behaviour (honest-degrade).
+   */
+  flowableClient?: FlowableClient;
 }
 
 const UUID_RE =
@@ -1137,7 +1149,7 @@ export function registerInboxRoutes(
   //   - actor must hold the role the task is addressed to (approve grant): 403 NOT_ELIGIBLE
   // Success: 200 { instanceId, status: "done", action: "approve" }
   if (writeDeps) {
-    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore } = writeDeps;
+    const { pool, resolveActorTenant: resolveActorTenantDep, outboxStore, flowableClient: writeDepsFlowable } = writeDeps;
 
     router.register("POST", "/api/inbox/:id/action", withAuth(async (req, res, params) => {
       // Mode-aware actor resolution (T-0327 + T-0372: resolve KC sub → employee slug).
@@ -1340,6 +1352,133 @@ export function registerInboxRoutes(
           });
         }
       });
+
+      // T-0443: engine-drive post-approve (best-effort / logged; NEVER fails the response).
+      // Honest-degrade: if writeDepsFlowable is absent, no engine call is made — unchanged
+      // linear audit-only behaviour. The response is always 200 regardless of engine state.
+      if (writeDepsFlowable) {
+        const engineDriveInstanceId = task.inst;
+        const engineDriveProcKey = task.procKey;
+        // T-0443 Fix A: use the taskDefKey threaded from the projection (InstanceInboxTask).
+        // Base process.started rows carry taskDefKey="task-approve" (set in listInstanceInboxTasks).
+        // process.next_task rows carry the actual defKey written by appendNextTaskEvent
+        // (e.g. "task-extra-approve" on the 6M gateway branch).
+        // This enables N-step generality: every sequential human task completes by its own defKey.
+        const approvedTaskDefKey: string = task.taskDefKey;
+
+        void (async () => {
+          try {
+            // Poll up to ~10s for the engine task (triage external-task might still be in flight).
+            let engineTaskId: string | null = null;
+            const pollStart = Date.now();
+            const pollTimeoutMs = 10_000;
+            const pollIntervalMs = 500;
+
+            while (Date.now() - pollStart < pollTimeoutMs) {
+              const tasksResult = await writeDepsFlowable.getActiveUserTasks(engineDriveInstanceId);
+              if (!tasksResult.ok) {
+                console.warn(
+                  `[inbox T-0443] getActiveUserTasks failed: ${tasksResult.code} ` +
+                    `(instance ${engineDriveInstanceId}) — engine reconcile skipped`,
+                );
+                return;
+              }
+              // Find the engine task matching the approved step's defKey.
+              const match = tasksResult.tasks.find((t) => t.taskDefinitionKey === approvedTaskDefKey);
+              if (match) {
+                engineTaskId = match.id;
+                break;
+              }
+              // No matching task yet — might still be at triage service task. Wait and retry.
+              if (tasksResult.tasks.length === 0) break; // no tasks at all → instance may have ended
+              await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+            }
+
+            if (engineTaskId) {
+              // Complete the engine user task identified by defKey.
+              const completeResult = await writeDepsFlowable.completeUserTask(engineTaskId);
+              if (!completeResult.ok) {
+                console.warn(
+                  `[inbox T-0443] completeUserTask(${engineTaskId}) failed: ${completeResult.code} ` +
+                    `(instance ${engineDriveInstanceId}) — continuing to reconcile`,
+                );
+              }
+            }
+
+            // Reconcile: isInstanceEnded → either emit instance.ended or process.next_task.
+            const endedResult = await writeDepsFlowable.isInstanceEnded(engineDriveInstanceId);
+            if (!endedResult.ok) {
+              console.warn(
+                `[inbox T-0443] isInstanceEnded failed: ${endedResult.code} ` +
+                  `(instance ${engineDriveInstanceId}) — reconcile skipped`,
+              );
+              return;
+            }
+
+            if (endedResult.ended) {
+              // Engine confirms instance done → emit instance.ended (engine-gated done signal).
+              try {
+                await withTenantTx(pool, tenantId, async (client) => {
+                  await appendInstanceEnded(
+                    client as unknown as import("../db/audit-writer.js").PgClientLike,
+                    {
+                      taskId,
+                      instanceId: engineDriveInstanceId,
+                      procKey: engineDriveProcKey,
+                      actor,
+                      nowMs: Date.now(),
+                      tenantId,
+                    },
+                  );
+                });
+              } catch (endedErr) {
+                console.warn(
+                  `[inbox T-0443] appendInstanceEnded failed (instance ${engineDriveInstanceId}):`,
+                  endedErr,
+                );
+              }
+            } else {
+              // Engine has more steps → surface the next waiting task as a pool task.
+              const nextTasksResult = await writeDepsFlowable.getActiveUserTasks(engineDriveInstanceId);
+              if (nextTasksResult.ok && nextTasksResult.tasks.length > 0) {
+                // Use the first active user task that is NOT the just-completed defKey.
+                const nextTask = nextTasksResult.tasks.find(
+                  (t) => t.taskDefinitionKey !== approvedTaskDefKey,
+                ) ?? nextTasksResult.tasks[0]!;
+
+                // candidateGroups from Flowable → role slug for inbox pool addressing.
+                // Use first group if available; fallback to the original approver role.
+                const nextRole = nextTask.candidateGroups[0] ?? task.role;
+                const nextInboxTaskId = randomUUID();
+
+                try {
+                  await appendNextTaskEvent(pool, tenantId, {
+                    instanceId: engineDriveInstanceId,
+                    procKey: engineDriveProcKey,
+                    actor,
+                    nowMs: Date.now(),
+                    taskDefKey: nextTask.taskDefinitionKey,
+                    taskName: nextTask.name || APPROVE_TASK_NAME,
+                    taskRole: nextRole,
+                    taskStep: nextTask.name || "Согласование",
+                    inboxTaskId: nextInboxTaskId,
+                  });
+                } catch (nextErr) {
+                  console.warn(
+                    `[inbox T-0443] appendNextTaskEvent failed (instance ${engineDriveInstanceId}):`,
+                    nextErr,
+                  );
+                }
+              }
+            }
+          } catch (engineErr) {
+            console.warn(
+              `[inbox T-0443] engine-drive error (instance ${task.inst}):`,
+              engineErr,
+            );
+          }
+        })();
+      }
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
