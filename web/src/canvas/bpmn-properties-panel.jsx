@@ -38,6 +38,7 @@ import {
 } from './outcome-presets.js';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { Field, Select } from '../components/components.jsx';
+import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 
 /* --------------------------------------------------------------------------
    Dev tenant UUID — same constant used throughout the codebase (screen-agents,
@@ -1102,6 +1103,15 @@ export default function BpmnPropertiesPanel({ modeler }) {
           {/* T-0353 [E16]: Named branch for SequenceFlow — set choros:outcomeName */}
           {isSequenceFlow && (
             <SequenceFlowOutcomePanel
+              bo={bo}
+              modeler={modeler}
+              element={selected.element}
+            />
+          )}
+
+          {/* T-0434: Gateway condition panel — branch conditions for bpmn:ExclusiveGateway */}
+          {bo.$type === 'bpmn:ExclusiveGateway' && (
+            <GatewayConditionPanel
               bo={bo}
               modeler={modeler}
               element={selected.element}

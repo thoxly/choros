@@ -179,6 +179,32 @@ const ChorosModdleDescriptor = {
         },
       ],
     },
+    {
+      /**
+       * T-0434: Extend bpmn:ExclusiveGateway with the routing variable name.
+       *
+       * choros:routingVar — The process variable name that the gateway reads
+       *   to select a branch (e.g. "approvalRequired").
+       *   Serialised as an attribute on the <exclusiveGateway> element.
+       *   The conditionExpression on each outgoing SequenceFlow uses this
+       *   variable in a standard EL expression: ${routingVar == 'value'}.
+       *
+       * Round-trip:
+       *   1. Panel writes bo.routingVar = 'approvalRequired'
+       *   2. saveXML emits <exclusiveGateway ... choros:routingVar="approvalRequired"/>
+       *   3. importXML reads it back onto bo.routingVar
+       *   4. Panel reads it to populate the routing variable input.
+       */
+      name: 'GatewayConditionExtension',
+      extends: ['bpmn:ExclusiveGateway'],
+      properties: [
+        {
+          name: 'routingVar',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
   ],
   enumerations: [],
   associations: [],
