@@ -317,6 +317,16 @@ jobs:
       FLOWABLE_REST_BASE_URL: http://localhost:8082/flowable-rest/service
       FLOWABLE_PORT: "8082"
       FLOWABLE_REST_APP_ADMIN_PASSWORD: choros_flowable_dev_pw
+      # T-0273: the lifecycle bridge (startLifecycleBridge) is gated on FLOWABLE_BASE_URL
+      # and only polls FLOWABLE_TOPICS. Without these the `tel-intake` triage external task
+      # is never completed → the DMN gateway never sets approvalRequired → CS-1's
+      # «Доп. согласование» extra-approval task never spawns. Same `.../flowable-rest/service`
+      # base + host-published :8082 as FLOWABLE_REST_BASE_URL. Bridge admin creds use the
+      # FLOWABLE_ADMIN_USER/PASSWORD names (distinct from FLOWABLE_REST_APP_ADMIN_*).
+      FLOWABLE_BASE_URL: http://localhost:8082/flowable-rest/service
+      FLOWABLE_TOPICS: tel-intake
+      FLOWABLE_ADMIN_USER: admin
+      FLOWABLE_ADMIN_PASSWORD: choros_flowable_dev_pw
       DEMO_TENANT_SLUG: dev
       ACCEPTANCE_PORT: "3100"
     steps:

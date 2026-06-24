@@ -225,6 +225,13 @@
     "  function closeAll(except){d.querySelectorAll('.fjs-select-display').forEach(function(s){if(s!==except){s.removeAttribute('data-open');var dd=s.nextElementSibling;if(dd)dd.removeAttribute('data-open');}});}",
     "  d.querySelectorAll('.fjs-form-field-select').forEach(function(f){",
     "    var disp=f.querySelector('.fjs-select-display');var list=f.querySelector('.fjs-dropdownlist');var val=f.querySelector('.fjs-select-value');",
+    // T-0273: a visual-only select (e.g. покупка → Поставщик, T-0370) carries the
+    // .fjs-select-display BUT no .fjs-dropdownlist/.fjs-select-value. Guard against
+    // null here: without the guard `list.querySelectorAll(...)` threw synchronously
+    // during init, aborting the WHOLE IIFE before the submit handler (below) was
+    // ever attached → the native form submit navigated instead of posting fjs-submit
+    // → /api/forms/purchase/submit was never POSTed (deploy-acceptance U2 timeout).
+    "    if(!disp||!list||!val)return;",
     "    disp.addEventListener('click',function(e){e.stopPropagation();var open=disp.hasAttribute('data-open');closeAll(disp);if(!open){disp.setAttribute('data-open','true');list.setAttribute('data-open','true');}});",
     "    list.querySelectorAll('.fjs-dropdownlist-item').forEach(function(it){it.addEventListener('click',function(e){e.stopPropagation();list.querySelectorAll('[aria-selected]').forEach(function(x){x.setAttribute('aria-selected','false');});it.setAttribute('aria-selected','true');val.textContent=it.getAttribute('data-val');disp.removeAttribute('data-open');list.removeAttribute('data-open');});});",
     "  });",
