@@ -149,6 +149,14 @@ export interface InstanceInboxTask {
   readonly procKey: string;
   /** Epoch-ms the task became available. */
   readonly occurredAt: number;
+  /**
+   * T-0443: BPMN task definition key for the engine user-task this inbox row maps to.
+   * Base process.started rows default to "task-approve"; process.next_task rows carry
+   * their own defKey (e.g. "task-extra-approve" for the 6M branch).
+   * Used by the approve handler to complete the RIGHT engine task instead of always
+   * targeting the hardcoded "task-approve" defKey.
+   */
+  readonly taskDefKey: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,7 +670,22 @@ export async function listInstanceProjections(
   opts?: { limit?: number },
 ): Promise<InstanceProjection[]> {
   const limit = Math.min(opts?.limit ?? 200, 500);
-  const { started, endedInstanceIds, approvedTaskIds } = await readEvents(pool, tenantId, limit);
+  const { started, endedInstanceIds, approvedTaskIds, nextTaskRows } = await readEvents(pool, tenantId, limit);
+
+  // T-0443 Fix D: compute which instances have a PENDING (unapproved) next_task.
+  // The backward-compat fallback (approvedTaskIds.has(row.id)) must NOT fire while
+  // task-extra-approve is still waiting — that would falsely mark the 6M instance done.
+  // A next_task is pending when its row.id is NOT yet in approvedTaskIds.
+  const pendingNextTaskInstanceIds = new Set<string>();
+  for (const ntRow of nextTaskRows) {
+    if (!approvedTaskIds.has(ntRow.id)) {
+      const p = (ntRow.payload ?? {}) as Record<string, unknown>;
+      const ntInst = p["inst"];
+      if (typeof ntInst === "string" && ntInst.length > 0) {
+        pendingNextTaskInstanceIds.add(ntInst);
+      }
+    }
+  }
 
   return started.map((row): InstanceProjection => {
     const payload = (row.payload ?? {}) as Record<string, unknown>;
@@ -671,8 +694,12 @@ export async function listInstanceProjections(
     const role = strField(payload, "task_role", APPROVER_ROLE);
     const step = strField(payload, "task_step", APPROVE_STEP);
     // T-0443: done IFF engine-gated instance.ended event exists for this instance.
-    // Fallback to task.approved for rows written before T-0443 (no instance.ended).
-    const done = endedInstanceIds.has(inst) || approvedTaskIds.has(row.id);
+    // Backward-compat fallback: task.approved exists (pre-T-0443 rows with no instance.ended)
+    // BUT only when there is no pending next_task — a pending next_task means the 6M branch
+    // is active and the instance is genuinely still waiting (Fix D).
+    const done =
+      endedInstanceIds.has(inst) ||
+      (approvedTaskIds.has(row.id) && !pendingNextTaskInstanceIds.has(inst));
     // T-0414 / T-0356: read originating record_id (present when started via on_create).
     const rawRecordId = payload["record_id"];
     const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
@@ -728,6 +755,8 @@ export async function listInstanceInboxTasks(
       inst,
       procKey: strField(payload, "proc_key", "telLinear"),
       occurredAt: row.occurred_at,
+      // T-0443: base process.started rows always map to the primary approve BPMN task.
+      taskDefKey: "task-approve",
     });
   }
 
@@ -747,6 +776,10 @@ export async function listInstanceInboxTasks(
       inst,
       procKey: strField(payload, "proc_key", "telLinear"),
       occurredAt: row.occurred_at,
+      // T-0443 Fix A: process.next_task payload carries task_def_key set by the engine-drive
+      // handler (appendNextTaskEvent writes it). Use it so the approve handler can complete
+      // the RIGHT engine user-task (e.g. "task-extra-approve" on the 6M branch).
+      taskDefKey: strField(payload, "task_def_key", "task-approve"),
     });
   }
 

@@ -1359,20 +1359,12 @@ export function registerInboxRoutes(
       if (writeDepsFlowable) {
         const engineDriveInstanceId = task.inst;
         const engineDriveProcKey = task.procKey;
-        // Determine the base defKey for this approver row. The base task-approve is
-        // "task-approve"; post-gateway next_task rows carry their own defKey via task_def_key.
-        // We look that up from the task payload (process.started has no task_def_key;
-        // process.next_task rows carry it). If absent → default to "task-approve".
-        const approvedTaskDefKey: string = (() => {
-          // The task object was resolved from findWaitingInstanceTask which reads from
-          // both process.started and process.next_task rows. For base approve, the row has
-          // no task_def_key payload field. For next_task rows we'd need to read the payload —
-          // but findWaitingInstanceTask returns InstanceInboxTask which doesn't carry that.
-          // Safe default: "task-approve" for the base approve row; post-gateway rows will
-          // be resolved by scanning getActiveUserTasks for the most-recently activated task.
-          // For now we use "task-approve" as the expected defKey for the primary approve step.
-          return "task-approve";
-        })();
+        // T-0443 Fix A: use the taskDefKey threaded from the projection (InstanceInboxTask).
+        // Base process.started rows carry taskDefKey="task-approve" (set in listInstanceInboxTasks).
+        // process.next_task rows carry the actual defKey written by appendNextTaskEvent
+        // (e.g. "task-extra-approve" on the 6M gateway branch).
+        // This enables N-step generality: every sequential human task completes by its own defKey.
+        const approvedTaskDefKey: string = task.taskDefKey;
 
         void (async () => {
           try {
