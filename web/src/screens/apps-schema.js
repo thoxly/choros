@@ -197,6 +197,17 @@ export function validateField(field) {
           sfErrs.push("Недопустимый тип колонки");
         }
 
+        // T-0450 Fix 1 (G3 BLOCKING): select sub-fields require ≥1 non-blank
+        // option — mirrors top-level select validation (T-0294). Without options
+        // the record-entry <select> cell would have zero choices → unfillable.
+        if (sfType === "select") {
+          const sfOpts = Array.isArray(sf?.options) ? sf.options : [];
+          const sfNonEmpty = sfOpts.filter((o) => typeof o === "string" && o.trim().length > 0);
+          if (sfNonEmpty.length === 0) {
+            sfErrs.push("Укажите варианты для колонки-списка");
+          }
+        }
+
         if (sfErrs.length > 0) {
           subErrors.push(sfErrs.join("; "));
           hasSubError = true;

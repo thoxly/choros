@@ -112,6 +112,12 @@ const subFieldRowGrid = {
  *
  * Product-language labels:  «Колонки» / «Колонка» — no «sub-field»/«collection».
  *
+ * T-0450 Fix 1 (G3 BLOCKING): when a column's type is «select», a
+ * «Варианты (по одному на строку)» textarea is rendered in a full-width
+ * sub-row below the column controls — mirrors the top-level select-options
+ * pattern (FieldRow / T-0294). Without options the cell `<select>` would have
+ * zero choices → a required cell that can never be filled (dead path).
+ *
  * @param {{ key, type, label, required, options? }[]} subFields current list
  * @param {string|undefined} subFieldsError top-level error from validateField
  * @param {(next: typeof subFields) => void} onChange
@@ -145,53 +151,82 @@ function CollectionSubFieldEditor({ subFields, subFieldsError, onChange }) {
             <span style={{ ...colHeadStyle, textAlign: 'center' }}>Обяз.</span>
             <span />
           </div>
-          {subFields.map((sf, i) => (
-            <div key={i} role="group" aria-label={`Колонка ${i + 1}`} style={subFieldRowGrid}>
-              {/* sub-field key */}
-              <input
-                className={`${inputCls(false)} chs-input--mono`}
-                value={sf.key}
-                onChange={(e) => updateCol(i, { key: e.target.value })}
-                placeholder="col_key"
-                aria-label="Ключ колонки"
-              />
-              {/* sub-field type (scalars only — depth cap 1) */}
-              <select
-                className={inputCls(false)}
-                value={sf.type}
-                onChange={(e) => updateCol(i, { type: e.target.value })}
-                aria-label="Тип колонки"
-              >
-                {COLLECTION_SUB_FIELD_TYPES.map((t) => (
-                  <option key={t} value={t}>{COLUMN_TYPE_LABELS[t] || t}</option>
-                ))}
-              </select>
-              {/* sub-field label */}
-              <input
-                className={inputCls(false)}
-                value={sf.label}
-                onChange={(e) => updateCol(i, { label: e.target.value })}
-                placeholder="Название (опц.)"
-                aria-label="Название колонки"
-              />
-              {/* required */}
-              <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
-                <input
-                  type="checkbox"
-                  checked={Boolean(sf.required)}
-                  onChange={(e) => updateCol(i, { required: e.target.checked })}
-                  aria-label="Обязательная колонка"
-                />
-              </label>
-              {/* remove */}
-              <Button
-                type="button" variant="ghost" size="sm"
-                onClick={() => removeCol(i)} title="Удалить колонку" aria-label="Удалить колонку"
-              >
-                <KitIcon name="close" />
-              </Button>
-            </div>
-          ))}
+          {subFields.map((sf, i) => {
+            // T-0450 Fix 1: options text ↔ array conversion (mirrors top-level pattern).
+            const sfOptionsText = Array.isArray(sf.options) ? sf.options.join('\n') : '';
+            const setSfOptionsFromText = (text) => {
+              updateCol(i, { options: text.split('\n') });
+            };
+            return (
+              <React.Fragment key={i}>
+                <div role="group" aria-label={`Колонка ${i + 1}`} style={subFieldRowGrid}>
+                  {/* sub-field key */}
+                  <input
+                    className={`${inputCls(false)} chs-input--mono`}
+                    value={sf.key}
+                    onChange={(e) => updateCol(i, { key: e.target.value })}
+                    placeholder="col_key"
+                    aria-label="Ключ колонки"
+                  />
+                  {/* sub-field type (scalars only — depth cap 1) */}
+                  <select
+                    className={inputCls(false)}
+                    value={sf.type}
+                    onChange={(e) => updateCol(i, { type: e.target.value })}
+                    aria-label="Тип колонки"
+                  >
+                    {COLLECTION_SUB_FIELD_TYPES.map((t) => (
+                      <option key={t} value={t}>{COLUMN_TYPE_LABELS[t] || t}</option>
+                    ))}
+                  </select>
+                  {/* sub-field label */}
+                  <input
+                    className={inputCls(false)}
+                    value={sf.label}
+                    onChange={(e) => updateCol(i, { label: e.target.value })}
+                    placeholder="Название (опц.)"
+                    aria-label="Название колонки"
+                  />
+                  {/* required */}
+                  <label style={{ display: 'inline-flex', justifyContent: 'center', width: '100%' }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(sf.required)}
+                      onChange={(e) => updateCol(i, { required: e.target.checked })}
+                      aria-label="Обязательная колонка"
+                    />
+                  </label>
+                  {/* remove */}
+                  <Button
+                    type="button" variant="ghost" size="sm"
+                    onClick={() => removeCol(i)} title="Удалить колонку" aria-label="Удалить колонку"
+                  >
+                    <KitIcon name="close" />
+                  </Button>
+                </div>
+                {/* T-0450 Fix 1 (G3 BLOCKING): select-type column requires a variants
+                    textarea so the author can supply options. Without options the cell
+                    <select> in record-entry would be unfillable (only «— выберите —»).
+                    Mirrors the top-level T-0294 select-options sub-row in FieldRow. */}
+                {sf.type === 'select' && (
+                  <div style={{ paddingLeft: 'var(--chs-space-3)', paddingBottom: 'var(--chs-space-3)', borderBottom: '1px solid var(--chs-color-border)', maxWidth: '380px' }}>
+                    <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                      Варианты (по одному на строку):
+                    </span>
+                    <textarea
+                      className={inputCls(false)}
+                      style={textareaStyle}
+                      value={sfOptionsText}
+                      onChange={(e) => setSfOptionsFromText(e.target.value)}
+                      placeholder={'вариант_1\nвариант_2\nвариант_3'}
+                      aria-label={`Варианты колонки ${sf.label || sf.key || i + 1}`}
+                      rows={3}
+                    />
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
         </>
       )}
 
