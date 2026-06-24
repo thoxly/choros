@@ -50,6 +50,13 @@ export { resolveFieldContract };
  * called with (key, nextValue): a string for text/number/select/date, a boolean
  * for checkbox.
  *
+ * T-0450 Fix 2 (G7): `hideLabel` — when true, omits the `<label>` element and the
+ * bottom-margin wrapper div (renders the bare control only). Designed for table-cell
+ * contexts (LineItemsField `<td>`) where the column `<th>` header already provides
+ * the label; repeating it per-cell stacks a "form-in-a-form" anti-pattern and adds
+ * unwanted margin that breaks table rhythm.
+ * Default: false → backward-compatible; all existing callers keep their labels.
+ *
  * @param {object} props
  * @param {{ key: string, label?: string, title?: string, required?: boolean,
  *           type?: string, contract?: string, presentation?: string,
@@ -58,8 +65,9 @@ export { resolveFieldContract };
  * @param {(key: string, value: string|boolean) => void} props.onChange
  * @param {string} [props.error]   per-field error message
  * @param {string} [props.idPrefix] id namespace (default "field")
+ * @param {boolean} [props.hideLabel] when true, omit label + wrapper margin (default false)
  */
-export function FieldControl({ field, value, onChange, error, idPrefix = 'field' }) {
+export function FieldControl({ field, value, onChange, error, idPrefix = 'field', hideLabel = false }) {
   const id = `${idPrefix}-${field.key}`;
   const label = field.label || field.title || field.key;
   const isRequired = Boolean(field.required);
@@ -88,6 +96,22 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
     const note = editable
       ? `Поле типа «${descriptor.label}» пока заполняется в другом месте`
       : `«${descriptor.label}» — только для чтения (вычисляется автоматически)`;
+    // hideLabel: omit label + margin wrapper when caller manages the label externally.
+    if (hideLabel) {
+      return (
+        <>
+          <div
+            id={id}
+            className="chs-input"
+            aria-readonly="true"
+            style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}
+          >
+            {note}
+          </div>
+          {errorNode}
+        </>
+      );
+    }
     return (
       <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
         <label className="chs-label" htmlFor={id}>
@@ -128,6 +152,10 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         ))}
       </select>
     );
+    // T-0450 Fix 2: hideLabel → bare control, no .chs-field wrapper or label.
+    if (hideLabel) {
+      return <>{control}{errorNode}</>;
+    }
     return (
       <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
         <label className="chs-label" htmlFor={id}>
@@ -144,6 +172,22 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
 
   // ----- boolean (checkbox) — label is part of the control -------------------
   if (presentation === 'checkbox') {
+    // T-0450 Fix 2: hideLabel → bare checkbox (label text removed; th header is the label).
+    if (hideLabel) {
+      return (
+        <>
+          <input
+            id={id}
+            type="checkbox"
+            checked={Boolean(value)}
+            onChange={(e) => onChange(field.key, e.target.checked)}
+            aria-required={isRequired || undefined}
+            aria-invalid={invalid || undefined}
+          />
+          {errorNode}
+        </>
+      );
+    }
     return (
       <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)' }}>
@@ -223,6 +267,10 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
     );
   }
 
+  // T-0450 Fix 2: hideLabel → bare control without .chs-field wrapper or label.
+  if (hideLabel) {
+    return <>{control}{errorNode}</>;
+  }
   return (
     <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
       <label className="chs-label" htmlFor={id}>

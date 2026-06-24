@@ -469,12 +469,17 @@ function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
                             borderBottom: '1px solid var(--chs-color-border)',
                           }}
                         >
+                          {/* T-0450 Fix 2 (G7): hideLabel=true — the <th> column
+                              header already provides the label; repeating it per-cell
+                              stacks a "form in a form" and adds unwanted bottom margin
+                              that breaks table rhythm. */}
                           <FieldControl
                             field={cellField}
                             value={row[sf.key] !== undefined ? row[sf.key] : (sf.type === 'boolean' ? false : '')}
                             onChange={(subKey, cellVal) => setCellValue(rowIdx, subKey, cellVal)}
                             error={cellError}
                             idPrefix={`${idPrefix}-${field.key}-row${rowIdx}`}
+                            hideLabel
                           />
                         </td>
                       );

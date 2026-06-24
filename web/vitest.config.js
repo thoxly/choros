@@ -18,13 +18,17 @@
  */
 
 import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
 
 export default defineConfig({
+  plugins: [react()],
   test: {
     // Root for discovery: all *.test.js files anywhere under web/src/.
     // Exclude nothing extra — there are no db, worktree, or CI-check files here.
     include: ['src/**/*.test.js', 'src/**/*.test.jsx'],
     // node environment: tests stub browser globals themselves (see auth-headers.test.js).
+    // T-0450: @vitejs/plugin-react added to support .test.jsx files (FieldControl
+    // hideLabel test inspects React element trees without DOM rendering).
     environment: 'node',
     // No globalSetup (no DB isolation needed for pure-logic web tests).
   },
