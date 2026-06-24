@@ -37,6 +37,8 @@ import AssistantScreen from '../screens/screen-assistant.jsx';
 import LlmConfigScreen from '../screens/screen-llm-config.jsx';
 // T-0383 (D5/PD-6): assistant system prompt editor.
 import AssistantPromptScreen from '../screens/screen-assistant-prompt.jsx';
+// T-0435: DMN branch-rules editor — /processes/:processKey/branch-rules
+import DmnEditorScreen from '../screens/screen-dmn-editor.jsx';
 
 export { Icon };
 
@@ -82,6 +84,8 @@ const SCREEN_META = {
   "llm-config": { crumb: ["Конфигурация", "LLM-подключение"] },
   // T-0383 (D5/PD-6): assistant system prompt editor.
   "assistant-prompt": { crumb: ["Конфигурация", "Промпт ассистента"] },
+  // T-0435: branch-rules editor — /processes/:processKey/branch-rules
+  // The route starts with "processes" so SCREEN_META.processes crumb applies by default.
 };
 
 /**
@@ -742,6 +746,8 @@ function AppShell() {
             <Route path="/llm-config" element={<LlmConfigScreen />} />
             {/* T-0383 (D5/PD-6): assistant system prompt editor. */}
             <Route path="/assistant-prompt" element={<AssistantPromptScreen />} />
+            {/* T-0435: DMN branch-rules editor — scoped to a processKey. */}
+            <Route path="/processes/:processKey/branch-rules" element={<DmnEditorScreen />} />
           </Routes>
         </div>
       </main>
