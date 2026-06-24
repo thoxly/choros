@@ -187,7 +187,17 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
       // the routing variable + version pins into the startInstance variables map
       // so the exclusiveGateway in authored processes can route at start time.
       // Degrades gracefully: no published rule table → no injection, no throw.
+      //
+      // SAVEPOINT isolation: preComputeGatewayVariable writes an audit event
+      // (emitGatewayEvaluated → appendAuditEvent) on this same client.  A DB
+      // error inside that INSERT would leave the outer tx in an aborted state
+      // (25P02) even though the JS catch swallows the JS error, causing every
+      // subsequent query to fail.  Wrapping in a SAVEPOINT ensures that on any
+      // DB error the tx is rolled back only to the savepoint — the outer tx
+      // remains clean and launch proceeds with the original variables.
+      // Same idiom as proc_proj SAVEPOINT in records.ts.
       let launchVariables = variables;
+      await client.query('SAVEPOINT dmn_precompute');
       try {
         const dmnResult = await preComputeGatewayVariable(client, {
           tenantId,
@@ -208,9 +218,12 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
         } else if (Object.keys(dmnResult.versionVars).length > 0) {
           launchVariables = { ...(variables ?? {}), ...dmnResult.versionVars };
         }
+        await client.query('RELEASE SAVEPOINT dmn_precompute');
       } catch (dmnErr) {
         // Non-fatal: a DMN evaluation failure must NOT block the process launch.
-        // The gateway will fall through to the default flow (engine-side safety net).
+        // Roll back to the savepoint so the tx is clean, then proceed with
+        // the original variables (gateway falls through to default flow).
+        await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
         console.warn(
           `[process-start dmn-precompute] non-fatal DMN pre-compute error for process ` +
             `${processKey}:`,

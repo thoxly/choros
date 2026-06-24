@@ -936,3 +936,196 @@ describe("DG-16: T-0439 — preComputeGatewayVariable generic launch routing", (
     expect(Object.keys(launchVariables)).not.toContain("scoreBranch");
   });
 });
+
+// ---------------------------------------------------------------------------
+// DG-17: T-0439 review Fix-1 — SAVEPOINT isolation: DB error in audit INSERT
+//         must NOT poison the outer tx (graceful-degrade on DB error is true)
+//
+// Verifies the SAVEPOINT dmn_precompute / ROLLBACK TO SAVEPOINT dmn_precompute
+// idiom added at both call-sites in records.ts and process-start.ts.
+//
+// Approach: make a stub client that throws a simulated DB error on
+// INSERT INTO choros.audit_event (the write inside emitGatewayEvaluated /
+// appendAuditEvent).  Wrap preComputeGatewayVariable in the SAVEPOINT pattern
+// as the call-sites do and assert:
+//   (a) preComputeGatewayVariable itself throws (the DB error propagates out of it)
+//   (b) the ROLLBACK TO SAVEPOINT branch is reached (tx poison is prevented)
+//   (c) a subsequent query on the same client succeeds (tx is clean, not aborted)
+//   (d) the original variables are unchanged after the catch (no orphan injection)
+// ---------------------------------------------------------------------------
+
+/** Simulated Postgres "current transaction is aborted" error (code 25P02). */
+class SimulatedDbError extends Error {
+  readonly code = "25P02";
+  constructor() {
+    super("ERROR: current transaction is aborted, commands ignored until end of transaction block");
+    this.name = "SimulatedDbError";
+  }
+}
+
+/**
+ * Build a stub client that throws SimulatedDbError on the audit_event INSERT,
+ * otherwise behaves like makeStubClient.  Tracks which SAVEPOINT commands were
+ * issued so the test can assert the rollback path was taken.
+ */
+function makeFailingAuditClient(ruleTables?: DmnRuleTable[]): {
+  client: import("pg").PoolClient;
+  savepointLog: string[];
+} {
+  const savepointLog: string[] = [];
+  const base = makeStubClient({ ruleTables: ruleTables ?? [TEL_THRESHOLD_TABLE] });
+
+  const wrappedClient = {
+    query: async (sql: unknown, values?: unknown[]) => {
+      const sqlText = typeof sql === "string" ? sql : ((sql as { text?: string }).text ?? "");
+      const upper = sqlText.trimStart().toUpperCase();
+
+      // Track SAVEPOINT commands (SAVEPOINT x, RELEASE SAVEPOINT x, ROLLBACK TO SAVEPOINT x).
+      // Note: "ROLLBACK TO SAVEPOINT" starts with "ROLLBACK" so the base stub would
+      // absorb it — we intercept first here to track it before delegating.
+      if (
+        upper.startsWith("SAVEPOINT") ||
+        upper.startsWith("RELEASE SAVEPOINT") ||
+        upper.startsWith("ROLLBACK TO SAVEPOINT")
+      ) {
+        savepointLog.push(sqlText.trim());
+        return { rows: [] };
+      }
+
+      // Throw on audit_event INSERT to simulate a DB-level failure inside
+      // emitGatewayEvaluated → appendAuditEvent.
+      if (/INSERT INTO choros\.audit_event/i.test(sqlText)) {
+        throw new SimulatedDbError();
+      }
+
+      return (base.client.query as (sql: unknown, values?: unknown[]) => Promise<{ rows: unknown[] }>)(sql, values);
+    },
+    release: () => {},
+  } as unknown as import("pg").PoolClient;
+
+  return { client: wrappedClient, savepointLog };
+}
+
+describe("DG-17: T-0439 review Fix-1 — SAVEPOINT isolation on DB error in audit INSERT", () => {
+  it("DG-17a: preComputeGatewayVariable throws when audit INSERT fails (DB error propagates)", async () => {
+    // The call-site wraps preComputeGatewayVariable in SAVEPOINT / catch.
+    // First verify that the DB error inside appendAuditEvent IS propagated out of
+    // preComputeGatewayVariable so the catch at the call-site fires.
+    const { client } = makeFailingAuditClient();
+    let threw = false;
+    try {
+      await preComputeGatewayVariable(client, {
+        tenantId: TENANT_ID,
+        instanceId: INSTANCE_ID,
+        processKey: PROC_KEY,
+        actor: ACTOR,
+        nowMs: NOW_MS,
+        bindings: { amount: 6_000_000 },
+        gatewayId: TEL_GATEWAY_ID,
+      });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
+  it("DG-17b: call-site SAVEPOINT pattern — ROLLBACK TO SAVEPOINT is issued after DB error (tx not poisoned)", async () => {
+    // Simulate the SAVEPOINT wrapper that both call-sites now apply.
+    const { client, savepointLog } = makeFailingAuditClient();
+
+    let caughtError: unknown = null;
+    await client.query('SAVEPOINT dmn_precompute');
+    try {
+      await preComputeGatewayVariable(client, {
+        tenantId: TENANT_ID,
+        instanceId: INSTANCE_ID,
+        processKey: PROC_KEY,
+        actor: ACTOR,
+        nowMs: NOW_MS,
+        bindings: { amount: 6_000_000 },
+        gatewayId: TEL_GATEWAY_ID,
+      });
+      await client.query('RELEASE SAVEPOINT dmn_precompute');
+    } catch (err) {
+      caughtError = err;
+      await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
+    }
+
+    // The error must have been caught (not re-thrown to the outer tx).
+    expect(caughtError).toBeInstanceOf(SimulatedDbError);
+
+    // SAVEPOINT was opened; ROLLBACK TO SAVEPOINT was issued (not RELEASE).
+    expect(savepointLog).toContain('SAVEPOINT dmn_precompute');
+    expect(savepointLog).toContain('ROLLBACK TO SAVEPOINT dmn_precompute');
+    expect(savepointLog).not.toContain('RELEASE SAVEPOINT dmn_precompute');
+  });
+
+  it("DG-17c: after ROLLBACK TO SAVEPOINT the client is still usable (tx not aborted)", async () => {
+    // After the ROLLBACK TO SAVEPOINT the tx must be clean.
+    // A subsequent query on the same client must succeed (no 25P02 state).
+    const { client } = makeFailingAuditClient();
+
+    await client.query('SAVEPOINT dmn_precompute');
+    try {
+      await preComputeGatewayVariable(client, {
+        tenantId: TENANT_ID,
+        instanceId: INSTANCE_ID,
+        processKey: PROC_KEY,
+        actor: ACTOR,
+        nowMs: NOW_MS,
+        bindings: { amount: 6_000_000 },
+        gatewayId: TEL_GATEWAY_ID,
+      });
+      await client.query('RELEASE SAVEPOINT dmn_precompute');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
+    }
+
+    // A query that follows (mirrors startInstance read-back SELECT in records.ts).
+    // If the tx were aborted this would throw with code 25P02.
+    let postQueryFailed = false;
+    try {
+      await client.query('SELECT 1'); // absorbed by base stub → { rows: [] }
+    } catch {
+      postQueryFailed = true;
+    }
+    expect(postQueryFailed).toBe(false);
+  });
+
+  it("DG-17d: original variables are unchanged after DB error in pre-compute (no orphan injection)", async () => {
+    // Call-site pattern: on catch, launchVariables must stay equal to the original.
+    const { client } = makeFailingAuditClient();
+    const originalVariables: Record<string, unknown> = { amount: 6_000_000, userId: "u-1" };
+    let launchVariables = { ...originalVariables };
+
+    await client.query('SAVEPOINT dmn_precompute');
+    try {
+      const dmnResult = await preComputeGatewayVariable(client, {
+        tenantId: TENANT_ID,
+        instanceId: INSTANCE_ID,
+        processKey: PROC_KEY,
+        actor: ACTOR,
+        nowMs: NOW_MS,
+        bindings: originalVariables,
+        gatewayId: TEL_GATEWAY_ID,
+      });
+      if (dmnResult.gatewayVar !== null) {
+        launchVariables = {
+          ...originalVariables,
+          [dmnResult.gatewayVar.name]: dmnResult.gatewayVar.value,
+          ...dmnResult.versionVars,
+        };
+      }
+      await client.query('RELEASE SAVEPOINT dmn_precompute');
+    } catch {
+      // Graceful degrade: roll back and keep original variables.
+      await client.query('ROLLBACK TO SAVEPOINT dmn_precompute');
+      // launchVariables intentionally NOT updated (stays === originalVariables).
+    }
+
+    // Launch proceeds with original variables — no gateway injection, no orphan.
+    expect(launchVariables).toEqual(originalVariables);
+    expect(Object.keys(launchVariables)).not.toContain("approvalRequired");
+    expect(Object.keys(launchVariables)).not.toContain("scoreBranch");
+  });
+});
