@@ -389,15 +389,8 @@ describe('T-0294: date fields in records-form', () => {
   });
 
   it('validateRecordValues: date with valid ISO value passes', () => {
-    const dateSchema = {
-      type: 'object', additionalProperties: false,
-      properties: { due: { type: 'string', title: 'Due' } },
-      required: ['due'],
-    };
-    const fields = schemaToFormFields(dateSchema);
-    // Fields parsed from plain string schema — field.type will be 'string' (date
-    // stored as string, no distinguishing marker). We need a date-typed field from
-    // records-form to properly test date validation. Use a field list directly.
+    // schemaToFormFields parses a plain type:"string" for date — not distinguishable.
+    // We need a date-typed field to test date validation; use a field list directly.
     const dateField = [{ key: 'due', type: 'date', title: 'Due', label: 'Due', required: true, inputKind: 'date' }];
     const { valid } = validateRecordValues(dateField, { due: '2024-03-15' });
     expect(valid).toBe(true);
