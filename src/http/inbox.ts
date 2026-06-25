@@ -50,6 +50,7 @@ import {
   findWaitingInstanceTask,
   listInstanceInboxTasks,
   listInstanceProjections,
+  reconcileInstanceTimers,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -637,6 +638,11 @@ async function findInboxItems(
           minute: "2-digit",
         }),
         deadline,
+        // T-0458 [D8-R3]: carry the timer-firing escalation provenance + F5 prefill
+        // reason from the projection so the «Эскалации» tab + prefilled form work
+        // without client-side string-matching.
+        ...(row.escalated ? { escalated: true } : {}),
+        ...(row.doubtReason ? { doubt_reason: row.doubtReason } : {}),
       };
 
       return { base, claim };
@@ -779,6 +785,28 @@ export function registerInboxRoutes(
       let devUserId = req.headers[DEV_USER_HEADER];
       if (Array.isArray(devUserId)) devUserId = devUserId[0];
       actor = typeof devUserId === "string" ? devUserId : null;
+    }
+
+    // T-0458 [D8-R3]: timer-firing projection (reconcile-on-read). A boundary/
+    // intermediate TIMER that fired in Flowable routes the token to the escalation
+    // user-task WITHOUT a human action, so the firing cannot be projected on the
+    // approve path. Here — the moment the inbox is read — we reconcile each waiting
+    // instance's live engine task set and surface any newly-active (timer-fired)
+    // escalation task as a process.next_task(escalated) row, so it appears in THIS
+    // response. Best-effort + idempotent (dedup by defKey); engine/DB hiccups degrade
+    // silently. Only runs when a FlowableClient + DB are available (honest-degrade).
+    if (writeDeps?.flowableClient && hasDb()) {
+      try {
+        const reconTenantId = await resolveTenant(actor);
+        await reconcileInstanceTimers(
+          getOrgPool(),
+          reconTenantId,
+          writeDeps.flowableClient,
+          { actor: actor ?? "system:timer" },
+        );
+      } catch (err) {
+        console.warn("[inbox T-0458] timer reconcile-on-read failed (non-fatal):", err);
+      }
     }
 
     const base = await findInboxItems(actor);
