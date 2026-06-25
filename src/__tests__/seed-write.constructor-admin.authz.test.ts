@@ -60,7 +60,7 @@ function makeConstructorAdminPool(
   grantSet: Array<{ resourceType: string; operation: string }>,
 ): pg.Pool {
   const client = {
-    query: async (text: string, params?: unknown[]) => {
+    query: async (text: string, _params?: unknown[]) => {
       if (typeof text !== "string") return { rows: [], rowCount: 0 };
 
       // resolveActorTenant: slug → caller's tenant
