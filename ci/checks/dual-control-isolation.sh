@@ -185,6 +185,7 @@ _dc_mig081_failed=0                                                             
 _dc_mig082_failed=0                                                                # T0351-DC-MIG082-GUARD track when 082 triggers the FF-DC7 fail
 _dc_mig083_failed=0                                                                # T0354-DC-MIG083-GUARD track when 083 triggers the FF-DC7 fail
 _dc_mig104_failed=0                                                                # T0475-DC-MIG104-GUARD track when 104 triggers the FF-DC7 fail
+_dc_mig106_failed=0                                                                # T0476-DC-MIG106-GUARD track when 106 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -221,6 +222,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/104_capability_grants_l4_seed.sql" ]]; then   # T0475-DC-MIG104-GUARD
       _dc_mig104_failed=1                                                     # T0475-DC-MIG104-GUARD
     fi                                                                        # T0475-DC-MIG104-GUARD
+    # Track specifically when 106 triggers this FAIL (and nothing else).     # T0476-DC-MIG106-GUARD
+    if [[ "${m}" == "migrations/106_app_secret_store.sql" ]]; then            # T0476-DC-MIG106-GUARD
+      _dc_mig106_failed=1                                                     # T0476-DC-MIG106-GUARD
+    fi                                                                        # T0476-DC-MIG106-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -420,6 +425,35 @@ if [[ "${_dc_mig104_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0475-capability-grants-seed]: migration 104_capability_grants_l4_seed.sql is a pure INSERT seed of two capability-grant rows (confirmed_by='seed') — NO CREATE TABLE/RLS/POLICY, does NOT alter confirmed2_by/dual-control authority machinery — relief granted" # T0475-DC-MIG104-GUARD
   fi                                                                           # T0475-DC-MIG104-GUARD
 fi                                                                             # T0475-DC-MIG104-GUARD
+# T-0476: additive relief for migration 106_app_secret_store.sql. Like 074/075, # T0476-DC-MIG106-GUARD
+# 106 IS a new tenant table (app_secret — the app:// encrypted secret store,   # T0476-DC-MIG106-GUARD
+# AES-256-GCM ciphertext+nonce, FORCE RLS) — but it is UNRELATED to the         # T0476-DC-MIG106-GUARD
+# dual-control authority domain (grant / confirmation / confirmed2_by). T-0044's # T0476-DC-MIG106-GUARD
+# real invariant — 031 is the ONLY dual-control migration, confirmed2_by stays  # T0476-DC-MIG106-GUARD
+# a derived additive column — is NOT touched by an encrypted-key store. Same     # T0476-DC-MIG106-GUARD
+# class as the T-0252 migration-074 / T-0270 migration-075 table-add reliefs.    # T0476-DC-MIG106-GUARD
+# Sanctioned in data/frozen-sanctions.jsonl (auto_additive). Cancels ONLY the    # T0476-DC-MIG106-GUARD
+# _dc_mig106_failed increment; fires only after independently verifying 106 does # T0476-DC-MIG106-GUARD
+# NOT create/alter any grant/confirmation/authority table and does NOT touch     # T0476-DC-MIG106-GUARD
+# confirmed2_by.                                                                 # T0476-DC-MIG106-GUARD
+_dc_mig106_stem="migrations/106_app_secret_store.sql"                            # T0476-DC-MIG106-GUARD
+if [[ "${_dc_mig106_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig106_stem}"; then # T0476-DC-MIG106-GUARD
+  _dc_mig106_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig106_stem}" 2>/dev/null || true)"  # T0476-DC-MIG106-GUARD
+  _dc_mig106_bad=0                                                             # T0476-DC-MIG106-GUARD
+  # 106 must not create/alter the dual-control authority domain (grant/confirmation/authority). # T0476-DC-MIG106-GUARD
+  if echo "${_dc_mig106_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0476-DC-MIG106-GUARD
+    _dc_mig106_bad=1                                                           # T0476-DC-MIG106-GUARD touches authority domain
+  fi                                                                           # T0476-DC-MIG106-GUARD
+  # ... and must NOT touch the confirmed2_by invariant.                       # T0476-DC-MIG106-GUARD
+  if echo "${_dc_mig106_content}" | grep -iqE "confirmed2_by"; then           # T0476-DC-MIG106-GUARD
+    _dc_mig106_bad=1                                                           # T0476-DC-MIG106-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0476-DC-MIG106-GUARD
+  if [[ "${_dc_mig106_bad}" -eq 0 ]]; then                                    # T0476-DC-MIG106-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0476-DC-MIG106-GUARD cancel false-red
+    _dc_mig106_failed=0                                                        # T0476-DC-MIG106-GUARD
+    echo "PASS [FF-DC7-T0476-app-secret-store]: migration 106_app_secret_store.sql creates app_secret (app:// encrypted key store, FORCE RLS) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0476-DC-MIG106-GUARD
+  fi                                                                           # T0476-DC-MIG106-GUARD
+fi                                                                             # T0476-DC-MIG106-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

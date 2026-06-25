@@ -58,9 +58,14 @@ import { getGrantsForSubject, getFieldVisibilityPolicy } from "./db/grants-dao.j
 import { dormantLlmPort } from "./core/llm-port.js";
 // T-0363 (E17): DeepSeek / OpenAI-compatible LLM adapter (composition-root only — RL-3).
 import { OpenAILlmPort } from "./adapters/openai-llm-port.js";
-import { validateSecretHandleShape, redactHandle, type SecretResolverPort } from "./core/secret-handle-validator.js";
+import { validateSecretHandleShape, redactHandle, parseAppHandle, type SecretResolverPort } from "./core/secret-handle-validator.js";
 // T-0382 (D5) BLOCKER-1: env:// secret-handle allow-list (arbitrary env exfil guard).
 import { decideEnvHandle } from "./core/env-secret-allowlist.js";
+// T-0476 (E-AGENTS L3): app:// encrypted secret store — AEAD decrypt at the root.
+import { loadMasterKey, decryptSecret, AppSecretStoreUnconfiguredError } from "./core/app-secret-cipher.js";
+import { getAppSecretSealed } from "./db/app-secret-dao.js";
+import { registerAppSecretRoutes } from "./http/app-secret.js";
+import { type PgClientLike } from "./db/audit-writer.js";
 // T-0363 (E17): Analyst production ports.
 import { setAnalystPorts } from "./core/assistant-analyst.js";
 import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition-journal.js";
@@ -153,7 +158,58 @@ const deepseekSecretResolver: SecretResolverPort = {
 // resolveSecret("env://...") against the REAL composition-root resolver
 // and assert it always throws rather than returning any server env value.
 export const tenantSecretResolver: SecretResolverPort = {
-  async resolveSecret(handle: string, _ctx: { tenantId: string }): Promise<string> {
+  async resolveSecret(handle: string, ctx: { tenantId: string }): Promise<string> {
+    // T-0476 (E-AGENTS L3): app://<id> → decrypt the tenant's BYO key IN MEMORY.
+    // This is the self-serve tenant key path. The plaintext is returned ONLY to the
+    // immediate caller (the LLM adapter at call time) — it is NEVER logged, returned
+    // in an API response, or egressed (the secret-handle-isolation gate enforces no
+    // raw-key handling outside this custody resolver).
+    const appRef = parseAppHandle(handle);
+    if (appRef !== null) {
+      // Master key from env at the COMPOSITION ROOT only (app-secret-cipher is env-free).
+      let masterKey: Buffer;
+      try {
+        masterKey = loadMasterKey(process.env["APP_SECRET_MASTER_KEY"]);
+      } catch (err) {
+        if (err instanceof AppSecretStoreUnconfiguredError) {
+          // DORMANT: store not configured → honest error (no crash, no plaintext).
+          throw new Error(
+            `[T-0476] app:// secret store is not configured (APP_SECRET_MASTER_KEY unset); ` +
+            `cannot resolve handle ${redactHandle(handle)}.`,
+          );
+        }
+        throw err;
+      }
+      // Read the sealed row under the tenant's RLS scope, then decrypt in memory.
+      const pool = getOrgPool();
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SET LOCAL choros.tenant_id = '${ctx.tenantId}'`);
+        await client.query("SET LOCAL search_path TO choros");
+        const sealed = await getAppSecretSealed(
+          client as unknown as PgClientLike,
+          ctx.tenantId,
+          appRef.secretId,
+        );
+        await client.query("COMMIT");
+        if (sealed === null) {
+          // Not found / wrong tenant (RLS hid it) → opaque error, no key material.
+          throw new Error(`[T-0476] app:// secret not found for handle ${redactHandle(handle)}`);
+        }
+        // Decrypt IN MEMORY. Returned to the immediate caller ONLY (RL-3).
+        return decryptSecret(
+          { ciphertext: sealed.ciphertext, nonce: sealed.nonce, keyVersion: sealed.keyVersion },
+          masterKey,
+        );
+      } catch (err) {
+        try { await client.query("ROLLBACK"); } catch { /* already closed */ }
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
     // T-0413: REJECT all env:// handles in the tenant path — scheme is SYSTEM-ONLY.
     // decideEnvHandle classifies the handle; any env:// outcome (denied OR allowed)
     // is rejected here because the allow-list only governs the system-internal path.
@@ -867,6 +923,20 @@ function buildRouter(
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0476 (E-AGENTS L3): app:// encrypted secret store — "вставить API-ключ".
+  // POST/GET-status/DELETE /api/llm-connections/:id/key — write-only key binding.
+  // The raw key is encrypted (AES-256-GCM) into app_secret and the connection's
+  // secret_handle is set to app://<id>; the key is NEVER returned/logged. DORMANT
+  // (503 honest) when APP_SECRET_MASTER_KEY is unset. Read at the composition root.
+  if (grantsPool) {
+    registerAppSecretRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      getMasterKey: () => process.env["APP_SECRET_MASTER_KEY"],
     });
   }
 
