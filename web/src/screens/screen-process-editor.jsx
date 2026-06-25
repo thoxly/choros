@@ -423,6 +423,14 @@ export default function ProcessEditorScreen() {
   }, [doLoad]);
 
   /* ------------------------------------------------------------------
+     T-0484: onError callback from BpmnModelerWrapper — surface a failed
+     diagram import as an honest banner instead of a silently-blank canvas.
+     ------------------------------------------------------------------ */
+  const handleModelerError = useCallback((message) => {
+    setStatusMsg({ text: message, isError: true });
+  }, []);
+
+  /* ------------------------------------------------------------------
      T-0098: onReady callback from BpmnModelerWrapper.
      ------------------------------------------------------------------ */
   const handleModelerReady = useCallback((modeler) => {
@@ -734,6 +742,7 @@ export default function ProcessEditorScreen() {
             ref={modelerWrapperRef}
             style={{ position: 'absolute', inset: 0 }}
             onReady={handleModelerReady}
+            onError={handleModelerError}
             initialXml={initialXml}
           />
 
