@@ -151,7 +151,7 @@ describe("T-0459 — broadcast signal (within-tenant only)", () => {
     ];
     const r = correlateEnvelope(env({ messageName: "status-changed", correlationKey: "STATUS" }), subs);
     expect(r.delivered).toBe(true);
-    expect(r.firedInstances.sort()).toEqual(["inst-A", "inst-B"]);
+    expect([...r.firedInstances].sort()).toEqual(["inst-A", "inst-B"]);
   });
 
   it("a broadcast NEVER crosses the tenant boundary", () => {
