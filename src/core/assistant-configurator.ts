@@ -88,6 +88,46 @@ interface ToolDeclaration {
   };
 }
 
+// slug validation: lowercase alphanumerics + dashes, 1..64 — mirrors
+// applications.ts SLUG_RE / registry-defs.ts so a bot-authored slug is the
+// same URL-shaped identifier the visual constructor produces (co-equal).
+const CONFIGURATOR_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * create_application — T-0462 (D8-G1): create a NEW section + application in DRAFT.
+ *
+ * Unlike edit_jsonschema (which edits an EXISTING registry_def by id), this tool
+ * CREATES a brand-new application + a primary registry_def "section" under it.
+ * Both land in DRAFT tier (application.tier='draft'); a human promotes later.
+ * Co-equal: writes the SAME application + registry_def tables the visual
+ * constructor writes (applications.ts POST / registry-defs.ts POST).
+ */
+const TOOL_CREATE_APPLICATION: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "create_application",
+    description:
+      "Create a NEW application (and its primary section/registry) in DRAFT tier. " +
+      "Use this when the user asks to BUILD a new app that does NOT exist yet " +
+      "(«построй приложение …», «собери CRM», «создай раздел …»). " +
+      "Both the application and its section land in DRAFT; a human promotes later. " +
+      "To EDIT an existing application's fields, use edit_jsonschema instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        appSlug: { type: "string", description: "URL-shaped slug for the application (lowercase a-z0-9-, 1..64)." },
+        appDisplayName: { type: "string", description: "Human-readable application name (e.g. «Заявки на закупку»)." },
+        appDescription: { type: "string", description: "Optional one-line description of the application." },
+        sectionSlug: { type: "string", description: "Optional slug for the primary section/registry (defaults to appSlug)." },
+        sectionDisplayName: { type: "string", description: "Optional display name for the primary section (defaults to appDisplayName)." },
+        recordSchema: { type: "string", description: "Optional JSON string: initial record_schema for the section (defaults to an empty object schema)." },
+        humanReadableReason: { type: "string", description: "Why this application is being created (for changelog)." },
+      },
+      required: ["appSlug", "appDisplayName", "humanReadableReason"],
+    },
+  },
+};
+
 /** author_binding — upsert a process_app_binding (trigger type + start form + field mapping). */
 const TOOL_AUTHOR_BINDING: ToolDeclaration = {
   type: "function",
@@ -228,6 +268,7 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
 
 /** All E16 authoring tools available to the configurator. */
 const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
+  TOOL_CREATE_APPLICATION,
   TOOL_AUTHOR_BINDING,
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
@@ -249,6 +290,7 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
  */
 export interface ApprovedOp {
   readonly kind:
+    | "create_application"
     | "author_binding"
     | "edit_jsonschema_non_destructive"
     | "emit_form"
@@ -366,6 +408,77 @@ function processToolCall(
   const reason = (args["humanReadableReason"] as string | undefined) ?? call.name;
 
   switch (call.name) {
+    // -----------------------------------------------------------------------
+    // create_application — T-0462 (D8-G1): create a NEW app + section in DRAFT.
+    // Non-destructive (pure creation). Validates the slug so a bad slug returns
+    // an honest blocked message rather than a 500 at the DB layer.
+    // -----------------------------------------------------------------------
+    case "create_application": {
+      const appSlug = typeof args["appSlug"] === "string" ? args["appSlug"] : "";
+      const appDisplayName =
+        typeof args["appDisplayName"] === "string" ? args["appDisplayName"].trim() : "";
+
+      if (!CONFIGURATOR_SLUG_RE.test(appSlug)) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description:
+            `create_application: некорректный slug приложения «${appSlug}» ` +
+            `(нужны строчные латиница/цифры/дефис, 1–64 символа).`,
+          toolName: call.name,
+          requiredAction: "Уточните корректный slug приложения и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] create_application: некорректный slug «${appSlug}»`,
+          toolResultContent: `error: invalid appSlug '${appSlug}'`,
+        };
+      }
+      if (appDisplayName.length === 0) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `create_application: не указано название приложения (appDisplayName).`,
+          toolName: call.name,
+          requiredAction: "Укажите название приложения и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] create_application: пустое название`,
+          toolResultContent: `error: empty appDisplayName`,
+        };
+      }
+
+      // Section defaults to the application's own slug/name when not specified.
+      const sectionSlug =
+        typeof args["sectionSlug"] === "string" && CONFIGURATOR_SLUG_RE.test(args["sectionSlug"])
+          ? args["sectionSlug"]
+          : appSlug;
+      const sectionDisplayName =
+        typeof args["sectionDisplayName"] === "string" && args["sectionDisplayName"].trim()
+          ? args["sectionDisplayName"].trim()
+          : appDisplayName;
+
+      const approved: ApprovedOp = {
+        kind: "create_application",
+        description:
+          `Создание приложения «${appDisplayName}» (slug=${appSlug}) ` +
+          `с разделом «${sectionDisplayName}» (slug=${sectionSlug}) [DRAFT]: ${reason}`,
+        // Normalize args so the executor sees resolved section fields.
+        args: { ...args, appSlug, appDisplayName, sectionSlug, sectionDisplayName },
+        tier: "draft",
+      };
+      return {
+        approved,
+        changelogLine: `✓ [DRAFT] create_application: ${approved.description}`,
+        toolResultContent: JSON.stringify({
+          status: "draft",
+          appSlug,
+          appDisplayName,
+          sectionSlug,
+          tier: "draft",
+        }),
+      };
+    }
+
     // -----------------------------------------------------------------------
     // author_binding — always non-destructive (upsert on binding, no field drops)
     // -----------------------------------------------------------------------
