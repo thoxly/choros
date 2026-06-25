@@ -559,7 +559,44 @@ function ProcessesScreen() {
                   </td>
                   <td><MonoId>{inst.id}</MonoId></td>
                   <td><StatusChip status={inst.status} /></td>
-                  <td><Mono style={{ fontSize: "var(--chs-text-sm)" }}>{inst.node}</Mono></td>
+                  {/* T-0456 [D8-R1]: show CONCURRENT branches of an AND-split.
+                      inst.nodes carries every active step; render each on its own line
+                      with a "parallel" marker when there is more than one. Falls back to
+                      the single inst.node for seed fixtures without nodes. */}
+                  <td>
+                    {(() => {
+                      const nodes = Array.isArray(inst.nodes) && inst.nodes.length > 0
+                        ? inst.nodes
+                        : [inst.node];
+                      if (nodes.length <= 1) {
+                        return <Mono style={{ fontSize: "var(--chs-text-sm)" }}>{nodes[0]}</Mono>;
+                      }
+                      return (
+                        <div
+                          data-testid="concurrent-branches"
+                          style={{ display: "flex", flexDirection: "column", gap: "var(--chs-space-1)" }}
+                        >
+                          {nodes.map((n, i) => (
+                            <div key={i} style={{ display: "flex", alignItems: "center", gap: "var(--chs-space-2)" }}>
+                              <span
+                                aria-hidden="true"
+                                title="Параллельная ветка"
+                                style={{
+                                  display: "inline-block",
+                                  width: 6,
+                                  height: 6,
+                                  borderRadius: "50%",
+                                  background: "var(--chs-color-accent, var(--chs-color-text-muted))",
+                                  flexShrink: 0,
+                                }}
+                              />
+                              <Mono style={{ fontSize: "var(--chs-text-sm)" }}>{n}</Mono>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td>
                     <Mono style={{ fontSize: "var(--chs-text-sm)", color: "var(--chs-color-text-muted)" }}>
                       {inst.progress.done}/{inst.progress.total}

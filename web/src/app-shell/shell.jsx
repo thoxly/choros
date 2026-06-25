@@ -276,12 +276,31 @@ function Topbar({ screen, pathname, theme, setTheme }) {
         Новый процесс
       </Button>
     ) : screen === "org" ? (
-      <Button variant="secondary" size="sm" glyph={<Icon name="plus" className="chs-btn__glyph" />}>Исполнитель</Button>
+      // T-0484: this topbar button was INERT (no onClick — looked clickable, did
+      // nothing). The real "add executor" controls (+ Сотрудник / + Роль /
+      // Назначить роль) live in the org tree toolbar and are owner-gated there.
+      // Make the affordance HONEST: disabled with a tooltip pointing to the
+      // working controls, instead of a dead button that silently swallows clicks.
+      <Tooltip label="Добавить исполнителя можно в панели оргструктуры слева (+ Сотрудник / Назначить роль). Доступно владельцу тенанта.">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled
+          glyph={<Icon name="plus" className="chs-btn__glyph" />}
+        >
+          Исполнитель
+        </Button>
+      </Tooltip>
     ) : screen === "audit" ? (
       // T-0138: download current instance audit log via GET /api/audit/export
       <Button variant="secondary" size="sm" onClick={downloadAuditLog}>Экспорт лога</Button>
     ) : screen === "rights" ? (
-      <Button variant="secondary" size="sm">Экспорт прав</Button>
+      // T-0484: this button was INERT (no onClick). No export-rights endpoint is
+      // wired yet — make the affordance honest (disabled + reason) rather than a
+      // dead button that looks functional.
+      <Tooltip label="Экспорт прав пока недоступен — функция в разработке.">
+        <Button variant="secondary" size="sm" disabled>Экспорт прав</Button>
+      </Tooltip>
     ) : null;
   return (
     <header className="chs-topbar">

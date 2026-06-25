@@ -258,3 +258,137 @@ describe('FieldControl T-0450 Fix 2 · backward-compatibility (existing callers 
     expect(labels.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0404 [D7-9] — per-step field MODE enforcement in the renderer
+//   hidden → not rendered; read-only → disabled; required-to-advance → required
+// ---------------------------------------------------------------------------
+
+import { resolveFieldMode } from './field-contract.js';
+
+/** Collect all input/select/textarea controls from a returned tree. */
+function findControls(tree) {
+  return [
+    ...findByType(tree, 'input'),
+    ...findByType(tree, 'select'),
+    ...findByType(tree, 'textarea'),
+  ];
+}
+
+/** True iff the tree contains the required-asterisk marker span. */
+function hasRequiredStar(tree) {
+  const spans = findByType(tree, 'span');
+  return spans.some((s) => {
+    const c = s.props?.children;
+    return c === '*' || (Array.isArray(c) && c.includes('*'));
+  });
+}
+
+describe('resolveFieldMode (pure)', () => {
+  it('absent mode → all flags false', () => {
+    expect(resolveFieldMode({ key: 'x' })).toEqual({
+      mode: undefined, hidden: false, readOnly: false, required: false,
+    });
+  });
+  it('hidden mode → hidden flag', () => {
+    expect(resolveFieldMode({ key: 'x', mode: 'hidden' }).hidden).toBe(true);
+  });
+  it('read-only mode → readOnly flag', () => {
+    expect(resolveFieldMode({ key: 'x', mode: 'read-only' }).readOnly).toBe(true);
+  });
+  it('required-to-advance mode → required flag', () => {
+    expect(resolveFieldMode({ key: 'x', mode: 'required-to-advance' }).required).toBe(true);
+  });
+  it('unknown mode → ignored (all flags false)', () => {
+    const r = resolveFieldMode({ key: 'x', mode: 'bogus' });
+    expect(r.hidden || r.readOnly || r.required).toBe(false);
+  });
+});
+
+describe('FieldControl T-0404 · hidden mode → renders nothing', () => {
+  for (const type of ['string', 'select', 'boolean', 'number', 'date']) {
+    it(`${type} hidden → returns null`, () => {
+      const tree = FieldControl({
+        field: { key: 'k', label: 'L', type, mode: 'hidden', options: ['a', 'b'] },
+        value: '',
+        onChange: noop,
+      });
+      expect(tree).toBeNull();
+    });
+  }
+});
+
+describe('FieldControl T-0404 · read-only mode → control rendered disabled', () => {
+  it('text read-only → input readOnly', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'string', mode: 'read-only' },
+      value: 'v', onChange: noop,
+    });
+    const controls = findControls(tree);
+    expect(controls.length).toBeGreaterThan(0);
+    expect(controls[0].props.readOnly).toBe(true);
+  });
+
+  it('select read-only → select disabled', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'select', mode: 'read-only', options: ['a', 'b'] },
+      value: 'a', onChange: noop,
+    });
+    const selects = findByType(tree, 'select');
+    expect(selects[0].props.disabled).toBe(true);
+  });
+
+  it('checkbox read-only → checkbox disabled', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'boolean', mode: 'read-only' },
+      value: true, onChange: noop,
+    });
+    const inputs = findByType(tree, 'input');
+    expect(inputs[0].props.disabled).toBe(true);
+  });
+
+  it('number read-only → input readOnly', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'integer', mode: 'read-only' },
+      value: '3', onChange: noop,
+    });
+    expect(findControls(tree)[0].props.readOnly).toBe(true);
+  });
+
+  it('date read-only → input readOnly', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'date', mode: 'read-only' },
+      value: '2026-01-01', onChange: noop,
+    });
+    expect(findControls(tree)[0].props.readOnly).toBe(true);
+  });
+});
+
+describe('FieldControl T-0404 · required-to-advance mode → marked required', () => {
+  it('text required-to-advance → aria-required + asterisk', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'string', required: false, mode: 'required-to-advance' },
+      value: '', onChange: noop,
+    });
+    const controls = findControls(tree);
+    expect(controls[0].props['aria-required']).toBe(true);
+    expect(hasRequiredStar(tree)).toBe(true);
+  });
+
+  it('select required-to-advance → aria-required', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'select', required: false, mode: 'required-to-advance', options: ['a'] },
+      value: '', onChange: noop,
+    });
+    expect(findByType(tree, 'select')[0].props['aria-required']).toBe(true);
+  });
+
+  it('a plain field (no mode, required:false) is NOT marked required', () => {
+    const tree = FieldControl({
+      field: { key: 'k', label: 'L', type: 'string', required: false },
+      value: '', onChange: noop,
+    });
+    expect(findControls(tree)[0].props['aria-required']).toBeUndefined();
+    expect(hasRequiredStar(tree)).toBe(false);
+  });
+});

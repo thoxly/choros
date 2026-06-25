@@ -83,12 +83,16 @@ const BLANK_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
    ValidationBanner
    Shows validation errors and warnings below the toolbar.
    -------------------------------------------------------------------------- */
-function ValidationBanner({ result, onDismiss }) {
+export function ValidationBanner({ result, onDismiss }) {
   if (!result) return null;
 
   const hasErrors = result.errors && result.errors.length > 0;
   const hasWarnings = result.warnings && result.warnings.length > 0;
-  if (!hasErrors && !hasWarnings) {
+  // T-0484 (honesty): only show the GREEN "валидна" state when validation
+  // actually reported valid === true. Previously an empty errors+warnings list
+  // alone painted green — so a result that was NOT valid but happened to carry
+  // no listed messages would falsely read as success. Never show invalid as green.
+  if (result.valid === true && !hasErrors && !hasWarnings) {
     return (
       <div className="chs-banner chs-banner--success">
         <span className="chs-banner__msg">Диаграмма валидна</span>
@@ -104,13 +108,20 @@ function ValidationBanner({ result, onDismiss }) {
     );
   }
 
+  // T-0484: "invalid" outranks "warning". If validation failed (valid === false)
+  // treat it as a danger banner even when no specific messages were listed —
+  // never downgrade a failed validation to a soft yellow warning.
+  const isDanger = hasErrors || result.valid === false;
+
   return (
-    <div className={`chs-banner ${hasErrors ? 'chs-banner--danger' : 'chs-banner--warning'}`}>
+    <div className={`chs-banner ${isDanger ? 'chs-banner--danger' : 'chs-banner--warning'}`}>
       <div className="chs-banner__header">
         <span className="chs-banner__title">
           {hasErrors
             ? `Ошибки валидации (${result.errors.length})`
-            : `Предупреждения (${result.warnings.length})`}
+            : result.valid === false
+              ? 'Диаграмма не валидна'
+              : `Предупреждения (${result.warnings.length})`}
         </span>
         <button
           type="button"
@@ -410,6 +421,14 @@ export default function ProcessEditorScreen() {
   useEffect(() => {
     doLoad();
   }, [doLoad]);
+
+  /* ------------------------------------------------------------------
+     T-0484: onError callback from BpmnModelerWrapper — surface a failed
+     diagram import as an honest banner instead of a silently-blank canvas.
+     ------------------------------------------------------------------ */
+  const handleModelerError = useCallback((message) => {
+    setStatusMsg({ text: message, isError: true });
+  }, []);
 
   /* ------------------------------------------------------------------
      T-0098: onReady callback from BpmnModelerWrapper.
@@ -723,6 +742,7 @@ export default function ProcessEditorScreen() {
             ref={modelerWrapperRef}
             style={{ position: 'absolute', inset: 0 }}
             onReady={handleModelerReady}
+            onError={handleModelerError}
             initialXml={initialXml}
           />
 

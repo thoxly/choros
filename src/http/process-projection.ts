@@ -131,6 +131,17 @@ export interface InstanceProjection {
    * triggered it without a separate query.
    */
   readonly recordId?: string;
+  /**
+   * T-0456 [D8-R1]: the CONCURRENT waiting steps of this instance — one entry per
+   * currently-active user-task (an AND-split / parallelGateway leaves several tokens
+   * active at once). For a single-token (linear) instance this is a 1-element array
+   * equal to [step]; for a done instance it is empty. The process card renders this
+   * to show all concurrent branches instead of a single "current node".
+   *
+   * Always present (length ≥ 0). `step` remains the primary/first step for
+   * backward compatibility with callers that only show one node.
+   */
+  readonly concurrentSteps: readonly string[];
 }
 
 /** The waiting user-task surfaced to inbox, addressed to a ROLE (not a person). */
@@ -677,12 +688,23 @@ export async function listInstanceProjections(
   // task-extra-approve is still waiting — that would falsely mark the 6M instance done.
   // A next_task is pending when its row.id is NOT yet in approvedTaskIds.
   const pendingNextTaskInstanceIds = new Set<string>();
+  // T-0456 [D8-R1]: collect the CONCURRENT waiting steps per instance from pending
+  // next_task rows. Multiple pending next_task rows for one instance = an AND-split's
+  // concurrent branches. Keyed by instance id → ordered list of step labels.
+  const concurrentNextStepsByInst = new Map<string, string[]>();
   for (const ntRow of nextTaskRows) {
     if (!approvedTaskIds.has(ntRow.id)) {
       const p = (ntRow.payload ?? {}) as Record<string, unknown>;
       const ntInst = p["inst"];
       if (typeof ntInst === "string" && ntInst.length > 0) {
         pendingNextTaskInstanceIds.add(ntInst);
+        const stepLabel = strField(p, "task_step", APPROVE_STEP);
+        const arr = concurrentNextStepsByInst.get(ntInst);
+        if (arr === undefined) {
+          concurrentNextStepsByInst.set(ntInst, [stepLabel]);
+        } else if (!arr.includes(stepLabel)) {
+          arr.push(stepLabel);
+        }
       }
     }
   }
@@ -703,6 +725,20 @@ export async function listInstanceProjections(
     // T-0414 / T-0356: read originating record_id (present when started via on_create).
     const rawRecordId = payload["record_id"];
     const recordId = typeof rawRecordId === "string" && rawRecordId ? rawRecordId : undefined;
+    // T-0456 [D8-R1]: assemble the concurrent waiting steps. The base process.started
+    // step is waiting until its own task.approved arrives (approvedTaskIds.has(row.id));
+    // pending next_task rows add the post-split concurrent branches. A done instance
+    // has no waiting steps.
+    const concurrentSteps: string[] = [];
+    if (!done) {
+      const baseApproved = approvedTaskIds.has(row.id);
+      if (!baseApproved) concurrentSteps.push(step);
+      for (const ntStep of concurrentNextStepsByInst.get(inst) ?? []) {
+        if (!concurrentSteps.includes(ntStep)) concurrentSteps.push(ntStep);
+      }
+      // Defensive: a waiting instance should always show at least its primary step.
+      if (concurrentSteps.length === 0) concurrentSteps.push(step);
+    }
     return {
       inst,
       procKey,
@@ -713,6 +749,7 @@ export async function listInstanceProjections(
       // row.id == process.started event id == inbox_task_id (self-referential back-link).
       // Surfaces on the projection so callers can correlate by taskId without a separate lookup.
       inboxTaskId: row.id,
+      concurrentSteps,
       ...(recordId !== undefined ? { recordId } : {}),
     };
   });

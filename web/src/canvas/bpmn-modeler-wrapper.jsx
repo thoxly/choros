@@ -141,11 +141,16 @@ const DEFAULT_DIAGRAM_XML = `<?xml version="1.0" encoding="UTF-8"?>
      onReady    — T-0098: callback(modeler) fired after importXML resolves;
                   lets parent components (e.g. BpmnPropertiesPanel) receive
                   the modeler instance without polling the ref.
+     onError    — T-0484: callback(message) fired when importXML REJECTS (e.g.
+                  corrupt/invalid BPMN from the backend). Previously such a
+                  failure was only console.error'd → the canvas sat blank with
+                  NO user-visible error (silent failure). The parent uses this
+                  to show an honest banner instead of a deceptively empty canvas.
    Ref forwarded value:
      { modeler }  — the BpmnModeler instance (or null before mount)
    -------------------------------------------------------------------------- */
 const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
-  { className = '', style, onReady, initialXml },
+  { className = '', style, onReady, onError, initialXml },
   ref
 ) {
   const containerRef = useRef(null);
@@ -213,8 +218,15 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
         }
       })
       .catch((err) => {
-        // Non-fatal: log parse errors but keep the modeler alive
+        // Keep the modeler alive, but DO NOT swallow silently (T-0484): the
+        // canvas would otherwise sit blank with no explanation. Log AND notify
+        // the parent so it can show an honest error banner.
         console.error('[choros/bpmn-modeler] importXML error:', err);
+        if (typeof onError === 'function') {
+          onError(
+            `Не удалось открыть диаграмму: ${err?.message || 'неверный или повреждённый BPMN'}`,
+          );
+        }
       });
 
     return () => {
