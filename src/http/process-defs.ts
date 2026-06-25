@@ -14,6 +14,13 @@
  *
  * Design invariants:
  *   - Auth via x-dev-user convention (same as binding.ts).
+ *   - T-0468 [SECURITY]: the tenant is resolved from the AUTHENTICATED IDENTITY
+ *     (extractActor → resolveActorTenant), exactly like applications.ts — NEVER
+ *     from an attacker-controlled x-tenant-id header. Trusting the client header
+ *     allowed a caller in tenant A to read/write tenant B's process_definition
+ *     rows; defense-in-depth closes that even though RLS would also bite. ALL
+ *     routes (reads included) are withAuth-wrapped so the identity is established
+ *     before tenant resolution.
  *   - Tenant isolation via withTenantTx + FORCE RLS (same as binding.ts / invoke.ts).
  *   - FlowableClient injected via composition root (NO env reads in core — NF-1).
  *   - lintBpmn called before any deploy attempt; ok:false → HTTP 422 with violations.
@@ -50,6 +57,15 @@ interface ProcessDefRow {
   created_at: string;
   updated_at: string;
 }
+
+/**
+ * Resolve the tenant the actor (resolved slug) actually belongs to.
+ * Production binding = resolveActorTenant(getOrgPool(), slug) from src/db/org.ts;
+ * injected (mirrors applications.ts / process-start.ts) so the test suite can stub
+ * the membership check without standing up the org DB / Keycloak. T-0468: this is
+ * the ONLY source of truth for the tenant — never a request header.
+ */
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,17 +118,6 @@ async function withTenantTx<T>(
   } finally {
     client.release();
   }
-}
-
-// Extract tenantId from /api/tenants/:tenantId/... prefix OR from x-tenant-id header.
-// Routes are mounted under /api/process-defs and tenant comes from header x-tenant-id.
-function extractTenantId(req: IncomingMessage): string {
-  let tenantId = req.headers["x-tenant-id"];
-  if (Array.isArray(tenantId)) tenantId = tenantId[0];
-  if (!tenantId || typeof tenantId !== "string") {
-    throw new HttpError(400, "VALIDATION", "missing x-tenant-id header");
-  }
-  return tenantId;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +230,7 @@ export function registerProcessDefsRoutes(
   router: Router,
   pool: pg.Pool,
   flowable: FlowableClient,
+  resolveActorTenant: ActorTenantResolver,
 ): void {
 
   // -------------------------------------------------------------------------
@@ -241,8 +247,9 @@ export function registerProcessDefsRoutes(
   // (401 otherwise; no x-dev-user bypass); dev mode is a no-op pass-through.
   router.register("POST", "/api/process-defs", withAuth(async (req, res) => {
     // Auth gate — actor derived from the validated token (keycloak) or x-dev-user (dev).
-    await extractActor(req, pool);
-    const tenantId = extractTenantId(req);
+    // T-0468 [SECURITY]: tenant from the actor's identity, NOT an x-tenant-id header.
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
 
     const rawBody = await readJsonBody(req);
     if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -321,9 +328,12 @@ export function registerProcessDefsRoutes(
 
   // -------------------------------------------------------------------------
   // GET /api/process-defs — list latest version per process key
+  // T-0468 [SECURITY]: withAuth-wrapped + tenant resolved from identity. A read of
+  // another tenant's definitions via a forged x-tenant-id is no longer possible.
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/process-defs", async (req, res) => {
-    const tenantId = extractTenantId(req);
+  router.register("GET", "/api/process-defs", withAuth(async (req, res) => {
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
 
     const rows = await withTenantTx(pool, tenantId, async (client) => {
       return listAll(client, tenantId);
@@ -343,13 +353,15 @@ export function registerProcessDefsRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/process-defs/:key — get latest version for a process key
+  // T-0468 [SECURITY]: withAuth-wrapped + tenant resolved from identity (not header).
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/process-defs/:key", async (req, res, params) => {
-    const tenantId = extractTenantId(req);
+  router.register("GET", "/api/process-defs/:key", withAuth(async (req, res, params) => {
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
     const processKey = decodeURIComponent(params["key"] ?? "");
     if (!processKey) {
       throw new HttpError(400, "VALIDATION", "process key must be non-empty");
@@ -376,7 +388,7 @@ export function registerProcessDefsRoutes(
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/process-defs/:key/publish — lint → deploy → persist
@@ -391,8 +403,9 @@ export function registerProcessDefsRoutes(
   // T-0418 [SECURITY] P0: withAuth-wrapped write — keycloak REQUIRES a valid Bearer.
   router.register("POST", "/api/process-defs/:key/publish", withAuth(async (req, res, params) => {
     // Auth gate — write operation; actor from validated token (keycloak) or x-dev-user (dev).
-    await extractActor(req, pool);
-    const tenantId = extractTenantId(req);
+    // T-0468 [SECURITY]: tenant from the actor's identity, NOT an x-tenant-id header.
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
     const processKey = decodeURIComponent(params["key"] ?? "");
     if (!processKey) {
       throw new HttpError(400, "VALIDATION", "process key must be non-empty");
