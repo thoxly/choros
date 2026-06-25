@@ -50,6 +50,7 @@ import {
   findWaitingInstanceTask,
   listInstanceInboxTasks,
   listInstanceProjections,
+  reconcileInstanceTimers,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -637,6 +638,11 @@ async function findInboxItems(
           minute: "2-digit",
         }),
         deadline,
+        // T-0458 [D8-R3]: carry the timer-firing escalation provenance + F5 prefill
+        // reason from the projection so the «Эскалации» tab + prefilled form work
+        // without client-side string-matching.
+        ...(row.escalated ? { escalated: true } : {}),
+        ...(row.doubtReason ? { doubt_reason: row.doubtReason } : {}),
       };
 
       return { base, claim };
@@ -779,6 +785,28 @@ export function registerInboxRoutes(
       let devUserId = req.headers[DEV_USER_HEADER];
       if (Array.isArray(devUserId)) devUserId = devUserId[0];
       actor = typeof devUserId === "string" ? devUserId : null;
+    }
+
+    // T-0458 [D8-R3]: timer-firing projection (reconcile-on-read). A boundary/
+    // intermediate TIMER that fired in Flowable routes the token to the escalation
+    // user-task WITHOUT a human action, so the firing cannot be projected on the
+    // approve path. Here — the moment the inbox is read — we reconcile each waiting
+    // instance's live engine task set and surface any newly-active (timer-fired)
+    // escalation task as a process.next_task(escalated) row, so it appears in THIS
+    // response. Best-effort + idempotent (dedup by defKey); engine/DB hiccups degrade
+    // silently. Only runs when a FlowableClient + DB are available (honest-degrade).
+    if (writeDeps?.flowableClient && hasDb()) {
+      try {
+        const reconTenantId = await resolveTenant(actor);
+        await reconcileInstanceTimers(
+          getOrgPool(),
+          reconTenantId,
+          writeDeps.flowableClient,
+          { actor: actor ?? "system:timer" },
+        );
+      } catch (err) {
+        console.warn("[inbox T-0458] timer reconcile-on-read failed (non-fatal):", err);
+      }
     }
 
     const base = await findInboxItems(actor);
@@ -1438,36 +1466,72 @@ export function registerInboxRoutes(
                 );
               }
             } else {
-              // Engine has more steps → surface the next waiting task as a pool task.
+              // Engine has more steps → surface EVERY waiting task as a pool task.
+              //
+              // T-0456 [D8-R1]: an AND-split (parallelGateway) leaves MULTIPLE
+              // concurrent user-tasks active on ONE instance. The inbox projection is a
+              // SEPARATE state machine from Flowable (two machines) — engine-drive must
+              // reconcile against the LIVE engine token set, NOT "first active". We
+              // therefore emit a process.next_task for EACH currently-active engine task
+              // that is not yet surfaced as a waiting inbox task, instead of only the
+              // first non-matching one (the pre-T-0456 single-token behaviour).
               const nextTasksResult = await writeDepsFlowable.getActiveUserTasks(engineDriveInstanceId);
               if (nextTasksResult.ok && nextTasksResult.tasks.length > 0) {
-                // Use the first active user task that is NOT the just-completed defKey.
-                const nextTask = nextTasksResult.tasks.find(
-                  (t) => t.taskDefinitionKey !== approvedTaskDefKey,
-                ) ?? nextTasksResult.tasks[0]!;
-
-                // candidateGroups from Flowable → role slug for inbox pool addressing.
-                // Use first group if available; fallback to the original approver role.
-                const nextRole = nextTask.candidateGroups[0] ?? task.role;
-                const nextInboxTaskId = randomUUID();
-
+                // Dedup against (a) the just-completed defKey and (b) tasks already
+                // projected as waiting for this instance. listInstanceInboxTasks reflects
+                // both base process.started rows and prior process.next_task rows, so a
+                // re-approve or a concurrent branch already on screen is NOT re-emitted.
+                let alreadyProjectedDefKeys = new Set<string>();
                 try {
-                  await appendNextTaskEvent(pool, tenantId, {
-                    instanceId: engineDriveInstanceId,
-                    procKey: engineDriveProcKey,
-                    actor,
-                    nowMs: Date.now(),
-                    taskDefKey: nextTask.taskDefinitionKey,
-                    taskName: nextTask.name || APPROVE_TASK_NAME,
-                    taskRole: nextRole,
-                    taskStep: nextTask.name || "Согласование",
-                    inboxTaskId: nextInboxTaskId,
-                  });
-                } catch (nextErr) {
-                  console.warn(
-                    `[inbox T-0443] appendNextTaskEvent failed (instance ${engineDriveInstanceId}):`,
-                    nextErr,
+                  const projected = await listInstanceInboxTasks(pool, tenantId);
+                  alreadyProjectedDefKeys = new Set(
+                    projected
+                      .filter((t) => t.inst === engineDriveInstanceId)
+                      .map((t) => t.taskDefKey),
                   );
+                } catch (projErr) {
+                  console.warn(
+                    `[inbox T-0443/T-0456] listInstanceInboxTasks failed during reconcile ` +
+                      `(instance ${engineDriveInstanceId}):`,
+                    projErr,
+                  );
+                }
+
+                // Emit each live engine task that isn't already on screen. Guard against
+                // double-emitting the SAME defKey within this reconcile pass (Flowable
+                // could return two concurrent tokens with the same task definition key —
+                // rare but possible with a parallel multi-instance-like authoring).
+                const emittedThisPass = new Set<string>();
+                for (const nextTask of nextTasksResult.tasks) {
+                  const defKey = nextTask.taskDefinitionKey;
+                  if (defKey === approvedTaskDefKey) continue; // the step we just completed
+                  if (alreadyProjectedDefKeys.has(defKey)) continue; // already on screen
+                  if (emittedThisPass.has(defKey)) continue; // dedup within this pass
+                  emittedThisPass.add(defKey);
+
+                  // candidateGroups from Flowable → role slug for inbox pool addressing.
+                  // Use first group if available; fallback to the original approver role.
+                  const nextRole = nextTask.candidateGroups[0] ?? task.role;
+                  const nextInboxTaskId = randomUUID();
+
+                  try {
+                    await appendNextTaskEvent(pool, tenantId, {
+                      instanceId: engineDriveInstanceId,
+                      procKey: engineDriveProcKey,
+                      actor,
+                      nowMs: Date.now(),
+                      taskDefKey: defKey,
+                      taskName: nextTask.name || APPROVE_TASK_NAME,
+                      taskRole: nextRole,
+                      taskStep: nextTask.name || "Согласование",
+                      inboxTaskId: nextInboxTaskId,
+                    });
+                  } catch (nextErr) {
+                    console.warn(
+                      `[inbox T-0443/T-0456] appendNextTaskEvent failed (instance ${engineDriveInstanceId}, defKey ${defKey}):`,
+                      nextErr,
+                    );
+                  }
                 }
               }
             }

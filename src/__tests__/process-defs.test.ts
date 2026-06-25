@@ -564,6 +564,46 @@ describe("process-defs: POST /api/process-defs/:key/publish — success path", (
 });
 
 // ---------------------------------------------------------------------------
+// T-0483: publish surfaces a CLEAR, TYPED ENGINE_UNAVAILABLE error (503) when the
+// engine is unreachable — NOT an opaque "502 ENGINE_ERROR deployBpmn failed: ...".
+// The diagram MUST stay a draft (no status flip to published).
+// ---------------------------------------------------------------------------
+
+describe("process-defs T-0483: POST /publish — engine unavailable → 503 ENGINE_UNAVAILABLE", () => {
+  let server: http.Server;
+  let base: string;
+  let flowable: FlowableClient;
+
+  beforeAll(async () => {
+    const pool = makeMemoryPool([
+      {
+        tenant_id: TENANT_ID, id: "dddd-0001-0001-0001-000000000099",
+        process_key: "engineDownKey", name: "EngineDown", bpmn_xml: CLEAN_BPMN,
+        version: 1, status: "draft", deployment_id: null,
+        created_at: 1000, updated_at: 1000,
+      },
+    ]);
+    // Engine unreachable: deployBpmn returns ENGINE_UNAVAILABLE (5xx after retries).
+    flowable = makeStubFlowableClient({ ok: false, code: "ENGINE_UNAVAILABLE" });
+    const h = buildServer(pool, flowable);
+    server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }));
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("returns 503 with typed code ENGINE_UNAVAILABLE and an honest message", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs/engineDownKey/publish`, AUTH_HEADERS);
+    expect(r.status).toBe(503);
+    const body = r.json as Record<string, unknown>;
+    const err = body["error"] as Record<string, unknown>;
+    expect(err["code"]).toBe("ENGINE_UNAVAILABLE");
+    expect(String(err["message"])).toContain("Движок процессов недоступен");
+    // Must NOT report the diagram as published.
+    expect(JSON.stringify(body)).not.toContain("published");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0377 (B19): Auto-key assignment — POST /api/process-defs without processKey
 // ---------------------------------------------------------------------------
 

@@ -294,7 +294,7 @@ describe("process-start: 403 cross-tenant deny", () => {
 // 502 — engine error
 // ---------------------------------------------------------------------------
 
-describe("process-start: 502 engine error", () => {
+describe("process-start: engine error", () => {
   let server: http.Server;
   let base: string;
 
@@ -306,14 +306,18 @@ describe("process-start: 502 engine error", () => {
   });
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-  it("returns 502 ENGINE_ERROR when startInstance is not ok", async () => {
+  // T-0483: engine unreachable now surfaces a CLEAR, TYPED error — 503 with code
+  // "ENGINE_UNAVAILABLE" (transient, retryable) instead of an opaque 502 ENGINE_ERROR.
+  it("returns 503 ENGINE_UNAVAILABLE when the engine is unreachable", async () => {
     const r = await httpReq("POST", `${base}/api/processes/start`,
       { "x-dev-user": ACTOR, "x-tenant-id": TENANT_ID },
       { processKey: "telLinear" });
-    expect(r.status).toBe(502);
+    expect(r.status).toBe(503);
     const body = r.json as Record<string, unknown>;
     const err = body["error"] as Record<string, unknown>;
-    expect(err["code"]).toBe("ENGINE_ERROR");
+    expect(err["code"]).toBe("ENGINE_UNAVAILABLE");
+    // Honest, user-readable message — not opaque "startInstance failed: ...".
+    expect(String(err["message"])).toContain("Движок процессов недоступен");
   });
 });
 

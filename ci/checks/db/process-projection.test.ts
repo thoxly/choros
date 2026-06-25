@@ -30,7 +30,11 @@ import {
   appendTaskApproved,
   listInstanceProjections,
   listInstanceInboxTasks,
+  reconcileInstanceTimers,
+  TIMER_ESCALATION_REASON,
   APPROVER_ROLE,
+  type TimerReconcileEnginePort,
+  type ActiveEngineTask,
 } from "../../../src/http/process-projection.js";
 
 const { Client } = pg;
@@ -207,6 +211,124 @@ describe("T-0282 — projection is tenant-RLS isolated (AC-9 substrate)", () => 
       const projB = await listInstanceProjections(pool, tenantB);
       expect(projB.find((p) => p.inst === instB)).toBeDefined();
       expect(projB.find((p) => p.inst === instA)).toBeUndefined();
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0458 [D8-R3] — timer-firing projection: a fired boundary timer surfaces an
+// ESCALATION inbox task to the escalation target, with an F5 prefill reason.
+// ---------------------------------------------------------------------------
+
+/**
+ * A fake engine port that simulates Flowable AFTER a boundary timer fired: the
+ * instance now has a single active escalation user-task (the boundary-event target),
+ * addressed to the escalation role via candidateGroups.
+ */
+function fakeEngineWithEscalation(
+  instanceId: string,
+  escTask: ActiveEngineTask,
+): TimerReconcileEnginePort {
+  return {
+    async getActiveUserTasks(inst: string) {
+      if (inst === instanceId) return { ok: true, tasks: [escTask] };
+      return { ok: true, tasks: [] };
+    },
+  };
+}
+
+describe("T-0458 — timer firing surfaces an escalation inbox task", () => {
+  it("reconcileInstanceTimers emits a process.next_task(escalated) addressed to the escalation role", async () => {
+    const tenantId = freshTenant();
+    const instanceId = `flw-${crypto.randomUUID().slice(0, 8)}`;
+
+    // Seed a started instance waiting on the base approval task.
+    await withTenantTx(tenantId, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: "telLinear",
+        actor: "e-orlov",
+        nowMs: Date.now(),
+      }),
+    );
+
+    const pool = new pg.Pool({ connectionString: appUrl(), max: 2 });
+    try {
+      // The timer fired in Flowable → the escalation user-task is now active.
+      const escTask: ActiveEngineTask = {
+        id: "engine-task-escalate",
+        taskDefinitionKey: "task-escalate",
+        name: "Эскалация: согласование просрочено",
+        candidateGroups: ["role-manager"],
+      };
+      const engine = fakeEngineWithEscalation(instanceId, escTask);
+
+      const emitted = await reconcileInstanceTimers(pool, tenantId, engine, {
+        actor: "system:timer",
+      });
+      expect(emitted).toBe(1);
+
+      // The escalation task is now in the inbox, addressed to the manager pool,
+      // flagged escalated, and carrying the F5 prefill reason.
+      const tasks = await listInstanceInboxTasks(pool, tenantId);
+      const esc = tasks.find((t) => t.taskDefKey === "task-escalate");
+      expect(esc).toBeDefined();
+      expect(esc!.role).toBe("role-manager");
+      expect(esc!.inst).toBe(instanceId);
+      expect(esc!.escalated).toBe(true);
+      expect(esc!.doubtReason).toBe(TIMER_ESCALATION_REASON);
+
+      // Idempotent: a second reconcile pass (timer still firing, task already
+      // surfaced) emits nothing — the escalation row is not duplicated.
+      const emittedAgain = await reconcileInstanceTimers(pool, tenantId, engine, {
+        actor: "system:timer",
+      });
+      expect(emittedAgain).toBe(0);
+      const tasks2 = await listInstanceInboxTasks(pool, tenantId);
+      expect(tasks2.filter((t) => t.taskDefKey === "task-escalate")).toHaveLength(1);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("no firing → no escalation row (engine reports no extra active tasks)", async () => {
+    const tenantId = freshTenant();
+    const instanceId = `flw-${crypto.randomUUID().slice(0, 8)}`;
+
+    await withTenantTx(tenantId, (tx) =>
+      appendProcessStarted(tx, {
+        instanceId,
+        procKey: "telLinear",
+        actor: "e-orlov",
+        nowMs: Date.now(),
+      }),
+    );
+
+    const pool = new pg.Pool({ connectionString: appUrl(), max: 2 });
+    try {
+      // Engine reports ONLY the base approve task (already projected) → nothing new.
+      const engine: TimerReconcileEnginePort = {
+        async getActiveUserTasks() {
+          return {
+            ok: true,
+            tasks: [
+              {
+                id: "engine-task-approve",
+                taskDefinitionKey: "task-approve",
+                name: "Согласование",
+                candidateGroups: [APPROVER_ROLE],
+              },
+            ],
+          };
+        },
+      };
+      const emitted = await reconcileInstanceTimers(pool, tenantId, engine, {});
+      expect(emitted).toBe(0);
+
+      const tasks = await listInstanceInboxTasks(pool, tenantId);
+      expect(tasks.some((t) => t.escalated)).toBe(false);
     } finally {
       await pool.end();
     }

@@ -427,3 +427,112 @@ describe("validateFormSubmit — proto-key defence-in-depth (D7-2)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0404 [D7-9] — per-step field MODE enforcement (server-authoritative)
+//   read-only / hidden → write rejected; required-to-advance → must be present
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — T-0404 [D7-9]: per-step field mode", () => {
+  it("T0404-1: write to a read-only field → readonly_write violation, value NOT in safeValues", () => {
+    const fields = makeFields([
+      { key: "amount", type: "number", mode: "read-only" },
+      { key: "note", type: "text" },
+    ]);
+    const result = validateFormSubmit(
+      { amount: 999, note: "ok" },
+      fields,
+      undefined,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "amount");
+      expect(v?.type).toBe("readonly_write");
+      expect(v?.message).toMatch(/read-only/);
+    }
+  });
+
+  it("T0404-2: write to a hidden field → hidden_write violation", () => {
+    const fields = makeFields([
+      { key: "secret", type: "text", mode: "hidden" },
+    ]);
+    const result = validateFormSubmit({ secret: "x" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "secret");
+      expect(v?.type).toBe("hidden_write");
+      expect(v?.message).toMatch(/hidden/);
+    }
+  });
+
+  it("T0404-3: required-to-advance field MISSING → missing_required violation", () => {
+    const fields = makeFields([
+      { key: "decision", type: "text", mode: "required-to-advance" },
+    ]);
+    // submit nothing for `decision`
+    const result = validateFormSubmit({}, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "decision");
+      expect(v?.type).toBe("missing_required");
+      expect(v?.message).toMatch(/required to advance/);
+    }
+  });
+
+  it("T0404-4: required-to-advance field submitted EMPTY ('' / whitespace) → still missing", () => {
+    const fields = makeFields([
+      { key: "decision", type: "text", mode: "required-to-advance" },
+    ]);
+    for (const empty of ["", "   ", null, undefined] as unknown[]) {
+      const result = validateFormSubmit({ decision: empty }, fields, undefined);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.violations.some((x) => x.type === "missing_required")).toBe(true);
+      }
+    }
+  });
+
+  it("T0404-5: required-to-advance field PRESENT → passes, value in safeValues", () => {
+    const fields = makeFields([
+      { key: "decision", type: "text", mode: "required-to-advance" },
+    ]);
+    const result = validateFormSubmit({ decision: "approve" }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["decision"]).toBe("approve");
+    }
+  });
+
+  it("T0404-6: a field with NO mode behaves exactly as before (backward-compat)", () => {
+    const fields = makeFields([
+      { key: "note", type: "text" }, // no mode
+    ]);
+    // Not submitting `note` is fine (no required-to-advance), and submitting it is fine.
+    expect(validateFormSubmit({}, fields, undefined).ok).toBe(true);
+    const r2 = validateFormSubmit({ note: "hi" }, fields, undefined);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.safeValues["note"]).toBe("hi");
+  });
+
+  it("T0404-7: modes compose — read-only write rejected AND required-to-advance missing reported together", () => {
+    const fields = makeFields([
+      { key: "ro", type: "text", mode: "read-only" },
+      { key: "req", type: "text", mode: "required-to-advance" },
+    ]);
+    const result = validateFormSubmit({ ro: "tampered" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((v) => v.type === "readonly_write" && v.key === "ro")).toBe(true);
+      expect(result.violations.some((v) => v.type === "missing_required" && v.key === "req")).toBe(true);
+    }
+  });
+
+  it("T0404-8: required-to-advance accepts non-string presence (checkbox true, number 0)", () => {
+    const fields = makeFields([
+      { key: "agree", type: "boolean", mode: "required-to-advance" },
+      { key: "qty", type: "number", mode: "required-to-advance" },
+    ]);
+    const result = validateFormSubmit({ agree: true, qty: 0 }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+});

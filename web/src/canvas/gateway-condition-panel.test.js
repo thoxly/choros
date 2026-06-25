@@ -413,9 +413,10 @@ describe('choros-moddle-extension — T-0434 GatewayConditionExtension type', ()
     expect(prop.type).toBe('String');
   });
 
-  it('descriptor now has 4 types (ExecutorTypeActivity + UserTaskOutcomes + SequenceFlowOutcome + GatewayConditionExtension)', () => {
+  it('descriptor has GatewayConditionExtension among its types (T-0458 added TimerDeadlineExtension as 5th)', () => {
     const names = descriptor.types.map((t) => t.name);
     expect(names).toContain('GatewayConditionExtension');
-    expect(descriptor.types).toHaveLength(4);
+    // T-0458 [D8-R3]: TimerDeadlineExtension added additively → 5 types.
+    expect(descriptor.types).toHaveLength(5);
   });
 });

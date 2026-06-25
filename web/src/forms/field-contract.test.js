@@ -10,7 +10,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveFieldContract, normaliseTypeToFieldType } from './field-contract.js';
+import {
+  resolveFieldContract,
+  normaliseTypeToFieldType,
+  contractKindForFieldType,
+} from './field-contract.js';
 
 // ---------------------------------------------------------------------------
 // normaliseTypeToFieldType
@@ -239,5 +243,80 @@ describe('resolveFieldContract — legacy default (no type/contract/options)', (
     const result = resolveFieldContract({ type: 'boolean' });
     expect(result.descriptor).toBeDefined();
     expect(result.descriptor.kind).toBe(result.contractKind);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0480 [D7-K]: contractKindForFieldType — single map of the records-form
+// legacy `type` vocabulary onto the catalog contract kinds.
+// ---------------------------------------------------------------------------
+
+describe('contractKindForFieldType', () => {
+  it('scalar primitives → scalar', () => {
+    for (const t of ['string', 'text', 'textarea', 'number', 'integer', 'boolean', 'date']) {
+      expect(contractKindForFieldType(t)).toBe('scalar');
+    }
+  });
+
+  it('select / enum → enum', () => {
+    expect(contractKindForFieldType('select')).toBe('enum');
+    expect(contractKindForFieldType('enum')).toBe('enum');
+  });
+
+  it('relation → relation', () => {
+    expect(contractKindForFieldType('relation')).toBe('relation');
+  });
+
+  it('collection → collection', () => {
+    expect(contractKindForFieldType('collection')).toBe('collection');
+  });
+
+  it('computed → rollup (read-only итог)', () => {
+    expect(contractKindForFieldType('computed')).toBe('rollup');
+  });
+
+  it('unknown → scalar (safe degradation)', () => {
+    expect(contractKindForFieldType('whatever')).toBe('scalar');
+    expect(contractKindForFieldType(undefined)).toBe('scalar');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0480 [D7-K]: resolveFieldContract routes records-form STRUCTURAL types
+// (relation/collection/computed) to their catalog contracts, so the record
+// screen dispatches off the catalog — not a parallel `inputKind` string chain.
+// ---------------------------------------------------------------------------
+
+describe('resolveFieldContract — records-form structural types', () => {
+  it('records-form relation descriptor → relation contract (reference)', () => {
+    const result = resolveFieldContract({ key: 'supplier', type: 'relation', label: 'Поставщик' });
+    expect(result.contractKind).toBe('relation');
+    expect(result.presentation).toBe('reference');
+    expect(result.editable).toBe(true);
+  });
+
+  it('records-form collection descriptor → collection contract (table)', () => {
+    const result = resolveFieldContract({ key: 'lines', type: 'collection', label: 'Позиции' });
+    expect(result.contractKind).toBe('collection');
+    expect(result.presentation).toBe('table');
+    expect(result.editable).toBe(true);
+  });
+
+  it('records-form computed descriptor → rollup contract (readout, read-only)', () => {
+    const result = resolveFieldContract({ key: 'total', type: 'computed', label: 'Итог' });
+    expect(result.contractKind).toBe('rollup');
+    expect(result.presentation).toBe('readout');
+    expect(result.editable).toBe(false);
+  });
+
+  it('explicit contract still wins over a structural type', () => {
+    const result = resolveFieldContract({ type: 'collection', contract: 'scalar' });
+    expect(result.contractKind).toBe('scalar');
+  });
+
+  it('structural type with no options is not mis-classified as enum', () => {
+    // relation/collection/computed must classify BEFORE the options-force-enum rule.
+    const result = resolveFieldContract({ type: 'relation' });
+    expect(result.contractKind).toBe('relation');
   });
 });

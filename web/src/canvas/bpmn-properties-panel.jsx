@@ -40,6 +40,8 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import { Field, Select } from '../components/components.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
+/* T-0458 [D8-R3]: timer/deadline + escalation panel (NEW FILE — additive import). */
+import { TimerDeadlinePanel } from './timer-deadline-panel.jsx';
 
 /* --------------------------------------------------------------------------
    Dev tenant UUID — same constant used throughout the codebase (screen-agents,
@@ -54,7 +56,13 @@ import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 
    Mirrors the fetch pattern in screen-agents.jsx:loadPositions:
      GET /api/org/tenant-state?tenant_id=…  (genesis-owner gated)
-     403 → empty list (honest: dropdown stays unpopulated, description explains)
+
+   T-0484 (honesty): a 403 is honest-empty (caller is not the tenant owner → the
+   assignment list legitimately stays unpopulated). But a 5xx / engine-unavailable
+   / any other non-ok status is a REAL FAILURE and was previously swallowed into an
+   empty list — indistinguishable from "no roles exist". That made the «Назначение»
+   control look usable-but-dead. We now surface such failures as a typed `error` so
+   the panel shows an honest message instead of a misleading empty dropdown.
    -------------------------------------------------------------------------- */
 function useRoles() {
   const [roles, setRoles] = useState(null);   // null = not yet fetched
@@ -75,7 +83,20 @@ function useRoles() {
         );
         if (cancelled) return;
         if (!res.ok) {
-          // 403 = no owner access → honest empty (not an error)
+          if (res.status === 403) {
+            // 403 = caller is not the tenant owner → honest empty (NOT an error).
+            setRoles([]);
+            setLoading(false);
+            return;
+          }
+          // Any other non-ok status (500, 503/engine-unavailable, …) is a real
+          // failure. Surface it honestly — never let it masquerade as empty.
+          let detail = `HTTP ${res.status}`;
+          try {
+            const body = await res.json();
+            detail = body?.error?.message || body?.message || detail;
+          } catch { /* non-JSON body — keep status-based detail */ }
+          setError(`Не удалось загрузить роли: ${detail}`);
           setRoles([]);
           setLoading(false);
           return;
@@ -88,7 +109,7 @@ function useRoles() {
         setRoles(list);
       } catch (err) {
         if (!cancelled) {
-          setError(err?.message || 'Ошибка загрузки ролей');
+          setError(`Не удалось загрузить роли: ${err?.message || 'сеть недоступна'}`);
           setRoles([]);
         }
       } finally {
@@ -152,6 +173,21 @@ function effectiveExecType(bo) {
   if (bo.$type === 'bpmn:UserTask') return 'human';
   if (TASK_TYPES.has(bo.$type)) return 'service';
   return null;
+}
+
+/* --------------------------------------------------------------------------
+   T-0458 [D8-R3]: timer-event detection (ADDITIVE — distinct region).
+   A bpmn:BoundaryEvent / bpmn:IntermediateCatchEvent is a "timer event" when its
+   eventDefinitions array contains a bpmn:TimerEventDefinition. The timer panel
+   shows for those so the user can set the deadline + escalation target.
+   -------------------------------------------------------------------------- */
+function isTimerEvent(bo) {
+  if (!bo) return false;
+  if (bo.$type !== 'bpmn:BoundaryEvent' && bo.$type !== 'bpmn:IntermediateCatchEvent') {
+    return false;
+  }
+  const defs = bo.eventDefinitions || [];
+  return defs.some((d) => d && d.$type === 'bpmn:TimerEventDefinition');
 }
 
 /* Exec type display labels */
@@ -1066,8 +1102,15 @@ export default function BpmnPropertiesPanel({ modeler }) {
                 {rolesLoading ? (
                   <p className="bio-properties-panel-description">Загрузка ролей…</p>
                 ) : rolesError ? (
-                  <p className="bio-properties-panel-description" style={{ color: 'var(--chs-color-danger)' }}>
-                    Ошибка загрузки ролей
+                  // T-0484: surface the REAL backend error here (not a vague
+                  // "Ошибка загрузки ролей") and present it as a clear failure,
+                  // so a 500/engine-unavailable never reads as an empty list.
+                  <p
+                    className="bio-properties-panel-description"
+                    role="alert"
+                    style={{ color: 'var(--chs-color-danger)' }}
+                  >
+                    {rolesError} — назначение недоступно. Повторите позже.
                   </p>
                 ) : (
                   <Select
@@ -1116,6 +1159,20 @@ export default function BpmnPropertiesPanel({ modeler }) {
               bo={bo}
               modeler={modeler}
               element={selected.element}
+            />
+          )}
+
+          {/* T-0458 [D8-R3]: Timer/deadline + escalation panel — for timer events
+              (boundary / intermediate catch carrying a TimerEventDefinition). */}
+          {isTimerEvent(bo) && (
+            <TimerDeadlinePanel
+              bo={bo}
+              modeler={modeler}
+              element={selected.element}
+              PanelGroup={PanelGroup}
+              PPEntry={PPEntry}
+              roles={roles}
+              rolesLoading={rolesLoading}
             />
           )}
 

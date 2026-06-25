@@ -137,6 +137,19 @@ function makeRecordingPool(): RecordingPool {
         return { rows: [{ exists: slug === TOKEN_ACTOR }] };
       }
 
+      // T-0486: resolveActorTenant (employee ⋈ tenant by slug → tenant_id).
+      // In keycloak mode resolveInvokeTenant calls this for the resolved caller.
+      // Return the tenant ONLY for the token actor — any OTHER slug yields 0 rows,
+      // which now fails CLOSED (403) instead of the removed DEV_TENANT_ID fallback.
+      if (
+        sql.includes("FROM choros.employee e") &&
+        sql.includes("JOIN choros.tenant t") &&
+        sql.includes("e.slug = $1")
+      ) {
+        const slug = String(params?.[0] ?? "");
+        return { rows: slug === TOKEN_ACTOR ? [{ tenant_id: TENANT_ID }] : [] };
+      }
+
       // loadAgentCard
       if (sql.includes("FROM choros.agent_card")) {
         return { rows: [{ employee_id: AGENT_ID }] };

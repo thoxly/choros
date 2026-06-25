@@ -884,3 +884,294 @@ describe("handler-level engine-drive (Fix A + Fix D + Fix C, T-0443)", () => {
     expect(inboxTasks).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 9. T-0456 [D8-R1]: parallelGateway AND-split — MULTI-TOKEN reconciliation.
+//
+// The inbox projection is a SEPARATE state machine from Flowable (two machines).
+// An AND-split leaves N user-tasks active on ONE instance at once. The engine-drive
+// must reconcile by surfacing EVERY concurrent token (not "first active"), and the
+// projection must show all concurrent branches.
+//
+// These tests exercise the reconciliation logic against REALISTIC multi-token engine
+// state (getActiveUserTasks returns TWO concurrent tasks), NOT a single-task mock —
+// a single-task mock would mask the bug this task fixes.
+// ---------------------------------------------------------------------------
+
+describe("T-0456 [D8-R1] parallelGateway multi-token reconciliation", () => {
+  let server: http.Server;
+  let base: string;
+
+  afterEach(async () => {
+    _resetClaimStateForTests();
+    if (server) await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  async function startServer(deps: InboxWriteDeps): Promise<void> {
+    const h = buildHandlerServer(deps);
+    server = h.server;
+    await new Promise<void>((r) =>
+      server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 9a. AND-split: base approve → engine NOT ended, TWO concurrent tasks active.
+  //     Reconcile MUST emit a process.next_task for BOTH branches (not just the
+  //     first). Both surface in the inbox; projection shows BOTH concurrent steps.
+  // -------------------------------------------------------------------------
+  it("9a. AND-split surfaces BOTH concurrent branches (not first-active)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // REALISTIC multi-token engine state: after the base approve completes, the
+    // parallelGateway splits into TWO concurrent user-tasks (branch A + branch B),
+    // both active on the SAME instance. This is the multi-token reality a single-task
+    // mock would hide.
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn()
+        // 1st call: poll to find the just-approved base task.
+        .mockResolvedValueOnce({
+          ok: true,
+          tasks: [{ id: "eng-base-id", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: ["role-approver"] }],
+        })
+        // 2nd call: next_task discovery → TWO concurrent tokens (AND-split).
+        .mockResolvedValueOnce({
+          ok: true,
+          tasks: [
+            { id: "eng-branchA-id", taskDefinitionKey: "task-legal", name: "Юридическая проверка", candidateGroups: ["role-approver"] },
+            { id: "eng-branchB-id", taskDefinitionKey: "task-finance", name: "Финансовая проверка", candidateGroups: ["role-approver"] },
+          ],
+        }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+    expect(r.status).toBe(200);
+    await drainMicrotasks();
+
+    // KEY ASSERTION: TWO process.next_task rows emitted — one per concurrent branch.
+    // The pre-T-0456 code emitted only ONE (the first non-matching active task).
+    const nextTaskEvents = db.events.filter((e) => e.type === NEXT_TASK_TYPE);
+    expect(nextTaskEvents).toHaveLength(2);
+    const emittedDefKeys = nextTaskEvents.map((e) => e.payload["task_def_key"]).sort();
+    expect(emittedDefKeys).toEqual(["task-finance", "task-legal"]);
+
+    // Instance is NOT done while concurrent branches are still waiting.
+    const endedEvents = db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE);
+    expect(endedEvents).toHaveLength(0);
+
+    // BOTH concurrent tasks surface in the inbox projection.
+    const inboxTasks = await listInstanceInboxTasks(pool, H_TENANT);
+    const instTasks = inboxTasks.filter((t) => t.inst === H_INST);
+    expect(instTasks).toHaveLength(2);
+    expect(instTasks.map((t) => t.taskDefKey).sort()).toEqual(["task-finance", "task-legal"]);
+    // Base task is hidden (approved).
+    expect(inboxTasks.find((t) => t.id === baseTaskId)).toBeUndefined();
+
+    // Projection shows BOTH concurrent steps (the process card renders them).
+    const projections = await listInstanceProjections(pool, H_TENANT);
+    expect(projections).toHaveLength(1);
+    expect(projections[0]?.status).toBe("waiting");
+    const steps = [...(projections[0]?.concurrentSteps ?? [])].sort();
+    expect(steps).toEqual(["Финансовая проверка", "Юридическая проверка"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9b. Idempotency: re-running the reconcile (e.g. a second approve, or a retry)
+  //     against the SAME live multi-token state does NOT duplicate next_task rows
+  //     for branches already on screen.
+  // -------------------------------------------------------------------------
+  it("9b. reconcile is idempotent — already-projected branches are not re-emitted", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    await appendTaskApproved(setupClient as unknown as PgClientLike, {
+      taskId: baseTaskId,
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: H_APPROVER,
+      nowMs: 2000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // Branch A already surfaced from a prior reconcile pass.
+    const branchATaskId = "aaaa1111-2222-3333-4444-555555555555";
+    await appendNextTaskEvent(pool, H_TENANT, {
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: H_APPROVER,
+      nowMs: 2100,
+      taskDefKey: "task-legal",
+      taskName: "Юридическая проверка",
+      taskRole: "role-approver",
+      taskStep: "Юридическая проверка",
+      inboxTaskId: branchATaskId,
+    });
+
+    // Now approve branch A. Engine still has branch A (about to complete) AND branch B
+    // active. After completing A, reconcile sees branch B still active — but branch A
+    // is already projected, so it must NOT be re-emitted; only branch B is new.
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn()
+        // poll: find branch A's engine task by defKey.
+        .mockResolvedValueOnce({
+          ok: true,
+          tasks: [
+            { id: "eng-branchA-id", taskDefinitionKey: "task-legal", name: "Юридическая проверка", candidateGroups: ["role-approver"] },
+            { id: "eng-branchB-id", taskDefinitionKey: "task-finance", name: "Финансовая проверка", candidateGroups: ["role-approver"] },
+          ],
+        })
+        // next_task discovery: branch B still active (A completed).
+        .mockResolvedValueOnce({
+          ok: true,
+          tasks: [
+            { id: "eng-branchB-id", taskDefinitionKey: "task-finance", name: "Финансовая проверка", candidateGroups: ["role-approver"] },
+          ],
+        }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${branchATaskId}/action`, H_APPROVER, { action: "approve" });
+    expect(r.status).toBe(200);
+    await drainMicrotasks();
+
+    // Fix A: completed branch A's engine task by its own defKey.
+    expect(mockClient.completeUserTask).toHaveBeenCalledWith("eng-branchA-id");
+
+    // Exactly ONE new next_task (branch B). Branch A (already projected) is NOT
+    // re-emitted. Total next_task rows = 1 (seeded A) + 1 (new B) = 2.
+    const nextTaskEvents = db.events.filter((e) => e.type === NEXT_TASK_TYPE);
+    expect(nextTaskEvents).toHaveLength(2);
+    const finance = nextTaskEvents.filter((e) => e.payload["task_def_key"] === "task-finance");
+    const legal = nextTaskEvents.filter((e) => e.payload["task_def_key"] === "task-legal");
+    expect(finance).toHaveLength(1); // branch B emitted exactly once
+    expect(legal).toHaveLength(1);   // branch A NOT re-emitted (still the seeded one)
+
+    // Branch A is now approved/hidden; branch B is the only remaining waiting task.
+    const inboxTasks = await listInstanceInboxTasks(pool, H_TENANT);
+    const instTasks = inboxTasks.filter((t) => t.inst === H_INST);
+    expect(instTasks.map((t) => t.taskDefKey).sort()).toEqual(["task-finance"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9c. AND-join: after the last concurrent branch completes, the engine joins and
+  //     ends the instance → instance.ended → projection done, no waiting steps.
+  // -------------------------------------------------------------------------
+  it("9c. AND-join ends the instance after the last branch (done, empty concurrentSteps)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    await appendTaskApproved(setupClient as unknown as PgClientLike, {
+      taskId: baseTaskId,
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: H_APPROVER,
+      nowMs: 2000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // Branch B is the LAST remaining concurrent branch (A already completed earlier).
+    const branchBTaskId = "bbbb1111-2222-3333-4444-555555555555";
+    await appendNextTaskEvent(pool, H_TENANT, {
+      instanceId: H_INST,
+      procKey: "telParallel",
+      actor: H_APPROVER,
+      nowMs: 2100,
+      taskDefKey: "task-finance",
+      taskName: "Финансовая проверка",
+      taskRole: "role-approver",
+      taskStep: "Финансовая проверка",
+      inboxTaskId: branchBTaskId,
+    });
+
+    // Approving branch B completes the last token → AND-join → instance ends.
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValueOnce({
+        ok: true,
+        tasks: [{ id: "eng-branchB-id", taskDefinitionKey: "task-finance", name: "Финансовая проверка", candidateGroups: ["role-approver"] }],
+      }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${branchBTaskId}/action`, H_APPROVER, { action: "approve" });
+    expect(r.status).toBe(200);
+    await drainMicrotasks();
+    await drainMicrotasks(); // extra flush for appendInstanceEnded tx
+
+    expect(mockClient.completeUserTask).toHaveBeenCalledWith("eng-branchB-id");
+
+    // AND-join ended the instance.
+    const endedEvents = db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE);
+    expect(endedEvents).toHaveLength(1);
+
+    // Projection: done, no concurrent waiting steps.
+    const projections = await listInstanceProjections(pool, H_TENANT);
+    expect(projections[0]?.status).toBe("done");
+    expect(projections[0]?.concurrentSteps).toEqual([]);
+
+    const inboxTasks = await listInstanceInboxTasks(pool, H_TENANT);
+    expect(inboxTasks.filter((t) => t.inst === H_INST)).toHaveLength(0);
+  });
+});

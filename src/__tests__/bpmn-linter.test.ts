@@ -995,3 +995,451 @@ describe("T-0436 — multi-gateway: shared routingVar, disjoint branches (Fix 2)
     }
   });
 });
+
+// ===========================================================================
+// T-0456 [D8-R1]: parallelGateway (AND split/join) well-formedness linter
+// ===========================================================================
+
+/**
+ * Build a BPMN with a well-formed AND split → two branches → AND join.
+ *   start → split (1-in/2-out) → A, B → join (2-in/1-out) → end
+ */
+function makeBalancedParallelBpmn(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway id="split"/>
+    <userTask id="taskA"/>
+    <userTask id="taskB"/>
+    <parallelGateway id="join"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="split"/>
+    <sequenceFlow id="f1" sourceRef="split" targetRef="taskA"/>
+    <sequenceFlow id="f2" sourceRef="split" targetRef="taskB"/>
+    <sequenceFlow id="f3" sourceRef="taskA" targetRef="join"/>
+    <sequenceFlow id="f4" sourceRef="taskB" targetRef="join"/>
+    <sequenceFlow id="f5" sourceRef="join" targetRef="end"/>
+  </process>
+</definitions>`;
+}
+
+describe("T-0456 — parallel_gateway: well-formed AND split/join publishes 200", () => {
+  it("balanced split (1-in/2-out) + join (2-in/1-out) passes", () => {
+    const result = lintBpmn(makeBalancedParallelBpmn());
+    expect(result.ok).toBe(true);
+  });
+
+  it("balanced parallel gateway passes even with ruleTables opt present", () => {
+    // The structural check is independent of the T-0436 ruleTables path.
+    const result = lintBpmn(makeBalancedParallelBpmn(), { ruleTables: [] });
+    expect(result.ok).toBe(true);
+  });
+
+  it("three-way split (1-in/3-out) + join (3-in/1-out) passes", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway id="split"/>
+    <userTask id="a"/><userTask id="b"/><userTask id="c"/>
+    <parallelGateway id="join"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="split"/>
+    <sequenceFlow id="f1" sourceRef="split" targetRef="a"/>
+    <sequenceFlow id="f2" sourceRef="split" targetRef="b"/>
+    <sequenceFlow id="f3" sourceRef="split" targetRef="c"/>
+    <sequenceFlow id="f4" sourceRef="a" targetRef="join"/>
+    <sequenceFlow id="f5" sourceRef="b" targetRef="join"/>
+    <sequenceFlow id="f6" sourceRef="c" targetRef="join"/>
+    <sequenceFlow id="f7" sourceRef="join" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a 1-in/1-out parallel gateway is a no-op pass-through (allowed)", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway id="pg"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="pg"/>
+    <sequenceFlow id="f1" sourceRef="pg" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+
+  it("a process with NO parallel gateway is unaffected", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="t"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="t"/>
+    <sequenceFlow id="f1" sourceRef="t" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+
+  it("declaration order independent: flows declared BEFORE the gateway still resolve", () => {
+    // Flows come first, gateway last — counting must be resolved post-walk.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <sequenceFlow id="f0" sourceRef="start" targetRef="split"/>
+    <sequenceFlow id="f1" sourceRef="split" targetRef="a"/>
+    <sequenceFlow id="f2" sourceRef="split" targetRef="b"/>
+    <sequenceFlow id="f3" sourceRef="a" targetRef="join"/>
+    <sequenceFlow id="f4" sourceRef="b" targetRef="join"/>
+    <sequenceFlow id="f5" sourceRef="join" targetRef="end"/>
+    <startEvent id="start"/>
+    <userTask id="a"/><userTask id="b"/>
+    <endEvent id="end"/>
+    <parallelGateway id="split"/>
+    <parallelGateway id="join"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("T-0456 — parallel_gateway: malformed AND split/join → 422 violation", () => {
+  it("dangling split (no outgoing flows) → violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway id="split"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="split"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "parallel_gateway_imbalance");
+      expect(v).toBeDefined();
+      expect(v?.elementKind).toBe("parallelGateway");
+      expect(v?.elementId).toBe("split");
+      expect(v?.message).toMatch(/dangling/);
+    }
+  });
+
+  it("dangling gateway (no incoming flows) → violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <parallelGateway id="orphan"/>
+    <userTask id="a"/><userTask id="b"/>
+    <sequenceFlow id="f1" sourceRef="orphan" targetRef="a"/>
+    <sequenceFlow id="f2" sourceRef="orphan" targetRef="b"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "parallel_gateway_imbalance");
+      expect(v?.elementId).toBe("orphan");
+      expect(v?.message).toMatch(/dangling/);
+    }
+  });
+
+  it("mixed split+join in one gateway (2-in/2-out) → violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <userTask id="in1"/><userTask id="in2"/>
+    <parallelGateway id="mixed"/>
+    <userTask id="out1"/><userTask id="out2"/>
+    <sequenceFlow id="f1" sourceRef="in1" targetRef="mixed"/>
+    <sequenceFlow id="f2" sourceRef="in2" targetRef="mixed"/>
+    <sequenceFlow id="f3" sourceRef="mixed" targetRef="out1"/>
+    <sequenceFlow id="f4" sourceRef="mixed" targetRef="out2"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "parallel_gateway_imbalance");
+      expect(v?.elementId).toBe("mixed");
+      expect(v?.message).toMatch(/mixes split and join/);
+    }
+  });
+
+  it("parallel gateway with NO id (cannot be linked by any flow) → dangling violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "parallel_gateway_imbalance");
+      expect(v).toBeDefined();
+      expect(v?.elementId).toBe(""); // no id
+      expect(v?.message).toMatch(/dangling/);
+    }
+  });
+
+  it("one balanced + one dangling gateway → only the dangling one is flagged", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <parallelGateway id="goodSplit"/>
+    <userTask id="a"/><userTask id="b"/>
+    <parallelGateway id="goodJoin"/>
+    <parallelGateway id="badSplit"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="goodSplit"/>
+    <sequenceFlow id="f1" sourceRef="goodSplit" targetRef="a"/>
+    <sequenceFlow id="f2" sourceRef="goodSplit" targetRef="b"/>
+    <sequenceFlow id="f3" sourceRef="a" targetRef="goodJoin"/>
+    <sequenceFlow id="f4" sourceRef="b" targetRef="goodJoin"/>
+    <sequenceFlow id="f5" sourceRef="goodJoin" targetRef="badSplit"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const pgViolations = result.violations.filter((x) => x.type === "parallel_gateway_imbalance");
+      // goodSplit (1/2) ok, goodJoin (2/1) ok, badSplit (1-in/0-out) dangling.
+      expect(pgViolations).toHaveLength(1);
+      expect(pgViolations[0]?.elementId).toBe("badSplit");
+    }
+  });
+});
+
+// ===========================================================================
+// T-0458 [D8-R3]: timer / deadline + escalation well-formedness linter
+// ===========================================================================
+
+/**
+ * Build a BPMN with a well-formed boundary timer guarding a userTask, escalating
+ * to a second userTask on fire:
+ *   start → task-approve (boundary timer PT24H) → end
+ *                 │ (timer fires)
+ *                 └→ task-escalate → end
+ */
+function makeBoundaryTimerBpmn(opts?: {
+  body?: string;
+  bodyKind?: "timeDuration" | "timeDate" | "timeCycle";
+  attachedToRef?: string;
+  withEscalationFlow?: boolean;
+}): string {
+  const body = opts?.body ?? "PT24H";
+  const bodyKind = opts?.bodyKind ?? "timeDuration";
+  const attached = opts?.attachedToRef ?? "task-approve";
+  const escFlow =
+    opts?.withEscalationFlow === false
+      ? ""
+      : `<sequenceFlow id="sf-timer-esc" sourceRef="bnd-deadline" targetRef="task-escalate"/>`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns:choros="http://choros.io/bpmn" xmlns:flowable="http://flowable.org/bpmn" targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve" flowable:candidateGroups="role-approver"/>
+    <boundaryEvent id="bnd-deadline" attachedToRef="${attached}" cancelActivity="true">
+      <timerEventDefinition><${bodyKind}>${body}</${bodyKind}></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-escalate" flowable:candidateGroups="role-manager"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="task-approve" targetRef="end"/>
+    ${escFlow}
+    <sequenceFlow id="f2" sourceRef="task-escalate" targetRef="end"/>
+  </process>
+</definitions>`;
+}
+
+describe("T-0458 — timer_malformed: well-formed boundary timer publishes 200", () => {
+  it("ISO-8601 duration PT24H boundary timer with escalation flow passes", () => {
+    const result = lintBpmn(makeBoundaryTimerBpmn());
+    expect(result.ok).toBe(true);
+  });
+
+  it("passes even with ruleTables opt present (timer check is structural)", () => {
+    const result = lintBpmn(makeBoundaryTimerBpmn(), { ruleTables: [] });
+    expect(result.ok).toBe(true);
+  });
+
+  it("a fixed ISO-8601 date timeDate passes", () => {
+    const result = lintBpmn(
+      makeBoundaryTimerBpmn({ body: "2026-07-01T14:00:00Z", bodyKind: "timeDate" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("a date pulled from a record field (EL expression) passes", () => {
+    const result = lintBpmn(
+      makeBoundaryTimerBpmn({ body: "${record.dueDate}", bodyKind: "timeDate" }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("an intermediate catch timer (inline wait) with a duration passes", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait1">
+      <timerEventDefinition><timeDuration>PT1H</timeDuration></timerEventDefinition>
+    </intermediateCatchEvent>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait1"/>
+    <sequenceFlow id="f1" sourceRef="wait1" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("T-0458 — timer_malformed: malformed timers fail closed (422)", () => {
+  it("empty timeDuration → timer_malformed violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve"/>
+    <boundaryEvent id="bnd-deadline" attachedToRef="task-approve">
+      <timerEventDefinition><timeDuration></timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-escalate"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="bnd-deadline" targetRef="task-escalate"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "timer_malformed");
+      expect(v?.elementId).toBe("bnd-deadline");
+      expect(v?.message).toMatch(/without a valid deadline|non-empty/);
+    }
+  });
+
+  it("timerEventDefinition with no body child → timer_malformed violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve"/>
+    <boundaryEvent id="bnd-deadline" attachedToRef="task-approve">
+      <timerEventDefinition/>
+    </boundaryEvent>
+    <userTask id="task-escalate"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="bnd-deadline" targetRef="task-escalate"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_malformed")).toBe(true);
+    }
+  });
+
+  it("malformed (non-ISO) timeDuration → timer_malformed violation", () => {
+    const result = lintBpmn(makeBoundaryTimerBpmn({ body: "24 hours" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "timer_malformed");
+      expect(v?.elementId).toBe("bnd-deadline");
+      expect(v?.message).toMatch(/not a valid ISO-8601 duration/);
+    }
+  });
+
+  it("dangling timer (no outgoing escalation flow) → timer_malformed violation", () => {
+    const result = lintBpmn(makeBoundaryTimerBpmn({ withEscalationFlow: false }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find(
+        (x) => x.type === "timer_malformed" && /no outgoing sequence flow/.test(x.message),
+      );
+      expect(v?.elementId).toBe("bnd-deadline");
+    }
+  });
+
+  it("boundary timer with no attachedToRef → timer_malformed violation", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve"/>
+    <boundaryEvent id="bnd-deadline">
+      <timerEventDefinition><timeDuration>PT24H</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-escalate"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="bnd-deadline" targetRef="task-escalate"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find(
+        (x) => x.type === "timer_malformed" && /no attachedToRef/.test(x.message),
+      );
+      expect(v?.elementId).toBe("bnd-deadline");
+    }
+  });
+
+  it("malformed timeDate (not ISO, not EL) → timer_malformed violation", () => {
+    const result = lintBpmn(
+      makeBoundaryTimerBpmn({ body: "next tuesday", bodyKind: "timeDate" }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "timer_malformed");
+      expect(v?.message).toMatch(/neither an ISO-8601 date/);
+    }
+  });
+});
+
+describe("T-0458 — non-timer events are not flagged", () => {
+  it("a process with no timer events is unaffected", () => {
+    const result = lintBpmn(makeBalancedParallelBpmn());
+    expect(result.ok).toBe(true);
+  });
+
+  it("a boundaryEvent WITHOUT a timerEventDefinition (e.g. error) is ignored by the timer check", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve"/>
+    <boundaryEvent id="bnd-err" attachedToRef="task-approve">
+      <errorEventDefinition errorRef="someError"/>
+    </boundaryEvent>
+    <userTask id="task-handle"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="task-approve" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-err" targetRef="task-handle"/>
+    <sequenceFlow id="f3" sourceRef="task-handle" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    // No timer_malformed violation: the boundary event carries no timerEventDefinition.
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_malformed")).toBe(false);
+    }
+  });
+});

@@ -130,24 +130,44 @@ export async function publishProcessDef(processKey) {
     headers: apiHeaders(),
   });
 
-  if (res.status === 422) {
-    let violations = [];
+  // Parse the error envelope once so we can branch on the typed code.
+  let errCode = null;
+  let errMessage = null;
+  let violations = [];
+  if (!res.ok) {
     try {
       const body = await res.json();
+      errCode = body?.error?.code || null;
+      errMessage = body?.error?.message || body?.message || null;
       violations = body?.error?.violations || [];
-    } catch { /* ignore */ }
+    } catch { /* non-JSON / empty body — fall through to status-based message */ }
+  }
+
+  if (res.status === 422 && errCode === 'BPMN_LINT_FAILED') {
     const err = new Error(`Диаграмма не прошла проверку перед публикацией`);
     err.violations = violations;
+    err.code = errCode;
+    throw err;
+  }
+
+  // T-0483: typed engine-unavailable. The backend returns 503 + code
+  // ENGINE_UNAVAILABLE with an honest message when the process engine is
+  // unreachable. Surface the code on the Error so the modeler can show an
+  // honest "движок недоступен" state (status stays ЧЕРНОВИК — never green).
+  if (!res.ok && errCode === 'ENGINE_UNAVAILABLE') {
+    const err = new Error(
+      errMessage ||
+        'Движок процессов недоступен. Изменения сохранены как черновик — повторите публикацию позже.',
+    );
+    err.code = 'ENGINE_UNAVAILABLE';
     throw err;
   }
 
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const body = await res.json();
-      detail = body?.error?.message || body?.message || detail;
-    } catch { /* ignore */ }
-    throw new Error(`Ошибка публикации: ${detail}`);
+    const detail = errMessage || `HTTP ${res.status}`;
+    const err = new Error(`Ошибка публикации: ${detail}`);
+    if (errCode) err.code = errCode;
+    throw err;
   }
 
   return res.json();
