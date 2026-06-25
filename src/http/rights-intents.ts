@@ -295,11 +295,16 @@ function registerHire(router: Router, pool: pg.Pool): void {
       ownScope = await lookupPositionOrgScope(pool, tenantId, positionId);
     }
 
+    // T-0469 [auth] — hire mints a role_assignment with body `role_id`; if that
+    // role is the genesis tenant-owner, assigning it is OWNER-ONLY. A delegable
+    // mgmt grant must NOT satisfy authority for it (self-promotion path).
+    const assignsOwnerRole = await isOwnerRoleScoped(pool, tenantId, roleId);
+
     // GATE (org axis) BEFORE any side-effect — the admin must cover the target
     // org scope to assign the role there (mirrors role-assignment gate).
     const asgGate = validateAdminDelegation(
       admin,
-      { kind: "assignment", targetOrgScope: ownScope },
+      { kind: "assignment", targetOrgScope: ownScope, assignsOwnerRole },
       SEED_ORACLE,
     );
     if (!asgGate.ok) {
@@ -606,12 +611,17 @@ function registerSubstitute(router: Router, pool: pg.Pool): void {
       throw new HttpError(400, "VALIDATION", "org_scope (ScopeElement, hierarchy:org) is required");
     }
 
+    // T-0469 [auth] — substitution issues authority for `role_id`; standing into
+    // the genesis tenant-owner role is OWNER-ONLY (a non-owner must not be able
+    // to acquire owner authority via a substitution rule).
+    const assignsOwnerRole = await isOwnerRoleScoped(pool, tenantId, roleId);
+
     // GATE: the admin must cover the substitution's org scope (it issues authority
     // for the stand-in there). Rejected before any write.
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
     const gate = validateAdminDelegation(
       admin,
-      { kind: "assignment", targetOrgScope: orgScope },
+      { kind: "assignment", targetOrgScope: orgScope, assignsOwnerRole },
       SEED_ORACLE,
     );
     if (!gate.ok) {
@@ -908,6 +918,41 @@ async function lookupPositionOrgScope(
       nodeId: rows[0].department_id,
       nodeLevel: "department",
     } as ScopeElement);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// isOwnerRoleScoped — T-0469 [auth]: is `roleId` the genesis tenant-owner role?
+//
+// The owner role is identified by `role.slug = 'tenant-owner'` (migration 026 /
+// 019). The hire/substitute intents mint role authority from a body-supplied
+// `role_id`; if it resolves to the owner role, the assignment delegation is
+// OWNER-ONLY (closes the self-promotion path mirror of POST /api/role-assignments).
+// Tenant-scoped via SET LOCAL; an unknown role ⇒ not owner (false).
+// ---------------------------------------------------------------------------
+
+async function isOwnerRoleScoped(
+  pool: pg.Pool,
+  tenantId: string,
+  roleId: string,
+): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.role
+        WHERE tenant_id = $1 AND id = $2 AND slug = 'tenant-owner' LIMIT 1`,
+      [tenantId, roleId],
+    );
+    await client.query("COMMIT");
+    return rows.length > 0;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
