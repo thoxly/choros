@@ -50,6 +50,11 @@ import {
   type AuthoringOp,
   type AuthoringContext,
 } from "./authoring-redlines.js";
+import {
+  resolveRelationTarget,
+  type RegistryDefCandidate,
+  type RelationCascadeDecision,
+} from "./relation-cascade.js";
 import type { ChatLlmRequest, ChatLlmResult, ChatToolCall } from "./llm-port.js";
 
 // ---------------------------------------------------------------------------
@@ -124,6 +129,46 @@ const TOOL_CREATE_APPLICATION: ToolDeclaration = {
         humanReadableReason: { type: "string", description: "Why this application is being created (for changelog)." },
       },
       required: ["appSlug", "appDisplayName", "humanReadableReason"],
+    },
+  },
+};
+
+/**
+ * relate_application — T-0463 (D8-G2): add a RELATION field whose target may not
+ * exist yet, cascading the related application into the SAME draft bundle.
+ *
+ * The bot describes the relation target by slug and/or display name. The cascade
+ * primitive (resolveRelationTarget) then DEDUPS against existing registry_defs:
+ *   - found one     → LINK (no duplicate app) and the relation field gets its id.
+ *   - found none    → CREATE the related app in the same draft bundle (one promote).
+ *   - ambiguous     → ASK (returned as a clarification; no guess).
+ *   - too deep      → STOP (hop-cap=3, no runaway fan-out).
+ *
+ * This is the SAME primitive the visual relation-picker uses (Развилка-5: one
+ * primitive, two drivers).
+ */
+const TOOL_RELATE_APPLICATION: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "relate_application",
+    description:
+      "Add a RELATION field on an application that points to ANOTHER application " +
+      "(«поле-связь на Контрагентов»). If that target application does NOT exist " +
+      "yet, it is CREATED in the same DRAFT bundle (one promote brings both). " +
+      "If it already exists, the field LINKS to it (no duplicate). If the match is " +
+      "ambiguous, you are asked to clarify. Use this instead of edit_jsonschema " +
+      "when the relation target may need to be created.",
+    parameters: {
+      type: "object",
+      properties: {
+        sourceRegistryDefId: { type: "string", description: "UUID of the registry_def to add the relation field to (the SOURCE)." },
+        relationFieldKey: { type: "string", description: "Field key for the new relation field (e.g. «contractor»)." },
+        relationFieldLabel: { type: "string", description: "Human label for the relation field (e.g. «Контрагент»)." },
+        targetAppSlug: { type: "string", description: "Slug of the target application to relate to (optional if name given)." },
+        targetAppDisplayName: { type: "string", description: "Display name of the target application (e.g. «Контрагенты»)." },
+        humanReadableReason: { type: "string", description: "Why this relation is being created (for changelog)." },
+      },
+      required: ["sourceRegistryDefId", "relationFieldKey", "humanReadableReason"],
     },
   },
 };
@@ -269,6 +314,7 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
 /** All E16 authoring tools available to the configurator. */
 const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_CREATE_APPLICATION,
+  TOOL_RELATE_APPLICATION,
   TOOL_AUTHOR_BINDING,
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
@@ -291,6 +337,7 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
 export interface ApprovedOp {
   readonly kind:
     | "create_application"
+    | "relate_application"
     | "author_binding"
     | "edit_jsonschema_non_destructive"
     | "emit_form"
@@ -382,6 +429,12 @@ async function hasAuthoringDraftGrant(ctx: HandlerContext): Promise<boolean> {
  */
 function processToolCall(
   call: ChatToolCall,
+  /**
+   * T-0463: existing registry_defs to dedup relation cascades against (PD-5).
+   * Injected pure from the loop; the HTTP layer supplies the real tenant list.
+   * Empty array → every relation target cascades a new app (no dedup possible).
+   */
+  existingRegistryDefs: readonly RegistryDefCandidate[] = [],
 ): {
   approved?: ApprovedOp;
   blocked?: BlockedOp;
@@ -476,6 +529,135 @@ function processToolCall(
           sectionSlug,
           tier: "draft",
         }),
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // relate_application — T-0463 (D8-G2): add a relation field, cascading the
+    // target application into the same DRAFT bundle when it doesn't exist.
+    // Uses the SHARED resolveRelationTarget primitive (same as the visual picker).
+    // -----------------------------------------------------------------------
+    case "relate_application": {
+      const sourceRegistryDefId =
+        typeof args["sourceRegistryDefId"] === "string" ? args["sourceRegistryDefId"] : "";
+      const relationFieldKey =
+        typeof args["relationFieldKey"] === "string" ? args["relationFieldKey"].trim() : "";
+      const relationFieldLabel =
+        typeof args["relationFieldLabel"] === "string" && args["relationFieldLabel"].trim()
+          ? args["relationFieldLabel"].trim()
+          : relationFieldKey;
+      const targetAppSlug =
+        typeof args["targetAppSlug"] === "string" ? args["targetAppSlug"].trim() : "";
+      const targetAppDisplayName =
+        typeof args["targetAppDisplayName"] === "string" ? args["targetAppDisplayName"].trim() : "";
+
+      if (!sourceRegistryDefId || !relationFieldKey) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description:
+            `relate_application: не указан исходный набор полей или ключ поля-связи.`,
+          toolName: call.name,
+          requiredAction: "Укажите sourceRegistryDefId и relationFieldKey и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] relate_application: отсутствует источник/ключ`,
+          toolResultContent: `error: missing sourceRegistryDefId or relationFieldKey`,
+        };
+      }
+      if (!targetAppSlug && !targetAppDisplayName) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `relate_application: не указан целевой приложение-цель (slug/название).`,
+          toolName: call.name,
+          requiredAction: "Укажите targetAppSlug или targetAppDisplayName и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] relate_application: нет цели связи`,
+          toolResultContent: `error: missing relation target slug/name`,
+        };
+      }
+
+      // Resolve the relation target via the SHARED cascade primitive.
+      // depth=1: the first cascade off a top-level relation creates an app at depth 1.
+      const decision: RelationCascadeDecision = resolveRelationTarget(
+        { targetSlug: targetAppSlug || undefined, targetDisplayName: targetAppDisplayName || undefined },
+        existingRegistryDefs,
+        1,
+      );
+
+      if (decision.decision === "ask") {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: decision.question,
+          toolName: call.name,
+          requiredAction:
+            "Уточните, на какое существующее приложение ссылаться, или подтвердите создание нового.",
+        };
+        return {
+          blocked,
+          changelogLine: `❓ [ОЖИДАЕТ УТОЧНЕНИЯ] relate_application: неоднозначная цель «${targetAppDisplayName || targetAppSlug}»`,
+          toolResultContent: JSON.stringify({
+            status: "ask",
+            question: decision.question,
+            candidates: decision.candidates.map((c) => ({ id: c.id, slug: c.slug, name: c.displayName })),
+          }),
+        };
+      }
+
+      if (decision.decision === "hop_cap_exceeded") {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description:
+            `relate_application: каскад связей глубже лимита (${decision.cap}) — ` +
+            `создание прекращено во избежание лавины приложений.`,
+          toolName: call.name,
+          requiredAction: "Сократите цепочку связанных приложений (макс. глубина 3).",
+        };
+        return {
+          blocked,
+          changelogLine: `🛑 [ЛИМИТ ГЛУБИНЫ] relate_application: глубина ${decision.attemptedDepth} > ${decision.cap}`,
+          toolResultContent: JSON.stringify({
+            status: "hop_cap_exceeded",
+            attemptedDepth: decision.attemptedDepth,
+            cap: decision.cap,
+          }),
+        };
+      }
+
+      // decision is LINK or CREATE — both produce an approved relate_application op.
+      // The HTTP executor: for LINK, writes the relation field pointing at the
+      // existing target_registry_id; for CREATE, creates the app+section in the
+      // SAME bundle, then writes the relation field at the new section's id (atomic).
+      const isCreate = decision.decision === "create";
+      const approved: ApprovedOp = {
+        kind: "relate_application",
+        description: isCreate
+          ? `Связь «${relationFieldLabel}»: целевое приложение «${decision.appDisplayName}» (slug=${decision.appSlug}) НЕ найдено → создаётся в том же DRAFT-бандле; поле-связь добавляется в исходный набор [DRAFT]: ${reason}`
+          : `Связь «${relationFieldLabel}»: найдено существующее приложение (${decision.matchReason}) → ссылка без дубликата [DRAFT]: ${reason}`,
+        args: {
+          ...args,
+          sourceRegistryDefId,
+          relationFieldKey,
+          relationFieldLabel,
+          // Resolved cascade plan — the executor reads this discriminant.
+          cascade: isCreate
+            ? { mode: "create", appSlug: decision.appSlug, appDisplayName: decision.appDisplayName, depth: decision.depth }
+            : { mode: "link", targetRegistryId: decision.targetRegistryId, matchReason: decision.matchReason },
+        },
+        tier: "draft",
+      };
+      return {
+        approved,
+        changelogLine: isCreate
+          ? `✓ [DRAFT] relate_application(create): ${approved.description}`
+          : `✓ [DRAFT] relate_application(link): ${approved.description}`,
+        toolResultContent: JSON.stringify(
+          isCreate
+            ? { status: "draft", mode: "create_cascade", appSlug: decision.appSlug, relationFieldKey, tier: "draft" }
+            : { status: "draft", mode: "link", targetRegistryId: decision.targetRegistryId, matchReason: decision.matchReason, relationFieldKey, tier: "draft" },
+        ),
       };
     }
 
@@ -713,6 +895,8 @@ async function runConfiguratorLoop(
   ctx: HandlerContext,
   /** T-0383: per-tenant system prompt override (null → use default). */
   systemPromptOverride: string | null = null,
+  /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
+  existingRegistryDefs: readonly RegistryDefCandidate[] = [],
 ): Promise<ConfiguratorResult> {
   const approvedOps: ApprovedOp[] = [];
   const blockedOps: BlockedOp[] = [];
@@ -763,7 +947,7 @@ async function runConfiguratorLoop(
     // Process each tool call
     const toolResultParts: string[] = [];
     for (const call of result.toolCalls) {
-      const processed = processToolCall(call);
+      const processed = processToolCall(call, existingRegistryDefs);
 
       if (processed.approved) approvedOps.push(processed.approved);
       if (processed.blocked) blockedOps.push(processed.blocked);
@@ -857,6 +1041,8 @@ export async function handleConfigurator(
   userText: string,
   ctx: HandlerContext,
   systemPromptOverride: string | null = null,
+  /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
+  existingRegistryDefs: readonly RegistryDefCandidate[] = [],
 ): Promise<HandlerResult> {
   // SECURITY: Check grant ceiling FIRST (intersection already agent ∩ user)
   const hasGrant = await hasAuthoringDraftGrant(ctx);
@@ -869,7 +1055,7 @@ export async function handleConfigurator(
     };
   }
 
-  const result = await runConfiguratorLoop(userText, ctx, systemPromptOverride);
+  const result = await runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);
 
   return {
     text: result.text,
@@ -899,6 +1085,8 @@ export async function runConfigurator(
   userText: string,
   ctx: HandlerContext,
   systemPromptOverride: string | null = null,
+  /** T-0463: existing registry_defs for relation-cascade dedup (PD-5). */
+  existingRegistryDefs: readonly RegistryDefCandidate[] = [],
 ): Promise<ConfiguratorResult> {
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
@@ -912,5 +1100,5 @@ export async function runConfigurator(
       grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
     };
   }
-  return runConfiguratorLoop(userText, ctx, systemPromptOverride);
+  return runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);
 }
