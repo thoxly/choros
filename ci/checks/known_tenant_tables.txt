@@ -55,3 +55,4 @@ inflight_mapping_request
 process_definition
 process_app_binding
 user_task_claim
+llm_connection
