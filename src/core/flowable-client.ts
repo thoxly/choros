@@ -196,6 +196,16 @@ export type IsInstanceEndedResult =
   | { ok: true; ended: boolean }
   | { ok: false; code: FlowableErrorCode };
 
+/**
+ * T-0483: result of pingEngine — a lightweight engine-reachability probe used by
+ * the readiness endpoint (GET /api/engine/health). `reachable` is true when the
+ * engine's management endpoint answers 200; otherwise `code` carries the typed
+ * failure reason. This is SINGLE-SHOT (no retry) so the readiness probe is fast.
+ */
+export type PingEngineResult =
+  | { ok: true; reachable: true }
+  | { ok: true; reachable: false; code: FlowableErrorCode };
+
 /** Wire shape from Flowable /runtime/external-jobs/acquire (FR-3). */
 export interface ExternalTask {
   readonly id: string;
@@ -285,6 +295,17 @@ export interface FlowableClient {
    * process.next_task with the live next task's defKey/name/role).
    */
   isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult>;
+  /**
+   * T-0483: lightweight engine-reachability probe for the readiness endpoint.
+   * Single GET to {baseUrl}/management/engine (the same endpoint the compose
+   * healthcheck uses). No retry — a readiness probe must answer quickly. Never
+   * throws: returns { reachable: false, code } on any transport/HTTP failure.
+   *
+   * OPTIONAL on the interface so existing partial test stubs need no change
+   * (honest-degrade: the readiness route reports "unknown" when absent). The
+   * real makeFlowableClient factory always provides it.
+   */
+  pingEngine?(): Promise<PingEngineResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +850,35 @@ export function makeFlowableClient(
     }, resolved) as Promise<IsInstanceEndedResult>;
   }
 
+  // -------------------------------------------------------------------------
+  // T-0483: pingEngine — readiness probe (single-shot, no retry).
+  //
+  // Hits the engine management endpoint (same one the compose healthcheck uses).
+  // Bounded by the configured timeout so a hung engine can't hang the readiness
+  // endpoint. Never throws — maps any transport/HTTP failure to a typed code so
+  // GET /api/engine/health can report an honest "движок недоступен" state.
+  // -------------------------------------------------------------------------
+  async function pingEngine(): Promise<PingEngineResult> {
+    const url = `${resolved.baseUrl}/management/engine`;
+    try {
+      const raceResult = await Promise.race([
+        globalThis.fetch(url, { method: "GET", headers: { Authorization: auth } }),
+        makeTimeoutPromise(resolved.timeoutMs),
+      ]);
+      if (raceResult === TIMEOUT_SENTINEL) {
+        return { ok: true, reachable: false, code: "TIMEOUT" };
+      }
+      const resp = raceResult as Response;
+      if (resp.status === 200) {
+        return { ok: true, reachable: true };
+      }
+      return { ok: true, reachable: false, code: httpStatusToCode(resp.status) };
+    } catch {
+      // Network/DNS/connection-refused → engine unreachable.
+      return { ok: true, reachable: false, code: "ENGINE_UNAVAILABLE" };
+    }
+  }
+
   return {
     deployBpmn,
     startInstance,
@@ -839,5 +889,6 @@ export function makeFlowableClient(
     completeUserTask,
     getActiveUserTasks,
     isInstanceEnded,
+    pingEngine,
   };
 }
