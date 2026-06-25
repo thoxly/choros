@@ -341,8 +341,8 @@ function RelationCell({ targetId, appId }) {
 // No «collection»/«sub-field»/«registry» jargon (G5).
 // Token-only styling: all colors from --chs-color-* (G2, G6).
 //
-// Additive route: a single `f.inputKind === 'collection'` branch in formFields.map
-// routes to this component; RelationPicker and FieldControl branches are unchanged.
+// Dispatch (T-0480): the `collection` catalog contract (resolveFieldContract)
+// routes to this component; relation/rollup and scalar/enum route elsewhere.
 // ---------------------------------------------------------------------------
 
 /**
@@ -555,8 +555,8 @@ function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
 //   - Displays «—» when no rows exist or all cells are non-numeric (null from computeRollup).
 //   - Token-only colors (G2, G6); no hardcoded hex.
 //
-// Additive: a single `f.inputKind === 'computed'` branch in formFields.map routes
-// here; RelationPicker and LineItemsField branches are NOT touched.
+// Dispatch (T-0480): the `rollup` catalog contract (computed field, via
+// resolveFieldContract) routes here; relation/collection and scalar/enum elsewhere.
 // ---------------------------------------------------------------------------
 
 /**
