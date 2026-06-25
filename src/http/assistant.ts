@@ -78,7 +78,12 @@ import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
-import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
+// T-0466 (D8-G5): AUTHORING_CAPTURE_CONFIRMATION appended after a successful capture.
+import {
+  runConfigurator,
+  AUTHORING_CAPTURE_CONFIRMATION,
+  type ApprovedOp,
+} from "../core/assistant-configurator.js";
 import type { RegistryDefCandidate } from "../core/relation-cascade.js";
 import { reconcileCrossAppRefs } from "./registry-defs.js";
 // T-0464 (D8-G3): free-topology process generation loop (generate→validate→repair).
@@ -86,6 +91,13 @@ import { runProcessGenLoop } from "../core/process-gen-loop.js";
 import type { GroundingContext } from "../core/process-gen-validator.js";
 import { CONFIGURATOR_DEFAULT_SYSTEM_PROMPT } from "../core/assistant-configurator.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
+// T-0466 (D8-G5): capture-as-request — file a non-admin's config-request as a
+// notification to authoring_draft holders (admins/owners). Reuses the EXISTING
+// notification mechanism (choros.notification, migration 046) — NO new table.
+import {
+  getAuthoringDraftHolderEmployeeIds,
+  findTenantOwnerEmployeeId,
+} from "../db/grants-dao.js";
 // T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
 import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
 
@@ -846,6 +858,97 @@ async function executeApprovedOpAsDraft(
 }
 
 // ---------------------------------------------------------------------------
+// T-0466 (D8-G5): capture-as-request.
+//
+// When a non-admin (no authoring_draft grant) describes something to configure,
+// runConfigurator returns a captureRequest. We file it as a config-request so the
+// intent is NOT lost: a notification per admin/owner recipient, reusing the
+// EXISTING notification center (choros.notification — migration 046, no new table).
+//
+// Recipients: human employees holding a confirmed authoring_draft grant
+// (= the admins/owners who can act on the sandbox). Fallback to the tenant owner
+// when no explicit holder exists, so the request is never dropped on the floor.
+//
+// NOTE: choros.notification.recipient_id is uuid with FK → employee(tenant_id,id)
+// (migration 046), so recipients are EMPLOYEE IDs, not slugs.
+//
+// Returns the number of recipients notified (0 = nobody to route to — honest).
+// ---------------------------------------------------------------------------
+
+/** Notification event_kind for a captured config-request. */
+const CONFIG_REQUEST_EVENT_KIND = "config_request";
+
+async function captureConfigRequest(
+  pool: pg.Pool,
+  tenantId: string,
+  requesterSlug: string,
+  description: string,
+): Promise<number> {
+  const nowMs = Date.now();
+
+  // Resolve admin/owner recipients: holders of a confirmed authoring_draft grant.
+  let recipientIds = await getAuthoringDraftHolderEmployeeIds(pool, tenantId, nowMs).catch(
+    () => [] as string[],
+  );
+
+  // Fallback: route to the tenant owner if no explicit holder exists.
+  if (recipientIds.length === 0) {
+    const ownerId = await findTenantOwnerEmployeeId(pool, tenantId, nowMs).catch(() => null);
+    if (ownerId) recipientIds = [ownerId];
+  }
+
+  if (recipientIds.length === 0) return 0;
+
+  // Truncate the body for the notification (keep the title short, body bounded).
+  const trimmed = description.replace(/\s+/g, " ").trim();
+  const title = "Заявка на настройку системы";
+
+  // Insert one notification per recipient inside a tenant-scoped tx (RLS).
+  // We write the SAME columns as PgNotificationStore.insert (migration 046),
+  // but through the tx client so the choros.tenant_id GUC is set (RLS-safe).
+  let notified = 0;
+  await withTenantTx(pool, tenantId, async (client) => {
+    // Resolve the requester's employee id so we (a) never notify them and
+    // (b) can name them in the body. Best-effort: if unresolved, use the slug.
+    const { rows: reqRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      [tenantId, requesterSlug],
+    );
+    const requesterId = reqRows.length > 0 ? reqRows[0]!.id : null;
+
+    const body =
+      `Сотрудник «${requesterSlug}» просит настроить систему:\n\n` +
+      (trimmed.length <= 1000 ? trimmed : trimmed.slice(0, 1000) + "…") +
+      `\n\nОткройте конструктор/ассистента, чтобы выполнить настройку.`;
+
+    for (const recipientId of recipientIds) {
+      // The request is FROM the requester, not TO them — skip self.
+      if (requesterId !== null && recipientId === requesterId) continue;
+      await client.query(
+        `INSERT INTO choros.notification
+           (tenant_id, id, recipient_id, event_kind, title, body, object_ref,
+            is_read, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8, $9)`,
+        [
+          tenantId,
+          randomUUID(),
+          recipientId,
+          CONFIG_REQUEST_EVENT_KIND,
+          title,
+          body,
+          null,
+          nowMs,
+          null,
+        ],
+      );
+      notified++;
+    }
+  });
+
+  return notified;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers: thread + message shapes reconstructed from audit_event rows
 // ---------------------------------------------------------------------------
 
@@ -1579,6 +1682,39 @@ export function registerAssistantRoutes(
           const cfgCandidates = await fetchRegistryDefCandidates(pool, tenantId).catch(() => []);
           const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride, cfgCandidates);
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
+
+          // T-0466 (D8-G5): capture-as-request. When the user lacks authoring_draft
+          // and described something configurable, runConfigurator returns a
+          // captureRequest. File it as a config-request notification to admins so
+          // the intent is not lost. Non-fatal — a routing failure must not 500 the
+          // honest refusal the user already got.
+          if (cfgResult.captureRequest) {
+            try {
+              const notified = await captureConfigRequest(
+                pool,
+                tenantId,
+                actorSlug,
+                cfgResult.captureRequest.description,
+              );
+              handlerResult = {
+                // Truthful: confirm delivery only when someone actually received it.
+                text:
+                  notified > 0
+                    ? cfgResult.text + " " + AUTHORING_CAPTURE_CONFIRMATION
+                    : cfgResult.text +
+                      "\n\n(Пока некому передать заявку — в пространстве нет администратора с правами настройки.)",
+                intent: "configurator" as const,
+              };
+            } catch (capErr) {
+              console.error(`[T-0466] capture-as-request failed: ${String(capErr)}`);
+              handlerResult = {
+                text:
+                  cfgResult.text +
+                  "\n\n(Не удалось автоматически передать заявку администратору — обратитесь к нему напрямую.)",
+                intent: "configurator" as const,
+              };
+            }
+          }
 
           // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).
           // T-0464 (D8-G3): generate_process needs the live LLM port + the resolved

@@ -422,6 +422,22 @@ export interface PendingPromote {
 // ---------------------------------------------------------------------------
 
 /**
+ * T-0466 [D8-G5]: when a non-holder is refused the authoring sandbox, we offer
+ * to CAPTURE their description as a config-request (заявка на настройку) directed
+ * to an admin/owner so the intent is not lost. This is the signal the pure core
+ * returns; the HTTP layer (assistant.ts) persists it via the EXISTING notification
+ * mechanism (PgNotificationStore — migration 046), routed to authoring_draft
+ * holders. No new table.
+ *
+ * The core stays pure: it does NOT decide recipients or write anything; it only
+ * surfaces the verbatim user description that should be captured.
+ */
+export interface CaptureRequest {
+  /** The verbatim description the non-holder gave (what they want configured). */
+  readonly description: string;
+}
+
+/**
  * The full result of one configurator invocation.
  * The HTTP route (assistant.ts) reads approvedOps and executes them via
  * the same write paths the visual constructor uses.
@@ -437,6 +453,40 @@ export interface ConfiguratorResult {
   readonly pendingPromotes: readonly PendingPromote[];
   /** Whether the intersection grant ceiling was insufficient for any op. */
   readonly grantCeilingViolations: readonly string[];
+  /**
+   * T-0466 [D8-G5]: set ONLY when the user was refused for lacking the
+   * authoring_draft grant AND their message described something to configure.
+   * The HTTP layer persists this as a config-request notification to admins.
+   * undefined → nothing to capture (holder, or empty/trivial message).
+   */
+  readonly captureRequest?: CaptureRequest;
+}
+
+// ---------------------------------------------------------------------------
+// T-0466 [D8-G5]: human-friendly access-refusal text (spec §3.5, PD-21).
+//
+// The non-holder must NOT see a raw 503/opaque error. They see this warm,
+// plain-language message. When their message describes something to configure,
+// we ALSO offer to capture it as a config-request to an admin (capture-as-request).
+// ---------------------------------------------------------------------------
+
+/** Base human refusal — no jargon front-and-center, points at the administrator. */
+export const AUTHORING_ACCESS_DENIED_MESSAGE =
+  "У вас нет прав настраивать систему — это может сделать администратор или владелец. " +
+  "Обратитесь к администратору вашего пространства.";
+
+/** Appended when we captured the user's description as a config-request. */
+export const AUTHORING_CAPTURE_CONFIRMATION =
+  "Я передал ваше описание администратору как заявку на настройку — он увидит его и сможет всё сделать. " +
+  "Вам ничего больше делать не нужно.";
+
+/**
+ * T-0466: does a non-holder's message carry an actual description worth
+ * capturing? Trivial pings («привет», «?») are not captured. Heuristic:
+ * non-empty after trim and at least a few characters of substance.
+ */
+export function isCaptureWorthy(text: string): boolean {
+  return text.trim().length >= 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,10 +1188,16 @@ export async function handleConfigurator(
   // SECURITY: Check grant ceiling FIRST (intersection already agent ∩ user)
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
+    // T-0466 [D8-G5]: HUMAN refusal (no raw 503/jargon front-and-centre).
+    // handleConfigurator is the analyst-side IntentHandler contract (text+intent
+    // only); the capture-as-request side-effect runs through runConfigurator
+    // (which the HTTP route calls for configurator intent). Here we still offer
+    // the human "ask an admin" message; capture is wired in runConfigurator.
+    const captureNote = isCaptureWorthy(userText)
+      ? " Хотите — я передам это администратору как заявку на настройку."
+      : "";
     return {
-      text:
-        "У вас недостаточно прав для настройки системы (требуется грант authoring_draft). " +
-        "Обратитесь к администратору.",
+      text: AUTHORING_ACCESS_DENIED_MESSAGE + captureNote,
       intent: "configurator",
     };
   }
@@ -1181,14 +1237,24 @@ export async function runConfigurator(
 ): Promise<ConfiguratorResult> {
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
+    // T-0466 [D8-G5]: human refusal + capture-as-request.
+    //  - text is the warm "ask an admin" message (NOT a raw 503).
+    //  - when the message describes something configurable, captureRequest is set
+    //    so the HTTP layer files it as a config-request notification to admins.
+    //
+    // We do NOT bake the "передал администратору" confirmation into the text here:
+    // whether the request was actually routed depends on a DB side-effect the
+    // pure core cannot perform. The HTTP layer appends AUTHORING_CAPTURE_CONFIRMATION
+    // ONLY after a successful capture (and an honest note if nobody could receive
+    // it). This keeps the message truthful — no claim of delivery the core can't make.
+    const worthy = isCaptureWorthy(userText);
     return {
-      text:
-        "У вас недостаточно прав для настройки системы (требуется грант authoring_draft). " +
-        "Обратитесь к администратору.",
+      text: AUTHORING_ACCESS_DENIED_MESSAGE,
       approvedOps: [],
       blockedOps: [],
       pendingPromotes: [],
       grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
+      captureRequest: worthy ? { description: userText.trim() } : undefined,
     };
   }
   return runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);
