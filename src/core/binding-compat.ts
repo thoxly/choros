@@ -42,6 +42,39 @@ import {
 // Exported types (frozen public surface — ADR §6)
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0404 [D7-9]: per-field MODE bound to the BPMN NODE (step) — distinct from the
+ * per-ROLE visibility in field-visibility.ts (both compose; neither replaces the
+ * other). The mode lives in the BINDING layer (form_binding.fields per step) and
+ * is the CLOSED set:
+ *
+ *   read-only            — the field is rendered but not editable; a write to it
+ *                          on submit is REJECTED (server-authoritative).
+ *   required-to-advance  — the field MUST carry a non-empty value to advance the
+ *                          step; a missing value REJECTS the submit.
+ *   hidden               — the field is NOT rendered at this step; a write to it on
+ *                          submit is REJECTED (server-authoritative).
+ *
+ * ABSENT mode → backward-compatible default: the field is editable, optional at the
+ * step level (its existing `required` flag still applies independently), and shown.
+ */
+export type FieldMode = "read-only" | "required-to-advance" | "hidden";
+
+/** The CLOSED set of per-step field modes. Mirrored in web/src/forms/field-contract.js. */
+export const FIELD_MODES: readonly FieldMode[] = [
+  "read-only",
+  "required-to-advance",
+  "hidden",
+] as const;
+
+/** True iff value is a known field mode. */
+export function isFieldMode(value: unknown): value is FieldMode {
+  return (
+    typeof value === "string" &&
+    (FIELD_MODES as readonly string[]).includes(value)
+  );
+}
+
 export interface BindingField {
   key: string;
   type: string;
@@ -67,6 +100,13 @@ export interface BindingField {
    * authoring side: the renderer now sees the options and draws a <select>.
    */
   options?: string[];
+  /**
+   * T-0404 [D7-9]: per-field MODE for THIS process step (read-only /
+   * required-to-advance / hidden). Bound to the BPMN node via the per-step
+   * form_binding row. Absent → editable, optional, shown (backward-compatible).
+   * Distinct from per-role visibility (field-visibility.ts); both apply.
+   */
+  mode?: FieldMode;
 }
 
 export type BindingViolationType = "missing_in_schema" | "missing_in_bpmn";
@@ -272,6 +312,13 @@ export function validateBindingFields(raw: unknown): { ok: true; fields: Binding
       }
     }
 
+    // T-0404 [D7-9]: mode (optional) — must be a known field mode if present.
+    const mode = obj["mode"];
+    if (mode !== undefined && !isFieldMode(mode)) {
+      errors.push({ index: i, field: item, reason: `field.mode "${String(mode)}" is not a known field mode (read-only | required-to-advance | hidden)` });
+      continue;
+    }
+
     fields.push({
       key,
       type,
@@ -280,6 +327,7 @@ export function validateBindingFields(raw: unknown): { ok: true; fields: Binding
       ...(isBindingContractKind(contract) ? { contract } : {}),
       ...(typeof presentation === "string" ? { presentation: presentation as PresentationMode } : {}),
       ...(Array.isArray(options) ? { options: options as string[] } : {}),
+      ...(isFieldMode(mode) ? { mode } : {}),
     });
   }
 

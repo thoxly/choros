@@ -85,7 +85,7 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.js";
 import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
-import type { FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 import {
   parsePaginationParams,
@@ -749,12 +749,11 @@ async function createRecord(args: {
           Object.keys(variables).length > 0 ? variables : undefined,
         );
         if (!startResult.ok) {
-          // Engine failure is propagated: no record without a process start.
-          throw new HttpError(
-            502,
-            "ENGINE_ERROR",
-            `on_create process start failed (binding ${binding.id}): ${startResult.code}`,
-          );
+          // Engine failure is propagated: no record without a process start (tx rolls back).
+          // T-0483: surface a CLEAR, TYPED error — ENGINE_UNAVAILABLE → 503 with an
+          // honest message — instead of an opaque "502 ENGINE_ERROR ...".
+          const { status, code, message } = flowableErrorToHttp(startResult.code);
+          throw new HttpError(status, code, message);
         }
 
         // T-0368 (E16): dissolve double-submit.

@@ -28,6 +28,14 @@
        degrades visibly rather than pretending a text box captures them)
      rollup / matrix-lookup (editable:false)                → read-only readout
 
+   Per-step field MODE (T-0404 [D7-9]): each renderable field may carry a `mode`
+   (read-only / required-to-advance / hidden) bound to the BPMN node via
+   form_binding.fields. The renderer ENFORCES it: hidden → not rendered; read-only →
+   rendered disabled; required-to-advance → marked required. This is DISTINCT from
+   per-role visibility (server-side field-visibility.ts) — both apply. The mode is
+   ALSO enforced server-side on submit (form-submit-validator.ts); the render here is
+   the cosmetic-consistent half, not the authoritative boundary.
+
    Theming: --chs-* tokens + .chs-input/.chs-label only (gate G2/G6). No hardcoded
    colors. The control is theme-agnostic (works light/dark via tokens).
    ============================================================================ */
@@ -36,9 +44,9 @@ import React from 'react';
 // Pure contract-resolution lives in a React-free sibling (field-contract.js) so
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
-import { resolveFieldContract } from './field-contract.js';
+import { resolveFieldContract, resolveFieldMode } from './field-contract.js';
 
-export { resolveFieldContract };
+export { resolveFieldContract, resolveFieldMode };
 
 // ---------------------------------------------------------------------------
 // FieldControl — the single field component the schema-driven forms render.
@@ -70,7 +78,18 @@ export { resolveFieldContract };
 export function FieldControl({ field, value, onChange, error, idPrefix = 'field', hideLabel = false }) {
   const id = `${idPrefix}-${field.key}`;
   const label = field.label || field.title || field.key;
-  const isRequired = Boolean(field.required);
+  // T-0404 [D7-9]: per-step field mode (read-only / required-to-advance / hidden),
+  // bound to the BPMN node via form_binding.fields. Distinct from per-role
+  // visibility (server-side field-visibility.ts) — both apply. hidden → not rendered;
+  // read-only → rendered disabled; required-to-advance → marked required.
+  const { hidden, readOnly, required: modeRequired } = resolveFieldMode(field);
+  // hidden: the field is not rendered AT ALL at this step. Server-side submit
+  // validation rejects any write to it (form-submit-validator.ts), so dropping the
+  // control here is cosmetic-consistent, not the security boundary.
+  if (hidden) return null;
+  // required marker is the union of the legacy per-field `required` flag and the
+  // step-bound `required-to-advance` mode.
+  const isRequired = Boolean(field.required) || modeRequired;
   const invalid = Boolean(error);
   const { presentation, descriptor, editable } = resolveFieldContract(field);
 
@@ -144,6 +163,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        disabled={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
         style={inputStyle}
       >
         <option value="">— выберите —</option>
@@ -183,6 +204,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
             onChange={(e) => onChange(field.key, e.target.checked)}
             aria-required={isRequired || undefined}
             aria-invalid={invalid || undefined}
+            disabled={readOnly || undefined}
+            aria-disabled={readOnly || undefined}
           />
           {errorNode}
         </>
@@ -198,6 +221,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
             onChange={(e) => onChange(field.key, e.target.checked)}
             aria-required={isRequired || undefined}
             aria-invalid={invalid || undefined}
+            disabled={readOnly || undefined}
+            aria-disabled={readOnly || undefined}
           />
           {label}
           {isRequired && (
@@ -220,6 +245,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
         rows={3}
         style={inputStyle}
       />
@@ -235,6 +262,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
         style={inputStyle}
       />
     );
@@ -248,6 +277,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
         style={inputStyle}
       />
     );
@@ -262,6 +293,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
         style={inputStyle}
       />
     );

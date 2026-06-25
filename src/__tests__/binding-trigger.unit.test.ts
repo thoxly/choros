@@ -316,8 +316,10 @@ describe("T-0351 projectEngineVariables — scalar projection (RECORD_IN_PAYLOAD
 // ---------------------------------------------------------------------------
 
 describe("T-0351 on_create: engine fail → tx rolled back (create = start atomicity)", () => {
-  it("startInstance ENGINE_ERROR → 502 and tx ROLLBACK (record not persisted)", async () => {
-    const flowable = makeStubFlowable({ ok: false, code: "ENGINE_DOWN" as never });
+  it("startInstance ENGINE_UNAVAILABLE → 503 and tx ROLLBACK (record not persisted)", async () => {
+    // T-0483: engine unreachable surfaces a typed 503 ENGINE_UNAVAILABLE (transient),
+    // not an opaque 502. The record must still NOT persist (create=start atomicity).
+    const flowable = makeStubFlowable({ ok: false, code: "ENGINE_UNAVAILABLE" });
     const trackRollback = { called: false };
     const bindingRow = {
       id: "bind-002",
@@ -345,10 +347,10 @@ describe("T-0351 on_create: engine fail → tx rolled back (create = start atomi
           data: { days: 5 },
         },
       );
-      // Engine failure → 502
-      expect(res.status).toBe(502);
+      // Engine unreachable → typed 503 ENGINE_UNAVAILABLE
+      expect(res.status).toBe(503);
       const body = res.json as { error?: { code?: string } };
-      expect(body?.error?.code).toBe("ENGINE_ERROR");
+      expect(body?.error?.code).toBe("ENGINE_UNAVAILABLE");
       // TX was rolled back (no orphan record)
       expect(trackRollback.called).toBe(true);
     } finally {

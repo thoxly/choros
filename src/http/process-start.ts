@@ -11,7 +11,8 @@
  *   400 VALIDATION       — processKey empty / body not object / tenantId not UUID
  *   401 UNAUTHENTICATED  — no x-dev-user
  *   403 NOT_ELIGIBLE     — actor not entitled to start a process in this tenant (PDP)
- *   502 ENGINE_ERROR     — startInstance returned not-ok
+ *   503 ENGINE_UNAVAILABLE — engine unreachable/slow (T-0483; transient, retry)
+ *   502 UNKNOWN          — other engine failure (typed via flowableErrorToHttp)
  *
  * Why this is its OWN module (not inline in processes.ts):
  *   FF-DISPLAY-4 (ci/checks/demo/pack-serve-no-write.sh) forbids src/http/processes.ts
@@ -38,7 +39,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type RouteHandler } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
-import type { FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
@@ -289,7 +290,10 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
     });
 
     if (!startResult.ok) {
-      throw new HttpError(502, "ENGINE_ERROR", `startInstance failed: ${startResult.code}`);
+      // T-0483: typed engine error (ENGINE_UNAVAILABLE → 503 + honest message)
+      // instead of an opaque "502 startInstance failed: ...".
+      const { status, code, message } = flowableErrorToHttp(startResult.code);
+      throw new HttpError(status, code, message);
     }
 
     // 6. 201 with the FROZEN response shape.
