@@ -83,7 +83,7 @@ const BLANK_BPMN_XML = `<?xml version="1.0" encoding="UTF-8"?>
    ValidationBanner
    Shows validation errors and warnings below the toolbar.
    -------------------------------------------------------------------------- */
-function ValidationBanner({ result, onDismiss }) {
+export function ValidationBanner({ result, onDismiss }) {
   if (!result) return null;
 
   const hasErrors = result.errors && result.errors.length > 0;
