@@ -2,6 +2,7 @@
  * web/src/app-shell/nav-config.test.js
  *
  * T-0355: IA reshuffle — authoring space ≠ work space.
+ * T-0482: F3 IA cleanup — «Формы задач» nav item hidden (duplicate nav removed).
  *
  * Verifies invariants of the nav-config structure:
  *   1. All expected groups exist;
@@ -14,7 +15,9 @@
  *   8. Every item's status is a valid NavStatus value;
  *   9. Home group (Обзор) has no space tag — it is above both spaces;
  *  10. visibleItems filters hidden items;
- *  11. effectiveStatus falls back to 'soon' for legacy soon:true items.
+ *  11. effectiveStatus falls back to 'soon' for legacy soon:true items;
+ *  12. «Формы задач» (id=forms) is hidden (T-0482 F3 cleanup);
+ *  13. forms item still EXISTS in config (route /forms preserved for direct links).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -155,5 +158,43 @@ describe('nav-config T-0355', () => {
     const liveIds = liveAuthoring.map((i) => i.id);
     // Allow Приложения (apps) to be live. Others should be demo until E16 backend ships.
     expect(liveIds.filter((id) => id !== 'apps')).toHaveLength(0);
+  });
+
+  // T-0482 [F3]: «Формы задач» nav cleanup --------------------------------
+
+  it('T-0482: forms item (id=forms) exists in config (route /forms preserved)', () => {
+    // The /forms route is kept for power-user direct-link access (FormBuilder).
+    // The item must still exist in NAV; only its visibility changes.
+    const allItems = NAV.flatMap((g) => g.items);
+    const formsItem = allItems.find((i) => i.id === 'forms');
+    expect(formsItem).toBeDefined();
+  });
+
+  it('T-0482: forms item is hidden from sidebar (hidden: true)', () => {
+    // The standalone «Формы задач» entry is a duplicate nav path:
+    //   • step-form binding → modeler UserTaskFormBindingPanel (T-0461)
+    //   • record-form → FieldControl F1 renderer (T-0480)
+    // Setting hidden:true removes it from the sidebar while preserving /forms.
+    const allItems = NAV.flatMap((g) => g.items);
+    const formsItem = allItems.find((i) => i.id === 'forms');
+    expect(formsItem.hidden).toBe(true);
+  });
+
+  it('T-0482: forms item is NOT returned by visibleItems (not rendered in sidebar)', () => {
+    // visibleItems() is the filter the shell uses when building the nav list.
+    // forms must be filtered out so the sidebar stays clean.
+    const konstruktorGroup = NAV.find((g) => g.group === 'Конструктор');
+    expect(konstruktorGroup).toBeDefined();
+    const visible = visibleItems(konstruktorGroup);
+    const ids = visible.map((i) => i.id);
+    expect(ids).not.toContain('forms');
+  });
+
+  it('T-0482: Приложения is still visible in Конструктор after forms removal', () => {
+    // Guard against accidentally hiding Приложения.
+    const konstruktorGroup = NAV.find((g) => g.group === 'Конструктор');
+    const visible = visibleItems(konstruktorGroup);
+    const ids = visible.map((i) => i.id);
+    expect(ids).toContain('apps');
   });
 });

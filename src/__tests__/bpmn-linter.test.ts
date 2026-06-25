@@ -1443,3 +1443,213 @@ describe("T-0458 — non-timer events are not flagged", () => {
     }
   });
 });
+
+// ===========================================================================
+// T-0459 [D8-R4] — message_event_incoherent: message/signal catch coherence.
+//
+// A message-catch MUST have a guarding TIMEOUT (R3 — else infinite wait), a
+// correlation field (correlation is by a record-field key), and a message name.
+// ===========================================================================
+
+/**
+ * A WELL-FORMED message catch: an intermediate message-catch wait, GUARDED by a
+ * boundary timer attached to it (the deadline that prevents an infinite wait), with
+ * a correlation field + message name declared. attrs are the attribute local names
+ * the linter reads after namespace-prefix stripping (choros:messageName → messageName).
+ */
+function makeWellFormedMessageCatchBpmn(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait-signature" choros:messageName="contract-signed" choros:correlationField="contract_number">
+      <messageEventDefinition messageRef="contract-signed"/>
+    </intermediateCatchEvent>
+    <boundaryEvent id="bnd-msg-timeout" attachedToRef="wait-signature">
+      <timerEventDefinition><timeDuration>P5D</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-chase"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait-signature"/>
+    <sequenceFlow id="f1" sourceRef="wait-signature" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-msg-timeout" targetRef="task-chase"/>
+    <sequenceFlow id="f3" sourceRef="task-chase" targetRef="end"/>
+  </process>
+</definitions>`;
+}
+
+describe("T-0459 — message_event_incoherent: well-formed message catch publishes 200", () => {
+  it("a message catch GUARDED by a boundary timer, with correlation field + name passes", () => {
+    const result = lintBpmn(makeWellFormedMessageCatchBpmn());
+    expect(result.ok).toBe(true);
+  });
+
+  it("passes even with ruleTables opt present (message check is structural)", () => {
+    const result = lintBpmn(makeWellFormedMessageCatchBpmn(), { ruleTables: [] });
+    expect(result.ok).toBe(true);
+  });
+
+  it("a receiveTask guarded by a boundary timer, fully configured, passes", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <receiveTask id="rt-await" choros:messageName="payment-received" choros:correlationField="invoice_no"/>
+    <boundaryEvent id="bnd-rt-timeout" attachedToRef="rt-await">
+      <timerEventDefinition><timeDuration>PT48H</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-remind"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="rt-await"/>
+    <sequenceFlow id="f1" sourceRef="rt-await" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-rt-timeout" targetRef="task-remind"/>
+    <sequenceFlow id="f3" sourceRef="task-remind" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("T-0459 — message_event_incoherent: a message-catch WITHOUT a timeout lints RED (422)", () => {
+  it("an intermediate message catch with NO guarding timer → message_event_incoherent", () => {
+    // Same as well-formed but the boundary timer is removed → infinite-wait risk.
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait-signature" choros:messageName="contract-signed" choros:correlationField="contract_number">
+      <messageEventDefinition messageRef="contract-signed"/>
+    </intermediateCatchEvent>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait-signature"/>
+    <sequenceFlow id="f1" sourceRef="wait-signature" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.type === "message_event_incoherent");
+      expect(v?.elementId).toBe("wait-signature");
+      expect(v?.message).toMatch(/NO TIMEOUT|wait\s+forever|MUST have a timeout/i);
+    }
+  });
+
+  it("a receiveTask with no guarding boundary timer → message_event_incoherent", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <receiveTask id="rt-await" choros:messageName="payment-received" choros:correlationField="invoice_no"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="rt-await"/>
+    <sequenceFlow id="f1" sourceRef="rt-await" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.violations.some(
+          (x) => x.type === "message_event_incoherent" && /NO TIMEOUT/i.test(x.message),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("a message catch with no correlationField → message_event_incoherent", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait-x" choros:messageName="contract-signed">
+      <messageEventDefinition messageRef="contract-signed"/>
+    </intermediateCatchEvent>
+    <boundaryEvent id="bnd-t" attachedToRef="wait-x">
+      <timerEventDefinition><timeDuration>P1D</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-y"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait-x"/>
+    <sequenceFlow id="f1" sourceRef="wait-x" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-t" targetRef="task-y"/>
+    <sequenceFlow id="f3" sourceRef="task-y" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.violations.some(
+          (x) => x.type === "message_event_incoherent" && /correlationField/.test(x.message),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("a message catch with no messageName → message_event_incoherent", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="wait-z" choros:correlationField="contract_number">
+      <signalEventDefinition signalRef="some-signal"/>
+    </intermediateCatchEvent>
+    <boundaryEvent id="bnd-tz" attachedToRef="wait-z">
+      <timerEventDefinition><timeDuration>P1D</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-w"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="wait-z"/>
+    <sequenceFlow id="f1" sourceRef="wait-z" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-tz" targetRef="task-w"/>
+    <sequenceFlow id="f3" sourceRef="task-w" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.violations.some(
+          (x) => x.type === "message_event_incoherent" && /messageName/.test(x.message),
+        ),
+      ).toBe(true);
+    }
+  });
+});
+
+describe("T-0459 — non-message events are not flagged", () => {
+  it("a pure timer boundary (no message def) is NOT a message-catch", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<definitions targetNamespace="t" xmlns:choros="http://choros.io/bpmn">
+  <process id="p1">
+    <startEvent id="start"/>
+    <userTask id="task-approve"/>
+    <boundaryEvent id="bnd-deadline" attachedToRef="task-approve">
+      <timerEventDefinition><timeDuration>PT24H</timeDuration></timerEventDefinition>
+    </boundaryEvent>
+    <userTask id="task-escalate"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f0" sourceRef="start" targetRef="task-approve"/>
+    <sequenceFlow id="f1" sourceRef="task-approve" targetRef="end"/>
+    <sequenceFlow id="f2" sourceRef="bnd-deadline" targetRef="task-escalate"/>
+    <sequenceFlow id="f3" sourceRef="task-escalate" targetRef="end"/>
+  </process>
+</definitions>`;
+    const result = lintBpmn(xml);
+    // The timer is well-formed; no message_event_incoherent should appear.
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "message_event_incoherent")).toBe(false);
+    } else {
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("a process with no message catches is unaffected", () => {
+    const result = lintBpmn(makeWellFormedMessageCatchBpmn().replace(/intermediateCatchEvent[\s\S]*?<\/intermediateCatchEvent>/, "<userTask id=\"plain\"/>").replace(/<boundaryEvent[\s\S]*?<\/boundaryEvent>/, ""));
+    // Smoke: removing the message catch must not introduce a message violation.
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "message_event_incoherent")).toBe(false);
+    }
+  });
+});

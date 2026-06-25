@@ -310,6 +310,81 @@ const ChorosModdleDescriptor = {
         },
       ],
     },
+    {
+      /**
+       * T-0459 [D8-R4]: message/signal correlation config — rides on bpmn:CatchEvent
+       * (superclass of BoundaryEvent + IntermediateCatchEvent) so a message/signal
+       * CATCH carries its correlation contract. The CATCH waits for a message named
+       * choros:messageName and correlates an inbound envelope by the business key read
+       * from the record field named choros:correlationField (бесшовность — correlation
+       * is built into the record). The publish-time linter (bpmn-linter.ts
+       * checkMessageEventCoherence) reads these to enforce a correlation field + a
+       * guarding timeout.
+       *
+       * choros:messageName — the message/signal name the catch waits for.
+       * choros:correlationField — the record field key whose value is the correlation
+       *   key (e.g. "contract_number").
+       * choros:messageBroadcast — "true" iff this is a broadcast signal-catch
+       *   (delivered to every matching subscription IN THE SAME TENANT).
+       */
+      name: 'MessageCorrelationCatchExtension',
+      extends: ['bpmn:CatchEvent'],
+      properties: [
+        {
+          name: 'messageName',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'correlationField',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'messageBroadcast',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
+    {
+      /**
+       * T-0459 [D8-R4]: the SAME message correlation + THROW config on bpmn:Activity
+       * so a receiveTask (a message wait that is a Task, not a CatchEvent) carries
+       * messageName/correlationField, AND a sendTask/throw carries the throw channel.
+       *
+       * THROW side (spec §3.5 part 3): a throw message is sent through a
+       * messaging_channel effect_resource authorised by an invoke-grant (T-0034).
+       * choros:throwChannelResourceId — the effect_resource id of the channel/connector
+       *   the throw uses (what authorizeThrowMessage → verifyEffectGrants checks).
+       * choros:throwPayloadFields — CSV of record field keys whose values form the
+       *   throw payload (бесшовность — payload from record fields).
+       */
+      name: 'MessageCorrelationActivityExtension',
+      extends: ['bpmn:Activity'],
+      properties: [
+        {
+          name: 'messageName',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'correlationField',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'throwChannelResourceId',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'throwPayloadFields',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
   ],
   enumerations: [],
   associations: [],

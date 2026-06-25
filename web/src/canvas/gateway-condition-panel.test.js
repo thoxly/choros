@@ -413,10 +413,14 @@ describe('choros-moddle-extension — T-0434 GatewayConditionExtension type', ()
     expect(prop.type).toBe('String');
   });
 
-  it('descriptor has GatewayConditionExtension among its types (T-0458 added TimerDeadlineExtension as 5th)', () => {
+  it('descriptor has GatewayConditionExtension among its types (additive extensions grow the set)', () => {
     const names = descriptor.types.map((t) => t.name);
     expect(names).toContain('GatewayConditionExtension');
-    // T-0458 [D8-R3]: TimerDeadlineExtension added additively → 5 types.
-    expect(descriptor.types).toHaveLength(5);
+    // T-0458 [D8-R3]: TimerDeadlineExtension → 5 types.
+    // T-0459 [D8-R4]: MessageCorrelationCatchExtension + MessageCorrelationActivityExtension
+    //   added additively → 7 types.
+    expect(names).toContain('MessageCorrelationCatchExtension');
+    expect(names).toContain('MessageCorrelationActivityExtension');
+    expect(descriptor.types).toHaveLength(7);
   });
 });
