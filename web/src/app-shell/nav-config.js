@@ -152,8 +152,10 @@ export const NAV = [
       { id: "notifications", label: "Уведомления", icon: "bell",   screen: true, status: "live" },
       // Аудит: GET /api/audit (live), GET /api/audit/export (live)
       { id: "audit",         label: "Аудит",       icon: "audit",  screen: true, status: "live" },
-      // Бюджеты: не построено
-      { id: "budgets",       label: "Бюджеты",     icon: "budget", soon: true,   status: "soon" },
+      // Расход (T-0477, E-AGENTS L5): учёт стоимости LLM-вызовов.
+      // GET /api/spend (aggregates) + GET /api/spend/recent — живые → live.
+      // Без лимитов/потолков (Stage-2, decision 3). Только учёт + показ.
+      { id: "spend",         label: "Расход",       icon: "budget", screen: true, status: "live" },
     ],
   },
   // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
