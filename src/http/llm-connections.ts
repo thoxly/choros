@@ -12,11 +12,14 @@
  *
  * Auth: same x-dev-user / keycloak-Bearer pattern as llm-config.ts (withAuth +
  *   extractActor + resolveActorTenant).
- * Authz (spec §6): configuring connections = genesis-owner OR a tenant-root
- *   mgmt_object:agent/update delegation — the same management tier that owns the
- *   existing /api/llm-config and /api/agents/:id/secret-handle routes. (The
- *   dedicated llm_connection:configure grant is L4; until then this reuses the
- *   established agent-mgmt predicate so config stays admin-only, never general.)
+ * Authz (spec §6, T-0475 [E-AGENTS L4]): configuring connections = genesis-owner
+ *   OR a holder of the dedicated `llm_connection:configure` capability grant. The
+ *   gate is fail-closed: a plain tenant member (no owner, no grant) → 403. A
+ *   role-constructor-admin (T-0469) granted llm_connection:configure inside the
+ *   owner-delegated envelope qualifies via the grant. Resolved through
+ *   canConfigureLlmConnection (capability-grants-dao), which composes the existing
+ *   getGrantsForSubject DAO + the DB-resolved owner check — NOT the mgmt_object
+ *   scoped-admin tier (this is a CAPABILITY, not an org-place delegation).
  * Tenant isolation: resolveActorTenant → withTenantTx (SET LOCAL + FORCE RLS) +
  *   the DAO's explicit WHERE tenant_id double-predicate.
  *
@@ -34,10 +37,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
-import { loadAdminContext } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
-import type { AdminContext } from "../core/scoped-admin.js";
+import { canConfigureLlmConnection } from "../db/capability-grants-dao.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import {
@@ -114,30 +114,11 @@ async function withTenantTx<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Authz — configuring connections is management-tier (spec §6).
-// Reuse the established agent-mgmt predicate (genesis-owner OR a tenant-root
-// mgmt_object:agent/update delegation) — same gate as /api/llm-config. The
-// dedicated llm_connection:configure grant lands in L4.
+// Authz — T-0475 [E-AGENTS L4]: configuring connections = genesis-owner OR a
+// holder of the dedicated `llm_connection:configure` capability grant (spec §6).
+// Resolved by canConfigureLlmConnection (capability-grants-dao). Fail-closed: a
+// plain member with neither → 403.
 // ---------------------------------------------------------------------------
-
-/** Tenant-root org scope — only genesis-owner or a root-covering delegation admits it. */
-const TENANT_ROOT_SCOPE: ScopeElement = {
-  kind: "node",
-  hierarchy: "org",
-  nodeId: "org",
-  nodeLevel: "department",
-};
-
-function holdsConnectionConfigure(admin: AdminContext): boolean {
-  if (admin.isGenesisOwner) return true;
-  return admin.adminGrants.some(
-    (g) =>
-      g.resourceType === "mgmt_object:agent" &&
-      g.operation === "update" &&
-      g.delegable &&
-      isNarrowerOrEqual(TENANT_ROOT_SCOPE, g.scope as ScopeElement, SEED_ORACLE),
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Audit writer
@@ -200,11 +181,11 @@ async function handleList(
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 
-  // Management-tier read: the connection registry (provider/endpoint/prices +
-  // bound-state) is config metadata, not general-read — gate like llm-config GET.
-  const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
-  if (!holdsConnectionConfigure(admin)) {
-    throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
+  // Capability read: the connection registry (provider/endpoint/prices +
+  // bound-state) is config metadata, not general-read — gate on the
+  // llm_connection:configure capability (owner OR grant holder).
+  if (!(await canConfigureLlmConnection(pool, tenantId, actor, nowMs))) {
+    throw new HttpError(403, "LLM_CONNECTION_CONFIGURE_REQUIRED", "requires owner or llm_connection:configure grant");
   }
 
   const rows = await withTenantTx(pool, tenantId, (client) =>
@@ -245,9 +226,8 @@ async function handleCreate(
   const tenantId = await resolveActorTenant(actor);
   const nowMs = Date.now();
 
-  const admin = await loadAdminContext(pool, tenantId, actor, nowMs);
-  if (!holdsConnectionConfigure(admin)) {
-    throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
+  if (!(await canConfigureLlmConnection(pool, tenantId, actor, nowMs))) {
+    throw new HttpError(403, "LLM_CONNECTION_CONFIGURE_REQUIRED", "requires owner or llm_connection:configure grant");
   }
 
   const body = await readJsonBody(req);

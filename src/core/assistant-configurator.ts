@@ -44,7 +44,6 @@
 
 import { randomUUID } from "node:crypto";
 import type { HandlerContext, HandlerResult } from "./assistant-intent.js";
-import type { Grant } from "./grant-lattice.js";
 import {
   evaluateAuthoringRedLine,
   type AuthoringOp,
@@ -56,18 +55,9 @@ import {
   type RelationCascadeDecision,
 } from "./relation-cascade.js";
 import type { ChatLlmRequest, ChatLlmResult, ChatToolCall } from "./llm-port.js";
-
-// ---------------------------------------------------------------------------
-// Authoring resource type constant (mirrors migration 044 / grant-lattice widening-cast)
-// ---------------------------------------------------------------------------
-
-/**
- * The resourceType string for authoring_draft grants.
- * This value is authoritative in the migration (044) and tests (config-agent-toolset).
- * We declare it as a Grant["resourceType"] widening-cast to match the lattice's
- * open-string resourceType field — same pattern as config-agent-toolset.test.ts:L50.
- */
-const AUTHORING_DRAFT_RESOURCE = "authoring_draft" as Grant["resourceType"];
+// T-0475 [E-AGENTS L4]: operating a SYSTEM agent (the configurator IS one) is the
+// capability axis canOperateSystemAgent — authoring_draft OR system_agent:operate.
+import { canOperateSystemAgent } from "./capability-authz.js";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — the E16 authoring tools the configurator can call.
@@ -595,21 +585,20 @@ export function confirmsPlan(text: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether the intersection grants include at least one effective
- * authoring_draft grant (create or update).
+ * Check whether the intersection grants authorize OPERATING the configurator
+ * system agent (spec §6, T-0475). Authority = an effective authoring_draft grant
+ * (create/update) OR an explicit system_agent:operate grant — encoded by the
+ * shared canOperateSystemAgent predicate (capability-authz.ts), so the
+ * configurator gate and any future operate-system-agent gate agree.
  *
  * SECURITY: uses ctx.intersectionGrants which is already the INTERSECTION of
  * agent ∩ user — never wider. An agent cannot author on behalf of a user who
- * has no authoring_draft grant.
+ * holds neither capability.
  */
 async function hasAuthoringDraftGrant(ctx: HandlerContext): Promise<boolean> {
   const nowMs = Date.now();
   const grants = await ctx.intersectionGrants.getGrants(ctx.userSubject, nowMs);
-  return grants.some(
-    (g) =>
-      g.resourceType === AUTHORING_DRAFT_RESOURCE &&
-      (g.operation === "create" || g.operation === "update"),
-  );
+  return canOperateSystemAgent(grants);
 }
 
 // ---------------------------------------------------------------------------

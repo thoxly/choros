@@ -184,6 +184,7 @@ _dc_mig078_failed=0                                                             
 _dc_mig081_failed=0                                                                # T0346-DC-MIG081-GUARD track when 081 triggers the FF-DC7 fail
 _dc_mig082_failed=0                                                                # T0351-DC-MIG082-GUARD track when 082 triggers the FF-DC7 fail
 _dc_mig083_failed=0                                                                # T0354-DC-MIG083-GUARD track when 083 triggers the FF-DC7 fail
+_dc_mig104_failed=0                                                                # T0475-DC-MIG104-GUARD track when 104 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -216,6 +217,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/083_core_system_registries_seed.sql" ]]; then # T0354-DC-MIG083-GUARD
       _dc_mig083_failed=1                                                     # T0354-DC-MIG083-GUARD
     fi                                                                        # T0354-DC-MIG083-GUARD
+    # Track specifically when 104 triggers this FAIL (and nothing else).     # T0475-DC-MIG104-GUARD
+    if [[ "${m}" == "migrations/104_capability_grants_l4_seed.sql" ]]; then   # T0475-DC-MIG104-GUARD
+      _dc_mig104_failed=1                                                     # T0475-DC-MIG104-GUARD
+    fi                                                                        # T0475-DC-MIG104-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -383,6 +388,38 @@ if [[ "${_dc_mig083_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0354-core-registries-seed]: migration 083_core_system_registries_seed.sql is a pure INSERT seed — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0354-DC-MIG083-GUARD
   fi                                                                           # T0354-DC-MIG083-GUARD
 fi                                                                             # T0354-DC-MIG083-GUARD
+# T-0475: additive relief for migration 104_capability_grants_l4_seed.sql.   # T0475-DC-MIG104-GUARD
+# 104 is a PURE SEED — only INSERT ... ON CONFLICT DO NOTHING of two new      # T0475-DC-MIG104-GUARD
+# capability-grant rows (confirmed_by='seed') into the EXISTING choros."grant" # T0475-DC-MIG104-GUARD
+# table (migration 008). Zero DDL: no CREATE TABLE, no RLS/POLICY change.     # T0475-DC-MIG104-GUARD
+# The two seeded rows are CAPABILITY grants (llm_connection:configure,        # T0475-DC-MIG104-GUARD
+# system_agent:operate) — they do NOT alter the confirmed2_by/dual-control    # T0475-DC-MIG104-GUARD
+# authority machinery and do NOT touch the confirmed2_by invariant.          # T0475-DC-MIG104-GUARD
+# UNRELATED to the dual-control authority domain (grant-CONFIRMATION /        # T0475-DC-MIG104-GUARD
+# confirmation / confirmed2_by). Same class as T-0244 migration-073 and      # T0475-DC-MIG104-GUARD
+# T-0354 migration-083 pure-seed reliefs (auto_additive).                    # T0475-DC-MIG104-GUARD
+_dc_mig104_stem="migrations/104_capability_grants_l4_seed.sql"                  # T0475-DC-MIG104-GUARD
+if [[ "${_dc_mig104_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig104_stem}"; then # T0475-DC-MIG104-GUARD
+  _dc_mig104_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig104_stem}" 2>/dev/null || true)"  # T0475-DC-MIG104-GUARD
+  _dc_mig104_bad=0                                                             # T0475-DC-MIG104-GUARD
+  # 104 must add NO table/RLS/policy (pure seed) ...                          # T0475-DC-MIG104-GUARD
+  if echo "${_dc_mig104_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0475-DC-MIG104-GUARD
+    _dc_mig104_bad=1                                                           # T0475-DC-MIG104-GUARD introduces DDL/RLS
+  fi                                                                           # T0475-DC-MIG104-GUARD
+  # ... and must NOT create/alter the dual-control authority domain ...       # T0475-DC-MIG104-GUARD
+  if echo "${_dc_mig104_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0475-DC-MIG104-GUARD
+    _dc_mig104_bad=1                                                           # T0475-DC-MIG104-GUARD touches authority domain
+  fi                                                                           # T0475-DC-MIG104-GUARD
+  # ... and must NOT touch the confirmed2_by invariant.                       # T0475-DC-MIG104-GUARD
+  if echo "${_dc_mig104_content}" | grep -iqE "confirmed2_by"; then           # T0475-DC-MIG104-GUARD
+    _dc_mig104_bad=1                                                           # T0475-DC-MIG104-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0475-DC-MIG104-GUARD
+  if [[ "${_dc_mig104_bad}" -eq 0 ]]; then                                    # T0475-DC-MIG104-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0475-DC-MIG104-GUARD cancel false-red
+    _dc_mig104_failed=0                                                        # T0475-DC-MIG104-GUARD
+    echo "PASS [FF-DC7-T0475-capability-grants-seed]: migration 104_capability_grants_l4_seed.sql is a pure INSERT seed of two capability-grant rows (confirmed_by='seed') — NO CREATE TABLE/RLS/POLICY, does NOT alter confirmed2_by/dual-control authority machinery — relief granted" # T0475-DC-MIG104-GUARD
+  fi                                                                           # T0475-DC-MIG104-GUARD
+fi                                                                             # T0475-DC-MIG104-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
