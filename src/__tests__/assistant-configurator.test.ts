@@ -601,3 +601,100 @@ describe("AC-T462-4: create_application gated by authoring_draft — non-holder 
     expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC-T463 (D8-G2): relate_application cascade — create / link-dedup / ask / hop-cap
+//
+// Drives the SHARED relation-cascade primitive through the configurator (bot
+// driver). existingRegistryDefs is passed as the 4th runConfigurator arg.
+// ---------------------------------------------------------------------------
+
+const CAND_CONTRACTORS = {
+  id: "c0000000-0000-0000-0000-000000000001",
+  slug: "contractors",
+  displayName: "Контрагенты",
+};
+
+describe("AC-T463-1: relate_application → NON-existent target cascades a create [D8-G2]", () => {
+  it("relation to an app that does not exist → approved relate_application op in CREATE mode", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "supplier",
+      relationFieldLabel: "Поставщик",
+      targetAppDisplayName: "Поставщики",
+      humanReadableReason: "Заявке нужна связь на поставщика",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    // No existing registry_defs → must cascade-create.
+    const result = await runConfigurator("добавь связь на поставщиков", ctx, null, []);
+
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("relate_application");
+    expect(op.tier).toBe("draft");
+    const cascade = op.args["cascade"] as Record<string, unknown>;
+    expect(cascade["mode"]).toBe("create");
+    expect(cascade["appDisplayName"]).toBe("Поставщики");
+    expect(cascade["appSlug"]).toBe("postavschiki");
+  });
+});
+
+describe("AC-T463-2: relate_application → EXISTING target dedups (link, no duplicate) [D8-G2]", () => {
+  it("relation to an existing app (by name) → LINK mode, no cascade create", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      relationFieldLabel: "Контрагент",
+      targetAppDisplayName: "Контрагенты",
+      humanReadableReason: "Связь на уже существующих контрагентов",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("свяжи с контрагентами", ctx, null, [CAND_CONTRACTORS]);
+
+    expect(result.blockedOps).toHaveLength(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("relate_application");
+    const cascade = op.args["cascade"] as Record<string, unknown>;
+    // INVARIANT: dedup hit → link to existing id, NOT a duplicate create.
+    expect(cascade["mode"]).toBe("link");
+    expect(cascade["targetRegistryId"]).toBe(CAND_CONTRACTORS.id);
+  });
+});
+
+describe("AC-T463-3: relate_application → AMBIGUOUS target asks (no guess) [D8-G2]", () => {
+  it("two existing apps share the name → blockedOp (pending_human_confirm), no approved op", async () => {
+    const dup1 = { id: "d0000000-0000-0000-0000-000000000001", slug: "v-a", displayName: "Контрагенты" };
+    const dup2 = { id: "d0000000-0000-0000-0000-000000000002", slug: "v-b", displayName: "контрагенты" };
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      targetAppDisplayName: "Контрагенты",
+      humanReadableReason: "Неоднозначная цель",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("свяжи с контрагентами", ctx, null, [dup1, dup2]);
+
+    // INVARIANT: ambiguous → ASK (blocked), never a silent guess (no approved op).
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+    expect(result.blockedOps[0]!.description).toMatch(/несколько|уточните/i);
+  });
+});
+
+describe("AC-T463-4: relate_application missing target → honest block, not silent op [D8-G2]", () => {
+  it("no slug and no name → blockedOp asking for the target (no approved op)", async () => {
+    const llm = new ToolCallLlmPort("relate_application", {
+      sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+      relationFieldKey: "contractor",
+      humanReadableReason: "Нет цели",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("добавь связь", ctx, null, []);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+});
