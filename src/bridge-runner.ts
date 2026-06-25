@@ -39,8 +39,12 @@ async function main(): Promise<void> {
   const maxTasksPerTopic = Number(process.env["BRIDGE_MAX_TASKS"] ?? "10");
   const retries = Number(process.env["BRIDGE_RETRIES"] ?? "3");
 
+  // T-0483: the compose-internal hostname `flowable` is only reachable on the
+  // container's internal port 8080 — the host-published mapping is 8082, which is
+  // NOT valid from inside the compose network. Default must be self-consistent so
+  // an absent env override does not silently target the wrong port (→ ENGINE_UNAVAILABLE).
   const flowableBaseUrl =
-    process.env["FLOWABLE_BASE_URL"] ?? "http://flowable:8082/flowable-rest/service";
+    process.env["FLOWABLE_BASE_URL"] ?? "http://flowable:8080/flowable-rest/service";
   const flowableAdminUser = process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin";
   const flowableAdminPassword = process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"];
 
