@@ -1314,3 +1314,94 @@ export async function surfaceMessageCatchWaits(
   }
   return emitted;
 }
+
+// ---------------------------------------------------------------------------
+// T-0459 [D8-R4]: engine-backed MessageSubscriptionSource for the LIVE read.
+//
+// The waiting projection (surfaceMessageCatchWaits) needs to know WHICH instances
+// are parked on a message-catch. The engine truth for that is the active
+// event-subscriptions of each WAITING instance: a token parked on a receiveTask /
+// intermediateCatchEvent(message|signal) / message-boundary registers a
+// "message"/"signal" event-subscription. This factory builds a
+// MessageSubscriptionSource that:
+//   1. reads the currently-waiting instances from the projection (the same source
+//      the timer reconcile uses — listInstanceProjections, status != done), and
+//   2. asks the engine which of them carry a parked message/signal catch
+//      (getMessageCatchWaits), turning each into a MessageSubscription.
+//
+// Honest-degrade: any engine/DB hiccup for a single instance is swallowed (that
+// instance is simply not surfaced this pass — retried on the next read); the source
+// never throws past its own boundary. Keeps the engine port injectable so the live
+// read can mirror the reconcileInstanceTimers wiring exactly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal engine port the message-wait read-projection needs — a structural subset
+ * of FlowableClient. Reveals the parked message/signal catches of a live instance.
+ */
+export interface MessageWaitEnginePort {
+  getMessageCatchWaits(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; waits: { messageName: string; eventType: string }[] }
+    | { ok: false; code: string }
+  >;
+}
+
+/**
+ * Build a MessageSubscriptionSource backed by the live engine: enumerate the
+ * waiting instances of a tenant (projection) and project each instance's parked
+ * message/signal catches (engine) into MessageSubscription rows. The correlationKey
+ * is NOT load-bearing on the waiting path (surfaceMessageCatchWaits keys only on
+ * inst + messageName); it is filled with the instance id as an honest non-empty
+ * placeholder (the DELIVERY path — deliverMessageEnvelope — sources its
+ * subscriptions with the real record-field key, Stage-2 Pull seam).
+ *
+ * Best-effort: a per-instance engine failure is skipped (degrade-silent). A failure
+ * to read the projection returns an empty subscription set (so the wait projection
+ * simply emits nothing this pass).
+ */
+export function makeEngineMessageSubscriptionSource(
+  pool: pg.Pool,
+  engine: MessageWaitEnginePort,
+  opts?: { limit?: number },
+): MessageSubscriptionSource {
+  return {
+    async listWaitingSubscriptions(tenantId: string): Promise<MessageSubscription[]> {
+      let projections: InstanceProjection[];
+      try {
+        projections = await listInstanceProjections(pool, tenantId, { limit: opts?.limit });
+      } catch {
+        return []; // cannot read projection — surface nothing (degrade-silent).
+      }
+      const waitingInstanceIds = projections
+        .filter((p) => p.status !== "done")
+        .map((p) => p.inst);
+      if (waitingInstanceIds.length === 0) return [];
+
+      const subscriptions: MessageSubscription[] = [];
+      for (const inst of waitingInstanceIds) {
+        let result;
+        try {
+          result = await engine.getMessageCatchWaits(inst);
+        } catch {
+          continue; // engine hiccup for this instance — skip, try others.
+        }
+        if (!result.ok || result.waits.length === 0) continue;
+        for (const w of result.waits) {
+          if (!w.messageName) continue;
+          subscriptions.push({
+            inst,
+            tenant: tenantId,
+            messageName: w.messageName,
+            // correlationKey unused on the waiting path (dedup is inst+messageName);
+            // a non-empty honest placeholder keeps the shape valid.
+            correlationKey: inst,
+            broadcast: w.eventType.toLowerCase() === "signal",
+          });
+        }
+      }
+      return subscriptions;
+    },
+  };
+}
