@@ -262,3 +262,41 @@ export async function clearDefaultLlmConnection(
     [tenantId, nowMs],
   );
 }
+
+/**
+ * T-0476 [E-AGENTS L3]: point a connection profile at an OPAQUE secret handle
+ * (e.g. app://<app_secret-id> after the raw key was encrypted into app_secret).
+ * The handle is RL-3 opaque — NEVER a raw key (the route validates the shape and
+ * only ever passes an app:///env:///vault:// reference here). Returns the prior
+ * handle (so the caller can delete a superseded app_secret row), or undefined if
+ * the connection id does not exist in this tenant. Runs inside the caller's
+ * tenant-scoped tx; explicit tenant_id predicate on top of RLS (double guard).
+ */
+export async function setLlmConnectionSecretHandle(
+  client: PgClientLike,
+  tenantId: string,
+  connectionId: string,
+  secretHandle: string,
+  nowMs: number,
+): Promise<{ priorHandle: string | null } | undefined> {
+  if (!isUuid(tenantId)) {
+    throw new Error(`[T-0476] setLlmConnectionSecretHandle: invalid tenantId shape`);
+  }
+  if (!isUuid(connectionId)) return undefined;
+  // Read the prior handle first (same tx) so the caller can clean up a superseded
+  // app_secret row. Then update. Both are tenant-scoped (RLS + predicate).
+  const before = await client.query(
+    `SELECT secret_handle FROM choros.llm_connection
+      WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+    [tenantId, connectionId],
+  );
+  const beforeRow = (before.rows as Array<{ secret_handle: string | null }>)[0];
+  if (!beforeRow) return undefined;
+  await client.query(
+    `UPDATE choros.llm_connection
+        SET secret_handle = $3, updated_at = $4
+      WHERE tenant_id = $1 AND id = $2`,
+    [tenantId, connectionId, secretHandle, nowMs],
+  );
+  return { priorHandle: beforeRow.secret_handle ?? null };
+}

@@ -105,6 +105,139 @@ const chipStyle = (ok) => ({
   border: `1px solid ${ok ? 'var(--chs-color-success)' : 'var(--chs-color-border)'}`,
 });
 
+/* ===========================================================================
+   T-0476 [E-AGENTS L3] — app:// encrypted secret store: "вставить API-ключ".
+   SELF-CONTAINED BLOCK (kept distinct to minimize conflict with T-0477).
+
+   Write-only key binding on a connection. The raw key is POSTed once, encrypted
+   server-side (AES-256-GCM) into app_secret, and the connection's secret_handle is
+   set to app://<id>. The key is NEVER read back: GET status returns only
+   secret_bound + redacted scheme. Live contracts:
+     POST   /api/llm-connections/:id/key         { api_key }  → 200 { secret_bound }
+     GET    /api/llm-connections/:id/key/status  → { secret_bound, scheme }
+     DELETE /api/llm-connections/:id/key         → 200 { secret_bound:false }
+   503 "secret store not configured" when APP_SECRET_MASTER_KEY is unset (dormant).
+   =========================================================================== */
+function ConnectionKeyBinder({ connectionId, secretBound, onChanged }) {
+  const [apiKey, setApiKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);    // { kind: 'ok'|'err', text }
+  const [open, setOpen] = useState(false);
+
+  const submitKey = useCallback(async (e) => {
+    e.preventDefault();
+    setMsg(null);
+    const raw = apiKey;
+    if (!raw || raw.length === 0) {
+      setMsg({ kind: 'err', text: 'Вставьте API-ключ.' });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/llm-connections/${connectionId}/key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ api_key: raw }),
+      });
+      // Clear the raw key from state IMMEDIATELY (write-only — never keep it around).
+      setApiKey('');
+      if (res.status === 200) {
+        setMsg({ kind: 'ok', text: 'Ключ зашифрован и привязан (app://). Сырой ключ не хранится.' });
+        setOpen(false);
+        if (onChanged) onChanged();
+        return;
+      }
+      if (res.status === 503) {
+        setMsg({ kind: 'err', text: 'Хранилище ключей не настроено на сервере (APP_SECRET_MASTER_KEY). Обратитесь к оператору.' });
+        return;
+      }
+      if (res.status === 403) {
+        setMsg({ kind: 'err', text: 'Недостаточно прав (требуется владелец/админ).' });
+        return;
+      }
+      setMsg({ kind: 'err', text: `Не удалось привязать ключ (HTTP ${res.status}).` });
+    } catch {
+      setApiKey('');
+      setMsg({ kind: 'err', text: 'Сетевая ошибка — ключ не привязан.' });
+    } finally {
+      setBusy(false);
+    }
+  }, [apiKey, connectionId, onChanged]);
+
+  const clearKey = useCallback(async () => {
+    setMsg(null);
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/llm-connections/${connectionId}/key`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (res.status === 200) {
+        setMsg({ kind: 'ok', text: 'Ключ отвязан.' });
+        if (onChanged) onChanged();
+        return;
+      }
+      setMsg({ kind: 'err', text: `Не удалось отвязать ключ (HTTP ${res.status}).` });
+    } catch {
+      setMsg({ kind: 'err', text: 'Сетевая ошибка — ключ не отвязан.' });
+    } finally {
+      setBusy(false);
+    }
+  }, [connectionId, onChanged]);
+
+  const noteStyle = {
+    fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)',
+    marginTop: 'var(--chs-space-2)',
+  };
+  const msgStyle = (kind) => ({
+    marginTop: 'var(--chs-space-3)', fontSize: 'var(--chs-text-xs)',
+    color: kind === 'ok' ? 'var(--chs-color-success)' : 'var(--chs-color-danger)',
+  });
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-4)', width: '100%' }}>
+      {!open && (
+        <div style={{ display: 'flex', gap: 'var(--chs-space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
+          <Button variant="ghost" size="sm" type="button" onClick={() => { setOpen(true); setMsg(null); }}>
+            {secretBound ? 'Заменить API-ключ' : 'Вставить API-ключ'}
+          </Button>
+          {secretBound && (
+            <Button variant="ghost" size="sm" type="button" onClick={clearKey} loading={busy} disabled={busy}>
+              Отвязать
+            </Button>
+          )}
+        </div>
+      )}
+      {open && (
+        <form onSubmit={submitKey} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-3)' }}>
+          <Field
+            label="API-ключ (вставить)"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="sk-..."
+            type="password"
+            autoComplete="off"
+            mono
+          />
+          <div style={noteStyle}>
+            Ключ шифруется на сервере и хранится зашифрованным. Обратно он не читается —
+            видно только статус «ключ привязан».
+          </div>
+          <div style={{ display: 'flex', gap: 'var(--chs-space-3)' }}>
+            <Button variant="primary" size="sm" type="submit" loading={busy} disabled={busy}>
+              Зашифровать и привязать
+            </Button>
+            <Button variant="ghost" size="sm" type="button" onClick={() => { setApiKey(''); setOpen(false); setMsg(null); }}>
+              Отмена
+            </Button>
+          </div>
+        </form>
+      )}
+      {msg && <div style={msgStyle(msg.kind)}>{msg.text}</div>}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -403,7 +536,7 @@ export default function LlmConnectionsScreen() {
         {Array.isArray(connections) && connections.length > 0 && (
           <div>
             {connections.map((c) => (
-              <div key={c.id} style={cardStyle}>
+              <div key={c.id} style={{ ...cardStyle, flexWrap: 'wrap' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={nameStyle}>
                     {c.name}
@@ -433,6 +566,12 @@ export default function LlmConnectionsScreen() {
                     <span style={monoStyle}>{c.secret_handle_redacted}</span>
                   )}
                 </div>
+                {/* T-0476 [E-AGENTS L3]: write-only app:// key binder (self-contained). */}
+                <ConnectionKeyBinder
+                  connectionId={c.id}
+                  secretBound={!!c.secret_bound}
+                  onChanged={loadConnections}
+                />
               </div>
             ))}
           </div>

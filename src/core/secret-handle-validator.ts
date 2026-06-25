@@ -102,6 +102,44 @@ export function validateSecretHandleShape(value: string): SecretHandleVerdict {
 }
 
 // ---------------------------------------------------------------------------
+// app:// handle scheme (T-0476 E-AGENTS L3)
+//
+// The encrypted secret store (migration 106, app_secret) is addressed by the handle
+// app://<secret_id> where <secret_id> is the app_secret row UUID. This is the
+// SELF-SERVE tenant BYO-key path (env:// stays operator-only). These helpers are
+// PURE — recognising + parsing the scheme. The actual encrypt/decrypt lives in
+// app-secret-cipher.ts; resolution lives at the composition root (server.ts).
+// ---------------------------------------------------------------------------
+
+/** The app:// scheme prefix. */
+export const APP_SECRET_SCHEME = "app://" as const;
+
+const APP_HANDLE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True iff the handle uses the app:// scheme (does NOT validate the id shape). */
+export function isAppHandle(handle: string): boolean {
+  return typeof handle === "string" && handle.startsWith(APP_SECRET_SCHEME);
+}
+
+/**
+ * Parse an app://<uuid> handle. Returns the secret id when the handle is a
+ * well-formed app:// reference to a UUID, else null (caller treats null as
+ * "not an app handle / malformed" → not resolvable, never a crash).
+ */
+export function parseAppHandle(handle: string): { secretId: string } | null {
+  if (!isAppHandle(handle)) return null;
+  const secretId = handle.slice(APP_SECRET_SCHEME.length);
+  if (!APP_HANDLE_UUID_RE.test(secretId)) return null;
+  return { secretId };
+}
+
+/** Build the opaque app:// handle for a given app_secret row id. */
+export function makeAppHandle(secretId: string): string {
+  return `${APP_SECRET_SCHEME}${secretId}`;
+}
+
+// ---------------------------------------------------------------------------
 // redactHandle
 // ---------------------------------------------------------------------------
 
