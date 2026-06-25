@@ -51,6 +51,8 @@ import {
   listInstanceInboxTasks,
   listInstanceProjections,
   reconcileInstanceTimers,
+  surfaceMessageCatchWaits,
+  makeEngineMessageSubscriptionSource,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -155,6 +157,20 @@ type InboxItem = {
    * Additive optional field — absent on all existing tasks (non-breaking).
    */
   routed_to_fallback?: "role_unfilled";
+  /**
+   * T-0459 [D8-R4]: true when this waiting row represents an instance PARKED ON A
+   * MESSAGE-CATCH (receiveTask / intermediateCatchEvent(message|signal) / message
+   * boundary) — it is WAITING for a correlated message, not for a human decision.
+   * Drives the card / inbox to render «Ожидает сообщения» instead of an actionable
+   * approve button. Additive optional field — absent on all existing tasks.
+   */
+  messageCatch?: boolean;
+  /**
+   * T-0459 [D8-R4]: the message/signal name a messageCatch row is waiting for
+   * (surfaced for the card label «Ожидает: <messageName>»). Present only on
+   * messageCatch rows.
+   */
+  messageName?: string;
 };
 
 /** Internal seed shape — carries tenant + role for addressing; tenant is stripped on the wire. */
@@ -643,6 +659,11 @@ async function findInboxItems(
         // without client-side string-matching.
         ...(row.escalated ? { escalated: true } : {}),
         ...(row.doubtReason ? { doubt_reason: row.doubtReason } : {}),
+        // T-0459 [D8-R4]: carry the message-catch wait provenance + awaited message
+        // name so the card renders «Ожидает сообщения» (not an approve button) and
+        // the wait is observable in the GET /api/inbox response.
+        ...(row.messageCatch ? { messageCatch: true } : {}),
+        ...(row.messageName ? { messageName: row.messageName } : {}),
       };
 
       return { base, claim };
@@ -806,6 +827,34 @@ export function registerInboxRoutes(
         );
       } catch (err) {
         console.warn("[inbox T-0458] timer reconcile-on-read failed (non-fatal):", err);
+      }
+    }
+
+    // T-0459 [D8-R4]: message-catch WAITING projection (reconcile-on-read). An
+    // instance PARKED on a message-catch (receiveTask / intermediateCatchEvent /
+    // message boundary) is WAITING for a correlated message — it has no userTask, so
+    // it never surfaces on the approve/timer paths. Here — the moment the inbox is
+    // read — we ask the engine which waiting instances carry a parked message/signal
+    // event-subscription (getMessageCatchWaits) and surface each as a
+    // «Ожидает сообщения» waiting row carrying the awaited messageName, so it appears
+    // in THIS response. MIRRORS reconcileInstanceTimers: same honest-degrade pattern
+    // (only when FlowableClient + DB present; engine/DB hiccups log non-fatal, never
+    // fail the 200); idempotent (dedup by inst+messageName in surfaceMessageCatchWaits).
+    if (writeDeps?.flowableClient && hasDb()) {
+      try {
+        const waitTenantId = await resolveTenant(actor);
+        const subscriptionSource = makeEngineMessageSubscriptionSource(
+          getOrgPool(),
+          writeDeps.flowableClient,
+        );
+        await surfaceMessageCatchWaits(
+          getOrgPool(),
+          waitTenantId,
+          subscriptionSource,
+          { actor: actor ?? "system:message" },
+        );
+      } catch (err) {
+        console.warn("[inbox T-0459] message-wait reconcile-on-read failed (non-fatal):", err);
       }
     }
 
