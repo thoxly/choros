@@ -26,10 +26,17 @@
 
 import React from 'react';
 import { FieldControl } from './field-renderer.jsx';
-import Floor2Viewer from './Floor2Viewer.jsx';
 import {
   childrenOf, isDataNodeType, indexSchema, defaultWidgetForType,
 } from './form-document.js';
+
+// Floor2Viewer (class-b sandbox-iframe) is loaded LAZILY: it transitively imports
+// the compiled core twin (floor2-renderer.js, produced by tsc / resolved by the
+// vite build). Lazy-loading keeps that import OFF the module graph of the unified
+// declarative renderer — the 99% path never pays for it, and the pure-logic test
+// tier can import this renderer without the build-only twin. The custom node is
+// the rare flagged escape; deferring its viewer is also a sound code-split.
+const Floor2Viewer = React.lazy(() => import('./Floor2Viewer.jsx'));
 
 // ---------------------------------------------------------------------------
 // Live-schema → renderable-field adapter
@@ -304,7 +311,9 @@ function CustomNode({ node, ctx }) {
   };
   return (
     <div className="chs-fd-custom" data-component-id={node.componentId}>
-      <Floor2Viewer descriptor={descriptor} fields={fields} theme={ctx.theme || 'light'} onError={ctx.onCustomError} />
+      <React.Suspense fallback={<div className="chs-fd-custom__loading" aria-busy="true" />}>
+        <Floor2Viewer descriptor={descriptor} fields={fields} theme={ctx.theme || 'light'} onError={ctx.onCustomError} />
+      </React.Suspense>
     </div>
   );
 }
