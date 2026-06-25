@@ -422,90 +422,133 @@ export function registerProcessDefsRoutes(
       throw new HttpError(400, "VALIDATION", "process key must be non-empty");
     }
 
-    // Step 1: Load latest version
-    const row = await withTenantTx(pool, tenantId, async (client) => {
-      return getLatestVersion(client, tenantId, processKey);
-    });
+    // T-0465: the publish flow is factored into publishProcessByKey so the
+    // bundle-promote endpoint (solution-bundles.ts) can reuse the EXACT same
+    // lint → deploy → persist path — co-equal with single-process publish.
+    const result = await publishProcessByKey(pool, flowable, tenantId, processKey);
 
-    if (!row) {
+    if (result.status === "not_found") {
       throw new HttpError(404, "NOT_FOUND", `process definition '${processKey}' not found`);
     }
-
-    // Step 2: Lint — fail-closed gate (T-0027 deploy-gate-contract)
-    // T-0436: load published rule tables for this process and pass to lintBpmn
-    // for publish-time gateway↔rule-table coherence check.
-    // Uses a short-lived tenant-scoped client (same RLS pattern as other reads).
-    let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
-    try {
-      const { tables } = await withTenantTx(pool, tenantId, async (client) => {
-        return loadPublishedRuleTables(client, tenantId, processKey);
-      });
-      ruleTables = tables;
-    } catch (err) {
-      // Degrade gracefully: if rule table load fails (e.g. table not yet migrated
-      // on older deployment), skip the coherence check rather than blocking publish.
-      // The coherence check is advisory at this stage of rollout.
-      console.warn(
-        `[process-defs] publish ${processKey}: loadPublishedRuleTables failed — ` +
-        `skipping gateway coherence check. Reason: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      ruleTables = undefined;
-    }
-
-    const lintResult = lintBpmn(row.bpmn_xml, ruleTables !== undefined ? { ruleTables } : undefined);
-    if (!lintResult.ok) {
+    if (result.status === "lint_failed") {
       res.statusCode = 422;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({
-        error: { code: "BPMN_LINT_FAILED", violations: lintResult.violations },
+        error: { code: "BPMN_LINT_FAILED", violations: result.violations },
       }));
       return;
     }
-
-    // Step 3: Deploy to Flowable
-    // T-0483: surface a CLEAR, TYPED error to the client instead of an opaque 502.
-    // ENGINE_UNAVAILABLE/TIMEOUT → 503 with code "ENGINE_UNAVAILABLE" + honest message
-    // so the modeler keeps the diagram a ЧЕРНОВИК and shows "движок недоступен"
-    // (never a green "опубликовано"). The diagram stays unpublished (no DB update below).
-    const deployResult = await flowable.deployBpmn(row.bpmn_xml);
-    if (!deployResult.ok) {
-      const { status, code, message } = flowableErrorToHttp(deployResult.code);
-      throw new HttpError(status, code, message);
+    if (result.status === "engine_unavailable") {
+      throw new HttpError(result.httpStatus, result.code, result.message);
     }
 
-    const deploymentId = deployResult.deploymentId;
-    const nowMs = Date.now();
-
-    // Step 4: Persist publication
-    await withTenantTx(pool, tenantId, async (client) => {
-      await client.query(
-        `UPDATE choros.process_definition
-            SET status = 'published',
-                deployment_id = $1,
-                updated_at = $2
-          WHERE tenant_id = $3
-            AND id = $4`,
-        [deploymentId, nowMs, tenantId, row.id],
-      );
-    });
-
-    // Step 5: T-0380 (F7): check for unfilled roles — WARNING, not block.
-    // The fallback-executor resolver covers unfilled roles at runtime (spec §4.4),
-    // so we do NOT block publication. We surface warnings so the author knows.
-    // Degrades gracefully: DB errors → empty warnings (publish still succeeds).
-    const roleWarnings = await buildUnfilledRoleWarnings(pool, tenantId, row.bpmn_xml);
-
-    // Step 6: Respond
+    // published
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({
-      id: row.id,
-      processKey: row.process_key,
-      version: row.version,
+      id: result.id,
+      processKey: result.processKey,
+      version: result.version,
       status: "published",
-      deploymentId,
+      deploymentId: result.deploymentId,
       // Additive: only present when there are role warnings (non-breaking).
-      ...(roleWarnings.length > 0 ? { warnings: roleWarnings } : {}),
+      ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     }));
   }));
+}
+
+// ---------------------------------------------------------------------------
+// publishProcessByKey — T-0465: reusable publish (lint → deploy → persist).
+//
+// Extracted from the POST /publish route so the bundle-promote endpoint can
+// publish each process in a solution bundle through the SAME path (co-equal).
+// Returns a typed result instead of writing the HTTP response, so callers
+// decide how to surface success/failure (single response vs bundle aggregate).
+//
+// NOTE: this writes status='published' on choros.process_definition — that is the
+// process publish-state field (NOT the config-tier 'tier' column). FF-10 governs
+// only the literal tier='published'; process status is unrelated.
+// ---------------------------------------------------------------------------
+
+export type PublishProcessResult =
+  | { status: "not_found" }
+  | { status: "lint_failed"; violations: unknown[] }
+  | { status: "engine_unavailable"; httpStatus: number; code: string; message: string }
+  | {
+      status: "published";
+      id: string;
+      processKey: string;
+      version: number;
+      deploymentId: string;
+      warnings: string[];
+    };
+
+export async function publishProcessByKey(
+  pool: pg.Pool,
+  flowable: FlowableClient,
+  tenantId: string,
+  processKey: string,
+): Promise<PublishProcessResult> {
+  // Step 1: Load latest version
+  const row = await withTenantTx(pool, tenantId, async (client) => {
+    return getLatestVersion(client, tenantId, processKey);
+  });
+  if (!row) {
+    return { status: "not_found" };
+  }
+
+  // Step 2: Lint — fail-closed gate (T-0027). Load published rule tables (advisory).
+  let ruleTables: import("../core/dmn-middle.js").DmnRuleTable[] | undefined;
+  try {
+    const { tables } = await withTenantTx(pool, tenantId, async (client) => {
+      return loadPublishedRuleTables(client, tenantId, processKey);
+    });
+    ruleTables = tables;
+  } catch (err) {
+    console.warn(
+      `[process-defs] publish ${processKey}: loadPublishedRuleTables failed — ` +
+      `skipping gateway coherence check. Reason: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    ruleTables = undefined;
+  }
+
+  const lintResult = lintBpmn(row.bpmn_xml, ruleTables !== undefined ? { ruleTables } : undefined);
+  if (!lintResult.ok) {
+    return { status: "lint_failed", violations: lintResult.violations };
+  }
+
+  // Step 3: Deploy to Flowable
+  const deployResult = await flowable.deployBpmn(row.bpmn_xml);
+  if (!deployResult.ok) {
+    const { status, code, message } = flowableErrorToHttp(deployResult.code);
+    return { status: "engine_unavailable", httpStatus: status, code, message };
+  }
+
+  const deploymentId = deployResult.deploymentId;
+  const nowMs = Date.now();
+
+  // Step 4: Persist publication
+  await withTenantTx(pool, tenantId, async (client) => {
+    await client.query(
+      `UPDATE choros.process_definition
+          SET status = 'published',
+              deployment_id = $1,
+              updated_at = $2
+        WHERE tenant_id = $3
+          AND id = $4`,
+      [deploymentId, nowMs, tenantId, row.id],
+    );
+  });
+
+  // Step 5: unfilled-role warnings (advisory, never block).
+  const roleWarnings = await buildUnfilledRoleWarnings(pool, tenantId, row.bpmn_xml);
+
+  return {
+    status: "published",
+    id: row.id,
+    processKey: row.process_key,
+    version: row.version,
+    deploymentId,
+    warnings: roleWarnings,
+  };
 }
