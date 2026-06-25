@@ -71,9 +71,11 @@ export const NAV = [
       // Приложения: GET /api/applications (live), POST /api/applications (live) — T-0262/T-0265.
       // Первый реальный create-экран продукта (E13): список + работающая «Создать приложение».
       { id: "apps", label: "Приложения", icon: "apps", screen: true, status: "live" },
-      // Формы задач — developer sandbox (form-js демо). Не рабочий экран пользователя;
-      // инструмент авторинга для проектирования форм, честно помечен «демо».
-      { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo" },
+      // Формы задач (T-0482): убрана из навигации — пункт был дублирующим.
+      // Привязка формы к шагу userTask → UserTaskFormBindingPanel в модельере (T-0461).
+      // Запись-форма автогенерируется через FieldControl (F1-рендерер, T-0480).
+      // Маршрут /forms сохранён для прямых ссылок; в сайдбар не попадает.
+      { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo", hidden: true },
     ],
   },
   {
