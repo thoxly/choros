@@ -11,6 +11,7 @@
 import pg from "pg";
 import type { Grant, ScopeElement } from "../core/grant-lattice.js";
 import type { AdminContext } from "../core/scoped-admin.js";
+import { HttpError } from "../http/router.js";
 
 const { Pool } = pg;
 
@@ -270,7 +271,26 @@ export async function listHumanEmployees(
 //
 // Runs a BYPASSRLS query (same pattern as seed-write.ts:181-195 slug lookup)
 // without setting the tenant GUC, so it can find the tenant before the GUC
-// is known. Falls back to DEV_TENANT_ID if slug not found or DB unavailable.
+// is known.
+//
+// T-0486 [SECURITY] — FAIL-CLOSED. This helper drives the per-request tenant
+// scoping for ~25 routes. It used to fall back to DEV_TENANT_ID when the actor
+// could not be resolved (unknown slug, or a DB error). That was a fail-OPEN
+// default: a request whose identity does NOT map to any employee silently
+// landed in the Dev Silo instead of being rejected — a cross-tenant correctness
+// AND authz gap. Both unresolvable paths now THROW HttpError(403), which the
+// router (src/http/router.ts) turns into an honest 403 envelope for every
+// caller that awaits this (sync + async catch paths both covered) — no caller
+// signature change required (FF-7), the Promise<string> contract is preserved.
+//
+// LEGITIMATE DEV-MODE IS UNCHANGED: in CHOROS_AUTH_MODE=dev a valid x-dev-user
+// whose slug IS a known employee still resolves to that employee's real tenant
+// exactly as before (the SELECT returns a row → first return below). Only the
+// ERROR / UNKNOWN-actor path changed. There is no "dev bootstrap with no
+// employees yet" case routed through this helper: dev-mode invoke pins
+// DEV_TENANT_ID directly (invoke.ts::resolveInvokeTenant, not via this fn), and
+// the pre-login tenant picker uses resolveTenantBySlug (a separate helper, left
+// fail-open-to-dev on purpose). So nothing legitimate relied on the fallback.
 // ---------------------------------------------------------------------------
 
 export async function resolveActorTenant(
@@ -278,13 +298,14 @@ export async function resolveActorTenant(
   actorSlug: string,
 ): Promise<string> {
   const demoSlug = process.env["DEMO_TENANT_SLUG"] ?? "showcase";
+  let rows: Array<{ tenant_id: string }>;
   const client = await pool.connect();
   try {
     // Prefer the employee row belonging to the DEMO_TENANT_SLUG tenant (showcase).
-    // ORDER BY: demo tenant first (CASE), then DEV_TENANT_ID second, then any other.
+    // ORDER BY: demo tenant first (CASE), then any other by recency.
     // This handles dev DB pollution (multiple tenants with the same employee slug
     // from test suites) without changing the BYPASSRLS query pattern.
-    const { rows } = await client.query<{ tenant_id: string }>(
+    ({ rows } = await client.query<{ tenant_id: string }>(
       `SELECT e.tenant_id
          FROM choros.employee e
          JOIN choros.tenant t ON t.id = e.tenant_id
@@ -294,17 +315,34 @@ export async function resolveActorTenant(
           e.created_at DESC
         LIMIT 1`,
       [actorSlug, demoSlug],
+    ));
+  } catch (err) {
+    // DB error (e.g. connection refused). FAIL-CLOSED: do NOT silently route the
+    // caller into the Dev Silo. We cannot prove this identity belongs to any
+    // tenant, so reject. (A genuine infra outage surfaces as a 403 here rather
+    // than a cross-tenant leak — the honest, safe failure mode.)
+    void err;
+    throw new HttpError(
+      403,
+      "ACTOR_TENANT_UNRESOLVED",
+      "could not resolve the caller's tenant",
     );
-    if (rows.length > 0 && rows[0].tenant_id) {
-      return rows[0].tenant_id;
-    }
-    return DEV_TENANT_ID;
-  } catch {
-    // DB error (e.g. connection refused) → safe fallback
-    return DEV_TENANT_ID;
   } finally {
     client.release();
   }
+
+  if (rows.length > 0 && rows[0].tenant_id) {
+    return rows[0].tenant_id;
+  }
+
+  // Unknown actor: the slug matches no employee row in any tenant. FAIL-CLOSED —
+  // previously this returned DEV_TENANT_ID, silently landing an unresolvable
+  // identity in the Dev Silo. Reject instead.
+  throw new HttpError(
+    403,
+    "ACTOR_TENANT_UNRESOLVED",
+    "the caller's identity does not resolve to any tenant",
+  );
 }
 
 // ---------------------------------------------------------------------------

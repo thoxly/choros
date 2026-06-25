@@ -464,6 +464,17 @@ function makeFakePool(opts: {
           if (sql === "ROLLBACK") { client._inTx = false; return { rows: [] }; }
           if (sql.startsWith("SET LOCAL")) return { rows: [] };
 
+          // T-0486: resolveActorTenant — slug → caller's tenant. The caller
+          // (genesisUser) is a known employee, so this must resolve to a tenant
+          // (was relying on the removed DEV_TENANT_ID fail-open fallback).
+          if (
+            sql.includes("FROM choros.employee e") &&
+            sql.includes("JOIN choros.tenant t") &&
+            sql.includes("e.slug = $1")
+          ) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
+
           // position lookup
           if (sql.includes("FROM choros.position")) {
             if (!positionExists) return { rows: [] };
@@ -818,6 +829,16 @@ function makeAuditTrackingPool(): { pool: pg.Pool; capturedAuditTypes: string[] 
         query: async (sql: string, params?: unknown[]) => {
           if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
           if (sql.startsWith("SET LOCAL")) return { rows: [] };
+
+          // T-0486: resolveActorTenant — slug → caller's tenant (genesis-owner
+          // is a known employee; was relying on the removed DEV_TENANT_ID fallback).
+          if (
+            sql.includes("FROM choros.employee e") &&
+            sql.includes("JOIN choros.tenant t") &&
+            sql.includes("e.slug = $1")
+          ) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
 
           if (sql.includes("FROM choros.position")) {
             return { rows: [{ id: "pos-uuid-1", department_id: "b0000000-0000-0000-0000-000000000001" }] };
