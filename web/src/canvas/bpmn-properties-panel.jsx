@@ -54,7 +54,13 @@ import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 
    Mirrors the fetch pattern in screen-agents.jsx:loadPositions:
      GET /api/org/tenant-state?tenant_id=…  (genesis-owner gated)
-     403 → empty list (honest: dropdown stays unpopulated, description explains)
+
+   T-0484 (honesty): a 403 is honest-empty (caller is not the tenant owner → the
+   assignment list legitimately stays unpopulated). But a 5xx / engine-unavailable
+   / any other non-ok status is a REAL FAILURE and was previously swallowed into an
+   empty list — indistinguishable from "no roles exist". That made the «Назначение»
+   control look usable-but-dead. We now surface such failures as a typed `error` so
+   the panel shows an honest message instead of a misleading empty dropdown.
    -------------------------------------------------------------------------- */
 function useRoles() {
   const [roles, setRoles] = useState(null);   // null = not yet fetched
@@ -75,7 +81,20 @@ function useRoles() {
         );
         if (cancelled) return;
         if (!res.ok) {
-          // 403 = no owner access → honest empty (not an error)
+          if (res.status === 403) {
+            // 403 = caller is not the tenant owner → honest empty (NOT an error).
+            setRoles([]);
+            setLoading(false);
+            return;
+          }
+          // Any other non-ok status (500, 503/engine-unavailable, …) is a real
+          // failure. Surface it honestly — never let it masquerade as empty.
+          let detail = `HTTP ${res.status}`;
+          try {
+            const body = await res.json();
+            detail = body?.error?.message || body?.message || detail;
+          } catch { /* non-JSON body — keep status-based detail */ }
+          setError(`Не удалось загрузить роли: ${detail}`);
           setRoles([]);
           setLoading(false);
           return;
@@ -88,7 +107,7 @@ function useRoles() {
         setRoles(list);
       } catch (err) {
         if (!cancelled) {
-          setError(err?.message || 'Ошибка загрузки ролей');
+          setError(`Не удалось загрузить роли: ${err?.message || 'сеть недоступна'}`);
           setRoles([]);
         }
       } finally {
@@ -1066,8 +1085,15 @@ export default function BpmnPropertiesPanel({ modeler }) {
                 {rolesLoading ? (
                   <p className="bio-properties-panel-description">Загрузка ролей…</p>
                 ) : rolesError ? (
-                  <p className="bio-properties-panel-description" style={{ color: 'var(--chs-color-danger)' }}>
-                    Ошибка загрузки ролей
+                  // T-0484: surface the REAL backend error here (not a vague
+                  // "Ошибка загрузки ролей") and present it as a clear failure,
+                  // so a 500/engine-unavailable never reads as an empty list.
+                  <p
+                    className="bio-properties-panel-description"
+                    role="alert"
+                    style={{ color: 'var(--chs-color-danger)' }}
+                  >
+                    {rolesError} — назначение недоступно. Повторите позже.
                   </p>
                 ) : (
                   <Select
