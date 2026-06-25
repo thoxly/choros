@@ -1,4 +1,4 @@
--- 104 · form_binding.layout (T-0481 E-FORMS F2) — the form-document layout column.
+-- 105 · form_binding.layout (T-0481 E-FORMS F2) — the form-document layout column.
 --
 -- form-document-format.spec.md §7: the declarative FORM-DOCUMENT (the layout the
 -- drag-n-drop editor AND the AI emitter both produce — ONE artefact, two drivers)
@@ -23,7 +23,7 @@
 -- known_tenant_tables.txt BYTE-UNCHANGED (additive nullable column on an
 -- already-registered tenant table — no new table, no RLS change, no PK change).
 --
--- Migration slot: 104 (T-0481 brief; highest occupied slot on this branch is 103).
+-- Migration slot: 105 (104 taken by T-0475 capability grants; highest occupied slot on dev is 104).
 
 ALTER TABLE choros.form_binding
   ADD COLUMN IF NOT EXISTS layout jsonb NULL;
