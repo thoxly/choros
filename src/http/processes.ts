@@ -33,6 +33,14 @@ export type ProcessInstance = {
   procId: string;
   status: "running" | "waiting" | "done" | "failed";
   node: string;
+  /**
+   * T-0456 [D8-R1]: the CONCURRENT active nodes/steps of this instance. An AND-split
+   * (parallelGateway) leaves several user-tasks active at once, so the process card
+   * must show every concurrent branch, not a single "current node". For linear
+   * (single-token) instances this is a 1-element array; absent on seed fixtures
+   * (the card falls back to `node`).
+   */
+  nodes?: string[];
   started: string;
   elapsed: string;
   progress: { done: number; total: number };
@@ -196,12 +204,17 @@ function projectionToInstance(p: InstanceProjection): ProcessInstance {
   });
   // Linear ТЭЛ progress: waiting at U4 ⇒ 2/3 nodes done; done ⇒ 3/3.
   const progress = p.status === "done" ? { done: 3, total: 3 } : { done: 2, total: 3 };
+  // T-0456 [D8-R1]: surface concurrent branches. `node` stays the primary step for
+  // back-compat; `nodes` carries every concurrent waiting step so the card can render
+  // an AND-split's parallel branches. A done instance has no waiting nodes.
+  const nodes = p.concurrentSteps.length > 0 ? [...p.concurrentSteps] : [p.step];
   return {
     id: p.inst,
     name: "Канонический линейный ТЭЛ",
     procId: p.procKey,
     status: p.status === "running" ? "running" : p.status, // running|waiting|done
     node: p.step,
+    nodes,
     started,
     elapsed: "—",
     progress,
