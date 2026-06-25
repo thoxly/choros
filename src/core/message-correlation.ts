@@ -34,6 +34,13 @@
  * the actual invoke happens at the call-site behind a held grant.
  */
 
+import {
+  verifyEffectGrants,
+  type EffectDeclaration,
+  type EffectSource,
+} from "./effect-resource.js";
+import type { Grant } from "./grant-lattice.js";
+
 // ---------------------------------------------------------------------------
 // Source vocabulary (closed set — fail-closed on anything else, FR-3 style).
 // ---------------------------------------------------------------------------
@@ -337,17 +344,49 @@ export interface ThrowMessageConfig {
  * authorised by the SAME invoke-grant model as any other effect (spec §3.5 «Throw =
  * invoke-грант на effect_resource через канал»). Returns null when the config names
  * no channel — a throw with no channel is unsendable (fail-closed at the call-site).
- *
- * The shape returned matches effect-resource.ts EffectDeclaration so the call-site
- * passes it straight into verifyEffectGrants(...) — we do NOT import the type here to
- * keep this module dependency-free; the structural shape { resourceId, kind } is the
- * contract.
  */
 export function buildThrowEffectDeclaration(
   config: ThrowMessageConfig,
-): { resourceId: string; kind: "messaging_channel" } | null {
+): EffectDeclaration | null {
   if (!nonEmptyString(config.channelResourceId)) return null;
   return { resourceId: config.channelResourceId.trim(), kind: "messaging_channel" };
+}
+
+/** Outcome of authorizing a throw-message against the caller's held grants. */
+export type ThrowAuthResult =
+  | { ok: true }
+  | { ok: false; reason: "no-channel" | "no-invoke-grant"; missingResourceId?: string };
+
+/**
+ * Authorize a throw-message via the EXISTING invoke-grant mechanism (T-0034).
+ *
+ * THE throw-side wiring (spec §3.5 part 3): a throw message is an `invoke` on a
+ * `messaging_channel` effect_resource. This composes:
+ *   buildThrowEffectDeclaration(config) → the EffectDeclaration, then
+ *   verifyEffectGrants([decl], grants, nowMs, source, tenant) → the SAME gateway
+ *   check any effect-invoke goes through (resourceType==="effect_resource" AND
+ *   operation==="invoke" AND effective AND tenant-scoped).
+ *
+ * Fail-closed: a throw with no channel, or with no covering invoke-grant, is denied —
+ * never sent. The actual send (notifications/email/connector) only runs when this
+ * returns ok:true. Pure aside from the injected EffectSource port (no IO here).
+ */
+export function authorizeThrowMessage(
+  config: ThrowMessageConfig,
+  coveringGrants: readonly Grant[],
+  nowMs: number,
+  source: EffectSource,
+  tenantId: string,
+): ThrowAuthResult {
+  const decl = buildThrowEffectDeclaration(config);
+  if (decl === null) {
+    return { ok: false, reason: "no-channel" };
+  }
+  const verdict = verifyEffectGrants([decl], coveringGrants as Grant[], nowMs, source, tenantId);
+  if (!verdict.ok) {
+    return { ok: false, reason: "no-invoke-grant", missingResourceId: verdict.missingResourceId };
+  }
+  return { ok: true };
 }
 
 /**
