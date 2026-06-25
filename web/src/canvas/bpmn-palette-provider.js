@@ -167,7 +167,28 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
       { eventDefinitionType: 'bpmn:TimerEventDefinition' },
     ),
 
-    // Separator between the timer event and the rest of the palette.
+    // ---- T-0459 [D8-R4]: message catch event (WORKING element) ------------
+    // Drops an intermediate message catch event. The instance PARKS here waiting
+    // for a correlated message (envelope { tenant, messageName, correlationKey,
+    // payload, source }); correlation is by a business key taken from a record field
+    // (configured in bpmn-properties-panel.jsx → MessageCorrelationPanel). v1 sources:
+    // external human (T-0122 token surface) + internal signal (broadcast within
+    // tenant). The waiting instance shows «Ожидает сообщения» in the inbox
+    // (process-projection.ts surfaceMessageCatchWaits); when a correlated message
+    // arrives the catch fires (deliverMessageEnvelope, tenant-fail-closed). A
+    // message-catch MUST have a guarding timeout (publish linter
+    // checkMessageEventCoherence) — drop a timer boundary on it to avoid an infinite
+    // wait.
+    'create.choros-message-catch': createAction(
+      'bpmn:IntermediateCatchEvent',
+      'choros-events',
+      'bpmn-icon-intermediate-event-catch-message chs-palette-message',
+      'Сообщение — ожидание (корреляция по полю)',
+      // Pre-stamp the message event definition so the created event is a message catch.
+      { eventDefinitionType: 'bpmn:MessageEventDefinition' },
+    ),
+
+    // Separator between the events and the rest of the palette.
     'choros-event-separator': {
       group: 'choros-events',
       separator: true,

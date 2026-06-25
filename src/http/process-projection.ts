@@ -43,6 +43,12 @@ import {
   TRANSITION_PAYLOAD_KEY,
   projectActorType,
 } from "../core/transition-payload.js";
+import {
+  validateEnvelope,
+  correlateEnvelope,
+  type MessageSubscription,
+  type CorrelationResult,
+} from "../core/message-correlation.js";
 
 // ---------------------------------------------------------------------------
 // Audit event types (free-text `type` column; no enum constraint — migrations/006).
@@ -184,6 +190,20 @@ export interface InstanceInboxTask {
    * tasks.
    */
   readonly doubtReason?: string;
+  /**
+   * T-0459 [D8-R4]: true when this waiting row represents an instance PARKED ON A
+   * MESSAGE-CATCH (receiveTask / intermediateCatchEvent(message|signal)) — it is
+   * WAITING for a correlated message to arrive, not for a human decision. Drives the
+   * process card / inbox to render «Ожидает сообщения» instead of an actionable
+   * approve button, and is cleared (the row dropped) once the catch fires. Set on the
+   * process.next_task row the message-wait reconcile emits; absent for ordinary tasks.
+   */
+  readonly messageCatch?: boolean;
+  /**
+   * T-0459 [D8-R4]: the message/signal name this catch is waiting for (surfaced for
+   * the card label «Ожидает: <messageName>»). Present only on messageCatch rows.
+   */
+  readonly messageName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +553,16 @@ export async function appendNextTaskEvent(
      * reconcile passes "timer-fire" so the provenance is honest.
      */
     readonly via?: string;
+    /**
+     * T-0459 [D8-R4]: mark this next_task as a MESSAGE-CATCH WAIT (the instance is
+     * parked waiting for a correlated message). The message-wait reconcile sets this
+     * so the inbox/card renders «Ожидает сообщения» instead of an approve button.
+     */
+    readonly messageCatch?: boolean;
+    /**
+     * T-0459 [D8-R4]: the message/signal name a messageCatch row is waiting for.
+     */
+    readonly messageName?: string;
   },
 ): Promise<void> {
   await withTenant(pool, tenantId, async (client) => {
@@ -556,6 +586,9 @@ export async function appendNextTaskEvent(
         // T-0458 [D8-R3]: escalation provenance (timer firing) + F5 prefill reason.
         ...(args.escalated ? { escalated: true } : {}),
         ...(args.doubtReason ? { doubt_reason: args.doubtReason } : {}),
+        // T-0459 [D8-R4]: message-catch wait provenance + the awaited message name.
+        ...(args.messageCatch ? { message_catch: true } : {}),
+        ...(args.messageName ? { message_name: args.messageName } : {}),
       },
       occurred_at: args.nowMs,
     });
@@ -846,6 +879,11 @@ export async function listInstanceInboxTasks(
     const doubtReason = typeof payload["doubt_reason"] === "string" && payload["doubt_reason"]
       ? (payload["doubt_reason"] as string)
       : undefined;
+    // T-0459 [D8-R4]: surface message-catch wait provenance + awaited message name.
+    const isMessageCatch = payload["message_catch"] === true;
+    const messageName = typeof payload["message_name"] === "string" && payload["message_name"]
+      ? (payload["message_name"] as string)
+      : undefined;
     tasks.push({
       id: row.id,
       role: strField(payload, "task_role", APPROVER_ROLE),
@@ -860,6 +898,8 @@ export async function listInstanceInboxTasks(
       taskDefKey: strField(payload, "task_def_key", "task-approve"),
       ...(isEscalated ? { escalated: true } : {}),
       ...(doubtReason ? { doubtReason } : {}),
+      ...(isMessageCatch ? { messageCatch: true } : {}),
+      ...(messageName ? { messageName } : {}),
     });
   }
 
@@ -1016,4 +1056,352 @@ export async function reconcileInstanceTimers(
   }
 
   return emitted;
+}
+
+// ---------------------------------------------------------------------------
+// T-0459 [D8-R4]: message/signal catch — waiting projection + correlated delivery.
+//
+// Two halves mirroring the timer reconcile pattern (T-0458) + the engine-drive
+// reconcile (T-0443/T-0456):
+//
+//   WAITING PROJECTION (reconcile-on-read): an instance PARKED on a message-catch
+//   (receiveTask / intermediateCatchEvent(message|signal)) shows as WAITING with a
+//   «Ожидает сообщения» row — NOT stuck, NOT done. The base process card already
+//   renders any non-done instance as waiting; surfaceMessageCatchWaits adds the
+//   honest «waiting on a message» row carrying the awaited messageName so the card
+//   says WHAT it waits for.
+//
+//   CORRELATED DELIVERY: deliverMessageEnvelope validates an inbound envelope,
+//   correlates it (TENANT-FAIL-CLOSED via the pure core), signals each fired
+//   instance in the live engine, and reconciles the engine's NEW active task into
+//   the projection (reuse the T-0456 engine-drive reconcile pattern). A message for
+//   the wrong / unknown tenant is rejected — never delivered cross-tenant.
+// ---------------------------------------------------------------------------
+
+/**
+ * Default display name/step for a message-catch waiting row («Ожидает сообщения»).
+ */
+export const MESSAGE_WAIT_TASK_NAME = "Ожидает сообщения";
+export const MESSAGE_WAIT_STEP = "Ожидание сообщения";
+
+/**
+ * Minimal engine port the message delivery needs — a structural subset of
+ * FlowableClient. `correlateMessage` signals a parked message-catch in the live
+ * engine (Flowable's message correlation API); `getActiveUserTasks` lets the
+ * post-delivery reconcile surface the NEW active task the firing produced. Kept
+ * structural so this module stays decoupled from the concrete client type.
+ */
+export interface MessageDeliveryEnginePort {
+  /**
+   * Signal a correlated message into a specific process instance (the catch fires).
+   * Flowable: POST /runtime/process-instances/{id}/event or the message-event
+   * correlation endpoint. Returns ok:false (with a code) on engine error — the
+   * delivery is best-effort and never throws past this boundary.
+   */
+  correlateMessage(
+    instanceId: string,
+    messageName: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: true } | { ok: false; code: string }>;
+  getActiveUserTasks(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; tasks: ActiveEngineTask[] }
+    | { ok: false; code: string }
+  >;
+}
+
+/**
+ * Port that loads the WAITING message-catch subscriptions for a tenant — the
+ * instances parked on a message-catch, each with its resolved correlation key (the
+ * value of the element's correlationField on the bound record), messageName and
+ * broadcast flag. Injected so the pure correlation core is exercised against real
+ * subscriptions while the impure load (BPMN config + record field) is testable.
+ *
+ * In production this is backed by the message-catch waiting rows + the element
+ * config + a record-field read; tests supply a fixture array directly.
+ */
+export interface MessageSubscriptionSource {
+  listWaitingSubscriptions(tenantId: string): Promise<MessageSubscription[]>;
+}
+
+/**
+ * Result of attempting to deliver an inbound envelope.
+ *  - rejected:"bad-envelope"  → the envelope failed shape validation (fail-closed).
+ *  - rejected:"wrong-tenant"  → a name+key match existed only in another tenant
+ *                               (TENANT-FAIL-CLOSED — never delivered cross-tenant).
+ *  - rejected:"no-match"      → nothing correlated in this tenant.
+ *  - delivered                → ≥1 instance fired; firedInstances lists them.
+ */
+export type DeliveryResult =
+  | { delivered: true; firedInstances: string[] }
+  | { delivered: false; rejected: "bad-envelope" | "wrong-tenant" | "no-match"; reason: string };
+
+/**
+ * Deliver an inbound message envelope. Pure decision (correlateEnvelope) + impure
+ * effects (engine signal, projection reconcile) behind injected ports.
+ *
+ * Flow:
+ *  1. Validate the envelope shape (fail-closed on anything malformed).
+ *  2. Load the WAITING subscriptions for the envelope's tenant ONLY (the source is
+ *     called with envelope.tenant — a subscription source must itself be
+ *     tenant-scoped; the correlation core ALSO re-checks tenant on every candidate,
+ *     so even a leaky source can never deliver cross-tenant).
+ *  3. correlateEnvelope → fired instance ids (TENANT-FAIL-CLOSED, point-to-point for
+ *     messages, broadcast within-tenant for signals).
+ *  4. For each fired instance: signal the engine, then reconcile the new active task
+ *     into the projection so the inbox advances (catch fired → next step appears).
+ *
+ * Never throws past this boundary — engine/DB hiccups degrade to a best-effort
+ * partial delivery (the envelope can be re-delivered; correlation is idempotent on
+ * the projection side via dedup).
+ */
+export async function deliverMessageEnvelope(
+  pool: pg.Pool,
+  rawEnvelope: unknown,
+  subscriptionSource: MessageSubscriptionSource,
+  engine: MessageDeliveryEnginePort,
+  opts?: { nowMs?: number; actor?: string },
+): Promise<DeliveryResult> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const actor = opts?.actor ?? "system:message";
+
+  // 1. Shape validation — fail-closed.
+  const validation = validateEnvelope(rawEnvelope);
+  if (!validation.ok) {
+    return { delivered: false, rejected: "bad-envelope", reason: validation.reason };
+  }
+  const envelope = validation.envelope;
+
+  // 2. Load waiting subscriptions for THIS tenant only.
+  let subscriptions: MessageSubscription[];
+  try {
+    subscriptions = await subscriptionSource.listWaitingSubscriptions(envelope.tenant);
+  } catch {
+    // Cannot load — treat as no match (fail-closed; never delivers cross-tenant).
+    return { delivered: false, rejected: "no-match", reason: "subscription load failed" };
+  }
+
+  // 3. Pure correlation — TENANT-FAIL-CLOSED is enforced inside correlateEnvelope.
+  const result: CorrelationResult = correlateEnvelope(envelope, subscriptions);
+
+  if (!result.delivered) {
+    if (result.tenantRejected) {
+      return {
+        delivered: false,
+        rejected: "wrong-tenant",
+        reason: "message rejected: name+key matched only in a different tenant (tenant-fail-closed)",
+      };
+    }
+    return { delivered: false, rejected: "no-match", reason: "no waiting catch correlated this message" };
+  }
+
+  // 4. Signal each fired instance + reconcile its new active task into the projection.
+  const fired: string[] = [];
+  for (const inst of result.firedInstances) {
+    let signalled = false;
+    try {
+      const r = await engine.correlateMessage(inst, envelope.messageName, { ...envelope.payload });
+      signalled = r.ok;
+    } catch {
+      signalled = false;
+    }
+    if (!signalled) continue; // engine couldn't fire this instance — skip; retriable.
+    fired.push(inst);
+
+    // The catch fired → the engine has advanced to a NEW active task. Reconcile it
+    // into the projection (reuse the T-0456 engine-drive pattern). Best-effort.
+    try {
+      const tasksResult = await engine.getActiveUserTasks(inst);
+      if (tasksResult.ok) {
+        const projected = await listInstanceInboxTasks(pool, envelope.tenant);
+        const projectedDefKeys = new Set(
+          projected.filter((t) => t.inst === inst).map((t) => t.taskDefKey),
+        );
+        const procKey =
+          projected.find((t) => t.inst === inst)?.procKey ?? "telLinear";
+        const emittedThisPass = new Set<string>();
+        for (const engineTask of tasksResult.tasks) {
+          const defKey = engineTask.taskDefinitionKey;
+          if (projectedDefKeys.has(defKey)) continue; // already on screen.
+          if (emittedThisPass.has(defKey)) continue;
+          emittedThisPass.add(defKey);
+          await appendNextTaskEvent(pool, envelope.tenant, {
+            instanceId: inst,
+            procKey,
+            actor,
+            nowMs,
+            taskDefKey: defKey,
+            taskName: engineTask.name || APPROVE_TASK_NAME,
+            taskRole: engineTask.candidateGroups[0] ?? APPROVER_ROLE,
+            taskStep: engineTask.name || APPROVE_STEP,
+            inboxTaskId: randomUUID(),
+            via: "message-fire",
+          });
+        }
+      }
+    } catch {
+      // best-effort — the next read reconciles; the catch already fired in the engine.
+    }
+  }
+
+  if (fired.length === 0) {
+    // Correlated but the engine could not fire any (transient) — retriable.
+    return { delivered: false, rejected: "no-match", reason: "correlated but engine signal failed" };
+  }
+  return { delivered: true, firedInstances: fired };
+}
+
+/**
+ * WAITING PROJECTION for message-catches. For each parked subscription, emit a
+ * `process.next_task(messageCatch)` row so the instance shows «Ожидает сообщения» in
+ * the inbox/process card — surfacing the wait as WAITING (not stuck, not done) and
+ * naming WHAT it waits for. Idempotent: a wait row already surfaced for the same
+ * instance+messageName is not re-emitted (dedup by the (inst, message_name) pair).
+ *
+ * Best-effort + degrade-silent (read-projection, never a hard dependency). Returns
+ * the number of wait rows newly emitted.
+ */
+export async function surfaceMessageCatchWaits(
+  pool: pg.Pool,
+  tenantId: string,
+  subscriptionSource: MessageSubscriptionSource,
+  opts?: { nowMs?: number; actor?: string },
+): Promise<number> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const actor = opts?.actor ?? "system:message";
+
+  let subscriptions: MessageSubscription[];
+  let projected: InstanceInboxTask[];
+  try {
+    subscriptions = await subscriptionSource.listWaitingSubscriptions(tenantId);
+    projected = await listInstanceInboxTasks(pool, tenantId);
+  } catch {
+    return 0;
+  }
+  if (subscriptions.length === 0) return 0;
+
+  // Already-surfaced (inst, messageName) waits — dedup so re-reads don't pile rows.
+  const surfaced = new Set<string>();
+  for (const t of projected) {
+    if (t.messageCatch && t.messageName) surfaced.add(`${t.inst}::${t.messageName}`);
+  }
+
+  let emitted = 0;
+  for (const sub of subscriptions) {
+    const key = `${sub.inst}::${sub.messageName}`;
+    if (surfaced.has(key)) continue;
+    surfaced.add(key); // also dedup within this pass.
+    try {
+      await appendNextTaskEvent(pool, tenantId, {
+        instanceId: sub.inst,
+        procKey: "telLinear",
+        actor,
+        nowMs,
+        taskDefKey: `message-catch:${sub.messageName}`,
+        taskName: MESSAGE_WAIT_TASK_NAME,
+        taskRole: APPROVER_ROLE,
+        taskStep: MESSAGE_WAIT_STEP,
+        inboxTaskId: randomUUID(),
+        via: "message-wait",
+        messageCatch: true,
+        messageName: sub.messageName,
+      });
+      emitted++;
+    } catch {
+      // best-effort — retried on next read.
+    }
+  }
+  return emitted;
+}
+
+// ---------------------------------------------------------------------------
+// T-0459 [D8-R4]: engine-backed MessageSubscriptionSource for the LIVE read.
+//
+// The waiting projection (surfaceMessageCatchWaits) needs to know WHICH instances
+// are parked on a message-catch. The engine truth for that is the active
+// event-subscriptions of each WAITING instance: a token parked on a receiveTask /
+// intermediateCatchEvent(message|signal) / message-boundary registers a
+// "message"/"signal" event-subscription. This factory builds a
+// MessageSubscriptionSource that:
+//   1. reads the currently-waiting instances from the projection (the same source
+//      the timer reconcile uses — listInstanceProjections, status != done), and
+//   2. asks the engine which of them carry a parked message/signal catch
+//      (getMessageCatchWaits), turning each into a MessageSubscription.
+//
+// Honest-degrade: any engine/DB hiccup for a single instance is swallowed (that
+// instance is simply not surfaced this pass — retried on the next read); the source
+// never throws past its own boundary. Keeps the engine port injectable so the live
+// read can mirror the reconcileInstanceTimers wiring exactly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal engine port the message-wait read-projection needs — a structural subset
+ * of FlowableClient. Reveals the parked message/signal catches of a live instance.
+ */
+export interface MessageWaitEnginePort {
+  getMessageCatchWaits(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; waits: { messageName: string; eventType: string }[] }
+    | { ok: false; code: string }
+  >;
+}
+
+/**
+ * Build a MessageSubscriptionSource backed by the live engine: enumerate the
+ * waiting instances of a tenant (projection) and project each instance's parked
+ * message/signal catches (engine) into MessageSubscription rows. The correlationKey
+ * is NOT load-bearing on the waiting path (surfaceMessageCatchWaits keys only on
+ * inst + messageName); it is filled with the instance id as an honest non-empty
+ * placeholder (the DELIVERY path — deliverMessageEnvelope — sources its
+ * subscriptions with the real record-field key, Stage-2 Pull seam).
+ *
+ * Best-effort: a per-instance engine failure is skipped (degrade-silent). A failure
+ * to read the projection returns an empty subscription set (so the wait projection
+ * simply emits nothing this pass).
+ */
+export function makeEngineMessageSubscriptionSource(
+  pool: pg.Pool,
+  engine: MessageWaitEnginePort,
+  opts?: { limit?: number },
+): MessageSubscriptionSource {
+  return {
+    async listWaitingSubscriptions(tenantId: string): Promise<MessageSubscription[]> {
+      let projections: InstanceProjection[];
+      try {
+        projections = await listInstanceProjections(pool, tenantId, { limit: opts?.limit });
+      } catch {
+        return []; // cannot read projection — surface nothing (degrade-silent).
+      }
+      const waitingInstanceIds = projections
+        .filter((p) => p.status !== "done")
+        .map((p) => p.inst);
+      if (waitingInstanceIds.length === 0) return [];
+
+      const subscriptions: MessageSubscription[] = [];
+      for (const inst of waitingInstanceIds) {
+        let result;
+        try {
+          result = await engine.getMessageCatchWaits(inst);
+        } catch {
+          continue; // engine hiccup for this instance — skip, try others.
+        }
+        if (!result.ok || result.waits.length === 0) continue;
+        for (const w of result.waits) {
+          if (!w.messageName) continue;
+          subscriptions.push({
+            inst,
+            tenant: tenantId,
+            messageName: w.messageName,
+            // correlationKey unused on the waiting path (dedup is inst+messageName);
+            // a non-empty honest placeholder keeps the shape valid.
+            correlationKey: inst,
+            broadcast: w.eventType.toLowerCase() === "signal",
+          });
+        }
+      }
+      return subscriptions;
+    },
+  };
 }

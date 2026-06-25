@@ -125,6 +125,10 @@ class MockFlowableClient implements FlowableClient {
     return { ok: true, tasks: [] };
   }
 
+  async getMessageCatchWaits(_instanceId: string): Promise<import("../core/flowable-client.js").GetMessageCatchWaitsResult> {
+    return { ok: true, waits: [] };
+  }
+
   async isInstanceEnded(_instanceId: string): Promise<import("../core/flowable-client.js").IsInstanceEndedResult> {
     return { ok: true, ended: false };
   }

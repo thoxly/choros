@@ -27,6 +27,8 @@ import {
   writeAgentConfig,
   readUserTaskConfig,
   writeUserTaskConfig,
+  readMessageConfig,
+  writeMessageConfig,
   splitFieldList,
   joinFieldList,
   AUTONOMY_LEVELS,
@@ -252,6 +254,91 @@ describe('moddle descriptor — new choros:* attrs round-trip on bpmn:Activity',
       'agentRef', 'autonomyLevel', 'agentReadsFields', 'agentWritesFields',
       'formContractRef', 'visibleFields',
     ]) {
+      expect(byName[name], `missing moddle prop ${name}`).toBeDefined();
+      expect(byName[name].isAttr).toBe(true);
+      expect(byName[name].type).toBe('String');
+    }
+  });
+});
+
+// ===========================================================================
+// T-0459 [D8-R4] — message/signal correlation config contract.
+// ===========================================================================
+
+describe('T-0459 — read/writeMessageConfig round-trip', () => {
+  it('round-trips messageName + correlationField (registered prop AND $attrs)', () => {
+    const bo = {};
+    writeMessageConfig(bo, { messageName: 'contract-signed', correlationField: 'contract_number' });
+    // Dual-write: registered prop + $attrs fallback.
+    expect(bo.messageName).toBe('contract-signed');
+    expect(bo.$attrs['choros:messageName']).toBe('contract-signed');
+    expect(bo.correlationField).toBe('contract_number');
+    expect(bo.$attrs['choros:correlationField']).toBe('contract_number');
+    const read = readMessageConfig(bo);
+    expect(read.messageName).toBe('contract-signed');
+    expect(read.correlationField).toBe('contract_number');
+  });
+
+  it('reads correlation config from imported $attrs (no registered prop)', () => {
+    const bo = { $attrs: { 'choros:messageName': 'paid', 'choros:correlationField': 'invoice_no' } };
+    const read = readMessageConfig(bo);
+    expect(read.messageName).toBe('paid');
+    expect(read.correlationField).toBe('invoice_no');
+  });
+
+  it('broadcast flag persists as "true" and reads back boolean', () => {
+    const bo = {};
+    writeMessageConfig(bo, { broadcast: true });
+    expect(bo.$attrs['choros:messageBroadcast']).toBe('true');
+    expect(readMessageConfig(bo).broadcast).toBe(true);
+    // Clearing broadcast removes the attr (clean XML).
+    writeMessageConfig(bo, { broadcast: false });
+    expect(bo.$attrs['choros:messageBroadcast']).toBeUndefined();
+    expect(readMessageConfig(bo).broadcast).toBe(false);
+  });
+
+  it('throw config round-trips (channel resource id + payload fields CSV)', () => {
+    const bo = {};
+    writeMessageConfig(bo, {
+      throwChannelResourceId: 'chan-uuid',
+      throwPayloadFields: ['amount', 'vendor', 'amount'], // dedupe
+    });
+    expect(bo.$attrs['choros:throwChannelResourceId']).toBe('chan-uuid');
+    expect(bo.$attrs['choros:throwPayloadFields']).toBe('amount,vendor');
+    const read = readMessageConfig(bo);
+    expect(read.throwChannelResourceId).toBe('chan-uuid');
+    expect(read.throwPayloadFields).toEqual(['amount', 'vendor']);
+  });
+
+  it('partial patches leave untouched keys intact', () => {
+    const bo = {};
+    writeMessageConfig(bo, { messageName: 'm1', correlationField: 'f1' });
+    writeMessageConfig(bo, { correlationField: 'f2' }); // only correlationField
+    const read = readMessageConfig(bo);
+    expect(read.messageName).toBe('m1'); // untouched
+    expect(read.correlationField).toBe('f2');
+  });
+});
+
+describe('T-0459 — moddle descriptor: message correlation attrs declared', () => {
+  it('MessageCorrelationCatchExtension extends bpmn:CatchEvent with the catch attrs', () => {
+    const ext = descriptor.types.find((t) => t.name === 'MessageCorrelationCatchExtension');
+    expect(ext).toBeDefined();
+    expect(ext.extends).toContain('bpmn:CatchEvent');
+    const byName = Object.fromEntries(ext.properties.map((p) => [p.name, p]));
+    for (const name of ['messageName', 'correlationField', 'messageBroadcast']) {
+      expect(byName[name], `missing moddle prop ${name}`).toBeDefined();
+      expect(byName[name].isAttr).toBe(true);
+      expect(byName[name].type).toBe('String');
+    }
+  });
+
+  it('MessageCorrelationActivityExtension extends bpmn:Activity with catch + throw attrs', () => {
+    const ext = descriptor.types.find((t) => t.name === 'MessageCorrelationActivityExtension');
+    expect(ext).toBeDefined();
+    expect(ext.extends).toContain('bpmn:Activity');
+    const byName = Object.fromEntries(ext.properties.map((p) => [p.name, p]));
+    for (const name of ['messageName', 'correlationField', 'throwChannelResourceId', 'throwPayloadFields']) {
       expect(byName[name], `missing moddle prop ${name}`).toBeDefined();
       expect(byName[name].isAttr).toBe(true);
       expect(byName[name].type).toBe('String');
