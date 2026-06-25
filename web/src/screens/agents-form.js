@@ -202,6 +202,24 @@ export function statusLabel(status) {
 }
 
 /**
+ * Human label for the agent function taxonomy (migration 093 / T-0473).
+ *   workforce → исполнитель задач в оргструктуре (имеет оргместо)
+ *   system    → действует над платформой (конфигуратор, доки, внедрение)
+ *   assistant → общий чат-помощник тенанта
+ * Unknown / missing → 'Агент' (defensive; never throws).
+ * @param {string} agentType one of 'workforce' | 'system' | 'assistant'
+ * @returns {string} short Russian label for the registry badge
+ */
+export function agentTypeLabel(agentType) {
+  switch (agentType) {
+    case 'workforce': return 'Рабочий';
+    case 'system': return 'Системный';
+    case 'assistant': return 'Ассистент';
+    default: return 'Агент';
+  }
+}
+
+/**
  * Human display name for an agent — strips the provisioning marker that leaks
  * into seeded display_name values ("Config-агент (seed)", "Агент-документатор
  * (seed)") so the user never sees the "(seed)" dev-jargon (principles.md §3,

@@ -120,9 +120,15 @@ function holdsAgentMgmtUpdate(
 
 async function loadAgentOrgScope(
   client: pg.PoolClient,
-  agentId: string,
+  agentId: string | null,
   tenantId: string,
 ): Promise<ScopeElement> {
+  // Org-less agent (system/assistant, migration 093): no employee row → no
+  // department. Map to the tenant-root org scope, same as the deptId-NULL path
+  // below — only a root-covering delegation (or genesis-owner) admits it.
+  if (agentId === null) {
+    return { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" };
+  }
   const { rows } = await client.query<{ department_id: string | null }>(
     `SELECT p.department_id
        FROM choros.employee e
@@ -157,8 +163,10 @@ async function appendAudit(
 // ---------------------------------------------------------------------------
 
 interface AgentCardRow {
-  employee_id: string;
-  slug: string;
+  /** NULL for an org-less agent (system/assistant, migration 093). */
+  employee_id: string | null;
+  /** NULL when the agent has no employee row (org-less). */
+  slug: string | null;
   llm_endpoint: string | null;
   llm_model: string | null;
   /** Computed boolean: true iff the agent's secret handle is bound. Never the raw value. */
@@ -341,12 +349,23 @@ async function handlePutLlmConfig(
         "No agent configured for this tenant. Hire an agent first.",
       );
     }
-    agentId = row.employee_id;
-
     const orgScope = await loadAgentOrgScope(client, row.employee_id, tenantId);
     if (!holdsAgentMgmtUpdate(admin, orgScope)) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
     }
+
+    // This write path addresses the agent_card by employee_id (the historical key).
+    // An org-less agent (system/assistant, migration 093) has no employee_id and
+    // cannot be updated here yet — L2 (llm_connection) introduces surrogate-id
+    // addressing for org-less LLM config. Fail honestly rather than silently no-op.
+    if (row.employee_id === null) {
+      throw new HttpError(
+        409,
+        "AGENT_HAS_NO_ORG_PLACE",
+        "this agent has no org-place; LLM config for org-less agents lands with the connection registry (L2)",
+      );
+    }
+    agentId = row.employee_id;
 
     // BLOCKER-2 (T-0382): the UPDATE runs on connection A (this client) INSIDE
     // the outer withTenantTx, so the audit append below and the endpoint/model
