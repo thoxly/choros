@@ -129,8 +129,10 @@ export async function insertAgentRows(
  * keeping the FF-25-3 custody surface auditable (no string-concat dodge needed).
  */
 export interface AgentLlmConfigRow {
-  employee_id: string;
-  slug: string;
+  /** NULL for an org-less agent (system/assistant, migration 093). */
+  employee_id: string | null;
+  /** NULL when the agent has no employee row (org-less). */
+  slug: string | null;
   llm_endpoint: string | null;
   llm_model: string | null;
   /** Opaque secret handle (RL-3), aliased from the handle column. NULL when unbound. */
@@ -150,13 +152,16 @@ export async function readPrimaryAgentLlmConfig(
   tx: PgClientLike,
 ): Promise<AgentLlmConfigRow | null> {
   const { rows } = await tx.query(
+    // LEFT JOIN: migration 093 makes employee_id NULLable (org-less system/
+    // assistant agents). Those rows must not be silently dropped from the primary
+    // pick; their slug comes back NULL (sorts last, after assistant-agent).
     `SELECT ac.employee_id,
             e.slug,
             ac.llm_endpoint,
             ac.llm_model,
             ac.llm_secret_handle AS secret_handle_ref
        FROM choros.agent_card ac
-       JOIN choros.employee e
+       LEFT JOIN choros.employee e
             ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
       WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid
       ORDER BY CASE WHEN e.slug = 'assistant-agent' THEN 0 ELSE 1 END, e.slug
@@ -178,13 +183,15 @@ export async function readConfiguredAgentLlmConfig(
   tx: PgClientLike,
 ): Promise<AgentLlmConfigRow | null> {
   const { rows } = await tx.query(
+    // LEFT JOIN: org-less agents (NULL employee_id, migration 093) that ARE fully
+    // configured must still be eligible as the live per-tenant LLM port.
     `SELECT ac.employee_id,
             e.slug,
             ac.llm_endpoint,
             ac.llm_model,
             ac.llm_secret_handle AS secret_handle_ref
        FROM choros.agent_card ac
-       JOIN choros.employee e
+       LEFT JOIN choros.employee e
             ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
       WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid
         AND ac.llm_endpoint IS NOT NULL

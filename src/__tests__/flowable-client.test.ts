@@ -308,3 +308,32 @@ describe("factory validation", () => {
     if (saved !== undefined) process.env["FLOWABLE_REST_APP_ADMIN_PASSWORD"] = saved;
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0483: pingEngine — readiness probe (single GET to /management/engine)
+// ---------------------------------------------------------------------------
+describe("T-0483 pingEngine", () => {
+  it("reachable: true on HTTP 200 (hits /management/engine, single shot)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(200, { name: "default" }));
+    const client = testConfig();
+    const result = await client.pingEngine!();
+    expect(result).toEqual({ ok: true, reachable: true });
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    const [url] = vi.mocked(globalThis.fetch).mock.calls[0] as [string];
+    expect(url).toContain("/management/engine");
+  });
+
+  it("reachable: false + ENGINE_UNAVAILABLE on HTTP 500", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(500));
+    const client = testConfig();
+    const result = await client.pingEngine!();
+    expect(result).toEqual({ ok: true, reachable: false, code: "ENGINE_UNAVAILABLE" });
+  });
+
+  it("reachable: false + ENGINE_UNAVAILABLE on a network error (never throws)", async () => {
+    vi.mocked(globalThis.fetch).mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const client = testConfig();
+    const result = await client.pingEngine!();
+    expect(result).toEqual({ ok: true, reachable: false, code: "ENGINE_UNAVAILABLE" });
+  });
+});

@@ -407,11 +407,45 @@ function buildRouter(
       ? makeFlowableClient({
           baseUrl:
             process.env["FLOWABLE_REST_BASE_URL"] ??
-            "http://flowable:8082/flowable-rest/service",
+            // T-0483: compose-internal hostname `flowable` is reachable on the
+            // container-internal port 8080 (8082 is the host-published mapping only,
+            // invalid from inside the compose network). Keep the default self-consistent
+            // so an absent override does not silently produce ENGINE_UNAVAILABLE.
+            "http://flowable:8080/flowable-rest/service",
           adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
           adminPassword: flowablePassword,
         })
       : null;
+
+  // T-0483: engine readiness probe. Separate from GET /health (which is the
+  // CONTAINER liveness probe — it must NOT depend on the engine, or an engine
+  // blip would mark choros itself unhealthy and trigger a needless restart).
+  // This endpoint reflects engine reachability so the UI / ops can distinguish
+  // "engine down" (honest "движок недоступен") from "app down". When no client is
+  // configured (memory mode / no FLOWABLE creds) it reports status "unknown".
+  router.register("GET", "/api/engine/health", async (_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    if (!flowableClient || typeof flowableClient.pingEngine !== "function") {
+      res.statusCode = 200;
+      res.end(JSON.stringify({ engine: "unknown", reason: "not_configured" }));
+      return;
+    }
+    try {
+      const ping = await flowableClient.pingEngine();
+      if (ping.reachable) {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ engine: "up" }));
+      } else {
+        // 503 so callers (and the UI) see a clear "engine unavailable" signal.
+        res.statusCode = 503;
+        res.end(JSON.stringify({ engine: "down", code: ping.code }));
+      }
+    } catch {
+      // pingEngine never throws, but be defensive: report down rather than 500.
+      res.statusCode = 503;
+      res.end(JSON.stringify({ engine: "down", code: "ENGINE_UNAVAILABLE" }));
+    }
+  });
 
   // Register inbox endpoints. T-0282 (ADR §2.3): when a pool is available
   // (DB-backed), wire the card-action approve route (POST /api/inbox/:id/action)

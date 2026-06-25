@@ -17,7 +17,7 @@ import {
   SLUG_RE,
   validateHire, buildHirePayload,
   classifyHandle, handleRejectMessage, validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions, displayAgentName,
+  mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
 } from './agents-form.js';
 
 describe('validateHire', () => {
@@ -150,6 +150,18 @@ describe('statusLabel', () => {
   it('labels configured vs needs_llm', () => {
     expect(statusLabel('configured')).toMatch(/привязана/i);
     expect(statusLabel('needs_llm')).toMatch(/Нужна/i);
+  });
+});
+
+describe('agentTypeLabel — registry shows the function taxonomy (T-0473)', () => {
+  it('labels each known agent_type distinctly', () => {
+    expect(agentTypeLabel('workforce')).toBe('Рабочий');
+    expect(agentTypeLabel('system')).toBe('Системный');
+    expect(agentTypeLabel('assistant')).toBe('Ассистент');
+  });
+  it('falls back to a neutral label for unknown/missing types (never throws)', () => {
+    expect(agentTypeLabel(undefined)).toBe('Агент');
+    expect(agentTypeLabel('something-new')).toBe('Агент');
   });
 });
 
