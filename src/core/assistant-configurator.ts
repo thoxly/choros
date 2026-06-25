@@ -306,6 +306,48 @@ const TOOL_GENERATE_PROCESS: ToolDeclaration = {
   },
 };
 
+/**
+ * propose_plan — T-0465 (D8-G4): PLAN-IN-DIALOGUE. The bot describes, in plain
+ * human language, the WHOLE solution it intends to build (which application + fields,
+ * which related apps it would CREATE vs LINK, which process steps + roles) BEFORE
+ * generating anything. This tool writes NOTHING — it is a proposal the user can refine
+ * by text. The user must CONFIRM («да», «давай», «генерируй») before the bot calls the
+ * generating tools (create_application / relate_application / generate_process).
+ *
+ * INVARIANT: a propose_plan call produces NO ApprovedOp (no DRAFT write). It surfaces
+ * a PlanProposal the HTTP layer renders as the plan-step of the flow.
+ */
+const TOOL_PROPOSE_PLAN: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "propose_plan",
+    description:
+      "Propose, in plain human language, the WHOLE solution you intend to build, " +
+      "BEFORE generating anything. Use this FIRST when the user describes a problem/solution " +
+      "(«у нас бардак с закупками…», «построй CRM», «собери приложение заявок»). " +
+      "Describe: which application + fields; which RELATED apps you would CREATE vs LINK to existing; " +
+      "the process steps + branching + roles. Writes NOTHING — it is editable by the user's next message. " +
+      "Only AFTER the user confirms the plan («да», «давай», «генерируй») call the generating tools.",
+    parameters: {
+      type: "object",
+      properties: {
+        planText: {
+          type: "string",
+          description:
+            "The human-language plan, e.g. «Создам приложение «Заявки на закупку» с полями …; " +
+            "приложения «Контрагенты» у вас нет — создам связанное; процесс: подача → согласование → " +
+            "если сумма большая → доп. согласование, иначе закрыть». Multi-line is fine.",
+        },
+        humanReadableReason: {
+          type: "string",
+          description: "Why this is the right plan for the user's described problem.",
+        },
+      },
+      required: ["planText"],
+    },
+  },
+};
+
 /** request_promote — request a human to promote DRAFT → published. NEVER auto-promotes. */
 const TOOL_REQUEST_PROMOTE: ToolDeclaration = {
   type: "function",
@@ -342,18 +384,30 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "Твоя задача — помочь пользователю настроить систему: добавить поля, формы, привязки процессов, DMN-таблицы. " +
   "ВСЕ изменения вносятся ТОЛЬКО в DRAFT (черновик). Промоут в production выполняет ЧЕЛОВЕК. " +
   "Деструктивные операции (удаление/переименование поля, потеря данных) НЕЛЬЗЯ выполнять без явного подтверждения человека. " +
+  // T-0465 (D8-G4): PLAN-IN-DIALOGUE — план словами ПЕРЕД генерацией.
+  "ВАЖНО (порядок работы со сквозным решением): когда пользователь ОПИСЫВАЕТ задачу/проблему словами " +
+  "(«у нас бардак с закупками», «построй приложение заявок», «собери CRM») — СНАЧАЛА вызови propose_plan " +
+  "и опиши ВЕСЬ план человеческим языком (какое приложение и поля; какие связанные приложения СОЗДАТЬ, а какие " +
+  "ВЗЯТЬ существующие; шаги процесса, ветвление, роли). propose_plan НИЧЕГО НЕ ПИШЕТ — это предложение, " +
+  "которое пользователь правит текстом. НЕ вызывай create_application / relate_application / generate_process, " +
+  "пока пользователь ЯВНО не подтвердит план («да», «давай», «генерируй», «поехали»). " +
+  "Когда план подтверждён — собери ВСЁ решение за ОДИН заход (приложение + связанные приложения + процесс) единым бандлом. " +
   "Используй инструменты для каждого конкретного изменения. " +
   "Если поле-связь ссылается на приложение, которого ещё нет — используй relate_application: " +
   "система сама создаст связанное приложение в том же черновике или сошлётся на существующее (без дубликатов). " +
   "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
   "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
   "и положит черновик в Модельер на ревью (без авто-публикации). " +
+  "После генерации НЕ пытайся показать конструктор в чате — дай пользователю ссылки на разделы (Приложения / Модельер), " +
+  "ревью происходит ВИЗУАЛЬНО там, и там же человек публикует весь бандл одним действием. " +
   "После каждого изменения кратко объясни что и зачем было сделано. " +
   "Если конфигурация завершена — вызови request_promote с описанием изменений. " +
   "Отвечай по-русски.";
 
 /** All E16 authoring tools available to the configurator. */
 const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
+  // T-0465 (D8-G4): propose_plan FIRST — plan-in-dialogue precedes any generation.
+  TOOL_PROPOSE_PLAN,
   TOOL_CREATE_APPLICATION,
   TOOL_RELATE_APPLICATION,
   TOOL_AUTHOR_BINDING,
@@ -417,6 +471,16 @@ export interface PendingPromote {
   readonly summary: string;
 }
 
+/**
+ * T-0465 (D8-G4): PLAN-IN-DIALOGUE. A propose_plan result — the bot's human-language
+ * plan for the whole solution, surfaced BEFORE anything is generated. Carries NO write.
+ * The HTTP layer renders this as the plan-step (user confirms/refines by text).
+ */
+export interface PlanProposal {
+  /** The human-language plan text the user reviews + refines. */
+  readonly planText: string;
+}
+
 // ---------------------------------------------------------------------------
 // ConfiguratorResult — returned by runConfigurator, used by handleConfigurator
 // ---------------------------------------------------------------------------
@@ -451,6 +515,12 @@ export interface ConfiguratorResult {
   readonly blockedOps: readonly BlockedOp[];
   /** Pending promote requests (human-gated). */
   readonly pendingPromotes: readonly PendingPromote[];
+  /**
+   * T-0465 (D8-G4): plan-in-dialogue proposals. Non-empty when the bot proposed a
+   * plan (via propose_plan) instead of (or before) generating. When present, the
+   * HTTP layer surfaces the plan and does NOT expect DRAFT writes this turn.
+   */
+  readonly planProposals: readonly PlanProposal[];
   /** Whether the intersection grant ceiling was insufficient for any op. */
   readonly grantCeilingViolations: readonly string[];
   /**
@@ -487,6 +557,37 @@ export const AUTHORING_CAPTURE_CONFIRMATION =
  */
 export function isCaptureWorthy(text: string): boolean {
   return text.trim().length >= 5;
+}
+
+// ---------------------------------------------------------------------------
+// T-0465 (D8-G4): plan confirmation heuristic.
+//
+// PLAN-IN-DIALOGUE: the bot proposes a plan first (propose_plan, no writes); the
+// user confirms with a short affirmation, after which the bot generates the bundle.
+// This heuristic lets the HTTP layer (and tests) detect a confirmation turn so the
+// plan-vs-generate boundary is observable. It is intentionally conservative — short
+// affirmative messages confirm; a fresh problem description does NOT.
+// ---------------------------------------------------------------------------
+
+/** Whether `text` reads as a user confirming a previously-proposed plan. */
+export function confirmsPlan(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (t.length === 0) return false; // empty never confirms
+  // Affirmation tokens (RU + EN). Matched as whole words / common phrasings.
+  const AFFIRM = [
+    "да", "давай", "давайте", "генерируй", "генерируйте", "собери", "собирай",
+    "поехали", "go", "подтверждаю", "подтвердить", "ок", "окей", "согласен",
+    "согласна", "верно", "всё верно", "все верно", "делай", "делайте",
+    "погнали", "ага", "угу", "yes", "confirm", "approve", "build it", "let's go",
+  ];
+  // Exact short answer, or message that starts with an affirmation token.
+  for (const a of AFFIRM) {
+    if (t === a) return true;
+    if (t.startsWith(a + " ") || t.startsWith(a + ",") || t.startsWith(a + ".") || t.startsWith(a + "!")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +633,8 @@ function processToolCall(
   approved?: ApprovedOp;
   blocked?: BlockedOp;
   pendingPromote?: PendingPromote;
+  /** T-0465 (D8-G4): a plan proposal (propose_plan) — NO write. */
+  planProposal?: PlanProposal;
   changelogLine: string;
   toolResultContent: string;
 } {
@@ -961,6 +1064,39 @@ function processToolCall(
     }
 
     // -----------------------------------------------------------------------
+    // propose_plan — T-0465 (D8-G4): PLAN-IN-DIALOGUE. Returns a plan proposal.
+    // NO ApprovedOp, NO write — the user reviews/refines by text, then confirms.
+    // -----------------------------------------------------------------------
+    case "propose_plan": {
+      const planText =
+        typeof args["planText"] === "string" ? (args["planText"] as string).trim() : "";
+      if (!planText) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: "propose_plan: пустой план — нечего предложить.",
+          toolName: "propose_plan",
+        };
+        return {
+          blocked,
+          changelogLine: "⚠ [ПЛАН] propose_plan без текста — пропущено",
+          toolResultContent: "error: propose_plan requires non-empty planText",
+        };
+      }
+      const planProposal: PlanProposal = { planText };
+      return {
+        planProposal,
+        // The plan is NOT a draft write — it is a proposal awaiting confirmation.
+        changelogLine: `📋 [ПЛАН — подтвердите, чтобы собрать] ${planText.split("\n")[0]!.slice(0, 80)}`,
+        toolResultContent: JSON.stringify({
+          status: "plan_proposed",
+          message:
+            "План предложен — НИЧЕГО не создано. Дождись подтверждения пользователя («да»/«генерируй»), " +
+            "затем собери всё решение одним бандлом.",
+        }),
+      };
+    }
+
+    // -----------------------------------------------------------------------
     // request_promote — returns PENDING ticket, NEVER auto-promotes
     // -----------------------------------------------------------------------
     case "request_promote": {
@@ -1042,6 +1178,7 @@ async function runConfiguratorLoop(
   const approvedOps: ApprovedOp[] = [];
   const blockedOps: BlockedOp[] = [];
   const pendingPromotes: PendingPromote[] = [];
+  const planProposals: PlanProposal[] = [];
   const changelogLines: string[] = [];
   const grantCeilingViolations: string[] = [];
 
@@ -1093,6 +1230,7 @@ async function runConfiguratorLoop(
       if (processed.approved) approvedOps.push(processed.approved);
       if (processed.blocked) blockedOps.push(processed.blocked);
       if (processed.pendingPromote) pendingPromotes.push(processed.pendingPromote);
+      if (processed.planProposal) planProposals.push(processed.planProposal);
       if (processed.changelogLine) changelogLines.push(processed.changelogLine);
 
       toolResultParts.push(`[${call.name}] → ${processed.toolResultContent}`);
@@ -1119,6 +1257,16 @@ async function runConfiguratorLoop(
     }
   }
 
+  // T-0465 (D8-G4): PLAN-IN-DIALOGUE. When the bot proposed a plan (no writes this
+  // turn), surface the plan prominently and ask for confirmation. This is the
+  // plan-step text the user reviews/refines before any generation happens.
+  const planSection =
+    planProposals.length > 0
+      ? `\n\n**План решения (ничего ещё не создано):**\n${planProposals
+          .map((p) => p.planText)
+          .join("\n\n")}\n\nПодтвердите («да» / «генерируй»), и я соберу всё одним черновиком-бандлом. Или поправьте план текстом.`
+      : "";
+
   // Build human-readable changelog
   const changelog =
     changelogLines.length > 0
@@ -1144,9 +1292,12 @@ async function runConfiguratorLoop(
 
   const text =
     (finalText ||
-      (approvedOps.length > 0
-        ? `Конфигурация обновлена: ${approvedOps.length} операций в DRAFT.`
-        : "Нет одобренных операций.")) +
+      (planProposals.length > 0
+        ? "Вот план — подтвердите, чтобы я собрал решение."
+        : approvedOps.length > 0
+          ? `Конфигурация обновлена: ${approvedOps.length} операций в DRAFT.`
+          : "Нет одобренных операций.")) +
+    planSection +
     changelog +
     blockedSummary +
     promoteSummary +
@@ -1157,6 +1308,7 @@ async function runConfiguratorLoop(
     approvedOps,
     blockedOps,
     pendingPromotes,
+    planProposals,
     grantCeilingViolations,
   };
 }
@@ -1253,6 +1405,7 @@ export async function runConfigurator(
       approvedOps: [],
       blockedOps: [],
       pendingPromotes: [],
+      planProposals: [],
       grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
       captureRequest: worthy ? { description: userText.trim() } : undefined,
     };

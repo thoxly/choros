@@ -50,6 +50,7 @@ import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests
 import { registerSodRoutes } from "./http/rights-sod.js";
 import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
+import { registerSolutionBundleRoutes } from "./http/solution-bundles.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
 import { getOrgPool, resolveActorTenant } from "./db/org.js";
 // T-0419 (D7-3-FU): production field-visibility resolver — grants + policy from DB.
@@ -726,6 +727,15 @@ function buildRouter(
       flowableClient,
       (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
     );
+
+    // T-0465 (D8-G4): bundle-promote — publish a whole text-first solution bundle
+    // (apps + sections + processes tagged with one bundle_id) as ONE unit. Reuses
+    // promoteTier (config tier) + publishProcessByKey (process publish). Human-gated.
+    registerSolutionBundleRoutes(router, {
+      pool: grantsPool,
+      flowable: flowableClient,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    });
   }
 
   // T-0342: Register public registration endpoint (POST /api/register).
