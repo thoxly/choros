@@ -36,6 +36,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
+import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
@@ -275,7 +276,17 @@ export function registerProcessDefsRoutes(
     // Idempotent and additive — userTasks with an explicit role are left as-is,
     // and a diagram with no lanes is returned unchanged. The persisted draft
     // therefore carries the role binding the executor-resolver consumes.
-    const bpmnXml = mapLanesToCandidateGroups(rawBpmnXml);
+    const lanedBpmnXml = mapLanesToCandidateGroups(rawBpmnXml);
+
+    // T-0458 [D8-R3]: timer/deadline → escalation wiring. After lanes, materialise the
+    // native <timerEventDefinition> body from the typed choros:timerDeadline* config
+    // (so Flowable actually schedules the timer) and stamp the escalation-target
+    // userTask's flowable:candidateGroups from choros:escalateTo (so the firing
+    // projection addresses the right pool — manager/owner/role). Idempotent and
+    // additive: hand-authored bodies and explicit roles are preserved; a diagram with
+    // no timer events is returned unchanged. Runs BEFORE lint so the linter validates
+    // the materialised body.
+    const bpmnXml = mapTimerEscalation(lanedBpmnXml);
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;

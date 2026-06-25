@@ -205,6 +205,47 @@ const ChorosModdleDescriptor = {
         },
       ],
     },
+    {
+      /**
+       * T-0458 [D8-R3]: Extend bpmn:CatchEvent (superclass of both BoundaryEvent
+       * and IntermediateCatchEvent) with the typed timer/deadline config that the
+       * timer properties panel manages. These attributes drive the panel UI AND are
+       * read by the publish-time mapper that materialises the native
+       * <timerEventDefinition> body and the escalation target. They round-trip on
+       * the event element so re-opening the model restores the panel state.
+       *
+       * choros:timerDeadlineKind — "duration" | "date" | "field"
+       *   How the deadline is expressed:
+       *     duration → an ISO-8601 duration (choros:timerDeadline = "PT24H")
+       *     date     → a fixed ISO-8601 date (choros:timerDeadline = "2026-07-01T14:00:00Z")
+       *     field    → a date pulled from a record field (choros:timerDeadline = field key)
+       *
+       * choros:timerDeadline — the deadline value, interpreted per timerDeadlineKind.
+       *
+       * choros:escalateTo — whom to escalate to when the timer fires:
+       *   "manager" | "owner" | a role slug. Materialised into the escalation
+       *   user-task's flowable:candidateGroups by the publish mapper.
+       */
+      name: 'TimerDeadlineExtension',
+      extends: ['bpmn:CatchEvent'],
+      properties: [
+        {
+          name: 'timerDeadlineKind',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'timerDeadline',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'escalateTo',
+          isAttr: true,
+          type: 'String',
+        },
+      ],
+    },
   ],
   enumerations: [],
   associations: [],
