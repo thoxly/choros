@@ -1438,6 +1438,8 @@ describe("T-0458 — non-timer events are not flagged", () => {
 </definitions>`;
     const result = lintBpmn(xml);
     // No timer_malformed violation: the boundary event carries no timerEventDefinition.
-    expect(result.violations === undefined || !result.violations.some((x: { type: string }) => x.type === "timer_malformed")).toBe(true);
+    if (!result.ok) {
+      expect(result.violations.some((x) => x.type === "timer_malformed")).toBe(false);
+    }
   });
 });
