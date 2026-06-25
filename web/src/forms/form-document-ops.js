@@ -173,5 +173,56 @@ export function moveNodeAcross(doc, fromContainer, fromIndex, toContainer, toInd
   })();
   if (moving === undefined) return doc;
   const removed = removeNode(doc, fromContainer, fromIndex, fromTab);
-  return insertNode(removed, toContainer, moving, toIndex, toTab);
+  // Removing fromContainer[fromIndex] can shift sibling indices the target path
+  // depends on. If fromContainer is the SAME container as (a prefix of) the
+  // target, and the removed index precedes the target's diverging segment, that
+  // segment shifts left by one. Adjust so the insert lands where the caller meant
+  // (target path expressed against the PRE-removal tree).
+  const adjustedTo = adjustPathAfterRemoval(fromContainer, fromIndex, fromTab, toContainer);
+  // If the move is within the SAME container, the target index itself shifts when
+  // it sits after the removed index.
+  let adjustedToIndex = toIndex;
+  if (samePath(fromContainer, toContainer) && fromTab === toTab && typeof toIndex === 'number' && toIndex > fromIndex) {
+    adjustedToIndex = toIndex - 1;
+  }
+  return insertNode(removed, adjustedTo, moving, adjustedToIndex, toTab);
+}
+
+/** Structural equality of two numeric/segment paths. */
+function samePath(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const sa = a[i]; const sb = b[i];
+    if (typeof sa === 'number' || typeof sb === 'number') { if (sa !== sb) return false; }
+    else if (sa.tab !== sb.tab || sa.index !== sb.index) return false;
+  }
+  return true;
+}
+
+/**
+ * Adjust a target path after a removal of `fromContainer[fromIndex]`. When
+ * `fromContainer` is a strict prefix of `toContainer` and the removed index
+ * precedes the target's segment at that depth (in the same tab), the segment
+ * shifts left by one.
+ */
+function adjustPathAfterRemoval(fromContainer, fromIndex, fromTab, toContainer) {
+  // Only relevant when fromContainer is a prefix of toContainer.
+  if (fromContainer.length >= toContainer.length) return toContainer;
+  for (let i = 0; i < fromContainer.length; i += 1) {
+    if (!segEqual(fromContainer[i], toContainer[i])) return toContainer;
+  }
+  const seg = toContainer[fromContainer.length];
+  const segIndex = typeof seg === 'number' ? seg : seg.index;
+  const segTab = typeof seg === 'number' ? undefined : seg.tab;
+  if (segTab === fromTab && segIndex > fromIndex) {
+    const next = toContainer.slice();
+    next[fromContainer.length] = typeof seg === 'number' ? seg - 1 : { ...seg, index: seg.index - 1 };
+    return next;
+  }
+  return toContainer;
+}
+
+function segEqual(a, b) {
+  if (typeof a === 'number' || typeof b === 'number') return a === b;
+  return a.tab === b.tab && a.index === b.index;
 }
