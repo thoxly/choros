@@ -217,6 +217,8 @@ function FormBuilder() {
 
   // Catalog of processes (for the process key picker)
   const [processCatalog, setProcessCatalog] = useState(null);
+  // null = no error; string = load failed (5xx / network); distinct from empty-list
+  const [catalogError, setCatalogError] = useState(null);
 
   // UI state
   const [loadingApps, setLoadingApps] = useState(false);
@@ -227,15 +229,30 @@ function FormBuilder() {
   const [saveResult, setSaveResult] = useState(null); // null | { ok, message }
   const [formErrors, setFormErrors] = useState({});
 
-  // Load process catalog on mount
-  useEffect(() => {
+  // Load process catalog on mount.
+  // T-0487: distinguish a real load failure (5xx / network) from a legitimately
+  // empty catalog (403 = no access yet, or tenant has no deployed processes).
+  // On real failure: set catalogError so the UI can surface an honest hint with
+  // a retry action, rather than silently showing an empty quick-pick list.
+  const loadCatalog = useCallback(() => {
     setLoadingCatalog(true);
+    setCatalogError(null);
     fetch('/api/process-catalog', { headers: authHeaders() })
-      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then((data) => setProcessCatalog(data.definitions || []))
-      .catch(() => setProcessCatalog([]))
+      .then((r) => {
+        // 403 = caller has no access; treat as legitimately empty (not an error).
+        if (r.status === 403) return { definitions: [] };
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => { setProcessCatalog(data.definitions || []); })
+      .catch((err) => {
+        setCatalogError(String(err?.message || err));
+        setProcessCatalog([]);
+      })
       .finally(() => setLoadingCatalog(false));
   }, []);
+
+  useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
   // Load applications list
   useEffect(() => {
@@ -460,6 +477,19 @@ function FormBuilder() {
             />
             {loadingCatalog ? (
               <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>Загрузка процессов…</span>
+            ) : catalogError ? (
+              /* T-0487: real load failure — surface an honest hint, not a silent empty list */
+              <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+                Не удалось загрузить список процессов.{' '}
+                <button
+                  type="button"
+                  onClick={loadCatalog}
+                  style={{ background: 'none', border: 'none', padding: 0, color: 'var(--chs-color-accent)', cursor: 'pointer', fontSize: 'inherit', textDecoration: 'underline' }}
+                >
+                  Повторить
+                </button>
+                {' — или введите ключ вручную.'}
+              </span>
             ) : processCatalog && processCatalog.length > 0 && (
               <div style={{ marginTop: 'var(--chs-space-2)' }}>
                 <span style={{ display: 'block', marginBottom: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
