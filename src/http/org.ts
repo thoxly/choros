@@ -20,7 +20,9 @@ import {
   getOrgPool,
   DEV_TENANT_ID,
   resolveActorTenant,
+  resolveActorSlugFromAuth,
   resolveTenantBySlug,
+  getTenantInfo,
   type OrgPerson,
   type OrgDepartment,
 } from "../db/org.js";
@@ -224,6 +226,56 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ departments }));
+  }));
+
+  // GET /api/my-tenant — resolve the CALLER's real tenant from their identity.
+  //
+  // WHY THIS EXISTS: in keycloak mode the JWT carries no tenant claim and the SPA
+  // had no way to learn which tenant the logged-in user belongs to — so every
+  // org/process/agent screen hardcoded x-tenant-id = DEV_TENANT_ID (the seed
+  // "Dev Silo"). A user who registered their OWN company was therefore pointed at
+  // a tenant they don't own → 403 NOT_OWNER on org writes (and process drafts
+  // leaked into the dev silo). This endpoint returns the caller's actual tenant
+  // (resolved from the validated identity, NEVER from a request header), so the
+  // SPA can send the correct tenant and label the workspace with the real company.
+  router.register("GET", "/api/my-tenant", withAuth(async (req, res) => {
+    let tenantId: string;
+    let tenant = null;
+    if (hasDb()) {
+      const authCtx = getAuthContext(req);
+      let actorSlug: string | null | undefined;
+      if (authCtx !== undefined) {
+        // keycloak: resolve sub/preferred_username → employee slug (sub-first).
+        actorSlug = await resolveActorSlugFromAuth(
+          getOrgPool(),
+          authCtx.sub,
+          authCtx.preferredUsername,
+        );
+        if (!actorSlug) {
+          throw new HttpError(
+            401,
+            "UNAUTHENTICATED",
+            "no employee matches authenticated identity",
+          );
+        }
+      } else {
+        // dev: x-dev-user header is the slug.
+        let h = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(h)) h = h[0];
+        actorSlug = typeof h === "string" && h.length > 0 ? h : undefined;
+        if (!actorSlug) {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+      }
+      tenantId = await resolveActorTenant(getOrgPool(), actorSlug);
+      tenant = await getTenantInfo(getOrgPool(), tenantId);
+    } else {
+      // dev-no-db: keep the SPA functional with the legacy fallback tenant.
+      tenantId = DEV_TENANT_ID;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ tenantId, tenant }));
   }));
 
   // GET /api/org/employee/:id — return details of one employee

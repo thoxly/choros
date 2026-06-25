@@ -308,6 +308,58 @@ export async function resolveActorTenant(
 }
 
 // ---------------------------------------------------------------------------
+// getTenantInfo — resolve a tenant id → its public descriptor (slug, display
+// name, live member count). Used by GET /api/my-tenant so the SPA can (a) send
+// the caller's REAL tenant as x-tenant-id instead of a hardcoded constant, and
+// (b) label the sidebar with the actual company instead of a baked-in string.
+//
+// BYPASSRLS query (same pattern as resolveActorTenant): the caller id is only
+// ever the caller's OWN resolved tenant, so cross-tenant reach is not exposed.
+// ---------------------------------------------------------------------------
+
+export interface TenantInfo {
+  id: string;
+  slug: string;
+  displayName: string;
+  memberCount: number;
+}
+
+export async function getTenantInfo(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<TenantInfo | null> {
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query<{
+      id: string;
+      slug: string;
+      display_name: string;
+      member_count: string;
+    }>(
+      `SELECT t.id,
+              t.slug,
+              t.display_name,
+              (SELECT count(*) FROM choros.employee e WHERE e.tenant_id = t.id) AS member_count
+         FROM choros.tenant t
+        WHERE t.id = $1
+        LIMIT 1`,
+      [tenantId],
+    );
+    if (rows.length === 0 || !rows[0]) return null;
+    return {
+      id: rows[0].id,
+      slug: rows[0].slug,
+      displayName: rows[0].display_name,
+      memberCount: Number(rows[0].member_count),
+    };
+  } catch {
+    return null;
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // resolveActorSlugFromAuth — T-0371: resolve an authenticated request → the
 // correct employee SLUG before that slug is used for tenant/grant resolution.
 //

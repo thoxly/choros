@@ -17,10 +17,10 @@ import React, { useState, useEffect, useId } from 'react';
 import { Button, Field, KitIcon } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 
-// Dev tenant UUID — the silo every org row is scoped to (server DEV_TENANT_ID).
-// Same constant screen-org.jsx uses; the tenant-state read is genesis-owner gated.
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
+// The tenant-state read is genesis-owner gated against the caller's OWN tenant.
 
 /* ----------------------------------------------------------------------------
    Org directory (T-0312 · audit #10): the hire/substitute/revoke forms used to
@@ -37,7 +37,7 @@ function useOrgDirectory() {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
-    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { ...authHeaders() } })
+    fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: { ...authHeaders() } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((d) => {
         if (!alive) return;

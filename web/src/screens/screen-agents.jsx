@@ -23,14 +23,14 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import {
   validateHire, buildHirePayload,
   validateBind, buildBindPayload,
   mapAgentError, statusLabel, positionOptions, displayAgentName,
 } from './agents-form.js';
 
-// Dev tenant UUID — the silo the hire/list endpoints scope to (server DEV_TENANT_ID).
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 
 const LLM_PROVIDERS = [
   { value: 'anthropic', label: 'Anthropic (Claude)' },
@@ -300,7 +300,7 @@ export default function AgentsScreen() {
   // a 403 just means the dropdown stays empty — the form shows an honest hint).
   const loadPositions = useCallback(async () => {
     try {
-      const res = await fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: authHeaders() });
+      const res = await fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: authHeaders() });
       if (!res.ok) { setPositions([]); return; }
       const data = await res.json();
       setPositions(positionOptions(data.positions));

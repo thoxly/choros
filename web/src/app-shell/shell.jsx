@@ -8,6 +8,7 @@ import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-r
 import { Button, Modal, Tooltip } from '../components/components.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
+import { resolveActiveTenant } from './active-tenant.js';
 import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
 import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
@@ -444,6 +445,7 @@ function AppShell() {
   // mode; authConfig holds it; currentUser is the active identity (dev-user in
   // dev mode, keycloak user in keycloak mode). authError surfaces login errors.
   const [authReady, setAuthReady] = useState(false);
+  const [orgLabel, setOrgLabel] = useState(""); // resolved tenant label for the sidebar
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -497,6 +499,23 @@ function AppShell() {
         }
       } else {
         setCurrentUser(getDevUser());
+      }
+      // Resolve the caller's REAL tenant (server-derived from identity) so every
+      // screen sends the correct x-tenant-id instead of the hardcoded seed tenant.
+      // Failure is non-fatal: active-tenant.js keeps the legacy fallback.
+      try {
+        const resolved = await resolveActiveTenant();
+        if (!cancelled && resolved && resolved.tenant) {
+          const t = resolved.tenant;
+          const n = Number(t.memberCount);
+          setOrgLabel(
+            t.displayName
+              ? `${t.displayName}${Number.isFinite(n) ? ` · ${n} исп.` : ""}`
+              : "",
+          );
+        }
+      } catch {
+        /* non-fatal */
       }
       if (!cancelled) setAuthReady(true);
     })();
@@ -623,7 +642,7 @@ function AppShell() {
           <div className="chs-nav__logo" />
           <div className="chs-nav__brandtext">
             <span className="chs-nav__name">Choros</span>
-            <span className="chs-nav__org">control-plane · 214 исп.</span>
+            <span className="chs-nav__org">{orgLabel || "—"}</span>
           </div>
         </div>
 

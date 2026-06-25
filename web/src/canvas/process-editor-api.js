@@ -22,15 +22,15 @@
    ============================================================================ */
 
 import { authHeaders } from '../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../app-shell/active-tenant.js';
 
-// Dev tenant UUID — same constant used by screen-processes.jsx, screen-org.jsx etc.
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 
 /** Build the full header set for process-def API calls. */
 function apiHeaders(extra = {}) {
   return {
     ...authHeaders(),
-    'x-tenant-id': DEV_TENANT_ID,
+    'x-tenant-id': getActiveTenantId(),
     ...extra,
   };
 }

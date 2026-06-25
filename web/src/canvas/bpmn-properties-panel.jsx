@@ -37,6 +37,7 @@ import {
   defaultOutcomesFor,
 } from './outcome-presets.js';
 import { authHeaders } from '../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import { Field, Select } from '../components/components.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 
@@ -44,7 +45,7 @@ import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
    Dev tenant UUID — same constant used throughout the codebase (screen-agents,
    screen-org, ra-intents). Scopes the tenant-state fetch.
    -------------------------------------------------------------------------- */
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 
 /* --------------------------------------------------------------------------
    useRoles — loads org roles once (panel lifetime).
@@ -69,7 +70,7 @@ function useRoles() {
     (async () => {
       try {
         const res = await fetch(
-          `/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`,
+          `/api/org/tenant-state?tenant_id=${getActiveTenantId()}`,
           { headers: authHeaders() },
         );
         if (cancelled) return;

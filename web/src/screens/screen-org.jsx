@@ -16,14 +16,17 @@ import {
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import {
   validateDepartment, validatePosition, validateEmployee, validateRole, validateAssignment,
   buildDepartmentPayload, buildPositionPayload, buildEmployeePayload, buildRolePayload, buildAssignmentPayload,
   mapOrgError, indexBySlug, EMPLOYEE_KINDS,
 } from './org-crud.js';
 
-// Dev tenant UUID — the silo every write endpoint scopes to (server-side DEV_TENANT_ID).
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
+// Org writes are scoped to the caller's OWN tenant; the server's authorizeOrgWrite
+// gate then passes because target tenant == caller tenant (was failing when this
+// was hardcoded to the seed "Dev Silo" the user does not own).
 
 /* ----------------------------------------------------------------------------
    CRUD over the EXISTING org write endpoints (T-0269). Genuinely live:
@@ -203,7 +206,7 @@ function makeCrudConfig(kind, state, actorId) {
   if (kind === 'department') {
     return {
       title: 'Добавить подразделение', subtitle: 'Корневое подразделение тенанта.', entity: ENTITY_LABEL.department,
-      endpoint: '/api/departments', validate: validateDepartment, buildPayload: (v) => buildDepartmentPayload(DEV_TENANT_ID, v),
+      endpoint: '/api/departments', validate: validateDepartment, buildPayload: (v) => buildDepartmentPayload(getActiveTenantId(), v),
       fields: [
         { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'sales', hint: SLUG_HINT },
         { key: 'display_name', label: 'Название', kind: 'text', placeholder: 'Продажи' },
@@ -213,7 +216,7 @@ function makeCrudConfig(kind, state, actorId) {
   if (kind === 'position') {
     return {
       title: 'Добавить должность', subtitle: 'Должность внутри подразделения.', entity: ENTITY_LABEL.position,
-      endpoint: '/api/positions', validate: validatePosition, buildPayload: (v) => buildPositionPayload(DEV_TENANT_ID, v),
+      endpoint: '/api/positions', validate: validatePosition, buildPayload: (v) => buildPositionPayload(getActiveTenantId(), v),
       fields: [
         { key: 'department_id', label: 'Подразделение', kind: 'select', options: deptOptions, placeholder: '— подразделение —' },
         { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'lead', hint: SLUG_HINT },
@@ -224,7 +227,7 @@ function makeCrudConfig(kind, state, actorId) {
   if (kind === 'employee') {
     return {
       title: 'Добавить сотрудника', subtitle: 'Человек или агент. Должность — опционально.', entity: ENTITY_LABEL.employee,
-      endpoint: '/api/employees', validate: validateEmployee, buildPayload: (v) => buildEmployeePayload(DEV_TENANT_ID, v),
+      endpoint: '/api/employees', validate: validateEmployee, buildPayload: (v) => buildEmployeePayload(getActiveTenantId(), v),
       fields: [
         { key: 'kind', label: 'Тип', kind: 'select', default: 'human', placeholder: '— тип —',
           options: EMPLOYEE_KINDS.map((k) => ({ value: k, label: k === 'human' ? 'человек' : 'агент' })) },
@@ -237,7 +240,7 @@ function makeCrudConfig(kind, state, actorId) {
   if (kind === 'role') {
     return {
       title: 'Добавить роль', subtitle: 'Роль тенанта. Гранты роли настраиваются в «Права и доступ».', entity: ENTITY_LABEL.role,
-      endpoint: '/api/roles', validate: validateRole, buildPayload: (v) => buildRolePayload(DEV_TENANT_ID, v),
+      endpoint: '/api/roles', validate: validateRole, buildPayload: (v) => buildRolePayload(getActiveTenantId(), v),
       fields: [
         { key: 'slug', label: 'Слаг', kind: 'slug', placeholder: 'approver', hint: SLUG_HINT },
         { key: 'display_name', label: 'Название роли', kind: 'text', placeholder: 'Согласующий' },
@@ -375,7 +378,7 @@ function ExplainPanel({ subjectSlug }) {
   const run = async () => {
     setResult("loading");
     // tenantId фиксирован dev-силом на сервере; UI передаёт согласованный плейсхолдер.
-    const TENANT = "a0000000-0000-0000-0000-000000000001";
+    const TENANT = getActiveTenantId();
     const ref = recordId
       ? { kind: "record", tenantId: TENANT, registryId: resourceType, recordId }
       : { kind: "registry", tenantId: TENANT, applicationId: resourceType, registryId: resourceType };
@@ -535,7 +538,7 @@ function OrgScreen({ onOpenRights }) {
   // failures ⇒ treat as read-only (no fabricated write capability).
   const loadState = useCallback(async () => {
     try {
-      const res = await fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: authHeaders() });
+      const res = await fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: authHeaders() });
       if (res.status === 200) {
         const data = await res.json();
         setState(data);
@@ -583,7 +586,7 @@ function OrgScreen({ onOpenRights }) {
       const res = await fetch(`/api/${path}/${uuid}`, {
         method: 'DELETE',
         headers: { 'content-type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ tenant_id: DEV_TENANT_ID }),
+        body: JSON.stringify({ tenant_id: getActiveTenantId() }),
       });
       if (res.ok) {
         push({ tone: 'success', message: `Удалено · ${label}` });

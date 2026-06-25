@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 import { isKeycloakMode, getAuthConfig } from '../../app-shell/auth-mode.js';
 import {
   ORG_TREE, ORG_BY_ID, SCOPE_TAGS, RESOURCES, RES_BY_URI, PRESETS,
@@ -229,7 +230,7 @@ async function postSecondConfirm(changeRef, actorId) {
 }
 
 // Dev tenant UUID — same constant as screen-org.jsx and ra-intents.jsx use.
-const DEV_TENANT_ID = 'a0000000-0000-0000-0000-000000000001';
+// Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 
 /**
  * useRoleList — fetch live roles from GET /api/org/tenant-state.
@@ -243,7 +244,7 @@ function useRoleList() {
   const [error, setError] = useState(null);
   useEffect(() => {
     let alive = true;
-    fetch(`/api/org/tenant-state?tenant_id=${DEV_TENANT_ID}`, { headers: { ...authHeaders() } })
+    fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: { ...authHeaders() } })
       .then((r) => {
         if (r.status === 403) return { roles: [] }; // non-owner: honest empty
         if (!r.ok) return Promise.reject(new Error(`HTTP ${r.status}`));
