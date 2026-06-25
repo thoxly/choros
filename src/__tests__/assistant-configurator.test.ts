@@ -130,7 +130,8 @@ describe("AC-T361-2: grant ceiling enforced when no authoring_draft grant", () =
     const result = await handleConfigurator("настрой форму", ctx);
 
     expect(result.intent).toBe("configurator");
-    expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
+    // T-0466 [D8-G5]: HUMAN refusal — points at the administrator, no raw jargon/503.
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
     // LLM chat() must NOT have been called (grant check fails before tool dispatch)
     expect(stub.chatCalls).toHaveLength(0);
   });
@@ -147,7 +148,7 @@ describe("AC-T361-2: grant ceiling enforced when no authoring_draft grant", () =
     const result = await handleConfigurator("добавь поле", ctx);
 
     expect(result.intent).toBe("configurator");
-    expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
     expect(stub.chatCalls).toHaveLength(0);
   });
 });
@@ -598,7 +599,8 @@ describe("AC-T462-4: create_application gated by authoring_draft — non-holder 
     expect(result.approvedOps).toHaveLength(0);
     expect(result.blockedOps).toHaveLength(0);
     expect(result.grantCeilingViolations.length).toBeGreaterThan(0);
-    expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
+    // T-0466 [D8-G5]: HUMAN refusal (no raw 503 / jargon front-and-centre).
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
   });
 });
 
@@ -696,5 +698,82 @@ describe("AC-T463-4: relate_application missing target → honest block, not sil
     expect(result.approvedOps).toHaveLength(0);
     expect(result.blockedOps.length).toBeGreaterThan(0);
     expect(result.blockedOps[0]!.kind).toBe("pending_human_confirm");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T466 (D8-G5): access-gating for the authoring sandbox — human refusal +
+// capture-as-request. Spec §3.5 / PD-21.
+// ---------------------------------------------------------------------------
+
+describe("AC-T466-1: non-holder gets a HUMAN refusal, not a raw 503/jargon [D8-G5]", () => {
+  it("runConfigurator: no authoring_draft → warm «нет прав настраивать … администратор», no 503", async () => {
+    const stub = new StubChatLlmPort();
+    const ctx = makeContext([], stub); // no grant
+    const result = await runConfigurator("настрой форму для заявки", ctx);
+
+    // Human-friendly: points at the administrator, no raw error code / opaque jargon.
+    expect(result.text).toMatch(/нет прав настраивать/i);
+    expect(result.text).toMatch(/администратор/i);
+    expect(result.text).not.toMatch(/503|error|exception|undefined|null/i);
+    // No tool dispatch happened (grant check short-circuits).
+    expect(stub.chatCalls).toHaveLength(0);
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.grantCeilingViolations.length).toBeGreaterThan(0);
+  });
+
+  it("handleConfigurator: same human refusal text on the IntentHandler path", async () => {
+    const ctx = makeContext([]);
+    const result = await handleConfigurator("настрой процесс согласования", ctx);
+    expect(result.intent).toBe("configurator");
+    expect(result.text).toMatch(/нет прав настраивать/i);
+    expect(result.text).toMatch(/администратор/i);
+    expect(result.text).not.toMatch(/503/);
+  });
+});
+
+describe("AC-T466-2: capture-as-request — a non-holder's description is captured [D8-G5]", () => {
+  it("non-holder describing something → captureRequest carries the verbatim description", async () => {
+    const ctx = makeContext([]); // no grant
+    const desc = "хочу единую форму заявок на закупку с автоподсчётом суммы";
+    const result = await runConfigurator(desc, ctx);
+
+    // The intent is captured (so the HTTP layer can file it to admins) and NOT lost.
+    expect(result.captureRequest).toBeDefined();
+    expect(result.captureRequest!.description).toBe(desc);
+    // The reply confirms the request was passed to an admin (human language).
+    expect(result.text).toMatch(/заявку на настройку|администратор/i);
+  });
+
+  it("trivial message («?») → NO captureRequest (we don't file empty noise)", async () => {
+    const ctx = makeContext([]); // no grant
+    const result = await runConfigurator("?", ctx);
+    expect(result.captureRequest).toBeUndefined();
+    // Still a human refusal (no capture confirmation appended).
+    expect(result.text).toMatch(/нет прав настраивать/i);
+  });
+});
+
+describe("AC-T466-3: holder is unaffected — full authoring, no captureRequest [D8-G5]", () => {
+  it("a holder of authoring_draft authors normally and gets NO captureRequest", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Собираю черновик." });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // Holder reaches the authoring loop (LLM engaged) and is never routed to capture.
+    expect(stub.chatCalls.length).toBeGreaterThan(0);
+    expect(result.captureRequest).toBeUndefined();
+    expect(result.grantCeilingViolations).toHaveLength(0);
+    expect(result.text).not.toMatch(/нет прав настраивать/i);
+  });
+});
+
+describe("AC-T466-4: isCaptureWorthy heuristic [D8-G5]", () => {
+  it("filters trivial pings but keeps real descriptions", async () => {
+    const { isCaptureWorthy } = await import("../core/assistant-configurator.js");
+    expect(isCaptureWorthy("?")).toBe(false);
+    expect(isCaptureWorthy("   ")).toBe(false);
+    expect(isCaptureWorthy("hi")).toBe(false);
+    expect(isCaptureWorthy("настрой форму заявок")).toBe(true);
   });
 });
