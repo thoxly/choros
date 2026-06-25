@@ -17,10 +17,6 @@
 services:
   postgres:
     image: postgres:16
-    # T-0483: self-heal on crash/OOM so a transient substrate death does not leave
-    # the silo permanently down. unless-stopped survives daemon restarts but honours
-    # an explicit `docker compose stop` (so dev teardown still works).
-    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-choros}
       POSTGRES_USER: ${POSTGRES_USER:-choros_migrator}     # bootstrap = migrator/owner
@@ -50,8 +46,6 @@ services:
   # Readiness probe: GET /health/ready on management port (24 × 5s retries = 120 s — AC-1).
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
-    # T-0483: self-heal on crash so login does not stay down after a transient death.
-    restart: unless-stopped
     # tini as PID 1 reaps the zombie sh/cat children the CMD-SHELL healthcheck
     # (process-substitution below) spawns every 5s — without it PID 1 (the JVM)
     # never reaps them and ~13k zombies fill the cgroup pids in ~22h, exhausting
@@ -120,6 +114,11 @@ services:
     # non-clean exit and survives a daemon restart, while still honouring an explicit
     # `docker compose stop`. Combined with the healthcheck below + the API's
     # depends_on: service_healthy, the engine self-heals and the API waits for readiness.
+    #
+    # NOTE: postgres + keycloak intentionally do NOT carry this line — their service
+    # blocks are frozen by ci/checks/flowable/static-checks.sh (FF-FL-11). Adding the
+    # same self-heal there is a follow-up that must move the FF-FL-11 baseline in the
+    # same change (out of scope for T-0483; see BLOCKERS).
     restart: unless-stopped
     environment:
       SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
