@@ -572,7 +572,7 @@ export function isCaptureWorthy(text: string): boolean {
 /** Whether `text` reads as a user confirming a previously-proposed plan. */
 export function confirmsPlan(text: string): boolean {
   const t = text.trim().toLowerCase();
-  if (t.length === 0) return true === false; // empty never confirms
+  if (t.length === 0) return false; // empty never confirms
   // Affirmation tokens (RU + EN). Matched as whole words / common phrasings.
   const AFFIRM = [
     "да", "давай", "давайте", "генерируй", "генерируйте", "собери", "собирай",
