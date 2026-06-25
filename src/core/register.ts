@@ -217,6 +217,11 @@ export async function registerTenant(
   const agentRaConfiguratorId = randomUUID();
   const grantCreateId = randomUUID();
   const grantUpdateId = randomUUID();
+  // T-0475 [E-AGENTS L4]: capability grants on role-configurator — llm_connection:
+  // configure + system_agent:operate (spec §6). Granting them to role-configurator
+  // (which the owner holds via 3g) keeps the configurator the platform-admin role.
+  const grantLlmConnConfigureId = randomUUID();
+  const grantSystemAgentOperateId = randomUUID();
   // T-0469 [auth]: IDs for the role-constructor-admin role + its delegable
   // org-object grants. The role is SEEDED but NOT auto-assigned — the owner
   // grants it to whoever should be a constructor-admin (owner-rights MINUS
@@ -412,6 +417,36 @@ export async function registerTenant(
         [
           tenantId,
           grantUpdateId,
+          configuratorRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          ts,
+        ],
+      );
+
+      // 3j-bis. T-0475 [E-AGENTS L4]: capability grants on role-configurator.
+      //   llm_connection:configure → configure LLM connections + keys (spec §6).
+      //   system_agent:operate     → configure/run a SYSTEM agent (spec §6, tied to
+      //                              authoring_draft — seeded explicitly so the
+      //                              capability exists in the lattice on its own).
+      // CAPABILITY (not mgmt_object): delegable=false, ⊥-scope, resource_type carries
+      // the capability token verbatim (free-text grant column). The owner holds these
+      // via the 3g owner→role-configurator assignment (belt-and-suspenders with the
+      // code owner-short-circuit); any human assigned role-configurator inherits them.
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES
+           ($1, $2, $4, 'llm_connection:configure', NULL, 'configure', $5::jsonb,
+            NULL, false, 'registration', NULL, 'registration', NULL, NULL, $6),
+           ($1, $3, $4, 'system_agent:operate', NULL, 'operate', $5::jsonb,
+            NULL, false, 'registration', NULL, 'registration', NULL, NULL, $6)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          grantLlmConnConfigureId,
+          grantSystemAgentOperateId,
           configuratorRoleId,
           JSON.stringify({ kind: "set", members: [] }),
           ts,
