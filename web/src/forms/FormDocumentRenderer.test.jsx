@@ -43,8 +43,9 @@ function collect(node, predicate, results = [], depth = 0) {
   if (typeof node !== 'object' || node.type === undefined) return results;
   if (predicate(node)) results.push(node);
   // Execute plain function components to reach their output. Skip React.lazy
-  // (object type with a $$typeof / _payload) and Suspense (Symbol type).
-  if (typeof node.type === 'function' && !node.type.$$typeof) {
+  // (object type) and components that use hooks (the class-b sandbox host — we
+  // assert its presence by props, never by executing it out of render).
+  if (typeof node.type === 'function' && !node.type.$$typeof && node.type.name !== 'Floor2Sandbox' && node.type.name !== 'TabsNode') {
     let rendered;
     try { rendered = node.type(node.props || {}); } catch { rendered = undefined; }
     if (rendered !== undefined) collect(rendered, predicate, results, depth + 1);

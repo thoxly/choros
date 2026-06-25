@@ -26,17 +26,19 @@
 
 import React from 'react';
 import { FieldControl } from './field-renderer.jsx';
+import Floor2Sandbox from './Floor2Sandbox.jsx';
 import {
   childrenOf, isDataNodeType, indexSchema, defaultWidgetForType,
 } from './form-document.js';
 
-// Floor2Viewer (class-b sandbox-iframe) is loaded LAZILY: it transitively imports
-// the compiled core twin (floor2-renderer.js, produced by tsc / resolved by the
-// vite build). Lazy-loading keeps that import OFF the module graph of the unified
-// declarative renderer — the 99% path never pays for it, and the pure-logic test
-// tier can import this renderer without the build-only twin. The custom node is
-// the rare flagged escape; deferring its viewer is also a sound code-split.
-const Floor2Viewer = React.lazy(() => import('./Floor2Viewer.jsx'));
+// The class-b (custom) node renders in Floor2Sandbox — the web-local
+// sandbox-iframe host that reuses the T-0101 isolation contract (opaque origin,
+// allow-scripts WITHOUT allow-same-origin, origin-validated height channel). It
+// is intentionally NOT the src/core-coupled Floor2Viewer.jsx: web/** is not
+// bundled with src/** (rollup cannot resolve the src/core/*.js twin), so coupling
+// the declarative renderer to it would break the build (D-056). Floor2Sandbox is
+// self-contained → the build stays integration-honest while the isolation
+// mechanism is the same.
 
 // ---------------------------------------------------------------------------
 // Live-schema → renderable-field adapter
@@ -290,30 +292,31 @@ function TableNode({ node, ctx }) {
 }
 
 function CustomNode({ node, ctx }) {
-  // Class-b escape — sandbox-iframe. Build the BindingField[] contract for the
-  // bindings the custom widget declares; the agent code in the iframe presents
-  // over THAT contract only and cannot reach the parent / process (T-0076/T-0101).
+  // Class-b escape — sandbox-iframe. Build the named-binding fields (WITH current
+  // values) for the bindings the custom widget declares; the agent code in the
+  // iframe presents over THAT contract only and cannot reach the parent / process
+  // (ADR §4 invariant; T-0101 isolation). A binding the live schema lacks is
+  // dropped (the widget cannot bind to a non-existent field).
   const bindings = Array.isArray(node.bindings) ? node.bindings : [];
   const fields = bindings
     .map((key) => {
       const sf = ctx.schema.byKey.get(key);
       if (!sf) return null;
-      return { key, label: sf.label || sf.title || key, type: sf.type, options: sf.options };
+      return {
+        key, label: sf.label || sf.title || key, type: sf.type, options: sf.options,
+        value: ctx.values ? ctx.values[key] : undefined,
+      };
     })
     .filter(Boolean);
   const descriptor = {
-    mode: node.descriptorMode || 'custom',
-    bindingKey: bindings[0] || node.componentId,
     componentId: node.componentId,
-    reactSource: node.reactSource,
-    // governance flag passes through; Floor2Viewer/validateFloor2Descriptor enforces it.
-    meta: node.meta,
+    code: node.code,
+    // governance opt-in (§9.10): the code mounts ONLY when explicitly flagged.
+    flagged: node.flagged === true,
   };
   return (
     <div className="chs-fd-custom" data-component-id={node.componentId}>
-      <React.Suspense fallback={<div className="chs-fd-custom__loading" aria-busy="true" />}>
-        <Floor2Viewer descriptor={descriptor} fields={fields} theme={ctx.theme || 'light'} onError={ctx.onCustomError} />
-      </React.Suspense>
+      <Floor2Sandbox descriptor={descriptor} fields={fields} onError={ctx.onCustomError} />
     </div>
   );
 }
