@@ -34,8 +34,7 @@ ALTER TABLE choros.form_binding
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM information_schema.constraint_column_usage
-    WHERE constraint_name = 'form_binding_layout_is_object'
+    SELECT 1 FROM pg_constraint WHERE conname = 'form_binding_layout_is_object'
   ) THEN
     ALTER TABLE choros.form_binding
       ADD CONSTRAINT form_binding_layout_is_object
