@@ -17,6 +17,10 @@
 services:
   postgres:
     image: postgres:16
+    # T-0483: self-heal on crash/OOM so a transient substrate death does not leave
+    # the silo permanently down. unless-stopped survives daemon restarts but honours
+    # an explicit `docker compose stop` (so dev teardown still works).
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-choros}
       POSTGRES_USER: ${POSTGRES_USER:-choros_migrator}     # bootstrap = migrator/owner
@@ -46,6 +50,8 @@ services:
   # Readiness probe: GET /health/ready on management port (24 × 5s retries = 120 s — AC-1).
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
+    # T-0483: self-heal on crash so login does not stay down after a transient death.
+    restart: unless-stopped
     # tini as PID 1 reaps the zombie sh/cat children the CMD-SHELL healthcheck
     # (process-substitution below) spawns every 5s — without it PID 1 (the JVM)
     # never reaps them and ~13k zombies fill the cgroup pids in ~22h, exhausting
@@ -107,6 +113,14 @@ services:
   # basic-auth → HTTP 200 when engine is fully up. wget ships in the image.
   flowable:
     image: flowable/flowable-rest:7.1.0
+    # T-0483 (BLOCKER #1 of the process half): the engine MUST self-heal. The field
+    # walkthrough (2026-06-25) saw POST /publish → 502 ENGINE_UNAVAILABLE; if the JVM
+    # transiently dies (OOM / DB blip) the engine must come back on its own rather than
+    # leaving every publish/start permanently broken. unless-stopped restarts on any
+    # non-clean exit and survives a daemon restart, while still honouring an explicit
+    # `docker compose stop`. Combined with the healthcheck below + the API's
+    # depends_on: service_healthy, the engine self-heals and the API waits for readiness.
+    restart: unless-stopped
     environment:
       SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
       # currentSchema=flowable directs PostgreSQL JDBC to use the 'flowable' schema
@@ -147,6 +161,8 @@ services:
   # depends_on: all three substrates must be healthy before choros-app starts.
   choros:
     build: .
+    # T-0483: self-heal on crash so the silo runtime comes back on its own.
+    restart: unless-stopped
     environment:
       DATABASE_URL:     ${DATABASE_URL:-postgres://choros_migrator:choros_dev_pw@postgres:5432/choros}
       CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:-dev}
