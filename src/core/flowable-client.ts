@@ -53,6 +53,78 @@ export type FlowableErrorCode =
   | "TIMEOUT"            // request timeout exceeded
   | "UNKNOWN";           // all other errors
 
+// ---------------------------------------------------------------------------
+// T-0483: typed mapping FlowableErrorCode → HTTP status + client-facing message.
+//
+// The publish/start routes proxy the engine; when the engine is unreachable
+// (down / OOM / DB blip) the route must surface a CLEAR, TYPED error the client
+// can branch on — not an opaque "502 deployBpmn failed: ENGINE_UNAVAILABLE".
+//
+// ENGINE_UNAVAILABLE / TIMEOUT → 503 Service Unavailable (transient; the engine
+// may self-heal via the compose restart policy — caller can retry). The error
+// `code` is preserved verbatim so the web layer can show an honest
+// "движок недоступен" state and keep the diagram a ЧЕРНОВИК (never green "валидно").
+//
+// Pure data + no I/O, so it lives in core (NF-1) and is unit-testable.
+// ---------------------------------------------------------------------------
+
+/** Shape consumed by the HTTP layer to build a typed error response. */
+export interface FlowableErrorHttp {
+  /** HTTP status to return to the client. */
+  readonly status: number;
+  /** Stable machine code the client branches on (equals the FlowableErrorCode). */
+  readonly code: FlowableErrorCode;
+  /** User-readable Russian message — honest, never papered over. */
+  readonly message: string;
+}
+
+const ENGINE_UNAVAILABLE_MSG =
+  "Движок процессов недоступен. Изменения сохранены как черновик — повторите публикацию позже.";
+
+/**
+ * Map a typed FlowableErrorCode to an HTTP status + client-facing message.
+ * Used by the publish + start-instance routes so an engine failure is explicit.
+ */
+export function flowableErrorToHttp(code: FlowableErrorCode): FlowableErrorHttp {
+  switch (code) {
+    case "ENGINE_UNAVAILABLE":
+    case "TIMEOUT":
+      // Transient: engine unreachable / slow. 503 signals "try again".
+      return { status: 503, code: "ENGINE_UNAVAILABLE", message: ENGINE_UNAVAILABLE_MSG };
+    case "BAD_BPMN":
+      return {
+        status: 422,
+        code,
+        message: "Диаграмма отклонена движком процессов (некорректный BPMN).",
+      };
+    case "UNAUTHORIZED":
+      return {
+        status: 502,
+        code,
+        message: "Движок процессов отклонил авторизацию сервера. Обратитесь к администратору.",
+      };
+    case "CONFLICT":
+      return {
+        status: 409,
+        code,
+        message: "Конфликт версий в движке процессов. Обновите страницу и повторите.",
+      };
+    case "NOT_FOUND":
+      return {
+        status: 502,
+        code,
+        message: "Движок процессов не нашёл ресурс. Обратитесь к администратору.",
+      };
+    // RECORD_IN_PAYLOAD / UNKNOWN and any future code → opaque-but-honest 502.
+    default:
+      return {
+        status: 502,
+        code: "UNKNOWN",
+        message: "Ошибка движка процессов. Повторите позже или обратитесь к администратору.",
+      };
+  }
+}
+
 export type DeployResult =
   | { ok: true; deploymentId: string }
   | { ok: false; code: FlowableErrorCode };
