@@ -15,7 +15,7 @@ import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
 // T-0399 [D7-K]: the inbox form field control is now the ONE unified renderer
 // (web/src/forms/field-renderer.jsx), keyed off the binding-contract catalog —
 // replacing the inline type→control map that silently dropped enum options.
-import { FieldControl } from '../forms/field-renderer.jsx';
+import { FieldControl, resolveFieldMode } from '../forms/field-renderer.jsx';
 
 // ---------------------------------------------------------------------------
 // T-0376: InboxTaskForm — renders the bound form for a userTask in the inbox
@@ -93,10 +93,15 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
     e.preventDefault();
     if (!binding || !Array.isArray(binding.fields)) return;
 
-    // Validate required fields
+    // Validate required fields. T-0404 [D7-9]: a field is required to advance the
+    // step when its legacy `required` flag is set OR its per-step mode is
+    // `required-to-advance`. Hidden fields are never asserted required (they are not
+    // rendered) — skip them so a hidden field never blocks submit.
     const errs = {};
     for (const f of binding.fields) {
-      if (!f.required) continue;
+      const { hidden, required: modeRequired } = resolveFieldMode(f);
+      if (hidden) continue;
+      if (!f.required && !modeRequired) continue;
       const v = values[f.key];
       if (v === '' || v === null || v === undefined || (typeof v === 'string' && !v.trim())) {
         errs[f.key] = 'Обязательное поле';
@@ -108,7 +113,24 @@ function InboxTaskForm({ processKey, stepKey, onSubmit, submitting }) {
       return;
     }
     setFormError(null);
-    if (onSubmit) onSubmit(values);
+    // T-0404 [D7-9]: never submit read-only/hidden fields — the user cannot edit
+    // them at this step, and the server REJECTS any write to them
+    // (form-submit-validator.ts). Omitting them client-side keeps a legitimate
+    // submit from being rejected as a readonly_write / hidden_write. The remaining
+    // (editable) keys are sent as before.
+    const editableKeys = new Set(
+      binding.fields
+        .filter((f) => {
+          const { hidden, readOnly } = resolveFieldMode(f);
+          return !hidden && !readOnly;
+        })
+        .map((f) => f.key),
+    );
+    const payload = {};
+    for (const [k, v] of Object.entries(values)) {
+      if (editableKeys.has(k)) payload[k] = v;
+    }
+    if (onSubmit) onSubmit(payload);
   }, [binding, values, onSubmit]);
 
   // Loading — use kit LoadingState
