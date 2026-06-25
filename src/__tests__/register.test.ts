@@ -977,9 +977,11 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
     await pool.end();
   });
 
-  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 2 roles, 2 employees, 3 confirmed role_assignments (T-0373 updated)", async () => {
-    // T-0373 (PD-7): registerTenant now also seeds role-configurator + assistant-agent.
-    // Updated counts: roles 1→2, employees 1→2, role_assignments 1→3.
+  it("FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 3 roles, 2 employees, 3 confirmed role_assignments (T-0469 updated)", async () => {
+    // T-0373 (PD-7): registerTenant also seeds role-configurator + assistant-agent.
+    // T-0469 [auth]: registerTenant ALSO seeds role-constructor-admin (UNASSIGNED).
+    //   roles 2→3; employees stay 2 (no new employee); role_assignments stay 3
+    //   (the constructor-admin role is seeded but assigned to nobody on registration).
     const kcLocal = new InMemoryKeycloakUserPort();
     const nowMs = () => Date.now();
     const req = {
@@ -1016,15 +1018,55 @@ describe.skipIf(!LIVE_DB)("FF-4 / FF-6 — DB-level fitness (requires live Postg
       );
       expect(tenants.rows).toHaveLength(1);
 
-      // Exactly 2 roles: tenant-owner + role-configurator (T-0373)
+      // Exactly 3 roles: tenant-owner + role-configurator (T-0373) +
+      // role-constructor-admin (T-0469, seeded-but-unassigned).
       const roles = await client.query(
         `SELECT slug FROM choros.role WHERE tenant_id = $1 ORDER BY slug`,
         [tenantId],
       );
-      expect(roles.rows).toHaveLength(2);
+      expect(roles.rows).toHaveLength(3);
       const roleSlugs = roles.rows.map((r: { slug: string }) => r.slug);
       expect(roleSlugs).toContain("tenant-owner");
       expect(roleSlugs).toContain("role-configurator");
+      expect(roleSlugs).toContain("role-constructor-admin");
+
+      // T-0469 boundary: role-constructor-admin is seeded but assigned to NOBODY
+      // on registration (the owner grants it explicitly later). So the assignment
+      // count stays 3 (no constructor-admin role_assignment), asserted below.
+      const caRole = roles.rows.find(
+        (r: { slug: string }) => r.slug === "role-constructor-admin",
+      );
+      const caRoleId = (
+        await client.query(
+          `SELECT id FROM choros.role WHERE tenant_id = $1 AND slug = 'role-constructor-admin'`,
+          [tenantId],
+        )
+      ).rows[0].id;
+      expect(caRole).toBeDefined();
+      const caAssignments = await client.query(
+        `SELECT id FROM choros.role_assignment WHERE tenant_id = $1 AND role_id = $2`,
+        [tenantId, caRoleId],
+      );
+      expect(caAssignments.rows).toHaveLength(0);
+
+      // T-0469 owner-only boundary in the GRANT SET: role-constructor-admin holds
+      // NO employee:delete grant and NO mgmt_object:grant grant (cannot remove a
+      // person, cannot mint role_assignments / replace the owner).
+      const caGrants = await client.query(
+        `SELECT resource_type, operation FROM choros."grant"
+          WHERE tenant_id = $1 AND role_id = $2`,
+        [tenantId, caRoleId],
+      );
+      const caGrantKeys = caGrants.rows.map(
+        (g: { resource_type: string; operation: string }) =>
+          `${g.resource_type}:${g.operation}`,
+      );
+      expect(caGrantKeys).toContain("mgmt_object:department:create");
+      expect(caGrantKeys).toContain("mgmt_object:employee:create");
+      expect(caGrantKeys).toContain("mgmt_object:role:create");
+      // The two things a constructor-admin must NEVER be able to do:
+      expect(caGrantKeys).not.toContain("mgmt_object:employee:delete");
+      expect(caGrantKeys.some((k: string) => k.startsWith("mgmt_object:grant:"))).toBe(false);
 
       // Exactly 2 employees: the owner (slug=KC sub) + assistant-agent (T-0373)
       const employees = await client.query(

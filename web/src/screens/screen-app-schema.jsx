@@ -34,6 +34,7 @@ import {
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
+import { resolveRelationTarget, slugFromName } from '../forms/relation-cascade.js';
 import {
   FIELD_TYPES,
   COLLECTION_SUB_FIELD_TYPES,
@@ -444,8 +445,39 @@ function RollupConfigEditor({ field, errors, allFields, onChange }) {
  * FieldEditor and passed down) for the target selector. targetRegistryId stored
  * on the field object.
  */
-function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields }) {
+function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, registryDefs, registryDefsLoading, registryDefsError, allFields, onCreateRelatedApp }) {
   const set = (patch) => onChange({ ...field, ...patch });
+
+  // T-0463 [D8-G2]: inline "create related app" state for the relation picker.
+  // When the desired relation target doesn't exist, the user names it here and
+  // we cascade-create it (or link to an existing match) via onCreateRelatedApp.
+  const [showCreateRelated, setShowCreateRelated] = useState(false);
+  const [relatedName, setRelatedName] = useState('');
+  const [creatingRelated, setCreatingRelated] = useState(false);
+  const [relatedError, setRelatedError] = useState(null);
+  const [relatedAsk, setRelatedAsk] = useState(null); // { candidates, question } when ambiguous
+
+  const submitCreateRelated = async () => {
+    setRelatedError(null);
+    setRelatedAsk(null);
+    if (!onCreateRelatedApp) return;
+    setCreatingRelated(true);
+    try {
+      const r = await onCreateRelatedApp(relatedName);
+      if (r && r.ok) {
+        set({ targetRegistryId: r.targetRegistryId });
+        setShowCreateRelated(false);
+        setRelatedName('');
+      } else if (r && r.ask) {
+        // Ambiguous — surface candidates so the user disambiguates (PD-5, no guess).
+        setRelatedAsk({ candidates: r.candidates || [], question: r.question || '' });
+      } else {
+        setRelatedError((r && r.error) || 'Не удалось создать связанное приложение');
+      }
+    } finally {
+      setCreatingRelated(false);
+    }
+  };
 
   // T-0294: convert options array ↔ newline-separated string for the textarea.
   const optionsText = Array.isArray(field.options)
@@ -576,11 +608,68 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
               )}
               {!registryDefsLoading && !registryDefsError && (registryDefs || []).length === 0 && (
                 <span style={{ display: 'block', marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                  Пока не создано ни одного набора полей, на который можно сослаться — создайте его первым
+                  Пока не создано ни одного набора полей, на который можно сослаться — создайте связанное приложение ниже
                 </span>
               )}
               {errors.targetRegistryId && (
                 <span style={errStyle}>{errors.targetRegistryId}</span>
+              )}
+
+              {/* T-0463 [D8-G2]: "create related app" — when the target doesn't
+                  exist, the user names it and we cascade-create (or link to a
+                  dedup match). Same primitive the bot uses (Развилка-5). */}
+              {!showCreateRelated && onCreateRelatedApp && (
+                <div style={{ marginTop: 'var(--chs-space-3)' }}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    glyph={<KitIcon name="plus" />}
+                    onClick={() => { setShowCreateRelated(true); setRelatedError(null); setRelatedAsk(null); }}
+                  >
+                    Нужного приложения нет — создать связанное
+                  </Button>
+                </div>
+              )}
+              {showCreateRelated && (
+                <div style={{ marginTop: 'var(--chs-space-3)', padding: 'var(--chs-space-4)', border: '1px dashed var(--chs-color-border)', borderRadius: 'var(--chs-radius-3)' }}>
+                  <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                    Название связанного приложения (создастся в том же черновике; если уже есть похожее — свяжем с ним):
+                  </span>
+                  <input
+                    className={inputCls(false)}
+                    value={relatedName}
+                    onChange={(e) => setRelatedName(e.target.value)}
+                    placeholder="Например: Контрагенты"
+                    aria-label="Название связанного приложения"
+                  />
+                  {relatedAsk && (
+                    <div style={{ marginTop: 'var(--chs-space-2)' }}>
+                      <span style={{ ...errStyle, color: 'var(--chs-color-text-muted)' }}>{relatedAsk.question}</span>
+                      {(relatedAsk.candidates || []).map((c) => (
+                        <div key={c.id} style={{ marginTop: 'var(--chs-space-2)' }}>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => { set({ targetRegistryId: c.id }); setShowCreateRelated(false); setRelatedName(''); setRelatedAsk(null); }}
+                          >
+                            Связать с «{c.displayName}»
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {relatedError && <span style={errStyle}>{relatedError}</span>}
+                  <div style={{ display: 'flex', gap: 'var(--chs-space-3)', marginTop: 'var(--chs-space-3)' }}>
+                    <Button type="button" variant="primary" size="sm" disabled={creatingRelated || !relatedName.trim()} onClick={submitCreateRelated}>
+                      {creatingRelated ? 'Создание…' : 'Создать и связать'}
+                    </Button>
+                    <Button type="button" variant="ghost" size="sm" disabled={creatingRelated} onClick={() => { setShowCreateRelated(false); setRelatedError(null); setRelatedAsk(null); }}>
+                      Отмена
+                    </Button>
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -685,6 +774,70 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const addField = useCallback(() => {
     setFields((prev) => [...prev, blankField()]);
   }, []);
+
+  // T-0463 [D8-G2]: create a RELATED application + section as the relation target
+  // when the desired target doesn't exist yet — the SECOND driver of the cascade
+  // primitive. Dedups against the existing list (resolveRelationTarget):
+  //   - existing match → returns its id (no duplicate app, LINK).
+  //   - ambiguous      → returns { ask } so the caller can disambiguate.
+  //   - none           → POST /api/applications + /api/registry-defs, returns new id.
+  // Returns { ok, targetRegistryId } | { ask, candidates } | { error }.
+  const createRelatedApp = useCallback(async (desiredName) => {
+    const name = String(desiredName || '').trim();
+    if (!name) return { error: 'Укажите название связанного приложения' };
+
+    // Build dedup candidates from the already-fetched tenant registry_defs.
+    const candidates = (allRegistryDefs || []).map((d) => ({
+      id: d.id, slug: d.slug, displayName: d.display_name || d.slug,
+    }));
+    // depth=1: a top-level relation creating one related app is at depth 1 (≤ HOP_CAP).
+    const decision = resolveRelationTarget({ targetDisplayName: name }, candidates, 1);
+
+    if (decision.decision === 'link') {
+      return { ok: true, targetRegistryId: decision.targetRegistryId };
+    }
+    if (decision.decision === 'ask') {
+      return { ask: true, candidates: decision.candidates, question: decision.question };
+    }
+    if (decision.decision === 'hop_cap_exceeded') {
+      return { error: `Слишком глубокий каскад связей (макс. ${decision.cap})` };
+    }
+
+    // decision === 'create' → POST the related app, then its primary section.
+    try {
+      const appSlug = decision.appSlug || slugFromName(name);
+      const appRes = await fetch('/api/applications', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ slug: appSlug, display_name: name }),
+      });
+      if (appRes.status !== 201) {
+        const parsed = await appRes.json().catch(() => null);
+        return { error: parsed?.message || `Не удалось создать приложение (HTTP ${appRes.status})` };
+      }
+      const createdApp = await appRes.json();
+      const regRes = await fetch('/api/registry-defs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({
+          application_id: createdApp.id,
+          slug: appSlug,
+          display_name: name,
+          record_schema: { type: 'object', properties: {} },
+        }),
+      });
+      if (regRes.status !== 201 && regRes.status !== 200) {
+        const parsed = await regRes.json().catch(() => null);
+        return { error: parsed?.message || `Не удалось создать набор полей (HTTP ${regRes.status})` };
+      }
+      const createdReg = await regRes.json();
+      // Refresh the dropdown list so the new app appears as a selectable target.
+      setAllRegistryDefs((prev) => [...prev, createdReg]);
+      return { ok: true, targetRegistryId: createdReg.id };
+    } catch (err) {
+      return { error: String(err?.message || err) };
+    }
+  }, [allRegistryDefs]);
 
   const handleSubmit = useCallback(async (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -814,6 +967,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
               registryDefsLoading={allRegistryDefsLoading}
               registryDefsError={allRegistryDefsError}
               allFields={fields}
+              onCreateRelatedApp={createRelatedApp}
             />
           ))}
         </div>

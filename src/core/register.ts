@@ -217,6 +217,24 @@ export async function registerTenant(
   const agentRaConfiguratorId = randomUUID();
   const grantCreateId = randomUUID();
   const grantUpdateId = randomUUID();
+  // T-0469 [auth]: IDs for the role-constructor-admin role + its delegable
+  // org-object grants. The role is SEEDED but NOT auto-assigned — the owner
+  // grants it to whoever should be a constructor-admin (owner-rights MINUS
+  // owner-deletion). See the seeding block below for the boundary rationale.
+  const constructorAdminRoleId = randomUUID();
+  const caGrantIds = {
+    deptCreate: randomUUID(),
+    deptUpdate: randomUUID(),
+    deptDelete: randomUUID(),
+    posCreate: randomUUID(),
+    posUpdate: randomUUID(),
+    posDelete: randomUUID(),
+    empCreate: randomUUID(),
+    empUpdate: randomUUID(),
+    roleCreate: randomUUID(),
+    roleUpdate: randomUUID(),
+    roleDelete: randomUUID(),
+  };
   const ts = deps.nowMs();
 
   let tenantSlug: string | undefined;
@@ -399,6 +417,99 @@ export async function registerTenant(
           ts,
         ],
       );
+
+      // -----------------------------------------------------------------------
+      // T-0469 [auth]: Tenant-zero seeding of role-constructor-admin.
+      //
+      // role-constructor-admin = OWNER RIGHTS *MINUS* OWNER-DELETION. It carries
+      // DELEGABLE mgmt_object grants that the seed-write.ts org routes honour
+      // (assertOrgObjectAuthority), so a holder gets owner-like AUTHORING power
+      // over departments / positions / employees / roles without being the
+      // genesis owner.
+      //
+      // THE SECURITY BOUNDARY — what is DELIBERATELY ABSENT from this grant set:
+      //   - NO mgmt_object:employee/delete grant. Employee DELETION is owner-only
+      //     (DELETE /api/employees keeps a strict isGenesisOwner gate AND the grant
+      //     set here cannot cover it even if a future refactor routed it through
+      //     the delegation helper). A constructor-admin can hire/edit people but
+      //     never remove one.
+      //   - NO mgmt_object:grant grant. The role/assignment-minting authority is
+      //     NOT delegated, so a constructor-admin can never mint a role_assignment
+      //     (and seed-write never touches role_assignment at all), and therefore
+      //     can never grant/replace/remove the tenant-owner. The owner stays the
+      //     un-parented delegation root.
+      //   - NO freeform scope. All grants are ⊥-scoped lattice elements.
+      //
+      // Scope ⊥ = {"kind":"set","members":[]}. isNarrowerOrEqual(⊥, ⊥) = true and
+      // ⊥ ⊑ anything = true (grant-lattice.ts), so an assignment of this role
+      // (org_scope ⊥, like the owner/configurator assignments) makes the synthetic
+      // child (scope = adminOrgScope = ⊥) pass both the org-axis and resource-axis
+      // gates of validateAdminDelegation. delegable=true is required for the
+      // resource-axis covering check.
+      //
+      // The role is SEEDED-BUT-UNASSIGNED: registerTenant assigns it to nobody.
+      // The owner confirms a role_assignment to make a real person a constructor-
+      // admin (via the existing rights machinery), so no person silently gains
+      // these rights on registration.
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (fresh IDs → never conflicts on a new
+      // tenant; safe no-op if the same path is re-run).
+      // -----------------------------------------------------------------------
+
+      // 3k. role-constructor-admin role row.
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, 'role-constructor-admin', 'Конструктор-администратор',
+                 $3, $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          constructorAdminRoleId,
+          "Owner-like org authoring (departments/positions/employees/roles) MINUS " +
+            "owner-deletion: no employee delete, no role_assignment/owner mutation.",
+          ts,
+        ],
+      );
+
+      // 3l. Delegable mgmt_object grants for role-constructor-admin.
+      //     resource_type ∈ {department, position, employee, role}; operations
+      //     create/update (+delete for dept/position/role). employee:delete and
+      //     mgmt_object:grant are intentionally OMITTED (owner-only boundary).
+      const caGrants: Array<{ id: string; rt: string; op: string }> = [
+        { id: caGrantIds.deptCreate, rt: "mgmt_object:department", op: "create" },
+        { id: caGrantIds.deptUpdate, rt: "mgmt_object:department", op: "update" },
+        { id: caGrantIds.deptDelete, rt: "mgmt_object:department", op: "delete" },
+        { id: caGrantIds.posCreate, rt: "mgmt_object:position", op: "create" },
+        { id: caGrantIds.posUpdate, rt: "mgmt_object:position", op: "update" },
+        { id: caGrantIds.posDelete, rt: "mgmt_object:position", op: "delete" },
+        { id: caGrantIds.empCreate, rt: "mgmt_object:employee", op: "create" },
+        { id: caGrantIds.empUpdate, rt: "mgmt_object:employee", op: "update" },
+        { id: caGrantIds.roleCreate, rt: "mgmt_object:role", op: "create" },
+        { id: caGrantIds.roleUpdate, rt: "mgmt_object:role", op: "update" },
+        { id: caGrantIds.roleDelete, rt: "mgmt_object:role", op: "delete" },
+      ];
+      for (const g of caGrants) {
+        await client.query(
+          `INSERT INTO choros."grant"
+             (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+              "constraint", delegable, granted_by, proposed_by, confirmed_by,
+              valid_from, valid_until, created_at)
+           VALUES ($1, $2, $3, $4, NULL, $5, $6::jsonb,
+                   NULL, true, 'registration', NULL, 'registration',
+                   NULL, NULL, $7)
+           ON CONFLICT DO NOTHING`,
+          [
+            tenantId,
+            g.id,
+            constructorAdminRoleId,
+            g.rt,
+            g.op,
+            JSON.stringify({ kind: "set", members: [] }),
+            ts,
+          ],
+        );
+      }
 
       await client.query("COMMIT");
       tenantSlug = candidateSlug;

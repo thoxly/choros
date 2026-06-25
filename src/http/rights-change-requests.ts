@@ -55,6 +55,7 @@ import pg from "pg";
 import {
   resolveActorTenant,
   resolveActorSlugFromAuth,
+  isGenesisOwnerForTenant,
 } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
@@ -441,8 +442,10 @@ async function rejectChangeRequest(args: {
   changeId: string;
   reason: string | null;
   nowMs: number;
+  /** T-0469 — true iff `actor` is the genesis tenant-owner (DB-resolved, NF-3). */
+  ownerActor: boolean;
 }): Promise<{ id: string; kind: "grant" | "assignment"; state: "rejected" }> {
-  const { pool, tenantId, actor, changeId, reason, nowMs } = args;
+  const { pool, tenantId, actor, changeId, reason, nowMs, ownerActor } = args;
 
   return withTenantTx(pool, tenantId, async (client) => {
     // Try grant table first.
@@ -472,9 +475,15 @@ async function rejectChangeRequest(args: {
       );
     } else {
       // Try role_assignment.
-      const { rows: raRows } = await client.query<{ confirmed2_by: string | null }>(
-        `SELECT confirmed2_by FROM choros.role_assignment
-          WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+      const { rows: raRows } = await client.query<{
+        confirmed2_by: string | null;
+        role_id: string;
+      }>(
+        `SELECT ra.confirmed2_by, ra.role_id, r.slug AS role_slug
+           FROM choros.role_assignment ra
+           LEFT JOIN choros.role r
+                ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE ra.tenant_id = $1 AND ra.id = $2 LIMIT 1`,
         [tenantId, changeId],
       );
       if (raRows.length === 0) {
@@ -482,10 +491,30 @@ async function rejectChangeRequest(args: {
       }
 
       changeKind = "assignment";
-      const row = raRows[0];
+      const row = raRows[0] as {
+        confirmed2_by: string | null;
+        role_id: string;
+        role_slug: string | null;
+      };
       if (row.confirmed2_by !== null) {
         throw new HttpError(409, "ALREADY_CONFIRMED", "cannot reject an already-confirmed change request");
       }
+
+      // T-0469 [auth] — reject on a role_assignment soft-deletes it (valid_until=now),
+      // which IS honoured at the RA read-path. A tenant-owner assignment (incl. the
+      // genesis owner's seeded RA, which is confirmed_by-set / confirmed2_by NULL and
+      // thus matches this path) must NEVER be strippable by a non-owner via reject —
+      // that would be an owner-strip / denial-of-owner exactly like the fire and
+      // role-assignments/:id/revoke vectors. Resolving owner-ness FROM the role.slug,
+      // a tenant-owner RA may be rejected ONLY by the genesis owner.
+      if (row.role_slug === "tenant-owner" && !ownerActor) {
+        throw new HttpError(
+          403,
+          "ADMIN_GATE_REJECTED",
+          "owner_assignment_owner_only",
+        );
+      }
+
       await client.query(
         `UPDATE choros.role_assignment SET valid_until = $3, updated_at = $4
           WHERE tenant_id = $1 AND id = $2 AND confirmed2_by IS NULL`,
@@ -575,6 +604,13 @@ export function registerRightsChangeRequestRoutes(
       // DC-3: agents cannot reject either.
       await assertApproverIsHuman(pool, tenantId, actorId);
 
+      // T-0469 [auth] — DB-resolve whether the actor is the genesis owner (NF-3).
+      // Rejecting a tenant-owner role_assignment soft-deletes it (valid_until=now,
+      // honoured at the RA read-path) and would otherwise let a non-owner strip the
+      // genesis owner. Owner-ness is consulted inside rejectChangeRequest only when
+      // the targeted change is a tenant-owner assignment.
+      const ownerActor = await isGenesisOwnerForTenant(pool, tenantId, actorId, nowMs);
+
       // Optional reason from body.
       let reason: string | null = null;
       try {
@@ -586,7 +622,7 @@ export function registerRightsChangeRequestRoutes(
       }
 
       const result = await rejectChangeRequest({
-        pool, tenantId, actor: actorId, changeId, reason, nowMs,
+        pool, tenantId, actor: actorId, changeId, reason, nowMs, ownerActor,
       });
 
       res.statusCode = 200;

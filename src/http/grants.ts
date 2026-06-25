@@ -1110,11 +1110,16 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     await assertEmployeeExists(pool, tenantId, employeeId);
     await assertRoleExists(pool, tenantId, roleId);
 
+    // T-0469 [auth] — resolve whether the TARGET role is the genesis tenant-owner.
+    // Minting an owner role_assignment is OWNER-ONLY; a delegable mgmt_object
+    // grant must NOT satisfy authority for it (self-promotion path).
+    const assignsOwnerRole = await isOwnerRole(pool, tenantId, roleId);
+
     // Load admin context and gate.
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
     const gateResult = validateAdminDelegation(
       admin,
-      { kind: "assignment", targetOrgScope: orgScope },
+      { kind: "assignment", targetOrgScope: orgScope, assignsOwnerRole },
       SEED_ORACLE,
     );
 
@@ -1218,6 +1223,10 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
       // Fetch assignment row (404 if missing).
       const raRow = await fetchRoleAssignmentRow(pool, tenantId, raId);
 
+      // T-0469 [auth] — REMOVING a tenant-owner assignment is OWNER-ONLY too:
+      // a non-owner must not be able to demote/strip the genesis owner.
+      const assignsOwnerRole = await isOwnerRole(pool, tenantId, raRow.roleId);
+
       // Load admin context and gate on assignment's org_scope.
       const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
       const gateResult = validateAdminDelegation(
@@ -1225,6 +1234,7 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
         {
           kind: "assignment",
           targetOrgScope: raRow.orgScope,
+          assignsOwnerRole,
         },
         SEED_ORACLE,
       );
@@ -1394,6 +1404,40 @@ async function assertRoleExists(
     if (rows.length === 0) {
       throw new HttpError(404, "NOT_FOUND", `role ${roleId} not found`);
     }
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * T-0469 [auth] — is `roleId` the genesis tenant-owner role for `tenantId`?
+ *
+ * The owner role is identified by `role.slug = 'tenant-owner'` (migration 026 /
+ * 019; UUID e0000000-…-0001). The write-path uses this to set the OWNER-ONLY
+ * carve-out flag on the assignment delegation target so a non-owner cannot
+ * mint/remove an owner role_assignment (proven self-promotion path). Tenant-
+ * scoped (RLS via SET LOCAL); a role missing in this tenant ⇒ not owner (false).
+ */
+async function isOwnerRole(
+  pool: pg.Pool,
+  tenantId: string,
+  roleId: string,
+): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.role
+        WHERE tenant_id = $1 AND id = $2 AND slug = 'tenant-owner' LIMIT 1`,
+      [tenantId, roleId],
+    );
+    await client.query("COMMIT");
+    return rows.length > 0;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

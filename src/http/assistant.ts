@@ -79,6 +79,8 @@ import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
 import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
+import type { RegistryDefCandidate } from "../core/relation-cascade.js";
+import { reconcileCrossAppRefs } from "./registry-defs.js";
 // T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
 import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
 
@@ -246,6 +248,36 @@ const auditWriter = makePgAuditWriter();
 //    is reported in the text rather than crashing the whole message.
 // ---------------------------------------------------------------------------
 
+/**
+ * T-0463 [D8-G2]: fetch the tenant's existing registry_defs as cascade-dedup
+ * candidates (PD-5 "validate against existing"). Supplies the SAME list the
+ * visual relation-picker fetches (GET /api/registry-defs), so the bot and the
+ * picker dedup against identical data.
+ */
+async function fetchRegistryDefCandidates(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<RegistryDefCandidate[]> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const res = await client.query<{ id: string; slug: string; display_name: string }>(
+      `SELECT id, slug, display_name FROM choros.registry_def WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    await client.query("COMMIT");
+    return res.rows.map((r) => ({ id: r.id, slug: r.slug, displayName: r.display_name }));
+  } catch {
+    await client.query("ROLLBACK").catch(() => {});
+    // Honest-degrade: no candidates → every cascade creates (no dedup). Non-fatal.
+    return [];
+  } finally {
+    client.release();
+  }
+}
+
 /** Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, error message on failure. */
 async function executeApprovedOpAsDraft(
   pool: pg.Pool,
@@ -316,6 +348,121 @@ async function executeApprovedOpAsDraft(
           // Honest error string (NOT a 500) — surfaced in the changelog, not thrown.
           if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
             return `create_application: slug '${appSlug}' already exists in this tenant`;
+          }
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // relate_application — T-0463 (D8-G2): add a relation field on the SOURCE
+      // registry_def. For LINK: write x-relation.target_registry_id = existing id.
+      // For CREATE (cascade): create the related app + section in the SAME tx,
+      // then write the relation field pointing at the new section's registry_def id
+      // — so a single promote brings BOTH the related app and the relation. After
+      // the schema write, reconcileCrossAppRefs keeps cross_app_ref in sync.
+      // -----------------------------------------------------------------------
+      case "relate_application": {
+        const args = op.args;
+        const sourceRegistryDefId =
+          typeof args["sourceRegistryDefId"] === "string" ? args["sourceRegistryDefId"] : null;
+        const relationFieldKey =
+          typeof args["relationFieldKey"] === "string" ? args["relationFieldKey"] : null;
+        const relationFieldLabel =
+          typeof args["relationFieldLabel"] === "string" ? args["relationFieldLabel"] : relationFieldKey;
+        const cascade = (args["cascade"] ?? {}) as Record<string, unknown>;
+        const mode = typeof cascade["mode"] === "string" ? cascade["mode"] : null;
+
+        if (!sourceRegistryDefId || !relationFieldKey || (mode !== "link" && mode !== "create")) {
+          return `relate_application: missing sourceRegistryDefId/relationFieldKey or invalid cascade mode`;
+        }
+
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+
+          // 1) Resolve the target registry_def id.
+          //    LINK → use the existing id directly.
+          //    CREATE → create the related app + section (tier='draft'), use its id.
+          let targetRegistryId: string;
+          if (mode === "link") {
+            targetRegistryId = typeof cascade["targetRegistryId"] === "string"
+              ? cascade["targetRegistryId"] : "";
+            if (!targetRegistryId) {
+              await client.query("ROLLBACK");
+              return `relate_application(link): missing targetRegistryId`;
+            }
+          } else {
+            const appSlug = typeof cascade["appSlug"] === "string" ? cascade["appSlug"] : null;
+            const appDisplayName =
+              typeof cascade["appDisplayName"] === "string" ? cascade["appDisplayName"] : null;
+            if (!appSlug || !appDisplayName) {
+              await client.query("ROLLBACK");
+              return `relate_application(create): missing cascade appSlug/appDisplayName`;
+            }
+            const cascadedAppId = randomUUID();
+            targetRegistryId = randomUUID();
+            // Related application — same DRAFT bundle as the parent (tier='draft').
+            await client.query(
+              `INSERT INTO choros.application
+                 (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)`,
+              [tenantId, cascadedAppId, appSlug, appDisplayName, null, nowMs],
+            );
+            // Primary section (registry_def) under the cascaded app — empty schema.
+            await client.query(
+              `INSERT INTO choros.registry_def
+                 (tenant_id, id, application_id, slug, display_name, description,
+                  record_schema, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)`,
+              [tenantId, targetRegistryId, cascadedAppId, appSlug, appDisplayName, null,
+               JSON.stringify({ type: "object", properties: {} }), nowMs],
+            );
+          }
+
+          // 2) Read the source schema, add the relation field (additive), write back.
+          const srcRes = await client.query<{ record_schema: Record<string, unknown> | null }>(
+            `SELECT record_schema FROM choros.registry_def WHERE tenant_id = $1 AND id = $2`,
+            [tenantId, sourceRegistryDefId],
+          );
+          if (srcRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            return `relate_application: source registry_def '${sourceRegistryDefId}' not found`;
+          }
+          const oldSchema = (srcRes.rows[0].record_schema ?? { type: "object", properties: {} }) as Record<string, unknown>;
+          const relationFieldSchema = {
+            type: "string",
+            title: relationFieldLabel,
+            "x-relation": { target_registry_id: targetRegistryId },
+          };
+          // Additive jsonb_set: properties[relationFieldKey] = relationFieldSchema.
+          const updRes = await client.query<{ record_schema: Record<string, unknown> }>(
+            `UPDATE choros.registry_def
+                SET record_schema = jsonb_set(
+                  COALESCE(record_schema, '{"type":"object","properties":{}}'::jsonb),
+                  ARRAY['properties', $2],
+                  $3::jsonb,
+                  true
+                ),
+                updated_at = $4
+              WHERE tenant_id = $1 AND id = $5
+              RETURNING record_schema`,
+            [tenantId, relationFieldKey, JSON.stringify(relationFieldSchema), nowMs, sourceRegistryDefId],
+          );
+          const newSchema = updRes.rows[0]?.record_schema ?? oldSchema;
+
+          // 3) Reconcile cross_app_ref from the x-relation fields (same tx, atomic).
+          await reconcileCrossAppRefs(client, tenantId, sourceRegistryDefId, oldSchema, newSchema);
+
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
+            return `relate_application: cascaded app slug already exists in this tenant`;
           }
           throw err;
         } finally {
@@ -1258,7 +1405,10 @@ export function registerAssistantRoutes(
           // T-0363 (d): run the full configurator loop to get approvedOps.
           // T-0383 (D5): load the per-tenant configurator system prompt override.
           const cfgPromptOverride = await readPublishedAssistantPrompt(pool, tenantId, "configurator").catch(() => null);
-          const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride);
+          // T-0463 (D8-G2): supply existing registry_defs so relation cascades dedup
+          // against existing apps (PD-5) — same candidate list the visual picker uses.
+          const cfgCandidates = await fetchRegistryDefCandidates(pool, tenantId).catch(() => []);
+          const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride, cfgCandidates);
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
 
           // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).
