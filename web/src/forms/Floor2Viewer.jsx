@@ -5,6 +5,13 @@
    Renders an agent-authored Floor-2 component over a named-binding key,
    inside an isolated sandbox-iframe (opaque origin — no parent-origin reach).
 
+   D7-K boundary (T-0480): Floor-2 is the §6 ESCAPE path (1% — a truly-new custom
+   React widget in an opaque sandbox), NOT a field renderer competing with the
+   binding-contract catalog. It consumes the SAME BindingField[] contract (§4) but
+   draws bespoke agent markup, deliberately outside the unified FieldControl. The
+   99% authoring path (drag-n-drop OR AI-emitted form-document) renders through the
+   ONE catalog renderer; this viewer is the flagged, sandboxed exception.
+
    Architecture:
    - Accepts a Floor2RenderDescriptor (vetted or custom) + current binding fields.
    - Validates the descriptor client-side (mirrors server-side validateFloor2Descriptor).

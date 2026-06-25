@@ -200,12 +200,57 @@ export function normaliseTypeToFieldType(type) {
   }
 }
 
+// Legacy records-form `type` vocabulary (records-form.js INPUT_KIND domain) →
+// canonical catalog contract kind. THE SINGLE place that maps the schema-driven
+// record-entry vocabulary onto the binding-contract catalog (PD-18), so the
+// record screens dispatch off the SAME catalog the inbox renderer uses — not a
+// parallel `inputKind` dictionary (spec §2 "размножение рендереров").
+//
+//   string/text/textarea/number/integer/boolean/date → scalar  (a primitive)
+//   select / enum                                     → enum
+//   relation                                          → relation
+//   collection                                        → collection
+//   computed (x-rollup)                               → rollup   (read-only итог)
+//
+// Unknown → "scalar" (safe degradation: a stray type renders as a text control
+// rather than crashing). matrix-lookup is catalog-declared but not yet emitted by
+// the record-schema layer, so it has no legacy `type` to map from here.
+export function contractKindForFieldType(type) {
+  switch (type) {
+    case 'select':
+    case 'enum':
+      return 'enum';
+    case 'relation':
+      return 'relation';
+    case 'collection':
+      return 'collection';
+    case 'computed':
+      return 'rollup';
+    case 'string':
+    case 'text':
+    case 'textarea':
+    case 'number':
+    case 'integer':
+    case 'boolean':
+    case 'date':
+    default:
+      return 'scalar';
+  }
+}
+
 /**
  * Resolve the binding contract + presentation for a renderable field. The
  * explicit `contract` wins; otherwise it's derived from the legacy scalar
  * `type`. A non-empty `options` array forces the `enum` contract even when the
  * legacy type is a bare "string" — this is the fix for the snapshot bug, where
  * an enum's options survived but its type read back as "string" (spec §2).
+ *
+ * Structural record-entry types (relation/collection/computed) carry their own
+ * catalog kind via this same resolver: a record-form descriptor whose `type` is
+ * one of those resolves to the relation/collection/rollup contract, so the
+ * record screen can dispatch structural fields to their editors OFF THE CATALOG
+ * (resolveFieldContract(...).contractKind) instead of a bespoke `inputKind`
+ * string chain. The scalar/enum contracts are rendered inline by FieldControl.
  *
  * Pure — no React, no I/O.
  *
@@ -215,6 +260,14 @@ export function normaliseTypeToFieldType(type) {
 export function resolveFieldContract(field) {
   const hasOptions = Array.isArray(field?.options) && field.options.length > 0;
 
+  // A structural record-entry type (relation/collection/computed) maps directly
+  // to its catalog kind — these never carry top-level `options`, so we classify
+  // them BEFORE the options-force-enum scalar rule.
+  const structuralKind =
+    field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed'
+      ? contractKindForFieldType(field.type)
+      : undefined;
+
   let contractKind;
   // When the contract is derived from the field type (not given explicitly), we
   // also capture the type-specific presentation so that e.g. type="date" renders
@@ -222,6 +275,9 @@ export function resolveFieldContract(field) {
   let typePresentation;
   if (typeof field?.contract === 'string') {
     contractKind = field.contract;
+  } else if (structuralKind !== undefined) {
+    // relation / collection / rollup (computed) — a structural catalog contract.
+    contractKind = structuralKind;
   } else if (hasOptions) {
     // Options present but no explicit contract → it's an enum (the snapshot bug fix).
     contractKind = 'enum';

@@ -65,9 +65,13 @@ import {
   extractFieldErrors,
   computeRollup,
 } from './records-form.js';
-// T-0399 [D7-K]: record-entry fields render through the ONE unified renderer
-// (catalog-driven), replacing the bespoke inline checkbox/number/text map below.
+// T-0399/T-0480 [D7-K]: record-entry fields render through the ONE unified
+// renderer (catalog-driven). FieldControl draws the scalar/enum controls;
+// structural contracts (relation/collection/rollup) dispatch to their dedicated
+// editors below — keyed off the SAME binding-contract catalog via
+// resolveFieldContract, NOT a parallel `inputKind` string chain (spec §2).
 import { FieldControl } from '../forms/field-renderer.jsx';
+import { resolveFieldContract } from '../forms/field-contract.js';
 
 // ---------------------------------------------------------------------------
 // T-0446: RelationPicker — searchable picker for a relation field.
@@ -337,8 +341,8 @@ function RelationCell({ targetId, appId }) {
 // No «collection»/«sub-field»/«registry» jargon (G5).
 // Token-only styling: all colors from --chs-color-* (G2, G6).
 //
-// Additive route: a single `f.inputKind === 'collection'` branch in formFields.map
-// routes to this component; RelationPicker and FieldControl branches are unchanged.
+// Dispatch (T-0480): the `collection` catalog contract (resolveFieldContract)
+// routes to this component; relation/rollup and scalar/enum route elsewhere.
 // ---------------------------------------------------------------------------
 
 /**
@@ -551,8 +555,8 @@ function LineItemsField({ field, value, onChange, error, idPrefix = 'field' }) {
 //   - Displays «—» when no rows exist or all cells are non-numeric (null from computeRollup).
 //   - Token-only colors (G2, G6); no hardcoded hex.
 //
-// Additive: a single `f.inputKind === 'computed'` branch in formFields.map routes
-// here; RelationPicker and LineItemsField branches are NOT touched.
+// Dispatch (T-0480): the `rollup` catalog contract (computed field, via
+// resolveFieldContract) routes here; relation/collection and scalar/enum elsewhere.
 // ---------------------------------------------------------------------------
 
 /**
@@ -727,42 +731,50 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
           </p>
         )}
 
-        {/* T-0399 [D7-K]: one catalog-driven control per field. FieldControl
-            resolves the contract from the field's `type` + `options`, so select
-            (enum) and date now render their proper controls here too.
-            T-0446: relation fields route to RelationPicker (async fetch of
-            target records) rather than the catalog renderer (which lacks fetch).
-            T-0450: collection fields route to LineItemsField (repeatable row
-            table).
-            T-0453: computed fields route to ComputedReadout (read-only live
-            aggregate from the current collection rows). Additive branch —
-            RelationPicker, LineItemsField and FieldControl branches unchanged. */}
-        {formFields.map((f) => (
-          f.inputKind === 'computed' ? (
-            <ComputedReadout
-              key={f.key}
-              field={f}
-              currentValues={values}
-            />
-          ) : f.inputKind === 'collection' ? (
-            <LineItemsField
-              key={f.key}
-              field={f}
-              value={values[f.key]}
-              onChange={setVal}
-              error={fieldErrors[f.key]}
-              idPrefix="record-field"
-            />
-          ) : f.inputKind === 'relation' ? (
-            <RelationPicker
-              key={f.key}
-              field={f}
-              value={values[f.key]}
-              onChange={setVal}
-              error={fieldErrors[f.key]}
-              idPrefix="record-field"
-            />
-          ) : (
+        {/* T-0399/T-0480 [D7-K]: one catalog-driven dispatch per field. The
+            binding-contract kind is resolved ONCE via resolveFieldContract (the
+            single catalog authority), then routed:
+              relation   → RelationPicker (async fetch of target records)
+              collection → LineItemsField (repeatable row table)
+              rollup     → ComputedReadout (read-only live aggregate)
+              scalar/enum → FieldControl (the unified inline control: text /
+                            number / checkbox / date / <select> with options)
+            The structural editors need fetch/local state FieldControl must not
+            own, so they stay as dedicated components — but they are selected by
+            the SAME catalog the inbox renderer uses, closing the parallel
+            `inputKind`-dictionary path (spec §2). */}
+        {formFields.map((f) => {
+          const { contractKind } = resolveFieldContract(f);
+          if (contractKind === 'rollup') {
+            return (
+              <ComputedReadout key={f.key} field={f} currentValues={values} />
+            );
+          }
+          if (contractKind === 'collection') {
+            return (
+              <LineItemsField
+                key={f.key}
+                field={f}
+                value={values[f.key]}
+                onChange={setVal}
+                error={fieldErrors[f.key]}
+                idPrefix="record-field"
+              />
+            );
+          }
+          if (contractKind === 'relation') {
+            return (
+              <RelationPicker
+                key={f.key}
+                field={f}
+                value={values[f.key]}
+                onChange={setVal}
+                error={fieldErrors[f.key]}
+                idPrefix="record-field"
+              />
+            );
+          }
+          return (
             <FieldControl
               key={f.key}
               field={f}
@@ -771,8 +783,8 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
               error={fieldErrors[f.key]}
               idPrefix="record-field"
             />
-          )
-        ))}
+          );
+        })}
 
         {submitErr && (
           <div role="alert" style={{
