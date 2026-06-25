@@ -242,6 +242,10 @@ marker circle {
 .djs-palette .entry.chs-palette-agent:hover  { background: var(--chs-exec-agent-soft)   !important; }
 .djs-palette .entry.chs-palette-service:hover{ background: var(--chs-exec-service-soft) !important; }
 
+/* T-0457: lane→role swimlane palette entry — neutral accent (org/structure tone) */
+.djs-palette .entry.chs-palette-lane { color: var(--chs-color-text-muted) !important; }
+.djs-palette .entry.chs-palette-lane:hover { background: var(--chs-color-surface-2) !important; }
+
 /* ============================================================================
    6. CONTEXT-PAD (контекстное меню узла — плавающие действия)
    ============================================================================ */
