@@ -193,7 +193,7 @@ function Inspector({ node, schemaField, onPatch }) {
  * Self-contained: fetches applications/registry-defs, derives the live schema,
  * starts from the default document (the same a bot would emit), lets the user
  * reshape it from the vetted palette, validates, previews, and persists the
- * layout via POST /api/forms/binding (the `layout` field, migration 104).
+ * layout via POST /api/forms/binding (the `layout` field, migration 105).
  *
  * @param {object} [props]
  * @param {object} [props.initialDocument] optional document to load (e.g. AI-emitted)
@@ -433,7 +433,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
 
 /**
  * Persist the form-document layout via POST /api/forms/binding. The server stores
- * it in form_binding.layout (migration 104) and re-validates server-side.
+ * it in form_binding.layout (migration 105) and re-validates server-side.
  */
 function persistLayout(doc, setSaveState) {
   setSaveState({ status: 'saving' });
