@@ -43,11 +43,20 @@ import type { Grant } from "./grant-lattice.js";
 // Capability resource-type tokens (the grant.resource_type strings).
 // ---------------------------------------------------------------------------
 
+// The capability tokens are stored verbatim in choros."grant".resource_type
+// (free text). The grant-lattice ResourceType union is org-resource shaped and
+// does NOT include them, so we declare them as a widening-cast to
+// Grant["resourceType"] — the SAME precedent as authoring_draft in
+// assistant-configurator.ts (AUTHORING_DRAFT_RESOURCE). The predicates compare on
+// the resource_type STRING only, so the closed Operation enum is irrelevant.
+
 /** Grant resource_type for "configure an LLM connection + key" (spec §6). */
-export const LLM_CONNECTION_CONFIGURE = "llm_connection:configure";
+export const LLM_CONNECTION_CONFIGURE =
+  "llm_connection:configure" as Grant["resourceType"];
 
 /** Grant resource_type for "configure/run a SYSTEM agent" (spec §6). */
-export const SYSTEM_AGENT_OPERATE = "system_agent:operate";
+export const SYSTEM_AGENT_OPERATE =
+  "system_agent:operate" as Grant["resourceType"];
 
 /**
  * Grant resource_type for the configurator's draft authoring capability (T-0462,
@@ -55,7 +64,7 @@ export const SYSTEM_AGENT_OPERATE = "system_agent:operate";
  * system-agent operation to THIS capability — an authoring_draft holder operates
  * system agents by construction (the configurator IS a system agent).
  */
-export const AUTHORING_DRAFT = "authoring_draft";
+export const AUTHORING_DRAFT = "authoring_draft" as Grant["resourceType"];
 
 // ---------------------------------------------------------------------------
 // Predicates over a resolved Grant[] (already confirmed + in-window — the DAO
