@@ -165,6 +165,15 @@ export const NAV = [
     group: "Конфигурация",
     space: "work",
     items: [
+      // T-0474 (E-AGENTS L2): именованные профили LLM-подключений (реестр).
+      // GET/POST /api/llm-connections (live).
+      {
+        id: "llm-connections",
+        label: "LLM-соединения",
+        icon: "assistant",
+        screen: true,
+        status: "live",
+      },
       {
         id: "llm-config",
         label: "LLM-подключение",
