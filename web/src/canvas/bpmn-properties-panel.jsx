@@ -503,7 +503,7 @@ function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
 }
 
 /** The «Исходы шага» panel group for a bpmn:UserTask. */
-function OutcomesPanel({ bo, modeler, element }) {
+export function OutcomesPanel({ bo, modeler, element }) {
   const [presetId, setPresetId] = useState(() => readOutcomePreset(bo) ?? 'done');
   const [outcomes, setOutcomes] = useState(() => {
     const stored = parseOutcomeButtons(bo);
@@ -701,7 +701,7 @@ function SequenceFlowOutcomePanel({ bo, modeler, element }) {
    seamlessness процесс↔приложение from spec §3.7. Writes go through the
    driver-agnostic writeUserTaskConfig so the D8 bot writes the same structure.
    -------------------------------------------------------------------------- */
-function UserTaskFormBindingPanel({ bo, modeler, element }) {
+export function UserTaskFormBindingPanel({ bo, modeler, element }) {
   const initial = readUserTaskConfig(bo);
   const [formRef, setFormRef] = useState(initial.formContractRef);
   const [visibleFields, setVisibleFields] = useState(joinFieldList(initial.visibleFields));
@@ -768,7 +768,7 @@ function UserTaskFormBindingPanel({ bo, modeler, element }) {
    replaces the body with the real MessageCorrelationPanel — it plugs into the
    SAME <TypedElementConfig> dispatch, touching only this one branch.
    -------------------------------------------------------------------------- */
-function MessageCorrelationSeam() {
+export function MessageCorrelationSeam() {
   return (
     <PanelGroup title="Сообщение / корреляция" defaultOpen={false}>
       <PPEntry>
@@ -794,7 +794,7 @@ function MessageCorrelationSeam() {
    Props bundle everything the sub-panels need (modeler/element/bo + the parent's
    role state for timer escalation + outcome chrome).
    -------------------------------------------------------------------------- */
-function TypedElementConfig({
+export function TypedElementConfig({
   bo, modeler, element, kind,
   roles, rolesLoading,
 }) {
