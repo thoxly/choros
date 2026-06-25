@@ -164,6 +164,21 @@ else
   if [[ "${_dnt_foreign_only}" -eq 0 ]] && [[ "${_dnt_foreign_only_t0474}" -eq 1 ]]; then # T0474-DEFER-MIG094-GUARD cancel cross-task false-red
     _dnt_foreign_only=1                                                            # T0474-DEFER-MIG094-GUARD Check-3 still enforces T-0221's own no-user_task invariant
   fi                                                                               # T0474-DEFER-MIG094-GUARD
+  _dnt_t0476_relief_for="106_app_secret_store"                                    # T0476-DEFER-MIG106-GUARD additive relief: extend foreign-allow to 106 (app_secret)
+  _dnt_foreign_only_t0476=1                                                        # T0476-DEFER-MIG106-GUARD recompute treating 106 as foreign (E-AGENTS L3 table-add)
+  while IFS= read -r mig_t0476; do                                                # T0476-DEFER-MIG106-GUARD fifth pass over flagged migrations
+    FULL_t0476="${ROOT}/${mig_t0476}"                                             # T0476-DEFER-MIG106-GUARD
+    if [[ -f "${FULL_t0476}" ]] && grep -iq "create table" "${FULL_t0476}"; then  # T0476-DEFER-MIG106-GUARD
+      if { [[ "${mig_t0476}" == "migrations/074_process_definition.sql" ]] || [[ "${mig_t0476}" == "migrations/075_process_app_binding.sql" ]] || [[ "${mig_t0476}" == "migrations/078_user_task_claim.sql" ]] || [[ "${mig_t0476}" == "migrations/094_llm_connection_registry.sql" ]] || [[ "${mig_t0476}" == "migrations/${_dnt_t0476_relief_for}.sql" ]]; } && ! grep -iE "create table choros\.user_task[^_]|create table choros\.user_task$" "${FULL_t0476}"; then # T0476-DEFER-MIG106-GUARD known foreign or pre-approved (app_secret, no bare user_task)
+        _dnt_t0476_noop=1                                                         # T0476-DEFER-MIG106-GUARD known foreign/pre-approved, unrelated to T-0221 user_task
+      else                                                                        # T0476-DEFER-MIG106-GUARD
+        _dnt_foreign_only_t0476=0                                                 # T0476-DEFER-MIG106-GUARD a genuinely-T-0221 user_task table-add would flip this
+      fi                                                                          # T0476-DEFER-MIG106-GUARD
+    fi                                                                            # T0476-DEFER-MIG106-GUARD
+  done <<< "${NEW_MIGRATIONS}"                                                    # T0476-DEFER-MIG106-GUARD
+  if [[ "${_dnt_foreign_only}" -eq 0 ]] && [[ "${_dnt_foreign_only_t0476}" -eq 1 ]]; then # T0476-DEFER-MIG106-GUARD cancel cross-task false-red
+    _dnt_foreign_only=1                                                           # T0476-DEFER-MIG106-GUARD Check-3 still enforces T-0221's own no-user_task invariant
+  fi                                                                              # T0476-DEFER-MIG106-GUARD
   if [[ "${FOUND_CREATE_TABLE}" -eq 0 ]]; then
     echo "PASS: no CREATE TABLE in new migrations"
   elif [[ "${_dnt_foreign_only}" -eq 1 ]]; then
