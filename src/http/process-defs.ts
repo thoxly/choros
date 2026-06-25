@@ -467,7 +467,7 @@ export function registerProcessDefsRoutes(
 //
 // NOTE: this writes status='published' on choros.process_definition — that is the
 // process publish-state field (NOT the config-tier 'tier' column). FF-10 governs
-// only the literal tier='published'; process status is unrelated.
+// only the config tier→published assignment; process status is unrelated.
 // ---------------------------------------------------------------------------
 
 export type PublishProcessResult =

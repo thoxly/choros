@@ -10,9 +10,9 @@
  *
  * Co-equal with promoting each item one-by-one in the sections:
  *   - application + registry_def (config tier) → promoteTier (artifacts.ts) — the
- *     SAME draft→published flip the per-artifact promote endpoint uses. FF-10:
- *     tier='published' is assigned ONLY in env-tier.ts / artifacts.ts, so this file
- *     NEVER writes tier='published' itself — it calls promoteTier per item.
+ *     SAME draft→published flip the per-artifact promote endpoint uses. FF-10: the
+ *     config tier→published assignment lives ONLY in env-tier.ts / artifacts.ts, so
+ *     this file NEVER flips the tier column itself — it calls promoteTier per item.
  *   - process_definition (publish status) → publishProcessByKey (process-defs.ts) —
  *     the SAME lint → deploy → persist flow the per-process publish route uses.
  *
