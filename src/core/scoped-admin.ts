@@ -112,10 +112,26 @@ export interface AdminContext {
  *
  * `targetOrgScope` is the org context the delegation lands in (the child grant's
  * org scope, or the assignee's org context) — checked `⊑ adminOrgScope`.
+ *
+ * T-0469 [auth] OWNER-ONLY assignment carve-out. `assignsOwnerRole` is an
+ * INJECTED boolean (default false) — like `isGenesisOwner`, the lattice stays
+ * ignorant of "owner": the write-path resolves whether the TARGET ROLE of the
+ * assignment is the genesis `tenant-owner` (role.slug === 'tenant-owner') and
+ * sets this flag. When true, minting/removing that assignment is OWNER-ONLY:
+ * a non-owner — including a `role-constructor-admin` holding delegable
+ * `mgmt_object:*` grants — is rejected with `owner_assignment_owner_only`,
+ * closing the proven self-promotion path (delegable mgmt grant → assign
+ * tenant-owner → become owner). Absent/false ⇒ legacy behaviour (normal
+ * in-scope role assignment by a scoped admin stays green).
  */
 export type DelegationTarget =
   | { kind: "grant"; childGrant: Grant; targetOrgScope: ScopeElement }
-  | { kind: "assignment"; targetOrgScope: ScopeElement };
+  | {
+      kind: "assignment";
+      targetOrgScope: ScopeElement;
+      /** T-0469 — true iff the assignment's target role is the genesis tenant-owner. */
+      assignsOwnerRole?: boolean;
+    };
 
 /**
  * Typed rejection union — extends T-0018's `NarrowingResult` with the two
@@ -138,7 +154,10 @@ export type AdminDelegationResult =
         | "parent_non_delegable"
         | "free_form_non_delegable"
         | "org_scope_widens"
-        | "no_admin_authority";
+        | "no_admin_authority"
+        // T-0469 [auth] — assigning/removing the tenant-owner role is OWNER-ONLY;
+        // a non-owner (incl. a delegable-mgmt-grant holder) is rejected here.
+        | "owner_assignment_owner_only";
     };
 
 // ---------------------------------------------------------------------------
@@ -169,12 +188,34 @@ export type AdminDelegationResult =
  *      `validateNarrowing(coveringAdminGrant, childGrant, oracle)` (its reasons
  *      surface verbatim). For `kind === "assignment"`, the org-axis gate (step 2)
  *      IS the whole check.
+ *
+ *   0. (T-0469 [auth], evaluated FIRST) Owner-role assignment carve-out. If the
+ *      assignment's target role is the genesis `tenant-owner`
+ *      (`assignsOwnerRole === true`) and the actor is NOT `isGenesisOwner`,
+ *      reject with `owner_assignment_owner_only` BEFORE any mgmt-grant authority
+ *      is consulted. This closes the proven escalation: a delegable
+ *      `mgmt_object:*` grant must never satisfy the authority to MINT or REMOVE
+ *      the tenant-owner binding (which would let a constructor-admin self-promote
+ *      to owner). The genesis owner is the only principal who may assign owner.
  */
 export function validateAdminDelegation(
   admin: AdminContext,
   target: DelegationTarget,
   oracle: AncestryOracle,
 ): AdminDelegationResult {
+  // --- Step 0: Owner-role assignment is OWNER-ONLY (T-0469 [auth]) ----------
+  // Evaluated before every other gate so no mgmt-grant authority path can reach
+  // around it. The flag is injected by the write-path from role.slug; the
+  // lattice stays ignorant of "owner". A non-owner assigning/removing the
+  // tenant-owner role is rejected outright.
+  if (
+    target.kind === "assignment" &&
+    target.assignsOwnerRole === true &&
+    !admin.isGenesisOwner
+  ) {
+    return { ok: false, reason: "owner_assignment_owner_only" };
+  }
+
   // --- Step 1: Freeform owner-only ----------------------------------------
   // A freeform child scope is outside the lattice — only the genesis owner may
   // mint one (T-0018 FR-6); a non-owner freeform mint is rejected up front.
