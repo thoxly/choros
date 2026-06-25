@@ -42,6 +42,18 @@ import { Field, Select } from '../components/components.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 /* T-0458 [D8-R3]: timer/deadline + escalation panel (NEW FILE — additive import). */
 import { TimerDeadlinePanel } from './timer-deadline-panel.jsx';
+/* T-0461 [D8-R6]: typed per-element dispatch + the new agentTask panel.
+   elementConfigKind() is the SINGLE dispatch both drivers consult (panel + bot);
+   AgentTaskPanel is the agentTask typed config; the read/write*Config helpers are
+   the driver-agnostic contract. This file no longer carries ad-hoc per-type
+   blocks — every typed config is mounted through <TypedElementConfig>. */
+import { AgentTaskPanel } from './agent-task-panel.jsx';
+import {
+  elementConfigKind,
+  readUserTaskConfig,
+  writeUserTaskConfig,
+  joinFieldList,
+} from './element-config-contract.js';
 
 /* --------------------------------------------------------------------------
    Dev tenant UUID — same constant used throughout the codebase (screen-agents,
@@ -176,19 +188,10 @@ function effectiveExecType(bo) {
 }
 
 /* --------------------------------------------------------------------------
-   T-0458 [D8-R3]: timer-event detection (ADDITIVE — distinct region).
-   A bpmn:BoundaryEvent / bpmn:IntermediateCatchEvent is a "timer event" when its
-   eventDefinitions array contains a bpmn:TimerEventDefinition. The timer panel
-   shows for those so the user can set the deadline + escalation target.
+   T-0458 [D8-R3] / T-0461: timer-event detection now lives in the shared
+   element-config contract (isTimerEventBo) and is reached via elementConfigKind()
+   in the typed dispatch — no local copy needed here anymore.
    -------------------------------------------------------------------------- */
-function isTimerEvent(bo) {
-  if (!bo) return false;
-  if (bo.$type !== 'bpmn:BoundaryEvent' && bo.$type !== 'bpmn:IntermediateCatchEvent') {
-    return false;
-  }
-  const defs = bo.eventDefinitions || [];
-  return defs.some((d) => d && d.$type === 'bpmn:TimerEventDefinition');
-}
 
 /* Exec type display labels */
 const EXEC_OPTIONS = [
@@ -500,7 +503,7 @@ function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
 }
 
 /** The «Исходы шага» panel group for a bpmn:UserTask. */
-function OutcomesPanel({ bo, modeler, element }) {
+export function OutcomesPanel({ bo, modeler, element }) {
   const [presetId, setPresetId] = useState(() => readOutcomePreset(bo) ?? 'done');
   const [outcomes, setOutcomes] = useState(() => {
     const stored = parseOutcomeButtons(bo);
@@ -687,6 +690,172 @@ function SequenceFlowOutcomePanel({ bo, modeler, element }) {
       </PPEntry>
     </PanelGroup>
   );
+}
+
+/* --------------------------------------------------------------------------
+   UserTaskFormBindingPanel — T-0461 [D8-R6]
+
+   The «форма + поля» half of the userTask typed config (the «роль» half is the
+   «Назначение» group, rendered by the parent with its existing role state). This
+   binds the step to a FORM/record-contract and the visible field set — the
+   seamlessness процесс↔приложение from spec §3.7. Writes go through the
+   driver-agnostic writeUserTaskConfig so the D8 bot writes the same structure.
+   -------------------------------------------------------------------------- */
+export function UserTaskFormBindingPanel({ bo, modeler, element }) {
+  const initial = readUserTaskConfig(bo);
+  const [formRef, setFormRef] = useState(initial.formContractRef);
+  const [visibleFields, setVisibleFields] = useState(joinFieldList(initial.visibleFields));
+
+  useEffect(() => {
+    const next = readUserTaskConfig(bo);
+    setFormRef(next.formContractRef);
+    setVisibleFields(joinFieldList(next.visibleFields));
+  }, [bo && bo.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fireChanged = useCallback(() => {
+    try {
+      if (modeler && element) modeler.get('eventBus').fire('element.changed', { element });
+    } catch (_) { /* non-fatal */ }
+  }, [modeler, element]);
+
+  const handleFormRef = (val) => {
+    setFormRef(val);
+    writeUserTaskConfig(bo, { formContractRef: val });
+    fireChanged();
+  };
+  const handleVisibleFields = (val) => {
+    setVisibleFields(val);
+    writeUserTaskConfig(bo, { visibleFields: val });
+    fireChanged();
+  };
+
+  return (
+    <PanelGroup title="Форма и поля" defaultOpen={false}>
+      <PPEntry>
+        <Field
+          label="Форма / набор полей (ключ)"
+          mono
+          value={formRef}
+          placeholder="purchase-request"
+          onChange={(e) => handleFormRef(e.target.value)}
+          aria-label="Ключ формы / набора полей шага"
+        />
+      </PPEntry>
+      <PPEntry>
+        <Field
+          label="Видимые поля"
+          mono
+          value={visibleFields}
+          placeholder="amount, vendor, comment"
+          onChange={(e) => handleVisibleFields(e.target.value)}
+          aria-label="Видимые поля записи на этом шаге"
+        />
+        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
+          Шаг показывает эту форму поверх записи. Перечислите ключи видимых полей
+          через запятую — режим (только чтение / обязательно) задаётся в форме (D7).
+        </p>
+      </PPEntry>
+    </PanelGroup>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   MessageCorrelationSeam — T-0461 [D8-R6] / T-0459 seam.
+
+   The message ELEMENT (projection, correlation runtime, payload) is T-0459 and is
+   NOT built here. This is the CLEAN EXTENSION SEAM: when an element dispatches to
+   the 'message' config kind, the typed dispatch mounts this placeholder. T-0459
+   replaces the body with the real MessageCorrelationPanel — it plugs into the
+   SAME <TypedElementConfig> dispatch, touching only this one branch.
+   -------------------------------------------------------------------------- */
+export function MessageCorrelationSeam() {
+  return (
+    <PanelGroup title="Сообщение / корреляция" defaultOpen={false}>
+      <PPEntry>
+        <p className="bio-properties-panel-description">
+          Настройка сообщения (имя · корреляция по полю записи · канал отправки)
+          появится здесь. Этот элемент пока без рантайма — соедините его с таймером,
+          чтобы избежать вечного ожидания.
+        </p>
+      </PPEntry>
+    </PanelGroup>
+  );
+}
+
+/* --------------------------------------------------------------------------
+   TypedElementConfig — T-0461 [D8-R6] KEYSTONE dispatch.
+
+   ONE framework: given the selected element, resolve its config kind via the
+   shared elementConfigKind() and mount the matching typed sub-panel. No parallel
+   ad-hoc per-type paths — every typed config is reached from here. The exec-type
+   selector + role «Назначение» group (which apply to several kinds) stay in the
+   parent's General region; this dispatch covers the kind-SPECIFIC config.
+
+   Props bundle everything the sub-panels need (modeler/element/bo + the parent's
+   role state for timer escalation + outcome chrome).
+   -------------------------------------------------------------------------- */
+export function TypedElementConfig({
+  bo, modeler, element, kind,
+  roles, rolesLoading,
+}) {
+  switch (kind) {
+    case 'userTask': {
+      // The userTask config family also catches non-agent service/plain tasks
+      // (a human/service step). Outcomes + form-binding are meaningful for a real
+      // human task — gate both on bpmn:UserTask so a plain serviceTask keeps its
+      // prior (no extra groups) behavior; the role «Назначение» group in General
+      // still applies to every task.
+      const isHumanTask = bo.$type === 'bpmn:UserTask';
+      if (!isHumanTask) return null;
+      return (
+        <>
+          <OutcomesPanel bo={bo} modeler={modeler} element={element} />
+          {/* Form + field binding — seamlessness процесс↔приложение. */}
+          <UserTaskFormBindingPanel bo={bo} modeler={modeler} element={element} />
+        </>
+      );
+    }
+
+    case 'agentTask':
+      return (
+        <AgentTaskPanel
+          bo={bo}
+          modeler={modeler}
+          element={element}
+          PanelGroup={PanelGroup}
+          PPEntry={PPEntry}
+        />
+      );
+
+    case 'gateway':
+      return <GatewayConditionPanel bo={bo} modeler={modeler} element={element} />;
+
+    case 'timer':
+      return (
+        <TimerDeadlinePanel
+          bo={bo}
+          modeler={modeler}
+          element={element}
+          PanelGroup={PanelGroup}
+          PPEntry={PPEntry}
+          roles={roles}
+          rolesLoading={rolesLoading}
+        />
+      );
+
+    case 'message':
+      // T-0459 seam — see MessageCorrelationSeam.
+      return <MessageCorrelationSeam />;
+
+    case 'parallel':
+    case 'start':
+    case 'end':
+    case 'none':
+    default:
+      // parallel → split/join, no params (spec §3.7). start/end carry only the
+      // seam-level trigger/finalize config (not built here). Nothing to render.
+      return null;
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -950,9 +1119,14 @@ export default function BpmnPropertiesPanel({ modeler }) {
   const bpmnType = bo.$type;
   const typeLabel = BPMN_TYPE_LABELS[bpmnType] || bpmnType;
   const isTask = TASK_TYPES.has(bpmnType);
-  const isUserTask = bpmnType === 'bpmn:UserTask';
   const isSequenceFlow = bpmnType === 'bpmn:SequenceFlow';
   const elemId = bo.id || '';
+
+  // T-0461 [D8-R6]: resolve the element-config kind ONCE — the typed dispatch
+  // consumes it. Recomputes on every render, so an exec-type change (which sets
+  // execType state and re-renders) flips a userTask↔agentTask config live, since
+  // elementConfigKind reads bo.executorType.
+  const configKind = elementConfigKind(bo);
 
   // Choose displayed executor label for header
   const execOption = EXEC_OPTIONS.find((o) => o.value === execType);
@@ -1135,44 +1309,32 @@ export default function BpmnPropertiesPanel({ modeler }) {
             </PanelGroup>
           )}
 
-          {/* T-0353 [E16]: Step outcomes — only for UserTask (human performer) */}
-          {isUserTask && (
-            <OutcomesPanel
-              bo={bo}
-              modeler={modeler}
-              element={selected.element}
-            />
-          )}
+          {/* ----------------------------------------------------------------
+              T-0461 [D8-R6]: TYPED PER-ELEMENT-TYPE DISPATCH (the keystone).
+              The kind-specific config (outcomes / form binding / agent / gateway
+              / timer / message-seam) is mounted by ONE dispatch keyed on
+              elementConfigKind(bo) — no parallel ad-hoc per-type render blocks.
+              The cross-kind General config (exec type, role «Назначение»,
+              BYO-LLM) stays above; the SequenceFlow named-branch is a connection
+              (not an element-config kind) so it keeps its own conditional below.
+              ---------------------------------------------------------------- */}
+          <TypedElementConfig
+            bo={bo}
+            modeler={modeler}
+            element={selected.element}
+            kind={configKind}
+            roles={roles}
+            rolesLoading={rolesLoading}
+          />
 
-          {/* T-0353 [E16]: Named branch for SequenceFlow — set choros:outcomeName */}
+          {/* T-0353 [E16]: Named branch for SequenceFlow — set choros:outcomeName.
+              A SequenceFlow is a CONNECTION, not an element-config kind — it
+              routes a branch, so it stays a dedicated conditional. */}
           {isSequenceFlow && (
             <SequenceFlowOutcomePanel
               bo={bo}
               modeler={modeler}
               element={selected.element}
-            />
-          )}
-
-          {/* T-0434: Gateway condition panel — branch conditions for bpmn:ExclusiveGateway */}
-          {bo.$type === 'bpmn:ExclusiveGateway' && (
-            <GatewayConditionPanel
-              bo={bo}
-              modeler={modeler}
-              element={selected.element}
-            />
-          )}
-
-          {/* T-0458 [D8-R3]: Timer/deadline + escalation panel — for timer events
-              (boundary / intermediate catch carrying a TimerEventDefinition). */}
-          {isTimerEvent(bo) && (
-            <TimerDeadlinePanel
-              bo={bo}
-              modeler={modeler}
-              element={selected.element}
-              PanelGroup={PanelGroup}
-              PPEntry={PPEntry}
-              roles={roles}
-              rolesLoading={rolesLoading}
             />
           )}
 
