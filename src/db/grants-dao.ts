@@ -331,8 +331,8 @@ export async function findTenantOwnerSlug(
 }
 
 // ---------------------------------------------------------------------------
-// getAuthoringDraftHolderSlugs — T-0466 (D8-G5): resolve the slugs of HUMAN
-// employees who hold a confirmed, in-window `authoring_draft` grant.
+// getAuthoringDraftHolderEmployeeIds — T-0466 (D8-G5): resolve the EMPLOYEE IDs
+// of HUMAN employees who hold a confirmed, in-window `authoring_draft` grant.
 //
 // These are exactly the admins/owners who CAN act on the authoring sandbox, so
 // they are the right recipients for a non-admin's config-request (заявка на
@@ -341,17 +341,19 @@ export async function findTenantOwnerSlug(
 // never notify agent employees (e.g. assistant-agent, config-agent-seed), who
 // also hold the grant but cannot read a notification center.
 //
-// Returns [] when no human holder exists (callers fall back to the tenant owner).
+// Returns employee UUIDs (NOT slugs) because choros.notification.recipient_id is
+// uuid with FK → employee(tenant_id, id) (migration 046). Empty when no human
+// holder exists (callers fall back to the tenant owner).
 // ---------------------------------------------------------------------------
 
-export async function getAuthoringDraftHolderSlugs(
+export async function getAuthoringDraftHolderEmployeeIds(
   pool: pg.Pool,
   tenantId: string,
   nowMs: number = Date.now(),
 ): Promise<string[]> {
   return withTenantReadTx(pool, tenantId, async (client) => {
-    const { rows } = await client.query<{ slug: string }>(
-      `SELECT DISTINCT e.slug
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT DISTINCT e.id
          FROM choros.employee e
          JOIN choros.role_assignment ra
               ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
@@ -368,7 +370,36 @@ export async function getAuthoringDraftHolderSlugs(
           AND (g.valid_until IS NULL OR g.valid_until  > $2)`,
       [tenantId, nowMs],
     );
-    return rows.map((r) => r.slug);
+    return rows.map((r) => r.id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// findTenantOwnerEmployeeId — T-0466 (D8-G5): the EMPLOYEE ID of the tenant
+// owner (fallback recipient when no explicit authoring_draft holder exists).
+// Mirrors findTenantOwnerSlug but returns the UUID for notification.recipient_id.
+// ---------------------------------------------------------------------------
+
+export async function findTenantOwnerEmployeeId(
+  pool: pg.Pool,
+  tenantId: string,
+  nowMs: number = Date.now(),
+): Promise<string | null> {
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT e.id
+         FROM choros.employee e
+         JOIN choros.role_assignment ra ON ra.tenant_id = e.tenant_id AND ra.employee_id = e.id
+         JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+        WHERE e.tenant_id = $1
+          AND r.slug = 'tenant-owner'
+          AND ra.confirmed_by IS NOT NULL
+          AND (ra.valid_from  IS NULL OR ra.valid_from  <= $2)
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $2)
+        LIMIT 1`,
+      [tenantId, nowMs],
+    );
+    return rows.length > 0 ? rows[0]!.id : null;
   });
 }
 
