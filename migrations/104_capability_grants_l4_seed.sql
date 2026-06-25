@@ -1,4 +1,4 @@
--- 095 · Capability grants for agents/keys authorization (T-0475, E-AGENTS L4)
+-- 104 · Capability grants for agents/keys authorization (T-0475, E-AGENTS L4)
 --
 -- Spec: docs/specs/agent-registry-and-llm-keys.spec.md §6.
 --
@@ -36,7 +36,7 @@
 -- per-tenant role-configurator so self-registered tenants get them too.
 --
 -- ADDITIVE / IDEMPOTENT / APPEND-ONLY:
---   * Next free slot after 094. No DDL, no new table — pure INSERT (defer-no-new-
+--   * Next free slot after 103. No DDL, no new table — pure INSERT (defer-no-new-
 --     table / new-relation guards untripped).
 --   * ON CONFLICT DO NOTHING on the grant PK (tenant_id, id) → safe re-run.
 --   * confirmed_by='seed' (NOT NULL) so getGrantsForSubject (confirmed_by IS NOT
