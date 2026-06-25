@@ -25,6 +25,12 @@
  *      the live record_schema.properties catch fields removed after the binding
  *      was authored. Drifted fields are flagged; if they appear in submittedValues
  *      they are also rejected as unknown keys (rule 1 subsumes them).
+ *   4. FIELD-MODE — WRITE GUARD (T-0404 [D7-9]): a write submitted to a field whose
+ *      per-step mode is `read-only` or `hidden` is REJECTED. Server-authoritative —
+ *      the client renders these disabled/absent, but the enforcement is here.
+ *   5. FIELD-MODE — REQUIRED-TO-ADVANCE (T-0404 [D7-9]): a field whose per-step mode
+ *      is `required-to-advance` must carry a non-empty value or the step does not
+ *      advance.
  *
  * Provenance fields (decision, approved_by, comment) are set by the server AFTER
  * the spread — they are NOT part of form_binding.fields and are never validated
@@ -34,15 +40,17 @@
  *   - Does NOT validate provenance / canonical fields (server controls those).
  *   - Does NOT validate types beyond enum (AJV on the full record schema handles
  *     type coercion — that is D7-3's domain).
- *   - Does NOT check required-ness (a field may be optional; the form only submits
- *     what the user filled in — missing-optional is valid).
+ *   - Does NOT check the legacy per-field `required` flag (that is a client-side UX
+ *     hint; missing-optional is valid). It DOES enforce the T-0404 [D7-9] per-step
+ *     `required-to-advance` MODE — a server-authoritative gate distinct from the
+ *     `required` flag (see the field-mode rules below).
  *   - Does NOT do I/O (pure function — no pg, no fs, no env reads).
  *
  * Pure: no pg / node:fs / node:http / node:net / child_process / import.meta /
  * process.env. Passes FF-NB-3 purity gate.
  */
 
-import type { BindingField } from "./binding-compat.js";
+import type { BindingField, FieldMode } from "./binding-compat.js";
 
 // ---------------------------------------------------------------------------
 // Exported types
@@ -58,11 +66,22 @@ import type { BindingField } from "./binding-compat.js";
  *   schema_drift  — key declared in BindingField[] but NOT in live record_schema
  *                   properties. The binding references a field that no longer exists
  *                   in the live schema (authoring-time vs run-time drift).
+ *   readonly_write — T-0404 [D7-9]: a write was submitted to a field whose per-step
+ *                    mode is `read-only`. The server is authoritative: the value is
+ *                    rejected, not merely cosmetically disabled in the client.
+ *   hidden_write   — T-0404 [D7-9]: a write was submitted to a field whose per-step
+ *                    mode is `hidden`. Same server-authoritative rejection.
+ *   missing_required — T-0404 [D7-9]: a field whose per-step mode is
+ *                      `required-to-advance` carries no non-empty value. The step
+ *                      cannot advance.
  */
 export type FormSubmitViolationType =
   | "unknown_key"
   | "enum_mismatch"
-  | "schema_drift";
+  | "schema_drift"
+  | "readonly_write"
+  | "hidden_write"
+  | "missing_required";
 
 export interface FormSubmitViolation {
   type: FormSubmitViolationType;
@@ -128,6 +147,28 @@ function isEnumField(field: BindingField): boolean {
 // ---------------------------------------------------------------------------
 
 const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+// ---------------------------------------------------------------------------
+// T-0404 [D7-9]: per-step field-mode helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Treat undefined/null/empty-string/blank-string as "no value supplied" for the
+ * purpose of `required-to-advance`. Mirrors the client's required-field check in
+ * screen-inbox.jsx (a checkbox `false` and a number `0` are still "present").
+ */
+export function isValuePresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string" && value.trim() === "") return false;
+  // Empty arrays (collection fields) and empty objects are "not supplied".
+  if (Array.isArray(value) && value.length === 0) return false;
+  return true;
+}
+
+/** Resolve a field's per-step mode (undefined when no mode is set). */
+function fieldMode(field: BindingField): FieldMode | undefined {
+  return field.mode;
+}
 
 // ---------------------------------------------------------------------------
 // validateFormSubmit — the pure core
@@ -216,6 +257,27 @@ export function validateFormSubmit(
       continue;
     }
 
+    // Rule 4 (T-0404 [D7-9]): a write to a read-only OR hidden field is rejected,
+    // server-authoritative. The client renders these disabled/absent, but a crafted
+    // request could still submit them — this is the enforcement that matters.
+    const mode = fieldMode(field);
+    if (mode === "read-only") {
+      violations.push({
+        type: "readonly_write",
+        key,
+        message: `field "${key}" is read-only at this step; a value may not be written to it`,
+      });
+      continue;
+    }
+    if (mode === "hidden") {
+      violations.push({
+        type: "hidden_write",
+        key,
+        message: `field "${key}" is hidden at this step; a value may not be written to it`,
+      });
+      continue;
+    }
+
     // Rule 2: enum validation — only when options are present (T-0399 D7-K).
     if (isEnumField(field)) {
       const options = field.options;
@@ -238,6 +300,22 @@ export function validateFormSubmit(
 
     // Value is valid: include in safeValues.
     safeValues[key] = value;
+  }
+
+  // Rule 5 (T-0404 [D7-9]): a `required-to-advance` field MUST carry a non-empty
+  // value to advance the step. Checked over the binding (NOT just submitted keys) so
+  // an omitted required field is caught. read-only/hidden never reach here as a
+  // requirement source (their writes were rejected above); they are not asserted
+  // required (a step cannot demand a value for a field the user cannot fill).
+  for (const [key, field] of fieldMap) {
+    if (fieldMode(field) !== "required-to-advance") continue;
+    if (!isValuePresent(submittedValues[key])) {
+      violations.push({
+        type: "missing_required",
+        key,
+        message: `field "${key}" is required to advance this step but no value was submitted`,
+      });
+    }
   }
 
   if (violations.length > 0) {

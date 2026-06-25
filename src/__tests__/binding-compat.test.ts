@@ -200,6 +200,41 @@ describe("validateBindingFields — adversarial cases", () => {
       expect(result.fields[0]?.key).toBe("supplier");
     }
   });
+
+  // T-0404 [D7-9]: per-step field mode validation on write.
+  it("T-0404: valid mode values accepted and preserved on the field", () => {
+    const result = validateBindingFields([
+      { key: "amount", type: "number", required: true, mode: "read-only" },
+      { key: "decision", type: "string", required: false, mode: "required-to-advance" },
+      { key: "secret", type: "string", required: false, mode: "hidden" },
+    ]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.fields[0]?.mode).toBe("read-only");
+      expect(result.fields[1]?.mode).toBe("required-to-advance");
+      expect(result.fields[2]?.mode).toBe("hidden");
+    }
+  });
+
+  it("T-0404: an unknown mode value is rejected with a clear reason", () => {
+    const result = validateBindingFields([
+      { key: "x", type: "string", required: false, mode: "write-only" },
+    ]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors[0]?.reason).toContain("mode");
+    }
+  });
+
+  it("T-0404: absent mode is backward-compatible (field has no mode key)", () => {
+    const result = validateBindingFields([
+      { key: "x", type: "string", required: false },
+    ]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.fields[0]).not.toHaveProperty("mode");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
