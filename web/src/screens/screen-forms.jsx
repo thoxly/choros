@@ -1,35 +1,49 @@
 /* ============================================================================
    CHOROS — screen-forms.jsx
-   T-0482 [F3]: Экран «Привязка форм к шагам».
+   T-0482 [F3] → T-0481 [F2]: Экран «Конструктор форм».
 
-   Показывает ТОЛЬКО FormBuilder (POST /api/forms/binding, T-0376):
-   выбрать процесс + шаг userTask → выбрать набор полей registry_def →
-   настроить метки/порядок/обязательность → сохранить привязку.
+   ОСНОВНАЯ поверхность авторинга — drag-n-drop конструктор форм (FormDesigner,
+   T-0481): собери форму из ВЕТТЕД-ПАЛИТРЫ (поле / таблица-позиции / итог /
+   разделитель / связь / секции-колонки-вкладки + код-виджет в песочнице).
+   Раскладка = декларативный форма-документ; ИИ эмитит ТОТ ЖЕ документ
+   (form-document-emit.js). Рендерит один рендерер (FormDocumentRenderer).
 
-   Что УБРАНО (T-0482 cleanup):
-     • Вкладка «Предпросмотр ТЭЛ-форм» + FormViewer (sandbox-iframe с hardcoded
-       ТЭЛ-формами purchase/approval). Она была демо-mockup, не рабочим инструментом.
-     • Переключатель форм (FORM_TABS: «Заявка на закупку» / «Согласование»).
+   ЗАПАСНАЯ поверхность — FormBuilder (T-0376): кнопочная привязка полей к шагу
+   (вырожденный fallback per forms-data-contract-foundation.spec §6 — не
+   самостоятельный продукт). Доступна вкладкой.
 
-   Что осталось и где живёт:
-     • ЗАПИСЬ form — автогенерируется из registry_def через единый рендерер
-       FieldControl (field-renderer.jsx, T-0480) в screen-app-records.jsx +
-       screen-inbox.jsx. Авторинг: конструктор полей /app-schema/:appId.
-     • ШАГ form — настраивается прямо в модельере через UserTaskFormBindingPanel
-       (bpmn-properties-panel.jsx, T-0461): клик на userTask → вкладка «Форма».
-
-   Nav: пункт «Формы задач» скрыт из сайдбара (nav-config.js hidden: true).
-   Роутинг /forms остаётся — экран доступен прямой ссылкой для авторинга.
+   Nav: пункт «Формы задач» в сайдбаре (nav-config.js). Роутинг /forms.
    ============================================================================ */
 
-import React from 'react';
+import React, { useState } from 'react';
+import FormDesigner from '../forms/FormDesigner.jsx';
 import FormBuilder from '../forms/FormBuilder.jsx';
 
+const TABS = [
+  { key: 'designer', label: 'Конструктор (drag-n-drop)' },
+  { key: 'binding', label: 'Привязка полей (запасное)' },
+];
+
 function FormsScreen() {
+  const [tab, setTab] = useState('designer');
   return (
     <div className="chs-forms-screen">
+      <div className="chs-forms-screen__tabs" role="tablist" style={{ display: 'flex', gap: 'var(--chs-space-2)', padding: 'var(--chs-space-4) var(--chs-space-6) 0' }}>
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.key}
+            className={`chs-btn chs-btn--ghost${tab === t.key ? ' chs-btn--active' : ''}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
       <div className="chs-forms-screen__canvas" style={{ padding: 'var(--chs-space-6)' }}>
-        <FormBuilder />
+        {tab === 'designer' ? <FormDesigner /> : <FormBuilder />}
       </div>
     </div>
   );
