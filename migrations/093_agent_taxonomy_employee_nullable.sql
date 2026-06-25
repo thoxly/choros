@@ -94,13 +94,21 @@ END $$;
 -- agent_card_employee_fk (tenant_id, employee_id, employee_kind) is MATCH SIMPLE,
 -- so it is NOT enforced when employee_id IS NULL — this is the "partial FK
 -- discriminator": kind='agent' is checked ONLY when an org-place is attached.
+--
+-- employee_kind KEEPS its DEFAULT 'agent' (a long-standing insert convention —
+-- callers that set employee_id omit employee_kind and rely on the default to make
+-- the FK target kind='agent'). It only becomes NULLable so an org-less inserter
+-- MAY null it; whether an org-less row carries 'agent' (vestigial, FK skipped) or
+-- NULL, it is permitted. The relaxed CHECK below admits both.
 ALTER TABLE choros.agent_card ALTER COLUMN employee_id   DROP NOT NULL;
 ALTER TABLE choros.agent_card ALTER COLUMN employee_kind DROP NOT NULL;
-ALTER TABLE choros.agent_card ALTER COLUMN employee_kind DROP DEFAULT;
 
--- Relax the discriminator CHECK so an org-less row may carry employee_kind IS NULL
--- (crisp semantics: no employee_id ⇒ no employee_kind), while an org-attached row
--- must still pin 'agent' (so the composite FK can only target a kind='agent' row).
+-- Relax the discriminator CHECK so an org-less row may carry employee_kind IS NULL,
+-- while an org-attached row pins 'agent' (so the composite FK can only target a
+-- kind='agent' row). NOTE: this is intentionally NOT a strict pair-check —
+-- employee_kind defaults to 'agent' even for an org-less row whose employee_id is
+-- NULL, and the FK (MATCH SIMPLE) is simply skipped there. The discriminator is
+-- "preserved only when employee_id is set" (spec §4.2), which MATCH SIMPLE gives.
 DO $$
 BEGIN
   IF EXISTS (
@@ -114,18 +122,6 @@ BEGIN
     ALTER TABLE choros.agent_card
       ADD CONSTRAINT agent_card_employee_kind_partial_chk
       CHECK (employee_kind IS NULL OR employee_kind = 'agent');
-  END IF;
-END $$;
-
--- Belt-and-braces consistency: employee_id and employee_kind are set together.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'agent_card_employee_pair_chk'
-  ) THEN
-    ALTER TABLE choros.agent_card
-      ADD CONSTRAINT agent_card_employee_pair_chk
-      CHECK ((employee_id IS NULL) = (employee_kind IS NULL));
   END IF;
 END $$;
 

@@ -66,8 +66,9 @@ describe("T-0473 migration 093 — agent_type taxonomy + employee_id NULLable", 
     // NULL employee_id), and the relaxed CHECK permits a NULL employee_kind.
     expect(body).not.toMatch(/DROP CONSTRAINT agent_card_employee_fk/i);
     expect(body).toMatch(/employee_kind IS NULL OR employee_kind = 'agent'/);
-    // employee_id and employee_kind move together (pair invariant).
-    expect(body).toMatch(/\(employee_id IS NULL\) = \(employee_kind IS NULL\)/);
+    // employee_kind stays NULLable but KEEPS its DEFAULT 'agent' (existing inserts
+    // that set employee_id omit the kind and rely on the default for the FK target).
+    expect(body).not.toMatch(/employee_kind DROP DEFAULT/i);
   });
 
   it("re-keys to a surrogate (tenant_id, id) so the registry id is org-independent", () => {
