@@ -257,6 +257,74 @@ async function executeApprovedOpAsDraft(
 
     switch (op.kind) {
       // -----------------------------------------------------------------------
+      // create_application — T-0462 (D8-G1): INSERT a NEW application (tier='draft')
+      // + its primary registry_def "section", in ONE transaction.
+      // Co-equal: same choros.application + choros.registry_def tables (and the
+      // tier='draft' default) the visual constructor writes via applications.ts
+      // POST /api/applications and registry-defs.ts POST /api/registry-defs.
+      // -----------------------------------------------------------------------
+      case "create_application": {
+        const args = op.args;
+        const appSlug      = typeof args["appSlug"]      === "string" ? args["appSlug"]      : null;
+        const appDisplayName = typeof args["appDisplayName"] === "string" ? args["appDisplayName"] : null;
+        const appDescription = typeof args["appDescription"] === "string" ? args["appDescription"] : null;
+        const sectionSlug  = typeof args["sectionSlug"]  === "string" ? args["sectionSlug"]  : appSlug;
+        const sectionDisplayName =
+          typeof args["sectionDisplayName"] === "string" ? args["sectionDisplayName"] : appDisplayName;
+
+        if (!appSlug || !appDisplayName) {
+          return `create_application: missing appSlug or appDisplayName`;
+        }
+
+        // Parse the optional initial record_schema; default to an empty object schema.
+        let recordSchema: Record<string, unknown> = { type: "object", properties: {} };
+        if (typeof args["recordSchema"] === "string" && args["recordSchema"]) {
+          try { recordSchema = JSON.parse(args["recordSchema"] as string) as Record<string, unknown>; }
+          catch { /* keep default empty object schema */ }
+        }
+
+        const appId = randomUUID();
+        const regId = randomUUID();
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+
+          // 1) Application — tier='draft' (column DEFAULT, but set explicitly for clarity).
+          await client.query(
+            `INSERT INTO choros.application
+               (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)`,
+            [tenantId, appId, appSlug, appDisplayName, appDescription, nowMs],
+          );
+
+          // 2) Primary section (registry_def) under the new application.
+          await client.query(
+            `INSERT INTO choros.registry_def
+               (tenant_id, id, application_id, slug, display_name, description,
+                record_schema, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)`,
+            [tenantId, regId, appId, sectionSlug, sectionDisplayName, null,
+             JSON.stringify(recordSchema), nowMs],
+          );
+
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          // 23505 = unique_violation → app/section slug already taken in this tenant.
+          // Honest error string (NOT a 500) — surfaced in the changelog, not thrown.
+          if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
+            return `create_application: slug '${appSlug}' already exists in this tenant`;
+          }
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
       // author_binding — upsert process_app_binding DRAFT row.
       // Same SQL as process-catalog.ts POST /api/process-catalog/:key/binding.
       // -----------------------------------------------------------------------

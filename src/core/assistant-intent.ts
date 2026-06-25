@@ -85,12 +85,27 @@ export interface HandlerResult {
  */
 export function classifyIntent(text: string): "analyst" | "configurator" | "unknown" {
   const t = text.toLowerCase();
+  // T-0462 (D8-G1): authoring/build intents MUST route to the CONFIGURATOR
+  // (authoring path), NOT the read-only analyst. A user who says
+  // «построй приложение …» / «собери CRM» / «настрой процесс …» is asking to
+  // BUILD, so they must reach the authoring tools (incl. create_application),
+  // gated downstream on the authoring_draft grant — not get a read-only answer.
+  // NOTE: «построй»/«собери» are checked before the analyst keywords below so a
+  // phrase like «собери аналитику по заявкам» still routes to authoring (the
+  // user wants something built), matching spec §3.3.
   if (
+    t.includes("построй") ||
+    t.includes("собери") ||
+    t.includes("собрать") ||
+    t.includes("построить") ||
     t.includes("настрой") ||
+    t.includes("настроить") ||
     t.includes("добавь поле") ||
     t.includes("добавь") ||
     t.includes("создай") ||
+    t.includes("создать") ||
     t.includes("изменить") ||
+    t.includes("build") ||
     t.includes("config") ||
     t.includes("configure") ||
     t.includes("setup")
