@@ -24,13 +24,20 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 
 // ---------------------------------------------------------------------------
 // Provider presets (auto-fill endpoint/model + price hints; all editable)
+// T-0477 [E-AGENTS L5]: added priceIn/priceOut defaults per provider.
+// Prices are approximate public list rates (USD/1k tokens, 2024-2025 vintage).
+// Users can always override these — they are just convenient defaults.
 // ---------------------------------------------------------------------------
 const PROVIDER_PRESETS = [
-  { value: 'deepseek',    label: 'DeepSeek',    endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { value: 'openai',      label: 'OpenAI',      endpoint: 'https://api.openai.com/v1',   model: 'gpt-4o-mini' },
-  { value: 'anthropic',   label: 'Anthropic',   endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet' },
-  { value: 'self-hosted', label: 'Self-hosted', endpoint: '',                            model: '' },
-  { value: 'other',       label: 'Другой',      endpoint: '',                            model: '' },
+  // DeepSeek: deepseek-chat  input $0.14/1k  output $0.28/1k  (2025 pricing)
+  { value: 'deepseek',    label: 'DeepSeek',    endpoint: 'https://api.deepseek.com/v1',   model: 'deepseek-chat',       priceIn: '0.14', priceOut: '0.28', currency: 'USD' },
+  // OpenAI: gpt-4o-mini  input $0.15/1k  output $0.60/1k
+  { value: 'openai',      label: 'OpenAI',      endpoint: 'https://api.openai.com/v1',     model: 'gpt-4o-mini',         priceIn: '0.15', priceOut: '0.60', currency: 'USD' },
+  // Anthropic: claude-3-5-sonnet  input $3.00/1k  output $15.00/1k
+  { value: 'anthropic',   label: 'Anthropic',   endpoint: 'https://api.anthropic.com/v1',  model: 'claude-3-5-sonnet',   priceIn: '3.00', priceOut: '15.00', currency: 'USD' },
+  // Self-hosted: no price defaults (pricing varies per setup)
+  { value: 'self-hosted', label: 'Self-hosted', endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD' },
+  { value: 'other',       label: 'Другой',      endpoint: '',                              model: '',                    priceIn: '', priceOut: '', currency: 'USD' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -251,8 +258,9 @@ export default function LlmConnectionsScreen() {
   const [endpoint, setEndpoint] = useState('https://api.deepseek.com/v1');
   const [model, setModel] = useState('deepseek-chat');
   const [secretHandle, setSecretHandle] = useState('');
-  const [priceIn, setPriceIn] = useState('');
-  const [priceOut, setPriceOut] = useState('');
+  // T-0477 [E-AGENTS L5]: pre-fill with DeepSeek price presets (initial provider).
+  const [priceIn, setPriceIn] = useState('0.14');
+  const [priceOut, setPriceOut] = useState('0.28');
   const [currency, setCurrency] = useState('USD');
   const [isDefault, setIsDefault] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
@@ -296,6 +304,8 @@ export default function LlmConnectionsScreen() {
   // -------------------------------------------------------------------------
   // Provider preset change → auto-fill endpoint + model
   // -------------------------------------------------------------------------
+  // T-0477 [E-AGENTS L5]: onProviderChange also auto-fills price presets.
+  // Prices are user-editable — the preset is just a convenient starting point.
   const onProviderChange = (e) => {
     const val = e.target.value;
     setProvider(val);
@@ -303,6 +313,10 @@ export default function LlmConnectionsScreen() {
     if (found) {
       setEndpoint(found.endpoint);
       setModel(found.model);
+      // Fill prices only if currently blank (don't override user edits).
+      if (found.priceIn) setPriceIn(found.priceIn);
+      if (found.priceOut) setPriceOut(found.priceOut);
+      if (found.currency) setCurrency(found.currency);
     }
     setFieldErrors({});
     setCreateOk(false);

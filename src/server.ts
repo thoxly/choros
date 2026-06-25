@@ -77,6 +77,9 @@ import { registerLlmConnectionsRoutes } from "./http/llm-connections.js";
 // T-0383 (D5/PD-6): per-tenant assistant system prompt routes + runtime loader.
 import { registerAssistantPromptRoutes } from "./http/assistant-prompt-routes.js";
 import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
+// T-0477 [E-AGENTS L5]: spend accounting routes + spend-tracking LLM port.
+import { registerSpendRoutes } from "./http/spend.js";
+import { getDefaultLlmConnection } from "./db/llm-connection-dao.js";
 
 const { Pool } = pg;
 
@@ -865,6 +868,37 @@ function buildRouter(
       // T-0382: async factory — reads per-tenant agent_card llm_* then falls back
       // to global DEEPSEEK_API_KEY env; dormantLlmPort → 503 when neither is set.
       llmPortFactory: (tenantId: string) => makeLlmPortFactory(tenantId, grantsPool),
+      // T-0477 [E-AGENTS L5]: spend-tracking context factory — resolves the default
+      // llm_connection for the tenant (for prices/connection_id). Non-fatal: returns
+      // null when the tenant has no default connection or on DB error.
+      spendTrackingFactory: async (tenantId: string) => {
+        try {
+          const client = await grantsPool.connect();
+          let conn = null;
+          try {
+            await client.query("BEGIN");
+            await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+            await client.query("SET LOCAL search_path TO choros");
+            conn = await getDefaultLlmConnection(client as unknown as import("./db/audit-writer.js").PgClientLike, tenantId);
+            await client.query("COMMIT");
+          } catch {
+            await client.query("ROLLBACK").catch(() => {});
+          } finally {
+            client.release();
+          }
+          if (!conn) return null;
+          return {
+            pool: grantsPool,
+            tenantId,
+            connectionId: conn.id,
+            priceInputPer1k: conn.priceInputPer1k,
+            priceOutputPer1k: conn.priceOutputPer1k,
+            currency: conn.currency,
+          };
+        } catch {
+          return null;
+        }
+      },
     });
   }
 
@@ -911,6 +945,18 @@ function buildRouter(
   // Additive — registers two routes per role for the prompt editor UI.
   if (grantsPool) {
     registerAssistantPromptRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0477 [E-AGENTS L5]: spend accounting routes (Расход screen backend).
+  // GET /api/spend — aggregates (windows + by-connection).
+  // GET /api/spend/recent — most-recent N rows.
+  // Auth: any tenant member (read-only accounting — no mutations, no ceilings).
+  if (grantsPool) {
+    registerSpendRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),

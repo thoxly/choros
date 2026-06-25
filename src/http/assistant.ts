@@ -77,6 +77,11 @@ import { LlmDormantError, type LlmPort } from "../core/llm-port.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
+// T-0477 [E-AGENTS L5]: spend-tracking port wrapper (non-fatal ledger write on chat()).
+import {
+  SpendTrackingLlmPort,
+  type SpendTrackingContext,
+} from "../adapters/spend-tracking-llm-port.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
 // T-0466 (D8-G5): AUTHORING_CAPTURE_CONFIRMATION appended after a successful capture.
 import {
@@ -128,6 +133,13 @@ export interface AssistantRouteDeps {
    * node equality — conservative, fail-closed until full oracle is wired).
    */
   ancestry?: AncestryOracle;
+  /**
+   * T-0477 [E-AGENTS L5]: optional factory that resolves spend-tracking context
+   * (connection_id + prices) for the current tenant. When present, the resolved
+   * LlmPort is wrapped in SpendTrackingLlmPort so each chat() call records a
+   * non-fatal spend_ledger row. When absent (or returns null), no tracking occurs.
+   */
+  spendTrackingFactory?: (tenantId: string) => Promise<SpendTrackingContext | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,7 +1459,7 @@ export function registerAssistantRoutes(
   router: Router,
   deps: AssistantRouteDeps,
 ): void {
-  const { pool, resolveActorTenant, llmPortFactory } = deps;
+  const { pool, resolveActorTenant, llmPortFactory, spendTrackingFactory } = deps;
   const agentSlug = deps.agentSlug ?? "assistant-agent";
   const ancestry = deps.ancestry ?? flatOracle;
 
@@ -1722,7 +1734,22 @@ export function registerAssistantRoutes(
       // 2. Resolve the LLM port.
       // -----------------------------------------------------------------------
       // T-0382: factory is now async (per-tenant agent_card config lookup).
-      const llm = await llmPortFactory(tenantId);
+      // T-0477 [E-AGENTS L5]: wrap with spend-tracking (non-fatal ledger write).
+      let llm = await llmPortFactory(tenantId);
+      if (spendTrackingFactory) {
+        try {
+          const spendCtx = await spendTrackingFactory(tenantId);
+          if (spendCtx !== null) {
+            llm = new SpendTrackingLlmPort(llm, {
+              ...spendCtx,
+              actorSlug: actorSlug,
+            });
+          }
+        } catch (err) {
+          // Non-fatal: spend-tracking setup failure must never break chat.
+          console.error(`[T-0477] spendTrackingFactory failed (non-fatal): ${String(err)}`);
+        }
+      }
 
       // -----------------------------------------------------------------------
       // 3. Persist the user message (outside LLM call — do not lose it if LLM fails).

@@ -186,6 +186,7 @@ _dc_mig082_failed=0                                                             
 _dc_mig083_failed=0                                                                # T0354-DC-MIG083-GUARD track when 083 triggers the FF-DC7 fail
 _dc_mig104_failed=0                                                                # T0475-DC-MIG104-GUARD track when 104 triggers the FF-DC7 fail
 _dc_mig106_failed=0                                                                # T0476-DC-MIG106-GUARD track when 106 triggers the FF-DC7 fail
+_dc_mig107_failed=0                                                                # T0477-DC-MIG107-GUARD track when 107 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -226,6 +227,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/106_app_secret_store.sql" ]]; then            # T0476-DC-MIG106-GUARD
       _dc_mig106_failed=1                                                     # T0476-DC-MIG106-GUARD
     fi                                                                        # T0476-DC-MIG106-GUARD
+    # Track specifically when 107 triggers this FAIL (and nothing else).     # T0477-DC-MIG107-GUARD
+    if [[ "${m}" == "migrations/107_spend_ledger_llm_tracking.sql" ]]; then   # T0477-DC-MIG107-GUARD
+      _dc_mig107_failed=1                                                     # T0477-DC-MIG107-GUARD
+    fi                                                                        # T0477-DC-MIG107-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -454,6 +459,45 @@ if [[ "${_dc_mig106_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0476-app-secret-store]: migration 106_app_secret_store.sql creates app_secret (app:// encrypted key store, FORCE RLS) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0476-DC-MIG106-GUARD
   fi                                                                           # T0476-DC-MIG106-GUARD
 fi                                                                             # T0476-DC-MIG106-GUARD
+# T-0477: additive relief for migration 107_spend_ledger_llm_tracking.sql.   # T0477-DC-MIG107-GUARD
+# 107 is an ADDITIVE EXTENSION of the EXISTING spend_ledger table (migration  # T0477-DC-MIG107-GUARD
+# 034) for LLM cost-tracking: it ONLY does ALTER TABLE ... DROP NOT NULL on   # T0477-DC-MIG107-GUARD
+# reservation_id/employee_id, ADD COLUMN IF NOT EXISTS (llm_connection_id +   # T0477-DC-MIG107-GUARD
+# prompt/completion/total token counts), one guarded FK, and CREATE INDEX IF  # T0477-DC-MIG107-GUARD
+# NOT EXISTS. NO CREATE TABLE, NO new RLS/POLICY (034's append-only trigger +  # T0477-DC-MIG107-GUARD
+# RLS are preserved as-is), NO new tenant table. It is UNRELATED to the        # T0477-DC-MIG107-GUARD
+# dual-control authority domain (grant / confirmation / confirmed2_by).        # T0477-DC-MIG107-GUARD
+# T-0044's real invariant — 031 is the ONLY dual-control migration,            # T0477-DC-MIG107-GUARD
+# confirmed2_by stays a derived additive column — is NOT touched by a spend    # T0477-DC-MIG107-GUARD
+# ledger extension. Same PURE-additive class as the T-0244 migration-073 /     # T0477-DC-MIG107-GUARD
+# T-0354 migration-083 seeds and the T-0475 migration-104 capability-grant     # T0477-DC-MIG107-GUARD
+# seed — no CREATE TABLE, no grant/dual-control mutation. Sanctioned in        # T0477-DC-MIG107-GUARD
+# data/frozen-sanctions.jsonl (auto_additive). Cancels ONLY the               # T0477-DC-MIG107-GUARD
+# _dc_mig107_failed increment; fires only after independently verifying 107    # T0477-DC-MIG107-GUARD
+# has NO CREATE TABLE/RLS/POLICY, does NOT create/alter any                    # T0477-DC-MIG107-GUARD
+# grant/confirmation/authority table, and does NOT touch confirmed2_by.        # T0477-DC-MIG107-GUARD
+_dc_mig107_stem="migrations/107_spend_ledger_llm_tracking.sql"                  # T0477-DC-MIG107-GUARD
+if [[ "${_dc_mig107_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig107_stem}"; then # T0477-DC-MIG107-GUARD
+  _dc_mig107_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig107_stem}" 2>/dev/null || true)"  # T0477-DC-MIG107-GUARD
+  _dc_mig107_bad=0                                                             # T0477-DC-MIG107-GUARD
+  # 107 must add NO table/RLS/policy (additive ALTER + index only) ...        # T0477-DC-MIG107-GUARD
+  if echo "${_dc_mig107_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0477-DC-MIG107-GUARD
+    _dc_mig107_bad=1                                                           # T0477-DC-MIG107-GUARD introduces DDL/RLS
+  fi                                                                           # T0477-DC-MIG107-GUARD
+  # ... and must NOT create/alter the dual-control authority domain ...       # T0477-DC-MIG107-GUARD
+  if echo "${_dc_mig107_content}" | grep -iqE "(CREATE|ALTER)[[:space:]]+TABLE[[:space:]]+[^;]*(grant|confirmation|authority)"; then # T0477-DC-MIG107-GUARD
+    _dc_mig107_bad=1                                                           # T0477-DC-MIG107-GUARD touches authority domain
+  fi                                                                           # T0477-DC-MIG107-GUARD
+  # ... and must NOT touch the confirmed2_by invariant.                       # T0477-DC-MIG107-GUARD
+  if echo "${_dc_mig107_content}" | grep -iqE "confirmed2_by"; then           # T0477-DC-MIG107-GUARD
+    _dc_mig107_bad=1                                                           # T0477-DC-MIG107-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0477-DC-MIG107-GUARD
+  if [[ "${_dc_mig107_bad}" -eq 0 ]]; then                                    # T0477-DC-MIG107-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0477-DC-MIG107-GUARD cancel false-red
+    _dc_mig107_failed=0                                                        # T0477-DC-MIG107-GUARD
+    echo "PASS [FF-DC7-T0477-spend-ledger-llm-tracking]: migration 107_spend_ledger_llm_tracking.sql is an ADDITIVE extension of the existing spend_ledger (ALTER DROP NOT NULL + ADD COLUMN + index, no CREATE TABLE/RLS/POLICY) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0477-DC-MIG107-GUARD
+  fi                                                                           # T0477-DC-MIG107-GUARD
+fi                                                                             # T0477-DC-MIG107-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
