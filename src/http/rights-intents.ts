@@ -479,12 +479,32 @@ function registerFire(router: Router, pool: pg.Pool): void {
         [tenantId, employeeId, nowMs],
       );
 
+      // T-0469 [auth] — fire revokes ALL of the target's role_assignments. If ANY
+      // of them is the genesis tenant-owner assignment, STRIPPING it is OWNER-ONLY
+      // (mirror of the POST /api/role-assignments/:id/revoke carve-out): a non-owner
+      // — including a constructor-admin holding delegable mgmt_object:* grants — must
+      // not be able to fire/demote the genesis owner (owner-strip / denial-of-owner).
+      // Resolve owner-ness per assignment role and inject assignsOwnerRole into the
+      // SAME validateAdminDelegation gate, so the Step-0 carve-out rejects with
+      // owner_assignment_owner_only BEFORE any revoke UPDATE runs (tx aborts whole).
+      const ownerRoleIds = new Set<string>();
+      for (const ra of raRows) {
+        if (await isOwnerRoleScoped(pool, tenantId, ra.role_id)) {
+          ownerRoleIds.add(ra.role_id);
+        }
+      }
+
       // GATE: the admin must cover EVERY assignment's org scope (no partial-cover
-      // fire). Rejected before any UPDATE — the whole tx aborts.
+      // fire) AND may strip a tenant-owner assignment ONLY if they are the owner.
+      // Rejected before any UPDATE — the whole tx aborts.
       for (const ra of raRows) {
         const gate = validateAdminDelegation(
           admin,
-          { kind: "assignment", targetOrgScope: ra.org_scope as ScopeElement },
+          {
+            kind: "assignment",
+            targetOrgScope: ra.org_scope as ScopeElement,
+            assignsOwnerRole: ownerRoleIds.has(ra.role_id),
+          },
           SEED_ORACLE,
         );
         if (!gate.ok) {
