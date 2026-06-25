@@ -161,7 +161,10 @@ function buildServer(
   flowable: FlowableClient,
 ): { server: http.Server; baseUrl: () => string } {
   const router = new Router();
-  registerProcessDefsRoutes(router, pool, flowable);
+  // T-0468 [SECURITY]: tenant is resolved from the actor's identity, not an
+  // x-tenant-id header. The resolver maps the dev-user actor → TENANT_ID so the
+  // tenant-scoped store rows (seeded under TENANT_ID) are reachable.
+  registerProcessDefsRoutes(router, pool, flowable, async () => TENANT_ID);
   const server = http.createServer((req, res) => {
     router.dispatch(req, res);
   });
@@ -211,7 +214,10 @@ async function httpReq(
 }
 
 const TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const AUTH_HEADERS = { "x-dev-user": "alice", "x-tenant-id": TENANT_ID };
+// T-0468 [SECURITY]: auth is the dev-user identity ALONE. The tenant is resolved
+// from that identity by the injected resolver (→ TENANT_ID), NOT from any header.
+// No x-tenant-id is sent — proving the route no longer reads a client tenant header.
+const AUTH_HEADERS = { "x-dev-user": "alice" };
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -242,14 +248,15 @@ describe("process-defs: 401 without x-dev-user", () => {
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
   it("POST /api/process-defs → 401", async () => {
-    const r = await httpReq("POST", `${base}/api/process-defs`, { "x-tenant-id": TENANT_ID }, {
+    // No x-dev-user → 401 (dev-mode identity gate). No tenant header is involved.
+    const r = await httpReq("POST", `${base}/api/process-defs`, {}, {
       processKey: "k", name: "N", bpmnXml: CLEAN_BPMN,
     });
     expect(r.status).toBe(401);
   });
 
   it("POST /api/process-defs/:key/publish → 401", async () => {
-    const r = await httpReq("POST", `${base}/api/process-defs/myKey/publish`, { "x-tenant-id": TENANT_ID });
+    const r = await httpReq("POST", `${base}/api/process-defs/myKey/publish`, {});
     expect(r.status).toBe(401);
   });
 });
@@ -328,7 +335,7 @@ describe("process-defs: GET /api/process-defs — list", () => {
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
   it("returns 200 with items array", async () => {
-    const r = await httpReq("GET", `${base}/api/process-defs`, { "x-tenant-id": TENANT_ID });
+    const r = await httpReq("GET", `${base}/api/process-defs`, AUTH_HEADERS);
     expect(r.status).toBe(200);
     const body = r.json as Record<string, unknown>;
     expect(Array.isArray(body["items"])).toBe(true);
@@ -362,7 +369,7 @@ describe("process-defs: GET /api/process-defs/:key", () => {
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
   it("returns 200 with definition when found", async () => {
-    const r = await httpReq("GET", `${base}/api/process-defs/myKey`, { "x-tenant-id": TENANT_ID });
+    const r = await httpReq("GET", `${base}/api/process-defs/myKey`, AUTH_HEADERS);
     expect(r.status).toBe(200);
     const body = r.json as Record<string, unknown>;
     expect(body["processKey"]).toBe("myKey");
@@ -371,8 +378,86 @@ describe("process-defs: GET /api/process-defs/:key", () => {
   });
 
   it("returns 404 for unknown key", async () => {
-    const r = await httpReq("GET", `${base}/api/process-defs/unknown-key`, { "x-tenant-id": TENANT_ID });
+    const r = await httpReq("GET", `${base}/api/process-defs/unknown-key`, AUTH_HEADERS);
     expect(r.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0468 [SECURITY]: a forged x-tenant-id header must NOT change the tenant.
+// The tenant is resolved from the actor's IDENTITY. A caller in tenant A who
+// presents x-tenant-id naming tenant B sees ONLY tenant A's rows; tenant B's
+// process_definition rows are never read or written through the forged header.
+// ---------------------------------------------------------------------------
+
+describe("process-defs T-0468: x-tenant-id header is ignored — tenant from identity", () => {
+  const TENANT_A = "11111111-1111-1111-1111-111111111111"; // == TENANT_ID; actor's real tenant
+  const TENANT_B = "22222222-2222-2222-2222-222222222222"; // a foreign tenant the attacker names
+
+  let server: http.Server;
+  let base: string;
+
+  beforeAll(async () => {
+    // Store has ONE row in tenant A and ONE row in tenant B.
+    const pool = makeMemoryPool([
+      {
+        tenant_id: TENANT_A, id: "a11a-0001-0001-0001-000000000001",
+        process_key: "ownProc", name: "Own Proc", bpmn_xml: CLEAN_BPMN,
+        version: 1, status: "draft", deployment_id: null,
+        created_at: 1000, updated_at: 1000,
+      },
+      {
+        tenant_id: TENANT_B, id: "b22b-0001-0001-0001-000000000001",
+        process_key: "foreignProc", name: "Foreign Proc", bpmn_xml: CLEAN_BPMN,
+        version: 1, status: "draft", deployment_id: null,
+        created_at: 1000, updated_at: 1000,
+      },
+    ]);
+    const flowable = makeStubFlowableClient({ ok: true, deploymentId: "dep-sec" });
+    const router = new Router();
+    // The actor ALWAYS resolves to tenant A, regardless of any request header.
+    registerProcessDefsRoutes(router, pool, flowable, async () => TENANT_A);
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((r) =>
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address() as { port: number };
+        base = `http://127.0.0.1:${addr.port}`;
+        r();
+      }),
+    );
+  });
+  afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
+
+  it("GET list with forged x-tenant-id=B returns ONLY tenant A's definitions", async () => {
+    const r = await httpReq("GET", `${base}/api/process-defs`, {
+      "x-dev-user": "alice",
+      "x-tenant-id": TENANT_B, // forged — must be ignored
+    });
+    expect(r.status).toBe(200);
+    const items = (r.json as Record<string, unknown>)["items"] as Array<Record<string, unknown>>;
+    const keys = items.map((i) => i["processKey"]);
+    expect(keys).toContain("ownProc");
+    expect(keys).not.toContain("foreignProc"); // tenant B's row is NOT leaked
+  });
+
+  it("GET :key for tenant B's process via forged header → 404 (not in actor's tenant)", async () => {
+    const r = await httpReq("GET", `${base}/api/process-defs/foreignProc`, {
+      "x-dev-user": "alice",
+      "x-tenant-id": TENANT_B, // forged — must be ignored
+    });
+    expect(r.status).toBe(404);
+  });
+
+  it("POST write with forged x-tenant-id=B persists under tenant A (identity), not B", async () => {
+    const r = await httpReq("POST", `${base}/api/process-defs`, {
+      "x-dev-user": "alice",
+      "x-tenant-id": TENANT_B, // forged — must be ignored
+    }, { processKey: "writeProbe", name: "Write Probe", bpmnXml: CLEAN_BPMN });
+    expect(r.status).toBe(201);
+    // Read it back WITHOUT any tenant header — identity-scoped to A — it must exist.
+    const back = await httpReq("GET", `${base}/api/process-defs/writeProbe`, { "x-dev-user": "alice" });
+    expect(back.status).toBe(200);
+    expect((back.json as Record<string, unknown>)["processKey"]).toBe("writeProbe");
   });
 });
 

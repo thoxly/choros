@@ -718,7 +718,14 @@ function buildRouter(
   // Requires grantsPool (same tenant RLS pattern) + the shared FlowableClient
   // composed above from env (NO env reads in core — NF-1).
   if (grantsPool && flowableClient) {
-    registerProcessDefsRoutes(router, grantsPool, flowableClient);
+    // T-0468 [SECURITY]: tenant comes from the actor's identity (resolveActorTenant),
+    // never from an x-tenant-id header — same injection shape as applications.ts.
+    registerProcessDefsRoutes(
+      router,
+      grantsPool,
+      flowableClient,
+      (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    );
   }
 
   // T-0342: Register public registration endpoint (POST /api/register).
