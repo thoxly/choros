@@ -40,6 +40,8 @@ import { authHeaders } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import { Field, Select } from '../components/components.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
+/* T-0458 [D8-R3]: timer/deadline + escalation panel (NEW FILE — additive import). */
+import { TimerDeadlinePanel } from './timer-deadline-panel.jsx';
 
 /* --------------------------------------------------------------------------
    Dev tenant UUID — same constant used throughout the codebase (screen-agents,
@@ -152,6 +154,21 @@ function effectiveExecType(bo) {
   if (bo.$type === 'bpmn:UserTask') return 'human';
   if (TASK_TYPES.has(bo.$type)) return 'service';
   return null;
+}
+
+/* --------------------------------------------------------------------------
+   T-0458 [D8-R3]: timer-event detection (ADDITIVE — distinct region).
+   A bpmn:BoundaryEvent / bpmn:IntermediateCatchEvent is a "timer event" when its
+   eventDefinitions array contains a bpmn:TimerEventDefinition. The timer panel
+   shows for those so the user can set the deadline + escalation target.
+   -------------------------------------------------------------------------- */
+function isTimerEvent(bo) {
+  if (!bo) return false;
+  if (bo.$type !== 'bpmn:BoundaryEvent' && bo.$type !== 'bpmn:IntermediateCatchEvent') {
+    return false;
+  }
+  const defs = bo.eventDefinitions || [];
+  return defs.some((d) => d && d.$type === 'bpmn:TimerEventDefinition');
 }
 
 /* Exec type display labels */
@@ -1116,6 +1133,20 @@ export default function BpmnPropertiesPanel({ modeler }) {
               bo={bo}
               modeler={modeler}
               element={selected.element}
+            />
+          )}
+
+          {/* T-0458 [D8-R3]: Timer/deadline + escalation panel — for timer events
+              (boundary / intermediate catch carrying a TimerEventDefinition). */}
+          {isTimerEvent(bo) && (
+            <TimerDeadlinePanel
+              bo={bo}
+              modeler={modeler}
+              element={selected.element}
+              PanelGroup={PanelGroup}
+              PPEntry={PPEntry}
+              roles={roles}
+              rolesLoading={rolesLoading}
             />
           )}
 
