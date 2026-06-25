@@ -42,6 +42,8 @@ import LlmConnectionsScreen from '../screens/screen-llm-connections.jsx';
 import AssistantPromptScreen from '../screens/screen-assistant-prompt.jsx';
 // T-0435: DMN branch-rules editor — /processes/:processKey/branch-rules
 import DmnEditorScreen from '../screens/screen-dmn-editor.jsx';
+// T-0477 (E-AGENTS L5): Расход — LLM cost accounting screen.
+import SpendScreen from '../screens/screen-spend.jsx';
 
 export { Icon };
 
@@ -84,6 +86,8 @@ const SCREEN_META = {
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
+  // T-0477 (E-AGENTS L5): LLM spend accounting screen.
+  spend: { crumb: ["Наблюдаемость", "Расход"] },
   // T-0474 (E-AGENTS L2): LLM connection-profile registry.
   "llm-connections": { crumb: ["Конфигурация", "LLM-соединения"] },
   // T-0382 (D5): LLM connection screen.
@@ -793,6 +797,8 @@ function AppShell() {
             <Route path="/assistant-prompt" element={<AssistantPromptScreen />} />
             {/* T-0435: DMN branch-rules editor — scoped to a processKey. */}
             <Route path="/processes/:processKey/branch-rules" element={<DmnEditorScreen />} />
+            {/* T-0477 (E-AGENTS L5): Расход — LLM cost accounting screen. */}
+            <Route path="/spend" element={<SpendScreen />} />
           </Routes>
         </div>
       </main>
