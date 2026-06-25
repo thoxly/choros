@@ -43,6 +43,8 @@ import {
   isGenesisOwnerForTenant,
 } from "../db/org.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
+import type { AdminContext } from "../core/scoped-admin.js";
+import type { Grant } from "../core/grant-lattice.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
@@ -229,6 +231,88 @@ const SEED_ORACLE: AncestryOracle = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// assertOrgObjectAuthority — T-0469 [auth]: the org-write authorization gate,
+// widened from "genesis owner ONLY" to "genesis owner OR a holder of a covering,
+// delegable mgmt_object grant for this object+operation".
+//
+// THE SEAM (reuse, not invent): the delegation machinery already loaded by
+// loadAdminContext (admin.adminGrants = confirmed, in-window, delegable
+// mgmt_object:* grants) is checked by validateAdminDelegation against a synthetic
+// child grant — EXACTLY the pattern POST /api/roles already uses. For the genesis
+// owner the check short-circuits ok (step 3 of validateAdminDelegation). For a
+// non-owner it passes iff some delegable mgmt_object:<kind>/<operation> grant
+// covers the target org scope. This is how `role-constructor-admin` gets owner-
+// like authoring power over departments/positions/employees/roles WITHOUT being
+// the owner.
+//
+// OWNER-ONLY BOUNDARY (the security crux — NOT routed through this helper):
+//   - employee DELETION stays isGenesisOwner-only (DELETE /api/employees below),
+//   - role_assignment mutation is not a seed-write surface AT ALL (this file
+//     never INSERT/UPDATE/DELETEs choros.role_assignment), so a constructor-admin
+//     can never remove/replace the tenant-owner through these routes.
+// So a constructor-admin can author org structure but can never delete a person
+// or touch who the owner is. See registerTenant role-constructor-admin seeding:
+// it is granted mgmt_object:{department,position,employee,role} create/update
+// ONLY — no employee:delete, no mgmt_object:grant, no freeform.
+// ---------------------------------------------------------------------------
+
+function assertOrgObjectAuthority(
+  admin: AdminContext,
+  mgmtKind:
+    | "mgmt_object:department"
+    | "mgmt_object:position"
+    | "mgmt_object:employee"
+    | "mgmt_object:role",
+  operation: "create" | "update" | "delete",
+  tenantId: string,
+  actorId: string,
+  nowMs: number,
+  notOwnerMessage: string,
+): void {
+  // Genesis owner short-circuits (preserves the existing owner path verbatim).
+  if (admin.isGenesisOwner) return;
+
+  // Non-owner: require a covering, delegable mgmt_object:<kind>/<operation> grant.
+  const syntheticChild: Grant = {
+    tenantId,
+    id: randomUUID(),
+    roleId: randomUUID(),
+    resourceType: mgmtKind,
+    operation,
+    scope: admin.adminOrgScope,
+    delegable: false,
+    grantedBy: actorId,
+    createdAt: nowMs,
+  };
+
+  const gate = validateAdminDelegation(
+    admin,
+    { kind: "grant", childGrant: syntheticChild, targetOrgScope: admin.adminOrgScope },
+    SEED_ORACLE,
+  );
+
+  if (!gate.ok) {
+    throw new HttpError(403, "NOT_OWNER", notOwnerMessage);
+  }
+}
+
+// T-0469: does the admin hold ANY delegable org-object mgmt grant? Used by the
+// READ counterpart (GET /api/org/tenant-state) where there is no specific
+// operation to gate — any org-authoring authority is sufficient to read state.
+const ORG_OBJECT_KINDS = new Set([
+  "mgmt_object:department",
+  "mgmt_object:position",
+  "mgmt_object:employee",
+  "mgmt_object:role",
+]);
+
+function hasOrgObjectAuthority(admin: AdminContext): boolean {
+  return admin.adminGrants.some(
+    (g) => g.delegable && ORG_OBJECT_KINDS.has(g.resourceType),
+  );
+}
+
 export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
   const nowMs = () => Date.now();
 
@@ -346,9 +430,11 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // forest-owner). Cross-tenant writes by non-forest-owners → 403.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create departments");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:department/create grant.
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:department", "create", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:department grant required to create departments",
+    );
 
     const slug = b["slug"];
     if (typeof slug !== "string" || slug.length === 0) {
@@ -405,9 +491,11 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create positions");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:position/create grant.
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:position", "create", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:position grant required to create positions",
+    );
 
     const department_id = b["department_id"];
     if (typeof department_id !== "string") {
@@ -468,9 +556,12 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // tenant — a self-registered owner can add people to THEIR tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to create employees");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:employee/create grant.
+    // (employee DELETION stays owner-only — see DELETE /api/employees below.)
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:employee", "create", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:employee grant required to create employees",
+    );
 
     const kind = b["kind"];
     if (kind !== "human" && kind !== "agent") {
@@ -614,9 +705,11 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete departments");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:department/delete grant.
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:department", "delete", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:department grant required to delete departments",
+    );
 
     const deptId = params["id"] as string;
     assertUuidShape(deptId, "id");
@@ -663,9 +756,11 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete positions");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:position/delete grant.
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:position", "delete", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:position grant required to delete positions",
+    );
 
     const posId = params["id"] as string;
     assertUuidShape(posId, "id");
@@ -712,6 +807,10 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0469 OWNER-ONLY BOUNDARY (the security crux): employee DELETION is NOT
+    // delegable. A constructor-admin gets owner-like AUTHORING power but can NEVER
+    // remove a person — that is reserved to the genesis owner. Do NOT route this
+    // through assertOrgObjectAuthority; the strict isGenesisOwner gate stays.
     if (!admin.isGenesisOwner) {
       throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete employees");
     }
@@ -761,9 +860,11 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to delete roles");
-    }
+    // T-0469: owner OR a covering delegable mgmt_object:role/delete grant.
+    assertOrgObjectAuthority(
+      admin, "mgmt_object:role", "delete", tenant_id, actorId, nowMs(),
+      "owner or mgmt_object:role grant required to delete roles",
+    );
 
     const roleId = params["id"] as string;
     assertUuidShape(roleId, "id");
@@ -847,8 +948,10 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // may read any tenant, since the importer diffs arbitrary tenants).
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenantId, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
-    if (!admin.isGenesisOwner) {
-      throw new HttpError(403, "NOT_OWNER", "genesis owner required to read tenant state");
+    // T-0469: owner OR a holder of any covering delegable org-object mgmt grant may
+    // read the state to diff/author it (the read-counterpart of the write surface).
+    if (!admin.isGenesisOwner && !hasOrgObjectAuthority(admin)) {
+      throw new HttpError(403, "NOT_OWNER", "owner or org-object grant required to read tenant state");
     }
 
     const state = await withTenantTx(pool, tenantId, async (client) => {
