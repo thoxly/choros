@@ -420,13 +420,18 @@ function DmnEditorScreen() {
     setSuccessMsg(null);
 
     try {
-      // Параллельно: поля процесса + сохранённые таблицы правил
+      // Параллельно: поля процесса + сохранённые таблицы правил.
+      // T-0484 (honesty): listRuleTables errors are NO LONGER swallowed into [].
+      // A real backend failure here previously rendered as EmptyState ("правил
+      // ещё нет") — masking a 500/503 as "nothing created". Let it reject so the
+      // outer catch surfaces an honest ErrorState with retry. Binding-fields
+      // stays non-fatal (rules are still authorable without populated field keys).
       const [fieldsRes, tables] = await Promise.all([
         fetch(
           `/api/forms/binding?processKey=${encodeURIComponent(processKey)}&stepKey=start`,
           { headers: authHeaders() },
         ),
-        listRuleTables(processKey).catch(() => []),
+        listRuleTables(processKey),
       ]);
 
       // Поля (binding)

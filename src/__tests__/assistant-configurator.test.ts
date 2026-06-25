@@ -493,3 +493,111 @@ describe("AC-T363-2: benign add_field tool call lands in approvedOps with tier='
     expect(op.tier).toBe("draft");
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC-T462-1 (D8-G1): create_application tool → ApprovedOp(create_application), DRAFT
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-1: create_application produces a DRAFT app+section ApprovedOp", () => {
+  it("create_application tool call → approvedOps[0].kind='create_application', tier='draft', section resolved", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "purchases",
+      appDisplayName: "Заявки на закупку",
+      appDescription: "Единая форма закупок",
+      humanReadableReason: "Пользователь попросил построить приложение для закупок",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // INVARIANT: creation op is non-destructive → approvedOps, not blockedOps.
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.approvedOps.length).toBeGreaterThan(0);
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    // INVARIANT: lands in DRAFT (not live).
+    expect(op.tier).toBe("draft");
+    // args preserved + section defaulted from app fields for the DB executor.
+    expect(op.args["appSlug"]).toBe("purchases");
+    expect(op.args["appDisplayName"]).toBe("Заявки на закупку");
+    expect(op.args["sectionSlug"]).toBe("purchases");
+    expect(op.args["sectionDisplayName"]).toBe("Заявки на закупку");
+  });
+
+  it("create_application honors explicit sectionSlug / sectionDisplayName", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "crm",
+      appDisplayName: "CRM",
+      sectionSlug: "contacts",
+      sectionDisplayName: "Контакты",
+      humanReadableReason: "Собрать CRM с разделом контактов",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("собери CRM", ctx);
+
+    const op = result.approvedOps[0]!;
+    expect(op.kind).toBe("create_application");
+    expect(op.args["sectionSlug"]).toBe("contacts");
+    expect(op.args["sectionDisplayName"]).toBe("Контакты");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-2 (D8-G1): create_application is exposed as a configurator tool
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-2: create_application is declared in the configurator toolset", () => {
+  it("the configurator's first LLM call declares a create_application tool", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Что именно построить?" });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("построй приложение", ctx);
+
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{ function?: { name?: string } }>;
+    const names = tools.map((t) => t.function?.name);
+    expect(names).toContain("create_application");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-3 (D8-G1): invalid slug → blocked (honest), NOT a crash/500
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-3: create_application with invalid slug is blocked honestly", () => {
+  it("a bad appSlug → blockedOps (pending_human_confirm), approvedOps empty — no throw", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "Заявки!",            // not slug-shaped
+      appDisplayName: "Заявки",
+      humanReadableReason: "Тест некорректного slug",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("построй приложение Заявки!", ctx);
+
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps.length).toBeGreaterThan(0);
+    const blocked = result.blockedOps[0]!;
+    expect(blocked.kind).toBe("pending_human_confirm");
+    expect(blocked.toolName).toBe("create_application");
+    expect(blocked.description).toMatch(/slug/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC-T462-4 (D8-G1): grant gate — non-holder refused honestly, not 500
+// ---------------------------------------------------------------------------
+
+describe("AC-T462-4: create_application gated by authoring_draft — non-holder refused honestly", () => {
+  it("a user WITHOUT authoring_draft asking to build → honest refusal, NO tool dispatch (no 500)", async () => {
+    const llm = new ToolCallLlmPort("create_application", {
+      appSlug: "purchases",
+      appDisplayName: "Заявки на закупку",
+      humanReadableReason: "Должно быть отказано до диспетча",
+    });
+    const ctx = makeContext([], llm as unknown as StubChatLlmPort); // no grants
+    const result = await runConfigurator("построй приложение для закупок", ctx);
+
+    // Grant ceiling fails BEFORE any tool dispatch → no approvedOps/blockedOps.
+    expect(result.approvedOps).toHaveLength(0);
+    expect(result.blockedOps).toHaveLength(0);
+    expect(result.grantCeilingViolations.length).toBeGreaterThan(0);
+    expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
+  });
+});
