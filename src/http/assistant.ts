@@ -81,6 +81,11 @@ import type { ResolveSubject } from "../core/object-handle.js";
 import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
 import type { RegistryDefCandidate } from "../core/relation-cascade.js";
 import { reconcileCrossAppRefs } from "./registry-defs.js";
+// T-0464 (D8-G3): free-topology process generation loop (generate→validate→repair).
+import { runProcessGenLoop } from "../core/process-gen-loop.js";
+import type { GroundingContext } from "../core/process-gen-validator.js";
+import { CONFIGURATOR_DEFAULT_SYSTEM_PROMPT } from "../core/assistant-configurator.js";
+import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 // T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
 import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
 
@@ -278,11 +283,83 @@ async function fetchRegistryDefCandidates(
   }
 }
 
+/**
+ * T-0464 (D8-G3): assemble the grounding context for process generation — the real
+ * field keys (from the bound application's registry_def record_schema) and the real
+ * role slugs in the tenant. The generation loop grounds gateway conditions on these
+ * fields and lane roles on these role slugs (cascade/ask when a reference is missing).
+ *
+ * applicationId is optional: when given, only that app's section field keys are used;
+ * when absent, the union of all tenant section field keys grounds the conditions (a
+ * looser ground — the loop still asks when a condition references nothing real).
+ */
+async function fetchGroundingContext(
+  pool: pg.Pool,
+  tenantId: string,
+  applicationId: string | null,
+): Promise<GroundingContext> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+
+    // Field keys: the record_schema.properties keys of the relevant registry_def(s).
+    const defRes = applicationId
+      ? await client.query<{ record_schema: Record<string, unknown> | null }>(
+          `SELECT record_schema FROM choros.registry_def
+             WHERE tenant_id = $1 AND application_id = $2`,
+          [tenantId, applicationId],
+        )
+      : await client.query<{ record_schema: Record<string, unknown> | null }>(
+          `SELECT record_schema FROM choros.registry_def WHERE tenant_id = $1`,
+          [tenantId],
+        );
+    const fieldKeys = new Set<string>();
+    for (const row of defRes.rows) {
+      const schema = row.record_schema as { properties?: Record<string, unknown> } | null;
+      const props = schema?.properties;
+      if (props && typeof props === "object") {
+        for (const key of Object.keys(props)) fieldKeys.add(key);
+      }
+    }
+
+    // Role slugs: every role.slug in the tenant.
+    const roleRes = await client.query<{ slug: string }>(
+      `SELECT slug FROM choros.role WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const roleSlugs = roleRes.rows.map((r) => r.slug);
+
+    await client.query("COMMIT");
+    return { fieldKeys: [...fieldKeys], roleSlugs };
+  } catch {
+    await client.query("ROLLBACK").catch(() => {});
+    // Honest-degrade: empty grounding → the loop surfaces needs_grounding rather than
+    // emitting an ungrounded process. Non-fatal.
+    return { fieldKeys: [], roleSlugs: [] };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * T-0464 (D8-G3): execution context for the generate_process op — the live LLM port
+ * (the bot that emits the BPMN) and the configurator system prompt. Threaded into
+ * executeApprovedOpAsDraft only for the generate_process kind (other ops are pure DB).
+ */
+interface GenExecContext {
+  readonly llm: LlmPort;
+  readonly systemPrompt: string;
+}
+
 /** Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, error message on failure. */
 async function executeApprovedOpAsDraft(
   pool: pg.Pool,
   tenantId: string,
   op: ApprovedOp,
+  /** T-0464: present only when op.kind === 'generate_process' (the loop needs the LLM). */
+  genCtx?: GenExecContext,
 ): Promise<string | null> {
   try {
     const nowMs = Date.now();
@@ -655,6 +732,98 @@ async function executeApprovedOpAsDraft(
                    name       = EXCLUDED.name,
                    updated_at = EXCLUDED.updated_at`,
             [tenantId, randomUUID(), syntheticKey, syntheticName, dmnXml, nowMs],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
+      // -----------------------------------------------------------------------
+      // generate_process — T-0464 (D8-G3): run the generate→validate→repair loop
+      // and persist the converged draft as a process_definition DRAFT row for human
+      // review in the Modeler. NEVER auto-published. On lint-exhaustion or an
+      // ungroundable reference, NO row is written (honest failure surfaced in text).
+      // Co-equal: writes the SAME 'draft' process_definition the visual modeler /
+      // process-defs POST writes.
+      // -----------------------------------------------------------------------
+      case "generate_process": {
+        if (!genCtx) {
+          // The dispatch site must supply the LLM context for this op kind.
+          return `generate_process: no LLM execution context wired`;
+        }
+        const args = op.args;
+        const processName = typeof args["processName"] === "string" ? args["processName"].trim() : "";
+        const description = typeof args["description"] === "string" ? args["description"].trim() : "";
+        const requestedKey = typeof args["processKey"] === "string" ? args["processKey"].trim() : "";
+        const applicationId = typeof args["applicationId"] === "string" ? args["applicationId"].trim() : "";
+
+        if (!processName || !description) {
+          return `generate_process: missing processName or description`;
+        }
+
+        // Resolve a collision-safe process key (mirrors process-defs POST B19).
+        const processKey = requestedKey
+          ? requestedKey
+          : await generateUniqueProcessKey(processName, async (candidate) => {
+              const c = await pool.connect();
+              try {
+                await c.query("BEGIN");
+                await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+                await c.query("SET LOCAL search_path TO choros");
+                const r = await c.query(
+                  `SELECT 1 FROM choros.process_definition
+                     WHERE tenant_id = $1 AND process_key = $2 LIMIT 1`,
+                  [tenantId, candidate],
+                );
+                await c.query("COMMIT");
+                return r.rowCount !== null && r.rowCount > 0;
+              } catch {
+                await c.query("ROLLBACK").catch(() => {});
+                return false;
+              } finally {
+                c.release();
+              }
+            });
+
+        // Grounding: real field keys + role slugs (cascade/ask when a reference misses).
+        const grounding = await fetchGroundingContext(pool, tenantId, applicationId || null);
+
+        // Run the loop. PURE core decides draft_ready / needs_grounding / exhausted.
+        const outcome = await runProcessGenLoop({
+          description,
+          llm: genCtx.llm,
+          systemPrompt: genCtx.systemPrompt,
+          grounding,
+          processKey,
+          processName,
+        });
+
+        if (outcome.status !== "draft_ready") {
+          // Honest non-emit: surface why, write NOTHING. The user sees this in the reply.
+          return `generate_process[${outcome.status}]: ${outcome.message}`;
+        }
+
+        // Converged — persist as DRAFT (status='draft'). Human reviews/promotes in Modeler.
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          await client.query(
+            `INSERT INTO choros.process_definition
+               (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $6)
+             ON CONFLICT (tenant_id, process_key, version) DO UPDATE
+               SET bpmn_xml   = EXCLUDED.bpmn_xml,
+                   name       = EXCLUDED.name,
+                   updated_at = EXCLUDED.updated_at`,
+            [tenantId, randomUUID(), processKey, processName, outcome.bpmnXml, nowMs],
           );
           await client.query("COMMIT");
         } catch (err) {
@@ -1412,9 +1581,22 @@ export function registerAssistantRoutes(
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
 
           // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).
+          // T-0464 (D8-G3): generate_process needs the live LLM port + the resolved
+          // configurator system prompt to run the generate→validate→repair loop.
+          const genCtx = {
+            llm,
+            systemPrompt: cfgPromptOverride && cfgPromptOverride.trim()
+              ? cfgPromptOverride
+              : CONFIGURATOR_DEFAULT_SYSTEM_PROMPT,
+          };
           const opErrors: string[] = [];
           for (const op of cfgResult.approvedOps) {
-            const err = await executeApprovedOpAsDraft(pool, tenantId, op);
+            const err = await executeApprovedOpAsDraft(
+              pool,
+              tenantId,
+              op,
+              op.kind === "generate_process" ? genCtx : undefined,
+            );
             if (err !== null) {
               opErrors.push(err);
               console.error(`[T-0363] draft op failed (${op.kind}): ${err}`);

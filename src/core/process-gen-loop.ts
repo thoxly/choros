@@ -226,7 +226,6 @@ export async function runProcessGenLoop(
   ];
 
   let lastValidation: GenValidationResult | null = null;
-  let lastDraftXml: string | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let replyText: string;
@@ -278,7 +277,6 @@ export async function runProcessGenLoop(
       continue;
     }
 
-    lastDraftXml = xml;
     const validation = validateGeneratedProcess(xml, req.grounding);
     lastValidation = validation;
 
