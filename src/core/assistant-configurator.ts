@@ -1152,11 +1152,15 @@ export async function runConfigurator(
     //  - text is the warm "ask an admin" message (NOT a raw 503).
     //  - when the message describes something configurable, captureRequest is set
     //    so the HTTP layer files it as a config-request notification to admins.
+    //
+    // We do NOT bake the "передал администратору" confirmation into the text here:
+    // whether the request was actually routed depends on a DB side-effect the
+    // pure core cannot perform. The HTTP layer appends AUTHORING_CAPTURE_CONFIRMATION
+    // ONLY after a successful capture (and an honest note if nobody could receive
+    // it). This keeps the message truthful — no claim of delivery the core can't make.
     const worthy = isCaptureWorthy(userText);
     return {
-      text: worthy
-        ? AUTHORING_ACCESS_DENIED_MESSAGE + " " + AUTHORING_CAPTURE_CONFIRMATION
-        : AUTHORING_ACCESS_DENIED_MESSAGE,
+      text: AUTHORING_ACCESS_DENIED_MESSAGE,
       approvedOps: [],
       blockedOps: [],
       pendingPromotes: [],

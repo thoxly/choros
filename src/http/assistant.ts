@@ -78,7 +78,12 @@ import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
-import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
+// T-0466 (D8-G5): AUTHORING_CAPTURE_CONFIRMATION appended after a successful capture.
+import {
+  runConfigurator,
+  AUTHORING_CAPTURE_CONFIRMATION,
+  type ApprovedOp,
+} from "../core/assistant-configurator.js";
 import type { RegistryDefCandidate } from "../core/relation-cascade.js";
 import { reconcileCrossAppRefs } from "./registry-defs.js";
 // T-0466 (D8-G5): capture-as-request — file a non-admin's config-request as a
@@ -1522,15 +1527,15 @@ export function registerAssistantRoutes(
                 actorSlug,
                 cfgResult.captureRequest.description,
               );
-              if (notified === 0) {
-                // No admin/owner to route to — be honest rather than claim it was sent.
-                handlerResult = {
-                  text:
-                    cfgResult.text +
-                    "\n\n(Пока некому передать заявку — в пространстве нет администратора с правами настройки.)",
-                  intent: "configurator" as const,
-                };
-              }
+              handlerResult = {
+                // Truthful: confirm delivery only when someone actually received it.
+                text:
+                  notified > 0
+                    ? cfgResult.text + " " + AUTHORING_CAPTURE_CONFIRMATION
+                    : cfgResult.text +
+                      "\n\n(Пока некому передать заявку — в пространстве нет администратора с правами настройки.)",
+                intent: "configurator" as const,
+              };
             } catch (capErr) {
               console.error(`[T-0466] capture-as-request failed: ${String(capErr)}`);
               handlerResult = {

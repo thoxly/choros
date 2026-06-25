@@ -741,8 +741,10 @@ describe("AC-T466-2: capture-as-request — a non-holder's description is captur
     // The intent is captured (so the HTTP layer can file it to admins) and NOT lost.
     expect(result.captureRequest).toBeDefined();
     expect(result.captureRequest!.description).toBe(desc);
-    // The reply confirms the request was passed to an admin (human language).
-    expect(result.text).toMatch(/заявку на настройку|администратор/i);
+    // The reply is the human refusal pointing at the administrator. The pure core
+    // does NOT claim delivery (that's a DB side-effect the HTTP layer confirms
+    // only after a successful capture) — so the text stays truthful here.
+    expect(result.text).toMatch(/администратор/i);
   });
 
   it("trivial message («?») → NO captureRequest (we don't file empty noise)", async () => {
