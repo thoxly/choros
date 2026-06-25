@@ -168,6 +168,22 @@ export interface InstanceInboxTask {
    * targeting the hardcoded "task-approve" defKey.
    */
   readonly taskDefKey: string;
+  /**
+   * T-0458 [D8-R3]: true when this waiting task was surfaced by a TIMER FIRING
+   * (a boundary/intermediate deadline elapsed → Flowable routed the token to the
+   * escalation user-task). Drives the inbox «Эскалации» tab and the escalation
+   * styling without client-side string-matching. Set on the process.next_task row
+   * the timer-firing reconcile emits (reconcileInstanceTimers); false/absent for
+   * ordinary post-gateway next-tasks.
+   */
+  readonly escalated?: boolean;
+  /**
+   * T-0458 [D8-R3] / F5: the pre-fill reason for the escalation form (e.g.
+   * «Истёк срок согласования»). Surfaced so the escalation inbox row opens a
+   * PRE-FILLED form rather than a blank one (spec §3.4). Absent for non-escalation
+   * tasks.
+   */
+  readonly doubtReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +516,23 @@ export async function appendNextTaskEvent(
     readonly taskStep: string;
     /** New inbox task id for the next waiting task (fresh UUID from caller). */
     readonly inboxTaskId: string;
+    /**
+     * T-0458 [D8-R3]: when true, this next_task is an ESCALATION surfaced by a
+     * timer firing. Marks the row as escalated so the inbox «Эскалации» tab and
+     * styling pick it up. Optional — ordinary post-gateway next-tasks omit it.
+     */
+    readonly escalated?: boolean;
+    /**
+     * T-0458 [D8-R3] / F5: pre-fill reason for the escalation form (e.g. «Истёк
+     * срок согласования»). Surfaced so the escalation row opens a pre-filled form.
+     */
+    readonly doubtReason?: string;
+    /**
+     * T-0458 [D8-R3]: the `via` provenance for the audit event. Defaults to
+     * "inbox-approve" (the T-0443 post-approve reconcile). The timer-firing
+     * reconcile passes "timer-fire" so the provenance is honest.
+     */
+    readonly via?: string;
   },
 ): Promise<void> {
   await withTenant(pool, tenantId, async (client) => {
@@ -509,7 +542,7 @@ export async function appendNextTaskEvent(
       actor: args.actor,
       subject: `instance:${args.instanceId}`,
       scope: { proc_key: args.procKey },
-      via: "inbox-approve",
+      via: args.via ?? "inbox-approve",
       proposed_by: null,
       confirmed_by: null,
       payload: {
@@ -520,6 +553,9 @@ export async function appendNextTaskEvent(
         task_step: args.taskStep,
         task_name: args.taskName,
         inbox_task_id: args.inboxTaskId,
+        // T-0458 [D8-R3]: escalation provenance (timer firing) + F5 prefill reason.
+        ...(args.escalated ? { escalated: true } : {}),
+        ...(args.doubtReason ? { doubt_reason: args.doubtReason } : {}),
       },
       occurred_at: args.nowMs,
     });
@@ -805,6 +841,11 @@ export async function listInstanceInboxTasks(
     if (!inst) continue;
     if (endedInstanceIds.has(inst)) continue; // instance ended → no more tasks.
     if (approvedTaskIds.has(row.id)) continue; // this next_task was approved → hide.
+    // T-0458 [D8-R3]: surface escalation provenance + F5 prefill reason from the payload.
+    const isEscalated = payload["escalated"] === true;
+    const doubtReason = typeof payload["doubt_reason"] === "string" && payload["doubt_reason"]
+      ? (payload["doubt_reason"] as string)
+      : undefined;
     tasks.push({
       id: row.id,
       role: strField(payload, "task_role", APPROVER_ROLE),
@@ -817,6 +858,8 @@ export async function listInstanceInboxTasks(
       // handler (appendNextTaskEvent writes it). Use it so the approve handler can complete
       // the RIGHT engine user-task (e.g. "task-extra-approve" on the 6M branch).
       taskDefKey: strField(payload, "task_def_key", "task-approve"),
+      ...(isEscalated ? { escalated: true } : {}),
+      ...(doubtReason ? { doubtReason } : {}),
     });
   }
 
@@ -835,4 +878,142 @@ export async function findWaitingInstanceTask(
 ): Promise<InstanceInboxTask | null> {
   const tasks = await listInstanceInboxTasks(pool, tenantId);
   return tasks.find((t) => t.id === taskId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// T-0458 [D8-R3]: timer-firing projection (reconcile-on-read).
+// ---------------------------------------------------------------------------
+
+/** Minimal engine-task shape — a structural subset of FlowableClient's ActiveUserTask
+ * so this projection module stays decoupled from the engine client type. */
+export interface ActiveEngineTask {
+  readonly id: string;
+  readonly taskDefinitionKey: string;
+  readonly name: string;
+  readonly candidateGroups: readonly string[];
+}
+
+/** Minimal engine port the timer reconcile needs (a subset of FlowableClient). */
+export interface TimerReconcileEnginePort {
+  getActiveUserTasks(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; tasks: ActiveEngineTask[] }
+    | { ok: false; code: string }
+  >;
+}
+
+/**
+ * F5 default pre-fill reason for a timer-fired escalation form. The deadline
+ * elapsed, so the escalation reviewer opens a form pre-filled with this reason.
+ */
+export const TIMER_ESCALATION_REASON = "Истёк срок шага — эскалация по таймеру";
+
+/**
+ * Timer-firing projection. For each WAITING instance, compare the live engine
+ * user-task set against what the audit-event projection already surfaces. A
+ * boundary/intermediate TIMER that fired in Flowable routes the token to the
+ * escalation user-task, which becomes a NEW active engine task. Any such task that
+ * is not yet projected is surfaced as a `process.next_task(escalated)` row — the
+ * firing projection — addressed to the escalation role (the candidateGroups the
+ * timer-escalation mapper stamped) with an F5 pre-fill reason.
+ *
+ * This is the read-side analogue of the post-approve engine-drive reconcile in
+ * inbox.ts (T-0443/T-0456). A timer fires WITHOUT a human action, so the firing
+ * cannot be projected on the approve path; it is reconciled when the inbox/processes
+ * screen is read (the natural moment a user would see the escalation appear).
+ *
+ * Best-effort + idempotent: a task already projected (base, prior next_task, or a
+ * prior timer-fire emission) is NOT re-emitted (dedup by defKey per instance). Engine
+ * failures degrade silently (the projection is never a hard dependency of the read).
+ *
+ * @returns the number of escalation rows emitted (0 when nothing fired / nothing new).
+ */
+export async function reconcileInstanceTimers(
+  pool: pg.Pool,
+  tenantId: string,
+  engine: TimerReconcileEnginePort,
+  opts?: { nowMs?: number; actor?: string; limit?: number },
+): Promise<number> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const actor = opts?.actor ?? "system:timer";
+
+  // Read current projection state once: which instances are waiting, and which
+  // defKeys are already surfaced per instance (to dedup re-emission).
+  let projections: InstanceProjection[];
+  let projectedTasks: InstanceInboxTask[];
+  try {
+    projections = await listInstanceProjections(pool, tenantId, { limit: opts?.limit });
+    projectedTasks = await listInstanceInboxTasks(pool, tenantId);
+  } catch {
+    return 0; // read-projection — degrade silently.
+  }
+
+  const waitingInstanceIds = projections
+    .filter((p) => p.status !== "done")
+    .map((p) => p.inst);
+  if (waitingInstanceIds.length === 0) return 0;
+
+  // defKeys already projected per instance (base + next_task rows).
+  const projectedDefKeysByInst = new Map<string, Set<string>>();
+  for (const t of projectedTasks) {
+    let set = projectedDefKeysByInst.get(t.inst);
+    if (set === undefined) {
+      set = new Set<string>();
+      projectedDefKeysByInst.set(t.inst, set);
+    }
+    set.add(t.taskDefKey);
+  }
+  // procKey per instance (for the emitted event scope).
+  const procKeyByInst = new Map<string, string>();
+  for (const p of projections) procKeyByInst.set(p.inst, p.procKey);
+
+  let emitted = 0;
+
+  for (const inst of waitingInstanceIds) {
+    let engineResult;
+    try {
+      engineResult = await engine.getActiveUserTasks(inst);
+    } catch {
+      continue; // engine hiccup for this instance — skip, try others.
+    }
+    if (!engineResult.ok || engineResult.tasks.length === 0) continue;
+
+    const projectedDefKeys = projectedDefKeysByInst.get(inst) ?? new Set<string>();
+    const emittedThisPass = new Set<string>();
+
+    for (const engineTask of engineResult.tasks) {
+      const defKey = engineTask.taskDefinitionKey;
+      if (projectedDefKeys.has(defKey)) continue; // already on screen.
+      if (emittedThisPass.has(defKey)) continue; // dedup within this pass.
+      emittedThisPass.add(defKey);
+
+      const role = engineTask.candidateGroups[0] ?? APPROVER_ROLE;
+      const procKey = procKeyByInst.get(inst) ?? "telLinear";
+      const taskName = engineTask.name || APPROVE_TASK_NAME;
+
+      try {
+        await appendNextTaskEvent(pool, tenantId, {
+          instanceId: inst,
+          procKey,
+          actor,
+          nowMs,
+          taskDefKey: defKey,
+          taskName,
+          taskRole: role,
+          taskStep: taskName,
+          inboxTaskId: randomUUID(),
+          // T-0458 [D8-R3]: this surfacing came from a timer firing → escalation.
+          escalated: true,
+          doubtReason: TIMER_ESCALATION_REASON,
+          via: "timer-fire",
+        });
+        emitted++;
+      } catch {
+        // best-effort — a failed emit just means it is retried on the next read.
+      }
+    }
+  }
+
+  return emitted;
 }
