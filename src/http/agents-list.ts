@@ -99,11 +99,25 @@ function extractActor(req: import("node:http").IncomingMessage): string {
 // Row + public types
 // ---------------------------------------------------------------------------
 
-/** Raw row from the employee ⋈ agent_card ⋈ position ⋈ department join. */
+/**
+ * Agent function taxonomy (migration 093). The registry shows this; the org
+ * structure (GET /api/org) shows ONLY 'workforce' agents (they alone have an
+ * org-place). 'system' / 'assistant' agents live in the registry without an
+ * employee row (employee_id IS NULL).
+ */
+export type AgentType = "workforce" | "system" | "assistant";
+
+/** Raw row from agent_card ⟕ employee ⟕ position ⟕ department (LEFT joins). */
 interface AgentListRow {
-  employee_id: string;
-  slug: string;
-  display_name: string;
+  /** Surrogate registry id (migration 093) — org-independent agent identity. */
+  agent_card_id: string;
+  /** Org-place link; NULL for system/assistant agents (no org-place). */
+  employee_id: string | null;
+  agent_type: AgentType;
+  /** NULL when the agent has no employee row (org-less). */
+  slug: string | null;
+  /** NULL when the agent has no employee row; falls back to kc_client_id below. */
+  display_name: string | null;
   kc_client_id: string;
   llm_endpoint: string | null;
   llm_model: string | null;
@@ -119,7 +133,17 @@ interface AgentListRow {
  * boolean `llm_bound` and the raw handle never reaches this object.
  */
 export interface AgentPublic {
+  /**
+   * Addressing id. For an org-attached (workforce) agent this is the employee_id
+   * — unchanged, so the existing GET-by-id / secret-handle routes (keyed on
+   * employee_id) keep working. For an org-less (system/assistant) agent it is the
+   * surrogate agent_card id (migration 093), so the registry can still address it.
+   */
   id: string;
+  /** Agent function taxonomy (migration 093). */
+  agent_type: AgentType;
+  /** true iff this agent has an org-place (employee_id set) — i.e. workforce. */
+  has_org_place: boolean;
   slug: string;
   display_name: string;
   /** Lifecycle hint derived from config — never a secret. */
@@ -155,10 +179,17 @@ export function deriveLlmProvider(endpoint: string | null): string | null {
  */
 export function serializeAgent(row: AgentListRow): AgentPublic {
   const bound = row.llm_secret_handle !== null;
+  const hasOrgPlace = row.employee_id !== null;
   return {
-    id: row.employee_id,
-    slug: row.slug,
-    display_name: row.display_name,
+    // Org-attached agents address by employee_id (existing routes unchanged);
+    // org-less agents address by their surrogate registry id.
+    id: hasOrgPlace ? row.employee_id! : row.agent_card_id,
+    agent_type: row.agent_type,
+    has_org_place: hasOrgPlace,
+    // Org-less agents have no employee row → fall back to the kc_client_id for a
+    // stable handle in both slug and display name.
+    slug: row.slug ?? row.kc_client_id,
+    display_name: row.display_name ?? row.kc_client_id,
     status: bound ? "configured" : "needs_llm",
     kc_client_id: row.kc_client_id,
     llm_provider: deriveLlmProvider(row.llm_endpoint),
@@ -174,38 +205,46 @@ export function serializeAgent(row: AgentListRow): AgentPublic {
 // ---------------------------------------------------------------------------
 
 /**
- * Tenant-scoped read of agent metadata under FORCE RLS. Joins employee
- * (kind='agent') ⋈ agent_card ⋈ position ⋈ department. Reads llm_secret_handle
- * ONLY to compute llm_bound; the value never escapes serializeAgent.
+ * Tenant-scoped read of agent metadata under FORCE RLS. The REGISTRY drives the
+ * read: agent_card ⟕ employee ⟕ position ⟕ department (LEFT joins), so org-less
+ * agents (employee_id IS NULL — system/assistant, migration 093) appear too. The
+ * employee join is dropped for them; slug/display_name come back NULL and the
+ * serializer falls back to kc_client_id. Reads llm_secret_handle ONLY to compute
+ * llm_bound; the value never escapes serializeAgent.
+ *
+ * The optional `agentId` filter matches EITHER the agent's employee_id (workforce,
+ * the historical addressing) OR the surrogate agent_card id (org-less) — so
+ * GET /api/agents/:id resolves both addressing schemes.
  */
 async function listAgentsTx(
   pool: pg.Pool,
   tenantId: string,
-  employeeId: string | null,
+  agentId: string | null,
 ): Promise<AgentListRow[]> {
   return withTenantTx(pool, tenantId, async (client) => {
     const { rows } = await client.query<AgentListRow>(
-      `SELECT e.id            AS employee_id,
-              e.slug          AS slug,
-              e.display_name  AS display_name,
-              ac.kc_client_id AS kc_client_id,
-              ac.llm_endpoint AS llm_endpoint,
-              ac.llm_model    AS llm_model,
+      `SELECT ac.id            AS agent_card_id,
+              ac.employee_id   AS employee_id,
+              ac.agent_type    AS agent_type,
+              e.slug           AS slug,
+              e.display_name   AS display_name,
+              ac.kc_client_id  AS kc_client_id,
+              ac.llm_endpoint  AS llm_endpoint,
+              ac.llm_model     AS llm_model,
               ac.llm_secret_handle AS llm_secret_handle,
-              p.title         AS position_title,
-              d.display_name  AS department_name
-         FROM choros.employee e
-         JOIN choros.agent_card ac
-              ON ac.tenant_id = e.tenant_id AND ac.employee_id = e.id
+              p.title          AS position_title,
+              d.display_name   AS department_name
+         FROM choros.agent_card ac
+         LEFT JOIN choros.employee e
+              ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
          LEFT JOIN choros.position p
               ON p.tenant_id = e.tenant_id AND p.id = e.position_id
          LEFT JOIN choros.department d
               ON d.tenant_id = p.tenant_id AND d.id = p.department_id
-        WHERE e.tenant_id = current_setting('choros.tenant_id', true)::uuid
-          AND e.kind = 'agent'
-          AND ($1::uuid IS NULL OR e.id = $1::uuid)
-        ORDER BY e.slug`,
-      [employeeId],
+        WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid
+          AND ($1::uuid IS NULL OR ac.employee_id = $1::uuid OR ac.id = $1::uuid)
+        ORDER BY ac.agent_type, COALESCE(e.slug, ac.kc_client_id)`,
+      [agentId],
     );
     return rows;
   });

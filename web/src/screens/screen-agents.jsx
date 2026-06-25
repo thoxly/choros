@@ -27,7 +27,7 @@ import { getActiveTenantId } from '../app-shell/active-tenant.js';
 import {
   validateHire, buildHirePayload,
   validateBind, buildBindPayload,
-  mapAgentError, statusLabel, positionOptions, displayAgentName,
+  mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
 } from './agents-form.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -55,20 +55,35 @@ const cardStyle = {
 };
 // Stack spacing between kit fields inside a modal form (layout only, no color).
 const fieldGap = { display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-6)' };
+// Agent-type badge — token-only pill (no hardcoded color), neutral surface.
+const typeBadgeStyle = {
+  display: 'inline-block', padding: 'var(--chs-space-1) var(--chs-space-3)',
+  borderRadius: 'var(--chs-radius-2)', fontSize: 'var(--chs-text-xs)',
+  fontWeight: 'var(--chs-weight-medium)',
+  background: 'var(--chs-color-surface-sunken, var(--chs-color-surface))',
+  border: '1px solid var(--chs-color-border)', color: 'var(--chs-color-text-muted)',
+};
 
 /* ---------------------------------------------------------------------------
    Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
    --------------------------------------------------------------------------- */
 function AgentRow({ agent, onBind }) {
   const name = displayAgentName(agent.display_name);
+  // Org-place line: workforce agents sit on a position; system/assistant agents
+  // live in the registry WITHOUT an org-place (migration 093 / T-0473).
+  const orgPlace = agent.has_org_place
+    ? `${agent.position || 'должность не назначена'}${agent.department ? ` · ${agent.department}` : ''}`
+    : 'вне оргструктуры';
   return (
     <div style={cardStyle}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>{name}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)' }}>
+          <span style={{ fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>{name}</span>
+          <span style={typeBadgeStyle} title="Тип агента">{agentTypeLabel(agent.agent_type)}</span>
+        </div>
         <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
           <MonoId>{agent.slug}</MonoId>
-          {agent.position ? ` · ${agent.position}` : ' · должность не назначена'}
-          {agent.department ? ` · ${agent.department}` : ''}
+          {` · ${orgPlace}`}
         </div>
       </div>
       <div style={{ textAlign: 'right', fontSize: 'var(--chs-text-xs)' }}>

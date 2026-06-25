@@ -112,6 +112,45 @@ const BINDING_CONTRACT_CATALOG = Object.freeze({
   },
 });
 
+// ---------------------------------------------------------------------------
+// T-0404 [D7-9]: per-step field MODE (read-only / required-to-advance / hidden)
+// Mirrors FieldMode / FIELD_MODES in src/core/binding-compat.ts (kept in sync).
+// ---------------------------------------------------------------------------
+
+/** The CLOSED set of per-step field modes. */
+const FIELD_MODES = Object.freeze(['read-only', 'required-to-advance', 'hidden']);
+
+/** True iff value is a known field mode. */
+export function isFieldMode(value) {
+  return typeof value === 'string' && FIELD_MODES.includes(value);
+}
+
+/**
+ * Resolve a renderable field's per-step mode flags. The mode lives on the binding
+ * field (`field.mode`) and is distinct from per-role visibility — this only covers
+ * the step-bound read-only / required-to-advance / hidden setting.
+ *
+ *   hidden              → { hidden:true }  the renderer must NOT render the field.
+ *   read-only           → { readOnly:true } the renderer renders it disabled.
+ *   required-to-advance → { required:true } the renderer marks it required.
+ *
+ * Absent / unknown mode → all flags false (backward-compatible: editable, shown,
+ * step-level optional — the field's own `required` flag still applies via the
+ * caller). Pure — no React, no I/O.
+ *
+ * @param {{ mode?: string }} field
+ * @returns {{ mode: string|undefined, hidden: boolean, readOnly: boolean, required: boolean }}
+ */
+export function resolveFieldMode(field) {
+  const mode = isFieldMode(field?.mode) ? field.mode : undefined;
+  return {
+    mode,
+    hidden: mode === 'hidden',
+    readOnly: mode === 'read-only',
+    required: mode === 'required-to-advance',
+  };
+}
+
 /** True iff value is a known contract kind. */
 function isBindingContractKind(value) {
   return (
