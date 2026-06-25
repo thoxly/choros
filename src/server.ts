@@ -68,6 +68,7 @@ import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "./db/transition
 import { loadTenantLlmConfig } from "./db/agent-card-llm.js";
 // T-0382: LLM-config HTTP routes (tenant LLM connection screen backend).
 import { registerLlmConfigRoutes } from "./http/llm-config.js";
+import { registerLlmConnectionsRoutes } from "./http/llm-connections.js";
 // T-0383 (D5/PD-6): per-tenant assistant system prompt routes + runtime loader.
 import { registerAssistantPromptRoutes } from "./http/assistant-prompt-routes.js";
 import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
@@ -816,6 +817,19 @@ function buildRouter(
   // Secret-handle binding remains via the existing POST /api/agents/:id/secret-handle.
   if (grantsPool) {
     registerLlmConfigRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0474 (E-AGENTS L2): named LLM connection registry routes.
+  // GET/POST /api/llm-connections — list/create reusable LLM connection profiles
+  // (migration 094 choros.llm_connection). Management-tier gated, tenant-scoped via
+  // resolveActorTenant + withTenantTx (FORCE RLS). The opaque secret handle is never
+  // egressed (secret_bound boolean + redacted scheme only).
+  if (grantsPool) {
+    registerLlmConnectionsRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),

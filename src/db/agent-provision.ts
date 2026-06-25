@@ -152,17 +152,24 @@ export async function readPrimaryAgentLlmConfig(
   tx: PgClientLike,
 ): Promise<AgentLlmConfigRow | null> {
   const { rows } = await tx.query(
-    // LEFT JOIN: migration 093 makes employee_id NULLable (org-less system/
+    // LEFT JOIN employee: migration 093 makes employee_id NULLable (org-less system/
     // assistant agents). Those rows must not be silently dropped from the primary
     // pick; their slug comes back NULL (sorts last, after assistant-agent).
+    //
+    // LEFT JOIN llm_connection (T-0474, migration 094): the LLM config now resolves
+    // THROUGH the named connection profile (agent_card.llm_connection_id) when set,
+    // with COALESCE fallback to the DEPRECATED inline columns during transition. The
+    // opaque handle is aliased to secret_handle_ref from whichever source wins.
     `SELECT ac.employee_id,
             e.slug,
-            ac.llm_endpoint,
-            ac.llm_model,
-            ac.llm_secret_handle AS secret_handle_ref
+            COALESCE(lc.endpoint, ac.llm_endpoint)                AS llm_endpoint,
+            COALESCE(lc.model, ac.llm_model)                      AS llm_model,
+            COALESCE(lc.secret_handle, ac.llm_secret_handle)      AS secret_handle_ref
        FROM choros.agent_card ac
        LEFT JOIN choros.employee e
             ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
+       LEFT JOIN choros.llm_connection lc
+            ON lc.tenant_id = ac.tenant_id AND lc.id = ac.llm_connection_id
       WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid
       ORDER BY CASE WHEN e.slug = 'assistant-agent' THEN 0 ELSE 1 END, e.slug
       LIMIT 1`,
@@ -183,20 +190,27 @@ export async function readConfiguredAgentLlmConfig(
   tx: PgClientLike,
 ): Promise<AgentLlmConfigRow | null> {
   const { rows } = await tx.query(
-    // LEFT JOIN: org-less agents (NULL employee_id, migration 093) that ARE fully
-    // configured must still be eligible as the live per-tenant LLM port.
+    // LEFT JOIN employee: org-less agents (NULL employee_id, migration 093) that ARE
+    // fully configured must still be eligible as the live per-tenant LLM port.
+    //
+    // LEFT JOIN llm_connection (T-0474, migration 094): the "fully configured" test
+    // now applies to the RESOLVED config — endpoint/model/handle come from the named
+    // connection profile (llm_connection_id) when set, else the DEPRECATED inline
+    // columns (COALESCE fallback). A profile-only or inline-only agent both qualify.
     `SELECT ac.employee_id,
             e.slug,
-            ac.llm_endpoint,
-            ac.llm_model,
-            ac.llm_secret_handle AS secret_handle_ref
+            COALESCE(lc.endpoint, ac.llm_endpoint)           AS llm_endpoint,
+            COALESCE(lc.model, ac.llm_model)                 AS llm_model,
+            COALESCE(lc.secret_handle, ac.llm_secret_handle) AS secret_handle_ref
        FROM choros.agent_card ac
        LEFT JOIN choros.employee e
             ON e.tenant_id = ac.tenant_id AND e.id = ac.employee_id
+       LEFT JOIN choros.llm_connection lc
+            ON lc.tenant_id = ac.tenant_id AND lc.id = ac.llm_connection_id
       WHERE ac.tenant_id = current_setting('choros.tenant_id', true)::uuid
-        AND ac.llm_endpoint IS NOT NULL
-        AND ac.llm_model IS NOT NULL
-        AND ac.llm_secret_handle IS NOT NULL
+        AND COALESCE(lc.endpoint, ac.llm_endpoint) IS NOT NULL
+        AND COALESCE(lc.model, ac.llm_model) IS NOT NULL
+        AND COALESCE(lc.secret_handle, ac.llm_secret_handle) IS NOT NULL
       ORDER BY CASE WHEN e.slug = 'assistant-agent' THEN 0 ELSE 1 END, e.slug
       LIMIT 1`,
   );
@@ -240,12 +254,17 @@ export async function readAgentCardLlmConfigById(
   employeeId: string,
 ): Promise<AgentCardLlmConfigById | null> {
   const { rows } = await tx.query(
-    `SELECT llm_endpoint,
-            llm_model,
-            llm_secret_handle AS secret_handle_ref,
-            autonomy_threshold
-       FROM choros.agent_card
-      WHERE tenant_id = $1 AND employee_id = $2`,
+    // LEFT JOIN llm_connection (T-0474, migration 094): resolve LLM config THROUGH
+    // the named profile (llm_connection_id) when set, COALESCE-falling back to the
+    // DEPRECATED inline columns. autonomy_threshold stays on the card (gate A).
+    `SELECT COALESCE(lc.endpoint, ac.llm_endpoint)           AS llm_endpoint,
+            COALESCE(lc.model, ac.llm_model)                 AS llm_model,
+            COALESCE(lc.secret_handle, ac.llm_secret_handle) AS secret_handle_ref,
+            ac.autonomy_threshold
+       FROM choros.agent_card ac
+       LEFT JOIN choros.llm_connection lc
+            ON lc.tenant_id = ac.tenant_id AND lc.id = ac.llm_connection_id
+      WHERE ac.tenant_id = $1 AND ac.employee_id = $2`,
     [tenantId, employeeId],
   );
   return (rows[0] as AgentCardLlmConfigById | undefined) ?? null;

@@ -1239,6 +1239,22 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'llm_connection': {
+      // T-0474 (migration 094) — named LLM connection-profile registry. No logical
+      // refs; secret_handle is an OPAQUE reference (never a raw key). is_default left
+      // false to avoid the one-default-per-tenant partial UNIQUE across both tenants.
+      await c.query(
+        `INSERT INTO choros.llm_connection
+           (tenant_id, id, name, provider, endpoint, model, secret_handle,
+            price_input_per_1k, price_output_per_1k, currency, is_default,
+            created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, 'deepseek', 'https://api.deepseek.com/v1', 'deepseek-chat',
+                 'env://CT_LLM_KEY', NULL, NULL, 'USD', false, 'ct-seed', 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, uuid(), `ct-llm-${uuid().slice(0, 8)}`],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1597,6 +1613,7 @@ const SEEDED_TABLES = new Set<string>([
   'inflight_mapping_request',
   'process_definition',
   'process_app_binding',
+  'llm_connection',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
