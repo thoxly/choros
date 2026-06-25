@@ -270,6 +270,42 @@ const TOOL_AUTHOR_DMN: ToolDeclaration = {
   },
 };
 
+/**
+ * generate_process — T-0464 (D8-G3): generate a FREE-TOPOLOGY BPMN process from a
+ * text description. The HTTP layer runs the generate→validate→repair loop
+ * (runProcessGenLoop), grounding gateway conditions + lane roles on the app's real
+ * fields/roles. The converged draft lands as a process_definition DRAFT for human
+ * review in the Modeler — NEVER auto-published. On lint-exhaustion or an ungroundable
+ * reference, the loop surfaces honestly (no broken process is emitted).
+ *
+ * Use this when the user describes a PROCESS / WORKFLOW in words («процесс: подача →
+ * согласование → если сумма большая → доп. согласование, иначе закрыть»), as opposed
+ * to authoring a single field/form/binding by hand.
+ */
+const TOOL_GENERATE_PROCESS: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "generate_process",
+    description:
+      "Generate a NEW executable BPMN process (free topology — branches, parallel, " +
+      "timers, lanes) from a text description. The system runs a generate→validate→" +
+      "repair loop and grounds gateway conditions + lane roles on the bound app's real " +
+      "fields/roles. The result lands as a DRAFT for human review in the Modeler; it is " +
+      "NEVER auto-published. Use this when the user describes a workflow/process in words.",
+    parameters: {
+      type: "object",
+      properties: {
+        processName: { type: "string", description: "Human-readable name for the process (e.g. «Согласование закупок»)." },
+        processKey: { type: "string", description: "Optional slug for the process (auto-generated from name when absent)." },
+        description: { type: "string", description: "The user's text description of the process to generate." },
+        applicationId: { type: "string", description: "Optional UUID of the application whose fields ground the gateway conditions." },
+        humanReadableReason: { type: "string", description: "Why this process is being generated (for changelog)." },
+      },
+      required: ["processName", "description", "humanReadableReason"],
+    },
+  },
+};
+
 /** request_promote — request a human to promote DRAFT → published. NEVER auto-promotes. */
 const TOOL_REQUEST_PROMOTE: ToolDeclaration = {
   type: "function",
@@ -309,6 +345,9 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "Используй инструменты для каждого конкретного изменения. " +
   "Если поле-связь ссылается на приложение, которого ещё нет — используй relate_application: " +
   "система сама создаст связанное приложение в том же черновике или сошлётся на существующее (без дубликатов). " +
+  "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
+  "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
+  "и положит черновик в Модельер на ревью (без авто-публикации). " +
   "После каждого изменения кратко объясни что и зачем было сделано. " +
   "Если конфигурация завершена — вызови request_promote с описанием изменений. " +
   "Отвечай по-русски.";
@@ -321,6 +360,7 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
   TOOL_AUTHOR_DMN,
+  TOOL_GENERATE_PROCESS,
   TOOL_REQUEST_PROMOTE,
 ];
 
@@ -343,7 +383,8 @@ export interface ApprovedOp {
     | "author_binding"
     | "edit_jsonschema_non_destructive"
     | "emit_form"
-    | "author_dmn";
+    | "author_dmn"
+    | "generate_process";
   /** Human-readable one-liner for the changelog. */
   readonly description: string;
   /** Raw tool arguments (type-narrowed per kind). */
@@ -381,6 +422,22 @@ export interface PendingPromote {
 // ---------------------------------------------------------------------------
 
 /**
+ * T-0466 [D8-G5]: when a non-holder is refused the authoring sandbox, we offer
+ * to CAPTURE their description as a config-request (заявка на настройку) directed
+ * to an admin/owner so the intent is not lost. This is the signal the pure core
+ * returns; the HTTP layer (assistant.ts) persists it via the EXISTING notification
+ * mechanism (PgNotificationStore — migration 046), routed to authoring_draft
+ * holders. No new table.
+ *
+ * The core stays pure: it does NOT decide recipients or write anything; it only
+ * surfaces the verbatim user description that should be captured.
+ */
+export interface CaptureRequest {
+  /** The verbatim description the non-holder gave (what they want configured). */
+  readonly description: string;
+}
+
+/**
  * The full result of one configurator invocation.
  * The HTTP route (assistant.ts) reads approvedOps and executes them via
  * the same write paths the visual constructor uses.
@@ -396,6 +453,40 @@ export interface ConfiguratorResult {
   readonly pendingPromotes: readonly PendingPromote[];
   /** Whether the intersection grant ceiling was insufficient for any op. */
   readonly grantCeilingViolations: readonly string[];
+  /**
+   * T-0466 [D8-G5]: set ONLY when the user was refused for lacking the
+   * authoring_draft grant AND their message described something to configure.
+   * The HTTP layer persists this as a config-request notification to admins.
+   * undefined → nothing to capture (holder, or empty/trivial message).
+   */
+  readonly captureRequest?: CaptureRequest;
+}
+
+// ---------------------------------------------------------------------------
+// T-0466 [D8-G5]: human-friendly access-refusal text (spec §3.5, PD-21).
+//
+// The non-holder must NOT see a raw 503/opaque error. They see this warm,
+// plain-language message. When their message describes something to configure,
+// we ALSO offer to capture it as a config-request to an admin (capture-as-request).
+// ---------------------------------------------------------------------------
+
+/** Base human refusal — no jargon front-and-center, points at the administrator. */
+export const AUTHORING_ACCESS_DENIED_MESSAGE =
+  "У вас нет прав настраивать систему — это может сделать администратор или владелец. " +
+  "Обратитесь к администратору вашего пространства.";
+
+/** Appended when we captured the user's description as a config-request. */
+export const AUTHORING_CAPTURE_CONFIRMATION =
+  "Я передал ваше описание администратору как заявку на настройку — он увидит его и сможет всё сделать. " +
+  "Вам ничего больше делать не нужно.";
+
+/**
+ * T-0466: does a non-holder's message carry an actual description worth
+ * capturing? Trivial pings («привет», «?») are not captured. Heuristic:
+ * non-empty after trim and at least a few characters of substance.
+ */
+export function isCaptureWorthy(text: string): boolean {
+  return text.trim().length >= 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +913,54 @@ function processToolCall(
     }
 
     // -----------------------------------------------------------------------
+    // generate_process — T-0464 (D8-G3): plan a free-topology process generation.
+    // The CORE only PLANS it (validates inputs); the HTTP layer runs the actual
+    // generate→validate→repair loop (runProcessGenLoop) and persists the converged
+    // draft (status='draft') for human review in the Modeler. Co-equal with the
+    // visual modeler: it writes the SAME process_definition draft row.
+    // -----------------------------------------------------------------------
+    case "generate_process": {
+      const processName =
+        typeof args["processName"] === "string" ? args["processName"].trim() : "";
+      const description =
+        typeof args["description"] === "string" ? args["description"].trim() : "";
+
+      if (!processName || !description) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `generate_process: не указано название процесса или его описание.`,
+          toolName: call.name,
+          requiredAction: "Укажите processName и description процесса и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] generate_process: нет названия/описания`,
+          toolResultContent: `error: missing processName or description`,
+        };
+      }
+
+      const approved: ApprovedOp = {
+        kind: "generate_process",
+        description:
+          `Генерация процесса «${processName}» из текстового описания (цикл генерация→` +
+          `проверка→починка; заземление условий/ролей на реальные поля; черновик в Модельер ` +
+          `на ревью — без авто-публикации) [DRAFT]: ${reason}`,
+        args,
+        tier: "draft",
+      };
+      return {
+        approved,
+        changelogLine: `✓ [DRAFT] generate_process: ${approved.description}`,
+        toolResultContent: JSON.stringify({
+          status: "queued_generation",
+          processName,
+          tier: "draft",
+          note: "Процесс будет собран циклом генерация→проверка→починка и положен черновиком в Модельер.",
+        }),
+      };
+    }
+
+    // -----------------------------------------------------------------------
     // request_promote — returns PENDING ticket, NEVER auto-promotes
     // -----------------------------------------------------------------------
     case "request_promote": {
@@ -1049,10 +1188,16 @@ export async function handleConfigurator(
   // SECURITY: Check grant ceiling FIRST (intersection already agent ∩ user)
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
+    // T-0466 [D8-G5]: HUMAN refusal (no raw 503/jargon front-and-centre).
+    // handleConfigurator is the analyst-side IntentHandler contract (text+intent
+    // only); the capture-as-request side-effect runs through runConfigurator
+    // (which the HTTP route calls for configurator intent). Here we still offer
+    // the human "ask an admin" message; capture is wired in runConfigurator.
+    const captureNote = isCaptureWorthy(userText)
+      ? " Хотите — я передам это администратору как заявку на настройку."
+      : "";
     return {
-      text:
-        "У вас недостаточно прав для настройки системы (требуется грант authoring_draft). " +
-        "Обратитесь к администратору.",
+      text: AUTHORING_ACCESS_DENIED_MESSAGE + captureNote,
       intent: "configurator",
     };
   }
@@ -1092,14 +1237,24 @@ export async function runConfigurator(
 ): Promise<ConfiguratorResult> {
   const hasGrant = await hasAuthoringDraftGrant(ctx);
   if (!hasGrant) {
+    // T-0466 [D8-G5]: human refusal + capture-as-request.
+    //  - text is the warm "ask an admin" message (NOT a raw 503).
+    //  - when the message describes something configurable, captureRequest is set
+    //    so the HTTP layer files it as a config-request notification to admins.
+    //
+    // We do NOT bake the "передал администратору" confirmation into the text here:
+    // whether the request was actually routed depends on a DB side-effect the
+    // pure core cannot perform. The HTTP layer appends AUTHORING_CAPTURE_CONFIRMATION
+    // ONLY after a successful capture (and an honest note if nobody could receive
+    // it). This keeps the message truthful — no claim of delivery the core can't make.
+    const worthy = isCaptureWorthy(userText);
     return {
-      text:
-        "У вас недостаточно прав для настройки системы (требуется грант authoring_draft). " +
-        "Обратитесь к администратору.",
+      text: AUTHORING_ACCESS_DENIED_MESSAGE,
       approvedOps: [],
       blockedOps: [],
       pendingPromotes: [],
       grantCeilingViolations: ["authoring_draft grant absent for intersection subject"],
+      captureRequest: worthy ? { description: userText.trim() } : undefined,
     };
   }
   return runConfiguratorLoop(userText, ctx, systemPromptOverride, existingRegistryDefs);

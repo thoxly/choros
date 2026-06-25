@@ -78,9 +78,26 @@ import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0363 (d): import runConfigurator to execute approvedOps as DRAFT.
-import { runConfigurator, type ApprovedOp } from "../core/assistant-configurator.js";
+// T-0466 (D8-G5): AUTHORING_CAPTURE_CONFIRMATION appended after a successful capture.
+import {
+  runConfigurator,
+  AUTHORING_CAPTURE_CONFIRMATION,
+  type ApprovedOp,
+} from "../core/assistant-configurator.js";
 import type { RegistryDefCandidate } from "../core/relation-cascade.js";
 import { reconcileCrossAppRefs } from "./registry-defs.js";
+// T-0464 (D8-G3): free-topology process generation loop (generate→validate→repair).
+import { runProcessGenLoop } from "../core/process-gen-loop.js";
+import type { GroundingContext } from "../core/process-gen-validator.js";
+import { CONFIGURATOR_DEFAULT_SYSTEM_PROMPT } from "../core/assistant-configurator.js";
+import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
+// T-0466 (D8-G5): capture-as-request — file a non-admin's config-request as a
+// notification to authoring_draft holders (admins/owners). Reuses the EXISTING
+// notification mechanism (choros.notification, migration 046) — NO new table.
+import {
+  getAuthoringDraftHolderEmployeeIds,
+  findTenantOwnerEmployeeId,
+} from "../db/grants-dao.js";
 // T-0383 (D5): per-tenant configurator system prompt loader (neutral import path).
 import { readPublishedAssistantPrompt } from "../db/assistant-prompt-dao.js";
 
@@ -278,11 +295,83 @@ async function fetchRegistryDefCandidates(
   }
 }
 
+/**
+ * T-0464 (D8-G3): assemble the grounding context for process generation — the real
+ * field keys (from the bound application's registry_def record_schema) and the real
+ * role slugs in the tenant. The generation loop grounds gateway conditions on these
+ * fields and lane roles on these role slugs (cascade/ask when a reference is missing).
+ *
+ * applicationId is optional: when given, only that app's section field keys are used;
+ * when absent, the union of all tenant section field keys grounds the conditions (a
+ * looser ground — the loop still asks when a condition references nothing real).
+ */
+async function fetchGroundingContext(
+  pool: pg.Pool,
+  tenantId: string,
+  applicationId: string | null,
+): Promise<GroundingContext> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+
+    // Field keys: the record_schema.properties keys of the relevant registry_def(s).
+    const defRes = applicationId
+      ? await client.query<{ record_schema: Record<string, unknown> | null }>(
+          `SELECT record_schema FROM choros.registry_def
+             WHERE tenant_id = $1 AND application_id = $2`,
+          [tenantId, applicationId],
+        )
+      : await client.query<{ record_schema: Record<string, unknown> | null }>(
+          `SELECT record_schema FROM choros.registry_def WHERE tenant_id = $1`,
+          [tenantId],
+        );
+    const fieldKeys = new Set<string>();
+    for (const row of defRes.rows) {
+      const schema = row.record_schema as { properties?: Record<string, unknown> } | null;
+      const props = schema?.properties;
+      if (props && typeof props === "object") {
+        for (const key of Object.keys(props)) fieldKeys.add(key);
+      }
+    }
+
+    // Role slugs: every role.slug in the tenant.
+    const roleRes = await client.query<{ slug: string }>(
+      `SELECT slug FROM choros.role WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const roleSlugs = roleRes.rows.map((r) => r.slug);
+
+    await client.query("COMMIT");
+    return { fieldKeys: [...fieldKeys], roleSlugs };
+  } catch {
+    await client.query("ROLLBACK").catch(() => {});
+    // Honest-degrade: empty grounding → the loop surfaces needs_grounding rather than
+    // emitting an ungrounded process. Non-fatal.
+    return { fieldKeys: [], roleSlugs: [] };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * T-0464 (D8-G3): execution context for the generate_process op — the live LLM port
+ * (the bot that emits the BPMN) and the configurator system prompt. Threaded into
+ * executeApprovedOpAsDraft only for the generate_process kind (other ops are pure DB).
+ */
+interface GenExecContext {
+  readonly llm: LlmPort;
+  readonly systemPrompt: string;
+}
+
 /** Execute a single ApprovedOp as a DRAFT DB write. Returns null on success, error message on failure. */
 async function executeApprovedOpAsDraft(
   pool: pg.Pool,
   tenantId: string,
   op: ApprovedOp,
+  /** T-0464: present only when op.kind === 'generate_process' (the loop needs the LLM). */
+  genCtx?: GenExecContext,
 ): Promise<string | null> {
   try {
     const nowMs = Date.now();
@@ -666,6 +755,98 @@ async function executeApprovedOpAsDraft(
         return null;
       }
 
+      // -----------------------------------------------------------------------
+      // generate_process — T-0464 (D8-G3): run the generate→validate→repair loop
+      // and persist the converged draft as a process_definition DRAFT row for human
+      // review in the Modeler. NEVER auto-published. On lint-exhaustion or an
+      // ungroundable reference, NO row is written (honest failure surfaced in text).
+      // Co-equal: writes the SAME 'draft' process_definition the visual modeler /
+      // process-defs POST writes.
+      // -----------------------------------------------------------------------
+      case "generate_process": {
+        if (!genCtx) {
+          // The dispatch site must supply the LLM context for this op kind.
+          return `generate_process: no LLM execution context wired`;
+        }
+        const args = op.args;
+        const processName = typeof args["processName"] === "string" ? args["processName"].trim() : "";
+        const description = typeof args["description"] === "string" ? args["description"].trim() : "";
+        const requestedKey = typeof args["processKey"] === "string" ? args["processKey"].trim() : "";
+        const applicationId = typeof args["applicationId"] === "string" ? args["applicationId"].trim() : "";
+
+        if (!processName || !description) {
+          return `generate_process: missing processName or description`;
+        }
+
+        // Resolve a collision-safe process key (mirrors process-defs POST B19).
+        const processKey = requestedKey
+          ? requestedKey
+          : await generateUniqueProcessKey(processName, async (candidate) => {
+              const c = await pool.connect();
+              try {
+                await c.query("BEGIN");
+                await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+                await c.query("SET LOCAL search_path TO choros");
+                const r = await c.query(
+                  `SELECT 1 FROM choros.process_definition
+                     WHERE tenant_id = $1 AND process_key = $2 LIMIT 1`,
+                  [tenantId, candidate],
+                );
+                await c.query("COMMIT");
+                return r.rowCount !== null && r.rowCount > 0;
+              } catch {
+                await c.query("ROLLBACK").catch(() => {});
+                return false;
+              } finally {
+                c.release();
+              }
+            });
+
+        // Grounding: real field keys + role slugs (cascade/ask when a reference misses).
+        const grounding = await fetchGroundingContext(pool, tenantId, applicationId || null);
+
+        // Run the loop. PURE core decides draft_ready / needs_grounding / exhausted.
+        const outcome = await runProcessGenLoop({
+          description,
+          llm: genCtx.llm,
+          systemPrompt: genCtx.systemPrompt,
+          grounding,
+          processKey,
+          processName,
+        });
+
+        if (outcome.status !== "draft_ready") {
+          // Honest non-emit: surface why, write NOTHING. The user sees this in the reply.
+          return `generate_process[${outcome.status}]: ${outcome.message}`;
+        }
+
+        // Converged — persist as DRAFT (status='draft'). Human reviews/promotes in Modeler.
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+          await client.query("SET LOCAL search_path TO choros");
+          await client.query(
+            `INSERT INTO choros.process_definition
+               (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $6)
+             ON CONFLICT (tenant_id, process_key, version) DO UPDATE
+               SET bpmn_xml   = EXCLUDED.bpmn_xml,
+                   name       = EXCLUDED.name,
+                   updated_at = EXCLUDED.updated_at`,
+            [tenantId, randomUUID(), processKey, processName, outcome.bpmnXml, nowMs],
+          );
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        } finally {
+          client.release();
+        }
+        return null;
+      }
+
       default:
         // Unknown op kind — log and skip (fail-open on unknown ops is safer than crashing).
         return `unknown op kind: ${String((op as ApprovedOp).kind)}`;
@@ -674,6 +855,97 @@ async function executeApprovedOpAsDraft(
     const msg = err instanceof Error ? err.message : String(err);
     return `op ${op.kind} failed: ${msg}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// T-0466 (D8-G5): capture-as-request.
+//
+// When a non-admin (no authoring_draft grant) describes something to configure,
+// runConfigurator returns a captureRequest. We file it as a config-request so the
+// intent is NOT lost: a notification per admin/owner recipient, reusing the
+// EXISTING notification center (choros.notification — migration 046, no new table).
+//
+// Recipients: human employees holding a confirmed authoring_draft grant
+// (= the admins/owners who can act on the sandbox). Fallback to the tenant owner
+// when no explicit holder exists, so the request is never dropped on the floor.
+//
+// NOTE: choros.notification.recipient_id is uuid with FK → employee(tenant_id,id)
+// (migration 046), so recipients are EMPLOYEE IDs, not slugs.
+//
+// Returns the number of recipients notified (0 = nobody to route to — honest).
+// ---------------------------------------------------------------------------
+
+/** Notification event_kind for a captured config-request. */
+const CONFIG_REQUEST_EVENT_KIND = "config_request";
+
+async function captureConfigRequest(
+  pool: pg.Pool,
+  tenantId: string,
+  requesterSlug: string,
+  description: string,
+): Promise<number> {
+  const nowMs = Date.now();
+
+  // Resolve admin/owner recipients: holders of a confirmed authoring_draft grant.
+  let recipientIds = await getAuthoringDraftHolderEmployeeIds(pool, tenantId, nowMs).catch(
+    () => [] as string[],
+  );
+
+  // Fallback: route to the tenant owner if no explicit holder exists.
+  if (recipientIds.length === 0) {
+    const ownerId = await findTenantOwnerEmployeeId(pool, tenantId, nowMs).catch(() => null);
+    if (ownerId) recipientIds = [ownerId];
+  }
+
+  if (recipientIds.length === 0) return 0;
+
+  // Truncate the body for the notification (keep the title short, body bounded).
+  const trimmed = description.replace(/\s+/g, " ").trim();
+  const title = "Заявка на настройку системы";
+
+  // Insert one notification per recipient inside a tenant-scoped tx (RLS).
+  // We write the SAME columns as PgNotificationStore.insert (migration 046),
+  // but through the tx client so the choros.tenant_id GUC is set (RLS-safe).
+  let notified = 0;
+  await withTenantTx(pool, tenantId, async (client) => {
+    // Resolve the requester's employee id so we (a) never notify them and
+    // (b) can name them in the body. Best-effort: if unresolved, use the slug.
+    const { rows: reqRows } = await client.query<{ id: string }>(
+      `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+      [tenantId, requesterSlug],
+    );
+    const requesterId = reqRows.length > 0 ? reqRows[0]!.id : null;
+
+    const body =
+      `Сотрудник «${requesterSlug}» просит настроить систему:\n\n` +
+      (trimmed.length <= 1000 ? trimmed : trimmed.slice(0, 1000) + "…") +
+      `\n\nОткройте конструктор/ассистента, чтобы выполнить настройку.`;
+
+    for (const recipientId of recipientIds) {
+      // The request is FROM the requester, not TO them — skip self.
+      if (requesterId !== null && recipientId === requesterId) continue;
+      await client.query(
+        `INSERT INTO choros.notification
+           (tenant_id, id, recipient_id, event_kind, title, body, object_ref,
+            is_read, created_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, false, $8, $9)`,
+        [
+          tenantId,
+          randomUUID(),
+          recipientId,
+          CONFIG_REQUEST_EVENT_KIND,
+          title,
+          body,
+          null,
+          nowMs,
+          null,
+        ],
+      );
+      notified++;
+    }
+  });
+
+  return notified;
 }
 
 // ---------------------------------------------------------------------------
@@ -1411,10 +1683,56 @@ export function registerAssistantRoutes(
           const cfgResult = await runConfigurator(userText, handlerCtx, cfgPromptOverride, cfgCandidates);
           handlerResult = { text: cfgResult.text, intent: "configurator" as const };
 
+          // T-0466 (D8-G5): capture-as-request. When the user lacks authoring_draft
+          // and described something configurable, runConfigurator returns a
+          // captureRequest. File it as a config-request notification to admins so
+          // the intent is not lost. Non-fatal — a routing failure must not 500 the
+          // honest refusal the user already got.
+          if (cfgResult.captureRequest) {
+            try {
+              const notified = await captureConfigRequest(
+                pool,
+                tenantId,
+                actorSlug,
+                cfgResult.captureRequest.description,
+              );
+              handlerResult = {
+                // Truthful: confirm delivery only when someone actually received it.
+                text:
+                  notified > 0
+                    ? cfgResult.text + " " + AUTHORING_CAPTURE_CONFIRMATION
+                    : cfgResult.text +
+                      "\n\n(Пока некому передать заявку — в пространстве нет администратора с правами настройки.)",
+                intent: "configurator" as const,
+              };
+            } catch (capErr) {
+              console.error(`[T-0466] capture-as-request failed: ${String(capErr)}`);
+              handlerResult = {
+                text:
+                  cfgResult.text +
+                  "\n\n(Не удалось автоматически передать заявку администратору — обратитесь к нему напрямую.)",
+                intent: "configurator" as const,
+              };
+            }
+          }
+
           // Execute approvedOps as DRAFT (non-destructive; destructive ops are in blockedOps).
+          // T-0464 (D8-G3): generate_process needs the live LLM port + the resolved
+          // configurator system prompt to run the generate→validate→repair loop.
+          const genCtx = {
+            llm,
+            systemPrompt: cfgPromptOverride && cfgPromptOverride.trim()
+              ? cfgPromptOverride
+              : CONFIGURATOR_DEFAULT_SYSTEM_PROMPT,
+          };
           const opErrors: string[] = [];
           for (const op of cfgResult.approvedOps) {
-            const err = await executeApprovedOpAsDraft(pool, tenantId, op);
+            const err = await executeApprovedOpAsDraft(
+              pool,
+              tenantId,
+              op,
+              op.kind === "generate_process" ? genCtx : undefined,
+            );
             if (err !== null) {
               opErrors.push(err);
               console.error(`[T-0363] draft op failed (${op.kind}): ${err}`);
