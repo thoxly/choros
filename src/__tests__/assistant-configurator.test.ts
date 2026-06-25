@@ -325,6 +325,7 @@ describe("AC-T361-9: ConfiguratorResult structure is DRAFT-safe", () => {
       ],
       blockedOps: [],
       pendingPromotes: [],
+      planProposals: [],
       grantCeilingViolations: [],
     };
 
@@ -777,5 +778,125 @@ describe("AC-T466-4: isCaptureWorthy heuristic [D8-G5]", () => {
     expect(isCaptureWorthy("   ")).toBe(false);
     expect(isCaptureWorthy("hi")).toBe(false);
     expect(isCaptureWorthy("настрой форму заявок")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// T-0465 (D8-G4): PLAN-IN-DIALOGUE + ONE-SHOT BUNDLE (pure-core invariants)
+// ===========================================================================
+
+/**
+ * MultiToolCallLlmPort — emits SEVERAL tool calls in the first chat() round, then
+ * a text-only reply (simulates a one-shot bundle: app + relate + process in one turn).
+ * ZERO NETWORK.
+ */
+class MultiToolCallLlmPort implements LlmPort {
+  private _callCount = 0;
+  private readonly _calls: Array<{ name: string; args: Record<string, unknown> }>;
+  constructor(calls: Array<{ name: string; args: Record<string, unknown> }>) {
+    this._calls = calls;
+  }
+  complete(_req: LlmRequest): Promise<LlmResult> {
+    return Promise.resolve({
+      confidence: 0.9,
+      answer: { answerForm: "t", redFlags: [], summary: "t" },
+    });
+  }
+  async chat(_req: ChatLlmRequest): Promise<ChatLlmResult> {
+    this._callCount++;
+    if (this._callCount === 1) {
+      return {
+        text: "",
+        toolCalls: this._calls.map((c, i) => ({
+          id: `call-${c.name}-${i}`,
+          name: c.name,
+          arguments: JSON.stringify(c.args),
+        })),
+      };
+    }
+    return { text: "Готово.", toolCalls: undefined };
+  }
+}
+
+describe("AC-T465-1: plan-in-dialogue — propose_plan produces a PLAN, NO premature writes [D8-G4]", () => {
+  it("propose_plan → planProposals non-empty AND approvedOps empty (nothing written)", async () => {
+    const llm = new ToolCallLlmPort("propose_plan", {
+      planText:
+        "Создам приложение «Заявки на закупку» с полями сумма/контрагент; приложения «Контрагенты» нет — создам связанное; " +
+        "процесс: подача → согласование → если сумма большая → доп. согласование, иначе закрыть.",
+      humanReadableReason: "Пользователь описал бардак с закупками",
+    });
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("у нас бардак с закупками, хочу единую форму и согласование крупных", ctx);
+
+    // INVARIANT (1): a PLAN was proposed.
+    expect(result.planProposals.length).toBeGreaterThan(0);
+    expect(result.planProposals[0]!.planText).toMatch(/закупк/i);
+    // INVARIANT (1): NOTHING was generated/approved — no premature writes.
+    expect(result.approvedOps).toHaveLength(0);
+    // The reply asks the user to confirm the plan.
+    expect(result.text).toMatch(/план/i);
+  });
+});
+
+describe("AC-T465-2: confirmsPlan heuristic — affirmations confirm, descriptions don't [D8-G4]", () => {
+  it("short affirmations confirm; a fresh problem description does not", async () => {
+    const { confirmsPlan } = await import("../core/assistant-configurator.js");
+    expect(confirmsPlan("да")).toBe(true);
+    expect(confirmsPlan("Давай, генерируй")).toBe(true);
+    expect(confirmsPlan("поехали")).toBe(true);
+    expect(confirmsPlan("подтверждаю")).toBe(true);
+    expect(confirmsPlan("yes")).toBe(true);
+    // A fresh problem description must NOT be read as a confirmation.
+    expect(confirmsPlan("у нас бардак с закупками, хочу форму")).toBe(false);
+    expect(confirmsPlan("")).toBe(false);
+  });
+});
+
+describe("AC-T465-3: one-shot bundle — confirmation generates MULTIPLE draft ops in one turn [D8-G4]", () => {
+  it("after confirm, app + relate + process are all approved (one unit)", async () => {
+    const llm = new MultiToolCallLlmPort([
+      {
+        name: "create_application",
+        args: { appSlug: "purchases", appDisplayName: "Заявки на закупку", humanReadableReason: "закупки" },
+      },
+      {
+        name: "relate_application",
+        args: {
+          sourceRegistryDefId: "a0000000-0000-0000-0000-000000000099",
+          relationFieldKey: "counterparty",
+          targetAppSlug: "counterparties",
+          targetAppDisplayName: "Контрагенты",
+          humanReadableReason: "связь с контрагентом",
+        },
+      },
+      {
+        name: "generate_process",
+        args: { processName: "Согласование закупки", description: "подача → согласование → доп. согласование", humanReadableReason: "процесс" },
+      },
+    ]);
+    const ctx = makeContext([DRAFT_GRANT], llm as unknown as StubChatLlmPort);
+    const result = await runConfigurator("да, генерируй", ctx);
+
+    // INVARIANT (2): all three bundle-worthy ops are approved in ONE turn (one promote unit).
+    const kinds = result.approvedOps.map((o) => o.kind);
+    expect(kinds).toContain("create_application");
+    expect(kinds).toContain("relate_application");
+    expect(kinds).toContain("generate_process");
+    // All DRAFT (the agent never publishes).
+    expect(result.approvedOps.every((o) => o.tier === "draft")).toBe(true);
+    // No plan proposed on a confirmation turn (we are GENERATING, not planning).
+    expect(result.planProposals).toHaveLength(0);
+  });
+});
+
+describe("AC-T465-4: propose_plan is declared in the configurator toolset [D8-G4]", () => {
+  it("the configurator's first LLM call declares a propose_plan tool", async () => {
+    const stub = new StubChatLlmPort({ fixedText: "Опишите задачу." });
+    const ctx = makeContext([DRAFT_GRANT], stub);
+    await handleConfigurator("построй решение для закупок", ctx);
+    const tools = (stub.chatCalls[0]?.tools ?? []) as Array<{ function?: { name?: string } }>;
+    const names = tools.map((t) => t.function?.name);
+    expect(names).toContain("propose_plan");
   });
 });

@@ -372,6 +372,13 @@ async function executeApprovedOpAsDraft(
   op: ApprovedOp,
   /** T-0464: present only when op.kind === 'generate_process' (the loop needs the LLM). */
   genCtx?: GenExecContext,
+  /**
+   * T-0465 (D8-G4): bundle grouping id. When the configurator generates a whole
+   * solution in one confirmed turn, every DRAFT artifact (apps, sections, processes)
+   * is tagged with this shared bundle_id so a single bundle-promote publishes them
+   * together. undefined → not part of a bundle (column stays NULL).
+   */
+  bundleId?: string,
 ): Promise<string | null> {
   try {
     const nowMs = Date.now();
@@ -413,21 +420,22 @@ async function executeApprovedOpAsDraft(
           await client.query("SET LOCAL search_path TO choros");
 
           // 1) Application — tier='draft' (column DEFAULT, but set explicitly for clarity).
+          //    T-0465: bundle_id ties this app into the one-shot solution bundle.
           await client.query(
             `INSERT INTO choros.application
-               (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)`,
-            [tenantId, appId, appSlug, appDisplayName, appDescription, nowMs],
+               (tenant_id, id, slug, display_name, description, tier, bundle_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $7)`,
+            [tenantId, appId, appSlug, appDisplayName, appDescription, bundleId ?? null, nowMs],
           );
 
           // 2) Primary section (registry_def) under the new application.
           await client.query(
             `INSERT INTO choros.registry_def
                (tenant_id, id, application_id, slug, display_name, description,
-                record_schema, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)`,
+                record_schema, bundle_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $9)`,
             [tenantId, regId, appId, sectionSlug, sectionDisplayName, null,
-             JSON.stringify(recordSchema), nowMs],
+             JSON.stringify(recordSchema), bundleId ?? null, nowMs],
           );
 
           await client.query("COMMIT");
@@ -496,20 +504,21 @@ async function executeApprovedOpAsDraft(
             const cascadedAppId = randomUUID();
             targetRegistryId = randomUUID();
             // Related application — same DRAFT bundle as the parent (tier='draft').
+            // T-0465: same bundle_id as the parent → ONE promote brings both.
             await client.query(
               `INSERT INTO choros.application
-                 (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)`,
-              [tenantId, cascadedAppId, appSlug, appDisplayName, null, nowMs],
+                 (tenant_id, id, slug, display_name, description, tier, bundle_id, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7, $7)`,
+              [tenantId, cascadedAppId, appSlug, appDisplayName, null, bundleId ?? null, nowMs],
             );
             // Primary section (registry_def) under the cascaded app — empty schema.
             await client.query(
               `INSERT INTO choros.registry_def
                  (tenant_id, id, application_id, slug, display_name, description,
-                  record_schema, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $8)`,
+                  record_schema, bundle_id, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $9)`,
               [tenantId, targetRegistryId, cascadedAppId, appSlug, appDisplayName, null,
-               JSON.stringify({ type: "object", properties: {} }), nowMs],
+               JSON.stringify({ type: "object", properties: {} }), bundleId ?? null, nowMs],
             );
           }
 
@@ -829,13 +838,14 @@ async function executeApprovedOpAsDraft(
           await client.query(
             `INSERT INTO choros.process_definition
                (tenant_id, id, process_key, name, bpmn_xml, version, status, deployment_id,
-                created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $6)
+                bundle_id, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 1, 'draft', NULL, $6, $7, $7)
              ON CONFLICT (tenant_id, process_key, version) DO UPDATE
                SET bpmn_xml   = EXCLUDED.bpmn_xml,
                    name       = EXCLUDED.name,
+                   bundle_id  = EXCLUDED.bundle_id,
                    updated_at = EXCLUDED.updated_at`,
-            [tenantId, randomUUID(), processKey, processName, outcome.bpmnXml, nowMs],
+            [tenantId, randomUUID(), processKey, processName, outcome.bpmnXml, bundleId ?? null, nowMs],
           );
           await client.query("COMMIT");
         } catch (err) {
@@ -854,6 +864,139 @@ async function executeApprovedOpAsDraft(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return `op ${op.kind} failed: ${msg}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0465 (D8-G4): BUNDLE — one-shot solution as ONE promote unit.
+//
+// When the user CONFIRMS a proposed plan, the configurator generates the whole
+// solution (application + cascaded apps + process) in ONE turn. Each DRAFT
+// artifact is tagged with a shared bundle_id (minted here). After execution we:
+//   (1) resolve the bundle's items (apps + sections + processes) from the tagged
+//       rows, to build DEEP-LINKS into the actual sections (Приложения / Модельер)
+//       — the user reviews the draft VISUALLY there, NOT a constructor in chat;
+//   (2) surface a bundlePromote descriptor so the whole bundle can be published
+//       together as one unit (POST /api/solution-bundles/:bundleId/promote).
+// ---------------------------------------------------------------------------
+
+/** ApprovedOp kinds that materialise a DRAFT artifact worth bundling. */
+const BUNDLE_OP_KINDS: ReadonlySet<ApprovedOp["kind"]> = new Set([
+  "create_application",
+  "relate_application",
+  "generate_process",
+]);
+
+/** A clickable deep-link surfaced in the assistant reply (rendered by the web chat). */
+export interface DeepLink {
+  /** Visible label, e.g. «Открыть приложение «Заявки на закупку»». */
+  readonly label: string;
+  /** SPA route path, e.g. "/app-schema/<uuid>" or "/processes/<key>/edit". */
+  readonly path: string;
+  /** Section kind — UI may badge it (app / process). */
+  readonly kind: "app" | "process";
+}
+
+/** Bundle-promote descriptor — the whole bundle published as ONE unit. */
+export interface BundlePromote {
+  readonly bundleId: string;
+  /** How many DRAFT items (apps + sections + processes) the bundle holds. */
+  readonly itemCount: number;
+  /** API endpoint the web chat POSTs to publish the whole bundle. */
+  readonly path: string;
+}
+
+/**
+ * T-0465 (D8-G4): PURE deep-link + bundle-promote construction (no DB).
+ * Exported so the plan→generate→review→promote contract is testable at $0:
+ *   - links point at the actual SECTIONS (/app-schema/:id, /processes/:key/edit) —
+ *     the user reviews the draft VISUALLY there, the chat does NOT render a constructor;
+ *   - the bundlePromote path targets the bundle-promote endpoint (ONE promote unit).
+ */
+export function buildBundleReview(
+  apps: ReadonlyArray<{ id: string; display_name: string }>,
+  procs: ReadonlyArray<{ process_key: string; name: string }>,
+  sectionCount: number,
+  bundleId: string,
+): { deepLinks: DeepLink[]; bundlePromote: BundlePromote | null } {
+  const deepLinks: DeepLink[] = [];
+  for (const a of apps) {
+    deepLinks.push({
+      label: `Открыть приложение «${a.display_name}»`,
+      path: `/app-schema/${a.id}`,
+      kind: "app",
+    });
+  }
+  for (const p of procs) {
+    deepLinks.push({
+      label: `Открыть процесс «${p.name}» в Модельере`,
+      path: `/processes/${encodeURIComponent(p.process_key)}/edit`,
+      kind: "process",
+    });
+  }
+  const itemCount = apps.length + procs.length + sectionCount;
+  const bundlePromote: BundlePromote | null =
+    itemCount > 0
+      ? { bundleId, itemCount, path: `/api/solution-bundles/${bundleId}/promote` }
+      : null;
+  return { deepLinks, bundlePromote };
+}
+
+/**
+ * Resolve the deep-links + bundle-promote descriptor for a freshly-built bundle.
+ * Reads the tagged DRAFT rows back (RLS-scoped) so the links point at the REAL
+ * sections the user reviews visually. Returns honest-empty on any read failure.
+ */
+async function resolveBundleReview(
+  pool: pg.Pool,
+  tenantId: string,
+  bundleId: string,
+): Promise<{ deepLinks: DeepLink[]; bundlePromote: BundlePromote | null }> {
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await client.query("SET LOCAL search_path TO choros");
+
+      // Applications in this bundle → deep-link to the schema/fields editor.
+      const apps = await client.query<{ id: string; display_name: string }>(
+        `SELECT id, display_name FROM choros.application
+           WHERE tenant_id = $1 AND bundle_id = $2
+           ORDER BY created_at ASC`,
+        [tenantId, bundleId],
+      );
+      // Processes in this bundle → deep-link to the Modeler (review the diagram).
+      const procs = await client.query<{ process_key: string; name: string }>(
+        `SELECT process_key, name FROM choros.process_definition
+           WHERE tenant_id = $1 AND bundle_id = $2
+           ORDER BY created_at ASC`,
+        [tenantId, bundleId],
+      );
+      // Sections (registry_def) count toward the bundle item total (promoted too).
+      const sectionCount = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM choros.registry_def
+           WHERE tenant_id = $1 AND bundle_id = $2`,
+        [tenantId, bundleId],
+      );
+      await client.query("COMMIT");
+
+      // Pure construction (testable at $0) from the tagged rows.
+      return buildBundleReview(
+        apps.rows,
+        procs.rows,
+        Number(sectionCount.rows[0]?.n ?? "0"),
+        bundleId,
+      );
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error(`[T-0465] resolveBundleReview failed: ${String(err)}`);
+    return { deepLinks: [], bundlePromote: null };
   }
 }
 
@@ -1725,6 +1868,14 @@ export function registerAssistantRoutes(
               ? cfgPromptOverride
               : CONFIGURATOR_DEFAULT_SYSTEM_PROMPT,
           };
+
+          // T-0465 (D8-G4): ONE-SHOT BUNDLE. If this confirmed turn generates any
+          // bundle-worthy artifact, mint a single bundle_id so every DRAFT artifact
+          // (app + cascaded apps + process) is tagged into ONE promote unit. Plan-only
+          // turns (propose_plan, no approvedOps) mint NOTHING — no premature writes.
+          const hasBundleOps = cfgResult.approvedOps.some((o) => BUNDLE_OP_KINDS.has(o.kind));
+          const bundleId = hasBundleOps ? randomUUID() : undefined;
+
           const opErrors: string[] = [];
           for (const op of cfgResult.approvedOps) {
             const err = await executeApprovedOpAsDraft(
@@ -1732,15 +1883,41 @@ export function registerAssistantRoutes(
               tenantId,
               op,
               op.kind === "generate_process" ? genCtx : undefined,
+              // Tag bundle-worthy ops with the shared id; others stay un-bundled.
+              BUNDLE_OP_KINDS.has(op.kind) ? bundleId : undefined,
             );
             if (err !== null) {
               opErrors.push(err);
               console.error(`[T-0363] draft op failed (${op.kind}): ${err}`);
             }
           }
+
+          // T-0465: REVIEW-IN-SECTIONS — build deep-links + bundle-promote descriptor
+          // from the tagged rows. Chat carries LINKS, not an in-chat constructor.
+          if (bundleId) {
+            const { deepLinks, bundlePromote } = await resolveBundleReview(pool, tenantId, bundleId);
+            if (deepLinks.length > 0 || bundlePromote) {
+              handlerResult = {
+                ...handlerResult,
+                deepLinks,
+                bundlePromote: bundlePromote ?? undefined,
+                // Append a plain-text fallback so non-structured clients still see links.
+                text:
+                  handlerResult.text +
+                  "\n\nРешение собрано черновиком. Откройте разделы для визуального ревью:\n" +
+                  deepLinks.map((l) => `• ${l.label} — ${l.path}`).join("\n") +
+                  (bundlePromote
+                    ? `\n\nКогда проверите — опубликуйте всё решение одним действием (${bundlePromote.itemCount} элементов).`
+                    : ""),
+              };
+            }
+          }
+
           if (opErrors.length > 0) {
             // Append error summary to text (non-fatal — user sees partial result).
+            // Preserve any deep-links/bundle-promote already attached this turn.
             handlerResult = {
+              ...handlerResult,
               text: handlerResult.text + `\n\n⚠ Ошибки при сохранении ${opErrors.length} операций в DRAFT: ${opErrors.join("; ")}`,
               intent: "configurator" as const,
             };
@@ -1832,6 +2009,16 @@ export function registerAssistantRoutes(
           ts: new Date(assistantTs).toISOString(),
           intent: handlerResult.intent,
           streaming_done: true,
+          // T-0465 (D8-G4): REVIEW-IN-SECTIONS. Structured deep-links into the actual
+          // sections (Приложения / Модельер) + a bundle-promote descriptor. Present
+          // ONLY when a bundle was generated this turn. The web chat renders these as
+          // clickable links + a "publish whole solution" button — NOT a chat constructor.
+          ...("deepLinks" in handlerResult && handlerResult.deepLinks
+            ? { deepLinks: handlerResult.deepLinks }
+            : {}),
+          ...("bundlePromote" in handlerResult && handlerResult.bundlePromote
+            ? { bundlePromote: handlerResult.bundlePromote }
+            : {}),
         }),
       );
     }),

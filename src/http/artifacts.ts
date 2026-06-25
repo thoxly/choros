@@ -180,7 +180,11 @@ function resolveArtifactTable(table: string): string {
  * this means both the agent gate and the NOT_IN_DRAFT guard run against the live row,
  * making the NOT_IN_DRAFT path reachable when a published artifact is re-promoted.
  */
-async function promoteTier(args: {
+// T-0465: exported so the bundle-promote endpoint (solution-bundles.ts) flips
+// app/registry_def tier through THIS sanctioned module (FF-10: tier='published'
+// is assigned ONLY in env-tier.ts / artifacts.ts). The bundle endpoint must NOT
+// write tier='published' itself — it calls promoteTier per bundle item.
+export async function promoteTier(args: {
   pool: pg.Pool;
   tenantId: string;
   artifactTable: string;    // validated config table name (e.g. "application")
