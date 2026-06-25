@@ -33,7 +33,8 @@ import {
 import { insertAgentRows, AgentConflictError } from "../db/agent-provision.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, withAuth } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth, resolveActorTenant } from "../db/org.js";
 import type { ScopeElement } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
@@ -41,9 +42,6 @@ import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const DEV_TENANT_ID =
-  process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,10 +87,26 @@ async function withTenantTx<T>(
 const agentAuditWriter = makePgAuditWriter();
 
 // ---------------------------------------------------------------------------
-// extractActor — dev-auth stub (NF-3 / AC-15)
+// extractActor — mode-aware caller identity (mirrors process-defs.ts / applications.ts).
+//   - keycloak: identity from the VALIDATED token (sub/preferred_username → slug); null
+//     → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+//   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
+// Previously dev-only — broke agent hire under CHOROS_AUTH_MODE=keycloak (always 401
+// "missing x-dev-user header" despite a valid Bearer).
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -160,8 +174,8 @@ export function registerAgentRoutes(
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/agents/hire", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(pool, actorId);
     const nowMs = Date.now();
 
     const body = await readJsonBody(req);
