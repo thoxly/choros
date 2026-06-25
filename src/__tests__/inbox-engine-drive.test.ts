@@ -110,6 +110,51 @@ describe("getActiveUserTasks wire-shape", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1b. getMessageCatchWaits wire-shape (T-0459 [D8-R4])
+// ---------------------------------------------------------------------------
+
+describe("getMessageCatchWaits wire-shape (T-0459)", () => {
+  it("maps message/signal event-subscriptions; filters out timers", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(
+      mockResp(200, {
+        data: [
+          { id: "es-1", eventType: "message", eventName: "contract-signed", processInstanceId: "inst-1" },
+          { id: "es-2", eventType: "signal", eventName: "status-changed", processInstanceId: "inst-1" },
+          // a timer subscription must NOT surface as a message-catch wait.
+          { id: "es-3", eventType: "timer", eventName: null, processInstanceId: "inst-1" },
+        ],
+      }),
+    );
+    const client = testClient();
+    const result = await client.getMessageCatchWaits("inst-1");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("should be ok");
+    expect(result.waits).toHaveLength(2);
+    expect(result.waits.map((w) => w.messageName).sort()).toEqual(["contract-signed", "status-changed"]);
+    expect(result.waits.find((w) => w.messageName === "contract-signed")?.eventType).toBe("message");
+    expect(result.waits.find((w) => w.messageName === "status-changed")?.eventType).toBe("signal");
+  });
+
+  it("returns empty waits when the instance is not parked on any message-catch", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResp(200, { data: [] }));
+    const client = testClient();
+    const result = await client.getMessageCatchWaits("inst-no-catch");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("should be ok");
+    expect(result.waits).toHaveLength(0);
+  });
+
+  it("returns a typed code on engine error (honest-degrade)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResp(404));
+    const client = testClient();
+    const result = await client.getMessageCatchWaits("inst-gone");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("should not be ok");
+    expect(result.code).toBe("NOT_FOUND");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. isInstanceEnded wire-shape
 // ---------------------------------------------------------------------------
 
