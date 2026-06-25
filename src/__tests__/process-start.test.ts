@@ -44,6 +44,7 @@ function makeStubFlowableClient(startResult: StartResult): FlowableClient {
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
     // T-0443: engine-reconcile stubs — not exercised by process-start tests.
     getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+    getMessageCatchWaits: vi.fn().mockResolvedValue({ ok: true, waits: [] }),
     isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
   };
 }

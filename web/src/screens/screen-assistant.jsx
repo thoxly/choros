@@ -184,6 +184,13 @@ function useMessagesStub(threadId, onFirstMessage) {
           text: assistantMsg.text,
           ts: assistantMsg.ts || new Date().toISOString(),
           streaming_done: assistantMsg.streaming_done ?? true,
+          intent: assistantMsg.intent,
+          // T-0465 (D8-G4): REVIEW-IN-SECTIONS. Deep-links into the actual sections
+          // (Приложения / Модельер) + a bundle-promote descriptor — present only when
+          // the bot generated a solution bundle this turn. Rendered as clickable links
+          // + a "publish whole solution" button, NOT a constructor inside the chat.
+          deepLinks: assistantMsg.deepLinks ?? null,
+          bundlePromote: assistantMsg.bundlePromote ?? null,
         },
       ]);
       // T-0384: after first message, reload thread list to surface auto-title.
@@ -386,9 +393,47 @@ function BudgetIndicator({ budget }) {
 function MessageBubble({ msg, activeThreadId }) {
   const isUser = msg.role === 'user';
   const isAnalyst = !isUser && msg.intent === 'analyst';
+  const navigate = useNavigate();
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [saveError, setSaveError] = React.useState(null);
+  // T-0465 (D8-G4): bundle-promote UI state (publish whole solution as one unit).
+  const [promoting, setPromoting] = React.useState(false);
+  const [promoted, setPromoted] = React.useState(false);
+  const [promoteError, setPromoteError] = React.useState(null);
+
+  // T-0465: deep-links + bundle-promote are present only on a bot reply that
+  // generated a solution bundle this turn.
+  const deepLinks = Array.isArray(msg.deepLinks) ? msg.deepLinks : [];
+  const bundlePromote = msg.bundlePromote || null;
+
+  const handleBundlePromote = async () => {
+    if (!bundlePromote || promoting || promoted) return;
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      const r = await fetch(bundlePromote.path, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      });
+      if (!r.ok && r.status !== 207) {
+        const txt = await r.text().catch(() => `HTTP ${r.status}`);
+        throw new Error(txt);
+      }
+      const data = await r.json().catch(() => ({}));
+      if (data.promoted) {
+        setPromoted(true);
+      } else {
+        // 207 partial — surface honestly, don't claim success.
+        const failed = (data.items || []).filter((i) => !i.ok).length;
+        setPromoteError(`Опубликовано ${data.promotedCount}/${data.itemCount}; ${failed} с ошибкой. Откройте раздел и доведите вручную.`);
+      }
+    } catch (err) {
+      setPromoteError(err.message ?? 'Не удалось опубликовать решение.');
+    } finally {
+      setPromoting(false);
+    }
+  };
 
   // Derive app_id from the message context: only an 'app' context carries a real
   // app UUID. Records and processes belong to apps indirectly and we don't have
@@ -450,6 +495,53 @@ function MessageBubble({ msg, activeThreadId }) {
         </div>
       )}
       <div className="chs-asst__msg-text">{msg.text}</div>
+
+      {/* T-0465 (D8-G4): REVIEW-IN-SECTIONS. Deep-links into the actual sections
+          (Приложения / Модельер) — the user reviews the generated DRAFT visually
+          THERE, not via a constructor rendered in chat. */}
+      {deepLinks.length > 0 && (
+        <div className="chs-asst__msg-deeplinks">
+          <div className="chs-asst__msg-deeplinks-title">Проверьте черновик в разделах:</div>
+          {deepLinks.map((dl, i) => (
+            <Button
+              key={`${dl.path}-${i}`}
+              variant="ghost"
+              size="sm"
+              onClick={() => navigate(dl.path)}
+              aria-label={dl.label}
+            >
+              {dl.kind === 'process' ? <Icon name="process" /> : <Icon name="apps" />}
+              {' '}{dl.label}
+            </Button>
+          ))}
+        </div>
+      )}
+
+      {/* T-0465 (D8-G4): BUNDLE-PROMOTE. Publish the WHOLE solution (all DRAFT apps
+          + the process) together as ONE unit. Human-gated; the bot never publishes. */}
+      {bundlePromote && !promoted && (
+        <div className="chs-asst__msg-actions">
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={promoting}
+            loading={promoting}
+            onClick={handleBundlePromote}
+            aria-label={`Опубликовать всё решение (${bundlePromote.itemCount} элементов) одним действием`}
+          >
+            Опубликовать решение ({bundlePromote.itemCount})
+          </Button>
+          {promoteError && (
+            <span className="chs-asst__save-error" role="alert">{promoteError}</span>
+          )}
+        </div>
+      )}
+      {bundlePromote && promoted && (
+        <div className="chs-asst__msg-actions">
+          <span className="chs-asst__save-ok">Решение опубликовано</span>
+        </div>
+      )}
+
       {/* T-0360: Сохранить как отчёт — только для ответов аналитика.
           Button is disabled (with tooltip) when no app context is present to
           avoid an FK violation on report_page(tenant_id, app_id) → application. */}

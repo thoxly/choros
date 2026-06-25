@@ -187,6 +187,30 @@ export type GetActiveUserTasksResult =
   | { ok: false; code: FlowableErrorCode };
 
 /**
+ * T-0459 [D8-R4]: a parked MESSAGE/SIGNAL-CATCH on a live instance. An instance
+ * sitting on a receiveTask / intermediateCatchEvent(message|signal) / message
+ * boundary registers an EVENT-SUBSCRIPTION in the engine — this is the engine
+ * truth that the instance is WAITING for a correlated message, not for a human.
+ * Maps the GET /runtime/event-subscriptions wire shape.
+ */
+export interface MessageCatchWait {
+  /** The awaited message/signal name (the subscription's eventName). */
+  readonly messageName: string;
+  /** "message" | "signal" — a signal-catch is broadcast-within-tenant. */
+  readonly eventType: string;
+}
+
+/**
+ * T-0459 [D8-R4]: result of getMessageCatchWaits — the parked message/signal
+ * catches for a process instance (the active event-subscriptions). Empty `waits`
+ * means the instance is NOT parked on any message-catch. `{ ok: false }` on engine
+ * error so the caller honest-degrades (the waiting projection is never a hard dep).
+ */
+export type GetMessageCatchWaitsResult =
+  | { ok: true; waits: MessageCatchWait[] }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
  * T-0443: result of isInstanceEnded — whether the given process instance has
  * ended (all paths reached endEvent). Returns { ok: true, ended: true } when
  * the instance is gone from runtime (404 on runtime endpoint) or its history
@@ -283,6 +307,19 @@ export interface FlowableClient {
    * Maps each task to { id, taskDefinitionKey, name, candidateGroups }.
    */
   getActiveUserTasks(instanceId: string): Promise<GetActiveUserTasksResult>;
+  /**
+   * T-0459 [D8-R4]: Get the parked MESSAGE/SIGNAL-CATCH event-subscriptions for a
+   * process instance. An instance sitting on a receiveTask /
+   * intermediateCatchEvent(message|signal) / message boundary registers an
+   * event-subscription in the engine; this query reveals which instances are
+   * WAITING for a correlated message (vs a userTask). Used by the message-wait
+   * read-projection (surfaceMessageCatchWaits) so a parked catch surfaces as
+   * «Ожидает сообщения». Empty waits ⇒ not parked on a catch.
+   *
+   * Flowable endpoint: GET {baseUrl}/runtime/event-subscriptions?processInstanceId={id}
+   * Maps each subscription to { messageName (eventName), eventType }.
+   */
+  getMessageCatchWaits(instanceId: string): Promise<GetMessageCatchWaitsResult>;
   /**
    * T-0443: Check whether a process instance has ended.
    * Strategy: GET /runtime/process-instances/{id} → 404 ⇒ ended (Flowable
@@ -799,6 +836,46 @@ export function makeFlowableClient(
   }
 
   // -------------------------------------------------------------------------
+  // T-0459 [D8-R4]: getMessageCatchWaits — parked message/signal-catch projection
+  //
+  // GET {baseUrl}/runtime/event-subscriptions?processInstanceId={id}
+  // Returns the engine event-subscriptions for an instance — a receiveTask /
+  // intermediateCatchEvent(message|signal) / message-boundary that the token is
+  // parked on registers a subscription with eventType "message" | "signal" and an
+  // eventName (the message/signal name). This is the engine truth that an instance
+  // is WAITING for a correlated message (not a userTask). Maps each to
+  // { messageName, eventType }; timer/other subscription types are filtered out.
+  // -------------------------------------------------------------------------
+  async function getMessageCatchWaits(instanceId: string): Promise<GetMessageCatchWaitsResult> {
+    return withRetry(async () => {
+      const url = `${resolved.baseUrl}/runtime/event-subscriptions?processInstanceId=${encodeURIComponent(instanceId)}`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        const items = data["data"] as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(items)) {
+          return { ok: true as const, waits: [] };
+        }
+        const waits: MessageCatchWait[] = [];
+        for (const s of items) {
+          const eventType = String(s["eventType"] ?? "").toLowerCase();
+          // Only message/signal catches are waiting-on-a-message; timers are handled
+          // by the T-0458 timer reconcile, not here.
+          if (eventType !== "message" && eventType !== "signal") continue;
+          const messageName = String(s["eventName"] ?? "");
+          if (messageName.length === 0) continue;
+          waits.push({ messageName, eventType });
+        }
+        return { ok: true as const, waits };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<GetMessageCatchWaitsResult>;
+  }
+
+  // -------------------------------------------------------------------------
   // FR-9: isInstanceEnded — T-0443 engine-reconcile seam
   //
   // Strategy:
@@ -888,6 +965,7 @@ export function makeFlowableClient(
     getFirstActiveUserTask,
     completeUserTask,
     getActiveUserTasks,
+    getMessageCatchWaits,
     isInstanceEnded,
     pingEngine,
   };

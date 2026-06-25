@@ -32,13 +32,19 @@ import type { DmnRuleTable } from "./dmn-middle.js";
 //   well-formedness guard (balanced split↔join, no dangling parallel gateway).
 // T-0458 [D8-R3]: "timer_malformed" added additively — boundary/intermediate timer
 //   well-formedness guard (valid timer body + boundary attach + outgoing escalation).
+// T-0459 [D8-R4]: "message_event_incoherent" added additively — message/signal
+//   catch coherence guard. A message-catch (receiveTask / intermediateCatchEvent /
+//   boundaryEvent carrying a message|signal definition) MUST have a TIMEOUT (R3) so
+//   it can never wait forever, and must declare a correlation field. Self-contained
+//   (checkMessageEventCoherence) — a sibling task may also touch this file.
 export type LintViolationType =
   | "raw_object_binding"
   | "malformed_xml"
   | "binding_mismatch"
   | "gateway_rule_mismatch"
   | "parallel_gateway_imbalance"
-  | "timer_malformed";
+  | "timer_malformed"
+  | "message_event_incoherent";
 
 export interface LintViolation {
   type: LintViolationType;
@@ -364,6 +370,22 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   // the text token can be attributed to it.
   let inTimerBodyChild: TimerBodyKind | null = null;
 
+  // T-0459 [D8-R4]: message/signal catch collection — always on (structural
+  // well-formedness, no opts gate). We collect every receiveTask /
+  // intermediateCatchEvent / boundaryEvent that carries a <messageEventDefinition>
+  // or <signalEventDefinition>, plus the boundary timers (attachedToRef) so the
+  // coherence check can verify each message-catch is GUARDED BY A TIMEOUT (R3). The
+  // correlationField is read off the choros:correlationField attribute. Resolved
+  // post-walk against the collected boundary-timer attach set.
+  const messageCatchEvents: MessageCatchCollect[] = [];
+  // Cursor for the message-catch element currently being parsed (null when outside).
+  let currentMessageCatch: MessageCatchCollect | null = null;
+  // Every (attachedToRef) of a boundary TIMER — the set of activity/event ids that
+  // have a deadline timer guarding them. A message-catch is timeout-covered iff its
+  // own id (intermediate/receiveTask) or its attachedToRef (boundary message) is in
+  // this set. Populated during the walk; consumed post-walk.
+  const boundaryTimerAttachRefs = new Set<string>();
+
   // Validate UTF-8 by checking for replacement characters that Node may have
   // inserted for invalid byte sequences. We operate on a JS string, so we
   // check for U+FFFD which signals lossy decoding.
@@ -536,6 +558,43 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         }
       }
 
+      // T-0459 [D8-R4]: open a message-catch cursor for the message-family carriers.
+      // receiveTask is itself a message wait; boundaryEvent / intermediateCatchEvent
+      // carry the message/signal via a child <messageEventDefinition>/<signalEventDefinition>.
+      // We open the cursor on ALL three and confirm the message/signal def on the
+      // child (a boundary/intermediate that turns out to carry only a timer def is
+      // discarded — it is a timer, handled by the T-0458 path, not a message-catch).
+      if (
+        localName === "receiveTask" ||
+        localName === "boundaryEvent" ||
+        localName === "intermediateCatchEvent"
+      ) {
+        const attachedToAttr = attrs.find((a) => a.name === "attachedToRef");
+        const corrFieldAttr = attrs.find((a) => a.name === "correlationField");
+        const msgNameAttr = attrs.find((a) => a.name === "messageName");
+        currentMessageCatch = {
+          id: elementId,
+          kind:
+            localName === "receiveTask"
+              ? "receiveTask"
+              : localName === "boundaryEvent"
+                ? "boundaryMessage"
+                : "intermediateMessage",
+          attachedToRef: attachedToAttr?.value ?? "",
+          correlationField: corrFieldAttr?.value ?? "",
+          messageName: msgNameAttr?.value ?? "",
+          // receiveTask IS a message wait by element type; boundary/intermediate must
+          // prove a message|signal child def below.
+          hasMessageDef: localName === "receiveTask",
+        };
+      }
+      if (
+        currentMessageCatch !== null &&
+        (localName === "messageEventDefinition" || localName === "signalEventDefinition")
+      ) {
+        currentMessageCatch.hasMessageDef = true;
+      }
+
       // T-0436: conditionExpression gateway collection.
       // When we encounter a <conditionExpression> element (already tracked by
       // SCOPED_ELEMENTS → contextStack), we also track it in our parallel
@@ -561,9 +620,26 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         ) {
           if (currentTimerEvent.hasTimerDef) {
             timerEvents.push(currentTimerEvent);
+            // T-0459 [D8-R4]: a committed BOUNDARY timer guards its attachedToRef.
+            if (currentTimerEvent.kind === "boundary" && currentTimerEvent.attachedToRef) {
+              boundaryTimerAttachRefs.add(currentTimerEvent.attachedToRef);
+            }
           }
           currentTimerEvent = null;
           inTimerBodyChild = null;
+        }
+        // T-0459 [D8-R4]: a self-closing message-catch host (no child def) is not a
+        // message-catch unless it is a receiveTask (which is one by element type).
+        if (
+          currentMessageCatch !== null &&
+          (localName === "receiveTask" ||
+            localName === "boundaryEvent" ||
+            localName === "intermediateCatchEvent")
+        ) {
+          if (currentMessageCatch.hasMessageDef) {
+            messageCatchEvents.push(currentMessageCatch);
+          }
+          currentMessageCatch = null;
         }
         elementStack.pop();
         if (contextStack.length > 0) {
@@ -677,9 +753,28 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       ) {
         if (currentTimerEvent.hasTimerDef) {
           timerEvents.push(currentTimerEvent);
+          // T-0459 [D8-R4]: a committed BOUNDARY timer guards its attachedToRef.
+          if (currentTimerEvent.kind === "boundary" && currentTimerEvent.attachedToRef) {
+            boundaryTimerAttachRefs.add(currentTimerEvent.attachedToRef);
+          }
         }
         currentTimerEvent = null;
         inTimerBodyChild = null;
+      }
+
+      // T-0459 [D8-R4]: commit the message-catch on close (only when a message|signal
+      // child def was present, or it is a receiveTask). A boundary/intermediate that
+      // carried only a timer def has hasMessageDef=false → discarded (it's a timer).
+      if (
+        currentMessageCatch !== null &&
+        (localName === "receiveTask" ||
+          localName === "boundaryEvent" ||
+          localName === "intermediateCatchEvent")
+      ) {
+        if (currentMessageCatch.hasMessageDef) {
+          messageCatchEvents.push(currentMessageCatch);
+        }
+        currentMessageCatch = null;
       }
 
       continue;
@@ -778,6 +873,29 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       outgoing: t.id ? allFlowSourceRefs.filter((r) => r === t.id).length : 0,
     }));
     checkTimerCoherence(timers, violations);
+  }
+
+  // T-0459 [D8-R4]: message/signal catch coherence — ALWAYS on. Every message-catch
+  // MUST be guarded by a timeout (R3 — spec §3.5 «message-catch ОБЯЗАН иметь таймаут»)
+  // and declare a correlation field. Resolve each catch's timeout-coverage against the
+  // collected boundary-timer attach set, then run the self-contained check.
+  if (messageCatchEvents.length > 0) {
+    const catches: MessageCatchInfo[] = messageCatchEvents.map((m) => ({
+      id: m.id,
+      kind: m.kind,
+      attachedToRef: m.attachedToRef,
+      correlationField: m.correlationField.trim(),
+      messageName: m.messageName.trim(),
+      // A boundary-message catch is timeout-covered when its OWN attachedToRef task
+      // also carries a boundary timer (a deadline on the same guarded activity). A
+      // receiveTask / intermediate-message catch is covered when a boundary timer is
+      // attached directly to IT (attachedToRef === this catch's id).
+      hasTimeout:
+        m.kind === "boundaryMessage"
+          ? m.attachedToRef.length > 0 && boundaryTimerAttachRefs.has(m.attachedToRef)
+          : m.id.length > 0 && boundaryTimerAttachRefs.has(m.id),
+    }));
+    checkMessageEventCoherence(catches, violations);
   }
 
   if (violations.length === 0) {
@@ -1030,6 +1148,125 @@ function checkTimerCoherence(
         message:
           `<${elemDesc}> has no outgoing sequence flow — when the deadline fires there is ` +
           `no escalation target to route to. Connect the timer to the escalation step`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0459 [D8-R4]: Message / signal catch coherence check
+//
+// Self-contained (a sibling task may also touch this file). Kept as a DISTINCT,
+// clearly-named function appended cleanly: it owns its own collection types and is
+// invoked from lintBpmn behind a `messageCatchEvents.length > 0` guard. No shared
+// mutable state with the other checks beyond the `violations` accumulator.
+// ---------------------------------------------------------------------------
+
+/** Which message-family carrier a catch is. */
+type MessageCatchKind = "receiveTask" | "boundaryMessage" | "intermediateMessage";
+
+/**
+ * Raw collection record for a message/signal catch, accumulated during the token
+ * walk. Resolved to a MessageCatchInfo (with timeout coverage) post-walk.
+ */
+interface MessageCatchCollect {
+  id: string;
+  kind: MessageCatchKind;
+  attachedToRef: string;
+  correlationField: string;
+  messageName: string;
+  /** True once a <messageEventDefinition>/<signalEventDefinition> child is seen
+   * (or the carrier is a receiveTask, which is a message wait by element type). */
+  hasMessageDef: boolean;
+}
+
+/**
+ * Resolved message/signal catch: a message-family carrier with its timeout coverage
+ * resolved (whether a boundary timer guards it).
+ */
+interface MessageCatchInfo {
+  /** Element id ("" when absent). */
+  id: string;
+  /** receiveTask | boundaryMessage | intermediateMessage. */
+  kind: MessageCatchKind;
+  /** attachedToRef of a boundary-message catch (the guarded task); "" otherwise. */
+  attachedToRef: string;
+  /** choros:correlationField — the record field whose value is the correlation key. */
+  correlationField: string;
+  /** choros:messageName — the message/signal name the catch waits for. */
+  messageName: string;
+  /** True iff a boundary timer guards this catch (the deadline that prevents
+   * an infinite wait — spec §3.5 R3 «message-catch ОБЯЗАН иметь таймаут»). */
+  hasTimeout: boolean;
+}
+
+/**
+ * Validate the well-formedness of every collected message/signal catch:
+ *
+ *   - NO TIMEOUT (R3 — the load-bearing rule): a message-catch with no guarding
+ *     timer waits FOREVER. spec §3.5 «Сцепка: message-catch ОБЯЗАН иметь таймаут
+ *     (R3) — иначе вечное ожидание». A receiveTask / intermediate-message catch
+ *     must have a boundary timer attached to it; a boundary-message catch's guarded
+ *     task must also carry a boundary timer. Missing → violation (the message would
+ *     park the instance with no escape).
+ *
+ *   - NO CORRELATION FIELD: a message-catch correlates by a business key read from a
+ *     record field (spec §3.5 «корреляция по бизнес-ключу из поля записи»). Without a
+ *     declared correlationField it can never correlate an inbound envelope → violation.
+ *
+ *   - NO MESSAGE NAME: a catch with no messageName cannot be addressed by any
+ *     envelope → violation (it is unreachable).
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkMessageEventCoherence(
+  catches: MessageCatchInfo[],
+  violations: LintViolation[],
+): void {
+  for (const c of catches) {
+    const elemKind =
+      c.kind === "receiveTask"
+        ? "receiveTask"
+        : c.kind === "boundaryMessage"
+          ? "boundaryEvent"
+          : "intermediateCatchEvent";
+    const elemDesc = c.id ? `${elemKind} id="${c.id}"` : `${elemKind} (no id)`;
+
+    // 1. THE timeout rule (R3) — a message-catch without a timeout = lint error.
+    if (!c.hasTimeout) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> is a message/signal catch with NO TIMEOUT — it would wait ` +
+          `forever if the message never arrives. Attach a boundary timer (deadline) ` +
+          `to it (spec §3.5 R3: a message-catch MUST have a timeout)`,
+      });
+    }
+
+    // 2. Correlation field must be declared (correlation is by record-field key).
+    if (c.correlationField.length === 0) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> declares no choros:correlationField — a message-catch ` +
+          `correlates an inbound envelope by a business key taken from a record field; ` +
+          `pick the record field that supplies the correlation key`,
+      });
+    }
+
+    // 3. Message/signal name must be present (otherwise the catch is unaddressable).
+    if (c.messageName.length === 0) {
+      violations.push({
+        type: "message_event_incoherent",
+        elementId: c.id,
+        elementKind: elemKind,
+        message:
+          `<${elemDesc}> declares no choros:messageName — no inbound envelope can be ` +
+          `addressed to it; set the message/signal name the catch waits for`,
       });
     }
   }

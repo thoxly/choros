@@ -69,7 +69,8 @@ const SCREEN_META = {
   apps:  { crumb: ["Конструктор", "Приложения"] },
   "app-schema": { crumb: ["Конструктор", "Приложения"] },
   "app-records": { crumb: ["Конструктор", "Приложения"] },
-  forms:  { crumb: ["Конструктор", "Формы задач"] },
+  // T-0482: «Формы задач» скрыт из nav; /forms доступен по прямой ссылке.
+  forms:  { crumb: ["Конструктор", "Привязка форм"] },
   // T-0355: Модельер lives under /processes/:id/edit — the breadcrumb reflects
   // the authoring space. The screen id seen in the pathname is "processes" for
   // editor deep-routes; "modeler" is a nav-config logical alias only.
