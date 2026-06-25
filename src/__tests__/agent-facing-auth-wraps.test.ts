@@ -122,7 +122,8 @@ beforeAll(async () => {
   const router = new Router();
 
   registerInvokeRoutes(router, pool);
-  registerProcessDefsRoutes(router, pool, flowable);
+  // T-0468 [SECURITY]: tenant from identity (resolver), not x-tenant-id header.
+  registerProcessDefsRoutes(router, pool, flowable, async () => TENANT_ID);
   registerBindingRoutes(router, pool, {
     pool,
     resolveActorTenant: async () => TENANT_ID,
@@ -166,9 +167,10 @@ const SURFACES: Array<{
   },
   {
     surface: "process-defs",
+    // T-0468 [SECURITY]: no x-tenant-id — tenant comes from identity. Dev positive
+    // path reaches the handler via x-dev-user alone; keycloak negative path 401s.
     method: "POST",
     path: "/api/process-defs",
-    headers: { "x-tenant-id": TENANT_ID },
     body: { processKey: "k", name: "N", bpmnXml: "<x/>" },
   },
   {
