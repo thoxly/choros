@@ -270,6 +270,42 @@ const TOOL_AUTHOR_DMN: ToolDeclaration = {
   },
 };
 
+/**
+ * generate_process — T-0464 (D8-G3): generate a FREE-TOPOLOGY BPMN process from a
+ * text description. The HTTP layer runs the generate→validate→repair loop
+ * (runProcessGenLoop), grounding gateway conditions + lane roles on the app's real
+ * fields/roles. The converged draft lands as a process_definition DRAFT for human
+ * review in the Modeler — NEVER auto-published. On lint-exhaustion or an ungroundable
+ * reference, the loop surfaces honestly (no broken process is emitted).
+ *
+ * Use this when the user describes a PROCESS / WORKFLOW in words («процесс: подача →
+ * согласование → если сумма большая → доп. согласование, иначе закрыть»), as opposed
+ * to authoring a single field/form/binding by hand.
+ */
+const TOOL_GENERATE_PROCESS: ToolDeclaration = {
+  type: "function",
+  function: {
+    name: "generate_process",
+    description:
+      "Generate a NEW executable BPMN process (free topology — branches, parallel, " +
+      "timers, lanes) from a text description. The system runs a generate→validate→" +
+      "repair loop and grounds gateway conditions + lane roles on the bound app's real " +
+      "fields/roles. The result lands as a DRAFT for human review in the Modeler; it is " +
+      "NEVER auto-published. Use this when the user describes a workflow/process in words.",
+    parameters: {
+      type: "object",
+      properties: {
+        processName: { type: "string", description: "Human-readable name for the process (e.g. «Согласование закупок»)." },
+        processKey: { type: "string", description: "Optional slug for the process (auto-generated from name when absent)." },
+        description: { type: "string", description: "The user's text description of the process to generate." },
+        applicationId: { type: "string", description: "Optional UUID of the application whose fields ground the gateway conditions." },
+        humanReadableReason: { type: "string", description: "Why this process is being generated (for changelog)." },
+      },
+      required: ["processName", "description", "humanReadableReason"],
+    },
+  },
+};
+
 /** request_promote — request a human to promote DRAFT → published. NEVER auto-promotes. */
 const TOOL_REQUEST_PROMOTE: ToolDeclaration = {
   type: "function",
@@ -309,6 +345,9 @@ export const CONFIGURATOR_DEFAULT_SYSTEM_PROMPT =
   "Используй инструменты для каждого конкретного изменения. " +
   "Если поле-связь ссылается на приложение, которого ещё нет — используй relate_application: " +
   "система сама создаст связанное приложение в том же черновике или сошлётся на существующее (без дубликатов). " +
+  "Если пользователь описывает ПРОЦЕСС/маршрут словами (подача → согласование → если сумма большая → доп. согласование) — " +
+  "используй generate_process: система соберёт BPMN циклом генерация→проверка→починка, заземлит условия и роли на реальные поля, " +
+  "и положит черновик в Модельер на ревью (без авто-публикации). " +
   "После каждого изменения кратко объясни что и зачем было сделано. " +
   "Если конфигурация завершена — вызови request_promote с описанием изменений. " +
   "Отвечай по-русски.";
@@ -321,6 +360,7 @@ const CONFIGURATOR_TOOLS: readonly ToolDeclaration[] = [
   TOOL_EDIT_JSONSCHEMA,
   TOOL_EMIT_FORM,
   TOOL_AUTHOR_DMN,
+  TOOL_GENERATE_PROCESS,
   TOOL_REQUEST_PROMOTE,
 ];
 
@@ -343,7 +383,8 @@ export interface ApprovedOp {
     | "author_binding"
     | "edit_jsonschema_non_destructive"
     | "emit_form"
-    | "author_dmn";
+    | "author_dmn"
+    | "generate_process";
   /** Human-readable one-liner for the changelog. */
   readonly description: string;
   /** Raw tool arguments (type-narrowed per kind). */
@@ -817,6 +858,54 @@ function processToolCall(
           processKey: args["processKey"],
           dmnKey: args["dmnKey"],
           tier: "draft",
+        }),
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // generate_process — T-0464 (D8-G3): plan a free-topology process generation.
+    // The CORE only PLANS it (validates inputs); the HTTP layer runs the actual
+    // generate→validate→repair loop (runProcessGenLoop) and persists the converged
+    // draft (status='draft') for human review in the Modeler. Co-equal with the
+    // visual modeler: it writes the SAME process_definition draft row.
+    // -----------------------------------------------------------------------
+    case "generate_process": {
+      const processName =
+        typeof args["processName"] === "string" ? args["processName"].trim() : "";
+      const description =
+        typeof args["description"] === "string" ? args["description"].trim() : "";
+
+      if (!processName || !description) {
+        const blocked: BlockedOp = {
+          kind: "pending_human_confirm",
+          description: `generate_process: не указано название процесса или его описание.`,
+          toolName: call.name,
+          requiredAction: "Укажите processName и description процесса и повторите.",
+        };
+        return {
+          blocked,
+          changelogLine: `⚠ [ЗАБЛОКИРОВАНО] generate_process: нет названия/описания`,
+          toolResultContent: `error: missing processName or description`,
+        };
+      }
+
+      const approved: ApprovedOp = {
+        kind: "generate_process",
+        description:
+          `Генерация процесса «${processName}» из текстового описания (цикл генерация→` +
+          `проверка→починка; заземление условий/ролей на реальные поля; черновик в Модельер ` +
+          `на ревью — без авто-публикации) [DRAFT]: ${reason}`,
+        args,
+        tier: "draft",
+      };
+      return {
+        approved,
+        changelogLine: `✓ [DRAFT] generate_process: ${approved.description}`,
+        toolResultContent: JSON.stringify({
+          status: "queued_generation",
+          processName,
+          tier: "draft",
+          note: "Процесс будет собран циклом генерация→проверка→починка и положен черновиком в Модельер.",
         }),
       };
     }
