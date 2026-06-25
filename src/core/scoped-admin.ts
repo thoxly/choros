@@ -43,18 +43,35 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * The four day-1 management-object kinds. Admin authority over each is expressed
+ * The day-1 management-object kinds. Admin authority over each is expressed
  * as ordinary `grant` rows whose `resourceType` is one of these `mgmt_object:*`
  * values — there is NO separate admin table/flag/role-kind (NF-1/AC-8).
  *
  * Frozen here for the siblings that consume it: T-0030 (write-API/UI) and
  * T-0039 (LLM-proposes).
+ *
+ * T-0469 [auth] — the three ORG-OBJECT kinds (`department`, `position`,
+ * `employee`) are added so that org-structure authoring (the seed-write.ts
+ * routes) is DELEGABLE: a holder of a covering, delegable
+ * `mgmt_object:department|position|employee` grant gains owner-like authoring
+ * power over those objects WITHOUT being the genesis owner. This is the
+ * mechanism the `role-constructor-admin` role is built on (owner-rights MINUS
+ * owner-deletion). NOTE: there is deliberately NO `mgmt_object:employee:delete`
+ * delegation in role-constructor-admin and NO `mgmt_object:assignment` kind —
+ * employee DELETION and any role_assignment mutation (incl. the tenant-owner
+ * assignment) remain OWNER-ONLY. Adding a kind here only makes the OBJECT
+ * delegable; which OPERATIONS a given role may delegate is decided by the
+ * grant rows seeded for that role (see registerTenant role-constructor-admin).
  */
 export const MGMT_OBJECT_KINDS = [
   "mgmt_object:role",
   "mgmt_object:agent",
   "mgmt_object:process",
   "mgmt_object:grant",
+  // T-0469 — org-structure objects, delegable for role-constructor-admin.
+  "mgmt_object:department",
+  "mgmt_object:position",
+  "mgmt_object:employee",
 ] as const;
 
 /** A day-1 mgmt-object resource-type literal. */
