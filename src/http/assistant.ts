@@ -888,7 +888,7 @@ const BUNDLE_OP_KINDS: ReadonlySet<ApprovedOp["kind"]> = new Set([
 ]);
 
 /** A clickable deep-link surfaced in the assistant reply (rendered by the web chat). */
-interface DeepLink {
+export interface DeepLink {
   /** Visible label, e.g. «Открыть приложение «Заявки на закупку»». */
   readonly label: string;
   /** SPA route path, e.g. "/app-schema/<uuid>" or "/processes/<key>/edit". */
@@ -898,12 +898,48 @@ interface DeepLink {
 }
 
 /** Bundle-promote descriptor — the whole bundle published as ONE unit. */
-interface BundlePromote {
+export interface BundlePromote {
   readonly bundleId: string;
   /** How many DRAFT items (apps + sections + processes) the bundle holds. */
   readonly itemCount: number;
   /** API endpoint the web chat POSTs to publish the whole bundle. */
   readonly path: string;
+}
+
+/**
+ * T-0465 (D8-G4): PURE deep-link + bundle-promote construction (no DB).
+ * Exported so the plan→generate→review→promote contract is testable at $0:
+ *   - links point at the actual SECTIONS (/app-schema/:id, /processes/:key/edit) —
+ *     the user reviews the draft VISUALLY there, the chat does NOT render a constructor;
+ *   - the bundlePromote path targets the bundle-promote endpoint (ONE promote unit).
+ */
+export function buildBundleReview(
+  apps: ReadonlyArray<{ id: string; display_name: string }>,
+  procs: ReadonlyArray<{ process_key: string; name: string }>,
+  sectionCount: number,
+  bundleId: string,
+): { deepLinks: DeepLink[]; bundlePromote: BundlePromote | null } {
+  const deepLinks: DeepLink[] = [];
+  for (const a of apps) {
+    deepLinks.push({
+      label: `Открыть приложение «${a.display_name}»`,
+      path: `/app-schema/${a.id}`,
+      kind: "app",
+    });
+  }
+  for (const p of procs) {
+    deepLinks.push({
+      label: `Открыть процесс «${p.name}» в Модельере`,
+      path: `/processes/${encodeURIComponent(p.process_key)}/edit`,
+      kind: "process",
+    });
+  }
+  const itemCount = apps.length + procs.length + sectionCount;
+  const bundlePromote: BundlePromote | null =
+    itemCount > 0
+      ? { bundleId, itemCount, path: `/api/solution-bundles/${bundleId}/promote` }
+      : null;
+  return { deepLinks, bundlePromote };
 }
 
 /**
@@ -945,34 +981,13 @@ async function resolveBundleReview(
       );
       await client.query("COMMIT");
 
-      const deepLinks: DeepLink[] = [];
-      for (const a of apps.rows) {
-        deepLinks.push({
-          label: `Открыть приложение «${a.display_name}»`,
-          path: `/app-schema/${a.id}`,
-          kind: "app",
-        });
-      }
-      for (const p of procs.rows) {
-        deepLinks.push({
-          label: `Открыть процесс «${p.name}» в Модельере`,
-          path: `/processes/${encodeURIComponent(p.process_key)}/edit`,
-          kind: "process",
-        });
-      }
-
-      const itemCount =
-        apps.rowCount! + procs.rowCount! + Number(sectionCount.rows[0]?.n ?? "0");
-      const bundlePromote: BundlePromote | null =
-        itemCount > 0
-          ? {
-              bundleId,
-              itemCount,
-              path: `/api/solution-bundles/${bundleId}/promote`,
-            }
-          : null;
-
-      return { deepLinks, bundlePromote };
+      // Pure construction (testable at $0) from the tagged rows.
+      return buildBundleReview(
+        apps.rows,
+        procs.rows,
+        Number(sectionCount.rows[0]?.n ?? "0"),
+        bundleId,
+      );
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
       throw err;
