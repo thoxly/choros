@@ -28,6 +28,7 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
+import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import type { FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
@@ -252,14 +253,22 @@ export function registerProcessDefsRoutes(
     // processKey is optional — when absent, we auto-generate from name.
     const requestedKey = body["processKey"];
     const name = body["name"];
-    const bpmnXml = body["bpmnXml"];
+    const rawBpmnXml = body["bpmnXml"];
 
     if (typeof name !== "string" || !name.trim()) {
       throw new HttpError(400, "VALIDATION", "name must be a non-empty string");
     }
-    if (typeof bpmnXml !== "string" || !bpmnXml.trim()) {
+    if (typeof rawBpmnXml !== "string" || !rawBpmnXml.trim()) {
       throw new HttpError(400, "VALIDATION", "bpmnXml must be a non-empty string");
     }
+
+    // T-0457 [D8-R2]: lane → role wiring. Before persisting, map each visual
+    // swimlane to the candidateGroups of the userTasks inside it (spec §3.3):
+    // a userTask in lane «Бухгалтер» gets flowable:candidateGroups="<lane-role>".
+    // Idempotent and additive — userTasks with an explicit role are left as-is,
+    // and a diagram with no lanes is returned unchanged. The persisted draft
+    // therefore carries the role binding the executor-resolver consumes.
+    const bpmnXml = mapLanesToCandidateGroups(rawBpmnXml);
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;
