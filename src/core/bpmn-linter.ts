@@ -28,7 +28,14 @@ import type { DmnRuleTable } from "./dmn-middle.js";
 
 // T-0072: "binding_mismatch" added additively (NF-4 / AC-13 — no existing tests broken).
 // T-0436: "gateway_rule_mismatch" added additively — publish-time coherence guard.
-export type LintViolationType = "raw_object_binding" | "malformed_xml" | "binding_mismatch" | "gateway_rule_mismatch";
+// T-0456 [D8-R1]: "parallel_gateway_imbalance" added additively — AND split/join
+//   well-formedness guard (balanced split↔join, no dangling parallel gateway).
+export type LintViolationType =
+  | "raw_object_binding"
+  | "malformed_xml"
+  | "binding_mismatch"
+  | "gateway_rule_mismatch"
+  | "parallel_gateway_imbalance";
 
 export interface LintViolation {
   type: LintViolationType;
@@ -332,6 +339,15 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   let condExprBuffer = "";
   let currentSeqFlowSourceRef = "";
 
+  // T-0456 [D8-R1]: parallelGateway collection — always on (no opts gate; the AND
+  // split/join well-formedness check is structural, needs no rule tables). We track
+  // every parallelGateway element id, and collect ALL sequenceFlow source/target refs.
+  // Refs are RESOLVED to gateways AFTER the full walk (BPMN does NOT guarantee a flow
+  // is declared after its referenced gateway — counting inline would miss earlier flows).
+  const parallelGatewayIds = new Set<string>(); // declared parallelGateway element ids
+  const allFlowSourceRefs: string[] = []; // sourceRef of every sequenceFlow (= outgoing of source node)
+  const allFlowTargetRefs: string[] = []; // targetRef of every sequenceFlow (= incoming of target node)
+
   // Validate UTF-8 by checking for replacement characters that Node may have
   // inserted for invalid byte sequences. We operate on a JS string, so we
   // check for U+FFFD which signals lossy decoding.
@@ -453,6 +469,25 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
       if (collectGateways && localName === "sequenceFlow") {
         const sourceRefAttr = attrs.find((a) => a.name === "sourceRef");
         currentSeqFlowSourceRef = sourceRefAttr?.value ?? "";
+      }
+
+      // T-0456 [D8-R1]: collect parallelGateway element ids (resolved after the walk).
+      if (localName === "parallelGateway") {
+        // An id-less parallelGateway is itself malformed for flow-balance purposes; the
+        // structural check below flags any parallel gateway it can identify. Without an
+        // id we cannot link flows to it, so it would appear as 0/0 (dangling) — which is
+        // the correct outcome. Use a synthetic key so it is still surfaced.
+        parallelGatewayIds.add(elementId || `__pg_anon_${parallelGatewayIds.size}`);
+      }
+
+      // T-0456 [D8-R1]: collect EVERY sequenceFlow's source/target ref. Resolved to
+      // gateways post-walk (declaration order is not guaranteed in BPMN). Independent
+      // of the T-0436 collectGateways flag — runs on every publish.
+      if (localName === "sequenceFlow") {
+        const srcAttr = attrs.find((a) => a.name === "sourceRef");
+        const tgtAttr = attrs.find((a) => a.name === "targetRef");
+        if (srcAttr?.value) allFlowSourceRefs.push(srcAttr.value);
+        if (tgtAttr?.value) allFlowTargetRefs.push(tgtAttr.value);
       }
 
       // T-0436: conditionExpression gateway collection.
@@ -625,10 +660,109 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
     checkGatewayRuleCoherence(Array.from(gatewayMap.values()), opts.ruleTables, violations);
   }
 
+  // T-0456 [D8-R1]: parallelGateway (AND split/join) well-formedness — ALWAYS on.
+  // Resolve the collected flow refs into per-gateway in/out counts, then run the
+  // structural coherence check (balanced split↔join, no dangling). Runs on every
+  // publish (structural — no rule tables needed).
+  if (parallelGatewayIds.size > 0) {
+    const parallelGateways: ParallelGatewayInfo[] = [];
+    for (const id of parallelGatewayIds) {
+      // Anonymous (id-less) gateways start with the synthetic prefix and can never be
+      // referenced by a flow → they resolve to 0/0 and are reported as dangling, which
+      // is the correct fail-closed outcome.
+      const isAnon = id.startsWith("__pg_anon_");
+      const realId = isAnon ? "" : id;
+      const outgoing = realId ? allFlowSourceRefs.filter((r) => r === realId).length : 0;
+      const incoming = realId ? allFlowTargetRefs.filter((r) => r === realId).length : 0;
+      parallelGateways.push({ id: realId, incoming, outgoing });
+    }
+    checkParallelGatewayCoherence(parallelGateways, violations);
+  }
+
   if (violations.length === 0) {
     return { ok: true };
   }
   return { ok: false, violations };
+}
+
+// ---------------------------------------------------------------------------
+// T-0456 [D8-R1]: Parallel gateway (AND split/join) well-formedness check
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes one parallelGateway found in the BPMN XML, with its incoming and
+ * outgoing sequenceFlow counts (resolved from flow source/target refs after the
+ * token walk). Pure data; collected by lintBpmn.
+ */
+interface ParallelGatewayInfo {
+  /** Element id of the parallelGateway ("" when the element had no id attribute). */
+  id: string;
+  /** Number of sequenceFlows whose targetRef points at this gateway (join arity). */
+  incoming: number;
+  /** Number of sequenceFlows whose sourceRef points at this gateway (split arity). */
+  outgoing: number;
+}
+
+/**
+ * Validate AND split/join well-formedness for every parallelGateway:
+ *
+ *   - DANGLING: a parallelGateway with 0 incoming or 0 outgoing flows is dangling
+ *     (no token can flow through it / it leads nowhere) → violation. This also
+ *     catches id-less gateways (which cannot be referenced by any flow).
+ *
+ *   - UNBALANCED FORK: a split (1 incoming, ≥2 outgoing) creates N concurrent
+ *     tokens. A diverging+converging gateway (≥2 in AND ≥2 out, a "mixed" gateway)
+ *     is rejected — BPMN best practice and Flowable execution clarity require a
+ *     dedicated split and a dedicated join, not a single mixed gateway. Balanced
+ *     well-formed shapes are: pure SPLIT (1-in / N-out) and pure JOIN (N-in / 1-out).
+ *     A 1-in/1-out parallel gateway is a no-op pass-through (allowed, advisory-clean).
+ *
+ * Note on whole-process balance (every split has a matching join): a full
+ * reachability/path analysis is out of v1 scope (spec §3.2 — "balanced split/join,
+ * no dangling"). Per-gateway arity + no-dangling catches the common authoring
+ * mistakes (fork that never joins back via a mixed gateway; a gateway wired to
+ * nothing). Flowable itself rejects truly unreachable graphs at deploy.
+ *
+ * Pure: no IO, no DB, no side effects.
+ */
+function checkParallelGatewayCoherence(
+  gateways: ParallelGatewayInfo[],
+  violations: LintViolation[],
+): void {
+  for (const gw of gateways) {
+    const elemDesc = gw.id ? `parallelGateway id="${gw.id}"` : "parallelGateway (no id)";
+
+    // Dangling: a parallel gateway with no incoming or no outgoing flow is unreachable
+    // or leads nowhere — a token can never split/join correctly.
+    if (gw.incoming === 0 || gw.outgoing === 0) {
+      violations.push({
+        type: "parallel_gateway_imbalance",
+        elementId: gw.id,
+        elementKind: "parallelGateway",
+        message:
+          `<${elemDesc}> is dangling: it has ${gw.incoming} incoming and ${gw.outgoing} ` +
+          `outgoing sequence flow(s). A parallel (AND) gateway must have at least one ` +
+          `incoming and one outgoing flow; a split needs 1 incoming and ≥2 outgoing, ` +
+          `a join needs ≥2 incoming and 1 outgoing`,
+      });
+      continue;
+    }
+
+    // Mixed split+join in a single gateway: ≥2 incoming AND ≥2 outgoing. Reject —
+    // split and join must be distinct gateways for correct, readable AND semantics.
+    if (gw.incoming >= 2 && gw.outgoing >= 2) {
+      violations.push({
+        type: "parallel_gateway_imbalance",
+        elementId: gw.id,
+        elementKind: "parallelGateway",
+        message:
+          `<${elemDesc}> mixes split and join: it has ${gw.incoming} incoming and ` +
+          `${gw.outgoing} outgoing flows. Use a dedicated AND-split (1 incoming, ≥2 ` +
+          `outgoing) and a dedicated AND-join (≥2 incoming, 1 outgoing) instead of one ` +
+          `mixed parallel gateway`,
+      });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
