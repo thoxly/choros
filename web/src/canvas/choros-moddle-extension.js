@@ -127,6 +127,70 @@ const ChorosModdleDescriptor = {
           isAttr: true,
           type: 'String',
         },
+        /* --------------------------------------------------------------------
+           T-0461 [D8-R6]: typed per-element config — agentTask + userTask form
+           binding. All ride on bpmn:Activity so every task subtype inherits
+           them. They round-trip identically whether written by the human panel
+           or the D8 bot (one config contract, two drivers — see
+           element-config-contract.js).
+           -------------------------------------------------------------------- */
+        {
+          /**
+           * choros:agentRef — AgentPublic.id of the agent that runs this step.
+           * Sourced from GET /api/agents (T-0473 registry). Read by the D4
+           * dispatcher (process-execution-model) to load the agent's grants+LLM.
+           * Only meaningful when executorType="agent".
+           */
+          name: 'agentRef',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * choros:autonomyLevel — per-step autonomy ceiling:
+           *   "suggest" | "assisted" | "auto". The agent's base autonomy floor +
+           * budget are set on the agent in Оргструктуре; this is the per-step cap.
+           */
+          name: 'autonomyLevel',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * choros:agentReadsFields — CSV of record field keys the agent READS.
+           * choros:agentWritesFields — CSV of record field keys the agent WRITES.
+           * The field set the step is bound to against the application data
+           * (registry_def); richer per-field config lives in form_binding (D7).
+           */
+          name: 'agentReadsFields',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          name: 'agentWritesFields',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * choros:formContractRef — which form / registry_def this userTask
+           * shows (the form key the step is bound to). Seamlessness
+           * процесс↔приложение: the step renders THIS form against the record.
+           */
+          name: 'formContractRef',
+          isAttr: true,
+          type: 'String',
+        },
+        {
+          /**
+           * choros:visibleFields — CSV of record field keys visible/editable on
+           * this step. Reuses the D7 contract catalog for presentation; storage
+           * is the field-key set so the bot writes it identically.
+           */
+          name: 'visibleFields',
+          isAttr: true,
+          type: 'String',
+        },
       ],
     },
     {
