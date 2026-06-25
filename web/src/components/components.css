@@ -134,6 +134,24 @@
 .chs-input--mono { font-family: var(--chs-font-mono); letter-spacing: var(--chs-tracking-mono); }
 .chs-input--invalid { border-color: var(--chs-color-danger); }
 .chs-input--invalid:focus { box-shadow: 0 0 0 3px var(--chs-color-danger-soft); }
+/* T-0487 (T-0404 follow-up): read-only and disabled affordance.
+   Previously a read-only scalar input looked identical to an editable one —
+   no visual cue that the field is locked. Use design-system tokens so the
+   treatment works in both light and dark themes. */
+.chs-input:read-only,
+.chs-input:disabled {
+  background: var(--chs-color-neutral-soft);
+  color: var(--chs-color-text-muted);
+  border-color: var(--chs-color-border);
+  cursor: not-allowed;
+  opacity: 1; /* override browser default; explicit muted color is more legible */
+}
+.chs-input:read-only:focus,
+.chs-input:disabled:focus {
+  outline: none;
+  border-color: var(--chs-color-border);
+  box-shadow: none;
+}
 
 /* ---------------- Select (нативный, токен-стилизованный) ---------------- */
 /* Гасим нативную стрелку (appearance:none) и рисуем свою KitIcon-шеврон, чтобы
