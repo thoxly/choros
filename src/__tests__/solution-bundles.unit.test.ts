@@ -144,6 +144,7 @@ function makeFlowable(deployOk = true): FlowableClient {
     completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
     getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
     isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    getMessageCatchWaits: vi.fn().mockResolvedValue({ ok: true, waits: [] }),
   };
 }
 
