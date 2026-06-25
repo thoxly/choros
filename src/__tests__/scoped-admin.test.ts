@@ -461,6 +461,81 @@ describe("AC-14 · revoking the assignment removes the capability at the authori
 });
 
 // ---------------------------------------------------------------------------
+// T-0469 [auth] — owner-role assignment is OWNER-ONLY (escalation carve-out).
+//
+// The SECURITY review proved: a role-constructor-admin holds delegable
+// `mgmt_object:*` grants, which satisfy the kind:"assignment" authority check
+// (any delegable mgmt grant + org reach). Without the carve-out, that admin
+// could mint a tenant-owner role_assignment → self-promote → delete the owner.
+// The carve-out makes assigning the owner role (assignsOwnerRole=true) require
+// isGenesisOwner; normal in-scope role assignment (flag absent/false) is intact.
+// ---------------------------------------------------------------------------
+describe("T-0469 · owner-role assignment is OWNER-ONLY", () => {
+  // A constructor-admin-like context: NOT owner, but holds a covering delegable
+  // mgmt_object grant + org reach over the whole forest — exactly what makes the
+  // kind:"assignment" authority check pass (the proven escalation precondition).
+  const constructorAdmin: AdminContext = {
+    isGenesisOwner: false,
+    adminGrants: [
+      mgmtGrant("mgmt_object:role", "create", FOREST, { delegable: true }),
+      mgmtGrant("mgmt_object:employee", "create", FOREST, { delegable: true, id: "g2" }),
+    ],
+    adminOrgScope: FOREST,
+  };
+
+  it("non-owner (constructor-admin) assigning the OWNER role ⇒ owner_assignment_owner_only", () => {
+    const target: DelegationTarget = {
+      kind: "assignment",
+      targetOrgScope: orgNode("fin"), // within reach — org-axis would otherwise pass
+      assignsOwnerRole: true,
+    };
+    expect(validateAdminDelegation(constructorAdmin, target, oracle)).toEqual({
+      ok: false,
+      reason: "owner_assignment_owner_only",
+    });
+  });
+
+  it("owner-role carve-out is checked FIRST — even with full org reach the non-owner is rejected", () => {
+    // Whole-forest reach + covering delegable grant: every other gate passes.
+    // Only the owner carve-out fires, proving it is not bypassable via authority.
+    const target: DelegationTarget = {
+      kind: "assignment",
+      targetOrgScope: FOREST,
+      assignsOwnerRole: true,
+    };
+    const r = validateAdminDelegation(constructorAdmin, target, oracle);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("owner_assignment_owner_only");
+  });
+
+  it("the genesis OWNER CAN assign the owner role ⇒ ok", () => {
+    const target: DelegationTarget = {
+      kind: "assignment",
+      targetOrgScope: FOREST,
+      assignsOwnerRole: true,
+    };
+    expect(validateAdminDelegation(OWNER, target, oracle)).toEqual({ ok: true });
+  });
+
+  it("non-owner assigning a NORMAL in-scope role (flag false) stays green — no over-restriction", () => {
+    const target: DelegationTarget = {
+      kind: "assignment",
+      targetOrgScope: orgNode("fin"),
+      assignsOwnerRole: false,
+    };
+    expect(validateAdminDelegation(constructorAdmin, target, oracle)).toEqual({ ok: true });
+  });
+
+  it("non-owner assigning a normal role (flag OMITTED, legacy callers) stays green", () => {
+    const target: DelegationTarget = {
+      kind: "assignment",
+      targetOrgScope: orgNode("fin"),
+    };
+    expect(validateAdminDelegation(constructorAdmin, target, oracle)).toEqual({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-10 — checker is pure: equal inputs ⇒ equal output (determinism property)
 // ---------------------------------------------------------------------------
 describe("AC-10 · checker is pure (deterministic)", () => {
