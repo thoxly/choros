@@ -127,9 +127,10 @@ describe("AC-T462-R3: intentDispatch routes «построй …» to configurat
     const stub = new StubChatLlmPort();
     const ctx = makeContext([], stub); // no authoring_draft grant
     const result = await intentDispatch("построй приложение Заявки", ctx);
-    // Routed to configurator (not analyst) → honest «недостаточно прав», no LLM dispatch.
+    // Routed to configurator (not analyst) → T-0466 [D8-G5] HUMAN refusal
+    // («нет прав настраивать … обратитесь к администратору»), no LLM dispatch.
     expect(result.intent).toBe("configurator");
-    expect(result.text).toMatch(/недостаточно прав|authoring_draft/i);
+    expect(result.text).toMatch(/нет прав настраивать|администратор/i);
     expect(stub.chatCalls).toHaveLength(0);
   });
 });
