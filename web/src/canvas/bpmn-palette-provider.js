@@ -146,6 +146,33 @@ ChorosPaletteProvider.prototype.getPaletteEntries = function () {
       'Дорожка — роль',
     ),
 
+    // ---- T-0458 [D8-R3]: timer / deadline (WORKING element) ----------------
+    // Drops an intermediate timer catch event. Flowable schedules the timer
+    // natively from the <timerEventDefinition> body. To make it a boundary
+    // DEADLINE on a task, drop it onto the task border (bpmn-js auto-converts an
+    // IntermediateCatchEvent attached to an activity into a BoundaryEvent). The
+    // timer properties panel (bpmn-properties-panel.jsx → TimerDeadlinePanel) then
+    // configures the deadline (duration / fixed date / record-field date) and the
+    // escalation target. On save the publish mapper (src/core/timer-escalation-mapper.ts)
+    // materialises the native <timeDuration>/<timeDate>/<timeCycle> body so the
+    // engine schedules it; when it fires Flowable routes the token to the escalation
+    // user-task, which the inbox projection surfaces (T-0443/T-0456 engine-drive).
+    'create.choros-timer': createAction(
+      'bpmn:IntermediateCatchEvent',
+      'choros-events',
+      'bpmn-icon-intermediate-event-catch-timer chs-palette-timer',
+      'Таймер — дедлайн / эскалация',
+      // Pre-stamp the timer event definition so the created event is a timer
+      // (bpmn-js ElementFactory reads eventDefinitionType to seed the definition).
+      { eventDefinitionType: 'bpmn:TimerEventDefinition' },
+    ),
+
+    // Separator between the timer event and the rest of the palette.
+    'choros-event-separator': {
+      group: 'choros-events',
+      separator: true,
+    },
+
     // ---- Remove default bpmn-js no-op elements (B13 / T-0375) -------------
     // These elements are decorative no-ops in this product: they can be placed
     // on the canvas but the engine does not process them at runtime.  Returning
