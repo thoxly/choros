@@ -15,7 +15,7 @@ import {
   TypedElementConfig,
   OutcomesPanel,
   UserTaskFormBindingPanel,
-  MessageCorrelationSeam,
+  MessageCorrelationPanel,
 } from './bpmn-properties-panel.jsx';
 import { AgentTaskPanel } from './agent-task-panel.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
@@ -90,10 +90,10 @@ describe('TypedElementConfig dispatch — right config per element-config kind',
     expect(types).toContain(TimerDeadlinePanel);
   });
 
-  it('message → MessageCorrelationSeam (T-0459 seam, no message element built here)', () => {
+  it('message → MessageCorrelationPanel (T-0459 — real correlation config replaces the seam)', () => {
     const types = dispatchTypes({ bo: messageBo, kind: 'message' });
-    expect(types).toContain(MessageCorrelationSeam);
-    // The seam does NOT pull in any real message-runtime panel yet.
+    expect(types).toContain(MessageCorrelationPanel);
+    // The message arm mounts ONLY the message panel — no other typed panel leaks in.
     expect(types).not.toContain(AgentTaskPanel);
   });
 

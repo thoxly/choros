@@ -312,6 +312,70 @@ export function writeUserTaskConfig(bo, patch) {
 }
 
 /* --------------------------------------------------------------------------
+   message/signal correlation config contract (NEW — T-0459 [D8-R4])
+
+   A message-catch carries (spec §3.7 row «message/signal»):
+     • messageName            — the message/signal name the catch waits for
+     • correlationField       — WHICH RECORD FIELD supplies the correlation key
+                                (бесшовность: correlation is by a business key from
+                                 the record, not an opaque token)
+     • broadcast              — true iff a broadcast signal-catch (within tenant)
+   The THROW side carries (spec §3.5 part 3 — send via invoke-grant on a channel):
+     • throwChannelResourceId — effect_resource id of the messaging_channel/connector
+     • throwPayloadFields      — record field keys whose values form the payload
+   These ride as choros:* attributes; the runtime (process-projection.ts delivery +
+   message-correlation.ts) reads messageName + correlationField; the throw side
+   (authorizeThrowMessage → verifyEffectGrants T-0034) reads throwChannelResourceId.
+
+   ONE contract, TWO drivers — the human panel (MessageCorrelationPanel) and the D8
+   bot both call these helpers, so they write the identical structure.
+   -------------------------------------------------------------------------- */
+
+/**
+ * Read the message correlation + throw config block off a businessObject. Pure.
+ * @param {object} bo
+ * @returns {{ messageName: string, correlationField: string, broadcast: boolean,
+ *            throwChannelResourceId: string, throwPayloadFields: string[] }}
+ */
+export function readMessageConfig(bo) {
+  const broadcastRaw = readConfigAttr(bo, 'messageBroadcast', 'choros:messageBroadcast', '');
+  return {
+    messageName: readConfigAttr(bo, 'messageName', 'choros:messageName', ''),
+    correlationField: readConfigAttr(bo, 'correlationField', 'choros:correlationField', ''),
+    broadcast: broadcastRaw === 'true' || broadcastRaw === true,
+    throwChannelResourceId: readConfigAttr(bo, 'throwChannelResourceId', 'choros:throwChannelResourceId', ''),
+    throwPayloadFields: splitFieldList(readConfigAttr(bo, 'throwPayloadFields', 'choros:throwPayloadFields', '')),
+  };
+}
+
+/**
+ * Write a PARTIAL message correlation + throw config patch. Both drivers call this.
+ * Undefined keys are left untouched. broadcast is stored as the string "true"/"".
+ * @param {object} bo
+ * @param {{ messageName?: string, correlationField?: string, broadcast?: boolean,
+ *          throwChannelResourceId?: string, throwPayloadFields?: string[] }} patch
+ */
+export function writeMessageConfig(bo, patch) {
+  if (!bo || !patch) return;
+  if ('messageName' in patch) {
+    writeConfigAttr(bo, 'messageName', 'choros:messageName', patch.messageName || '');
+  }
+  if ('correlationField' in patch) {
+    writeConfigAttr(bo, 'correlationField', 'choros:correlationField', patch.correlationField || '');
+  }
+  if ('broadcast' in patch) {
+    // Only persist the attribute when broadcast is true (omit when false → clean XML).
+    writeConfigAttr(bo, 'messageBroadcast', 'choros:messageBroadcast', patch.broadcast ? 'true' : '');
+  }
+  if ('throwChannelResourceId' in patch) {
+    writeConfigAttr(bo, 'throwChannelResourceId', 'choros:throwChannelResourceId', patch.throwChannelResourceId || '');
+  }
+  if ('throwPayloadFields' in patch) {
+    writeConfigAttr(bo, 'throwPayloadFields', 'choros:throwPayloadFields', joinFieldList(patch.throwPayloadFields));
+  }
+}
+
+/* --------------------------------------------------------------------------
    Field-list serialisation — the storage form for the field bindings.
    CSV of trimmed, de-duplicated, non-empty field keys. Chosen because it is the
    simplest thing both an isAttr moddle attribute and a text-first bot can emit;

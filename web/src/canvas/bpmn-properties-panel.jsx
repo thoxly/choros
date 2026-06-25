@@ -52,6 +52,8 @@ import {
   elementConfigKind,
   readUserTaskConfig,
   writeUserTaskConfig,
+  readMessageConfig,
+  writeMessageConfig,
   joinFieldList,
 } from './element-config-contract.js';
 
@@ -760,22 +762,149 @@ export function UserTaskFormBindingPanel({ bo, modeler, element }) {
 }
 
 /* --------------------------------------------------------------------------
-   MessageCorrelationSeam — T-0461 [D8-R6] / T-0459 seam.
+   MessageCorrelationPanel — T-0459 [D8-R4]
 
-   The message ELEMENT (projection, correlation runtime, payload) is T-0459 and is
-   NOT built here. This is the CLEAN EXTENSION SEAM: when an element dispatches to
-   the 'message' config kind, the typed dispatch mounts this placeholder. T-0459
-   replaces the body with the real MessageCorrelationPanel — it plugs into the
-   SAME <TypedElementConfig> dispatch, touching only this one branch.
+   REPLACES the T-0461 MessageCorrelationSeam placeholder. The real message
+   correlation config: pick the MESSAGE NAME the catch waits for and the RECORD
+   FIELD that supplies the correlation key (бесшовность — correlation is by a
+   business key from the record, not an opaque token). A broadcast toggle marks a
+   signal-catch (delivered to every matching subscription WITHIN THE TENANT). The
+   THROW group (channel resource id + payload field keys) configures sending a
+   message via an invoke-grant on a messaging_channel (T-0034).
+
+   Writes go through the driver-agnostic writeMessageConfig so the D8 bot writes the
+   identical structure. Plugs into the SAME <TypedElementConfig> dispatch — only the
+   'message' arm changed.
+
+   REMINDER rendered inline: a message-catch MUST be guarded by a timeout (publish
+   linter checkMessageEventCoherence rejects an unguarded catch → 422), otherwise the
+   instance waits forever.
    -------------------------------------------------------------------------- */
-export function MessageCorrelationSeam() {
+export function MessageCorrelationPanel({ bo, modeler, element }) {
+  const initial = readMessageConfig(bo);
+  const [messageName, setMessageName] = useState(initial.messageName);
+  const [correlationField, setCorrelationField] = useState(initial.correlationField);
+  const [broadcast, setBroadcast] = useState(initial.broadcast);
+  const [throwChannel, setThrowChannel] = useState(initial.throwChannelResourceId);
+  const [throwPayloadFields, setThrowPayloadFields] = useState(
+    joinFieldList(initial.throwPayloadFields),
+  );
+
+  useEffect(() => {
+    const next = readMessageConfig(bo);
+    setMessageName(next.messageName);
+    setCorrelationField(next.correlationField);
+    setBroadcast(next.broadcast);
+    setThrowChannel(next.throwChannelResourceId);
+    setThrowPayloadFields(joinFieldList(next.throwPayloadFields));
+  }, [bo && bo.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fireChanged = useCallback(() => {
+    try {
+      if (modeler && element) modeler.get('eventBus').fire('element.changed', { element });
+    } catch (_) { /* non-fatal */ }
+  }, [modeler, element]);
+
+  const handleMessageName = (val) => {
+    setMessageName(val);
+    writeMessageConfig(bo, { messageName: val });
+    fireChanged();
+  };
+  const handleCorrelationField = (val) => {
+    setCorrelationField(val);
+    writeMessageConfig(bo, { correlationField: val });
+    fireChanged();
+  };
+  const handleBroadcast = (val) => {
+    setBroadcast(val);
+    writeMessageConfig(bo, { broadcast: val });
+    fireChanged();
+  };
+  const handleThrowChannel = (val) => {
+    setThrowChannel(val);
+    writeMessageConfig(bo, { throwChannelResourceId: val });
+    fireChanged();
+  };
+  const handleThrowPayloadFields = (val) => {
+    setThrowPayloadFields(val);
+    writeMessageConfig(bo, { throwPayloadFields: val });
+    fireChanged();
+  };
+
   return (
-    <PanelGroup title="Сообщение / корреляция" defaultOpen={false}>
+    <PanelGroup title="Сообщение / корреляция" defaultOpen>
       <PPEntry>
-        <p className="bio-properties-panel-description">
-          Настройка сообщения (имя · корреляция по полю записи · канал отправки)
-          появится здесь. Этот элемент пока без рантайма — соедините его с таймером,
-          чтобы избежать вечного ожидания.
+        <Field
+          label="Имя сообщения / сигнала"
+          mono
+          value={messageName}
+          placeholder="contract-signed"
+          onChange={(e) => handleMessageName(e.target.value)}
+          aria-label="Имя сообщения или сигнала, которое ждёт элемент"
+        />
+      </PPEntry>
+      <PPEntry>
+        <Field
+          label="Поле записи для корреляции (ключ)"
+          mono
+          value={correlationField}
+          placeholder="contract_number"
+          onChange={(e) => handleCorrelationField(e.target.value)}
+          aria-label="Ключ поля записи, значение которого служит ключом корреляции"
+        />
+        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
+          Входящее сообщение коррелируется с этим экземпляром по значению этого поля
+          записи — только внутри тенанта (cross-tenant отклоняется).
+        </p>
+      </PPEntry>
+      <PPEntry>
+        <label
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)' }}
+        >
+          <input
+            type="checkbox"
+            checked={broadcast}
+            onChange={(e) => handleBroadcast(e.target.checked)}
+            aria-label="Сигнал-широковещание внутри тенанта"
+          />
+          <span>Сигнал (широковещание внутри тенанта)</span>
+        </label>
+      </PPEntry>
+
+      <PPEntry>
+        <p className="bio-properties-panel-description" style={{ fontWeight: 600, marginTop: 'var(--chs-space-3)' }}>
+          Отправка (throw) — через канал по invoke-гранту
+        </p>
+        <Field
+          label="Канал отправки (effect_resource id)"
+          mono
+          value={throwChannel}
+          placeholder="messaging_channel uuid"
+          onChange={(e) => handleThrowChannel(e.target.value)}
+          aria-label="Идентификатор ресурса-канала для отправки сообщения"
+        />
+      </PPEntry>
+      <PPEntry>
+        <Field
+          label="Поля записи в payload"
+          mono
+          value={throwPayloadFields}
+          placeholder="amount, vendor"
+          onChange={(e) => handleThrowPayloadFields(e.target.value)}
+          aria-label="Поля записи, попадающие в payload отправляемого сообщения"
+        />
+        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-2)' }}>
+          Отправка авторизуется invoke-грантом на этот канал (как любой эффект, T-0034).
+        </p>
+      </PPEntry>
+
+      <PPEntry>
+        <p
+          className="bio-properties-panel-description"
+          style={{ marginTop: 'var(--chs-space-3)', color: 'var(--chs-color-warning, inherit)' }}
+        >
+          Важно: соедините этот элемент с таймером (граничный дедлайн) — иначе
+          ожидание сообщения бесконечно, и публикация будет отклонена.
         </p>
       </PPEntry>
     </PanelGroup>
@@ -844,8 +973,8 @@ export function TypedElementConfig({
       );
 
     case 'message':
-      // T-0459 seam — see MessageCorrelationSeam.
-      return <MessageCorrelationSeam />;
+      // T-0459 [D8-R4]: real message correlation config (replaces the T-0461 seam).
+      return <MessageCorrelationPanel bo={bo} modeler={modeler} element={element} />;
 
     case 'parallel':
     case 'start':
