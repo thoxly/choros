@@ -407,7 +407,11 @@ function buildRouter(
       ? makeFlowableClient({
           baseUrl:
             process.env["FLOWABLE_REST_BASE_URL"] ??
-            "http://flowable:8082/flowable-rest/service",
+            // T-0483: compose-internal hostname `flowable` is reachable on the
+            // container-internal port 8080 (8082 is the host-published mapping only,
+            // invalid from inside the compose network). Keep the default self-consistent
+            // so an absent override does not silently produce ENGINE_UNAVAILABLE.
+            "http://flowable:8080/flowable-rest/service",
           adminUser: process.env["FLOWABLE_REST_APP_ADMIN_USER_ID"] ?? "admin",
           adminPassword: flowablePassword,
         })

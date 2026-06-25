@@ -29,7 +29,7 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
-import type { FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
 import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
 
@@ -430,9 +430,14 @@ export function registerProcessDefsRoutes(
     }
 
     // Step 3: Deploy to Flowable
+    // T-0483: surface a CLEAR, TYPED error to the client instead of an opaque 502.
+    // ENGINE_UNAVAILABLE/TIMEOUT → 503 with code "ENGINE_UNAVAILABLE" + honest message
+    // so the modeler keeps the diagram a ЧЕРНОВИК and shows "движок недоступен"
+    // (never a green "опубликовано"). The diagram stays unpublished (no DB update below).
     const deployResult = await flowable.deployBpmn(row.bpmn_xml);
     if (!deployResult.ok) {
-      throw new HttpError(502, "ENGINE_ERROR", `deployBpmn failed: ${deployResult.code}`);
+      const { status, code, message } = flowableErrorToHttp(deployResult.code);
+      throw new HttpError(status, code, message);
     }
 
     const deploymentId = deployResult.deploymentId;
