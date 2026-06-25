@@ -132,12 +132,18 @@ const OWNER: AdminContext = {
 // AC-1 — MGMT_OBJECT_KINDS frozen + mgmt_object:* is a valid ResourceType
 // ---------------------------------------------------------------------------
 describe("AC-1 · mgmt_object:* first-class resource-type", () => {
-  it("MGMT_OBJECT_KINDS is the frozen day-1 set", () => {
+  it("MGMT_OBJECT_KINDS is the day-1 set + T-0469 org-object kinds (additive)", () => {
+    // T-0469 [auth] — the org-object kinds (department/position/employee) were
+    // ADDED so org-structure authoring is delegable for role-constructor-admin.
+    // The original four day-1 kinds stay first and unchanged (additive only).
     expect([...MGMT_OBJECT_KINDS]).toEqual([
       "mgmt_object:role",
       "mgmt_object:agent",
       "mgmt_object:process",
       "mgmt_object:grant",
+      "mgmt_object:department",
+      "mgmt_object:position",
+      "mgmt_object:employee",
     ]);
   });
 
