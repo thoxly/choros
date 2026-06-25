@@ -62,13 +62,34 @@ function makeStubPool(opts: {
   ownedTenants: string[];
   knownEmployee?: { tenant: string; id: string };
   knownRole?: { tenant: string; id: string };
+  // T-0469 — roleIds whose role.slug = 'tenant-owner' (the genesis owner role).
+  ownerRoleIds?: string[];
+  // T-0469 — delegable mgmt_object grants the caller's (non-owner) role carries.
+  // When set, loadAdminContext step 2 returns one assignment and step 3 returns
+  // these grants, modelling a constructor-admin who holds covering mgmt grants.
+  adminMgmtGrants?: Array<{ resourceType: string; operation: string }>;
 }): pg.Pool {
   const { callerTenant, ownedTenants } = opts;
   const owned = new Set(ownedTenants);
+  const ownerRoles = new Set(opts.ownerRoleIds ?? []);
 
   const client = {
     query: async (text: string, params?: unknown[]) => {
       if (typeof text !== "string") return { rows: [], rowCount: 0 };
+
+      // T-0469 isOwnerRole — choros.role … AND slug = 'tenant-owner'.
+      // MUST come before the generic assertRoleExists matcher below (that one
+      // also matches FROM choros.role + tenant_id=$1 + id=$2) and before any
+      // role_assignment owner-lookup (this query has no 'role_assignment').
+      if (
+        text.includes("FROM choros.role") &&
+        text.includes("slug = 'tenant-owner'") &&
+        !text.includes("role_assignment")
+      ) {
+        const roleId = Array.isArray(params) ? (params[1] as string) : undefined;
+        const isOwner = roleId !== undefined && ownerRoles.has(roleId);
+        return { rows: isOwner ? [{ id: roleId }] : [], rowCount: isOwner ? 1 : 0 };
+      }
 
       // resolveActorSlugFromAuth — EXISTS check: choros.employee WHERE slug = $1 AND kind = 'human'
       // Dev-mode: no getAuthContext → this path is not reached; but guard it anyway.
@@ -94,8 +115,22 @@ function makeStubPool(opts: {
         return { rows: isOwner ? [{ id: "ra-owner-1" }] : [], rowCount: isOwner ? 1 : 0 };
       }
 
-      // loadAdminContext step 2 — assignment list (owner short-circuits → empty is fine)
+      // loadAdminContext step 2 — assignment list. For a non-owner constructor-admin
+      // we return ONE in-window assignment (org_scope = empty set = the caller's
+      // reach) so step 3 can attach the delegable mgmt grants (T-0469).
       if (text.includes("ra.id") && text.includes("ra.org_scope") && text.includes("role_assignment ra")) {
+        if ((opts.adminMgmtGrants?.length ?? 0) > 0) {
+          return {
+            rows: [
+              {
+                id: "ra-admin-1",
+                role_id: "role-admin-1",
+                org_scope: { kind: "set", members: [] },
+              },
+            ],
+            rowCount: 1,
+          };
+        }
         return { rows: [], rowCount: 0 };
       }
 
@@ -115,6 +150,30 @@ function makeStubPool(opts: {
         const known = opts.knownRole;
         const found = known !== undefined && tenantId === known.tenant && roleId === known.id;
         return { rows: found ? [{ id: roleId }] : [], rowCount: found ? 1 : 0 };
+      }
+
+      // loadAdminContext step 3 — delegable mgmt_object:* grants on the admin's
+      // role. Distinguished from loadRoleEffectiveGrants by the LIKE filter and
+      // delegable=true. Returns the configured constructor-admin grants (T-0469).
+      if (
+        text.includes("LIKE 'mgmt_object:%'") &&
+        text.includes("g.delegable = true")
+      ) {
+        const grants = (opts.adminMgmtGrants ?? []).map((g, i) => ({
+          id: `g-${i}`,
+          role_id: "role-admin-1",
+          resource_type: g.resourceType,
+          resource_facet: null,
+          operation: g.operation,
+          scope: { kind: "set", members: [] }, // whole-reach (empty set ⊑ anything)
+          constraint: null,
+          delegable: true,
+          granted_by: "seed",
+          valid_from: null,
+          valid_until: null,
+          created_at: "0",
+        }));
+        return { rows: grants, rowCount: grants.length };
       }
 
       // loadRoleEffectiveGrants (dual-control): returns empty list → routine 1-approver path
@@ -350,6 +409,105 @@ describe("T-0389 (d) — POST /api/grants also uses caller's tenant, not DEV_TEN
         granted_by: "e-owner-a",
       });
       expect(resp.status).toBe(403);
+    } finally {
+      await close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (e) T-0469 [SECURITY] — owner-role assignment is OWNER-ONLY.
+//
+// The adversarial review PROVED: a role-constructor-admin holds delegable
+// `mgmt_object:*` grants, which satisfy the kind:"assignment" authority check.
+// Without the fix, that admin could POST /api/role-assignments with role_id =
+// the tenant-owner role → self-promote to owner → delete the original owner.
+//
+// These tests run the FULL route through the stub pool:
+//   (e1) constructor-admin (non-owner, holds delegable mgmt grants) assigning
+//        the OWNER role → 403 ADMIN_GATE_REJECTED (owner_assignment_owner_only).
+//   (e2) the genesis OWNER assigning the OWNER role → 201 (legit flow green).
+//   (e3) a non-owner scoped-admin assigning a NORMAL in-scope role → 201
+//        (no over-restriction; the carve-out is owner-role-specific).
+// ---------------------------------------------------------------------------
+
+const OWNER_ROLE_ID = "e0000000-0000-0000-0000-000000000001"; // role.slug='tenant-owner'
+
+describe("T-0469 (e) — owner role_assignment is OWNER-ONLY (escalation closed)", () => {
+  it("(e1) constructor-admin (delegable mgmt grants, NOT owner) assigning tenant-owner → 403", async () => {
+    const { port, close } = await startTestServer(
+      makeStubPool({
+        callerTenant: TENANT_A,
+        ownedTenants: [], // NOT the genesis owner
+        knownEmployee: { tenant: TENANT_A, id: EMPLOYEE_ID },
+        knownRole: { tenant: TENANT_A, id: OWNER_ROLE_ID },
+        // role.slug = 'tenant-owner' for the target role → carve-out fires
+        ownerRoleIds: [OWNER_ROLE_ID],
+        // the constructor-admin's delegable mgmt grants — WITHOUT the carve-out
+        // these would satisfy the kind:"assignment" authority and yield 201.
+        adminMgmtGrants: [
+          { resourceType: "mgmt_object:role", operation: "create" },
+          { resourceType: "mgmt_object:employee", operation: "create" },
+        ],
+      }),
+    );
+    try {
+      const resp = await post(
+        port,
+        "/api/role-assignments",
+        roleAssignmentPayload(EMPLOYEE_ID, OWNER_ROLE_ID),
+      );
+      expect(resp.status).toBe(403);
+      expect(errCode(resp.body)).toBe("ADMIN_GATE_REJECTED");
+      // The precise reason proves it was the owner carve-out, not org/authority.
+      expect((resp.body as { error?: { message?: string } })?.error?.message).toBe(
+        "owner_assignment_owner_only",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("(e2) the genesis OWNER CAN assign the tenant-owner role → 201", async () => {
+    const { port, close } = await startTestServer(
+      makeStubPool({
+        callerTenant: TENANT_A,
+        ownedTenants: [TENANT_A], // the genesis owner
+        knownEmployee: { tenant: TENANT_A, id: EMPLOYEE_ID },
+        knownRole: { tenant: TENANT_A, id: OWNER_ROLE_ID },
+        ownerRoleIds: [OWNER_ROLE_ID],
+      }),
+    );
+    try {
+      const resp = await post(
+        port,
+        "/api/role-assignments",
+        roleAssignmentPayload(EMPLOYEE_ID, OWNER_ROLE_ID),
+      );
+      expect(resp.status).toBe(201);
+    } finally {
+      await close();
+    }
+  });
+
+  it("(e3) non-owner scoped-admin assigning a NORMAL in-scope role → 201 (no over-restriction)", async () => {
+    const { port, close } = await startTestServer(
+      makeStubPool({
+        callerTenant: TENANT_A,
+        ownedTenants: [], // NOT owner
+        knownEmployee: { tenant: TENANT_A, id: EMPLOYEE_ID },
+        knownRole: { tenant: TENANT_A, id: ROLE_ID }, // a NORMAL role (not owner)
+        ownerRoleIds: [OWNER_ROLE_ID], // owner role exists, but is NOT the target
+        adminMgmtGrants: [{ resourceType: "mgmt_object:role", operation: "create" }],
+      }),
+    );
+    try {
+      const resp = await post(
+        port,
+        "/api/role-assignments",
+        roleAssignmentPayload(EMPLOYEE_ID, ROLE_ID),
+      );
+      expect(resp.status).toBe(201);
     } finally {
       await close();
     }
