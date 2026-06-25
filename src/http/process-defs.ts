@@ -14,6 +14,13 @@
  *
  * Design invariants:
  *   - Auth via x-dev-user convention (same as binding.ts).
+ *   - T-0468 [SECURITY]: the tenant is resolved from the AUTHENTICATED IDENTITY
+ *     (extractActor → resolveActorTenant), exactly like applications.ts — NEVER
+ *     from an attacker-controlled x-tenant-id header. Trusting the client header
+ *     allowed a caller in tenant A to read/write tenant B's process_definition
+ *     rows; defense-in-depth closes that even though RLS would also bite. ALL
+ *     routes (reads included) are withAuth-wrapped so the identity is established
+ *     before tenant resolution.
  *   - Tenant isolation via withTenantTx + FORCE RLS (same as binding.ts / invoke.ts).
  *   - FlowableClient injected via composition root (NO env reads in core — NF-1).
  *   - lintBpmn called before any deploy attempt; ok:false → HTTP 422 with violations.
@@ -28,8 +35,9 @@ import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
+import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
-import type { FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
 import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
 
@@ -49,6 +57,15 @@ interface ProcessDefRow {
   created_at: string;
   updated_at: string;
 }
+
+/**
+ * Resolve the tenant the actor (resolved slug) actually belongs to.
+ * Production binding = resolveActorTenant(getOrgPool(), slug) from src/db/org.ts;
+ * injected (mirrors applications.ts / process-start.ts) so the test suite can stub
+ * the membership check without standing up the org DB / Keycloak. T-0468: this is
+ * the ONLY source of truth for the tenant — never a request header.
+ */
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -101,17 +118,6 @@ async function withTenantTx<T>(
   } finally {
     client.release();
   }
-}
-
-// Extract tenantId from /api/tenants/:tenantId/... prefix OR from x-tenant-id header.
-// Routes are mounted under /api/process-defs and tenant comes from header x-tenant-id.
-function extractTenantId(req: IncomingMessage): string {
-  let tenantId = req.headers["x-tenant-id"];
-  if (Array.isArray(tenantId)) tenantId = tenantId[0];
-  if (!tenantId || typeof tenantId !== "string") {
-    throw new HttpError(400, "VALIDATION", "missing x-tenant-id header");
-  }
-  return tenantId;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +230,7 @@ export function registerProcessDefsRoutes(
   router: Router,
   pool: pg.Pool,
   flowable: FlowableClient,
+  resolveActorTenant: ActorTenantResolver,
 ): void {
 
   // -------------------------------------------------------------------------
@@ -240,8 +247,9 @@ export function registerProcessDefsRoutes(
   // (401 otherwise; no x-dev-user bypass); dev mode is a no-op pass-through.
   router.register("POST", "/api/process-defs", withAuth(async (req, res) => {
     // Auth gate — actor derived from the validated token (keycloak) or x-dev-user (dev).
-    await extractActor(req, pool);
-    const tenantId = extractTenantId(req);
+    // T-0468 [SECURITY]: tenant from the actor's identity, NOT an x-tenant-id header.
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
 
     const rawBody = await readJsonBody(req);
     if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -252,14 +260,22 @@ export function registerProcessDefsRoutes(
     // processKey is optional — when absent, we auto-generate from name.
     const requestedKey = body["processKey"];
     const name = body["name"];
-    const bpmnXml = body["bpmnXml"];
+    const rawBpmnXml = body["bpmnXml"];
 
     if (typeof name !== "string" || !name.trim()) {
       throw new HttpError(400, "VALIDATION", "name must be a non-empty string");
     }
-    if (typeof bpmnXml !== "string" || !bpmnXml.trim()) {
+    if (typeof rawBpmnXml !== "string" || !rawBpmnXml.trim()) {
       throw new HttpError(400, "VALIDATION", "bpmnXml must be a non-empty string");
     }
+
+    // T-0457 [D8-R2]: lane → role wiring. Before persisting, map each visual
+    // swimlane to the candidateGroups of the userTasks inside it (spec §3.3):
+    // a userTask in lane «Бухгалтер» gets flowable:candidateGroups="<lane-role>".
+    // Idempotent and additive — userTasks with an explicit role are left as-is,
+    // and a diagram with no lanes is returned unchanged. The persisted draft
+    // therefore carries the role binding the executor-resolver consumes.
+    const bpmnXml = mapLanesToCandidateGroups(rawBpmnXml);
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;
@@ -312,9 +328,12 @@ export function registerProcessDefsRoutes(
 
   // -------------------------------------------------------------------------
   // GET /api/process-defs — list latest version per process key
+  // T-0468 [SECURITY]: withAuth-wrapped + tenant resolved from identity. A read of
+  // another tenant's definitions via a forged x-tenant-id is no longer possible.
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/process-defs", async (req, res) => {
-    const tenantId = extractTenantId(req);
+  router.register("GET", "/api/process-defs", withAuth(async (req, res) => {
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
 
     const rows = await withTenantTx(pool, tenantId, async (client) => {
       return listAll(client, tenantId);
@@ -334,13 +353,15 @@ export function registerProcessDefsRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ items }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // GET /api/process-defs/:key — get latest version for a process key
+  // T-0468 [SECURITY]: withAuth-wrapped + tenant resolved from identity (not header).
   // -------------------------------------------------------------------------
-  router.register("GET", "/api/process-defs/:key", async (req, res, params) => {
-    const tenantId = extractTenantId(req);
+  router.register("GET", "/api/process-defs/:key", withAuth(async (req, res, params) => {
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
     const processKey = decodeURIComponent(params["key"] ?? "");
     if (!processKey) {
       throw new HttpError(400, "VALIDATION", "process key must be non-empty");
@@ -367,7 +388,7 @@ export function registerProcessDefsRoutes(
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     }));
-  });
+  }));
 
   // -------------------------------------------------------------------------
   // POST /api/process-defs/:key/publish — lint → deploy → persist
@@ -382,8 +403,9 @@ export function registerProcessDefsRoutes(
   // T-0418 [SECURITY] P0: withAuth-wrapped write — keycloak REQUIRES a valid Bearer.
   router.register("POST", "/api/process-defs/:key/publish", withAuth(async (req, res, params) => {
     // Auth gate — write operation; actor from validated token (keycloak) or x-dev-user (dev).
-    await extractActor(req, pool);
-    const tenantId = extractTenantId(req);
+    // T-0468 [SECURITY]: tenant from the actor's identity, NOT an x-tenant-id header.
+    const actor = await extractActor(req, pool);
+    const tenantId = await resolveActorTenant(actor);
     const processKey = decodeURIComponent(params["key"] ?? "");
     if (!processKey) {
       throw new HttpError(400, "VALIDATION", "process key must be non-empty");
@@ -430,9 +452,14 @@ export function registerProcessDefsRoutes(
     }
 
     // Step 3: Deploy to Flowable
+    // T-0483: surface a CLEAR, TYPED error to the client instead of an opaque 502.
+    // ENGINE_UNAVAILABLE/TIMEOUT → 503 with code "ENGINE_UNAVAILABLE" + honest message
+    // so the modeler keeps the diagram a ЧЕРНОВИК and shows "движок недоступен"
+    // (never a green "опубликовано"). The diagram stays unpublished (no DB update below).
     const deployResult = await flowable.deployBpmn(row.bpmn_xml);
     if (!deployResult.ok) {
-      throw new HttpError(502, "ENGINE_ERROR", `deployBpmn failed: ${deployResult.code}`);
+      const { status, code, message } = flowableErrorToHttp(deployResult.code);
+      throw new HttpError(status, code, message);
     }
 
     const deploymentId = deployResult.deploymentId;

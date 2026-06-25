@@ -107,6 +107,19 @@ services:
   # basic-auth → HTTP 200 when engine is fully up. wget ships in the image.
   flowable:
     image: flowable/flowable-rest:7.1.0
+    # T-0483 (BLOCKER #1 of the process half): the engine MUST self-heal. The field
+    # walkthrough (2026-06-25) saw POST /publish → 502 ENGINE_UNAVAILABLE; if the JVM
+    # transiently dies (OOM / DB blip) the engine must come back on its own rather than
+    # leaving every publish/start permanently broken. unless-stopped restarts on any
+    # non-clean exit and survives a daemon restart, while still honouring an explicit
+    # `docker compose stop`. Combined with the healthcheck below + the API's
+    # depends_on: service_healthy, the engine self-heals and the API waits for readiness.
+    #
+    # NOTE: postgres + keycloak intentionally do NOT carry this line — their service
+    # blocks are frozen by ci/checks/flowable/static-checks.sh (FF-FL-11). Adding the
+    # same self-heal there is a follow-up that must move the FF-FL-11 baseline in the
+    # same change (out of scope for T-0483; see BLOCKERS).
+    restart: unless-stopped
     environment:
       SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
       # currentSchema=flowable directs PostgreSQL JDBC to use the 'flowable' schema
@@ -147,6 +160,8 @@ services:
   # depends_on: all three substrates must be healthy before choros-app starts.
   choros:
     build: .
+    # T-0483: self-heal on crash so the silo runtime comes back on its own.
+    restart: unless-stopped
     environment:
       DATABASE_URL:     ${DATABASE_URL:-postgres://choros_migrator:choros_dev_pw@postgres:5432/choros}
       CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:-dev}

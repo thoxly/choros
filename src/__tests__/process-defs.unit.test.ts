@@ -5,7 +5,9 @@
  * Tests the route registration and request-handling logic using a fake pg.Pool
  * that never opens a real connection. Covers:
  *   - extractActor: rejects missing x-dev-user with 401
- *   - extractTenantId: rejects missing x-tenant-id with 400
+ *   - T-0468 [SECURITY]: tenant is resolved from the actor's identity
+ *     (injected resolveActorTenant), NOT an x-tenant-id header. Missing identity
+ *     on a read route → 401 (the route is withAuth-wrapped + identity-scoped).
  *   - GET /api/process-defs/:key returns 404 when DB row absent
  *   - GET /api/process-defs/:key returns 200 + bpmnXml when row found
  *   - POST /api/process-defs validates required fields
@@ -96,6 +98,9 @@ function makeFlowable(overrides: Partial<FlowableClient> = {}): FlowableClient {
 
 const TENANT_ID = "a0000000-0000-0000-0000-000000000001";
 const DEV_USER  = "alice";
+// T-0468 [SECURITY]: tenant comes from the actor's identity via this injected
+// resolver, never from an x-tenant-id header. The actor always resolves to TENANT_ID.
+const TEST_RESOLVER = async () => TENANT_ID;
 
 function makeReq(overrides: {
   headers?: Record<string, string>;
@@ -150,20 +155,22 @@ describe("process-defs routes (unit, no DB)", () => {
   // -------------------------------------------------------------------------
 
   describe("auth + tenant guards", () => {
-    it("GET /api/process-defs/:key — 400 if x-tenant-id missing", async () => {
-      // GET /:key only requires tenant header (no actor check — read-only route).
-      // We need to construct a req WITHOUT the x-tenant-id header at all.
+    it("GET /api/process-defs/:key — 401 if x-dev-user missing (identity-gated read)", async () => {
+      // T-0468 [SECURITY]: the read route is withAuth-wrapped and tenant-from-identity.
+      // There is NO x-tenant-id path any more. A request with no actor identity at all
+      // (in dev mode, no x-dev-user) is rejected at extractActor with 401 BEFORE any
+      // tenant resolution — there is no header to forge.
       const pool = makePool(async (sql) => {
         if (/SET LOCAL|BEGIN|COMMIT/.test(sql)) return { rows: [] };
         return { rows: [] };
       });
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("GET", "/api/process-defs/my-process");
       expect(route).not.toBeNull();
 
-      // Build req with only x-dev-user, no x-tenant-id
+      // Build req with NO x-dev-user (and no x-tenant-id — irrelevant either way).
       const req = {
-        headers: { "x-dev-user": DEV_USER },
+        headers: {},
         on: vi.fn().mockImplementation((event: string, cb: () => void) => { if (event === "end") cb(); }),
         setEncoding: vi.fn(),
       } as unknown as IncomingMessage;
@@ -171,19 +178,19 @@ describe("process-defs routes (unit, no DB)", () => {
 
       await expect(
         route!.handler(req as any, res as any, { key: "my-process" }),
-      ).rejects.toMatchObject({ statusCode: 400 });
+      ).rejects.toMatchObject({ statusCode: 401 });
     });
 
     it("POST /api/process-defs — 401 if x-dev-user missing", async () => {
       // Write route: extractActor fires first → 401 before body read.
       const pool = makePool(async () => ({ rows: [] }));
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("POST", "/api/process-defs");
       expect(route).not.toBeNull();
 
-      // Build req with only x-tenant-id, no x-dev-user
+      // Build req with NO x-dev-user (no tenant header is consulted any more).
       const req = {
-        headers: { "x-tenant-id": TENANT_ID },
+        headers: {},
         on: vi.fn().mockImplementation((event: string, cb: () => void) => { if (event === "end") cb(); }),
         setEncoding: vi.fn(),
       } as unknown as IncomingMessage;
@@ -206,7 +213,7 @@ describe("process-defs routes (unit, no DB)", () => {
         // SELECT returns empty
         return { rows: [] };
       });
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("GET", "/api/process-defs/my-process");
       expect(route).not.toBeNull();
 
@@ -238,7 +245,7 @@ describe("process-defs routes (unit, no DB)", () => {
         return { rows: [] };
       });
 
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("GET", "/api/process-defs/my-process");
 
       const req = makeReq();
@@ -268,7 +275,7 @@ describe("process-defs routes (unit, no DB)", () => {
         if (/INSERT/.test(sql)) return { rows: [] };
         return { rows: [] };
       });
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("POST", "/api/process-defs");
       expect(route).not.toBeNull();
 
@@ -291,7 +298,7 @@ describe("process-defs routes (unit, no DB)", () => {
         return { rows: [] };
       });
 
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("POST", "/api/process-defs");
 
       const req = makeReq({
@@ -320,7 +327,7 @@ describe("process-defs routes (unit, no DB)", () => {
         return { rows: [] };
       });
 
-      registerProcessDefsRoutes(router as any, pool as any, flowable);
+      registerProcessDefsRoutes(router as any, pool as any, flowable, TEST_RESOLVER);
       const route = router.find("POST", "/api/process-defs/no-such-key/publish");
 
       const req = makeReq();
@@ -356,7 +363,7 @@ describe("process-defs routes (unit, no DB)", () => {
         deployBpmn: vi.fn().mockResolvedValue({ ok: true, deploymentId: "deploy-abc-123" }),
       });
 
-      registerProcessDefsRoutes(router as any, pool as any, flowableSuccess);
+      registerProcessDefsRoutes(router as any, pool as any, flowableSuccess, TEST_RESOLVER);
       const route = router.find("POST", "/api/process-defs/pub-proc/publish");
 
       const req = makeReq();

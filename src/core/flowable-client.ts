@@ -53,6 +53,78 @@ export type FlowableErrorCode =
   | "TIMEOUT"            // request timeout exceeded
   | "UNKNOWN";           // all other errors
 
+// ---------------------------------------------------------------------------
+// T-0483: typed mapping FlowableErrorCode → HTTP status + client-facing message.
+//
+// The publish/start routes proxy the engine; when the engine is unreachable
+// (down / OOM / DB blip) the route must surface a CLEAR, TYPED error the client
+// can branch on — not an opaque "502 deployBpmn failed: ENGINE_UNAVAILABLE".
+//
+// ENGINE_UNAVAILABLE / TIMEOUT → 503 Service Unavailable (transient; the engine
+// may self-heal via the compose restart policy — caller can retry). The error
+// `code` is preserved verbatim so the web layer can show an honest
+// "движок недоступен" state and keep the diagram a ЧЕРНОВИК (never green "валидно").
+//
+// Pure data + no I/O, so it lives in core (NF-1) and is unit-testable.
+// ---------------------------------------------------------------------------
+
+/** Shape consumed by the HTTP layer to build a typed error response. */
+export interface FlowableErrorHttp {
+  /** HTTP status to return to the client. */
+  readonly status: number;
+  /** Stable machine code the client branches on (equals the FlowableErrorCode). */
+  readonly code: FlowableErrorCode;
+  /** User-readable Russian message — honest, never papered over. */
+  readonly message: string;
+}
+
+const ENGINE_UNAVAILABLE_MSG =
+  "Движок процессов недоступен. Изменения сохранены как черновик — повторите публикацию позже.";
+
+/**
+ * Map a typed FlowableErrorCode to an HTTP status + client-facing message.
+ * Used by the publish + start-instance routes so an engine failure is explicit.
+ */
+export function flowableErrorToHttp(code: FlowableErrorCode): FlowableErrorHttp {
+  switch (code) {
+    case "ENGINE_UNAVAILABLE":
+    case "TIMEOUT":
+      // Transient: engine unreachable / slow. 503 signals "try again".
+      return { status: 503, code: "ENGINE_UNAVAILABLE", message: ENGINE_UNAVAILABLE_MSG };
+    case "BAD_BPMN":
+      return {
+        status: 422,
+        code,
+        message: "Диаграмма отклонена движком процессов (некорректный BPMN).",
+      };
+    case "UNAUTHORIZED":
+      return {
+        status: 502,
+        code,
+        message: "Движок процессов отклонил авторизацию сервера. Обратитесь к администратору.",
+      };
+    case "CONFLICT":
+      return {
+        status: 409,
+        code,
+        message: "Конфликт версий в движке процессов. Обновите страницу и повторите.",
+      };
+    case "NOT_FOUND":
+      return {
+        status: 502,
+        code,
+        message: "Движок процессов не нашёл ресурс. Обратитесь к администратору.",
+      };
+    // RECORD_IN_PAYLOAD / UNKNOWN and any future code → opaque-but-honest 502.
+    default:
+      return {
+        status: 502,
+        code: "UNKNOWN",
+        message: "Ошибка движка процессов. Повторите позже или обратитесь к администратору.",
+      };
+  }
+}
+
 export type DeployResult =
   | { ok: true; deploymentId: string }
   | { ok: false; code: FlowableErrorCode };
@@ -123,6 +195,16 @@ export type GetActiveUserTasksResult =
 export type IsInstanceEndedResult =
   | { ok: true; ended: boolean }
   | { ok: false; code: FlowableErrorCode };
+
+/**
+ * T-0483: result of pingEngine — a lightweight engine-reachability probe used by
+ * the readiness endpoint (GET /api/engine/health). `reachable` is true when the
+ * engine's management endpoint answers 200; otherwise `code` carries the typed
+ * failure reason. This is SINGLE-SHOT (no retry) so the readiness probe is fast.
+ */
+export type PingEngineResult =
+  | { ok: true; reachable: true }
+  | { ok: true; reachable: false; code: FlowableErrorCode };
 
 /** Wire shape from Flowable /runtime/external-jobs/acquire (FR-3). */
 export interface ExternalTask {
@@ -213,6 +295,17 @@ export interface FlowableClient {
    * process.next_task with the live next task's defKey/name/role).
    */
   isInstanceEnded(instanceId: string): Promise<IsInstanceEndedResult>;
+  /**
+   * T-0483: lightweight engine-reachability probe for the readiness endpoint.
+   * Single GET to {baseUrl}/management/engine (the same endpoint the compose
+   * healthcheck uses). No retry — a readiness probe must answer quickly. Never
+   * throws: returns { reachable: false, code } on any transport/HTTP failure.
+   *
+   * OPTIONAL on the interface so existing partial test stubs need no change
+   * (honest-degrade: the readiness route reports "unknown" when absent). The
+   * real makeFlowableClient factory always provides it.
+   */
+  pingEngine?(): Promise<PingEngineResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +850,35 @@ export function makeFlowableClient(
     }, resolved) as Promise<IsInstanceEndedResult>;
   }
 
+  // -------------------------------------------------------------------------
+  // T-0483: pingEngine — readiness probe (single-shot, no retry).
+  //
+  // Hits the engine management endpoint (same one the compose healthcheck uses).
+  // Bounded by the configured timeout so a hung engine can't hang the readiness
+  // endpoint. Never throws — maps any transport/HTTP failure to a typed code so
+  // GET /api/engine/health can report an honest "движок недоступен" state.
+  // -------------------------------------------------------------------------
+  async function pingEngine(): Promise<PingEngineResult> {
+    const url = `${resolved.baseUrl}/management/engine`;
+    try {
+      const raceResult = await Promise.race([
+        globalThis.fetch(url, { method: "GET", headers: { Authorization: auth } }),
+        makeTimeoutPromise(resolved.timeoutMs),
+      ]);
+      if (raceResult === TIMEOUT_SENTINEL) {
+        return { ok: true, reachable: false, code: "TIMEOUT" };
+      }
+      const resp = raceResult as Response;
+      if (resp.status === 200) {
+        return { ok: true, reachable: true };
+      }
+      return { ok: true, reachable: false, code: httpStatusToCode(resp.status) };
+    } catch {
+      // Network/DNS/connection-refused → engine unreachable.
+      return { ok: true, reachable: false, code: "ENGINE_UNAVAILABLE" };
+    }
+  }
+
   return {
     deployBpmn,
     startInstance,
@@ -767,5 +889,6 @@ export function makeFlowableClient(
     completeUserTask,
     getActiveUserTasks,
     isInstanceEnded,
+    pingEngine,
   };
 }

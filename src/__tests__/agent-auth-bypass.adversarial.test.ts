@@ -224,7 +224,8 @@ beforeAll(async () => {
   const router = new Router();
 
   registerInvokeRoutes(router, pool);
-  registerProcessDefsRoutes(router, pool, flowable);
+  // T-0468 [SECURITY]: tenant from identity (resolver), not x-tenant-id header.
+  registerProcessDefsRoutes(router, pool, flowable, async () => TENANT_ID);
   registerBindingRoutes(router, pool, {
     pool,
     resolveActorTenant: async () => TENANT_ID,
@@ -275,8 +276,8 @@ const SURFACES: Array<{
     body: { target_agent_id: AGENT_ID, goal: "do x" } },
   { surface: "invoke-command", method: "POST", path: "/api/invoke/command",
     body: { target_agent_id: AGENT_ID, goal: "do x" } },
+  // T-0468 [SECURITY]: no x-tenant-id — tenant comes from the actor's identity.
   { surface: "process-defs", method: "POST", path: "/api/process-defs",
-    headers: { "x-tenant-id": TENANT_ID },
     body: { processKey: "k", name: "N", bpmnXml: "<x/>" } },
   { surface: "binding", method: "POST",
     path: `/tenants/${TENANT_ID}/processes/p/forms/f/binding`, body: { fields: [] } },
