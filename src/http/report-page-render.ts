@@ -58,6 +58,8 @@ import {
   type ScopeElement,
   type AncestryOracle,
 } from "../core/grant-lattice.js";
+// T-0491: zero-dependency tabular export (CSV + XLSX) for the Floor-1 aggregate.
+import { toCsv, toXlsx, sanitizeSheetName, type Tabular } from "./tabular-export.js";
 // T-0339 [E15-S3]: cycle-time analytics for the transition journal.
 import {
   loadCycleTimeByActivity,
@@ -764,6 +766,58 @@ async function renderFloor1(args: {
 }
 
 // ---------------------------------------------------------------------------
+// T-0491 — flatten a Floor-1 RenderResult into a tabular shape for export.
+//
+// The aggregate is heterogeneous (some metrics are scalar, some are grouped),
+// so we emit a uniform "long" table whose columns are:
+//   metric | group | value
+// where:
+//   - metric = the metric label (title ?? "<agg>(<field_key>)").
+//   - group  = the group_by key value (empty for scalar metrics).
+//   - value  = the aggregate result (scalar, or per-group result).
+//
+// "list" aggregates yield a JSON array; we stringify it into the value cell so
+// the file stays flat. Empty metrics → header-only table (valid, NOT an error).
+//
+// PURE: no DB / authz / env. Operates only on the already-authorized RenderResult.
+// ---------------------------------------------------------------------------
+
+function metricLabel(m: MetricResult): string {
+  if (m.title !== undefined && m.title !== "") return m.title;
+  return `${m.agg}(${m.field_key})`;
+}
+
+/** Stringify an aggregate cell value (objects/arrays → JSON; scalars as-is). */
+function aggValueToCell(value: unknown): string | number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return String(value);
+  // arrays / objects (e.g. list agg, jsonb) → compact JSON.
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+export function flattenRenderResultToTable(result: RenderResult): Tabular {
+  const columns = ["metric", "group", "value"];
+  const rows: Tabular["rows"] = [];
+  for (const m of result.metrics) {
+    const label = metricLabel(m);
+    if (m.grouped !== undefined) {
+      for (const g of m.grouped) {
+        rows.push([label, g.group_key, aggValueToCell(g.result)]);
+      }
+    } else {
+      rows.push([label, "", aggValueToCell(m.result)]);
+    }
+  }
+  return { columns, rows };
+}
+
+// ---------------------------------------------------------------------------
 // dataFloor2 — Floor-2 RLS-gated data API (ADR §6 / §7 AC-11)
 //
 // Returns raw record rows for a given registry_def, subject to:
@@ -933,6 +987,86 @@ export function registerReportPageRenderRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
+    }),
+  );
+
+  // -------------------------------------------------------------------------
+  // T-0491: GET /api/report-pages/:id/export?format=xlsx|csv
+  //
+  // Downloads the SAME Floor-1 aggregate as /render, serialized as a file.
+  //
+  // SECURITY — reuses /render end-to-end, weakening NOTHING:
+  //   - extractActor → resolveTenantForActor: identical actor→tenant resolution
+  //     (keycloak JWT sub→slug or dev x-dev-user; tenant from the actor's OWN row).
+  //   - renderFloor1(...): the EXACT same function /render calls. It applies the
+  //     same PDP read-grant gate (authzDeps.checkReadGrant, scope-contained to the
+  //     page's app_id), the same RLS tenant-narrowed queries (withTenantTx GUC),
+  //     and the same field_key charset+schema injection guards. The export does NOT
+  //     re-implement any query — it consumes renderFloor1's already-authorized result.
+  //   - MAX_DATA_LIMIT: Floor-1 aggregates collapse the dataset (count/sum/...), so
+  //     no row stream crosses the wire; the export is BOUNDED by the same aggregate
+  //     vocabulary as /render (no raw-row dump, no limit bypass).
+  //   - Unauthenticated → 401, wrong tenant / no grant → 403, same as /render.
+  //
+  // format: csv (default) | xlsx. Unknown format → 400.
+  // -------------------------------------------------------------------------
+  router.register(
+    "GET",
+    "/api/report-pages/:id/export",
+    withAuth(async (req, res, params) => {
+      const pageId = params["id"] ?? "";
+      if (!UUID_RE.test(pageId)) {
+        throw new HttpError(400, "VALIDATION", "report_page id must be a valid UUID");
+      }
+
+      // Validate format FIRST (before any DB/authz work) — fail-fast on 400.
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const rawFormat = (url.searchParams.get("format") ?? "csv").toLowerCase();
+      if (rawFormat !== "csv" && rawFormat !== "xlsx") {
+        throw new HttpError(
+          400,
+          "VALIDATION",
+          `unknown format "${rawFormat}"; expected "csv" or "xlsx"`,
+        );
+      }
+
+      // Auth + tenant — identical resolution path to /render.
+      const pool = _poolHint ?? getPool();
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
+
+      // Reuse the EXACT /render path: same PDP gate, RLS, limit, injection guards.
+      const result = await renderFloor1({
+        pool,
+        tenantId,
+        pageId,
+        actor,
+        nowMs: Date.now(),
+        authzDeps: deps,
+      });
+
+      const table = flattenRenderResultToTable(result);
+      const slug = `report-${pageId}`;
+
+      if (rawFormat === "csv") {
+        const body = toCsv(table);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="${slug}.csv"`);
+        res.end(body);
+        return;
+      }
+
+      // xlsx
+      const buffer = toXlsx(table, sanitizeSheetName("report"));
+      res.statusCode = 200;
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader("Content-Disposition", `attachment; filename="${slug}.xlsx"`);
+      res.setHeader("Content-Length", String(buffer.length));
+      res.end(buffer);
     }),
   );
 
