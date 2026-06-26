@@ -12,11 +12,19 @@
  *    needed by the inbox (role-slug set for pool-task filtering).
  *  - Tenant-isolation: every query runs inside a `SET LOCAL choros.tenant_id`
  *    transaction (RLS). Follows the withTenant pattern from src/db/org.ts.
- *  - No `nowMs` time-window filtering for role slugs: the inbox only needs
- *    CONFIRMED assignments (confirmed_by IS NOT NULL) regardless of
- *    valid_from/valid_until. Time-window filtering is the PDP's responsibility
- *    (grant-resolver.ts step 3 / isEffective). The inbox role-check is a
- *    structural eligibility gate, not a full PDP decision.
+ *  - Validity windows: every assignment/grant read filters by the half-open
+ *    [valid_from, valid_until) window (bigint epoch-ms; NULL = unbounded). As of
+ *    T-0397 the GRANT query honors valid_until too (it previously did not), so a
+ *    grant past its valid_until is no longer PDP-active.
+ *  - Dual-control (T-0397): a CRITICAL grant/assignment is PDP-active only when
+ *    its SECOND distinct approver is present (confirmed2_by IS NOT NULL), not on
+ *    confirmed_by alone. "Critical" = the SQL-expressible criticality axes a grant
+ *    row can carry (role-criticality.ts axis a/b): operation ∈ {approve,transition}
+ *    OR (resource_type = effect_resource AND operation = invoke). An assignment is
+ *    critical iff the role it binds holds any such grant. This closes the read-path
+ *    hole where the WRITE side (grants.ts) landed escalating rows semi-confirmed
+ *    (confirmed2_by NULL = NOT active) but the read side never checked it.
+ *    Non-critical grants/assignments keep their single-confirm behaviour.
  *  - Reuse design: `getGrantsForSubject` provides the full Grant[] path for S2
  *    (executor-resolution, T-0336) and S1 (resolveFor seam, T-0335).
  *
@@ -103,9 +111,16 @@ export async function getGrantsForSubject(
     }
     const employeeId = empRows[0]!.id;
 
-    // Step 2: load confirmed, in-window role_assignments for the employee.
+    // Step 2: load ACTIVE role_assignments for the employee.
     // confirmed_by IS NOT NULL = confirmed (NF per migration 020 contract).
     // valid_from/until window: NULL = unbounded on that side.
+    //
+    // T-0397 — dual-control on the assignment too: an assignment is CRITICAL iff
+    // the role it binds holds any critical grant (axis a/b, same predicate as the
+    // grant query). A critical assignment is PDP-active only when its second
+    // approver is present (confirmed2_by IS NOT NULL). Non-critical assignments
+    // keep single-confirm. The criticality EXISTS is tenant-scoped on BOTH sides
+    // (g.tenant_id = ra.tenant_id) — no cross-tenant edge (NF-2).
     const { rows: raRows } = await client.query<{ role_id: string }>(
       `SELECT ra.role_id
          FROM choros.role_assignment ra
@@ -113,7 +128,20 @@ export async function getGrantsForSubject(
           AND ra.employee_id = $2
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND (
+                ra.confirmed2_by IS NOT NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM choros."grant" g
+                   WHERE g.tenant_id = ra.tenant_id
+                     AND g.role_id   = ra.role_id
+                     AND g.confirmed_by IS NOT NULL
+                     AND (
+                           g.operation IN ('approve', 'transition')
+                           OR (g.resource_type = 'effect_resource' AND g.operation = 'invoke')
+                         )
+                )
+              )`,
       [tenantId, employeeId, nowMs],
     );
     if (raRows.length === 0) {
@@ -121,8 +149,28 @@ export async function getGrantsForSubject(
     }
     const roleIds = raRows.map((r) => r.role_id);
 
-    // Step 3: load confirmed grants for those roles.
-    // confirmed_by IS NOT NULL = active grant (migration 031 dual-control contract).
+    // Step 3: load ACTIVE grants for those roles.
+    //
+    // T-0397 — PDP dual-control read-path enforcement. A grant is PDP-active iff:
+    //   (1) confirmed_by IS NOT NULL                (first approver — migration 030/031), AND
+    //   (2) it is in its validity window            (valid_from/valid_until — migration 008,
+    //       previously IGNORED for grants → now honored, matching the role_assignment
+    //       query and grant-resolver.ts isEffective), AND
+    //   (3) if it is CRITICAL, confirmed2_by IS NOT NULL (second distinct approver —
+    //       migration 031 dual-control contract). Before T-0397 this column was
+    //       written by grants.ts on the WRITE side (escalating rows land semi-
+    //       confirmed, confirmed2_by NULL = NOT active) but NEVER checked on the
+    //       READ side, so a critical grant went PDP-active after ONE approver.
+    //
+    // "Critical" is the SQL-expressible subset of the T-0040 criticality axes a/b
+    // a single grant row can carry (role-criticality.ts combineCriticality):
+    //   axis a — operation IN ('approve','transition')
+    //   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
+    // Axis c (sensitive_read clearance) is a derived clearance computation that the
+    // WRITE-side dual-control gate already forces confirmed2_by for, so those rows
+    // arrive already requiring the second confirmation; we do not re-derive it here.
+    //
+    // valid_from/until are bigint epoch-ms (NULL = unbounded); half-open [from, until).
     const { rows: grantRows } = await client.query<{
       id: string;
       role_id: string;
@@ -143,8 +191,17 @@ export async function getGrantsForSubject(
          FROM choros."grant"
         WHERE tenant_id = $1
           AND role_id = ANY($2::uuid[])
-          AND confirmed_by IS NOT NULL`,
-      [tenantId, roleIds],
+          AND confirmed_by IS NOT NULL
+          AND (valid_from  IS NULL OR valid_from  <= $3)
+          AND (valid_until IS NULL OR valid_until  > $3)
+          AND (
+                NOT (
+                  operation IN ('approve', 'transition')
+                  OR (resource_type = 'effect_resource' AND operation = 'invoke')
+                )
+                OR confirmed2_by IS NOT NULL
+              )`,
+      [tenantId, roleIds, nowMs],
     );
 
     return grantRows.map((g) => ({
@@ -246,6 +303,11 @@ export async function getRoleSlugsForActor(
     }
 
     // Confirmed, in-window assignments → role slugs in one join.
+    //
+    // T-0397 — same dual-control gate as getGrantsForSubject step 2: a CRITICAL
+    // assignment (role holds an axis-a/b grant) contributes its role slug to the
+    // inbox eligibility set ONLY when confirmed2_by IS NOT NULL. This keeps the
+    // claim/approve eligibility gate consistent with the PDP grant read.
     const { rows } = await client.query<{ slug: string }>(
       `SELECT DISTINCT r.slug
          FROM choros.role_assignment ra
@@ -255,7 +317,20 @@ export async function getRoleSlugsForActor(
           AND ra.employee_id = $2
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND (
+                ra.confirmed2_by IS NOT NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM choros."grant" g
+                   WHERE g.tenant_id = ra.tenant_id
+                     AND g.role_id   = ra.role_id
+                     AND g.confirmed_by IS NOT NULL
+                     AND (
+                           g.operation IN ('approve', 'transition')
+                           OR (g.resource_type = 'effect_resource' AND g.operation = 'invoke')
+                         )
+                )
+              )`,
       [tenantId, employeeId, nowMs],
     );
     return rows.map((r) => r.slug);
