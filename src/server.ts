@@ -16,7 +16,7 @@ import { registerAuthRoutes } from "./http/auth.js";
 import { registerRightsRoutes } from "./http/rights.js";
 import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.js";
 import { registerInvokeRoutes } from "./http/invoke.js";
-import { registerGrantProposeRoute } from "./http/grant-propose.js";
+import { registerGrantProposeRoute, defaultGrantProposeDeps } from "./http/grant-propose.js";
 import { registerSecretHandleRoutes } from "./http/secret-handle.js";
 import { actorInjectRegistrar } from "./http/actor-inject-registrar.js";
 import { registerProcessesRoutes } from "./http/processes.js";
@@ -572,7 +572,13 @@ function buildRouter(
     // so the literal '/api/grants/propose' path is not confused with ':id' patterns.
     // The path is a distinct fixed segment — it is never captured by the
     // existing '/api/grants/:id/revoke' pattern.
-    registerGrantProposeRoute(router, grantsPool);
+    // T-0489 [SECURITY]: keycloak-aware identity + tenant from the actor's own row
+    // (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo. Identity
+    // is resolved inside the handler via getAuthContext → resolveActorSlugFromAuth.
+    registerGrantProposeRoute(router, grantsPool, {
+      ...defaultGrantProposeDeps,
+      resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+    });
     // T-0418 [SECURITY] P0 + T-0328 G1: secret-handle.ts is FROZEN — its body still
     // resolves identity via the dev-only x-dev-user extractActor. Wrap at the
     // REGISTRATION SITE with the actor-inject façade (superset of withAuthRegistrar):
@@ -596,7 +602,12 @@ function buildRouter(
     // Register rights-INTENT operations (T-0223 D-2): hire/fire/substitute/urgent-revoke.
     // Thin orchestration over the existing kernel (grants/substitution/validateNarrowing/
     // audit). Same pool as grants. Explain-PDP-in-card reuses POST /api/pdp/explain (T-0136).
-    registerRightsIntentRoutes(router, grantsPool);
+    // T-0489 [SECURITY]: keycloak-aware identity + tenant from the actor's own row
+    // (resolveActorTenant, fail-closed). All four intent ops (hire/fire/substitute/
+    // urgent-revoke) now run under the caller's REAL tenant, not the Dev Silo.
+    registerRightsIntentRoutes(router, grantsPool, (actorSlug: string) =>
+      resolveActorTenant(getOrgPool(), actorSlug),
+    );
     // Register dual-control change-request API (T-0390 D2-FU).
     // MUST be registered BEFORE registerRightsRoutes (which adds GET /api/rights/:roleId).
     // The router is first-match-wins; without this ordering the static path
@@ -745,7 +756,11 @@ function buildRouter(
   );
 
   // Register artifact tier-promote endpoint (T-0087 E12.6).
-  registerArtifactRoutes(router);
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  registerArtifactRoutes(router, {
+    resolveActorTenant: (actorSlug: string) => resolveActorTenant(getOrgPool(), actorSlug),
+  });
 
   // Register notification preference endpoints (T-0171 E-N.4).
   if (grantsPool) {
@@ -768,10 +783,18 @@ function buildRouter(
   registerPdpExplainRoutes(router, grantsPool ?? null);
 
   // Register report_page CRUD + promote routes (T-0178 T-0121d).
-  registerReportPageRoutes(router);
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  registerReportPageRoutes(router, undefined, undefined, (actorSlug: string) =>
+    resolveActorTenant(getOrgPool(), actorSlug),
+  );
 
   // Register Floor-1 aggregate renderer + Floor-2 RLS-gated data API (T-0181 T-0121g).
-  registerReportPageRenderRoutes(router);
+  // T-0489 G2 [SECURITY]: withAuth-wrapped at the registration site + tenant from the
+  // actor's own row (resolveActorTenant, fail-closed) instead of the hardcoded Dev Silo.
+  registerReportPageRenderRoutes(router, undefined, undefined, (actorSlug: string) =>
+    resolveActorTenant(getOrgPool(), actorSlug),
+  );
 
   // Register Floor-1 form editor (T-0073 E11.2 — stateless pure transform).
   // Pool is used solely for the keycloak-mode process_designer authz lookup

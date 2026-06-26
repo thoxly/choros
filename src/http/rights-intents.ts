@@ -63,7 +63,8 @@ import {
 import { DICT_PRESETS, type GrantPreset, type GrantPresetAtom } from "./grants.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, withAuth } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -112,13 +113,53 @@ async function withTenantTx<T>(
   }
 }
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+// ---------------------------------------------------------------------------
+// extractActor — mode-aware caller identity (T-0489 / T-0372 pattern).
+//
+// keycloak mode: getAuthContext is populated (withAuth ran first); resolve the
+//   JWT `sub` (KC user UUID) → employee slug via resolveActorSlugFromAuth
+//   (kind='human' only). null ⇒ fail closed (401) — the raw sub is never trusted.
+// dev mode: getAuthContext is undefined; read the x-dev-user header as before.
+//
+// Before T-0489 this route read x-dev-user as the SOLE identity even in keycloak
+// mode (FF-0328-2 bug class); it now consults getAuthContext first.
+// ---------------------------------------------------------------------------
+
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// resolveTenant — T-0489 [SECURITY]: derive the tenant from the actor's OWN row
+// (resolveActorTenant, fail-closed) when a resolver is wired (server.ts); never a
+// request-supplied tenant. When omitted (unit tests with a stub pool) the legacy
+// DEV_TENANT_ID is used so dev-mode tests stay unchanged. ALL authority writes in
+// this module (hire/fire/substitute/urgent-revoke) run under this tenant.
+// ---------------------------------------------------------------------------
+
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+async function resolveTenant(
+  actorSlug: string,
+  resolveActorTenant: ActorTenantResolver | undefined,
+): Promise<string> {
+  return resolveActorTenant ? resolveActorTenant(actorSlug) : DEV_TENANT_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,11 +264,15 @@ function presetAtomScope(atom: GrantPresetAtom, ownScope: ScopeElement): ScopeEl
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerRightsIntentRoutes(router: Router, pool: pg.Pool): void {
-  registerHire(router, pool);
-  registerFire(router, pool);
-  registerSubstitute(router, pool);
-  registerUrgentRevoke(router, pool);
+export function registerRightsIntentRoutes(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
+  registerHire(router, pool, resolveActorTenant);
+  registerFire(router, pool, resolveActorTenant);
+  registerSubstitute(router, pool, resolveActorTenant);
+  registerUrgentRevoke(router, pool, resolveActorTenant);
 }
 
 // ===========================================================================
@@ -240,12 +285,16 @@ export function registerRightsIntentRoutes(router: Router, pool: pg.Pool): void 
 //   approver (FF-CRITICAL-6), exactly as the kernel's dual-control gate does.
 // ===========================================================================
 
-function registerHire(router: Router, pool: pg.Pool): void {
+function registerHire(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/rights/intents/hire", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
     const nowMs = Date.now();
 
     const body = (await readJsonBody(req)) as Record<string, unknown>;
@@ -452,12 +501,16 @@ function registerHire(router: Router, pool: pg.Pool): void {
 //   ordering + records the seam, it does not implement the router.
 // ===========================================================================
 
-function registerFire(router: Router, pool: pg.Pool): void {
+function registerFire(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/rights/intents/fire", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
     const nowMs = Date.now();
 
     const body = (await readJsonBody(req)) as Record<string, unknown>;
@@ -596,12 +649,16 @@ function registerFire(router: Router, pool: pg.Pool): void {
 //   delegable=false on the mint blocks re-delegation.
 // ===========================================================================
 
-function registerSubstitute(router: Router, pool: pg.Pool): void {
+function registerSubstitute(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/rights/intents/substitute", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
     const nowMs = Date.now();
 
     const body = (await readJsonBody(req)) as Record<string, unknown>;
@@ -824,12 +881,16 @@ function registerSubstitute(router: Router, pool: pg.Pool): void {
 //   the fail-closed contract floor + surfaces the halt obligation.
 // ===========================================================================
 
-function registerUrgentRevoke(router: Router, pool: pg.Pool): void {
+function registerUrgentRevoke(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/rights/intents/urgent-revoke", withAuth(async (req, res) => {
-    const actorId = extractActor(req);
-    const tenantId = DEV_TENANT_ID;
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
     const nowMs = Date.now();
 
     const body = (await readJsonBody(req)) as Record<string, unknown>;

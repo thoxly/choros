@@ -51,8 +51,8 @@
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
-import { loadAdminContext } from "../db/org.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import {
   isNarrowerOrEqual,
   type ScopeElement,
@@ -308,15 +308,40 @@ async function withTenantTx<T>(
 // Auth helper — extracts actor id from request (Keycloak or dev-mode)
 // ---------------------------------------------------------------------------
 
-function extractActor(req: IncomingMessage): string {
+// keycloak mode: the JWT `sub` is the KC user UUID, NOT the employee slug; resolve
+// it to the slug (T-0489 / T-0372, kind='human') so the PDP gate (defaultCheckReadGrant
+// looks up employee.slug) + tenant resolution use the real identity. null ⇒ 401.
+// dev mode: read the x-dev-user header as before.
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
   const ctx = getAuthContext(req);
-  if (ctx !== undefined) return ctx.sub;
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
     throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
   }
   return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// T-0489 [SECURITY]: tenant from the actor's OWN row (resolveActorTenant, fail-
+// closed) when a resolver is wired (server.ts); never a request-supplied tenant.
+// Omitted in unit tests → DEV_TENANT_ID (unchanged).
+// ---------------------------------------------------------------------------
+
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+async function resolveTenantForActor(
+  actorSlug: string,
+  resolveActorTenant: ActorTenantResolver | undefined,
+): Promise<string> {
+  return resolveActorTenant ? resolveActorTenant(actorSlug) : DEV_TENANT_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -865,11 +890,19 @@ async function dataFloor2(args: {
  * @param router    - The application router.
  * @param _poolHint - Optional pool override (test injection).
  * @param deps      - Injectable PDP gate deps.
+ * @param resolveActorTenant - T-0489 [SECURITY]: optional tenant resolver. When wired
+ *   (server.ts) every route runs in the caller's REAL tenant (fail-closed) instead of
+ *   the hardcoded Dev Silo. Omitted in unit tests → DEV_TENANT_ID (unchanged).
+ *
+ * T-0489 G2: every handler is withAuth-wrapped at the registration site — keycloak
+ * mode REQUIRES a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev
+ * mode is a no-op pass-through. Closes the http-route-auth-coverage [KNOWN-GAP] entry.
  */
 export function registerReportPageRenderRoutes(
   router: Router,
   _poolHint?: pg.Pool,
   deps: ReportPageRenderAuthzDeps = defaultRenderAuthzDeps,
+  resolveActorTenant?: ActorTenantResolver,
 ): void {
   // -------------------------------------------------------------------------
   // GET /api/report-pages/:id/render — Floor-1 server-side aggregate renderer
@@ -877,18 +910,20 @@ export function registerReportPageRenderRoutes(
   router.register(
     "GET",
     "/api/report-pages/:id/render",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       if (!UUID_RE.test(pageId)) {
         throw new HttpError(400, "VALIDATION", "report_page id must be a valid UUID");
       }
 
       // Auth (required for PDP gate + RLS context)
-      const actor = extractActor(req);
+      const pool = _poolHint ?? getPool();
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       const result = await renderFloor1({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
         actor,
         nowMs: Date.now(),
@@ -898,7 +933,7 @@ export function registerReportPageRenderRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
-    },
+    }),
   );
 
   // -------------------------------------------------------------------------
@@ -907,13 +942,15 @@ export function registerReportPageRenderRoutes(
   router.register(
     "GET",
     "/api/report-pages/:id/data",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       if (!UUID_RE.test(pageId)) {
         throw new HttpError(400, "VALIDATION", "report_page id must be a valid UUID");
       }
 
-      const actor = extractActor(req);
+      const pool = _poolHint ?? getPool();
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       // Parse query params
       const url = new URL(req.url ?? "/", "http://localhost");
@@ -945,8 +982,8 @@ export function registerReportPageRenderRoutes(
       }
 
       const result = await dataFloor2({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
         registryDefId,
         limit: limitVal,
@@ -959,7 +996,7 @@ export function registerReportPageRenderRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(result));
-    },
+    }),
   );
 
   // -------------------------------------------------------------------------
@@ -971,19 +1008,19 @@ export function registerReportPageRenderRoutes(
   //   - actorBreakdown: per-(activity, actor_type) count
   //
   // Uses loadCycleTimeByActivity (self-join on audit_event) + loadActorTypeBreakdown.
-  // Requires x-dev-user header (auth context) and the tenant from DEV_TENANT_ID.
+  // Requires an authenticated identity; the tenant is resolved from the actor's own
+  // row (T-0489), falling back to DEV_TENANT_ID when no resolver is wired.
   //
   // AC-2 (report-page-render-isolation.sh): uses the same injectable pool path.
   // -------------------------------------------------------------------------
   router.register(
     "GET",
     "/api/process-analytics",
-    async (req, res) => {
+    withAuth(async (req, res) => {
       // Auth context required (matches Floor-1 pattern — no anonymous analytics).
-      extractActor(req); // throws 401 if missing
-
       const pool = _poolHint ?? getPool();
-      const tenantId = DEV_TENANT_ID;
+      const actor = await extractActor(req, pool); // throws 401 if missing
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       const [cycleTime, actorBreakdown] = await Promise.all([
         loadCycleTimeByActivity(pool, tenantId),
@@ -1003,7 +1040,7 @@ export function registerReportPageRenderRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(analyticsResult));
-    },
+    }),
   );
 }
 
