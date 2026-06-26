@@ -37,10 +37,10 @@ import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
-import { mapAgentTaskToExternal } from "../core/agent-task-external-mapper.js";
-import { lintBpmn } from "../core/bpmn-linter.js";
+import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
+import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
-import { getHoldersForRole } from "../db/grants-dao.js";
+import { getHoldersForRole, filterProvisionedAgentEmployeeIds } from "../db/grants-dao.js";
 import { loadPublishedRuleTables } from "../db/dmn-rule-table-store.js";
 
 // ---------------------------------------------------------------------------
@@ -184,6 +184,76 @@ async function buildUnfilledRoleWarnings(
     }
   }
   return warnings;
+}
+
+// ---------------------------------------------------------------------------
+// [SECURITY] Publish-time agentTask executor-resolution gate (D8-R5 def-in-depth).
+//
+// An authored agentTask binds its executor via choros:agentRef on a
+// <serviceTask choros:executorType="agent">. The pure publish transform
+// (mapAgentTaskToExternal) stamps that ref VERBATIM as the dispatcher's
+// agentEmployeeId, and the pure (IO-free) bpmn-linter coherence guard only checks
+// the ref is PRESENT — neither verifies it resolves to a real agent. So a
+// process-designer (not necessarily an owner) could name a DIFFERENT, more-
+// privileged in-tenant agent's id as the executor; at runtime
+// assembleAgentStepContext would load THAT id's grants/toolset/criticality and the
+// step would run (and write agent.proceeded) as it. Blast radius is contained — a
+// human/non-agent id has no agent_card → dormant → defer with zero spend, critical-
+// role ops always defer at gate B, and the agent can never exceed its own grants —
+// and this mirrors the trusted-authoring posture for lane→role binding (T-0457). We
+// still close the in-tenant executor-confusion gap here, at publish time, as a
+// DB-backed gate kept OUT of the pure transform/linter.
+//
+// Rule: every authored choros:agentRef MUST resolve to a PROVISIONED kind='agent'
+// employee (agent_card row) in the PUBLISHING tenant. Any ref that does not is an
+// incoherent agent step → publish is rejected (HTTP 422). This is the executor-side
+// analogue of the userTask candidateGroups posture: the author may only assign an
+// executor that EXISTS as an agent in their OWN tenant (in-tenant provisioning is
+// the entitlement boundary — consistent with how candidateGroups assignment is
+// trusted within the tenant: buildUnfilledRoleWarnings warns but never blocks, and
+// there is no per-author role-assignment authz beyond tenant membership to mirror).
+//
+// Returns LintViolation[] reusing the existing agent_task_incoherent type (an
+// unresolvable executor IS an incoherent agent task) so the rejection mirrors the
+// lint-failed response shape. Empty array = every ref resolves (or no agent tasks).
+// ---------------------------------------------------------------------------
+
+async function buildUnresolvedAgentRefViolations(
+  pool: pg.Pool,
+  tenantId: string,
+  bpmnXml: string,
+): Promise<LintViolation[]> {
+  const refTasks = extractAgentTaskConfigs(bpmnXml).filter(
+    (c) => c.agentRef.trim() !== "",
+  );
+  // An agent task with NO ref is already a hard lint violation
+  // (agent_task_incoherent: missing agentRef) caught upstream, so by the time this
+  // runs every in-scope agent step carries a present ref. Nothing to resolve → done.
+  if (refTasks.length === 0) return [];
+
+  const resolved = await filterProvisionedAgentEmployeeIds(
+    pool,
+    tenantId,
+    refTasks.map((c) => c.agentRef.trim()),
+  );
+
+  const violations: LintViolation[] = [];
+  for (const cfg of refTasks) {
+    const ref = cfg.agentRef.trim();
+    if (resolved.has(ref)) continue;
+    const elemDesc = cfg.id ? `serviceTask id="${cfg.id}"` : "serviceTask (no id)";
+    violations.push({
+      type: "agent_task_incoherent",
+      elementId: cfg.id,
+      elementKind: "serviceTask",
+      message:
+        `<${elemDesc}> is an agent step whose choros:agentRef "${ref}" does not resolve ` +
+        `to a provisioned agent in this tenant — pick an agent that exists here (the ` +
+        `executor must be a kind='agent' employee with an agent card). Otherwise the ` +
+        `dispatcher would run the step as an unintended or non-existent executor`,
+    });
+  }
+  return violations;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +519,16 @@ export function registerProcessDefsRoutes(
       }));
       return;
     }
+    if (result.status === "agent_unresolved") {
+      // [SECURITY] 422 — an agentTask executor does not resolve to a provisioned
+      // agent in this tenant. Same envelope as lint_failed, distinct code.
+      res.statusCode = 422;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        error: { code: "AGENT_REF_UNRESOLVED", violations: result.violations },
+      }));
+      return;
+    }
     if (result.status === "engine_unavailable") {
       throw new HttpError(result.httpStatus, result.code, result.message);
     }
@@ -484,6 +564,11 @@ export function registerProcessDefsRoutes(
 export type PublishProcessResult =
   | { status: "not_found" }
   | { status: "lint_failed"; violations: unknown[] }
+  // [SECURITY] An authored agentTask's choros:agentRef did not resolve to a
+  // provisioned agent in the publishing tenant. Distinct from lint_failed (the
+  // pure linter passed; this is the DB-backed executor-resolution gate), surfaced
+  // with the SAME 422 envelope shape so clients render the violations identically.
+  | { status: "agent_unresolved"; violations: LintViolation[] }
   | { status: "engine_unavailable"; httpStatus: number; code: string; message: string }
   | {
       status: "published";
@@ -526,6 +611,17 @@ export async function publishProcessByKey(
   const lintResult = lintBpmn(row.bpmn_xml, ruleTables !== undefined ? { ruleTables } : undefined);
   if (!lintResult.ok) {
     return { status: "lint_failed", violations: lintResult.violations };
+  }
+
+  // Step 2.5: [SECURITY] executor-resolution gate (D8-R5 def-in-depth). Every
+  // authored agentTask's choros:agentRef MUST resolve to a provisioned kind='agent'
+  // employee (agent_card row) in THIS tenant. A DB read is allowed here (unlike the
+  // pure transform/linter). Runs AFTER lint (which guarantees each agent step has a
+  // present ref + the external-task shape) and BEFORE deploy — never deploy a
+  // process whose executor is unresolved. Mirrors the lint-failed 422 envelope.
+  const agentRefViolations = await buildUnresolvedAgentRefViolations(pool, tenantId, row.bpmn_xml);
+  if (agentRefViolations.length > 0) {
+    return { status: "agent_unresolved", violations: agentRefViolations };
   }
 
   // Step 3: Deploy to Flowable
