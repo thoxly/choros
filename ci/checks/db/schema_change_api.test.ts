@@ -17,7 +17,7 @@
 //
 // T-0144 discipline: BEGIN before SET LOCAL; COMMIT always; cleanup after self.
 
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as http from 'node:http';
 import pg from 'pg';
 import { migratorUrl, withClient, uuid } from './_helpers.js';
@@ -110,6 +110,55 @@ async function seedReportPageDep(
 }
 
 // ---------------------------------------------------------------------------
+// Resolvable actor seed (T-0501)
+//
+// The HTTP layer now resolves the caller's REAL tenant via resolveActorTenant
+// (org.ts) — it looks up choros.employee by slug and JOINs choros.tenant. The
+// previous hardcoded DEV_TENANT_ID fallback is gone (T-0486 fail-closed). The
+// requests in this file are sent as `x-dev-user: 'sc-tester'`, so 'sc-tester'
+// must exist as an employee in DEV_TENANT_ID or every PUT/PATCH short-circuits
+// with 403 ACTOR_TENANT_UNRESOLVED before reaching the schema-change logic.
+//
+// We seed 'sc-tester' as a PLAIN human employee in DEV_TENANT_ID:
+//   • employee.slug='sc-tester', tenant_id=DEV_TENANT_ID, kind='human',
+//     position_id=NULL (nullable per 016_employee.sql; FK on (tenant_id,
+//     position_id) is not enforced when position_id IS NULL).
+//   • NO role, NO role_assignment, NO mgmt_object:schema_destructive grant, and
+//     it is NOT the genesis owner (that is 'e-owner', migration 026). This is
+//     deliberate: AC-7 (non-destructive PUT) needs no grant and passes, while
+//     AC-9/AC-16 (destructive, no force) still get 409 and AC-10b (force without
+//     grant) still gets NO_SCHEMA_DESTRUCTIVE_GRANT — the gate logic is unchanged,
+//     only the tenant resolution is now reachable.
+//
+// The DEV_TENANT_ID tenant row already exists from migration 013 (slug 'dev');
+// we ON CONFLICT DO NOTHING on the tenant insert defensively and DO NOT delete
+// it in cleanup (we did not create it). We only delete OUR employee row by slug.
+async function seedResolvableActor(
+  c: pg.Client,
+  tenantId: string,
+  actorSlug: string,
+): Promise<void> {
+  // Defensive: ensure the tenant root exists (migration 013 already seeds Dev
+  // Silo, so this is a no-op there). RLS on choros.tenant requires the GUC, but
+  // the migrator role used by withClient(migratorUrl()) bypasses RLS.
+  await c.query(
+    `INSERT INTO choros.tenant (tenant_id, id, slug, display_name, created_at)
+     VALUES ($1, $1, $2, $2, 0) ON CONFLICT DO NOTHING`,
+    [tenantId, `t-${tenantId.slice(0, 8)}`],
+  );
+  await c.query('BEGIN');
+  await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  await c.query(
+    `INSERT INTO choros.employee
+       (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, NULL, 'human', $3, $4, 0, 0)
+     ON CONFLICT (tenant_id, slug) DO NOTHING`,
+    [tenantId, uuid(), actorSlug, `Schema-change tester ${actorSlug}`],
+  );
+  await c.query('COMMIT');
+}
+
+// ---------------------------------------------------------------------------
 // HTTP helper
 // ---------------------------------------------------------------------------
 
@@ -164,6 +213,29 @@ if (originalDbUrl) {
     });
   });
 }
+
+// Seed the resolvable PLAIN actor 'sc-tester' once for all AC cases. Without it,
+// resolveActorTenant('sc-tester') throws 403 ACTOR_TENANT_UNRESOLVED (T-0486
+// fail-closed) before any schema-change logic runs. See seedResolvableActor.
+beforeAll(async () => {
+  if (!originalDbUrl) return;
+  await withClient(migratorUrl(), async (c) => {
+    await seedResolvableActor(c, DEV_TENANT_ID, 'sc-tester');
+  });
+  // Best-effort cleanup: delete ONLY our employee row by slug. We never created
+  // the DEV_TENANT_ID tenant row (migration 013), so we leave it intact.
+  cleanupFns.push(async () => {
+    await withClient(migratorUrl(), async (cc) => {
+      await cc.query('BEGIN');
+      await cc.query(`SET LOCAL choros.tenant_id = '${DEV_TENANT_ID}'`);
+      await cc.query(
+        `DELETE FROM choros.employee WHERE tenant_id=$1 AND slug=$2`,
+        [DEV_TENANT_ID, 'sc-tester'],
+      );
+      await cc.query('COMMIT');
+    });
+  });
+});
 
 afterAll(async () => {
   // Cleanup seeded rows in reverse order
