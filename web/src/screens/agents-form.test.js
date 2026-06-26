@@ -18,6 +18,7 @@ import {
   validateHire, buildHirePayload,
   classifyHandle, handleRejectMessage, validateBind, buildBindPayload,
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
+  connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
 } from './agents-form.js';
 
 describe('validateHire', () => {
@@ -204,5 +205,63 @@ describe('positionOptions', () => {
   it('is defensive against non-arrays', () => {
     expect(positionOptions(undefined)).toEqual([]);
     expect(positionOptions(null)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0498 — LLM-connection selector helpers.
+// ---------------------------------------------------------------------------
+
+describe('connectionOptions — GET /api/llm-connections → dropdown', () => {
+  it('maps {id,name,provider,model} to {id, "Имя · провайдер · модель"}', () => {
+    const opts = connectionOptions([
+      { id: 'c1', name: 'DeepSeek prod', provider: 'deepseek', model: 'deepseek-chat' },
+      { id: 'c2', name: 'OpenAI', provider: 'openai' },
+      { id: 'c3', name: 'Bare' },
+    ]);
+    expect(opts).toEqual([
+      { id: 'c1', label: 'DeepSeek prod · deepseek · deepseek-chat' },
+      { id: 'c2', label: 'OpenAI · openai' },
+      { id: 'c3', label: 'Bare' },
+    ]);
+  });
+  it('skips rows without an id and is defensive against non-arrays', () => {
+    expect(connectionOptions([{ name: 'no-id' }, null, { id: '', name: 'empty' }])).toEqual([]);
+    expect(connectionOptions(undefined)).toEqual([]);
+    expect(connectionOptions(null)).toEqual([]);
+  });
+  it('falls back to the id as the label when name is missing', () => {
+    expect(connectionOptions([{ id: 'c9' }])).toEqual([{ id: 'c9', label: 'c9' }]);
+  });
+});
+
+describe('buildLlmConnectionPayload — UUID | null contract', () => {
+  it('sends the selected connection id', () => {
+    expect(buildLlmConnectionPayload('ffffffff-0000-0000-0000-000000000006'))
+      .toEqual({ llm_connection_id: 'ffffffff-0000-0000-0000-000000000006' });
+  });
+  it('maps an empty selection to null (detach)', () => {
+    expect(buildLlmConnectionPayload('')).toEqual({ llm_connection_id: null });
+    expect(buildLlmConnectionPayload(undefined)).toEqual({ llm_connection_id: null });
+    expect(buildLlmConnectionPayload(null)).toEqual({ llm_connection_id: null });
+  });
+});
+
+describe('mapLlmConnectionError — honest surfacing of the PUT contract', () => {
+  it('maps 400 LLM_CONNECTION_NOT_FOUND to a tenant-scoped hint', () => {
+    const m = mapLlmConnectionError(400, { error: { code: 'LLM_CONNECTION_NOT_FOUND' } });
+    expect(m).toMatch(/не найдено в вашем тенанте/i);
+  });
+  it('maps 403 to an authority message', () => {
+    expect(mapLlmConnectionError(403, {})).toMatch(/прав/i);
+  });
+  it('maps 401 to a re-login message', () => {
+    expect(mapLlmConnectionError(401, {})).toMatch(/авторизован/i);
+  });
+  it('maps 404 to agent-not-found', () => {
+    expect(mapLlmConnectionError(404, {})).toMatch(/не найден/i);
+  });
+  it('falls back with the HTTP status for unknown codes', () => {
+    expect(mapLlmConnectionError(500, {})).toMatch(/500/);
   });
 });
