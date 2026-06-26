@@ -30,6 +30,7 @@ import {
   validateBind, buildBindPayload,
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
+  outcomeMeta, formatActivityTime, activityContext, mapActivityError,
 } from './agents-form.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -73,6 +74,115 @@ const hintLinkStyle = {
   font: 'inherit', fontSize: 'var(--chs-text-xs)',
 };
 
+// Activity timeline row — token-only, both-theme readable.
+const activityItemStyle = {
+  display: 'flex', alignItems: 'flex-start', gap: 'var(--chs-space-4)',
+  padding: 'var(--chs-space-3) 0',
+  borderTop: '1px solid var(--chs-color-border)',
+};
+
+/* ---------------------------------------------------------------------------
+   T-0499 — Панель «Активность агента». Лента исходов из РЕАЛЬНОГО журнала
+   (audit_log): GET /api/agents/:id/activity. Сервер уже редактирует payload —
+   приходят только безопасные поля (исход/время/процесс/шаг/краткое пояснение).
+   Честные состояния: загрузка / ошибка(401→человеческий) / пусто. «Загрузить
+   ещё» через курсор. Без мёртвых кнопок.
+   --------------------------------------------------------------------------- */
+function ActivityPanel({ agentId }) {
+  const [items, setItems] = useState(null); // null = ещё не грузили / загрузка
+  const [cursor, setCursor] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async (after) => {
+    setError(null);
+    setLoading(true);
+    try {
+      const qs = after ? `?cursor=${encodeURIComponent(after)}` : '';
+      const res = await fetch(`/api/agents/${agentId}/activity${qs}`, { headers: authHeaders() });
+      if (!res.ok) {
+        let parsed = null;
+        try { parsed = await res.json(); } catch { /* non-JSON */ }
+        setError(mapActivityError(res.status, parsed));
+        if (!after) setItems([]); // first page failed → honest empty + error
+        return;
+      }
+      const data = await res.json();
+      const next = Array.isArray(data.items) ? data.items : [];
+      setItems((prev) => (after && Array.isArray(prev) ? [...prev, ...next] : next));
+      setCursor(typeof data.nextCursor === 'string' ? data.nextCursor : null);
+    } catch {
+      setError('Сетевая ошибка — не удалось загрузить активность агента.');
+      if (!after) setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId]);
+
+  // Lazy: load the first page when the panel is mounted (opened).
+  useEffect(() => { load(null); }, [load]);
+
+  if (items === null && loading) {
+    return <LoadingState label="Загрузка активности…" />;
+  }
+  if (error && (items === null || items.length === 0)) {
+    return (
+      <ErrorState
+        title="Не удалось загрузить активность"
+        message={error}
+        onRetry={() => load(null)}
+      />
+    );
+  }
+  if (Array.isArray(items) && items.length === 0) {
+    return (
+      <EmptyState
+        title="Агент ещё ничего не делал"
+        description="Запустите процесс с шагом этого агента — здесь появятся его решения (выполнил сам / отложил человеку / заблокирован)."
+      />
+    );
+  }
+
+  return (
+    <div style={{ width: '100%' }}>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {(items || []).map((it) => {
+          const meta = outcomeMeta(it.outcome);
+          const ctx = activityContext(it);
+          return (
+            <div key={it.id} style={activityItemStyle}>
+              <StatusChip status={meta.chip} label={meta.label} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text)' }}>
+                  {it.summary || meta.label}
+                </div>
+                <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-1)' }}>
+                  {formatActivityTime(it.ts)}
+                  {ctx ? ` · ${ctx}` : ''}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {error && items && items.length > 0 && (
+        <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)', marginTop: 'var(--chs-space-3)' }}>
+          {error}
+        </div>
+      )}
+
+      {cursor && (
+        <div style={{ marginTop: 'var(--chs-space-4)' }}>
+          <Button variant="ghost" size="sm" disabled={loading} loading={loading} onClick={() => load(cursor)}>
+            {loading ? 'Загружаю…' : 'Загрузить ещё'}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---------------------------------------------------------------------------
    Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
    T-0498: на карточке — селектор LLM-подключения (именованный профиль). Текущее
@@ -92,6 +202,8 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
   const [saving, setSaving] = useState(false);
   const [connErr, setConnErr] = useState(null);
   const [connOk, setConnOk] = useState(false);
+  // T-0499: «Активность» — лента исходов из реального журнала (lazy, по клику).
+  const [activityOpen, setActivityOpen] = useState(false);
 
   const options = connectionOptions(connections);
 
@@ -154,6 +266,14 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
         <Button variant="secondary" size="sm" onClick={() => onBind(agent)} title="Привязать LLM к агенту">
           Привязать LLM
         </Button>
+        <Button
+          variant="ghost" size="sm"
+          aria-expanded={activityOpen}
+          onClick={() => setActivityOpen((v) => !v)}
+          title="Активность агента — что он делал"
+        >
+          {activityOpen ? 'Скрыть активность' : 'Активность'}
+        </Button>
       </div>
 
       {/* LLM-подключение (именованный профиль) — селектор на всю ширину карточки. */}
@@ -199,6 +319,19 @@ function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnecti
           </div>
         )}
       </div>
+
+      {/* T-0499 — «Активность»: лента исходов агента из реального журнала. */}
+      {activityOpen && (
+        <div style={{ width: '100%', marginTop: 'var(--chs-space-4)', paddingTop: 'var(--chs-space-4)', borderTop: '1px solid var(--chs-color-border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)', marginBottom: 'var(--chs-space-3)' }}>
+            <Icon name="audit" />
+            <span style={{ fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>
+              Активность
+            </span>
+          </div>
+          <ActivityPanel agentId={agent.id} />
+        </div>
+      )}
     </div>
   );
 }

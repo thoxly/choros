@@ -19,6 +19,7 @@ import {
   classifyHandle, handleRejectMessage, validateBind, buildBindPayload,
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
   connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
+  outcomeMeta, formatActivityTime, activityContext, mapActivityError,
 } from './agents-form.js';
 
 describe('validateHire', () => {
@@ -263,5 +264,72 @@ describe('mapLlmConnectionError — honest surfacing of the PUT contract', () =>
   });
   it('falls back with the HTTP status for unknown codes', () => {
     expect(mapLlmConnectionError(500, {})).toMatch(/500/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0499 — agent activity helpers (GET /api/agents/:id/activity)
+// ---------------------------------------------------------------------------
+
+describe('outcomeMeta — outcome → human chip + label', () => {
+  it('maps proceeded → done «Выполнил сам»', () => {
+    expect(outcomeMeta('proceeded')).toEqual({ chip: 'done', label: 'Выполнил сам' });
+  });
+  it('maps deferred → waiting «Отложил человеку»', () => {
+    expect(outcomeMeta('deferred')).toEqual({ chip: 'waiting', label: 'Отложил человеку' });
+  });
+  it('maps blocked → failed «Заблокирован»', () => {
+    expect(outcomeMeta('blocked')).toEqual({ chip: 'failed', label: 'Заблокирован' });
+  });
+  it('falls back to a neutral chip for unknown outcomes (no raw jargon)', () => {
+    const m = outcomeMeta('agent.weird');
+    expect(m.chip).toBe('paused');
+    // never echoes the raw value
+    expect(m.label).not.toContain('agent.');
+  });
+});
+
+describe('formatActivityTime — human time, honest blank', () => {
+  it('formats a finite ts to a ru-RU locale string', () => {
+    const s = formatActivityTime(1700000000000);
+    expect(typeof s).toBe('string');
+    expect(s.length).toBeGreaterThan(0);
+    expect(s).not.toMatch(/Invalid/i);
+  });
+  it('returns an empty string for a missing / non-finite ts (no "Invalid Date")', () => {
+    expect(formatActivityTime(undefined)).toBe('');
+    expect(formatActivityTime(NaN)).toBe('');
+    expect(formatActivityTime('nope')).toBe('');
+  });
+});
+
+describe('activityContext — safe «процесс · шаг» line', () => {
+  it('joins process_key + step when both present', () => {
+    expect(activityContext({ process_key: 'purchase', step: 'triage' })).toBe('purchase · triage');
+  });
+  it('shows only what is present', () => {
+    expect(activityContext({ process_key: 'purchase' })).toBe('purchase');
+    expect(activityContext({ step: 'triage' })).toBe('triage');
+  });
+  it('returns empty when neither is known', () => {
+    expect(activityContext({})).toBe('');
+    expect(activityContext(null)).toBe('');
+  });
+});
+
+describe('mapActivityError — honest surfacing of the GET contract', () => {
+  it('maps 401 to a human re-login message (not a raw code)', () => {
+    const m = mapActivityError(401, {});
+    expect(m).toMatch(/авторизован/i);
+    expect(m).not.toContain('401');
+  });
+  it('maps 403 to an authority message', () => {
+    expect(mapActivityError(403, {})).toMatch(/прав/i);
+  });
+  it('maps 404 to agent-not-found', () => {
+    expect(mapActivityError(404, {})).toMatch(/не найден/i);
+  });
+  it('falls back with the HTTP status for unknown codes', () => {
+    expect(mapActivityError(500, {})).toMatch(/500/);
   });
 });

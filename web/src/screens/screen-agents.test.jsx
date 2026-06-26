@@ -56,3 +56,32 @@ describe('screen-agents — token discipline (OBLIK)', () => {
     expect(src).not.toContain('--chs-weight-normal');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0499 — agent ACTIVITY panel
+// ---------------------------------------------------------------------------
+
+describe('screen-agents — activity panel wiring (T-0499)', () => {
+  it('reads the activity stream from GET /api/agents/:id/activity', () => {
+    expect(src).toContain('/api/agents/${agentId}/activity');
+  });
+  it('has an "Активность" toggle (no dead button)', () => {
+    expect(src).toContain('Активность');
+    expect(src).toContain('setActivityOpen');
+  });
+  it('renders honest states (loading / error / empty)', () => {
+    expect(src).toContain('Загрузка активности');
+    expect(src).toContain('Агент ещё ничего не делал');
+    // 401/403 are surfaced human via mapActivityError, not raw codes.
+    expect(src).toContain('mapActivityError');
+  });
+  it('supports cursor pagination via «Загрузить ещё»', () => {
+    expect(src).toContain('Загрузить ещё');
+    expect(src).toContain('nextCursor');
+  });
+  it('maps outcomes to human chips (no raw agent.blocked jargon in the UI)', () => {
+    expect(src).toContain('outcomeMeta');
+    expect(src).not.toContain('agent.blocked');
+    expect(src).not.toContain('agent.proceeded');
+  });
+});
