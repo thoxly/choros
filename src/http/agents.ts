@@ -41,6 +41,11 @@ import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import { getLlmConnection } from "../db/llm-connection-dao.js";
 import { setAgentLlmConnection } from "../db/agent-llm-connection-dao.js";
+import {
+  readAgentActivity,
+  decodeActivityCursor,
+  type AgentActivityCursor,
+} from "../db/agent-activity-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -347,6 +352,123 @@ async function handleSetAgentLlmConnection(
 }
 
 // ---------------------------------------------------------------------------
+// T-0499 [E-AGENTS]: read an agent's ACTIVITY (outcome events) from the REAL
+// hash-chained audit log (choros.audit_event), the events dispatch-outcome.ts
+// writes (agent.proceeded / agent.deferred / agent.blocked).
+//
+// Authz — THE SAME class/predicate as the agent-management lifecycle
+// (PUT /api/agents/:id/llm-connection, POST /api/agents/:id/secret-handle —
+// holdsAgentMgmtUpdate): genesis-owner OR a confirmed, in-window, delegable
+// mgmt_object:agent/update grant covering the agent's org scope. NOT weaker:
+// whoever may MANAGE the agent may see WHAT it did. Fail-closed: a plain member
+// → 403; no identity → 401.
+//
+// Tenant-scope (CRITICAL, audit exposure): runs under withTenantTx (SET LOCAL +
+// FORCE RLS) AND the DAO carries a literal WHERE tenant_id = $1. The agent :id is
+// validated in the actor's tenant (foreign → 404) BEFORE any audit row is read.
+//
+// Redaction: the DAO projects ONLY a safe allow-list (outcome / time / proc_key /
+// instance_id / step / canned summary). The raw audit payload (free-text reasons,
+// agent_draft, signal) NEVER reaches the response.
+// ---------------------------------------------------------------------------
+
+/** Default + ceiling page size for the activity list. */
+const ACTIVITY_DEFAULT_LIMIT = 20;
+const ACTIVITY_MAX_LIMIT = 50;
+
+/** Parse + clamp ?limit= and decode ?cursor= for the activity list. */
+function parseActivityQuery(req: import("node:http").IncomingMessage): {
+  limit: number;
+  cursor: AgentActivityCursor | null;
+} {
+  const rawUrl = req.url ?? "";
+  const qIdx = rawUrl.indexOf("?");
+  const sp = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+
+  let limit = ACTIVITY_DEFAULT_LIMIT;
+  const rawLimit = sp.get("limit");
+  if (rawLimit !== null) {
+    const parsed = parseInt(rawLimit, 10);
+    if (!isNaN(parsed)) {
+      limit = Math.min(Math.max(1, parsed), ACTIVITY_MAX_LIMIT);
+    }
+  }
+
+  const rawCursor = sp.get("cursor");
+  const cursor = rawCursor !== null ? decodeActivityCursor(rawCursor) : null;
+
+  return { limit, cursor };
+}
+
+/**
+ * GET /api/agents/:id/activity?limit=&cursor= — the agent's outcome stream.
+ *
+ * Response: { items: [{ id, ts, outcome, process_key?, step?, instance_id?, summary? }],
+ *             nextCursor }
+ */
+async function handleGetAgentActivity(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  agentId: string,
+): Promise<void> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  assertUuidShape(agentId, "agent id");
+
+  const { limit, cursor } = parseActivityQuery(req);
+  const nowMs = Date.now();
+
+  // Authz — loadAdminContext is a DB read (own tx, no side-effect), BEFORE the
+  // read tx (mirrors handleSetAgentLlmConnection / secret-handle.ts). The org-scope
+  // check runs inside the read tx where the agent row is resolved.
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  const page = await withTenantTx(pool, tenantId, async (client) => {
+    // (1) Resolve the agent's org scope — this ALSO proves the agent exists in the
+    //     actor's tenant (RLS + literal tenant_id in the chain query). A foreign /
+    //     missing agent yields the org-root fallback, so we additionally assert the
+    //     agent row is present below to return 404 honestly.
+    const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
+
+    // (2) Gate: same predicate as agent management (mgmt_object:agent/update).
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope)) {
+      throw new HttpError(
+        403,
+        "ADMIN_GATE_REJECTED",
+        "insufficient management authority for agent",
+      );
+    }
+
+    // (3) Tenant existence guard: the agent (:id) MUST be an employee in the actor's
+    //     tenant. A foreign / missing agent → 404 (never leak another tenant's audit).
+    const exists = await client.query<{ id: string }>(
+      `SELECT id
+         FROM choros.employee
+        WHERE tenant_id = $1 AND id = $2
+        LIMIT 1`,
+      [tenantId, agentId],
+    );
+    if (exists.rows.length === 0) {
+      throw new HttpError(404, "AGENT_NOT_FOUND", "agent not found");
+    }
+
+    // (4) Read the redacted activity page (tenant-scoped under RLS + literal guard).
+    return readAgentActivity(
+      client as unknown as PgClientLike,
+      tenantId,
+      agentId,
+      limit,
+      cursor,
+    );
+  });
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify({ items: page.items, nextCursor: page.nextCursor }));
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -528,6 +650,20 @@ export function registerAgentRoutes(
     "/api/agents/:id/llm-connection",
     withAuth(async (req, res, params) =>
       handleSetAgentLlmConnection(pool, req, res, params["id"] ?? ""),
+    ),
+  );
+
+  // ---- GET /api/agents/:id/activity (T-0499) ------------------------------
+  // The agent's outcome stream from the REAL audit log. Same authz class as
+  // agent management (mgmt_object:agent/update); tenant-scoped (RLS + literal
+  // guard, foreign agent → 404); payload-redacted (safe allow-list only).
+  // withAuth: keycloak mode REQUIRES a valid Bearer (401 otherwise; no x-dev-user
+  // bypass); dev mode is a pass-through and the x-dev-user path is unchanged.
+  router.register(
+    "GET",
+    "/api/agents/:id/activity",
+    withAuth(async (req, res, params) =>
+      handleGetAgentActivity(pool, req, res, params["id"] ?? ""),
     ),
   );
 }
