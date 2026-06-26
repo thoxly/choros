@@ -19,6 +19,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { fmtDuration } from './screen-process-analytics.jsx';
@@ -272,6 +273,7 @@ export function useBestEffortFetch(url, errorDomain) {
 // ---------------------------------------------------------------------------
 
 function ProcessCard() {
+  const navigate = useNavigate();
   const { data, errMsg, loading, reload } = useBestEffortFetch(
     '/api/process-analytics',
     'аналитики процессов',
@@ -348,7 +350,7 @@ function ProcessCard() {
           variant="ghost"
           size="sm"
           type="button"
-          onClick={() => { window.location.hash = ''; window.location.pathname = '/process-analytics'; }}
+          onClick={() => navigate('/process-analytics')}
         >
           Подробнее →
         </Button>
@@ -368,6 +370,7 @@ const WINDOW_LABELS = {
 };
 
 function SpendCard() {
+  const navigate = useNavigate();
   const { data, errMsg, loading, reload } = useBestEffortFetch(
     '/api/spend',
     'расхода LLM',
@@ -435,8 +438,8 @@ function SpendCard() {
                 <div style={metricItemStyle}>
                   <span style={metricLabelStyle}>По соединениям</span>
                   <div style={miniListStyle}>
-                    {topConns.map((c) => (
-                      <div key={c.llm_connection_id ?? c.connection_name ?? 'unknown'} style={miniRowStyle}>
+                    {topConns.map((c, i) => (
+                      <div key={c.llm_connection_id ?? c.connection_name ?? `unknown-${i}`} style={miniRowStyle}>
                         <span style={miniLabelStyle} title={c.connection_name ?? 'Без имени'}>
                           {c.connection_name ?? 'Без имени'}
                         </span>
@@ -457,7 +460,7 @@ function SpendCard() {
           variant="ghost"
           size="sm"
           type="button"
-          onClick={() => { window.location.pathname = '/spend'; }}
+          onClick={() => navigate('/spend')}
         >
           Подробнее →
         </Button>
@@ -473,6 +476,7 @@ function SpendCard() {
 // ---------------------------------------------------------------------------
 
 function ReportsCard() {
+  const navigate = useNavigate();
   const { data, errMsg, loading, reload } = useBestEffortFetch(
     '/api/applications',
     'списка приложений',
@@ -537,7 +541,7 @@ function ReportsCard() {
           variant="ghost"
           size="sm"
           type="button"
-          onClick={() => { window.location.pathname = '/reports'; }}
+          onClick={() => navigate('/reports')}
         >
           Перейти к отчётам →
         </Button>
