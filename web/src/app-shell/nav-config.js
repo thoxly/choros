@@ -148,6 +148,10 @@ export const NAV = [
     group: "Наблюдаемость",
     space: "work",
     items: [
+      // Операционный обзор (T-0494): три сигнала в одной панели (процессы + расход + отчёты).
+      // GET /api/process-analytics + /api/spend + /api/applications — живые → live.
+      // Первым в группе: точка входа в наблюдаемость.
+      { id: "ops-overview", label: "Операционный обзор", icon: "audit", screen: true, status: "live" },
       // Уведомления: GET /api/notifications (live), mark-read/all (live), preferences (live)
       { id: "notifications", label: "Уведомления", icon: "bell",   screen: true, status: "live" },
       // Аудит: GET /api/audit (live), GET /api/audit/export (live)
