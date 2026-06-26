@@ -1255,6 +1255,22 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'app_secret': {
+      // T-0476 (migration 106) — at-rest encrypted secret store for the
+      // app://<id> handle scheme. No logical refs. ciphertext/nonce are opaque
+      // bytea (never a raw key here); the CHECKs require ciphertext non-empty and
+      // nonce exactly 12 bytes (the GCM IV length). key_version defaults to 1.
+      await c.query(
+        `INSERT INTO choros.app_secret
+           (tenant_id, id, ciphertext, nonce, key_version, created_by,
+            created_at, updated_at)
+         VALUES ($1, $2, decode('00112233445566778899aabb', 'hex'),
+                 decode('0102030405060708090a0b0c', 'hex'), 1, 'ct-seed', 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, uuid()],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1614,6 +1630,7 @@ const SEEDED_TABLES = new Set<string>([
   'process_definition',
   'process_app_binding',
   'llm_connection',
+  'app_secret',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
