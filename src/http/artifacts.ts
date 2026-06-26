@@ -34,8 +34,9 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { findEmployee } from "./org.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { decidePromote } from "../core/env-tier.js";
 
@@ -118,11 +119,20 @@ async function withTenantTx<T>(
 
 async function extractActorWithType(
   req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
 ): Promise<{ actor: string; actorType: "human" | "agent" }> {
   // Keycloak mode: AuthContext is set by withAuth() middleware before the handler.
+  // The JWT `sub` is the KC user UUID, NOT the employee slug; resolve it to the
+  // slug (T-0489 / T-0372, kind='human') so tenant resolution + the audit `actor`
+  // use the real employee identity. null ⇒ fail closed (401).
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    return { actor: ctx.sub, actorType: ctx.actorType };
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    // actorType comes from the AUTHENTICATED JWT claim (never the body — T-0044 §9).
+    return { actor: slug, actorType: ctx.actorType };
   }
 
   // Dev mode: resolve identity from x-dev-user header + employee record.
@@ -262,7 +272,18 @@ export async function promoteTier(args: {
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerArtifactRoutes(router: Router): void {
+/**
+ * T-0489 [SECURITY]: optional deps. `resolveActorTenant` derives the tenant from
+ * the actor's OWN row (resolveActorTenant(getOrgPool(), slug), fail-closed) so the
+ * promote runs in the caller's REAL tenant instead of the hardcoded Dev Silo. When
+ * omitted, DEV_TENANT_ID is used (legacy / no-DB honest-degrade path unchanged).
+ */
+export interface ArtifactRoutesDeps {
+  resolveActorTenant?: (actorSlug: string) => Promise<string>;
+}
+
+export function registerArtifactRoutes(router: Router, deps: ArtifactRoutesDeps = {}): void {
+  const { resolveActorTenant } = deps;
   /**
    * POST /api/artifacts/:id/promote
    *
@@ -273,16 +294,26 @@ export function registerArtifactRoutes(router: Router): void {
    * x-dev-user+employee.type). The request body MUST NOT supply actor_type,
    * is_human, or confirmed_by as gate inputs (T-0044 §9 / FF-7 lint target).
    *
+   * T-0489 G2: wrapped in withAuth at the registration site — keycloak mode REQUIRES
+   * a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev mode is a
+   * no-op pass-through. Closes the http-route-auth-coverage [KNOWN-GAP] allowlist entry.
+   *
    * Returns 200 { promoted: true, artifact_id, artifact_table, tier: "published" }
    * on success.
    */
-  router.register("POST", "/api/artifacts/:id/promote", async (req, res, params) => {
+  router.register("POST", "/api/artifacts/:id/promote", withAuth(async (req, res, params) => {
     const artifactId = params["id"] ?? "";
     assertUuidShape(artifactId, "artifact id");
 
+    const pool = getPool();
+
     // 1. Extract actor + actorType from AUTHENTICATED source only.
     //    actorType is from the authenticated claim; NEVER from the body (T-0044 §9).
-    const { actor, actorType } = await extractActorWithType(req);
+    const { actor, actorType } = await extractActorWithType(req, pool);
+
+    // T-0489 [SECURITY]: tenant from the actor's OWN identity (fail-closed) when a
+    // resolver is wired; never a request-supplied tenant. Falls back to DEV_TENANT_ID.
+    const tenantId = resolveActorTenant ? await resolveActorTenant(actor) : DEV_TENANT_ID;
 
     // 3. Parse artifact_table from body (optional; default "application").
     let artifactTable = "application";
@@ -332,10 +363,10 @@ export function registerArtifactRoutes(router: Router): void {
     // 5. Promote (transactional: tier flip + audit row).
     //    actorType is passed into promoteTier so decidePromote runs with the real
     //    currentTier from the DB (ADR §4.3 — NOT_IN_DRAFT path is live).
-    const pool = getPool();
+    //    tenantId is the actor's resolved tenant (T-0489), not the hardcoded silo.
     await promoteTier({
       pool,
-      tenantId: DEV_TENANT_ID,
+      tenantId,
       artifactTable,
       artifactId,
       actor,
@@ -353,5 +384,5 @@ export function registerArtifactRoutes(router: Router): void {
         tier: "published",
       }),
     );
-  });
+  }));
 }
