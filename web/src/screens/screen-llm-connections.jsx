@@ -113,6 +113,118 @@ const chipStyle = (ok) => ({
 });
 
 /* ===========================================================================
+   T-0496 — "Проверить подключение": server-side LLM connection probe.
+
+   LIVE contract:
+     POST /api/llm-connections/:id/test
+       → 200 { ok:true,  model, latency_ms, tokens? }   — подключение работает
+       → 200 { ok:false, error:"<человеческое сообщение>" } — ошибка ключа/сети
+       → 401 / 403 / 404  — auth / прав / профиль не найден
+
+   Сырой ключ НИКОГДА не возвращается: на сервере он резолвится в памяти, в ответ
+   приходит только результат теста (ok + модель/латентность ИЛИ санитизированная
+   ошибка). Кнопка честна: idle → проверка (спиннер/disabled) → ✓ / ✗.
+   =========================================================================== */
+
+/**
+ * Pure mapping from the probe HTTP response → button-state result. Exported for
+ * unit-testing (project convention: logic lives in testable helpers, the "node"
+ * vitest env does not mount React). Returns the normalized result object the
+ * ConnectionTester renders.
+ *
+ *   { ok:true,  model, latencyMs, tokens } | { ok:false, error }
+ *
+ * NOTE: this only shapes the SERVER's already-sanitized result — the raw key never
+ * reaches the client, so there is nothing to redact here.
+ */
+export function mapTestResponse(status, data) {
+  if (status === 401) return { ok: false, error: 'Войдите в систему для проверки подключения.' };
+  if (status === 403) return { ok: false, error: 'Недостаточно прав (требуется владелец/админ).' };
+  if (status === 404) return { ok: false, error: 'Профиль подключения не найден.' };
+  if (status !== 200 || !data || typeof data !== 'object') {
+    return { ok: false, error: `Не удалось проверить (HTTP ${status}).` };
+  }
+  if (data.ok === true) {
+    return { ok: true, model: data.model ?? null, latencyMs: data.latency_ms, tokens: data.tokens };
+  }
+  return { ok: false, error: data.error || 'Подключение не работает.' };
+}
+
+function ConnectionTester({ connectionId, secretBound }) {
+  const [busy, setBusy] = useState(false);
+  // result: null | { ok:true, model, latencyMs, tokens } | { ok:false, error }
+  const [result, setResult] = useState(null);
+
+  const runTest = useCallback(async () => {
+    setResult(null);
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/llm-connections/${connectionId}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      });
+      let data = null;
+      try { data = await res.json(); } catch { /* fallthrough — mapTestResponse handles null */ }
+      setResult(mapTestResponse(res.status, data));
+    } catch {
+      setResult({ ok: false, error: 'Сетевая ошибка — проверка не выполнена.' });
+    } finally {
+      setBusy(false);
+    }
+  }, [connectionId]);
+
+  const resultStyle = (ok) => ({
+    marginTop: 'var(--chs-space-3)',
+    padding: 'var(--chs-space-3) var(--chs-space-4)',
+    borderRadius: 'var(--chs-radius-3)',
+    fontSize: 'var(--chs-text-xs)',
+    background: ok ? 'var(--chs-color-success-soft)' : 'var(--chs-color-danger-soft)',
+    border: `1px solid ${ok ? 'var(--chs-color-success)' : 'var(--chs-color-danger)'}`,
+    color: 'var(--chs-color-text)',
+    display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)',
+  });
+  const hintStyle = {
+    marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)',
+    color: 'var(--chs-color-text-muted)',
+  };
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-3)', width: '100%' }}>
+      <Button
+        variant="secondary"
+        size="sm"
+        type="button"
+        onClick={runTest}
+        loading={busy}
+        disabled={busy}
+      >
+        {busy ? 'Проверка…' : 'Проверить подключение'}
+      </Button>
+      {!secretBound && !result && (
+        <div style={hintStyle}>Ключ ещё не привязан — проверка вернёт «ключ не задан».</div>
+      )}
+      {result && result.ok && (
+        <div style={resultStyle(true)}>
+          <Icon name="check" />
+          <span>
+            Подключение работает
+            {result.model ? <> · <strong>{result.model}</strong></> : null}
+            {typeof result.latencyMs === 'number' ? <> · {result.latencyMs} мс</> : null}
+            {result.tokens ? <> · {result.tokens.total} токенов</> : null}
+          </span>
+        </div>
+      )}
+      {result && !result.ok && (
+        <div style={resultStyle(false)}>
+          <span aria-hidden="true">✗</span>
+          <span>{result.error}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===========================================================================
    T-0476 [E-AGENTS L3] — app:// encrypted secret store: "вставить API-ключ".
    SELF-CONTAINED BLOCK (kept distinct to minimize conflict with T-0477).
 
@@ -585,6 +697,11 @@ export default function LlmConnectionsScreen() {
                   connectionId={c.id}
                   secretBound={!!c.secret_bound}
                   onChanged={loadConnections}
+                />
+                {/* T-0496: server-side "Проверить подключение" probe (self-contained). */}
+                <ConnectionTester
+                  connectionId={c.id}
+                  secretBound={!!c.secret_bound}
                 />
               </div>
             ))}
