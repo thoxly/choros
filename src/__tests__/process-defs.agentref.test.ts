@@ -170,13 +170,14 @@ function makeReq(): IncomingMessage {
 
 function makeRes() {
   const chunks: string[] = [];
+  const headers: Record<string, string> = {};
   return {
     statusCode: 200,
-    headers: {} as Record<string, string>,
-    setHeader(name: string, value: string) { this.headers[name] = value; },
+    headers,
+    setHeader(name: string, value: string) { headers[name] = value; },
     end(body?: string) { if (body) chunks.push(body); },
     get body() { return chunks.join(""); },
-    get json() { return JSON.parse(this.body); },
+    get json() { return JSON.parse(chunks.join("")); },
   } as unknown as ServerResponse & { body: string; json: any };
 }
 

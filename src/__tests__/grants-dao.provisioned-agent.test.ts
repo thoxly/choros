@@ -85,7 +85,7 @@ describe("filterProvisionedAgentEmployeeIds (unit, no DB)", () => {
     expect(resolved).toEqual(new Set([A_RECON]));
     // The query only ever carried the well-formed UUID — no invalid uuid cast risk.
     const agentQuery = pool._client.query.mock.calls.find(
-      ([sql]: [string]) => /JOIN choros\.agent_card/.test(sql),
+      (c: any[]) => /JOIN choros\.agent_card/.test(c[0]),
     );
     expect(agentQuery).toBeDefined();
     expect(agentQuery![1][1]).toEqual([A_RECON]);
@@ -113,7 +113,7 @@ describe("filterProvisionedAgentEmployeeIds (unit, no DB)", () => {
     );
     expect(resolved).toEqual(new Set([A_RECON]));
     const agentQuery = pool._client.query.mock.calls.find(
-      ([sql]: [string]) => /JOIN choros\.agent_card/.test(sql),
+      (c: any[]) => /JOIN choros\.agent_card/.test(c[0]),
     );
     expect(agentQuery![1][1]).toEqual([A_RECON]); // single, deduped element
   });
