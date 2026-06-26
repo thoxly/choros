@@ -27,6 +27,7 @@ import {
   type RenderResult,
 } from "../http/report-page-render.js";
 import { Router } from "../http/router.js";
+import { escapeCsvCell, toCsv, toXlsx } from "../http/tabular-export.js";
 
 // ---------------------------------------------------------------------------
 // Fake pool (mirrors report-page-render.test.ts)
@@ -443,5 +444,114 @@ describe("EX-9 — flattenRenderResultToTable shape", () => {
     const table = flattenRenderResultToTable({ page_id: VALID_PAGE_ID, floor: "1", metrics: [] });
     expect(table.columns).toEqual(["metric", "group", "value"]);
     expect(table.rows).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EX-10: CSV formula injection — escapeCsvCell neutralizes formula triggers
+// ---------------------------------------------------------------------------
+
+describe("EX-10 — escapeCsvCell neutralizes spreadsheet formula injection", () => {
+  // --- Dangerous formula triggers: must be prefixed with apostrophe ---
+
+  it("=1+1 → neutralized with leading apostrophe", () => {
+    const out = escapeCsvCell("=1+1");
+    expect(out).toBe(`"'=1+1"`);
+    expect(out.startsWith(`"'`)).toBe(true);
+  });
+
+  it("+1 → neutralized with leading apostrophe", () => {
+    const out = escapeCsvCell("+1");
+    expect(out).toBe(`"'+1"`);
+    expect(out.startsWith(`"'`)).toBe(true);
+  });
+
+  it("@SUM(A1:A10) → neutralized with leading apostrophe", () => {
+    const out = escapeCsvCell("@SUM(A1:A10)");
+    expect(out).toBe(`"'@SUM(A1:A10)"`);
+    expect(out.startsWith(`"'`)).toBe(true);
+  });
+
+  it("-2+3 → neutralized with leading apostrophe", () => {
+    const out = escapeCsvCell("-2+3");
+    expect(out).toBe(`"'-2+3"`);
+    expect(out.startsWith(`"'`)).toBe(true);
+  });
+
+  it("cell with leading tab → neutralized with leading apostrophe", () => {
+    const out = escapeCsvCell("\tmalicious");
+    // starts with apostrophe inside quotes
+    expect(out).toBe(`"'\tmalicious"`);
+    expect(out.startsWith(`"'`)).toBe(true);
+  });
+
+  it("DDE attack payload =cmd|'/C calc'!A0 → neutralized", () => {
+    const out = escapeCsvCell("=cmd|'/C calc'!A0");
+    // The ' inside the value gets doubled per RFC-4180 (only " is doubled, not ')
+    // but the leading ' neutralizer is prepended before the body
+    expect(out.startsWith(`"'=`)).toBe(true);
+  });
+
+  // --- Safe values: must NOT be altered ---
+
+  it("plain string 'abc' → unchanged", () => {
+    expect(escapeCsvCell("abc")).toBe("abc");
+  });
+
+  it("numeric string '123' → unchanged", () => {
+    expect(escapeCsvCell("123")).toBe("123");
+  });
+
+  it("string with comma 'a,b' → RFC-4180 quoted, no apostrophe prefix", () => {
+    const out = escapeCsvCell("a,b");
+    expect(out).toBe(`"a,b"`);
+    expect(out).not.toContain("'");
+  });
+
+  it("null → empty string", () => {
+    expect(escapeCsvCell(null)).toBe("");
+  });
+
+  it("empty string → empty string", () => {
+    expect(escapeCsvCell("")).toBe("");
+  });
+
+  it("number 42 → '42' (not altered)", () => {
+    expect(escapeCsvCell(42)).toBe("42");
+  });
+
+  // --- XLSX path: formula-looking values still emit as literal inlineStr ---
+
+  it("xlsx: formula-looking value =1+1 emits as literal inlineStr (no <f> tag)", () => {
+    const table = {
+      columns: ["formula_test"],
+      rows: [["=1+1"]],
+    };
+    const buf = toXlsx(table);
+    // Must be a valid ZIP (PK magic)
+    expect(buf[0]).toBe(0x50);
+    expect(buf[1]).toBe(0x4b);
+    expect(buf.length).toBeGreaterThan(100);
+    // The sheet XML content inside the zip should contain inlineStr, not <f>
+    const text = buf.toString("utf8");
+    expect(text).toContain("inlineStr");
+    expect(text).not.toContain("<f>");
+    // The raw formula text appears in the XML (XML-escaped if needed)
+    expect(text).toContain("=1+1");
+  });
+
+  // --- toCsv: formula in a data row is neutralized end-to-end ---
+
+  it("toCsv: formula value in data row is neutralized", () => {
+    const table = {
+      columns: ["metric", "group", "value"],
+      rows: [["sum(amount)", "", "=HYPERLINK(\"evil.com\")"]],
+    };
+    const csv = toCsv(table);
+    // The value cell must be neutralized (start with ')
+    expect(csv).toContain(`"'=HYPERLINK`);
+    // BOM + header row present
+    expect(csv.charCodeAt(0)).toBe(0xfeff);
+    expect(csv).toContain("metric,group,value");
   });
 });

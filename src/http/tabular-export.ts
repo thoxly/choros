@@ -44,14 +44,21 @@ function cellToString(cell: string | number | null | undefined): string {
 /**
  * Quote a CSV field per RFC-4180: wrap in double-quotes and double any embedded
  * quote IFF the value contains a comma, quote, CR, or LF. Otherwise emit as-is.
+ *
+ * SECURITY (OWASP): neutralize spreadsheet formula injection. If the string
+ * representation starts with one of the formula-trigger characters (= + - @ \t \r),
+ * prepend a leading apostrophe `'` to prevent Excel/LibreOffice from executing
+ * formulas (DDE / HYPERLINK exfiltration). The apostrophe is safe: most
+ * spreadsheet apps treat it as a literal-string prefix and do NOT display it.
  */
 export function escapeCsvCell(value: string | number | null | undefined): string {
   const s = cellToString(value);
   if (s === "") return "";
-  if (/[",\r\n]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
+  const needsQuote = /[",\r\n]/.test(s);
+  const dangerous = /^[=+\-@\t\r]/.test(s);
+  const body = dangerous ? `'${s}` : s;
+  if (needsQuote || dangerous) return `"${body.replace(/"/g, '""')}"`;
+  return body;
 }
 
 /** UTF-8 BOM — makes Excel detect UTF-8 so Cyrillic headers/values render. */
