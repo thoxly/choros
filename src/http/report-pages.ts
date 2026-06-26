@@ -40,8 +40,9 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, getAuthContext } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { findEmployee } from "./org.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import {
   checkReportPageDepFields,
   classifyReportPageFloor,
@@ -198,11 +199,19 @@ async function withTenantTx<T>(
 
 async function extractActorWithType(
   req: IncomingMessage,
+  pool: pg.Pool,
 ): Promise<{ actor: string; actorType: "human" | "agent" }> {
   // Keycloak mode: AuthContext is set by withAuth() middleware before the handler.
+  // The JWT `sub` is the KC user UUID, NOT the employee slug; resolve it to the slug
+  // (T-0489 / T-0372, kind='human') so tenant resolution + the audit actor use the
+  // real employee identity. null ⇒ fail closed (401).
   const ctx = getAuthContext(req);
   if (ctx !== undefined) {
-    return { actor: ctx.sub, actorType: ctx.actorType };
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return { actor: slug, actorType: ctx.actorType };
   }
 
   // Dev mode: resolve from x-dev-user header + employee record.
@@ -217,6 +226,22 @@ async function extractActorWithType(
   const actorType: "human" | "agent" = emp?.type === "agent" ? "agent" : "human";
 
   return { actor, actorType };
+}
+
+// ---------------------------------------------------------------------------
+// T-0489 [SECURITY]: tenant from the actor's OWN row (resolveActorTenant, fail-
+// closed) when a resolver is wired (server.ts); never a request-supplied tenant.
+// When omitted (unit tests with a stub pool) the legacy DEV_TENANT_ID is used so
+// dev-mode tests stay unchanged.
+// ---------------------------------------------------------------------------
+
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+async function resolveTenantForActor(
+  actorSlug: string,
+  resolveActorTenant: ActorTenantResolver | undefined,
+): Promise<string> {
+  return resolveActorTenant ? resolveActorTenant(actorSlug) : DEV_TENANT_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -940,11 +965,19 @@ async function promoteReportPage(args: {
  * @param router    - The application router.
  * @param _poolHint - Optional pool override (test injection). Production uses lazy singleton.
  * @param deps      - Injectable PDP gate deps. Default: loadAdminContext-based implementation.
+ * @param resolveActorTenant - T-0489 [SECURITY]: optional tenant resolver. When wired
+ *   (server.ts) every route runs in the caller's REAL tenant (fail-closed) instead of
+ *   the hardcoded Dev Silo. Omitted in unit tests → DEV_TENANT_ID (unchanged).
+ *
+ * T-0489 G2: every handler is withAuth-wrapped at the registration site — keycloak
+ * mode REQUIRES a valid Bearer (401 otherwise; x-dev-user no longer bypasses); dev
+ * mode is a no-op pass-through. Closes the http-route-auth-coverage [KNOWN-GAP] entry.
  */
 export function registerReportPageRoutes(
   router: Router,
   _poolHint?: pg.Pool,
   deps: ReportPageAuthzDeps = defaultReportPageAuthzDeps,
+  resolveActorTenant?: ActorTenantResolver,
 ): void {
   // ---------------------------------------------------------------------------
   // POST /api/report-pages — create draft page
@@ -952,8 +985,10 @@ export function registerReportPageRoutes(
   router.register(
     "POST",
     "/api/report-pages",
-    async (req, res) => {
-      const { actor } = await extractActorWithType(req);
+    withAuth(async (req, res) => {
+      const pool = _poolHint ?? getPool();
+      const { actor } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       const rawBody = await readJsonBody(req);
       if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -992,8 +1027,8 @@ export function registerReportPageRoutes(
       };
 
       const page = await createReportPage({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         body: createBody,
         actor,
         nowMs: Date.now(),
@@ -1013,7 +1048,7 @@ export function registerReportPageRoutes(
           created_at: page.created_at,
         }),
       );
-    },
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -1022,20 +1057,24 @@ export function registerReportPageRoutes(
   router.register(
     "GET",
     "/api/report-pages/:id",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       assertUuidShape(pageId, "report_page id");
 
+      const pool = _poolHint ?? getPool();
+      const { actor } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
+
       const page = await getReportPage({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
       });
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(page));
-    },
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -1044,7 +1083,7 @@ export function registerReportPageRoutes(
   router.register(
     "GET",
     "/api/report-pages",
-    async (req, res) => {
+    withAuth(async (req, res) => {
       // Parse app_id from query string
       const url = new URL(req.url ?? "/", "http://localhost");
       const appId = url.searchParams.get("app_id") ?? "";
@@ -1052,16 +1091,20 @@ export function registerReportPageRoutes(
         throw new HttpError(400, "VALIDATION", "app_id query param must be a valid UUID");
       }
 
+      const pool = _poolHint ?? getPool();
+      const { actor } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
+
       const pages = await listReportPages({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         appId,
       });
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ pages }));
-    },
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -1070,11 +1113,13 @@ export function registerReportPageRoutes(
   router.register(
     "PATCH",
     "/api/report-pages/:id",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       assertUuidShape(pageId, "report_page id");
 
-      const { actor } = await extractActorWithType(req);
+      const pool = _poolHint ?? getPool();
+      const { actor } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       const rawBody = await readJsonBody(req);
       if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
@@ -1091,8 +1136,8 @@ export function registerReportPageRoutes(
       }
 
       const page = await updateReportPage({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
         body: patchBody,
         actor,
@@ -1103,7 +1148,7 @@ export function registerReportPageRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(page));
-    },
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -1112,15 +1157,17 @@ export function registerReportPageRoutes(
   router.register(
     "DELETE",
     "/api/report-pages/:id",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       assertUuidShape(pageId, "report_page id");
 
-      const { actor } = await extractActorWithType(req);
+      const pool = _poolHint ?? getPool();
+      const { actor } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       await deleteReportPage({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
         actor,
         nowMs: Date.now(),
@@ -1129,7 +1176,7 @@ export function registerReportPageRoutes(
 
       res.statusCode = 204;
       res.end();
-    },
+    }),
   );
 
   // ---------------------------------------------------------------------------
@@ -1138,15 +1185,17 @@ export function registerReportPageRoutes(
   router.register(
     "POST",
     "/api/report-pages/:id/promote",
-    async (req, res, params) => {
+    withAuth(async (req, res, params) => {
       const pageId = params["id"] ?? "";
       assertUuidShape(pageId, "report_page id");
 
-      const { actor, actorType } = await extractActorWithType(req);
+      const pool = _poolHint ?? getPool();
+      const { actor, actorType } = await extractActorWithType(req, pool);
+      const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
       await promoteReportPage({
-        pool: _poolHint ?? getPool(),
-        tenantId: DEV_TENANT_ID,
+        pool,
+        tenantId,
         pageId,
         actor,
         actorType,
@@ -1157,6 +1206,6 @@ export function registerReportPageRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ promoted: true, page_id: pageId }));
-    },
+    }),
   );
 }
