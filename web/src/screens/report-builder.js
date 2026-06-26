@@ -161,6 +161,7 @@ export function slugFromTitle(name) {
  *   registryDefId?: string,
  *   groupBy?: string,               // '' = no grouping
  *   metrics?: { agg:string, fieldKey:string }[],
+ *   countFallbackKey?: string,      // passed through to buildPageDef for emptiness check
  * }} state
  * @returns {{ valid: boolean, errors: Record<string,string>, metricErrors: Record<number,string> }}
  */
@@ -195,6 +196,22 @@ export function validateBuilder(state) {
       }
     }
   });
+
+  // Check the resulting page_def is non-empty. This catches the case where all
+  // metrics are count with no countFallbackKey (no scalar fields in the dataset),
+  // or all metrics have an invalid field — the server would accept [] but render
+  // an empty phantom report.
+  if (Object.keys(errors).length === 0 && Object.keys(metricErrors).length === 0) {
+    const pageDef = buildPageDef(state);
+    if (pageDef.length === 0) {
+      const countFallbackKey = String(state?.countFallbackKey || '').trim();
+      if (countFallbackKey.length === 0) {
+        errors.metrics = 'В этом наборе нет полей для подсчёта — добавьте поля в конструкторе';
+      } else {
+        errors.metrics = 'Добавьте хотя бы одну метрику с полем';
+      }
+    }
+  }
 
   const valid = Object.keys(errors).length === 0 && Object.keys(metricErrors).length === 0;
   return { valid, errors, metricErrors };

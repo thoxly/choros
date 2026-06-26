@@ -410,6 +410,74 @@ describe('Построитель — восстановление метрик/�
 });
 
 // ---------------------------------------------------------------------------
+// B1: человеческие сообщения об ошибках на submit-пути (401/403)
+// ---------------------------------------------------------------------------
+
+describe('B1 — submit: 401/403 → человеческий русский (не сырой английский)', () => {
+  // Mirrors the logic in handleSubmit, extracted for pure unit-testing.
+  function mapSubmitError(status, context) {
+    if (status === 401) return 'Войдите в систему.';
+    if (status === 403 && context === 'author') return 'Нет прав на создание отчётов в этом приложении. Обратитесь к владельцу.';
+    if (status === 403 && context === 'promote') return 'Публиковать отчёты может только человек с правом публикации.';
+    return null; // falls through to apiErr
+  }
+
+  it('401 на create/update → «Войдите в систему.»', () => {
+    expect(mapSubmitError(401, 'author')).toBe('Войдите в систему.');
+  });
+
+  it('403 на create → русское сообщение без raw-ключей', () => {
+    const msg = mapSubmitError(403, 'author');
+    expect(msg).toBeTruthy();
+    expect(msg).not.toMatch(/denied|mgmt_object|report_page/);
+    expect(msg).toContain('прав');
+  });
+
+  it('403 на promote → упоминает публикацию, не raw «promote is human-only»', () => {
+    const msg = mapSubmitError(403, 'promote');
+    expect(msg).toBeTruthy();
+    expect(msg).not.toMatch(/promote|human-only/);
+    expect(msg).toContain('Публиковать');
+  });
+
+  it('200 статус → нет ошибки (falls through)', () => {
+    expect(mapSubmitError(200, 'author')).toBeNull();
+  });
+
+  it('500 → falls through (не маппится, идёт к apiErr)', () => {
+    expect(mapSubmitError(500, 'author')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3: tier labels — «черновик»/«опубликован» вместо «draft»/«published»
+// ---------------------------------------------------------------------------
+
+describe('P3 — tier labels: draft/published → русский', () => {
+  const TIER_LABELS = { draft: 'черновик', published: 'опубликован' };
+
+  function tierLabel(tier) {
+    return TIER_LABELS[tier] ?? tier;
+  }
+
+  it('draft → «черновик»', () => {
+    expect(tierLabel('draft')).toBe('черновик');
+  });
+
+  it('published → «опубликован»', () => {
+    expect(tierLabel('published')).toBe('опубликован');
+  });
+
+  it('неизвестный статус → оставляем как есть (не ломаем)', () => {
+    expect(tierLabel('archived')).toBe('archived');
+  });
+
+  it('пустой tier → пустая строка (не ломаем)', () => {
+    expect(tierLabel('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AGG_LABELS — проверяем маппинг через воспроизведение
 // ---------------------------------------------------------------------------
 

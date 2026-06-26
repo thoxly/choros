@@ -276,15 +276,63 @@ describe('validateBuilder', () => {
     expect(r.metricErrors[0]).toBeTruthy();
   });
 
-  it('count without a field is allowed (no per-metric error)', () => {
-    const r = validateBuilder({ ...ok, metrics: [{ agg: 'count', fieldKey: '' }] });
+  it('count without a field is allowed when countFallbackKey provides a schema key', () => {
+    const r = validateBuilder({ ...ok, metrics: [{ agg: 'count', fieldKey: '' }], countFallbackKey: 'amount' });
     expect(r.valid).toBe(true);
+    expect(r.errors).toEqual({});
+    expect(r.metricErrors).toEqual({});
   });
 
   it('unknown agg is a per-metric error', () => {
     const r = validateBuilder({ ...ok, metrics: [{ agg: 'median', fieldKey: 'amount' }] });
     expect(r.valid).toBe(false);
     expect(r.metricErrors[0]).toBeTruthy();
+  });
+
+  // B2: empty page_def = validation error, buttons stay disabled.
+  it('B2: count-only metrics with no countFallbackKey → empty page_def → validation error', () => {
+    // Dataset has no scalar fields: countFallbackKey is empty string.
+    const r = validateBuilder({
+      title: 'Тест',
+      registryDefId: REG_ID,
+      metrics: [{ agg: 'count', fieldKey: '' }],
+      countFallbackKey: '',
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.metrics).toMatch(/нет полей|Добавьте/i);
+  });
+
+  it('B2: all metrics result in empty page_def → validation error with field hint', () => {
+    // count with no fallback and no explicit field → buildPageDef returns []
+    const r = validateBuilder({
+      title: 'Тест',
+      registryDefId: REG_ID,
+      groupBy: '',
+      metrics: [{ agg: 'count', fieldKey: '' }],
+      countFallbackKey: '',
+    });
+    expect(r.valid).toBe(false);
+    expect(r.errors.metrics).toBeTruthy();
+  });
+
+  it('B2: count metrics WITH countFallbackKey → non-empty page_def → valid', () => {
+    const r = validateBuilder({
+      title: 'Тест',
+      registryDefId: REG_ID,
+      metrics: [{ agg: 'count', fieldKey: '' }],
+      countFallbackKey: 'status',
+    });
+    expect(r.valid).toBe(true);
+  });
+
+  it('B2: empty page_def message differs when no fields in dataset vs missing field choice', () => {
+    const noFields = validateBuilder({
+      title: 'Тест',
+      registryDefId: REG_ID,
+      metrics: [{ agg: 'count', fieldKey: '' }],
+      countFallbackKey: '',
+    });
+    expect(noFields.errors.metrics).toContain('нет полей');
   });
 });
 

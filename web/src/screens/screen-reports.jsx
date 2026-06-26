@@ -420,7 +420,7 @@ function MetricCard({ metric }) {
             <thead>
               <tr>
                 <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--chs-color-text-muted)', fontWeight: 'var(--chs-weight-semibold)', fontSize: 'var(--chs-text-xs)', borderBottom: '1px solid var(--chs-color-border)' }}>
-                  {metric.field_key}
+                  {metric.title || metric.field_key}
                 </th>
                 <th style={{ textAlign: 'right', padding: '4px 8px', color: 'var(--chs-color-text-muted)', fontWeight: 'var(--chs-weight-semibold)', fontSize: 'var(--chs-text-xs)', borderBottom: '1px solid var(--chs-color-border)' }}>
                   {AGG_LABELS[metric.agg] ?? metric.agg}
@@ -556,7 +556,7 @@ function ReportViewer({ report, onEdit }) {
 
       <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginBottom: 'var(--chs-space-5)' }}>
         {report.floor === '1' ? 'Floor-1 · агрегаты' : `Floor-${report.floor}`}
-        {report.slug && <span style={{ marginLeft: 8 }}>/ {report.slug}</span>}
+        {report.slug && <span style={{ marginLeft: 8 }}>/ {report.title || report.slug}</span>}
       </div>
 
       {/* Загрузка */}
@@ -751,7 +751,7 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
 
   const handleSubmit = useCallback(async (promote) => {
     setSubmitErr(null);
-    const state = { title, registryDefId, groupBy, metrics };
+    const state = { title, registryDefId, groupBy, metrics, countFallbackKey };
     const v = validateBuilder(state);
     setErrors(v.errors);
     setMetricErrors(v.metricErrors);
@@ -767,7 +767,12 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
           headers: { 'content-type': 'application/json', ...authHeaders() },
           body: JSON.stringify(buildPatchBody({ title, registryDefId, groupBy, metrics, countFallbackKey })),
         });
-        if (!res.ok) { setSubmitErr(await apiErr(res, 'Не удалось сохранить отчёт')); return; }
+        if (!res.ok) {
+          if (res.status === 401) { setSubmitErr('Войдите в систему.'); return; }
+          if (res.status === 403) { setSubmitErr('Нет прав на создание отчётов в этом приложении. Обратитесь к владельцу.'); return; }
+          setSubmitErr(await apiErr(res, 'Не удалось сохранить отчёт'));
+          return;
+        }
       } else {
         const res = await fetch('/api/report-pages', {
           method: 'POST',
@@ -775,6 +780,8 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
           body: JSON.stringify(buildCreateBody({ appId, title, registryDefId, groupBy, metrics, countFallbackKey })),
         });
         if (res.status !== 201 && res.status !== 200) {
+          if (res.status === 401) { setSubmitErr('Войдите в систему.'); return; }
+          if (res.status === 403) { setSubmitErr('Нет прав на создание отчётов в этом приложении. Обратитесь к владельцу.'); return; }
           setSubmitErr(await apiErr(res, 'Не удалось создать отчёт'));
           return;
         }
@@ -789,6 +796,8 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
           headers: { 'content-type': 'application/json', ...authHeaders() },
         });
         if (!res.ok) {
+          if (res.status === 401) { setSubmitErr('Отчёт сохранён. Войдите в систему для публикации.'); return; }
+          if (res.status === 403) { setSubmitErr('Публиковать отчёты может только человек с правом публикации.'); return; }
           setSubmitErr(await apiErr(res, 'Отчёт сохранён, но не опубликован'));
           // Всё равно показываем сохранённый отчёт ниже.
         }
@@ -1182,7 +1191,7 @@ export default function ReportsScreen() {
                       </span>
                       <span style={reportItemMetaStyle}>
                         {page.floor === '1' ? 'агрегаты' : `floor-${page.floor}`}
-                        {page.tier ? ` · ${page.tier}` : ''}
+                        {page.tier ? ` · ${{ draft: 'черновик', published: 'опубликован' }[page.tier] ?? page.tier}` : ''}
                       </span>
                     </button>
                   );
