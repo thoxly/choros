@@ -23,7 +23,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
+import { Button, Select, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 
 // ---------------------------------------------------------------------------
@@ -54,6 +54,26 @@ const descStyle = {
   fontSize: 'var(--chs-text-sm)',
   color: 'var(--chs-color-text-muted)',
   margin: '0 0 var(--chs-space-6) 0',
+};
+
+// T-0495: селектор процесса (дрилл-даун)
+const selectorRowStyle = {
+  display: 'flex',
+  alignItems: 'flex-end',
+  gap: 'var(--chs-space-4)',
+  marginBottom: 'var(--chs-space-6)',
+  maxWidth: 420,
+};
+
+const selectorWrapStyle = {
+  flex: 1,
+  minWidth: 0,
+};
+
+const selectorEmptyHintStyle = {
+  fontSize: 'var(--chs-text-xs)',
+  color: 'var(--chs-color-text-muted)',
+  marginBottom: 'var(--chs-space-6)',
 };
 
 const summaryCardStyle = {
@@ -459,15 +479,24 @@ function ActorBreakdownPanel({ breakdown }) {
 // ProcessAnalyticsScreen — корневой компонент
 // ---------------------------------------------------------------------------
 
+// Значение «все процессы» в селекторе (пустая строка → без параметра запроса).
+export const ALL_PROCESSES = '';
+
 export default function ProcessAnalyticsScreen() {
   const [data, setData] = useState(null);   // null=loading, false=error, obj=ok
   const [errMsg, setErrMsg] = useState(null);
+  // T-0495: выбранный процесс для дрилл-дауна ('' = все процессы).
+  const [selected, setSelected] = useState(ALL_PROCESSES);
+  // Список доступных процессов из последнего успешного ответа (для селектора).
+  const [processKeys, setProcessKeys] = useState([]);
 
-  const load = useCallback(async () => {
+  // load(processKey): '' / undefined → без фильтра (все процессы).
+  const load = useCallback(async (processKey) => {
     setErrMsg(null);
     setData(null);
+    const qs = processKey ? `?process_key=${encodeURIComponent(processKey)}` : '';
     try {
-      const res = await fetch('/api/process-analytics', { headers: authHeaders() });
+      const res = await fetch(`/api/process-analytics${qs}`, { headers: authHeaders() });
       if (res.status === 401) {
         setErrMsg('Войдите в систему для просмотра аналитики процессов.');
         setData(false);
@@ -486,15 +515,26 @@ export default function ProcessAnalyticsScreen() {
         setData(false);
         return;
       }
-      setData(await res.json());
+      const json = await res.json();
+      // Список процессов берём из ответа (самосогласован с данными).
+      if (Array.isArray(json.processKeys)) setProcessKeys(json.processKeys);
+      setData(json);
     } catch {
       setErrMsg('Сетевая ошибка при загрузке аналитики процессов.');
       setData(false);
     }
   }, []);
 
+  // Первичная загрузка — все процессы.
   useEffect(() => {
-    load();
+    load(ALL_PROCESSES);
+  }, [load]);
+
+  // Смена процесса в селекторе → рефетч с фильтром (или без — для «Все процессы»).
+  const onSelectProcess = useCallback((e) => {
+    const next = e.target.value;
+    setSelected(next);
+    load(next);
   }, [load]);
 
   // Извлекаем поля из ответа (безопасно)
@@ -505,16 +545,27 @@ export default function ProcessAnalyticsScreen() {
   // «Пусто» — ответ пришёл, но нет ни шагов, ни событий исполнителей
   const isEmpty = data && data !== false && rows.length === 0 && actorBreakdown.length === 0;
 
+  // Заголовок отражает выбранный процесс (человеческий язык).
+  const titleSuffix = selected ? `: ${selected}` : '';
+  const scopeLabel = selected ? selected : 'Все процессы';
+
+  // Опции селектора: «Все процессы» + список из ответа.
+  const selectOptions = [
+    { value: ALL_PROCESSES, label: 'Все процессы' },
+    ...processKeys.map((k) => ({ value: k, label: k })),
+  ];
+  const hasProcesses = processKeys.length > 0;
+
   return (
     <div style={layoutStyle}>
       {/* Заголовок */}
       <div style={headerRowStyle}>
-        <h1 style={h1Style}>Аналитика процессов</h1>
+        <h1 style={h1Style}>Аналитика процессов{titleSuffix}</h1>
         <Button
           variant="ghost"
           size="sm"
           type="button"
-          onClick={load}
+          onClick={() => load(selected)}
           disabled={data === null}
         >
           Обновить
@@ -523,8 +574,31 @@ export default function ProcessAnalyticsScreen() {
 
       <p style={descStyle}>
         Цикл-тайм по шагам процессов и нагрузка по типам исполнителей.
+        Сейчас показано: <strong>{scopeLabel}</strong>.
         Данные накапливаются из журнала переходов по мере выполнения задач.
       </p>
+
+      {/* T-0495: селектор процесса. Показываем только когда есть из чего выбирать. */}
+      {hasProcesses ? (
+        <div style={selectorRowStyle}>
+          <div style={selectorWrapStyle}>
+            <Select
+              label="Процесс"
+              options={selectOptions}
+              value={selected}
+              onChange={onSelectProcess}
+              disabled={data === null}
+              hint="Выберите процесс, чтобы посмотреть его узкое место и шаги."
+            />
+          </div>
+        </div>
+      ) : (
+        data && data !== false && (
+          <p style={selectorEmptyHintStyle}>
+            Пока нет процессов с данными для фильтрации — показаны все.
+          </p>
+        )
+      )}
 
       {/* Загрузка */}
       {data === null && <LoadingState label="Загрузка аналитики…" />}
@@ -534,15 +608,19 @@ export default function ProcessAnalyticsScreen() {
         <ErrorState
           title="Не удалось загрузить аналитику"
           message={errMsg ?? ''}
-          onRetry={load}
+          onRetry={() => load(selected)}
         />
       )}
 
       {/* Пусто */}
       {isEmpty && (
         <EmptyState
-          title="Аналитика пока недоступна"
-          description="Запустите процессы, чтобы увидеть аналитику. Данные появятся после первых выполненных шагов."
+          title={selected ? `Нет данных по процессу «${selected}»` : 'Аналитика пока недоступна'}
+          description={
+            selected
+              ? 'По выбранному процессу пока нет выполненных шагов. Выберите «Все процессы» или запустите этот процесс.'
+              : 'Запустите процессы, чтобы увидеть аналитику. Данные появятся после первых выполненных шагов.'
+          }
         />
       )}
 

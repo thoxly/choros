@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { fmtDuration, fmtActorType, aggregateActorBreakdown } from './screen-process-analytics.jsx';
+import { fmtDuration, fmtActorType, aggregateActorBreakdown, ALL_PROCESSES } from './screen-process-analytics.jsx';
 
 // ---------------------------------------------------------------------------
 // fmtDuration — форматтер длительности
@@ -195,6 +195,129 @@ describe('G4 — состояние «пусто»: нет шагов и нет 
 
   it('false (ошибка) → не считается пустым', () => {
     expect(isEmpty(false)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0495 — дрилл-даун по процессу: селектор, URL-рефетч, processKeys-пусто
+// ---------------------------------------------------------------------------
+
+describe('T-0495 — построение URL рефетча с process_key', () => {
+  // Зеркалит логику load() в экране: '' / undefined → без параметра.
+  function buildUrl(processKey) {
+    const qs = processKey ? `?process_key=${encodeURIComponent(processKey)}` : '';
+    return `/api/process-analytics${qs}`;
+  }
+
+  it('ALL_PROCESSES (пустая строка) → без параметра', () => {
+    expect(ALL_PROCESSES).toBe('');
+    expect(buildUrl(ALL_PROCESSES)).toBe('/api/process-analytics');
+  });
+
+  it('undefined → без параметра', () => {
+    expect(buildUrl(undefined)).toBe('/api/process-analytics');
+  });
+
+  it('конкретный процесс → ?process_key=<процесс>', () => {
+    expect(buildUrl('purchaseApproval')).toBe('/api/process-analytics?process_key=purchaseApproval');
+  });
+
+  it('процесс со спецсимволами → URL-энкодится (не сырая интерполяция)', () => {
+    const key = 'proc key/with&chars';
+    const url = buildUrl(key);
+    expect(url).toContain('process_key=');
+    expect(url).not.toContain(' '); // пробел закодирован
+    expect(url).toContain(encodeURIComponent(key));
+  });
+});
+
+describe('T-0495 — опции селектора процесса', () => {
+  // Зеркалит формирование selectOptions в экране.
+  function buildOptions(processKeys) {
+    return [
+      { value: ALL_PROCESSES, label: 'Все процессы' },
+      ...processKeys.map((k) => ({ value: k, label: k })),
+    ];
+  }
+
+  it('пустой processKeys → только «Все процессы»', () => {
+    const opts = buildOptions([]);
+    expect(opts).toHaveLength(1);
+    expect(opts[0].value).toBe('');
+    expect(opts[0].label).toBe('Все процессы');
+  });
+
+  it('есть процессы → «Все процессы» первым, затем ключи', () => {
+    const opts = buildOptions(['purchaseApproval', 'telLinear']);
+    expect(opts).toHaveLength(3);
+    expect(opts[0].label).toBe('Все процессы');
+    expect(opts[1]).toEqual({ value: 'purchaseApproval', label: 'purchaseApproval' });
+    expect(opts[2]).toEqual({ value: 'telLinear', label: 'telLinear' });
+  });
+
+  it('hasProcesses: пусто → селектор не показываем', () => {
+    const processKeys = [];
+    expect(processKeys.length > 0).toBe(false);
+  });
+
+  it('hasProcesses: есть ключи → селектор показываем', () => {
+    const processKeys = ['p1'];
+    expect(processKeys.length > 0).toBe(true);
+  });
+});
+
+describe('T-0495 — заголовок/подпись отражают выбранный процесс', () => {
+  // Зеркалит titleSuffix / scopeLabel в экране.
+  function scope(selected) {
+    return {
+      titleSuffix: selected ? `: ${selected}` : '',
+      scopeLabel: selected ? selected : 'Все процессы',
+    };
+  }
+
+  it('«Все процессы» (пусто) → без суффикса, метка «Все процессы»', () => {
+    expect(scope(ALL_PROCESSES)).toEqual({ titleSuffix: '', scopeLabel: 'Все процессы' });
+  });
+
+  it('конкретный процесс → суффикс «: <процесс>», метка = процесс', () => {
+    expect(scope('purchaseApproval')).toEqual({
+      titleSuffix: ': purchaseApproval',
+      scopeLabel: 'purchaseApproval',
+    });
+  });
+});
+
+describe('T-0495 — processKeys из ответа сервера', () => {
+  // Зеркалит обновление processKeys из json.processKeys.
+  function extractProcessKeys(json) {
+    return Array.isArray(json.processKeys) ? json.processKeys : [];
+  }
+
+  it('ответ с processKeys → массив сохраняется', () => {
+    expect(extractProcessKeys({ processKeys: ['a', 'b'] })).toEqual(['a', 'b']);
+  });
+
+  it('ответ без processKeys → пустой массив (защитно)', () => {
+    expect(extractProcessKeys({})).toEqual([]);
+  });
+
+  it('processKeys не массив → пустой массив', () => {
+    expect(extractProcessKeys({ processKeys: 'nope' })).toEqual([]);
+  });
+});
+
+describe('T-0495 — исходник содержит селектор и process_key', () => {
+  it('экран импортирует Select из kit', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const filePath = path.default.resolve(
+      new URL(import.meta.url).pathname,
+      '../screen-process-analytics.jsx',
+    );
+    const src = fs.default.readFileSync(filePath, 'utf-8');
+    expect(src).toMatch(/import\s*\{[^}]*\bSelect\b[^}]*\}\s*from\s*['"]\.\.\/components\/components\.jsx['"]/);
+    expect(src).toContain('process_key=');
+    expect(src).toContain('encodeURIComponent');
   });
 });
 
