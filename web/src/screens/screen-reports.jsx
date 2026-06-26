@@ -1,11 +1,12 @@
 /* ============================================================================
    CHOROS — screen-reports.jsx  (T-0490)
-   Отчёты: список report_page текущего тенанта + просмотр агрегатов Floor-1.
+   Отчёты: список report_page выбранного приложения + просмотр агрегатов Floor-1.
 
    Только ПРОСМОТР — построитель/создание в T-0492.
 
    ЖИВЫЕ контракты:
-     GET  /api/report-pages?app_id=<uuid>  — список страниц приложения
+     GET  /api/applications              — список приложений тенанта → { applications: [...] }
+     GET  /api/report-pages?app_id=<uuid>  — список страниц приложения → { pages: [...] }
      GET  /api/report-pages/:id/render     — Floor-1 агрегат: { page_id, floor, metrics[] }
        MetricResult: { source_registry_def_id, field_key, agg, result, grouped?, title? }
 
@@ -45,7 +46,33 @@ const h1Style = {
 const descStyle = {
   fontSize: 'var(--chs-text-sm)',
   color: 'var(--chs-color-text-muted)',
-  margin: '0 0 var(--chs-space-7) 0',
+  margin: '0 0 var(--chs-space-5) 0',
+};
+
+// App selector row
+const appSelectorRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 'var(--chs-space-4)',
+  marginBottom: 'var(--chs-space-7)',
+};
+
+const appSelectorLabelStyle = {
+  fontSize: 'var(--chs-text-sm)',
+  fontWeight: 'var(--chs-weight-semibold)',
+  color: 'var(--chs-color-text)',
+  whiteSpace: 'nowrap',
+};
+
+const appSelectorSelectStyle = {
+  fontSize: 'var(--chs-text-sm)',
+  color: 'var(--chs-color-text)',
+  background: 'var(--chs-color-surface)',
+  border: '1px solid var(--chs-color-border)',
+  borderRadius: 'var(--chs-radius-2)',
+  padding: 'var(--chs-space-2) var(--chs-space-4)',
+  minWidth: 200,
+  cursor: 'pointer',
 };
 
 const twoColStyle = {
@@ -85,15 +112,15 @@ const reportItemBaseStyle = {
 
 const reportItemActiveStyle = {
   ...reportItemBaseStyle,
-  background: 'var(--chs-color-primary-subtle)',
-  borderLeft: '3px solid var(--chs-color-primary)',
+  background: 'var(--chs-color-accent-soft)',
+  borderLeft: '3px solid var(--chs-color-accent)',
   paddingLeft: 'calc(var(--chs-space-5) - 3px)',
 };
 
 const reportItemLabelStyle = (active) => ({
   fontSize: 'var(--chs-text-sm)',
-  fontWeight: active ? 'var(--chs-weight-semibold)' : 'var(--chs-weight-normal)',
-  color: active ? 'var(--chs-color-primary)' : 'var(--chs-color-text)',
+  fontWeight: active ? 'var(--chs-weight-semibold)' : 'var(--chs-weight-regular)',
+  color: active ? 'var(--chs-color-accent)' : 'var(--chs-color-text)',
   display: 'block',
   marginBottom: 2,
 });
@@ -229,7 +256,7 @@ function BarChart({ data, title }) {
                 width={BAR_WIDTH}
                 height={barH}
                 rx="3"
-                fill="var(--chs-color-primary)"
+                fill="var(--chs-color-accent)"
                 opacity="0.85"
               />
               {/* Метка группы под столбцом */}
@@ -439,16 +466,55 @@ function ReportViewer({ report }) {
 // ---------------------------------------------------------------------------
 
 export default function ReportsScreen() {
-  // Список всех отчётов (без фильтра по приложению — тенант-изоляция на сервере)
-  const [pages, setPages] = useState(null);   // null=loading, false=error, []=ok
+  // ── Приложения тенанта ────────────────────────────────────────────────────
+  const [apps, setApps] = useState(null);      // null=loading, false=error, []=ok
+  const [appsErr, setAppsErr] = useState(null);
+  const [selectedAppId, setSelectedAppId] = useState(null);
+
+  const loadApps = useCallback(async () => {
+    setAppsErr(null);
+    setApps(null);
+    try {
+      const res = await fetch('/api/applications', { headers: authHeaders() });
+      if (res.status === 401) {
+        setAppsErr('Войдите в систему.');
+        setApps(false);
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setAppsErr(`Ошибка HTTP ${res.status}${body.message ? ': ' + body.message : ''}`);
+        setApps(false);
+        return;
+      }
+      const data = await res.json();
+      const list = Array.isArray(data.applications) ? data.applications : [];
+      setApps(list);
+      if (list.length > 0) setSelectedAppId((prev) => prev ?? list[0].id);
+    } catch {
+      setAppsErr('Сетевая ошибка при загрузке приложений.');
+      setApps(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadApps();
+  }, [loadApps]);
+
+  // ── Список отчётов выбранного приложения ──────────────────────────────────
+  const [pages, setPages] = useState(null);    // null=loading, false=error, []=ok
   const [pagesErr, setPagesErr] = useState(null);
   const [selected, setSelected] = useState(null); // выбранный report_page
 
   const loadPages = useCallback(async () => {
+    if (!selectedAppId) return;
     setPagesErr(null);
     setPages(null);
+    setSelected(null);
     try {
-      const res = await fetch('/api/report-pages', { headers: authHeaders() });
+      const res = await fetch(`/api/report-pages?app_id=${encodeURIComponent(selectedAppId)}`, {
+        headers: authHeaders(),
+      });
       if (res.status === 401) {
         setPagesErr('Войдите в систему.');
         setPages(false);
@@ -461,15 +527,15 @@ export default function ReportsScreen() {
         return;
       }
       const data = await res.json();
-      const list = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : []);
+      // Blocker 1 fix: сервер возвращает { pages: [...] }; устойчивость к массиву
+      const list = Array.isArray(data) ? data : (Array.isArray(data.pages) ? data.pages : (Array.isArray(data.items) ? data.items : []));
       setPages(list);
-      // Автовыбор первого элемента
-      if (list.length > 0 && !selected) setSelected(list[0]);
+      if (list.length > 0) setSelected(list[0]);
     } catch {
       setPagesErr('Сетевая ошибка.');
       setPages(false);
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedAppId]);
 
   useEffect(() => {
     loadPages();
@@ -483,12 +549,15 @@ export default function ReportsScreen() {
     }
   }, [pages]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Вычисляем имя выбранного приложения ──────────────────────────────────
+  const selectedApp = Array.isArray(apps) ? apps.find((a) => a.id === selectedAppId) : null;
+
   return (
     <div style={layoutStyle}>
       {/* ── Заголовок ──────────────────────────────────────────────────────── */}
       <div style={headerRowStyle}>
         <h1 style={h1Style}>Отчёты</h1>
-        <Button variant="ghost" size="sm" type="button" onClick={loadPages}>
+        <Button variant="ghost" size="sm" type="button" onClick={loadPages} disabled={!selectedAppId}>
           Обновить
         </Button>
       </div>
@@ -498,65 +567,114 @@ export default function ReportsScreen() {
         Создание отчётов — в конструкторе.
       </p>
 
-      {/* ── Загрузка списка ─────────────────────────────────────────────── */}
-      {pages === null && <LoadingState label="Загрузка списка отчётов…" />}
+      {/* ── Загрузка списка приложений ───────────────────────────────────── */}
+      {apps === null && <LoadingState label="Загрузка приложений…" />}
 
-      {/* ── Ошибка загрузки списка ──────────────────────────────────────── */}
-      {pages === false && (
+      {/* ── Ошибка загрузки приложений ───────────────────────────────────── */}
+      {apps === false && (
         <ErrorState
-          title="Не удалось загрузить отчёты"
-          message={pagesErr ?? ''}
-          onRetry={loadPages}
+          title="Не удалось загрузить приложения"
+          message={appsErr ?? ''}
+          onRetry={loadApps}
         />
       )}
 
-      {/* ── Пусто ───────────────────────────────────────────────────────── */}
-      {Array.isArray(pages) && pages.length === 0 && (
+      {/* ── Нет приложений ───────────────────────────────────────────────── */}
+      {Array.isArray(apps) && apps.length === 0 && (
         <EmptyState
-          title="Отчётов пока нет"
-          description="Создайте отчёт в конструкторе, чтобы он появился здесь."
+          title="Нет приложений"
+          description="Сначала создайте приложение в конструкторе, затем добавьте к нему отчёты."
         />
       )}
 
-      {/* ── Двухколоночный макет: список + просмотр ─────────────────────── */}
-      {Array.isArray(pages) && pages.length > 0 && (
-        <div style={twoColStyle}>
-          {/* Левая колонка: список */}
-          <div style={sidebarStyle}>
-            <div style={sidebarHeadStyle}>Список отчётов</div>
-            {pages.map((page) => {
-              const active = selected?.id === page.id;
-              return (
-                <button
-                  key={page.id}
-                  type="button"
-                  style={active ? reportItemActiveStyle : reportItemBaseStyle}
-                  aria-pressed={active}
-                  onClick={() => setSelected(page)}
-                >
-                  <span style={reportItemLabelStyle(active)}>
-                    {page.title ?? page.page_code ?? page.id}
-                  </span>
-                  <span style={reportItemMetaStyle}>
-                    {page.floor === '1' ? 'агрегаты' : `floor-${page.floor}`}
-                    {page.tier ? ` · ${page.tier}` : ''}
-                  </span>
-                </button>
-              );
-            })}
+      {/* ── Есть приложения: селектор + список отчётов ───────────────────── */}
+      {Array.isArray(apps) && apps.length > 0 && (
+        <>
+          {/* Селектор приложения */}
+          <div style={appSelectorRowStyle}>
+            <label htmlFor="app-select" style={appSelectorLabelStyle}>
+              Приложение:
+            </label>
+            <select
+              id="app-select"
+              style={appSelectorSelectStyle}
+              value={selectedAppId ?? ''}
+              onChange={(e) => setSelectedAppId(e.target.value)}
+            >
+              {apps.map((app) => (
+                <option key={app.id} value={app.id}>
+                  {app.display_name ?? app.slug ?? app.id}
+                </option>
+              ))}
+            </select>
+            {selectedApp && (
+              <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                {selectedApp.slug}
+              </span>
+            )}
           </div>
 
-          {/* Правая колонка: просмотр */}
-          {selected ? (
-            <ReportViewer key={selected.id} report={selected} />
-          ) : (
-            <div style={{ ...mainPanelStyle, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
-              <span style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-                Выберите отчёт из списка
-              </span>
+          {/* ── Загрузка списка отчётов ──────────────────────────────────── */}
+          {pages === null && <LoadingState label="Загрузка списка отчётов…" />}
+
+          {/* ── Ошибка загрузки отчётов ──────────────────────────────────── */}
+          {pages === false && (
+            <ErrorState
+              title="Не удалось загрузить отчёты"
+              message={pagesErr ?? ''}
+              onRetry={loadPages}
+            />
+          )}
+
+          {/* ── Пусто ────────────────────────────────────────────────────── */}
+          {Array.isArray(pages) && pages.length === 0 && (
+            <EmptyState
+              title="Отчётов пока нет"
+              description="Создайте отчёт в конструкторе, чтобы он появился здесь."
+            />
+          )}
+
+          {/* ── Двухколоночный макет: список + просмотр ──────────────────── */}
+          {Array.isArray(pages) && pages.length > 0 && (
+            <div style={twoColStyle}>
+              {/* Левая колонка: список */}
+              <div style={sidebarStyle}>
+                <div style={sidebarHeadStyle}>Список отчётов</div>
+                {pages.map((page) => {
+                  const active = selected?.id === page.id;
+                  return (
+                    <button
+                      key={page.id}
+                      type="button"
+                      style={active ? reportItemActiveStyle : reportItemBaseStyle}
+                      aria-pressed={active}
+                      onClick={() => setSelected(page)}
+                    >
+                      <span style={reportItemLabelStyle(active)}>
+                        {page.title ?? page.page_code ?? page.id}
+                      </span>
+                      <span style={reportItemMetaStyle}>
+                        {page.floor === '1' ? 'агрегаты' : `floor-${page.floor}`}
+                        {page.tier ? ` · ${page.tier}` : ''}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Правая колонка: просмотр */}
+              {selected ? (
+                <ReportViewer key={selected.id} report={selected} />
+              ) : (
+                <div style={{ ...mainPanelStyle, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+                  <span style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+                    Выберите отчёт из списка
+                  </span>
+                </div>
+              )}
             </div>
           )}
-        </div>
+        </>
       )}
     </div>
   );
