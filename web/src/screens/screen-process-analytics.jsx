@@ -263,7 +263,7 @@ function DurationBar({ value, max }) {
 // BottleneckCard — сводка вверху экрана
 // ---------------------------------------------------------------------------
 
-function BottleneckCard({ bottleneck, totalActivities, onRefresh }) {
+function BottleneckCard({ bottleneck, totalActivities }) {
   return (
     <div style={summaryCardStyle} role="region" aria-label="Сводка аналитики">
       {/* Узкое место */}
@@ -553,7 +553,6 @@ export default function ProcessAnalyticsScreen() {
           <BottleneckCard
             bottleneck={bottleneck}
             totalActivities={rows.length}
-            onRefresh={load}
           />
 
           {/* Таблица цикл-тайма */}
