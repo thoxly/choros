@@ -251,3 +251,75 @@ export function positionOptions(rows) {
       label: str(r.title) || str(r.slug) || r.id,
     }));
 }
+
+// ---------------------------------------------------------------------------
+// T-0498 — LLM-connection selector (PUT /api/agents/:id/llm-connection)
+//
+// WIRED CONTRACTS (exact, read from src/http/agents.ts + src/http/llm-connections.ts):
+//   GET /api/llm-connections                      → 200 { connections: [{id,name,provider,model,...}] }
+//   PUT /api/agents/:id/llm-connection            { llm_connection_id: string|null } → 200
+//                                                   { ok:true, llm_connection_id, connection_summary? }
+//
+// The connection carries the agent's LLM endpoint + (server-side) key handle. The
+// raw key NEVER travels: this dropdown only ever sends a connection id (a UUID) or
+// null (detach). The server resolves both agent and connection inside the actor's
+// tenant, so a foreign id → 400 (honest error, no rebind).
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the dropdown options from a GET /api/llm-connections `connections` array.
+ * Returns [{ id, label }] where label = "Имя · провайдер · модель" (provider/model
+ * appended only when present). Defensive against missing fields / non-arrays.
+ * @param {Array<{id?:string,name?:string,provider?:string,model?:string}>} rows
+ * @returns {Array<{id:string,label:string}>}
+ */
+export function connectionOptions(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .filter((r) => r && typeof r.id === 'string' && r.id.length > 0)
+    .map((r) => {
+      const name = str(r.name) || r.id;
+      const provider = str(r.provider);
+      const model = str(r.model);
+      const tail = [provider, model].filter((x) => x.length > 0).join(' · ');
+      return { id: r.id, label: tail ? `${name} · ${tail}` : name };
+    });
+}
+
+/**
+ * Build the PUT /api/agents/:id/llm-connection body. An empty/falsy selection maps
+ * to null (detach) — exactly the backend contract (UUID | null).
+ * @param {string} connectionId selected connection id, or '' for "not set"
+ * @returns {{ llm_connection_id: string|null }}
+ */
+export function buildLlmConnectionPayload(connectionId) {
+  const id = str(connectionId);
+  return { llm_connection_id: id.length > 0 ? id : null };
+}
+
+/**
+ * Map a PUT /api/agents/:id/llm-connection failure to an actionable Russian
+ * message. Covers the route's error codes (agents.ts handleSetAgentLlmConnection):
+ *   400 LLM_CONNECTION_NOT_FOUND / VALIDATION, 401, 403 ADMIN_GATE_REJECTED, 404.
+ * @param {number} status
+ * @param {unknown} body parsed JSON (may be null/non-object)
+ * @returns {string}
+ */
+export function mapLlmConnectionError(status, body) {
+  const obj = body && typeof body === 'object' ? body : undefined;
+  const code = obj ? (obj.error?.code || obj.code) : undefined;
+  const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
+
+  if (status === 400 && code === 'LLM_CONNECTION_NOT_FOUND') {
+    return 'Подключение не найдено в вашем тенанте. Обновите список и выберите своё подключение.';
+  }
+  if (status === 400) {
+    return serverMsg || 'Проверьте выбор подключения.';
+  }
+  if (status === 401) return 'Сессия не авторизована — войдите заново.';
+  if (status === 403) {
+    return 'Недостаточно прав: привязывать LLM-подключение к агенту может только администратор с грантом управления агентами.';
+  }
+  if (status === 404) return 'Агент не найден (возможно, в другом тенанте).';
+  return serverMsg || `Не удалось сохранить LLM-подключение (HTTP ${status}).`;
+}

@@ -19,6 +19,7 @@ const base = {
   llm_endpoint: null as string | null,
   llm_model: null as string | null,
   llm_secret_handle: null as string | null,
+  llm_connection_id: null as string | null,
   position_title: null as string | null,
   department_name: null as string | null,
 };
@@ -80,5 +81,28 @@ describe("T-0473 serializeAgent — org-attached vs org-less", () => {
   it("derives the provider host from the endpoint, never the key", () => {
     expect(deriveLlmProvider("https://api.openai.com/v1")).toBe("api.openai.com");
     expect(deriveLlmProvider(null)).toBeNull();
+  });
+
+  it("T-0498: surfaces the named-connection FK (llm_connection_id) for the UI dropdown", () => {
+    const bound = serializeAgent({
+      ...base,
+      agent_card_id: "card-uuid-9",
+      employee_id: "emp-uuid-9",
+      agent_type: "workforce",
+      slug: "x",
+      display_name: "X",
+      llm_connection_id: "ffffffff-0000-0000-0000-000000000006",
+    });
+    expect(bound.llm_connection_id).toBe("ffffffff-0000-0000-0000-000000000006");
+
+    const unbound = serializeAgent({
+      ...base,
+      agent_card_id: "card-uuid-10",
+      employee_id: "emp-uuid-10",
+      agent_type: "workforce",
+      slug: "y",
+      display_name: "Y",
+    });
+    expect(unbound.llm_connection_id).toBeNull();
   });
 });

@@ -20,6 +20,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, MonoId, Modal, StatusChip, EmptyState, LoadingState, ErrorState, Tooltip, Field, Select } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -28,6 +29,7 @@ import {
   validateHire, buildHirePayload,
   validateBind, buildBindPayload,
   mapAgentError, statusLabel, positionOptions, displayAgentName, agentTypeLabel,
+  connectionOptions, buildLlmConnectionPayload, mapLlmConnectionError,
 } from './agents-form.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
@@ -64,40 +66,139 @@ const typeBadgeStyle = {
   border: '1px solid var(--chs-color-border)', color: 'var(--chs-color-text-muted)',
 };
 
+// Soft hint linking to the LLM-connections registry (no dead button — navigates).
+const hintLinkStyle = {
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--chs-color-accent, var(--chs-color-text))', textDecoration: 'underline',
+  font: 'inherit', fontSize: 'var(--chs-text-xs)',
+};
+
 /* ---------------------------------------------------------------------------
    Список агентов — карточка читаема в ОБЕИХ темах (токены surface/text/muted).
+   T-0498: на карточке — селектор LLM-подключения (именованный профиль). Текущее
+   значение показано; при выборе → PUT /api/agents/:id/llm-connection. Подключения
+   приходят из GET /api/llm-connections (родительский экран). Без мёртвых кнопок.
    --------------------------------------------------------------------------- */
-function AgentRow({ agent, onBind }) {
+function AgentRow({ agent, onBind, connections, connectionsAvailable, onConnectionSaved, onGoToConnections }) {
   const name = displayAgentName(agent.display_name);
   // Org-place line: workforce agents sit on a position; system/assistant agents
   // live in the registry WITHOUT an org-place (migration 093 / T-0473).
   const orgPlace = agent.has_org_place
     ? `${agent.position || 'должность не назначена'}${agent.department ? ` · ${agent.department}` : ''}`
     : 'вне оргструктуры';
+
+  // Current binding (controlled): null/'' = «не задано (по умолчанию)».
+  const [connId, setConnId] = useState(agent.llm_connection_id || '');
+  const [saving, setSaving] = useState(false);
+  const [connErr, setConnErr] = useState(null);
+  const [connOk, setConnOk] = useState(false);
+
+  const options = connectionOptions(connections);
+
+  const saveConnection = async (e) => {
+    const next = e.target.value;
+    const prev = connId;
+    setConnId(next);
+    setConnErr(null);
+    setConnOk(false);
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/llm-connection`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(buildLlmConnectionPayload(next)),
+      });
+      if (res.ok) {
+        setConnOk(true);
+        onConnectionSaved?.();
+        return;
+      }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* non-JSON */ }
+      setConnErr(mapLlmConnectionError(res.status, parsed));
+      setConnId(prev); // revert on failure — honest state
+    } catch {
+      setConnErr('Сетевая ошибка — не удалось сохранить LLM-подключение.');
+      setConnId(prev);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Connection-id no longer in the (possibly 403-empty) list — show it honestly.
+  const currentMissingFromList =
+    connId && !options.some((o) => o.id === connId);
+
   return (
-    <div style={cardStyle}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)' }}>
-          <span style={{ fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>{name}</span>
-          <span style={typeBadgeStyle} title="Тип агента">{agentTypeLabel(agent.agent_type)}</span>
+    <div style={{ ...cardStyle, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)', width: '100%' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)' }}>
+            <span style={{ fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)' }}>{name}</span>
+            <span style={typeBadgeStyle} title="Тип агента">{agentTypeLabel(agent.agent_type)}</span>
+          </div>
+          <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
+            <MonoId>{agent.slug}</MonoId>
+            {` · ${orgPlace}`}
+          </div>
         </div>
-        <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
-          <MonoId>{agent.slug}</MonoId>
-          {` · ${orgPlace}`}
+        <div style={{ textAlign: 'right', fontSize: 'var(--chs-text-xs)' }}>
+          <Tooltip label={agent.llm_bound ? 'Секрет-хэндл привязан' : 'LLM не привязана'}>
+            <StatusChip status={agent.llm_bound ? 'done' : 'waiting'} label={statusLabel(agent.status)} />
+          </Tooltip>
+          <div style={{ color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-3)' }}>
+            {agent.llm_provider ? agent.llm_provider : 'провайдер не задан'}
+            {agent.llm_model ? ` · ${agent.llm_model}` : ''}
+          </div>
         </div>
+        <Button variant="secondary" size="sm" onClick={() => onBind(agent)} title="Привязать LLM к агенту">
+          Привязать LLM
+        </Button>
       </div>
-      <div style={{ textAlign: 'right', fontSize: 'var(--chs-text-xs)' }}>
-        <Tooltip label={agent.llm_bound ? 'Секрет-хэндл привязан' : 'LLM не привязана'}>
-          <StatusChip status={agent.llm_bound ? 'done' : 'waiting'} label={statusLabel(agent.status)} />
-        </Tooltip>
-        <div style={{ color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-3)' }}>
-          {agent.llm_provider ? agent.llm_provider : 'провайдер не задан'}
-          {agent.llm_model ? ` · ${agent.llm_model}` : ''}
-        </div>
+
+      {/* LLM-подключение (именованный профиль) — селектор на всю ширину карточки. */}
+      <div style={{ width: '100%', marginTop: 'var(--chs-space-4)' }}>
+        <Select
+          label="LLM-подключение"
+          value={connId}
+          onChange={saveConnection}
+          disabled={saving || !connectionsAvailable}
+          hint={
+            connErr
+              ? connErr
+              : connOk
+                ? 'Сохранено.'
+                : saving
+                  ? 'Сохраняю…'
+                  : undefined
+          }
+          invalid={!!connErr}
+        >
+          <option value="">— Не задано (по умолчанию) —</option>
+          {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+          {currentMissingFromList && (
+            <option value={connId}>{`Текущее подключение (${connId.slice(0, 8)}…)`}</option>
+          )}
+        </Select>
+
+        {/* Связка-подсказка: нет подключения → как сделать, чтобы агент заработал. */}
+        {!connId && (
+          <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
+            {connectionsAvailable && options.length === 0
+              ? 'Подключений пока нет. '
+              : 'Без подключения агент не работает на вашем ключе. '}
+            <button type="button" style={hintLinkStyle} onClick={onGoToConnections}>
+              Создайте подключение и привяжите его здесь
+            </button>
+            {' — чтобы агент работал на вашем ключе.'}
+          </div>
+        )}
+        {!connectionsAvailable && (
+          <div style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginTop: 'var(--chs-space-2)' }}>
+            Список LLM-подключений недоступен (нужны права настройки подключений).
+          </div>
+        )}
       </div>
-      <Button variant="secondary" size="sm" onClick={() => onBind(agent)} title="Привязать LLM к агенту">
-        Привязать LLM
-      </Button>
     </div>
   );
 }
@@ -291,11 +392,17 @@ function BindModal({ agent, onClose, onDone }) {
    Экран
    --------------------------------------------------------------------------- */
 export default function AgentsScreen() {
+  const navigate = useNavigate();
   const [agents, setAgents] = useState(null); // null=loading
   const [error, setError] = useState(null);
   const [positions, setPositions] = useState([]);
   const [hireOpen, setHireOpen] = useState(false);
   const [bindAgent, setBindAgent] = useState(null);
+  // T-0498: named LLM connection profiles for the per-agent selector.
+  const [connections, setConnections] = useState([]);
+  // false when GET /api/llm-connections is 403 (no configure right) — the selector
+  // is then disabled with an honest hint rather than offering an empty dropdown.
+  const [connectionsAvailable, setConnectionsAvailable] = useState(true);
 
   const loadAgents = useCallback(async () => {
     setError(null);
@@ -324,7 +431,25 @@ export default function AgentsScreen() {
     }
   }, []);
 
-  useEffect(() => { loadAgents(); loadPositions(); }, [loadAgents, loadPositions]);
+  // Named LLM connection profiles (GET /api/llm-connections). A 403 (no configure
+  // right) is NOT an error here — it just means the per-agent selector is disabled
+  // with an honest hint. Any other failure → empty list (selector still shows the
+  // agent's current binding via the "current connection" fallback option).
+  const loadConnections = useCallback(async () => {
+    try {
+      const res = await fetch('/api/llm-connections', { headers: authHeaders() });
+      if (res.status === 403) { setConnections([]); setConnectionsAvailable(false); return; }
+      if (!res.ok) { setConnections([]); setConnectionsAvailable(true); return; }
+      const data = await res.json();
+      setConnections(Array.isArray(data.connections) ? data.connections : []);
+      setConnectionsAvailable(true);
+    } catch {
+      setConnections([]);
+      setConnectionsAvailable(true);
+    }
+  }, []);
+
+  useEffect(() => { loadAgents(); loadPositions(); loadConnections(); }, [loadAgents, loadPositions, loadConnections]);
 
   const hasAgents = Array.isArray(agents) && agents.length > 0;
 
@@ -364,7 +489,17 @@ export default function AgentsScreen() {
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-4)' }}>
-          {agents.map((a) => <AgentRow key={a.id} agent={a} onBind={setBindAgent} />)}
+          {agents.map((a) => (
+            <AgentRow
+              key={a.id}
+              agent={a}
+              onBind={setBindAgent}
+              connections={connections}
+              connectionsAvailable={connectionsAvailable}
+              onConnectionSaved={loadAgents}
+              onGoToConnections={() => navigate('/llm-connections')}
+            />
+          ))}
         </div>
       )}
 

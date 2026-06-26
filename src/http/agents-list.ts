@@ -123,6 +123,8 @@ interface AgentListRow {
   llm_model: string | null;
   /** Present ONLY to derive the boolean `llm_bound`; never serialized. */
   llm_secret_handle: string | null;
+  /** Named LLM connection profile the agent is bound to (T-0498). NULL = none. NOT a secret. */
+  llm_connection_id: string | null;
   position_title: string | null;
   department_name: string | null;
 }
@@ -154,6 +156,12 @@ export interface AgentPublic {
   llm_model: string | null;
   /** true iff agent_card.llm_secret_handle is non-NULL. The handle itself is never sent. */
   llm_bound: boolean;
+  /**
+   * Named LLM connection profile the agent is bound to (T-0498), or null when none.
+   * NOT a secret — it is the FK id the UI shows as the current selection in the
+   * connection dropdown. The key/handle lives on the connection, never here.
+   */
+  llm_connection_id: string | null;
   position: string | null;
   department: string | null;
 }
@@ -195,6 +203,8 @@ export function serializeAgent(row: AgentListRow): AgentPublic {
     llm_provider: deriveLlmProvider(row.llm_endpoint),
     llm_model: row.llm_model,
     llm_bound: bound,
+    // The named-connection FK (T-0498): the UI's current dropdown selection. Not a secret.
+    llm_connection_id: row.llm_connection_id ?? null,
     position: row.position_title,
     department: row.department_name,
   };
@@ -232,6 +242,7 @@ async function listAgentsTx(
               ac.llm_endpoint  AS llm_endpoint,
               ac.llm_model     AS llm_model,
               ac.llm_secret_handle AS llm_secret_handle,
+              ac.llm_connection_id AS llm_connection_id,
               p.title          AS position_title,
               d.display_name   AS department_name
          FROM choros.agent_card ac
