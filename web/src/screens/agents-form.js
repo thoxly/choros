@@ -323,3 +323,84 @@ export function mapLlmConnectionError(status, body) {
   if (status === 404) return 'Агент не найден (возможно, в другом тенанте).';
   return serverMsg || `Не удалось сохранить LLM-подключение (HTTP ${status}).`;
 }
+
+// ---------------------------------------------------------------------------
+// T-0499 — Agent ACTIVITY panel (GET /api/agents/:id/activity)
+//
+// WIRED CONTRACT (exact, read from src/http/agents.ts handleGetAgentActivity +
+// src/db/agent-activity-dao.ts):
+//   GET /api/agents/:id/activity?limit=&cursor=
+//     → 200 { items: [{ id, ts, outcome, process_key?, step?, instance_id?, summary? }],
+//             nextCursor: string|null }
+//
+// outcome ∈ 'proceeded' | 'deferred' | 'blocked'. The backend ALREADY redacts:
+// no raw payload, no secret, no LLM text — only the safe allow-list above. This
+// module just maps the outcome to a human chip + label, and ts to a human time.
+// ---------------------------------------------------------------------------
+
+/**
+ * Map an agent outcome to a StatusChip `status` + a human Russian label.
+ *   proceeded → done    («Выполнил сам»)
+ *   deferred  → waiting («Отложил человеку»)
+ *   blocked   → failed  («Заблокирован»)
+ * Unknown / missing → neutral ('paused' chip, 'Событие').
+ * @param {string} outcome
+ * @returns {{ chip: string, label: string }}
+ */
+export function outcomeMeta(outcome) {
+  switch (outcome) {
+    case 'proceeded':
+      return { chip: 'done', label: 'Выполнил сам' };
+    case 'deferred':
+      return { chip: 'waiting', label: 'Отложил человеку' };
+    case 'blocked':
+      return { chip: 'failed', label: 'Заблокирован' };
+    default:
+      return { chip: 'paused', label: 'Событие' };
+  }
+}
+
+/**
+ * Human, locale-formatted time for an activity event ts (epoch ms). Returns ''
+ * for a missing / non-finite ts (honest blank, never "Invalid Date").
+ * @param {number} ts epoch ms
+ * @returns {string}
+ */
+export function formatActivityTime(ts) {
+  if (typeof ts !== 'number' || !isFinite(ts)) return '';
+  try {
+    return new Date(ts).toLocaleString('ru-RU');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Build a short context line for an activity item: «процесс · шаг» (only the
+ * parts that are present). Returns '' when neither process nor step is known.
+ * process_key / step / instance_id are SAFE identifiers (server-redacted).
+ * @param {{process_key?:string, step?:string}} item
+ * @returns {string}
+ */
+export function activityContext(item) {
+  const proc = str(item?.process_key);
+  const step = str(item?.step);
+  return [proc, step].filter((x) => x.length > 0).join(' · ');
+}
+
+/**
+ * Map a GET /api/agents/:id/activity failure to a human Russian message.
+ * @param {number} status
+ * @param {unknown} body parsed JSON (may be null/non-object)
+ * @returns {string}
+ */
+export function mapActivityError(status, body) {
+  const obj = body && typeof body === 'object' ? body : undefined;
+  const serverMsg = obj ? (obj.error?.message || obj.message) : undefined;
+  if (status === 401) return 'Сессия не авторизована — войдите заново.';
+  if (status === 403) {
+    return 'Недостаточно прав: смотреть активность агента может только администратор с грантом управления агентами.';
+  }
+  if (status === 404) return 'Агент не найден (возможно, в другом тенанте).';
+  return serverMsg || `Не удалось загрузить активность агента (HTTP ${status}).`;
+}
