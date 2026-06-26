@@ -47,6 +47,8 @@ import SpendScreen from '../screens/screen-spend.jsx';
 import ReportsScreen from '../screens/screen-reports.jsx';
 // T-0493: Аналитика процессов — цикл-тайм + нагрузка по исполнителям.
 import ProcessAnalyticsScreen from '../screens/screen-process-analytics.jsx';
+// T-0494: Операционный обзор — три сигнала в одной панели.
+import OpsOverviewScreen from '../screens/screen-ops-overview.jsx';
 
 export { Icon };
 
@@ -89,6 +91,8 @@ const SCREEN_META = {
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
   rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
+  // T-0494: операционный обзор — три сигнала (процессы + расход + отчёты).
+  "ops-overview": { crumb: ["Наблюдаемость", "Операционный обзор"] },
   // T-0477 (E-AGENTS L5): LLM spend accounting screen.
   spend: { crumb: ["Наблюдаемость", "Расход"] },
   // T-0490: отчёты — просмотр report_page + Floor-1 агрегаты.
@@ -809,6 +813,8 @@ function AppShell() {
             <Route path="/reports" element={<ReportsScreen />} />
             {/* T-0493: Аналитика процессов — цикл-тайм + нагрузка по исполнителям. */}
             <Route path="/process-analytics" element={<ProcessAnalyticsScreen />} />
+            {/* T-0494: Операционный обзор — три сигнала (процессы + расход + отчёты) */}
+            <Route path="/ops-overview" element={<OpsOverviewScreen />} />
           </Routes>
         </div>
       </main>
