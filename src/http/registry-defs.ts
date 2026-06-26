@@ -1024,8 +1024,13 @@ export function registerRegistryDefRoutes(
     const registryDefId = params["id"] ?? "";
     assertUuidShape(registryDefId, "registry_def id");
 
-    // 1. Extract actor (use _poolHint or lazy pool for slug resolution)
-    const actor = await extractActor(req, _poolHint ?? getPool());
+    // Pool: when CRUD deps are wired (production), use the SAME app pool POST/GET
+    // use, so the schema write runs under the identical RLS path. Falls back to the
+    // injected _poolHint (tests) or the lazy singleton (no-DB honest-degrade).
+    const schemaPool = crudDeps?.pool ?? _poolHint ?? getPool();
+
+    // 1. Extract actor (use the schema pool for slug resolution)
+    const actor = await extractActor(req, schemaPool);
 
     // 2. Parse body
     const rawBody = await readJsonBody(req);
@@ -1049,11 +1054,23 @@ export function registerRegistryDefRoutes(
 
     const force = body["force"] === true;
 
-    // 3. Run transactional schema-change guard.
-    // poolHint is provided by tests to inject a fake pool; production uses lazy singleton.
+    // 3. Resolve the actor's REAL tenant when a resolver is wired — the SAME
+    //    resolution POST/GET/LIST use. Historically (T-0177) this path keyed
+    //    tenancy off the hardcoded DEV_TENANT_ID (Dev Silo), which split the
+    //    cascade-relate flow across tenants: POST /api/registry-defs created the
+    //    related section under the actor's real tenant, but the PUT that wrote the
+    //    x-relation field onto the SOURCE schema (and reconciled cross_app_ref) ran
+    //    under Dev Silo → "registry_def not found" 404 for any non-Dev-Silo tenant,
+    //    leaving the relation unsaved / the related app a dangling reference.
+    //    Falls back to DEV_TENANT_ID only when no resolver is wired (no-DB degrade).
+    const tenantId = crudDeps?.resolveActorTenant
+      ? await crudDeps.resolveActorTenant(actor)
+      : DEV_TENANT_ID;
+
+    // 4. Run transactional schema-change guard under the resolved tenant + pool.
     const result = await updateSchemaInTx({
-      pool: _poolHint ?? getPool(),
-      tenantId: DEV_TENANT_ID,
+      pool: schemaPool,
+      tenantId,
       registryDefId,
       newSchema,
       force,
