@@ -242,6 +242,9 @@ export function registerSolutionBundleRoutes(router: Router, deps: SolutionBundl
             results.push({ kind: "process", ref: key, ok: true });
           } else if (pubResult.status === "lint_failed") {
             results.push({ kind: "process", ref: key, ok: false, detail: "BPMN_LINT_FAILED" });
+          } else if (pubResult.status === "agent_unresolved") {
+            // [SECURITY] an agentTask executor did not resolve to a provisioned agent.
+            results.push({ kind: "process", ref: key, ok: false, detail: "AGENT_REF_UNRESOLVED" });
           } else if (pubResult.status === "engine_unavailable") {
             results.push({ kind: "process", ref: key, ok: false, detail: pubResult.code });
           } else {

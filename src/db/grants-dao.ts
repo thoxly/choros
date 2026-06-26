@@ -445,3 +445,55 @@ export async function getFieldVisibilityPolicy(
 
   return { roleScopedFields };
 }
+
+// ---------------------------------------------------------------------------
+// filterProvisionedAgentEmployeeIds — [SECURITY def-in-depth, publish-time]:
+// resolve a set of candidate executor ids (authored choros:agentRef values) to
+// the subset that are PROVISIONED agents in this tenant — i.e. a kind='agent'
+// employee row WITH an agent_card row, scoped to `tenantId` (RLS-isolated read).
+//
+// Used by the process-publish path (process-defs.ts) to reject an authored
+// agentTask whose choros:agentRef names a non-existent / non-agent / cross-tenant
+// id BEFORE deploy. The pure publish transform (agent-task-external-mapper.ts)
+// stamps the ref verbatim as the dispatcher's agentEmployeeId, and the pure (and
+// IO-free) bpmn-linter only checks the ref is PRESENT — neither verifies it
+// resolves. This DB-backed reader is that missing resolution, kept OUT of the
+// pure transform/linter (which must stay side-effect-free) and in the DB layer.
+//
+// agent_card's FK pins employee_kind='agent' (migration 032), so an agent_card
+// row already implies kind='agent'; we still JOIN employee + assert e.kind='agent'
+// for an explicit, resilient guarantee and to confirm the employee row exists.
+// Org-less / system agents (NULL agent_card.employee_id, migration 093) are
+// addressed by their agent_card id — NOT an employee id — so they never match
+// here, which is correct: an org-less agent holds no process role and is not a
+// valid agentTask executor (agent-task-external-mapper.ts header).
+//
+// Returns the subset of `ids` that resolve (a Set for O(1) membership at the call
+// site). Inputs are deduped and filtered to well-formed UUIDs up-front: a non-UUID
+// id can never match the uuid employee.id column, so it is inherently unresolved
+// (the caller rejects it) — filtering avoids letting Postgres throw on an invalid
+// uuid cast inside the ANY($2::uuid[]) array.
+// ---------------------------------------------------------------------------
+
+export async function filterProvisionedAgentEmployeeIds(
+  pool: pg.Pool,
+  tenantId: string,
+  ids: readonly string[],
+): Promise<Set<string>> {
+  const candidateIds = Array.from(new Set(ids)).filter((id) => UUID_RE.test(id));
+  if (candidateIds.length === 0) return new Set<string>();
+
+  return withTenantReadTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `SELECT e.id
+         FROM choros.employee e
+         JOIN choros.agent_card ac
+           ON ac.tenant_id = e.tenant_id AND ac.employee_id = e.id
+        WHERE e.tenant_id = $1
+          AND e.kind = 'agent'
+          AND e.id = ANY($2::uuid[])`,
+      [tenantId, candidateIds],
+    );
+    return new Set<string>(rows.map((r) => r.id));
+  });
+}
