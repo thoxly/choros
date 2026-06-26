@@ -501,3 +501,272 @@ describe("getRoleSlugsForActor — T-0366 KC seed persona fallback", () => {
     expect(slugs).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0397 — PDP dual-control read-path enforcement
+//
+// A CRITICAL grant/assignment is PDP-active only when its SECOND distinct
+// approver is present (confirmed2_by IS NOT NULL); the grant query also honors
+// valid_until (previously ignored for grants). "Critical" = the SQL-expressible
+// criticality axes a grant row can carry (role-criticality.ts axis a/b):
+//   axis a — operation IN ('approve','transition')
+//   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
+// An assignment is critical iff the role it binds holds any such grant.
+//
+// This dedicated fake pool models the FULL T-0397 SQL semantics (confirmed2_by,
+// grant valid_until, role→grant criticality EXISTS) so the gating is verified
+// end-to-end through the real DAO queries. It is self-contained — it does NOT
+// reuse the legacy fixtures above (which predate confirmed2_by).
+// ---------------------------------------------------------------------------
+
+interface T0397Grant {
+  id: string;
+  operation: string;
+  resource_type: string;
+  confirmed_by: string | null;
+  confirmed2_by: string | null;
+  valid_from: number | null;
+  valid_until: number | null;
+}
+interface T0397Assignment {
+  role_id: string;
+  confirmed_by: string | null;
+  confirmed2_by: string | null;
+  valid_from: number | null;
+  valid_until: number | null;
+}
+
+/** Is a single grant row "critical" under the axis-a/b SQL predicate? */
+function isCriticalGrant(g: { operation: string; resource_type: string }): boolean {
+  return (
+    g.operation === "approve" ||
+    g.operation === "transition" ||
+    (g.resource_type === "effect_resource" && g.operation === "invoke")
+  );
+}
+
+/** Does this role hold ANY confirmed critical grant? (assignment criticality) */
+function roleHoldsCriticalGrant(grants: T0397Grant[]): boolean {
+  return grants.some((g) => g.confirmed_by !== null && isCriticalGrant(g));
+}
+
+const T0397_NOW = 10_000;
+
+// Employees: slug → id.
+const T0397_EMP: Record<string, string> = {
+  "e-approver": "d0000000-0000-0000-0000-0000000003a1",
+  "e-reader": "d0000000-0000-0000-0000-0000000003a2",
+  "e-expired": "d0000000-0000-0000-0000-0000000003a3",
+  "e-ra-critical": "d0000000-0000-0000-0000-0000000003a4",
+};
+
+// Roles: id → { slug, grants }.
+const T0397_ROLES: Record<string, { slug: string; grants: T0397Grant[] }> = {
+  // (a)/(b) Critical grant — single-confirm vs dual-confirm tested via two roles.
+  "r-crit-single": {
+    slug: "crit-single",
+    grants: [
+      // approve grant, confirmed_by only, confirmed2_by NULL → NOT active.
+      { id: "g-crit-single", operation: "approve", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+    ],
+  },
+  "r-crit-dual": {
+    slug: "crit-dual",
+    grants: [
+      // same approve grant but confirmed2_by present → active.
+      { id: "g-crit-dual", operation: "approve", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    ],
+  },
+  // (c) Critical, dual-confirmed, but EXPIRED valid_until → NOT active.
+  "r-crit-expired": {
+    slug: "crit-expired",
+    grants: [
+      { id: "g-crit-expired", operation: "invoke", resource_type: "effect_resource",
+        confirmed_by: "seed", confirmed2_by: "seed2", valid_from: 0, valid_until: 5_000 },
+    ],
+  },
+  // (d) Non-critical (read) grant, single-confirm → STILL active (no regression).
+  "r-noncrit": {
+    slug: "noncrit",
+    grants: [
+      { id: "g-noncrit", operation: "read", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+    ],
+  },
+};
+
+// Assignments per employee-id (for the role_assignment-level gate).
+const T0397_ASSIGN: Record<string, T0397Assignment[]> = {
+  // e-approver: assigned to BOTH crit-single (no #2) and crit-dual (#2 set), each
+  // assignment itself dual-confirmed so the assignment gate passes — this isolates
+  // the GRANT-level confirmed2_by gate.
+  [T0397_EMP["e-approver"]!]: [
+    { role_id: "r-crit-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-crit-dual",   confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+  ],
+  // e-reader: non-critical role, single-confirm assignment → active.
+  [T0397_EMP["e-reader"]!]: [
+    { role_id: "r-noncrit", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+  ],
+  // e-expired: critical role with EXPIRED grant (assignment itself fine).
+  [T0397_EMP["e-expired"]!]: [
+    { role_id: "r-crit-expired", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+  ],
+  // e-ra-critical: assigned to a CRITICAL role (crit-dual holds an active approve
+  // grant) but the ASSIGNMENT has confirmed2_by NULL → assignment-level gate
+  // excludes it (this is the role_assignment confirmed2_by test, deliverable (e)).
+  [T0397_EMP["e-ra-critical"]!]: [
+    { role_id: "r-crit-dual", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+  ],
+};
+
+function makeT0397Pool(nowMs: number): import("pg").Pool {
+  const inWindow = (vf: number | null, vu: number | null): boolean => {
+    if (vf !== null && vf > nowMs) return false;
+    if (vu !== null && vu <= nowMs) return false;
+    return true;
+  };
+  // Assignment passes its own gate: confirmed, in-window, AND
+  // (confirmed2_by set OR role holds no critical grant).
+  const assignmentActive = (ra: T0397Assignment): boolean => {
+    if (!ra.confirmed_by) return false;
+    if (!inWindow(ra.valid_from, ra.valid_until)) return false;
+    const role = T0397_ROLES[ra.role_id];
+    const roleCritical = role ? roleHoldsCriticalGrant(role.grants) : false;
+    if (roleCritical && ra.confirmed2_by === null) return false;
+    return true;
+  };
+
+  const fakeClient = {
+    query: async (text: string, values?: unknown[]) => {
+      const sql = typeof text === "object" ? (text as { text: string }).text : text;
+      const params = values ?? [];
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/i.test(sql)) return { rows: [] };
+      if (/^\s*SET LOCAL/i.test(sql)) return { rows: [] };
+
+      if (/FROM choros\.employee/i.test(sql)) {
+        const slug = params[1] as string;
+        const id = T0397_EMP[slug];
+        return { rows: id ? [{ id }] : [] };
+      }
+
+      // Role-slug JOIN path (getRoleSlugsForActor).
+      if (/JOIN choros\.role\b/i.test(sql)) {
+        const empId = params[1] as string;
+        const slugs = [...new Set(
+          (T0397_ASSIGN[empId] ?? [])
+            .filter(assignmentActive)
+            .map((ra) => T0397_ROLES[ra.role_id]?.slug)
+            .filter((s): s is string => s !== undefined),
+        )];
+        return { rows: slugs.map((slug) => ({ slug })) };
+      }
+
+      // Plain role_assignment path (getGrantsForSubject step 2).
+      if (/FROM choros\.role_assignment\b/i.test(sql)) {
+        const empId = params[1] as string;
+        const rows = (T0397_ASSIGN[empId] ?? [])
+          .filter(assignmentActive)
+          .map((ra) => ({ role_id: ra.role_id }));
+        return { rows };
+      }
+
+      // Grant path (getGrantsForSubject step 3): confirmed, in-window, AND
+      // (not critical OR confirmed2_by set).
+      if (/FROM choros\."grant"/i.test(sql)) {
+        const roleIds = params[1] as string[];
+        const rows: unknown[] = [];
+        for (const roleId of roleIds) {
+          const role = T0397_ROLES[roleId];
+          if (!role) continue;
+          for (const g of role.grants) {
+            if (!g.confirmed_by) continue;
+            if (!inWindow(g.valid_from, g.valid_until)) continue;
+            if (isCriticalGrant(g) && g.confirmed2_by === null) continue;
+            rows.push({
+              id: g.id,
+              role_id: roleId,
+              resource_type: g.resource_type,
+              resource_facet: null,
+              operation: g.operation,
+              scope: { kind: "node", hierarchy: "org", nodeId: "x", nodeLevel: "department" },
+              constraint: null,
+              delegable: false,
+              granted_by: "seed",
+              valid_from: g.valid_from,
+              valid_until: g.valid_until,
+              created_at: "0",
+            });
+          }
+        }
+        return { rows };
+      }
+
+      return { rows: [] };
+    },
+    release: () => {},
+  } as unknown as import("pg").PoolClient;
+
+  return { connect: async () => fakeClient } as unknown as import("pg").Pool;
+}
+
+describe("getGrantsForSubject — T-0397 dual-control grant gate", () => {
+  it("(a) critical grant with only confirmed_by (no confirmed2_by) → NOT PDP-active", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // e-approver holds BOTH crit-single (no #2) and crit-dual (#2 set).
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-approver", T0397_NOW);
+    const ids = grants.map((g) => g.id);
+    // crit-single grant must be excluded (confirmed2_by NULL on a critical grant).
+    expect(ids).not.toContain("g-crit-single");
+  });
+
+  it("(b) same critical capability with confirmed2_by set → PDP-active", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-approver", T0397_NOW);
+    const ids = grants.map((g) => g.id);
+    // crit-dual grant IS active (second approver present).
+    expect(ids).toContain("g-crit-dual");
+  });
+
+  it("(c) critical grant past its valid_until → NOT active (grant query honors valid_until)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // e-expired holds crit-expired (dual-confirmed) but valid_until=5000 < NOW=10000.
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-expired", T0397_NOW);
+    expect(grants.map((g) => g.id)).not.toContain("g-crit-expired");
+  });
+
+  it("(d) non-critical grant with single confirm → STILL active (no regression)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-reader", T0397_NOW);
+    // read grant, confirmed2_by NULL → must remain active (non-critical path).
+    expect(grants.map((g) => g.id)).toContain("g-noncrit");
+  });
+});
+
+describe("getRoleSlugsForActor / getGrantsForSubject — T-0397 role_assignment confirmed2_by gate", () => {
+  it("(e) assignment to a critical role with confirmed2_by NULL → role slug excluded", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // e-ra-critical: assigned to crit-dual (a critical role), but the ASSIGNMENT
+    // has confirmed2_by NULL → the assignment-level dual-control gate drops it.
+    const slugs = await getRoleSlugsForActor(pool, TENANT_ID, "e-ra-critical", T0397_NOW);
+    expect(slugs).not.toContain("crit-dual");
+    expect(slugs).toEqual([]);
+  });
+
+  it("(e') same critical assignment also contributes ZERO grants (PDP path)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // Step 2 (assignment) drops the role before step 3 (grants) runs → no grants.
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-ra-critical", T0397_NOW);
+    expect(grants).toEqual([]);
+  });
+
+  it("(e'') non-critical assignment with confirmed2_by NULL → role slug INCLUDED (no regression)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    // e-reader: assigned to noncrit role (no critical grant) with confirmed2_by
+    // NULL → assignment gate passes (role not critical).
+    const slugs = await getRoleSlugsForActor(pool, TENANT_ID, "e-reader", T0397_NOW);
+    expect(slugs).toContain("noncrit");
+  });
+});
