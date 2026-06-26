@@ -145,8 +145,19 @@ async function withTenant<T>(
 export async function loadCycleTimeByActivity(
   pool: pg.Pool,
   tenantId: string,
+  processKey?: string,
 ): Promise<CycleTimeAnalytics> {
   return withTenant(pool, tenantId, async (client) => {
+    // T-0495: optional drill-down by process. When a processKey is supplied it is
+    // bound as $3 (STRICTLY parameterized — never interpolated into the SQL) and
+    // filters on the canonical transition_payload.process_key. tenant_id stays $1.
+    const params: unknown[] = [tenantId, TRANSITION_EVENT_TYPES];
+    let processFilter = "";
+    if (processKey !== undefined && processKey !== "") {
+      params.push(processKey);
+      processFilter = `AND (payload -> 'transition_payload' ->> 'process_key') = $${params.length}`;
+    }
+
     const { rows } = await client.query<{
       activity: string;
       avg_duration_ms: string | null;
@@ -174,9 +185,10 @@ export async function loadCycleTimeByActivity(
       WHERE tenant_id = $1
         AND type = ANY($2::text[])
         AND payload ? 'transition_payload'
+        ${processFilter}
       GROUP BY (payload -> 'transition_payload' ->> 'activity')
       ORDER BY avg_duration_ms DESC NULLS LAST`,
-      [tenantId, TRANSITION_EVENT_TYPES],
+      params,
     );
 
     const analyticsRows: ActivityCycleTime[] = rows.map((r) => ({
@@ -213,8 +225,18 @@ export interface ActorTypeBreakdown {
 export async function loadActorTypeBreakdown(
   pool: pg.Pool,
   tenantId: string,
+  processKey?: string,
 ): Promise<ActorTypeBreakdown[]> {
   return withTenant(pool, tenantId, async (client) => {
+    // T-0495: same optional process drill-down as loadCycleTimeByActivity.
+    // processKey bound as $3 — parameterized, never interpolated. tenant_id stays $1.
+    const params: unknown[] = [tenantId, TRANSITION_EVENT_TYPES];
+    let processFilter = "";
+    if (processKey !== undefined && processKey !== "") {
+      params.push(processKey);
+      processFilter = `AND (payload -> 'transition_payload' ->> 'process_key') = $${params.length}`;
+    }
+
     const { rows } = await client.query<{
       activity: string;
       actor_type: string;
@@ -228,11 +250,12 @@ export async function loadActorTypeBreakdown(
       WHERE tenant_id = $1
         AND type = ANY($2::text[])
         AND payload ? 'transition_payload'
+        ${processFilter}
       GROUP BY
          (payload -> 'transition_payload' ->> 'activity'),
          (payload -> 'transition_payload' ->> 'actor_type')
       ORDER BY activity, actor_type`,
-      [tenantId, TRANSITION_EVENT_TYPES],
+      params,
     );
 
     return rows.map((r) => ({
@@ -240,6 +263,37 @@ export async function loadActorTypeBreakdown(
       actor_type: r.actor_type ?? "(unknown)",
       count: parseInt(r.cnt, 10),
     }));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// loadProcessKeys (T-0495)
+//
+// DISTINCT list of process_key values present in the transition journal for the
+// tenant — feeds the analytics drill-down selector. Same source-of-truth path as
+// the analytics queries above (audit_event → transition_payload.process_key) so the
+// selector list is self-consistent with the data it filters. Tenant-scoped via $1.
+// ---------------------------------------------------------------------------
+
+export async function loadProcessKeys(
+  pool: pg.Pool,
+  tenantId: string,
+): Promise<string[]> {
+  return withTenant(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ process_key: string | null }>(
+      `SELECT DISTINCT (payload -> 'transition_payload' ->> 'process_key') AS process_key
+         FROM choros.audit_event
+        WHERE tenant_id = $1
+          AND type = ANY($2::text[])
+          AND payload ? 'transition_payload'
+          AND (payload -> 'transition_payload' ->> 'process_key') IS NOT NULL
+        ORDER BY 1`,
+      [tenantId, TRANSITION_EVENT_TYPES],
+    );
+
+    return rows
+      .map((r) => r.process_key)
+      .filter((k): k is string => typeof k === "string" && k.length > 0);
   });
 }
 

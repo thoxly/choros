@@ -64,6 +64,7 @@ import { toCsv, toXlsx, sanitizeSheetName, type Tabular } from "./tabular-export
 import {
   loadCycleTimeByActivity,
   loadActorTypeBreakdown,
+  loadProcessKeys,
   type CycleTimeAnalytics,
   type ActorTypeBreakdown,
 } from "../db/transition-journal.js";
@@ -1156,19 +1157,32 @@ export function registerReportPageRenderRoutes(
       const actor = await extractActor(req, pool); // throws 401 if missing
       const tenantId = await resolveTenantForActor(actor, resolveActorTenant);
 
-      const [cycleTime, actorBreakdown] = await Promise.all([
-        loadCycleTimeByActivity(pool, tenantId),
-        loadActorTypeBreakdown(pool, tenantId),
+      // T-0495: optional drill-down by process. The process_key from the query is
+      // ONLY ever passed to the loaders as a bound SQL parameter ($N) — never
+      // interpolated into SQL. Empty/absent ⇒ undefined ⇒ tenant-wide analytics.
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const rawProcessKey = url.searchParams.get("process_key");
+      const processKey =
+        rawProcessKey !== null && rawProcessKey !== "" ? rawProcessKey : undefined;
+
+      const [cycleTime, actorBreakdown, processKeys] = await Promise.all([
+        loadCycleTimeByActivity(pool, tenantId, processKey),
+        loadActorTypeBreakdown(pool, tenantId, processKey),
+        loadProcessKeys(pool, tenantId),
       ]);
 
       const analyticsResult: {
         bottleneck: string | null;
         cycleTime: CycleTimeAnalytics;
         actorBreakdown: ActorTypeBreakdown[];
+        processKeys: string[];
+        selectedProcess: string | null;
       } = {
         bottleneck: cycleTime.bottleneck,
         cycleTime,
         actorBreakdown,
+        processKeys,
+        selectedProcess: processKey ?? null,
       };
 
       res.statusCode = 200;
