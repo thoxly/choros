@@ -268,7 +268,35 @@ function makeFakePool(rowSets: FakeRow[][]): import("pg").Pool {
   } as unknown as import("pg").Pool;
 }
 
-import { loadCycleTimeByActivity, loadActorTypeBreakdown } from "../db/transition-journal.js";
+import { loadCycleTimeByActivity, loadActorTypeBreakdown, loadProcessKeys } from "../db/transition-journal.js";
+
+// T-0495: capturing pool — records every (sql, params) so we can assert the
+// process_key drill-down is bound as a positional parameter (NOT interpolated)
+// and that tenant_id stays $1.
+interface CapturedQuery {
+  sql: string;
+  params: unknown[];
+}
+
+function makeCapturingPool(rowSets: FakeRow[][]): {
+  pool: import("pg").Pool;
+  captured: CapturedQuery[];
+} {
+  const captured: CapturedQuery[] = [];
+  let callIndex = 0;
+  const pool = {
+    connect: async () => ({
+      query: async (sql: string, params?: unknown[]) => {
+        captured.push({ sql, params: params ?? [] });
+        const rows = rowSets[callIndex] ?? [];
+        callIndex++;
+        return { rows, rowCount: rows.length };
+      },
+      release: () => {},
+    }),
+  } as unknown as import("pg").Pool;
+  return { pool, captured };
+}
 
 describe("T-0339 cycle-time analytics (stub pool)", () => {
   it("TJ-8: loadCycleTimeByActivity returns bottleneck = activity with highest avg", async () => {
@@ -328,6 +356,123 @@ describe("T-0339 cycle-time analytics (stub pool)", () => {
     expect(human?.count).toBe(5);
     const agent = result.find((r) => r.activity === "task.completed" && r.actor_type === "agent");
     expect(agent?.count).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0495: process drill-down — analytics loaders accept an optional processKey
+// that is bound as a positional parameter ($N), never interpolated. Plus
+// loadProcessKeys returns the DISTINCT selector list.
+// ---------------------------------------------------------------------------
+
+const PROC_KEY_FILTER = "purchaseApproval";
+
+describe("T-0495 process drill-down — loadCycleTimeByActivity(processKey)", () => {
+  it("DD-1: WITHOUT processKey → only $1 (tenant) + $2 (event types); no process filter in SQL", async () => {
+    // BEGIN, SET LOCAL, SET LOCAL search_path, SELECT (analytics), COMMIT
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadCycleTimeByActivity(pool, TENANT);
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.includes("avg_duration_ms"));
+    expect(select).toBeDefined();
+    // tenant stays $1
+    expect(select!.params[0]).toBe(TENANT);
+    // only 2 params bound (tenant + event types) — no process_key
+    expect(select!.params).toHaveLength(2);
+    // SQL does not mention process_key when no filter requested
+    expect(select!.sql).not.toContain("process_key");
+  });
+
+  it("DD-2: WITH processKey → adds $3 process filter, parameterized (no interpolation), tenant still $1", async () => {
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadCycleTimeByActivity(pool, TENANT, PROC_KEY_FILTER);
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.includes("avg_duration_ms"));
+    expect(select).toBeDefined();
+    // tenant_id is $1, process_key is $3 — bound, never inlined
+    expect(select!.params).toEqual([TENANT, expect.anything(), PROC_KEY_FILTER]);
+    expect(select!.sql).toContain("->> 'process_key') = $3");
+    // The raw process key value is NEVER spliced into the SQL string (no interpolation)
+    expect(select!.sql).not.toContain(PROC_KEY_FILTER);
+  });
+
+  it("DD-3: empty-string processKey behaves like absent (no filter)", async () => {
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadCycleTimeByActivity(pool, TENANT, "");
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.includes("avg_duration_ms"));
+    expect(select!.params).toHaveLength(2);
+    expect(select!.sql).not.toContain("process_key");
+  });
+
+  it("DD-4: injection-shaped processKey is passed only as a bound param (not SQL)", async () => {
+    const evil = "x'; DROP TABLE choros.audit_event;--";
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadCycleTimeByActivity(pool, TENANT, evil);
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.includes("avg_duration_ms"));
+    // The malicious string lives ONLY in params[2], never in the SQL text.
+    expect(select!.params[2]).toBe(evil);
+    expect(select!.sql).not.toContain("DROP TABLE");
+    expect(select!.sql).toContain("= $3");
+  });
+});
+
+describe("T-0495 process drill-down — loadActorTypeBreakdown(processKey)", () => {
+  it("DD-5: WITHOUT processKey → 2 params, no process filter", async () => {
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadActorTypeBreakdown(pool, TENANT);
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.toLowerCase().includes("actor_type"));
+    expect(select).toBeDefined();
+    expect(select!.params).toHaveLength(2);
+    expect(select!.sql).not.toContain("process_key");
+  });
+
+  it("DD-6: WITH processKey → $3 process filter, parameterized, tenant still $1", async () => {
+    const { pool, captured } = makeCapturingPool([[], [], [], [], []]);
+    await loadActorTypeBreakdown(pool, TENANT, PROC_KEY_FILTER);
+
+    const select = captured.find((c) => /^\s*SELECT/i.test(c.sql) && c.sql.toLowerCase().includes("actor_type"));
+    expect(select!.params).toEqual([TENANT, expect.anything(), PROC_KEY_FILTER]);
+    expect(select!.sql).toContain("->> 'process_key') = $3");
+    expect(select!.sql).not.toContain(PROC_KEY_FILTER);
+  });
+});
+
+describe("T-0495 process drill-down — loadProcessKeys", () => {
+  it("DD-7: returns DISTINCT non-null process keys from the journal", async () => {
+    const keyRows: FakeRow[] = [
+      { process_key: "purchaseApproval" } as unknown as FakeRow,
+      { process_key: "telLinear" } as unknown as FakeRow,
+    ];
+    // BEGIN, SET LOCAL, SET LOCAL search_path, SELECT DISTINCT, COMMIT
+    const { pool, captured } = makeCapturingPool([[], [], [], keyRows, []]);
+    const result = await loadProcessKeys(pool, TENANT);
+
+    expect(result).toEqual(["purchaseApproval", "telLinear"]);
+    const select = captured.find((c) => /SELECT DISTINCT/i.test(c.sql));
+    expect(select).toBeDefined();
+    // tenant-scoped via $1
+    expect(select!.params[0]).toBe(TENANT);
+    expect(select!.sql).toContain("process_key");
+  });
+
+  it("DD-8: filters out null / empty process keys defensively", async () => {
+    const keyRows: FakeRow[] = [
+      { process_key: "purchaseApproval" } as unknown as FakeRow,
+      { process_key: null } as unknown as FakeRow,
+      { process_key: "" } as unknown as FakeRow,
+    ];
+    const { pool } = makeCapturingPool([[], [], [], keyRows, []]);
+    const result = await loadProcessKeys(pool, TENANT);
+    expect(result).toEqual(["purchaseApproval"]);
+  });
+
+  it("DD-9: empty journal → empty list (honest empty)", async () => {
+    const { pool } = makeCapturingPool([[], [], [], [], []]);
+    const result = await loadProcessKeys(pool, TENANT);
+    expect(result).toEqual([]);
   });
 });
 

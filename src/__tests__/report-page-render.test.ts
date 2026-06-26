@@ -1005,6 +1005,141 @@ describe("T-0193 R-6 — two-app scope-containment: grant on App-A, page of App-
 });
 
 // ---------------------------------------------------------------------------
+// T-0495 — GET /api/process-analytics process drill-down
+//
+// Verifies: (1) the optional ?process_key= query is threaded to the loaders as a
+// bound SQL parameter (never interpolated); (2) the response carries the new
+// `processKeys` selector list and `selectedProcess` echo; (3) auth is unchanged.
+// ---------------------------------------------------------------------------
+
+// Capturing pool that tolerates concurrent connects (the route runs three loaders
+// via Promise.all). Each connect returns a fresh client at index 0 over the SAME
+// rowSets and records every (sql, params) into a shared `captured` array.
+function makeAnalyticsCapturingPool(rowSets: unknown[][]): {
+  pool: import("pg").Pool;
+  captured: { sql: string; params: unknown[] }[];
+} {
+  const captured: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    connect: async () => {
+      let i = 0;
+      return {
+        query: async (sql: string, params?: unknown[]) => {
+          captured.push({ sql, params: params ?? [] });
+          const rows = (rowSets[i] ?? []) as unknown[];
+          i++;
+          return { rows, rowCount: rows.length };
+        },
+        release: () => {},
+      } as unknown as import("pg").PoolClient;
+    },
+  } as unknown as import("pg").Pool;
+  return { pool, captured };
+}
+
+// Matches DEV_TENANT_ID fallback in report-page-render.ts (no resolver wired in tests).
+const DEV_TENANT_ID_FOR_TEST = "a0000000-0000-0000-0000-000000000001";
+
+describe("T-0495 — GET /api/process-analytics process drill-down", () => {
+  it("PA-1: 401 without auth (unchanged)", async () => {
+    resetRenderPoolForTesting();
+    const { server, baseUrl } = buildTestServer(allowDeps, makeFakePool([]));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status } = await httpReq("GET", baseUrl() + "/api/process-analytics");
+      expect(status).toBe(401);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("PA-2: WITHOUT process_key → 200, selectedProcess=null, no process filter in SQL", async () => {
+    resetRenderPoolForTesting();
+    // Each loader's connection runs: BEGIN, SET LOCAL, SET LOCAL, SELECT, COMMIT.
+    const rowSets: unknown[][] = [[], [], [], [], []];
+    const { pool, captured } = makeAnalyticsCapturingPool(rowSets);
+    const { server, baseUrl } = buildTestServer(allowDeps, pool);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl() + "/api/process-analytics",
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      expect(body["selectedProcess"]).toBeNull();
+      expect(Array.isArray(body["processKeys"])).toBe(true);
+      expect(body).toHaveProperty("bottleneck");
+      expect(body).toHaveProperty("cycleTime");
+      expect(body).toHaveProperty("actorBreakdown");
+      // No SELECT carried a process_key filter / a 3rd param.
+      const analyticsSelects = captured.filter(
+        (c) => /^\s*SELECT/i.test(c.sql) && c.sql.includes("transition_payload"),
+      );
+      expect(analyticsSelects.length).toBeGreaterThan(0);
+      for (const sel of analyticsSelects) {
+        expect(sel.sql).not.toContain("= $3");
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("PA-3: WITH process_key → 200, selectedProcess echoed, filter bound as $3 (param, not SQL)", async () => {
+    resetRenderPoolForTesting();
+    const rowSets: unknown[][] = [[], [], [], [], []];
+    const { pool, captured } = makeAnalyticsCapturingPool(rowSets);
+    const { server, baseUrl } = buildTestServer(allowDeps, pool);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const PROC = "purchaseApproval";
+    try {
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl() + `/api/process-analytics?process_key=${PROC}`,
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      expect(body["selectedProcess"]).toBe(PROC);
+
+      // The two filterable analytics SELECTs (cycle-time + actor breakdown) must
+      // carry the process key ONLY as bound param $3 — never spliced into SQL.
+      const filtered = captured.filter((c) => c.sql.includes("= $3"));
+      expect(filtered.length).toBe(2);
+      for (const sel of filtered) {
+        expect(sel.params[0]).toBe(DEV_TENANT_ID_FOR_TEST); // tenant stays $1
+        expect(sel.params[2]).toBe(PROC); // process_key is $3
+        expect(sel.sql).not.toContain(PROC); // never interpolated
+      }
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("PA-4: empty process_key (?process_key=) → treated as absent, selectedProcess=null", async () => {
+    resetRenderPoolForTesting();
+    const rowSets: unknown[][] = [[], [], [], [], []];
+    const { pool, captured } = makeAnalyticsCapturingPool(rowSets);
+    const { server, baseUrl } = buildTestServer(allowDeps, pool);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const { status, json } = await httpReq(
+        "GET",
+        baseUrl() + "/api/process-analytics?process_key=",
+        { "x-dev-user": DEV_ACTOR },
+      );
+      expect(status).toBe(200);
+      const body = json as Record<string, unknown>;
+      expect(body["selectedProcess"]).toBeNull();
+      expect(captured.some((c) => c.sql.includes("= $3"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FF-FLOOR2-RLS structural check: no DB credentials in render module
 // ---------------------------------------------------------------------------
 
