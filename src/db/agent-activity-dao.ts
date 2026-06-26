@@ -177,7 +177,12 @@ function toActivityItem(row: AuditRow): AgentActivityItem | null {
 
   const procKey = payload["proc_key"];
   const instanceId = payload["instance_id"];
-  const step = payload["step"] ?? payload["activity"];
+  // Allowlist hardening (T-0499 adversarial review): read ONLY the explicit
+  // `step` key — a short BPMN step identifier — and DO NOT widen to `activity`.
+  // Narrowing the projected key-set keeps a future writer that ever stored
+  // free-text under `activity` from latently surfacing through this redaction
+  // boundary. All projected fields are short identifiers, never free-text.
+  const step = payload["step"];
 
   return {
     id: row.id,
