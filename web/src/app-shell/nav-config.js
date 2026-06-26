@@ -156,6 +156,9 @@ export const NAV = [
       // GET /api/spend (aggregates) + GET /api/spend/recent — живые → live.
       // Без лимитов/потолков (Stage-2, decision 3). Только учёт + показ.
       { id: "spend",         label: "Расход",       icon: "budget", screen: true, status: "live" },
+      // Отчёты (T-0490): просмотр report_page + Floor-1 агрегаты.
+      // GET /api/report-pages + GET /api/report-pages/:id/render — живые → live.
+      { id: "reports",       label: "Отчёты",       icon: "audit",  screen: true, status: "live" },
     ],
   },
   // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
