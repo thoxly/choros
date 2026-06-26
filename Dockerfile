@@ -16,7 +16,8 @@
 FROM node:22-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN npm ci
+# Retry transient network failures (host npmjs resolution flakes over IPv6 — T-0502).
+RUN npm ci --fetch-retries=5 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000
 COPY web/ ./
 RUN npm run build
 
@@ -26,7 +27,8 @@ RUN npm run build
 FROM node:22-alpine AS app-builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+# Retry transient network failures (host npmjs resolution flakes over IPv6 — T-0502).
+RUN npm ci --fetch-retries=5 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000
 COPY src/ ./src/
 COPY tsconfig.json ./
 # seed/ участвует в npm run build (tsc --project seed/tsconfig.json, T-0140)
@@ -55,8 +57,8 @@ COPY migrations/ ./migrations/
 COPY ops/docker-entrypoint.sh ./ops/docker-entrypoint.sh
 RUN chmod +x /app/ops/docker-entrypoint.sh
 
-# Production-only deps
-RUN npm ci --omit=dev
+# Production-only deps (retry transient IPv6 npmjs flakes — T-0502).
+RUN npm ci --omit=dev --fetch-retries=5 --fetch-retry-mintimeout=10000 --fetch-retry-maxtimeout=120000
 
 EXPOSE 3000
 
