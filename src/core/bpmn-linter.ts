@@ -37,6 +37,13 @@ import type { DmnRuleTable } from "./dmn-middle.js";
 //   boundaryEvent carrying a message|signal definition) MUST have a TIMEOUT (R3) so
 //   it can never wait forever, and must declare a correlation field. Self-contained
 //   (checkMessageEventCoherence) — a sibling task may also touch this file.
+// T-0460 [D8-R5]: "agent_task_incoherent" added additively — authored agentTask
+//   coherence guard. A serviceTask the author marked as an agent step
+//   (choros:executorType="agent") MUST resolve to a known agentRef AND MUST carry the
+//   agent-step external-task shape (flowable:type="external" + flowable:topic) after the
+//   publish transform — otherwise the bridge never enqueues an agent job (half-wired
+//   agent step). Self-contained (checkAgentTaskCoherence) — a sibling task may also
+//   touch this file.
 export type LintViolationType =
   | "raw_object_binding"
   | "malformed_xml"
@@ -44,7 +51,8 @@ export type LintViolationType =
   | "gateway_rule_mismatch"
   | "parallel_gateway_imbalance"
   | "timer_malformed"
-  | "message_event_incoherent";
+  | "message_event_incoherent"
+  | "agent_task_incoherent";
 
 export interface LintViolation {
   type: LintViolationType;
@@ -380,6 +388,13 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
   const messageCatchEvents: MessageCatchCollect[] = [];
   // Cursor for the message-catch element currently being parsed (null when outside).
   let currentMessageCatch: MessageCatchCollect | null = null;
+
+  // T-0460 [D8-R5]: authored agentTask collection — always on (structural coherence,
+  // no opts gate). Every serviceTask carrying choros:executorType="agent" is collected
+  // off its open tag (executorType / agentRef / flowable:type / flowable:topic are all
+  // open-tag attributes). The coherence check (checkAgentTaskCoherence) verifies each
+  // resolves to a known agentRef AND received the agent-step external shape post-transform.
+  const agentTasks: AgentTaskCollect[] = [];
   // Every (attachedToRef) of a boundary TIMER — the set of activity/event ids that
   // have a deadline timer guarding them. A message-catch is timeout-covered iff its
   // own id (intermediate/receiveTask) or its attachedToRef (boundary message) is in
@@ -593,6 +608,22 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
         (localName === "messageEventDefinition" || localName === "signalEventDefinition")
       ) {
         currentMessageCatch.hasMessageDef = true;
+      }
+
+      // T-0460 [D8-R5]: collect authored agent serviceTasks. Everything the coherence
+      // check needs (executorType / agentRef / flowable:type / flowable:topic / id) lives
+      // on the serviceTask OPEN tag, so we collect it inline (no close-tag tracking). Only
+      // serviceTasks the author marked as an agent step are kept.
+      if (localName === "serviceTask") {
+        const executorType = attrs.find((a) => a.name === "executorType")?.value ?? "";
+        if (executorType === "agent") {
+          agentTasks.push({
+            id: elementId,
+            agentRef: attrs.find((a) => a.name === "agentRef")?.value ?? "",
+            flowableType: attrs.find((a) => a.name === "type")?.value ?? "",
+            topic: attrs.find((a) => a.name === "topic")?.value ?? "",
+          });
+        }
       }
 
       // T-0436: conditionExpression gateway collection.
@@ -896,6 +927,15 @@ export function lintBpmn(xml: string, opts?: LintOpts): LintResult {
           : m.id.length > 0 && boundaryTimerAttachRefs.has(m.id),
     }));
     checkMessageEventCoherence(catches, violations);
+  }
+
+  // T-0460 [D8-R5]: authored agentTask coherence — ALWAYS on. Every serviceTask the
+  // author marked as an agent step MUST resolve to a known agentRef AND carry the
+  // agent-step external-task shape (flowable:type="external" + flowable:topic) so the
+  // bridge enqueues a real agent job. A half-wired agent step (missing ref / not
+  // externalised) fails publish (the honest gate). Runs on every publish (structural).
+  if (agentTasks.length > 0) {
+    checkAgentTaskCoherence(agentTasks, violations);
   }
 
   if (violations.length === 0) {
@@ -1267,6 +1307,108 @@ function checkMessageEventCoherence(
         message:
           `<${elemDesc}> declares no choros:messageName — no inbound envelope can be ` +
           `addressed to it; set the message/signal name the catch waits for`,
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T-0460 [D8-R5]: Authored agentTask coherence check
+//
+// Self-contained (a sibling task may also touch this file). A serviceTask the author
+// marked with choros:executorType="agent" is an AGENT STEP: at runtime it must become a
+// Flowable external task on the agent-step topic so the (already-wired) D4 dispatcher
+// fires on it. The publish transform (agent-task-external-mapper.ts) materialises that
+// shape; THIS check is the fail-closed gate that no agent step is published half-wired:
+//
+//   - MISSING agentRef: an agent step with no choros:agentRef cannot resolve to an agent
+//     (no agentEmployeeId to load grants/LLM for) → it could never run → violation.
+//
+//   - NOT EXTERNALISED: an agent step that did not receive flowable:type="external" +
+//     flowable:topic (the transform was bypassed, or the author hand-wrote a broken
+//     agent task) would never surface as an agent-step external task → the bridge never
+//     enqueues it → the dispatcher never fires → violation. The topic must be the
+//     dedicated agent-step topic (NOT the tel-intake DMN seam).
+//
+//   - MISSING id: an agent serviceTask with no id cannot be addressed/wired → violation.
+// ---------------------------------------------------------------------------
+
+/** The dedicated agent-step external-task topic (mirrors AGENT_STEP_TOPIC; kept local to
+ * avoid a cross-module import into the linter's frozen-isolated import surface). */
+const AGENT_STEP_TOPIC_LITERAL = "agent-step";
+
+/**
+ * Raw collection record for an authored agent serviceTask, accumulated off its open tag.
+ */
+interface AgentTaskCollect {
+  /** serviceTask/@id ("" when absent). */
+  id: string;
+  /** choros:agentRef — the agent the step runs as (AgentPublic.id == agentEmployeeId). */
+  agentRef: string;
+  /** flowable:type ("external" after the publish transform; "" when not externalised). */
+  flowableType: string;
+  /** flowable:topic ("agent-step" after the publish transform; "" when absent). */
+  topic: string;
+}
+
+/**
+ * Validate the coherence of every authored agent serviceTask. Pure: no IO, no DB, no
+ * side effects.
+ */
+function checkAgentTaskCoherence(
+  agentTasks: AgentTaskCollect[],
+  violations: LintViolation[],
+): void {
+  for (const t of agentTasks) {
+    const elemDesc = t.id ? `serviceTask id="${t.id}"` : "serviceTask (no id)";
+
+    // 1. An agent step must be addressable.
+    if (!t.id) {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: "",
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step (choros:executorType="agent") with no id — ` +
+          `an agent task must have an id to be wired and addressed`,
+      });
+    }
+
+    // 2. An agent step must resolve to a known agentRef (→ agentEmployeeId).
+    if (!t.agentRef.trim()) {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step but declares no choros:agentRef — pick the ` +
+          `agent that runs this step (the dispatcher loads the agent's grants + LLM by ` +
+          `this id); without it the step can never execute`,
+      });
+    }
+
+    // 3. An agent step must carry the agent-step external-task shape post-transform.
+    if (t.flowableType !== "external") {
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step but is not an external task ` +
+          `(flowable:type="external" is missing) — it would never surface as an ` +
+          `agent-step job and the agent dispatcher would never fire on it`,
+      });
+    } else if (t.topic !== AGENT_STEP_TOPIC_LITERAL) {
+      // It IS external but on the wrong (or absent) topic — the dispatcher polls the
+      // dedicated agent-step topic; any other topic means it is never picked up.
+      violations.push({
+        type: "agent_task_incoherent",
+        elementId: t.id,
+        elementKind: "serviceTask",
+        message:
+          `<${elemDesc}> is an agent step external task but its flowable:topic is ` +
+          `"${t.topic}" — it must be "${AGENT_STEP_TOPIC_LITERAL}" so the agent ` +
+          `dispatcher polls and fires on it`,
       });
     }
   }

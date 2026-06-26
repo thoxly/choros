@@ -37,6 +37,7 @@ import { resolveActorSlugFromAuth } from "../db/org.js";
 import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
+import { mapAgentTaskToExternal } from "../core/agent-task-external-mapper.js";
 import { lintBpmn } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole } from "../db/grants-dao.js";
@@ -286,7 +287,17 @@ export function registerProcessDefsRoutes(
     // additive: hand-authored bodies and explicit roles are preserved; a diagram with
     // no timer events is returned unchanged. Runs BEFORE lint so the linter validates
     // the materialised body.
-    const bpmnXml = mapTimerEscalation(lanedBpmnXml);
+    const timeredBpmnXml = mapTimerEscalation(lanedBpmnXml);
+
+    // T-0460 [D8-R5]: agentTask → live agent-step external task. After lanes + timers,
+    // convert each authored agent serviceTask (choros:executorType="agent") into a
+    // Flowable external task on the agent-step topic and stamp the dispatcher variables
+    // (agentEmployeeId←choros:agentRef, roleId, stepName, read/write fields) so the
+    // already-wired D4 dispatcher fires on it. Without this the bridge never enqueues an
+    // agent job. Idempotent + additive: a serviceTask already external is left untouched,
+    // and a diagram with no agent tasks is returned unchanged. Runs BEFORE lint so the
+    // agent_task_incoherent coherence guard validates the materialised external shape.
+    const bpmnXml = mapAgentTaskToExternal(timeredBpmnXml);
 
     // T-0377: resolve the final key — explicit or auto-generated.
     let resolvedKey: string;

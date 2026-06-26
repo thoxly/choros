@@ -33,6 +33,7 @@ import {
 } from "../server/agent-dispatch-loop.js";
 import { dormantLlmPort } from "../core/llm-port.js";
 import { stubBudgetPort } from "../runtime/agent-dispatch/agent-step-context.js";
+import { AGENT_STEP_TOPIC } from "../core/agent-task-external-mapper.js";
 
 /** No-op fetcher that never yields jobs (we only test loop registration). */
 const noopFetcher: AgentJobFetcher = {
@@ -127,5 +128,23 @@ describe("startMain agent-dispatch-loop wiring (T-0392)", () => {
     // handle.agentDispatch is still present (noopHandle, not undefined).
     expect(handle.agentDispatch).toBeDefined();
     handle.stop(); // no throw
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0460 [D8-R5] — topic agreement (FF-R5-6): the publish transform stamps the
+// SAME topic the dispatcher polls. The dispatcher's DEFAULT_AGENT_TOPIC must equal
+// the single AGENT_STEP_TOPIC constant the mapper stamps + the linter validates —
+// no string drift between the authored external task and the runtime poll set.
+// ---------------------------------------------------------------------------
+
+describe("T-0460 topic agreement (FF-R5-6)", () => {
+  it("DEFAULT_AGENT_TOPIC === AGENT_STEP_TOPIC (single source of truth, no drift)", () => {
+    expect(DEFAULT_AGENT_TOPIC).toBe(AGENT_STEP_TOPIC);
+    expect(AGENT_STEP_TOPIC).toBe("agent-step");
+  });
+
+  it("the dispatcher default topic is NOT the tel-intake DMN-triage seam", () => {
+    expect(DEFAULT_AGENT_TOPIC).not.toBe("tel-intake");
   });
 });

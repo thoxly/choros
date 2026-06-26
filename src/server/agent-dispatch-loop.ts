@@ -43,6 +43,7 @@ import { dormantLlmPort } from "../core/llm-port.js";
 import { stubBudgetPort } from "../runtime/agent-dispatch/agent-step-context.js";
 import type { PostgresJobStore } from "../core/jobStore.js";
 import type { PostgresOutboxStore } from "../core/postgres/pgOutboxStore.js";
+import { AGENT_STEP_TOPIC } from "../core/agent-task-external-mapper.js";
 
 /**
  * Concrete InstructionSource that delegates to the real agent-instruction-store DAO.
@@ -53,8 +54,15 @@ export const storeInstructionSource: InstructionSource = {
   readPublished,
 };
 
-/** The default DEDICATED keystone agent topic (NOT the tel-intake DMN seam). */
-export const DEFAULT_AGENT_TOPIC = "agent-step";
+/**
+ * The default DEDICATED keystone agent topic (NOT the tel-intake DMN seam).
+ *
+ * T-0460 [D8-R5] FF-R5-6: sourced from the single exported AGENT_STEP_TOPIC constant
+ * (agent-task-external-mapper.ts) — the SAME literal the publish transform stamps onto
+ * authored agent serviceTasks (flowable:topic) and the linter coherence guard validates.
+ * One source of truth → no string drift between the publish wire and the dispatcher poll.
+ */
+export const DEFAULT_AGENT_TOPIC = AGENT_STEP_TOPIC;
 
 /** Handle returned by startAgentDispatchLoop; stop() is idempotent. */
 export interface AgentDispatchHandle {
