@@ -283,7 +283,7 @@ export async function listHumanEmployees(
 // caller that awaits this (sync + async catch paths both covered) — no caller
 // signature change required (FF-7), the Promise<string> contract is preserved.
 //
-// LEGITIMATE DEV-MODE IS UNCHANGED: in CHOROS_AUTH_MODE=dev a valid x-dev-user
+// LEGITIMATE DEV-MODE IS UNCHANGED: in dev auth-mode a valid x-dev-user
 // whose slug IS a known employee still resolves to that employee's real tenant
 // exactly as before (the SELECT returns a row → first return below). Only the
 // ERROR / UNKNOWN-actor path changed. There is no "dev bootstrap with no
