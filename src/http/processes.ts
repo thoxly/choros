@@ -15,6 +15,10 @@
  */
 import { HttpError, type Router } from "./router.js";
 import { withAuth, getAuthContext } from "./auth.js";
+import {
+  withActorInject,
+  type ActorSlugResolver,
+} from "./actor-inject-registrar.js";
 import { JobStore } from "../core/jobStore.js";
 import { tryLoadShowcasePack } from "./pack-serve.js";
 import { makeStartInstanceHandler, type StartInstanceDeps } from "./process-start.js";
@@ -236,6 +240,13 @@ export function registerProcessesRoutes(
   // (pool + FlowableClient + actor→tenant resolver), register the write-route.
   // Absent ⇒ GET-only display plane (E2E/no-DB/no-engine path stays unchanged).
   startDeps?: StartInstanceDeps,
+  // T-0328 G1: optional actor-slug resolver (resolveActorSlugFromAuth, kind='human').
+  // When supplied AND startDeps is present, the FROZEN process-start body is wrapped
+  // in the actor-inject façade so that, in keycloak mode, the validated JWT identity is
+  // resolved into x-dev-user + x-tenant-id BEFORE the frozen body reads them — making
+  // the surface FUNCTIONAL with a real Bearer (not just 401-closed). Absent ⇒ the
+  // legacy withAuth-only wrap (bypass closed, but keycloak body still 401s; pre-G1).
+  actorSlugResolver?: ActorSlugResolver,
 ): void {
   // POST /api/processes/start — start-instance write-route (T-0280, FROZEN §2.2).
   // Registered BEFORE GET /api/processes/:id so the literal '/start' segment is not
@@ -246,7 +257,27 @@ export function registerProcessesRoutes(
     // bypass); dev mode is a no-op pass-through and the x-dev-user / x-tenant-id FROZEN
     // contract (§2.2) is unchanged. The display-plane GETs below stay unguarded (public
     // read), matching the existing read-API posture.
-    router.register("POST", "/api/processes/start", withAuth(makeStartInstanceHandler(startDeps)));
+    const startHandler = makeStartInstanceHandler(startDeps);
+    if (actorSlugResolver) {
+      // T-0328 G1: actor-inject façade (superset of withAuth). In keycloak mode it
+      // resolves the validated JWT identity → x-dev-user AND the actor's OWN tenant →
+      // x-tenant-id (via startDeps.resolveActorTenant, fail-closed; NEVER a header-asserted
+      // tenant) BEFORE the FROZEN body reads them. The 201/§2.2 REST contract is unchanged;
+      // the body is byte-untouched. Dev mode is a pure pass-through. (ADR T-0328 §4.2.)
+      router.register(
+        "POST",
+        "/api/processes/start",
+        withActorInject(startHandler, {
+          resolveActorSlug: actorSlugResolver,
+          injectTenant: startDeps.resolveActorTenant,
+        }),
+      );
+    } else {
+      // Pre-G1 / no-slug-resolver path (e.g. tests that only need the dev x-dev-user
+      // flow): withAuth-only — bypass closed, but keycloak body still 401s without
+      // a slug resolver. Preserved for backward compatibility.
+      router.register("POST", "/api/processes/start", withAuth(startHandler));
+    }
   }
 
   // GET /api/processes — return full process instances list.

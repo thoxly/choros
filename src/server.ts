@@ -18,7 +18,7 @@ import { registerDictionariesRoute, registerGrantsRoutes } from "./http/grants.j
 import { registerInvokeRoutes } from "./http/invoke.js";
 import { registerGrantProposeRoute } from "./http/grant-propose.js";
 import { registerSecretHandleRoutes } from "./http/secret-handle.js";
-import { withAuthRegistrar } from "./http/auth-wrap-router.js";
+import { actorInjectRegistrar } from "./http/actor-inject-registrar.js";
 import { registerProcessesRoutes } from "./http/processes.js";
 import { registerGrantTrailRoutes } from "./http/grant-trail.js";
 import { registerAgentRoutes } from "./http/agents.js";
@@ -52,7 +52,7 @@ import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
 import { registerSolutionBundleRoutes } from "./http/solution-bundles.js";
 import { makeFlowableClient } from "./core/flowable-client.js";
-import { getOrgPool, resolveActorTenant } from "./db/org.js";
+import { getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "./db/org.js";
 // T-0419 (D7-3-FU): production field-visibility resolver — grants + policy from DB.
 import { getGrantsForSubject, getFieldVisibilityPolicy } from "./db/grants-dao.js";
 import { dormantLlmPort } from "./core/llm-port.js";
@@ -573,13 +573,23 @@ function buildRouter(
     // The path is a distinct fixed segment — it is never captured by the
     // existing '/api/grants/:id/revoke' pattern.
     registerGrantProposeRoute(router, grantsPool);
-    // T-0418 [SECURITY] P0: secret-handle.ts is FROZEN (FF-25-6) — its body still
+    // T-0418 [SECURITY] P0 + T-0328 G1: secret-handle.ts is FROZEN — its body still
     // resolves identity via the dev-only x-dev-user extractActor. Wrap at the
-    // REGISTRATION SITE: withAuthRegistrar applies withAuth() to every route the
-    // frozen registrar registers, so in keycloak mode a valid Bearer is REQUIRED
-    // (401 otherwise; x-dev-user no longer bypasses) and in dev mode it is a no-op
-    // pass-through (existing behaviour unchanged). secret-handle.ts is byte-untouched.
-    registerSecretHandleRoutes(withAuthRegistrar(router) as unknown as typeof router, grantsPool);
+    // REGISTRATION SITE with the actor-inject façade (superset of withAuthRegistrar):
+    // it applies withAuth() (keycloak ⇒ valid Bearer REQUIRED; 401 otherwise, x-dev-user
+    // no longer bypasses) AND, in keycloak mode, resolves the validated JWT identity
+    // (getAuthContext → resolveActorSlugFromAuth, kind='human' only) into x-dev-user
+    // BEFORE the frozen body reads it — so the surface is FUNCTIONAL with a real Bearer,
+    // not just 401-closed (ADR T-0328 §4.1 G1; unblocks T-0471). Dev mode is a pure
+    // pass-through. secret-handle.ts is byte-untouched. (Tenant stays DEV_TENANT_ID
+    // in-body — secret-handle does not read x-tenant-id — so no injectTenant here.)
+    registerSecretHandleRoutes(
+      actorInjectRegistrar(router, {
+        resolveActorSlug: (sub, preferredUsername) =>
+          resolveActorSlugFromAuth(getOrgPool(), sub, preferredUsername),
+      }) as unknown as typeof router,
+      grantsPool,
+    );
     // Register seed write-API (T-0140): POST /api/tenants|departments|positions|employees|roles
     // and DELETE variants for reset. Same pool as grants.
     registerSeedWriteRoutes(router, grantsPool);
@@ -625,6 +635,13 @@ function buildRouter(
           resolveActorTenant: (actorSlug: string) =>
             resolveActorTenant(getOrgPool(), actorSlug),
         }
+      : undefined,
+    // T-0328 G1: actor-slug resolver (kind='human') for the actor-inject façade so the
+    // FROZEN process-start body receives the validated JWT identity (x-dev-user +
+    // x-tenant-id) in keycloak mode. Wired only when DB-backed (grantsPool present).
+    grantsPool
+      ? (sub: string, preferredUsername: string | undefined) =>
+          resolveActorSlugFromAuth(getOrgPool(), sub, preferredUsername)
       : undefined,
   );
 
