@@ -18,12 +18,14 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { IncomingMessage } from "node:http";
 import pg from "pg";
 import { parseScopeElement } from "./grants.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER, withAuth } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { ScopeElement } from "../core/grant-lattice.js";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,14 @@ export interface GrantProposeDeps {
   resolveSecret: (handle: string, ctx: { tenantId: string }) => Promise<string>;
   callLlm: (req: LlmProposeRequest) => Promise<LlmProposeResponse>;
   now: () => number;
+  /**
+   * T-0489 [SECURITY]: resolve the caller's slug → the tenant the caller ACTUALLY
+   * belongs to (production binding = resolveActorTenant(getOrgPool(), slug), fail-
+   * closed). When supplied (server.ts), the proposal runs under the actor's OWN
+   * tenant — never the hardcoded Dev Silo. When omitted (unit tests with a stub
+   * pool), the legacy DEV_TENANT_ID is used so dev-mode tests stay unchanged.
+   */
+  resolveActorTenant?: (actorSlug: string) => Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +206,13 @@ async function defaultCallLlm(req: LlmProposeRequest): Promise<LlmProposeRespons
   return { atoms };
 }
 
-const defaultDeps: GrantProposeDeps = {
+/**
+ * Default deps (day-1 stub resolveSecret + globalThis.fetch callLlm + Date.now clock).
+ * Exported (T-0489) so the composition root can spread it and override ONLY
+ * `resolveActorTenant` without re-implementing the LLM/secret defaults.
+ * `resolveActorTenant` is left undefined here so this module stays DB-free by default.
+ */
+export const defaultGrantProposeDeps: GrantProposeDeps = {
   resolveSecret: defaultResolveSecret,
   callLlm: defaultCallLlm,
   now: () => Date.now(),
@@ -224,6 +240,36 @@ function assertUuidShape(value: string, label: string): void {
   if (!UUID_RE.test(value)) {
     throw new HttpError(400, "VALIDATION", `${label} must be a valid UUID`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// extractActor — mode-aware caller identity (T-0489 / T-0372 pattern).
+//
+// keycloak mode: getAuthContext is populated (withAuth ran first); the JWT `sub`
+//   is the KC user UUID, NOT the employee slug, so resolve it via
+//   resolveActorSlugFromAuth (kind='human' only; sub-first, preferred_username
+//   fallback). null ⇒ fail closed (401) — never trust the raw sub.
+// dev mode: getAuthContext is undefined; read the x-dev-user header as before.
+//
+// Before T-0489 this route read x-dev-user as the SOLE identity even in keycloak
+// mode (FF-0328-2 bug class); it now consults getAuthContext first.
+// ---------------------------------------------------------------------------
+
+async function extractActor(req: IncomingMessage, pool: pg.Pool): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
 }
 
 async function withTenantTx<T>(
@@ -267,22 +313,21 @@ async function withTenantTx<T>(
 export function registerGrantProposeRoute(
   router: Router,
   pool: pg.Pool,
-  deps: GrantProposeDeps = defaultDeps,
+  deps: GrantProposeDeps = defaultGrantProposeDeps,
 ): void {
   // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
   // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
   router.register("POST", "/api/grants/propose", withAuth(async (req, res) => {
-    let actorId: string;
-    {
-      let devUser = req.headers[DEV_USER_HEADER];
-      if (Array.isArray(devUser)) devUser = devUser[0];
-      if (!devUser || typeof devUser !== "string") {
-        throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
-      }
-      actorId = devUser;
-    }
+    // T-0489: identity is mode-aware (getAuthContext first; x-dev-user only as the
+    // dev fallback) — no longer reads x-dev-user as the sole identity in keycloak mode.
+    const actorId = await extractActor(req, pool);
 
-    const tenantId = DEV_TENANT_ID;
+    // T-0489 [SECURITY]: the proposal runs under the actor's OWN tenant (resolved
+    // from identity, fail-closed) when a resolver is wired — never a request-supplied
+    // tenant or the hardcoded Dev Silo. Unit tests omit the resolver → DEV_TENANT_ID.
+    const tenantId = deps.resolveActorTenant
+      ? await deps.resolveActorTenant(actorId)
+      : DEV_TENANT_ID;
     const nowMs = deps.now();
 
     const body = await readJsonBody(req);
