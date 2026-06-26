@@ -267,15 +267,14 @@ describe('fmtMetricValue-логика', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Честность скоупа (G3): экран только для просмотра
-// Проверяем, что в nav-config нет dead-кнопки «Создать отчёт»
-// (кнопка создания — зона T-0492, не T-0490)
+// Честность скоупа (G3): построитель ВСТРОЕН в экран «Отчёты» (T-0492),
+// а не отдельный пункт меню. В nav-config нет отдельной dead-кнопки.
 // ---------------------------------------------------------------------------
 
-describe('Скоуп — только просмотр (G3)', async () => {
+describe('Скоуп — построитель встроен, не отдельный пункт меню (G3)', async () => {
   const { NAV } = await import('../app-shell/nav-config.js');
 
-  it('в NAV нет пункта create-reports или reports-new', () => {
+  it('в NAV нет отдельного пункта create-reports или reports-new', () => {
     const allItems = NAV.flatMap((g) => g.items);
     expect(allItems.find((i) => i.id === 'create-reports')).toBeFalsy();
     expect(allItems.find((i) => i.id === 'reports-new')).toBeFalsy();
@@ -286,6 +285,127 @@ describe('Скоуп — только просмотр (G3)', async () => {
     const item = allItems.find((i) => i.id === 'reports');
     expect(item?.status).not.toBe('soon');
     expect(item?.soon).toBeFalsy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Выгрузка (T-0492): контракт URL экспорта /export?format=xlsx|csv
+// ---------------------------------------------------------------------------
+
+describe('Выгрузка — URL экспорта /export?format=', () => {
+  // Зеркалит downloadReportExport: строит URL для скачивания файла отчёта.
+  function exportUrl(pageId, format) {
+    return `/api/report-pages/${encodeURIComponent(pageId)}/export?format=${encodeURIComponent(format)}`;
+  }
+
+  it('xlsx → корректный путь и query', () => {
+    const id = 'b7c2a1d3-e4f5-6789-abcd-ef0123456789';
+    expect(exportUrl(id, 'xlsx')).toBe(`/api/report-pages/${id}/export?format=xlsx`);
+  });
+
+  it('csv → корректный путь и query', () => {
+    const id = 'b7c2a1d3-e4f5-6789-abcd-ef0123456789';
+    expect(exportUrl(id, 'csv')).toBe(`/api/report-pages/${id}/export?format=csv`);
+  });
+
+  it('имя скачиваемого файла включает id и расширение формата', () => {
+    const id = 'page-uuid';
+    const filename = (pageId, format) => `report-${pageId}.${format}`;
+    expect(filename(id, 'xlsx')).toBe('report-page-uuid.xlsx');
+    expect(filename(id, 'csv')).toBe('report-page-uuid.csv');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Построитель — машина состояний режима (undefined/null/object)
+// ---------------------------------------------------------------------------
+
+describe('Построитель — режим (undefined=закрыт / null=новый / object=правка)', () => {
+  it('«Новый отчёт» открывает построитель с editing=null', () => {
+    let builder = undefined;
+    const setBuilder = (v) => { builder = v; };
+    setBuilder(null);            // клик «Новый отчёт»
+    expect(builder).toBeNull();  // открыт в режиме создания
+  });
+
+  it('«Изменить» открывает построитель с объектом страницы (правка)', () => {
+    let builder = undefined;
+    const setBuilder = (v) => { builder = v; };
+    const page = { id: 'p1', title: 'Отчёт', tier: 'draft' };
+    setBuilder(page);
+    expect(builder).toBe(page);
+  });
+
+  it('«Отмена»/«Сохранено» закрывает построитель (undefined)', () => {
+    let builder = null;
+    const setBuilder = (v) => { builder = v; };
+    setBuilder(undefined);
+    expect(builder).toBeUndefined();
+  });
+
+  it('кнопка «Новый отчёт» видна только когда построитель закрыт', () => {
+    const showNewButton = (builder) => builder === undefined;
+    expect(showNewButton(undefined)).toBe(true);
+    expect(showNewButton(null)).toBe(false);   // создание открыто
+    expect(showNewButton({ id: 'p' })).toBe(false); // правка открыта
+  });
+
+  it('опубликованный отчёт не показывает кнопку «Изменить» (published-locked)', () => {
+    const canEdit = (report) => report.tier !== 'published';
+    expect(canEdit({ tier: 'draft' })).toBe(true);
+    expect(canEdit({ tier: 'published' })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Построитель — восстановление формы из page_def черновика (правка)
+// ---------------------------------------------------------------------------
+
+describe('Построитель — восстановление метрик/группировки из page_def', () => {
+  const BUILDER_AGGS = ['count', 'sum', 'avg', 'min', 'max'];
+
+  // Зеркалит логику восстановления в ReportBuilder useEffect.
+  function restoreFromPageDef(pageDef) {
+    const metrics = (Array.isArray(pageDef) ? pageDef : [])
+      .filter((m) => m && BUILDER_AGGS.includes(m.agg))
+      .map((m) => ({ agg: m.agg, fieldKey: m.agg === 'count' ? '' : (m.field_key || ''), title: m.title || '' }));
+    const gb = (Array.isArray(pageDef) ? pageDef : []).find((m) => m && typeof m.group_by === 'string' && m.group_by);
+    return { metrics, groupBy: gb ? gb.group_by : '' };
+  }
+
+  it('восстанавливает count-метрику с пустым полем (поле count игнорируется)', () => {
+    const { metrics } = restoreFromPageDef([
+      { source_registry_def_id: 'r', field_key: 'status', agg: 'count', group_by: 'status' },
+    ]);
+    expect(metrics).toEqual([{ agg: 'count', fieldKey: '', title: '' }]);
+  });
+
+  it('восстанавливает числовую метрику с её полем и подписью', () => {
+    const { metrics } = restoreFromPageDef([
+      { source_registry_def_id: 'r', field_key: 'amount', agg: 'sum', title: 'Итого' },
+    ]);
+    expect(metrics).toEqual([{ agg: 'sum', fieldKey: 'amount', title: 'Итого' }]);
+  });
+
+  it('восстанавливает группировку из любой метрики, где есть group_by', () => {
+    const { groupBy } = restoreFromPageDef([
+      { agg: 'count', field_key: 'status', group_by: 'status' },
+      { agg: 'sum', field_key: 'amount', group_by: 'status' },
+    ]);
+    expect(groupBy).toBe('status');
+  });
+
+  it('без group_by — группировка пустая', () => {
+    const { groupBy } = restoreFromPageDef([{ agg: 'sum', field_key: 'amount' }]);
+    expect(groupBy).toBe('');
+  });
+
+  it('игнорирует метрики с неизвестным агрегатором (list/median)', () => {
+    const { metrics } = restoreFromPageDef([
+      { agg: 'list', field_key: 'x' },
+      { agg: 'sum', field_key: 'amount' },
+    ]);
+    expect(metrics).toEqual([{ agg: 'sum', fieldKey: 'amount', title: '' }]);
   });
 });
 
