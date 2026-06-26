@@ -71,10 +71,12 @@ run $SSH_CMD "
   set -euo pipefail
   cd ${DEPLOY_DIR}
   # Build only the app service (postgres/keycloak/flowable images are pinned, no rebuild).
-  # NO --no-cache (T-0502/FE-s39-0002): forcing a full rebuild re-runs `npm ci` over the
-  # network every deploy, which flakes on the host's IPv6-only npmjs resolution. The
-  # npm-ci layer is content-hash cache-keyed on package*.json (unchanged) → cached build
-  # is network-free for deps yet still rebuilds changed source (COPY after npm ci).
+  # No --no-cache (T-0502/FE-s39-0002): a forced full rebuild re-runs the dependency
+  # install over the network every deploy and flakes on the host IPv6-only npmjs
+  # resolution. The dep layer is cache-keyed on the package manifest (unchanged) so a
+  # cached build stays network-free for deps yet still rebuilds changed source.
+  # NOTE: this block runs inside a double-quoted SSH heredoc -- keep comments free of
+  # backticks and dollar-substitutions to avoid local command/variable expansion (T-0503).
   docker compose build choros
   # Rolling restart: substrates stay up, only choros restarts
   docker compose up -d --no-deps choros
