@@ -469,11 +469,17 @@ describe('ADV-3: Revoke outside own scope — actor with no authority cannot rev
       { 'x-dev-user': 'nonexistent-actor-adv3x' },
     );
 
-    // Unknown actor → loadAdminContext returns isGenesisOwner=false + empty adminGrants
-    // → validateAdminDelegation → no_admin_authority → 403
+    // Unknown actor is denied. After T-0486 made resolveActorTenant (src/db/org.ts)
+    // FAIL-CLOSED, an actor slug that matches no employee row in any tenant is now
+    // rejected EARLIER — at tenant resolution — with 403 ACTOR_TENANT_UNRESOLVED,
+    // before the admin gate ever runs. (Previously such an actor silently resolved
+    // to the Dev Silo and then hit the admin gate → ADMIN_GATE_REJECTED.) Both are
+    // correct 403 denials of the SAME action; the deny just moved upstream and got
+    // strictly stronger (cross-tenant fail-closed). Accept either specific code —
+    // never weaken to "any 403". (404 stays valid for a not-found grant id path.)
     expect([403, 404]).toContain(res.status);
     if (res.status === 403) {
-      expect(errCode(res)).toBe('ADMIN_GATE_REJECTED');
+      expect(['ACTOR_TENANT_UNRESOLVED', 'ADMIN_GATE_REJECTED']).toContain(errCode(res));
     }
 
     // Row must be untouched
