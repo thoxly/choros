@@ -304,13 +304,37 @@ jobs:
   # is green at the moment it becomes blocking, so removing continue-on-error cannot
   # red-line dev. A non-clickable product now fails the merge — exactly the antidote
   # to the "read-only витрина" defect (spec §1).
+  #
+  # T-0274 (ADR docs/design/T-0274-deploy-acceptance-dod.adr.md, Split A — choros
+  # side): the founder ratified this as a HARD barrier ("ничего не «готово» без живого
+  # клика на деплое"). This task lands the barrier ADVISORY-FIRST and wires the
+  # gated/exempt predicate + a non-loosening guard (ci/checks/acceptance/
+  # deploy-acceptance-required.sh). Two advisory-first wiring changes here:
+  #   (i)  the job now runs `npm run acceptance` (the DECLARATIVE journey suite — EVERY
+  #        e2e/journeys/*.journey.ts) instead of only `acceptance:tel` (legacy ТЭЛ), so
+  #        every gated user-facing flow is exercised, not just ТЭЛ (FF-T0274-1).
+  #   (ii) it STAYS `continue-on-error: true` and is NOT yet in deploy-dev.needs.
+  # WHY still advisory (do NOT flip blind — D-056 / ADR §2 / §4): the required-flip is
+  # only safe once `npm run acceptance` is verified GREEN in the GitHub runner against
+  # this ephemeral compose stack (Docker was unavailable in the build env, so green
+  # could not be proven locally). A required gate that is red at flip-time would
+  # red-line dev auto-deploy.
+  #
+  # EXACT FLIP-CONDITION (founder's строгость-гейта leash, D-061 — applied with the
+  # Demiurge-side self-improve iteration, ADR Split B, NOT in this choros task):
+  #   1. This advisory job has gone GREEN at least once in the GitHub runner (proof).
+  #   2. THEN, together: delete `continue-on-error: true` below, AND add
+  #      `deploy-acceptance` to deploy-dev.needs (→ [ci, db, kc, stack, flowable,
+  #      deploy-acceptance]), AND set BARRIER_MODE_OVERRIDE=required (or change the
+  #      pinned BARRIER_MODE) in deploy-acceptance-required.sh so the guard enforces
+  #      and locks the hard barrier (anti re-loosening, FF-T0274-2).
+  # The guard FORBIDS doing only one of the two (half-flip) — see the script header.
   deploy-acceptance:
     runs-on: ubuntu-latest
-    # NB (orchestrator, musing-nightingale): reverted to informational. The gate is
-    # GREEN locally (real-click U1→U5 against the live stack), but the required-flip
-    # was an overstep — it is unproven in the GitHub runner (stack+playwright) and the
-    # founder-go gate for the E13 honest-gate plan (T-0274) is still pending. Keep
-    # non-blocking until validated in CI and the founder flips it under E13.
+    # T-0274: kept ADVISORY (continue-on-error) per the EXACT FLIP-CONDITION above —
+    # the journeys are not yet proven green in the GitHub runner, so flipping required
+    # would risk red-lining dev (D-056). The founder flips it under GO; the
+    # ci/checks/acceptance/deploy-acceptance-required.sh guard then locks it.
     continue-on-error: true
     env:
       DATABASE_URL: postgres://choros_migrator:choros_dev_pw@localhost:55432/choros
@@ -349,11 +373,17 @@ jobs:
         run: node migrations/run.mjs
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
-      # acceptance:tel: build web/dist + tsc, launch the choros server from THIS
-      # checkout pointed at the live stack, deterministic bootstrap, then the
-      # Playwright U1→U5 click-through (happy + fail-honest negative).
-      - name: Deploy-acceptance ТЭЛ click-through (acceptance:tel)
-        run: npm run acceptance:tel
+      # T-0274 (FF-T0274-1): run the DECLARATIVE journey suite (`npm run acceptance`,
+      # EVERY e2e/journeys/*.journey.ts + the fail-honest negative) — not only the
+      # legacy `acceptance:tel` ТЭЛ spec — so every gated user-facing flow is exercised
+      # against the live no-mock stack. Both share the same gate wiring (build web/dist +
+      # tsc, launch the choros server from THIS checkout pointed at the live stack,
+      # deterministic bootstrap, then Playwright). Still ADVISORY (continue-on-error
+      # above): a red journey is visible but cannot red-line dev until the founder flips
+      # it required (see EXACT FLIP-CONDITION in the job comment). `acceptance:tel`
+      # stays available as the legacy back-compat reference script.
+      - name: Deploy-acceptance journey suite (acceptance)
+        run: npm run acceptance
       - name: Stop services
         if: always()
         run: docker compose stop flowable postgres
