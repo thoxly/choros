@@ -35,9 +35,12 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth, resolveActorTenant } from "../db/org.js";
-import type { ScopeElement } from "../core/grant-lattice.js";
+import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
+import type { AdminContext } from "../core/scoped-admin.js";
+import { getLlmConnection } from "../db/llm-connection-dao.js";
+import { setAgentLlmConnection } from "../db/agent-llm-connection-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -152,6 +155,195 @@ async function lookupPositionOrgScope(
   } finally {
     client.release();
   }
+}
+
+// ---------------------------------------------------------------------------
+// T-0498 [E-AGENTS]: bind an agent to a NAMED llm_connection profile.
+//
+// Authz — THE SAME class/predicate as the secret-handle lifecycle
+// (POST /api/agents/:id/secret-handle, secret-handle.ts::holdsAgentMgmtUpdate):
+// genesis-owner OR a confirmed, in-window, delegable mgmt_object:agent/update
+// grant covering the agent's org scope (isNarrowerOrEqual). Fail-closed: a plain
+// member with neither → 403. Binding the LLM connection is the SAME management
+// operation as binding the secret handle (it points the agent at where its key
+// lives), so it MUST NOT be a weaker gate.
+// ---------------------------------------------------------------------------
+
+function holdsAgentMgmtUpdate(
+  admin: AdminContext,
+  agentOrgScope: ScopeElement,
+): boolean {
+  if (admin.isGenesisOwner) return true;
+  return admin.adminGrants.some(
+    (g) =>
+      g.resourceType === "mgmt_object:agent" &&
+      g.operation === "update" &&
+      g.delegable &&
+      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, SEED_ORACLE),
+  );
+}
+
+/**
+ * Resolve the agent's org placement (department) for the gate's scope check.
+ * Mirrors secret-handle.ts::loadAgentOrgScope: employee → position → department.
+ * An org-less agent (no department) maps to the tenant-root org node — only a
+ * root-covering delegation (or genesis-owner) admits it.
+ */
+async function loadAgentOrgScope(
+  client: pg.PoolClient,
+  agentId: string,
+  tenantId: string,
+): Promise<ScopeElement> {
+  const { rows } = await client.query<{ department_id: string | null }>(
+    `SELECT p.department_id
+       FROM choros.employee e
+       LEFT JOIN choros.position p
+         ON p.tenant_id = e.tenant_id AND p.id = e.position_id
+      WHERE e.tenant_id = $1 AND e.id = $2
+      LIMIT 1`,
+    [tenantId, agentId],
+  );
+  const deptId = rows[0]?.department_id ?? null;
+  if (deptId) {
+    return { kind: "node", hierarchy: "org", nodeId: deptId, nodeLevel: "department" };
+  }
+  return { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" };
+}
+
+/**
+ * PUT /api/agents/:id/llm-connection — point an agent at a named llm_connection
+ * profile (or detach it).
+ *
+ * Body: { llm_connection_id: string|null }
+ *   - UUID  → bind the agent to that connection (MUST exist in the actor's tenant).
+ *   - null  → detach (agent falls back to its inline columns / dormant fallback).
+ *
+ * Tenant validation (the KEYSTONE invariant): BOTH the agent (:id) AND the
+ * llm_connection_id are resolved under the ACTOR's tenant (resolveActorTenant →
+ * withTenantTx + RLS). An agent in another tenant → 404. A connection in another
+ * tenant (or non-existent) → 400 (getLlmConnection is tenant-scoped, so it returns
+ * null for a foreign id; the composite FK would also reject it). null is always
+ * valid (detach).
+ *
+ * Response: { ok:true, llm_connection_id, connection_summary?: {name,provider,model} }
+ * — REDACTED metadata only. The secret handle / raw key is NEVER read or returned.
+ */
+async function handleSetAgentLlmConnection(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  agentId: string,
+): Promise<void> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  assertUuidShape(agentId, "agent id");
+
+  // Parse + validate the body. llm_connection_id is REQUIRED to be present and is
+  // either a UUID (bind) or null (detach). An absent/garbage value → 400.
+  const body = await readJsonBody(req);
+  if (typeof body !== "object" || body === null) {
+    throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+  }
+  const raw = (body as Record<string, unknown>)["llm_connection_id"];
+  let connectionId: string | null;
+  if (raw === null) {
+    connectionId = null;
+  } else if (typeof raw === "string") {
+    // Reject a malformed UUID up front (a clean 400, not a DB error).
+    assertUuidShape(raw, "llm_connection_id");
+    connectionId = raw;
+  } else {
+    throw new HttpError(
+      400,
+      "VALIDATION",
+      "llm_connection_id must be a UUID string or null",
+    );
+  }
+
+  const nowMs = Date.now();
+
+  // Authz — loadAdminContext is a DB read (own tx, no side-effect), BEFORE the write
+  // tx (mirrors secret-handle.ts / llm-config.ts). The org-scope check then runs
+  // inside the write tx where the agent row is read.
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  let summary: { name: string; provider: string; model: string | null } | null = null;
+
+  await withTenantTx(pool, tenantId, async (client) => {
+    // Gate: same predicate as secret-handle binding (mgmt_object:agent/update).
+    const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope)) {
+      throw new HttpError(
+        403,
+        "ADMIN_GATE_REJECTED",
+        "insufficient management authority for agent",
+      );
+    }
+
+    // CROSS-TENANT GUARD: when binding (non-null), the connection MUST exist in the
+    // ACTOR's tenant. getLlmConnection is tenant-scoped (RLS + explicit tenant_id
+    // predicate) → null for a foreign or missing id → 400. Never attach an agent to
+    // another tenant's connection. (The composite FK is a second, DB-level guard.)
+    if (connectionId !== null) {
+      const conn = await getLlmConnection(
+        client as unknown as PgClientLike,
+        tenantId,
+        connectionId,
+      );
+      if (conn === null) {
+        throw new HttpError(
+          400,
+          "LLM_CONNECTION_NOT_FOUND",
+          "llm_connection_id does not exist in this tenant",
+        );
+      }
+      // Redacted summary — name/provider/model are NOT secrets. The opaque handle
+      // (conn.secretHandle) is NEVER read into the response.
+      summary = { name: conn.name, provider: conn.provider, model: conn.model };
+    }
+
+    const updated = await setAgentLlmConnection(
+      client as unknown as PgClientLike,
+      agentId,
+      connectionId,
+      nowMs,
+    );
+    if (updated === null) {
+      // The agent is not in the caller's tenant (or has no employee-keyed card).
+      throw new HttpError(404, "AGENT_NOT_FOUND", "agent not found");
+    }
+
+    // Audit — connection-id is NOT a secret; we log only the FK + redacted summary.
+    // The secret handle is NEVER named here.
+    const auditInput: AuditEventInput = {
+      id: randomUUID(),
+      type: "set_agent_llm_connection",
+      actor: actorId,
+      subject: agentId,
+      scope: null,
+      via: "agents",
+      proposed_by: null,
+      confirmed_by: null,
+      payload: {
+        agentEmployeeId: agentId,
+        llm_connection_id: connectionId,
+        connection_name: summary?.name ?? null,
+        connection_provider: summary?.provider ?? null,
+      },
+      occurred_at: nowMs,
+    };
+    await agentAuditWriter.appendAuditEvent(client as unknown as PgClientLike, auditInput);
+  });
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      ok: true,
+      llm_connection_id: connectionId,
+      ...(summary !== null ? { connection_summary: summary } : {}),
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -325,4 +517,17 @@ export function registerAgentRoutes(
       }),
     );
   }));
+
+  // ---- PUT /api/agents/:id/llm-connection (T-0498) ------------------------
+  // Bind an agent to a named llm_connection profile (or detach with null). Same
+  // authz class as POST /api/agents/:id/secret-handle (mgmt_object:agent/update).
+  // withAuth: keycloak mode REQUIRES a valid Bearer (401 otherwise; no x-dev-user
+  // bypass); dev mode is a pass-through and the x-dev-user path is unchanged.
+  router.register(
+    "PUT",
+    "/api/agents/:id/llm-connection",
+    withAuth(async (req, res, params) =>
+      handleSetAgentLlmConnection(pool, req, res, params["id"] ?? ""),
+    ),
+  );
 }
