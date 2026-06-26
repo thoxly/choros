@@ -91,6 +91,23 @@ describe('T-0044 dual-control gate write-path e2e', () => {
          ON CONFLICT DO NOTHING`,
         [DEV_TENANT, TEST_ROLE, `t0044-${TEST_ROLE.slice(0, 8)}`, now],
       );
+
+      // T-0486 made resolveActorTenant (src/db/org.ts) FAIL-CLOSED: an actor slug
+      // that matches no choros.employee row is rejected at tenant resolution with
+      // 403 ACTOR_TENANT_UNRESOLVED before any handler runs. ACTOR1 (e-owner) is
+      // already seeded by the genesis migration, but the second-confirm actors are
+      // not — seed them as real employees in DEV_TENANT so the LEGIT second-confirm
+      // flow resolves to its tenant and reaches 200. This is NOT an auth bypass:
+      // distinctness/self-confirm gating still runs on the resolved actors.
+      for (const slug of [ACTOR2, 'e-third']) {
+        await c.query(
+          `INSERT INTO choros.employee
+             (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
+           VALUES ($1, $2, NULL, 'human', $3, $3, 0, 0)
+           ON CONFLICT (tenant_id, slug) DO NOTHING`,
+          [DEV_TENANT, uuid(), slug],
+        );
+      }
     });
 
     const { createServer } = await import(join(REPO_ROOT, 'src', 'server.js'));
@@ -104,10 +121,13 @@ describe('T-0044 dual-control gate write-path e2e', () => {
 
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    // Cleanup grants + role + audit events for the test role.
+    // Cleanup grants + role + audit events for the test role, plus the
+    // second-confirm approver employees seeded above (keep DEV_TENANT clean for
+    // other db-tests that share the cloned DB and may count employee rows).
     await withClient(migratorUrl(), async (c) => {
       await c.query(`DELETE FROM choros."grant" WHERE tenant_id=$1 AND role_id=$2`, [DEV_TENANT, TEST_ROLE]);
       await c.query(`DELETE FROM choros.role WHERE tenant_id=$1 AND id=$2`, [DEV_TENANT, TEST_ROLE]);
+      await c.query(`DELETE FROM choros.employee WHERE tenant_id=$1 AND slug = ANY($2)`, [DEV_TENANT, [ACTOR2, 'e-third']]);
     });
   });
 
