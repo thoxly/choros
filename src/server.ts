@@ -65,6 +65,8 @@ import { decideEnvHandle } from "./core/env-secret-allowlist.js";
 import { loadMasterKey, decryptSecret, AppSecretStoreUnconfiguredError } from "./core/app-secret-cipher.js";
 import { getAppSecretSealed } from "./db/app-secret-dao.js";
 import { registerAppSecretRoutes } from "./http/app-secret.js";
+// T-0496: "Проверить подключение" — server-side LLM connection probe.
+import { registerLlmConnectionTestRoute } from "./http/llm-connection-test.js";
 import { type PgClientLike } from "./db/audit-writer.js";
 // T-0363 (E17): Analyst production ports.
 import { setAnalystPorts } from "./core/assistant-analyst.js";
@@ -977,6 +979,40 @@ function buildRouter(
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
       getMasterKey: () => process.env["APP_SECRET_MASTER_KEY"],
+    });
+  }
+
+  // T-0496: "Проверить подключение" — server-side LLM connection probe.
+  // POST /api/llm-connections/:id/test makes ONE minimal chat call through the
+  // existing OpenAILlmPort adapter using the REAL tenantSecretResolver (app:// decrypt
+  // in memory). Same authz as edit (owner OR llm_connection:configure), tenant-scoped.
+  // The raw key NEVER leaves the adapter; provider errors are sanitized before egress.
+  if (grantsPool) {
+    registerLlmConnectionTestRoute(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+      // Composition-root factory: builds the live port with the tenant secret resolver.
+      // Returns null when the connection cannot produce a usable port (invalid handle
+      // shape or no resolvable endpoint) — the route maps null → honest ok:false.
+      makeLlmPort: ({ tenantId, endpoint, model, secretHandle }) => {
+        // RL-3: only an opaque handle (app:///vault://) is usable. A malformed handle
+        // (or one that slipped through as a raw key) is rejected here — never sent.
+        const verdict = validateSecretHandleShape(secretHandle);
+        if (!verdict.ok) return null;
+        // The connection's own endpoint is preferred; fall back to the DeepSeek base
+        // only when the profile left it blank (a self-hosted/other profile must set one).
+        const ep = endpoint && endpoint.length > 0 ? endpoint : DEEPSEEK_BASE_URL;
+        return new OpenAILlmPort({
+          endpoint: ep,
+          model: model && model.length > 0 ? model : DEEPSEEK_MODEL,
+          secretHandle,
+          tenantId,
+          secretResolver: tenantSecretResolver,
+          // A probe must fail fast — cap the wait so a dead endpoint returns promptly.
+          timeoutMs: 15_000,
+        });
+      },
     });
   }
 
