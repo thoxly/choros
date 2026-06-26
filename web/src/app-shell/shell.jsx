@@ -45,6 +45,8 @@ import DmnEditorScreen from '../screens/screen-dmn-editor.jsx';
 // T-0477 (E-AGENTS L5): Расход — LLM cost accounting screen.
 import SpendScreen from '../screens/screen-spend.jsx';
 import ReportsScreen from '../screens/screen-reports.jsx';
+// T-0493: Аналитика процессов — цикл-тайм + нагрузка по исполнителям.
+import ProcessAnalyticsScreen from '../screens/screen-process-analytics.jsx';
 
 export { Icon };
 
@@ -91,6 +93,8 @@ const SCREEN_META = {
   spend: { crumb: ["Наблюдаемость", "Расход"] },
   // T-0490: отчёты — просмотр report_page + Floor-1 агрегаты.
   reports: { crumb: ["Наблюдаемость", "Отчёты"] },
+  // T-0493: аналитика процессов — цикл-тайм + нагрузка по исполнителям.
+  "process-analytics": { crumb: ["Наблюдаемость", "Аналитика процессов"] },
   // T-0474 (E-AGENTS L2): LLM connection-profile registry.
   "llm-connections": { crumb: ["Конфигурация", "LLM-соединения"] },
   // T-0382 (D5): LLM connection screen.
@@ -803,6 +807,8 @@ function AppShell() {
             {/* T-0477 (E-AGENTS L5): Расход — LLM cost accounting screen. */}
             <Route path="/spend" element={<SpendScreen />} />
             <Route path="/reports" element={<ReportsScreen />} />
+            {/* T-0493: Аналитика процессов — цикл-тайм + нагрузка по исполнителям. */}
+            <Route path="/process-analytics" element={<ProcessAnalyticsScreen />} />
           </Routes>
         </div>
       </main>

@@ -159,6 +159,9 @@ export const NAV = [
       // Отчёты (T-0490): просмотр report_page + Floor-1 агрегаты.
       // GET /api/report-pages + GET /api/report-pages/:id/render — живые → live.
       { id: "reports",       label: "Отчёты",       icon: "audit",  screen: true, status: "live" },
+      // Аналитика процессов (T-0493): цикл-тайм + нагрузка по исполнителям.
+      // GET /api/process-analytics — живой → live.
+      { id: "process-analytics", label: "Аналитика процессов", icon: "audit", screen: true, status: "live" },
     ],
   },
   // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
