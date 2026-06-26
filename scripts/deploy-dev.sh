@@ -70,8 +70,12 @@ log "3/5 Building choros image and restarting..."
 run $SSH_CMD "
   set -euo pipefail
   cd ${DEPLOY_DIR}
-  # Build only the app service (postgres/keycloak/flowable images are pinned, no rebuild)
-  docker compose build --no-cache choros
+  # Build only the app service (postgres/keycloak/flowable images are pinned, no rebuild).
+  # NO --no-cache (T-0502/FE-s39-0002): forcing a full rebuild re-runs `npm ci` over the
+  # network every deploy, which flakes on the host's IPv6-only npmjs resolution. The
+  # npm-ci layer is content-hash cache-keyed on package*.json (unchanged) → cached build
+  # is network-free for deps yet still rebuilds changed source (COPY after npm ci).
+  docker compose build choros
   # Rolling restart: substrates stay up, only choros restarts
   docker compose up -d --no-deps choros
 "
