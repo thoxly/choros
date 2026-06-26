@@ -20,8 +20,8 @@
  * a different, instance-scoped surface used by the process-instance demo).
  *
  * SECURITY (the spine of this read — it is audit EXPOSURE):
- *   • authz   — genesis-owner OR a tenant-wide delegable mgmt_object:* grant. 401 if
- *               unauthenticated, 403 if authenticated-without-authority.
+ *   • authz   — genesis-owner ONLY (T-0500 review: mgmt_object:* grant must not open
+ *               the whole journal). 401 if unauthenticated, 403 otherwise.
  *   • tenant  — withTenantTx (SET LOCAL choros.tenant_id + FORCE RLS) AND a literal
  *               WHERE tenant_id = $1 in the SELECT (defence-in-depth). Tenant comes
  *               from the ACTOR's resolved identity, NEVER from the request.
@@ -493,19 +493,16 @@ async function withTenantTx<T>(
 
 /**
  * The audit-read gate. The WHOLE tenant's audit is sensitive (it carries the entire
- * org's actions), so the gate is CONSERVATIVE: genesis-owner OR a holder of ANY
- * delegable tenant management grant (mgmt_object:*). A plain member with neither →
- * 403. There is no dedicated audit:read grant in the model, so tenant-management
- * authority is the narrowest existing honest predicate (owner/admin).
+ * org's actions, including grants, auth events, agent decisions), so the gate is
+ * OWNER-ONLY (T-0500 review): a mgmt_object:* grant covers a SINGLE object type
+ * (department/position/employee) and MUST NOT open the entire journal.
+ *
+ * Аудит всего тенанта — owner-only (T-0500 review): mgmt-грант на один объект НЕ
+ * должен открывать весь журнал. Расширение (напр. dedicated audit:read грант или
+ * admin-ярус) — отдельным founder-решением.
  */
 function holdsAuditRead(admin: AdminContext): boolean {
-  if (admin.isGenesisOwner) return true;
-  return admin.adminGrants.some(
-    (g) =>
-      typeof g.resourceType === "string" &&
-      g.resourceType.startsWith("mgmt_object:") &&
-      g.delegable,
-  );
+  return admin.isGenesisOwner;
 }
 
 /** Parse ?limit= / ?cursor= / ?actor= / ?action= for the audit list. */

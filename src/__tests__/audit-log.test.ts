@@ -9,8 +9,8 @@
  * the queries the handler runs (no real DB). Covered:
  *
  *   (1) success — owner reads the tenant-wide event list → 200 { events, nextCursor }
- *   (2) authz — neither owner nor mgmt grant → 403; no x-dev-user → 401; both BEFORE
- *       any audit read
+ *   (2) authz — non-owner (with or without mgmt grant) → 403; no x-dev-user → 401;
+ *       both BEFORE any audit read (T-0500 review: owner-only)
  *   (3) tenant-scope — the audit SELECT carries a literal WHERE tenant_id = $1 bound
  *       to the ACTOR's resolved tenant (cross-tenant isolation; a tenant-B caller
  *       resolves to tenant B and reads only tenant-B's rows)
@@ -259,12 +259,16 @@ describe("T-0500 (1) — owner reads the tenant-wide audit log", () => {
     }
   });
 
-  it("a non-owner holding a delegable mgmt_object:* grant CAN read → 200", async () => {
+  // T-0500 review: a mgmt_object:* grant covers one object type (dept/position/employee)
+  // and MUST NOT open the whole-tenant audit journal — narrowed to owner-only.
+  it("a non-owner holding a delegable mgmt_object:* grant CANNOT read → 403", async () => {
     const s = baseScenario({ isOwner: false, hasMgmtGrant: true, auditRows: sampleRows() });
     const { port, close } = await startServer(makePool(s));
     try {
       const r = await request(port, "GET", PATH);
-      expect(r.status).toBe(200);
+      expect(r.status).toBe(403);
+      expect(errCode(r.body)).toBe("ADMIN_GATE_REJECTED");
+      expect(s.capture.auditSql).toBeNull(); // gate fires BEFORE any DB read
     } finally {
       await close();
     }
