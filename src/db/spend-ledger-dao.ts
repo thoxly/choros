@@ -262,9 +262,13 @@ export async function getSpendWindows(
   const dayCutoff = now - dayMs;
   const monthCutoff = now - 30 * dayMs;
 
+  // NOTE: "window" is a reserved keyword in PostgreSQL (WINDOW clause). It MUST be
+  // double-quoted everywhere it is used as a column alias / ORDER BY target —
+  // an unquoted `AS window` / `ORDER BY window` raises a syntax error and 500s
+  // the /api/spend route. Quoting keeps the result key as `window` for the mapper.
   const { rows } = await client.query(
     `SELECT
-       'total' AS window,
+       'total' AS "window",
        COALESCE(currency, 'USD') AS currency,
        SUM(amount)::float                 AS total_amount,
        SUM(COALESCE(total_tokens, 0))     AS total_tokens,
@@ -276,7 +280,7 @@ export async function getSpendWindows(
     UNION ALL
 
     SELECT
-       'month' AS window,
+       'month' AS "window",
        COALESCE(currency, 'USD') AS currency,
        SUM(amount)::float,
        SUM(COALESCE(total_tokens, 0)),
@@ -289,7 +293,7 @@ export async function getSpendWindows(
     UNION ALL
 
     SELECT
-       'day' AS window,
+       'day' AS "window",
        COALESCE(currency, 'USD') AS currency,
        SUM(amount)::float,
        SUM(COALESCE(total_tokens, 0)),
@@ -298,7 +302,7 @@ export async function getSpendWindows(
     WHERE tenant_id = $1
       AND recorded_at >= $3
     GROUP BY COALESCE(currency, 'USD')
-    ORDER BY window`,
+    ORDER BY "window"`,
     [tenantId, monthCutoff, dayCutoff],
   );
 
