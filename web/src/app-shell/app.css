@@ -453,6 +453,14 @@
 .chs-ev__tag--ok  { color: var(--chs-color-success); background: var(--chs-color-success-soft); }
 .chs-ev__tag--budget { color: var(--chs-color-warning); background: var(--chs-color-warning-soft); }
 
+/* --- T-0500: фильтры журнала аудита + пагинация --- */
+.chs-auditbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--chs-space-6); margin-top: var(--chs-space-7); }
+.chs-auditbar__field { min-width: 180px; }
+.chs-auditbar__actions { display: flex; align-items: center; gap: var(--chs-space-4); padding-bottom: var(--chs-space-2); }
+.chs-audit-loadmore { display: flex; justify-content: center; padding: var(--chs-space-8) 0 var(--chs-space-4); }
+.chs-audit-loadmore__end { font-family: var(--chs-font-mono); font-size: var(--chs-text-xs); color: var(--chs-color-text-faint); }
+.chs-audit-loadmore__err { margin: var(--chs-space-6) 0 0; padding: var(--chs-space-4) var(--chs-space-6); border-radius: var(--chs-radius-2); background: var(--chs-color-danger-soft); color: var(--chs-color-danger); font-size: var(--chs-text-sm); }
+
 /* ============================================================================
    ЭКРАН 1 — дополнения: назначения ролей, BYO-LLM, резервирование бюджета
    ============================================================================ */

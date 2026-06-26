@@ -1,162 +1,191 @@
 /* ============================================================================
    CHOROS — screen-audit.jsx
-   ЭКРАН 3 (hero): таймлайн аудита одного инстанса процесса.
-   Единый вертикальный поток событий человек/агент/сервис.
-   Каждый вызов инструмента — отдельный AuditEvent с моноширинными ID и
-   таймстампом; раскрывается payload (вход/выход, длительность, токены, ₽).
+   ЭКРАН «Аудит»: РЕАЛЬНЫЙ журнал событий контура (tenant-wide).
+   T-0500: подключён к настоящему хэш-сцеплённому audit_log через GET /api/audit
+   (заменил демо-заглушку «Счёт-агент»). Сервер отдаёт ТОЛЬКО редактированную
+   проекцию (id/ts/actor/action/summary/target) — сырой payload не выходит за
+   границу. Здесь: единый вертикальный поток событий, человеко-понятные подписи,
+   пагинация «Загрузить ещё», честные состояния Загрузка/Ошибка/Пусто.
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
-import { ExecGlyph, MonoId, Mono, StatusChip, BudgetMeter, EXEC_META, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  ExecGlyph, MonoId, Mono, Button, Field, Select,
+  LoadingState, ErrorState, EmptyState,
+} from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
+import { execTypeOf, fmtTs, humanError, buildAuditUrl } from './screen-audit.logic.js';
 
-
-function AuditEventRich({ ev }) {
-  const [open, setOpen] = useState(false);
-  const isTool = !!ev.tool;
-  const expandable = !!ev.payload;
+function AuditEventRow({ ev }) {
+  const type = execTypeOf(ev.action);
   return (
-    <div className={`chs-ev ${isTool ? "chs-ev--toolcall" : ""}`} onClick={() => expandable && setOpen((o) => !o)}>
-      <div className="chs-ev__time">{ev.ts}</div>
+    <div className="chs-ev">
+      <div className="chs-ev__time">{fmtTs(ev.ts)}</div>
       <div className="chs-ev__rail">
-        <div className={`chs-ev__node chs-ev__node--${ev.type}`}><ExecGlyph type={ev.type} size={8} /></div>
+        <div className={`chs-ev__node chs-ev__node--${type}`}><ExecGlyph type={type} size={8} /></div>
       </div>
       <div className="chs-ev__body">
         <div className="chs-ev__line">
-          <span className={`chs-ev__actor chs-ev__actor--${ev.type}`}>{ev.actor}</span>
-          <span>{ev.action}</span>
+          <span className={`chs-ev__actor chs-ev__actor--${type}`}>{ev.actor}</span>
+          <span>{ev.summary || ev.action}</span>
           {ev.target && <MonoId chip>{ev.target}</MonoId>}
-          {ev.tag === "mcp" && <span className="chs-ev__tag chs-ev__tag--mcp">MCP</span>}
-          {ev.tag === "esc" && <span className="chs-ev__tag chs-ev__tag--esc">эскалация</span>}
-          {ev.tag === "ok" && <span className="chs-ev__tag chs-ev__tag--ok">ok</span>}
-          {ev.tag === "budget" && <span className="chs-ev__tag chs-ev__tag--budget">control-plane</span>}
-          {expandable && <span className="chs-ev__caret">{open ? "▾ свернуть" : "▸ payload"}</span>}
+          <MonoId>{ev.action}</MonoId>
         </div>
-        {ev.meta && (
-          <div className="chs-ev__meta">
-            <span><b>{ev.meta.dur}</b> длит.</span>
-            <span><b>{ev.meta.tok}</b></span>
-            <span><b>{ev.meta.cost}</b></span>
-          </div>
-        )}
-        {expandable && open && (
-          <div className="chs-ev__payload">
-            <div className="chs-ev__payrow"><span className="chs-ev__payk">вход</span><span className="chs-ev__payv">{ev.payload.call}</span></div>
-            <div className="chs-ev__payrow"><span className="chs-ev__payk">выход</span><span className="chs-ev__payv">{ev.payload.out}</span></div>
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
 function AuditScreen() {
-  const [data, setData] = useState(null);
+  const [events, setEvents] = useState(null);   // null = ещё не грузили
+  const [nextCursor, setNextCursor] = useState(null);
   const [error, setError] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  const load = async () => {
+  // Черновики фильтров (в инпутах) и применённые (в запросе).
+  const [actorDraft, setActorDraft] = useState('');
+  const [actionDraft, setActionDraft] = useState('');
+  const [filters, setFilters] = useState({ actor: '', action: '' });
+
+  // Первая страница (или перезагрузка при смене фильтров).
+  const load = useCallback(async () => {
     setError(null);
+    setEvents(null);
+    setNextCursor(null);
     try {
-      const res = await fetch('/api/audit', { headers: devHeaders() });
+      const res = await fetch(buildAuditUrl(filters, null), { headers: devHeaders() });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+        setError(humanError(res.status));
+        setEvents([]);
+        return;
       }
-      setData(await res.json());
+      const data = await res.json();
+      setEvents(Array.isArray(data.events) ? data.events : []);
+      setNextCursor(data.nextCursor ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(`Не удалось загрузить журнал аудита: ${err instanceof Error ? err.message : String(err)}`);
+      setEvents([]);
+    }
+  }, [filters]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await fetch(buildAuditUrl(filters, nextCursor), { headers: devHeaders() });
+      if (!res.ok) {
+        setError(humanError(res.status));
+        return;
+      }
+      const data = await res.json();
+      setEvents((prev) => [...(prev ?? []), ...(Array.isArray(data.events) ? data.events : [])]);
+      setNextCursor(data.nextCursor ?? null);
+    } catch (err) {
+      setError(`Не удалось загрузить ещё: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
-  useEffect(() => {
-    load();
-  }, []);
+  const applyFilters = (e) => {
+    if (e) e.preventDefault();
+    setFilters({ actor: actorDraft.trim(), action: actionDraft.trim() });
+  };
 
-  const flat = [];
+  const clearFilters = () => {
+    setActorDraft('');
+    setActionDraft('');
+    setFilters({ actor: '', action: '' });
+  };
 
-  // Error state
-  if (error) {
-    return (
-      <div className="chs-audit-screen">
-        <ErrorState message={`Не удалось загрузить аудит: ${error}`} onRetry={load} />
-      </div>
-    );
-  }
-
-  // Loading state
-  if (data === null) {
-    return (
-      <div className="chs-audit-screen">
-        <LoadingState label="Загрузка аудита…" />
-      </div>
-    );
-  }
-
-  // Empty state
-  if (!data.trace || data.trace.length === 0) {
-    return (
-      <div className="chs-audit-screen">
-        <EmptyState title="Нет событий" description="Для этого инстанса процесса ещё не записано ни одного события аудита." />
-      </div>
-    );
-  }
-
-  const { instance, trace } = data;
+  const hasActiveFilters = !!(filters.actor || filters.action);
 
   return (
     <div className="chs-audit-screen">
-      {/* Заголовок инстанса */}
       <div className="chs-inst">
         <div className="chs-inst__top">
           <div>
-            <h1 className="chs-inst__title">
-              {instance.process}
-              <StatusChip status={instance.status} />
-            </h1>
+            <h1 className="chs-inst__title">Журнал аудита</h1>
             <div className="chs-inst__sub">
-              <MonoId chip>{instance.id}</MonoId>
-              <span className="chs-crumbs__sep">/</span>
-              <MonoId>{instance.procId}</MonoId>
-              <span className="chs-crumbs__sep">/</span>
-              <span>текущий узел: <Mono style={{ color: "var(--chs-color-text)" }}>{instance.node}</Mono></span>
+              <span>Все события контура — append-only, хэш-сцепленный журнал.</span>
             </div>
           </div>
-          <div className="chs-inst__execs">
-            {instance.execs.map((t) => (
-              <span className={`chs-inst__execdot chs-inst__execdot--${t}`} key={t} title={EXEC_META[t].label}>
-                <ExecGlyph type={t} size={11} />
-              </span>
-            ))}
+        </div>
+
+        {/* Фильтры */}
+        <form className="chs-auditbar" onSubmit={applyFilters}>
+          <Select
+            label="Действие"
+            className="chs-auditbar__field"
+            value={actionDraft}
+            onChange={(e) => setActionDraft(e.target.value)}
+          >
+            <option value="">Все действия</option>
+            <option value="grant">Гранты прав</option>
+            <option value="assignment">Назначения ролей</option>
+            <option value="agent">События агентов</option>
+            <option value="substitution">Замещения</option>
+          </Select>
+          <Field
+            label="Актор"
+            className="chs-auditbar__field"
+            type="text"
+            placeholder="slug или id актора"
+            value={actorDraft}
+            onChange={(e) => setActorDraft(e.target.value)}
+          />
+          <div className="chs-auditbar__actions">
+            <Button variant="primary" size="sm" type="submit">Применить</Button>
+            {hasActiveFilters && (
+              <Button variant="ghost" size="sm" type="button" onClick={clearFilters}>Сбросить</Button>
+            )}
           </div>
-        </div>
-        <div className="chs-inst__facts">
-          <div className="chs-statcell"><span className="chs-statcell__k">Запущен</span><span className="chs-statcell__v"><Mono>{instance.started}</Mono></span></div>
-          <div className="chs-statcell"><span className="chs-statcell__k">В работе</span><span className="chs-statcell__v"><Mono>{instance.elapsed}</Mono></span></div>
-          {instance.budget.map((b) => (
-            <div className="chs-statcell" key={b.label} style={{ minWidth: "180px" }}>
-              <BudgetMeter label={b.label} used={b.used} total={b.total} unit={b.unit} fmt={b.money ? (n) => "₽" + n.toLocaleString("ru-RU") : (n) => n.toLocaleString("ru-RU")} />
-            </div>
-          ))}
-        </div>
+        </form>
       </div>
 
-      {/* Трасса */}
-      <div className="chs-trace">
-        {trace.map((step) => {
-          flat.length = 0;
-          return (
-            <div className="chs-tracestep" key={step.node}>
-              <div className="chs-tracestep__head">
-                <span className="chs-tracestep__node">{step.node}</span>
-                <span className="chs-tracestep__name">{step.name}</span>
-                <span className="chs-tracestep__line" />
-              </div>
-              {step.events.map((ev, i) => (
-                <AuditEventRich key={i} ev={ev} last={i === step.events.length - 1} />
-              ))}
-            </div>
-          );
-        })}
-      </div>
+      {/* Тело: состояния + поток событий */}
+      {error && (events === null || events.length === 0) ? (
+        <div className="chs-trace">
+          <ErrorState message={error} onRetry={load} />
+        </div>
+      ) : events === null ? (
+        <div className="chs-trace">
+          <LoadingState label="Загрузка журнала аудита…" />
+        </div>
+      ) : events.length === 0 ? (
+        <div className="chs-trace">
+          <EmptyState
+            title={hasActiveFilters ? 'Ничего не найдено' : 'Журнал пуст'}
+            description={
+              hasActiveFilters
+                ? 'По выбранным фильтрам событий нет. Измените или сбросьте фильтры.'
+                : 'В этом контуре ещё не записано ни одного события аудита.'
+            }
+            action={hasActiveFilters ? <Button variant="secondary" size="sm" onClick={clearFilters}>Сбросить фильтры</Button> : undefined}
+          />
+        </div>
+      ) : (
+        <div className="chs-trace">
+          {events.map((ev) => (
+            <AuditEventRow key={ev.id} ev={ev} />
+          ))}
+
+          {/* Невыводящая баннер-ошибка для частичного провала «загрузить ещё» */}
+          {error && <div className="chs-audit-loadmore__err">{error}</div>}
+
+          <div className="chs-audit-loadmore">
+            {nextCursor ? (
+              <Button variant="secondary" size="sm" loading={loadingMore} onClick={loadMore}>
+                {loadingMore ? 'Загрузка…' : 'Загрузить ещё'}
+              </Button>
+            ) : (
+              <span className="chs-audit-loadmore__end"><Mono>конец журнала</Mono></span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

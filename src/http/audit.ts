@@ -1,25 +1,56 @@
 /**
  * src/http/audit.ts
  *
- * Read-API for instance audit trace (GET /api/audit and GET /api/audit/:instanceId).
- * Export-API: GET /api/audit/export — download audit log as JSON file (T-0138).
- * In-memory seed data with audit events timeline for a single instance.
- * Zero external dependencies — only node:http types and router.ts.
+ * Read-API for the audit log.
  *
- * T-0138 export write-path:
+ *   GET /api/audit              — T-0500: the REAL tenant-wide hash-chained audit
+ *                                 log (choros.audit_event), tenant-scoped + REDACTED
+ *                                 + keyset-paginated + authz-gated. Replaces the
+ *                                 former in-memory "Счёт-агент" demo timeline.
+ *   GET /api/audit/:instanceId  — demo instance trace (in-memory seed) — UNCHANGED.
+ *   GET /api/audit/export       — download a demo instance as JSON (T-0138) — UNCHANGED.
+ *
+ * T-0500 (the reality-gap fix): `GET /api/audit` used to return a hardcoded in-memory
+ * timeline ({instance, trace}) that had NOTHING to do with the real audit_log. It now
+ * reads the genuine append-only, hash-chained audit the writer produces, scoped to the
+ * CALLER's tenant, redacted at the projection boundary (raw payload/scope NEVER egress),
+ * behind a conservative owner/admin gate (the whole tenant's audit is sensitive).
+ * Response shape: { events: AuditLogItem[], nextCursor } — the flat, paginated list the
+ * audit screen now consumes. The instance-trace demo routes are left untouched (they are
+ * a different, instance-scoped surface used by the process-instance demo).
+ *
+ * SECURITY (the spine of this read — it is audit EXPOSURE):
+ *   • authz   — genesis-owner ONLY (T-0500 review: mgmt_object:* grant must not open
+ *               the whole journal). 401 if unauthenticated, 403 otherwise.
+ *   • tenant  — withTenantTx (SET LOCAL choros.tenant_id + FORCE RLS) AND a literal
+ *               WHERE tenant_id = $1 in the SELECT (defence-in-depth). Tenant comes
+ *               from the ACTOR's resolved identity, NEVER from the request.
+ *   • redact  — readAuditLog projects an allow-list ONLY (id/ts/actor/action/summary/
+ *               safe-target). Raw payload/scope/subject free-text is dropped in the DAO.
+ *   • filters — optional ?actor= / ?action= are bound as parameters ($N), never
+ *               interpolated (injection-safe; LIKE wildcards neutralised).
+ *
+ * Export-API (T-0138, demo instance) write-path:
  *   GET /api/audit/export?instance=<id>  — download named instance as JSON.
  *   GET /api/audit/export                — download default instance (INS-7731).
  *   Authz: x-dev-user header required in dev mode (401 if absent).
- *   PDP gate: NONE in dev slice — all three audit routes (GET /api/audit,
- *   GET /api/audit/:instanceId, GET /api/audit/export) run without a PDP
- *   grant check. Hardening MUST close all three before production: add
- *   PDP operation=read on resource=audit_trace for each route (see
- *   FORWARD-OBLIGATION comments inline).
- *   Response: 200 application/json + Content-Disposition: attachment filename.
  */
+import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import {
+  resolveActorSlugFromAuth,
+  resolveActorTenant,
+  loadAdminContext,
+} from "../db/org.js";
+import type { AdminContext } from "../core/scoped-admin.js";
+import type { PgClientLike } from "../db/audit-writer.js";
+import {
+  readAuditLog,
+  decodeAuditCursor,
+  type AuditLogCursor,
+} from "../db/audit-read-dao.js";
 import {
   runDemoLegalPrecheck,
   demoApproveDenied,
@@ -405,20 +436,170 @@ export async function getTelDemoInstance(): Promise<AuditData> {
   return telDemoCache;
 }
 
+// ===========================================================================
+// T-0500 — REAL tenant-wide audit log read (GET /api/audit).
+// ===========================================================================
+
+const AUDIT_DEFAULT_LIMIT = 30;
+const AUDIT_MAX_LIMIT = 100;
+
+/**
+ * Mode-aware caller identity (mirrors agents.ts::extractActor / process-defs.ts).
+ *   - keycloak: identity from the VALIDATED token (sub/preferred_username → slug); null
+ *     → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+ *   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user.
+ */
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
+
+/** withTenantTx — read-path tenant scoping (SET LOCAL choros.tenant_id + RLS), mirrors agents.ts. */
+async function withTenantTx<T>(
+  pool: pg.Pool,
+  tenantId: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * The audit-read gate. The WHOLE tenant's audit is sensitive (it carries the entire
+ * org's actions, including grants, auth events, agent decisions), so the gate is
+ * OWNER-ONLY (T-0500 review): a mgmt_object:* grant covers a SINGLE object type
+ * (department/position/employee) and MUST NOT open the entire journal.
+ *
+ * Аудит всего тенанта — owner-only (T-0500 review): mgmt-грант на один объект НЕ
+ * должен открывать весь журнал. Расширение (напр. dedicated audit:read грант или
+ * admin-ярус) — отдельным founder-решением.
+ */
+function holdsAuditRead(admin: AdminContext): boolean {
+  return admin.isGenesisOwner;
+}
+
+/** Parse ?limit= / ?cursor= / ?actor= / ?action= for the audit list. */
+function parseAuditQuery(req: import("node:http").IncomingMessage): {
+  limit: number;
+  cursor: AuditLogCursor | null;
+  actor: string | null;
+  action: string | null;
+} {
+  const rawUrl = req.url ?? "";
+  const qIdx = rawUrl.indexOf("?");
+  const sp = new URLSearchParams(qIdx >= 0 ? rawUrl.slice(qIdx + 1) : "");
+
+  let limit = AUDIT_DEFAULT_LIMIT;
+  const rawLimit = sp.get("limit");
+  if (rawLimit !== null) {
+    const parsed = parseInt(rawLimit, 10);
+    if (!isNaN(parsed)) {
+      limit = Math.min(Math.max(1, parsed), AUDIT_MAX_LIMIT);
+    }
+  }
+
+  const rawCursor = sp.get("cursor");
+  const cursor = rawCursor !== null ? decodeAuditCursor(rawCursor) : null;
+
+  // Filters are bound as PARAMETERS downstream — capture raw values (trimmed, capped).
+  const actorRaw = sp.get("actor");
+  const actor = actorRaw !== null && actorRaw.trim() !== "" ? actorRaw.trim().slice(0, 128) : null;
+  const actionRaw = sp.get("action");
+  const action = actionRaw !== null && actionRaw.trim() !== "" ? actionRaw.trim().slice(0, 64) : null;
+
+  return { limit, cursor, actor, action };
+}
+
+/**
+ * GET /api/audit?limit=&cursor=&actor=&action= — the REAL tenant-wide audit log.
+ *
+ * Response: { events: [{ id, ts, actor, action, summary, target }], nextCursor }
+ */
+async function handleGetAuditLog(
+  pool: pg.Pool,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+): Promise<void> {
+  const actorId = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actorId);
+  const { limit, cursor, actor, action } = parseAuditQuery(req);
+  const nowMs = Date.now();
+
+  // Authz — loadAdminContext is a DB read (own tx, no side-effect), BEFORE the read
+  // tx (mirrors agents.ts). Fail-closed: owner/admin only.
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+  if (!holdsAuditRead(admin)) {
+    throw new HttpError(
+      403,
+      "ADMIN_GATE_REJECTED",
+      "insufficient authority to read the tenant audit log",
+    );
+  }
+
+  const page = await withTenantTx(pool, tenantId, async (client) =>
+    readAuditLog(
+      client as unknown as PgClientLike,
+      tenantId,
+      limit,
+      cursor,
+      { actor, action },
+    ),
+  );
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify({ events: page.items, nextCursor: page.nextCursor }));
+}
+
 // ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
-export function registerAuditRoutes(router: Router, _store?: JobStore): void {
-  // GET /api/audit — return default instance (INS-7731)
+export function registerAuditRoutes(
+  router: Router,
+  _store?: JobStore,
+  pool?: pg.Pool,
+): void {
+  // GET /api/audit — T-0500: the REAL tenant-wide, redacted, paginated audit log.
   //
-  // FORWARD-OBLIGATION: no PDP gate in dev slice. Hardening MUST add
-  // PDP check: operation=read, resource=audit_trace before returning data.
-  router.register("GET", "/api/audit", withAuth(async (_req, res) => {
-    const data = getDefaultAuditInstance();
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(data));
+  // When no pool is wired (memory mode / DATABASE_URL absent), there is NO real audit
+  // store to read — fail HONESTLY (503) rather than fall back to a fake timeline.
+  router.register("GET", "/api/audit", withAuth(async (req, res) => {
+    if (pool === undefined) {
+      throw new HttpError(
+        503,
+        "AUDIT_UNAVAILABLE",
+        "audit log is not available (no database configured)",
+      );
+    }
+    await handleGetAuditLog(pool, req, res);
   }));
 
   // GET /api/audit/export — download audit log as JSON file (T-0138).

@@ -557,8 +557,11 @@ function buildRouter(
       : undefined,
   );
 
-  // Register audit endpoints
-  registerAuditRoutes(router, store as JobStore);
+  // Register audit endpoints.
+  // T-0500: GET /api/audit now reads the REAL tenant-wide audit log — thread the
+  // grants pool (null in memory mode → the route fails honestly with 503). The
+  // demo instance-trace routes (/api/audit/:id, /api/audit/export) are pool-free.
+  registerAuditRoutes(router, store as JobStore, grantsPool ?? undefined);
 
   // Register GET /api/rights/dictionaries BEFORE :roleId catch-all (R-1 fix).
   // Seed-backed — no DATABASE_URL required (ADR §2.1 / AC-16).

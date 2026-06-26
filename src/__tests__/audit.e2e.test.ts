@@ -3,12 +3,19 @@ import * as http from "node:http";
 import { createServer } from "../server.js";
 
 // ---------------------------------------------------------------------------
-// E2E: Audit API with real server
+// E2E: Audit API with real server.
+//
+// T-0500: GET /api/audit is now the REAL tenant-wide audit-log read (DB-backed).
+// In memory mode (no DATABASE_URL) there is no audit store, so the route fails
+// HONESTLY with 503 rather than serving the old fake "Счёт-агент" timeline.
+// The demo instance-trace surface (GET /api/audit/:instanceId, .../export) is
+// in-memory and UNCHANGED — those assertions live below.
 // ---------------------------------------------------------------------------
 
 describe("Audit API E2E", () => {
   let server: http.Server;
   let baseUrl: string;
+  const hasDb = !!process.env["DATABASE_URL"];
 
   beforeAll(async () => {
     server = createServer();
@@ -29,18 +36,25 @@ describe("Audit API E2E", () => {
     });
   });
 
-  function makeRequest(method: string, path: string): Promise<{ statusCode: number; body: string }> {
+  function makeRequest(
+    method: string,
+    path: string,
+  ): Promise<{ statusCode: number; body: string }> {
     return new Promise((resolve, reject) => {
       const url = new URL(baseUrl + path);
-      const req = http.request(url, { method }, (res) => {
-        let body = "";
-        res.on("data", (chunk: Buffer) => {
-          body += chunk.toString();
-        });
-        res.on("end", () => {
-          resolve({ statusCode: res.statusCode || 200, body });
-        });
-      });
+      const req = http.request(
+        url,
+        { method, headers: { "x-dev-user": "e-owner" } },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk: Buffer) => {
+            body += chunk.toString();
+          });
+          res.on("end", () => {
+            resolve({ statusCode: res.statusCode || 200, body });
+          });
+        },
+      );
       req.on("error", (err: Error) => {
         reject(err);
       });
@@ -48,18 +62,54 @@ describe("Audit API E2E", () => {
     });
   }
 
-  it("GET /api/audit returns 200 with valid JSON structure", async () => {
-    const result = await makeRequest("GET", "/api/audit");
+  // -------------------------------------------------------------------------
+  // GET /api/audit — the REAL tenant-wide log.
+  // -------------------------------------------------------------------------
+
+  it.skipIf(hasDb)(
+    "GET /api/audit without a DB → 503 (honest: no audit store, not a fake timeline)",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit");
+      expect(result.statusCode).toBe(503);
+      const data = JSON.parse(result.body) as { error?: { code?: string } };
+      expect(data.error?.code).toBe("AUDIT_UNAVAILABLE");
+    },
+  );
+
+  it.skipIf(!hasDb)(
+    "GET /api/audit with a DB → 200 { events, nextCursor } OR a fail-closed auth status",
+    async () => {
+      const result = await makeRequest("GET", "/api/audit");
+      // With an ambient DB the seed owner reads the (possibly empty) event list;
+      // an unresolvable identity fails closed (401/403). Never the old shape.
+      expect([200, 401, 403]).toContain(result.statusCode);
+      if (result.statusCode === 200) {
+        const data = JSON.parse(result.body) as Record<string, unknown>;
+        expect(Array.isArray(data["events"])).toBe(true);
+        expect(data).not.toHaveProperty("trace");
+        expect(data).not.toHaveProperty("instance");
+      }
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // GET /api/audit/:instanceId — the demo instance-trace surface (UNCHANGED).
+  // -------------------------------------------------------------------------
+
+  it("GET /api/audit/INS-7731 returns 200 with the demo instance trace", async () => {
+    const result = await makeRequest("GET", "/api/audit/INS-7731");
 
     expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body);
-    expect(data).toHaveProperty("instance");
+    const data = JSON.parse(result.body) as Record<string, unknown>;
+    const instance = data.instance as Record<string, unknown>;
+
+    expect(instance.id).toBe("INS-7731");
     expect(data).toHaveProperty("trace");
     expect(Array.isArray(data.trace)).toBe(true);
   });
 
-  it("GET /api/audit response has instance with required fields", async () => {
-    const result = await makeRequest("GET", "/api/audit");
+  it("GET /api/audit/INS-7731 instance has required fields", async () => {
+    const result = await makeRequest("GET", "/api/audit/INS-7731");
 
     expect(result.statusCode).toBe(200);
     const data = JSON.parse(result.body) as Record<string, unknown>;
@@ -76,8 +126,8 @@ describe("Audit API E2E", () => {
     expect(Array.isArray(instance.budget)).toBe(true);
   });
 
-  it("GET /api/audit trace has steps with node, name, and events array", async () => {
-    const result = await makeRequest("GET", "/api/audit");
+  it("GET /api/audit/INS-7731 trace steps have node, name, events", async () => {
+    const result = await makeRequest("GET", "/api/audit/INS-7731");
 
     expect(result.statusCode).toBe(200);
     const data = JSON.parse(result.body) as Record<string, unknown>;
@@ -100,35 +150,14 @@ describe("Audit API E2E", () => {
     }
   });
 
-  it("GET /api/audit/INS-7731 returns 200 with matching instance", async () => {
-    const result = await makeRequest("GET", "/api/audit/INS-7731");
-
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const instance = data.instance as Record<string, unknown>;
-
-    expect(instance.id).toBe("INS-7731");
-    expect(data).toHaveProperty("trace");
-  });
-
   it("GET /api/audit/NOPE returns 404", async () => {
     const result = await makeRequest("GET", "/api/audit/NOPE");
 
     expect(result.statusCode).toBe(404);
   });
 
-  it("GET /api/audit returns default instance INS-7731", async () => {
-    const result = await makeRequest("GET", "/api/audit");
-
-    expect(result.statusCode).toBe(200);
-    const data = JSON.parse(result.body) as Record<string, unknown>;
-    const instance = data.instance as Record<string, unknown>;
-
-    expect(instance.id).toBe("INS-7731");
-  });
-
-  it("Default instance has running status and budget items", async () => {
-    const result = await makeRequest("GET", "/api/audit");
+  it("Demo instance INS-7731 has running status and budget items", async () => {
+    const result = await makeRequest("GET", "/api/audit/INS-7731");
 
     expect(result.statusCode).toBe(200);
     const data = JSON.parse(result.body) as Record<string, unknown>;
