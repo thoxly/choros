@@ -148,16 +148,19 @@ describe('nav-config T-0355', () => {
     expect(effectiveStatus({ id: 'x', label: 'X', icon: 'x', status: 'live' })).toBe('live');
   });
 
-  it('no authoring item has status live except Приложения (constructors can be live)', () => {
-    // This test guards that authoring tools marked live have genuinely live backends.
-    // Currently only Приложения is live; forms/modeler/assistant are demo.
+  it('no authoring item has status live except Приложения and Модельер (both have real backends)', () => {
+    // T-0508: Модельер (modeler) is a real working feature (bpmn-js + real save/publish
+    // to Flowable) so its status was updated from 'demo' to 'live'.
+    // This test now allows both 'apps' and 'modeler' to be live; assistant/forms remain demo.
     const authoringItems = NAV
       .filter((g) => g.space === 'authoring')
       .flatMap((g) => g.items);
     const liveAuthoring = authoringItems.filter((i) => i.status === 'live');
     const liveIds = liveAuthoring.map((i) => i.id);
-    // Allow Приложения (apps) to be live. Others should be demo until E16 backend ships.
-    expect(liveIds.filter((id) => id !== 'apps')).toHaveLength(0);
+    const unexpectedLive = liveIds.filter((id) => id !== 'apps' && id !== 'modeler');
+    expect(unexpectedLive).toHaveLength(0);
+    // Modeler must now be live (T-0508)
+    expect(liveIds).toContain('modeler');
   });
 
   // T-0482 [F3]: «Формы задач» nav cleanup --------------------------------

@@ -325,7 +325,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
             <Select
               value={selectedAppId}
               onChange={(e) => { setSelectedAppId(e.target.value); setSelectedDefId(''); }}
-              options={[{ value: '', label: '— выберите —' }, ...(applications || []).map((a) => ({ value: a.id, label: a.name || a.id }))]}
+              options={[{ value: '', label: '— выберите —' }, ...(applications || []).map((a) => ({ value: a.id, label: a.display_name || a.slug || a.id }))]}
             />
             {registryDefs && (
               <>
@@ -333,7 +333,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
                 <Select
                   value={selectedDefId}
                   onChange={(e) => setSelectedDefId(e.target.value)}
-                  options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.title || d.id }))]}
+                  options={[{ value: '', label: '— выберите —' }, ...registryDefs.map((d) => ({ value: d.id, label: d.display_name || d.slug || d.id }))]}
                 />
               </>
             )}

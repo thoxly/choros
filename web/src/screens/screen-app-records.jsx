@@ -1026,7 +1026,8 @@ function AppRecordsScreen() {
                   return (
                     <tr
                       key={rec.id}
-                      style={rec.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
+                      style={{ cursor: 'pointer', ...(rec.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : {}) }}
+                      onClick={() => navigate(`/apps/${appId}/records/${rec.id}`)}
                     >
                       {columns.map((c) => {
                         // T-0507: computed fields are never stored in data, so compute on-read.
@@ -1057,6 +1058,7 @@ function AppRecordsScreen() {
                             textDecoration: 'none',
                           }}
                           title="Открыть запись"
+                          onClick={(e) => e.stopPropagation()}
                         >
                           Открыть
                         </Link>
