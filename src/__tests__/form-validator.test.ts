@@ -24,8 +24,8 @@
  * Positive tests: valid purchase + valid approval, and sanitized output.
  */
 import { describe, it, expect } from "vitest";
-import { validateFormSubmission, type FieldError } from "../core/form-validator.js";
-import { getFormDef, formIds } from "../core/form-schema.js";
+import { validateFormSubmission, validateFormSubmissionAgainst, type FieldError } from "../core/form-validator.js";
+import { getFormDef, formIds, type FormDef } from "../core/form-schema.js";
 
 // A baseline VALID purchase payload — every test mutates one field off this.
 // T-0370: registry-aligned fields (title/amount) replacing old form-level fields.
@@ -236,5 +236,157 @@ describe("form-validator: sanitized output is server-truth", () => {
 describe("form-schema: registry sanity", () => {
   it("exposes exactly the two MVP forms", () => {
     expect(formIds().sort()).toEqual(["approval", "purchase"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0516: url / email / person / multi-select field type validation
+// ---------------------------------------------------------------------------
+
+/** Helper: build a one-field FormDef for validateFormSubmissionAgainst. */
+function singleFieldForm(key: string, type: Parameters<typeof validateFormSubmissionAgainst>[0]["fields"][number]["type"], required = true): FormDef {
+  return {
+    id: "test",
+    fields: [{ key, type, required }],
+  };
+}
+
+describe("form-validator T-0516: url type validation", () => {
+  const urlForm = singleFieldForm("website", "url", true);
+
+  it("accepts a valid http:// URL", () => {
+    const r = validateFormSubmissionAgainst(urlForm, { website: "http://example.com" });
+    expect(r.ok).toBe(true);
+  });
+
+  it("accepts a valid https:// URL", () => {
+    const r = validateFormSubmissionAgainst(urlForm, { website: "https://example.com/path?q=1" });
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a malformed URL (no scheme)", () => {
+    const r = validateFormSubmissionAgainst(urlForm, { website: "example.com" });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "website")).toBe(true);
+  });
+
+  it("rejects a non-string value for url field", () => {
+    const r = validateFormSubmissionAgainst(urlForm, { website: 42 });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "website" && e.code === "WRONG_TYPE")).toBe(true);
+  });
+
+  it("required url + missing → MISSING_REQUIRED", () => {
+    const r = validateFormSubmissionAgainst(urlForm, {});
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "website" && e.code === "MISSING_REQUIRED")).toBe(true);
+  });
+
+  it("optional url + absent → ok (omit is valid)", () => {
+    const optForm = singleFieldForm("website", "url", false);
+    const r = validateFormSubmissionAgainst(optForm, {});
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("form-validator T-0516: email type validation", () => {
+  const emailForm = singleFieldForm("contact", "email", true);
+
+  it("accepts a valid email address", () => {
+    const r = validateFormSubmissionAgainst(emailForm, { contact: "user@example.com" });
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects an email without @", () => {
+    const r = validateFormSubmissionAgainst(emailForm, { contact: "notanemail" });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "contact")).toBe(true);
+  });
+
+  it("rejects an email without domain extension", () => {
+    const r = validateFormSubmissionAgainst(emailForm, { contact: "user@nodot" });
+    expect(r.ok).toBe(false);
+  });
+
+  it("rejects a non-string value", () => {
+    const r = validateFormSubmissionAgainst(emailForm, { contact: 123 });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "contact" && e.code === "WRONG_TYPE")).toBe(true);
+  });
+
+  it("required email + missing → MISSING_REQUIRED", () => {
+    const r = validateFormSubmissionAgainst(emailForm, {});
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "contact" && e.code === "MISSING_REQUIRED")).toBe(true);
+  });
+
+  it("optional email + absent → ok", () => {
+    const optForm = singleFieldForm("contact", "email", false);
+    const r = validateFormSubmissionAgainst(optForm, {});
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("form-validator T-0516: person type validation", () => {
+  const personForm = singleFieldForm("assignee", "person", true);
+
+  it("accepts a non-empty string (employee id)", () => {
+    const r = validateFormSubmissionAgainst(personForm, { assignee: "e-orlov" });
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a non-string value", () => {
+    const r = validateFormSubmissionAgainst(personForm, { assignee: 42 });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "assignee" && e.code === "WRONG_TYPE")).toBe(true);
+  });
+
+  it("required person + missing → MISSING_REQUIRED", () => {
+    const r = validateFormSubmissionAgainst(personForm, {});
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "assignee" && e.code === "MISSING_REQUIRED")).toBe(true);
+  });
+
+  it("optional person + absent → ok", () => {
+    const optForm = singleFieldForm("assignee", "person", false);
+    const r = validateFormSubmissionAgainst(optForm, {});
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("form-validator T-0516: multi-select type validation", () => {
+  const msForm: FormDef = {
+    id: "test",
+    fields: [{ key: "tags", type: "multi-select", required: true }],
+  };
+
+  it("accepts an array of strings", () => {
+    const r = validateFormSubmissionAgainst(msForm, { tags: ["a", "b"] });
+    expect(r.ok).toBe(true);
+  });
+
+  it("accepts an empty array when optional", () => {
+    const optForm: FormDef = { ...msForm, fields: [{ key: "tags", type: "multi-select", required: false }] };
+    const r = validateFormSubmissionAgainst(optForm, { tags: [] });
+    // Empty array IS present so required check passes; but empty array is ok for optional
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a non-array value", () => {
+    const r = validateFormSubmissionAgainst(msForm, { tags: "a" });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "tags" && e.code === "WRONG_TYPE")).toBe(true);
+  });
+
+  it("rejects an array containing non-strings", () => {
+    const r = validateFormSubmissionAgainst(msForm, { tags: ["a", 2] });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "tags" && e.code === "WRONG_TYPE")).toBe(true);
+  });
+
+  it("required multi-select + absent → MISSING_REQUIRED", () => {
+    const r = validateFormSubmissionAgainst(msForm, {});
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.field === "tags" && e.code === "MISSING_REQUIRED")).toBe(true);
   });
 });

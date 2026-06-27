@@ -66,6 +66,8 @@ export const INPUT_KIND = {
   select: "select",
   "multi-select": "multi-select",
   date: "date",
+  url: "url",
+  email: "email",
   money: "money",
   relation: "relation",
   person: "person",
@@ -365,6 +367,36 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0516: detect url fields by the presence of x-url annotation.
+    // Shape: { type: "string", "x-url": true }.
+    // Must be detected before the generic string fallthrough.
+    const xUrl = def && typeof def === "object" ? def["x-url"] : undefined;
+    if (xUrl) {
+      return {
+        key,
+        type: "url",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "url",
+      };
+    }
+
+    // T-0516: detect email fields by the presence of x-email annotation.
+    // Shape: { type: "string", "x-email": true }.
+    // Must be detected before the generic string fallthrough.
+    const xEmail = def && typeof def === "object" ? def["x-email"] : undefined;
+    if (xEmail) {
+      return {
+        key,
+        type: "email",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "email",
+      };
+    }
+
     // T-0294: detect select fields by the presence of a non-empty enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -617,6 +649,32 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
+    // T-0516: url — required ⇒ non-empty; if present, must start with http:// or https://.
+    if (f.type === "url") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^https?:\/\/.+/.test(str)) {
+        errors[f.key] = "Введите корректный URL (начиная с http:// или https://)";
+      }
+      continue;
+    }
+
+    // T-0516: email — required ⇒ non-empty; if present, must match x@y.z pattern.
+    if (f.type === "email") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)) {
+        errors[f.key] = "Введите корректный адрес электронной почты";
+      }
+      continue;
+    }
+
     // string
     const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
     if (f.required && str.trim().length === 0) {
@@ -766,8 +824,9 @@ export function serializeRecordData(formFields, values) {
     }
 
     // T-0294: select and date are emitted as plain strings (just like string).
+    // T-0516: url and email are also plain strings.
     // Blank optional ⇒ omit; blank required is caught by validateRecordValues.
-    if (f.type === "select" || f.type === "date") {
+    if (f.type === "select" || f.type === "date" || f.type === "url" || f.type === "email") {
       const str = typeof raw === "string" ? raw : raw == null ? "" : String(raw);
       if (str.length === 0 && !f.required) {
         continue; // omit blank optional
@@ -912,6 +971,13 @@ export function formatCellValue(value, type) {
   // employees list from GET /api/org and pass the name in `value` if possible; otherwise
   // the id is shown as fallback. null/empty → "—".
   if (type === "person") {
+    if (typeof value === "string" && value.length > 0) return value;
+    return "—";
+  }
+
+  // T-0516: url — display as plain text (no async resolution needed; value is the URL string itself).
+  // null/empty → "—".
+  if (type === "url" || type === "email") {
     if (typeof value === "string" && value.length > 0) return value;
     return "—";
   }

@@ -32,11 +32,11 @@ const BINDING_CONTRACT_CATALOG = Object.freeze({
   scalar: {
     kind: 'scalar',
     schemaSlot: 'property',
-    presentations: ['text', 'textarea', 'number', 'checkbox', 'date'],
+    presentations: ['text', 'textarea', 'number', 'checkbox', 'date', 'url', 'email'],
     defaultPresentation: 'text',
     editable: true,
     label: 'Значение',
-    summary: 'Одно простое значение (текст, число, дата, да/нет).',
+    summary: 'Одно простое значение (текст, число, дата, да/нет, URL, email).',
   },
   enum: {
     kind: 'enum',
@@ -228,6 +228,10 @@ export function deriveContractFromFieldType(type) {
       return { kind: 'scalar', presentation: 'date' };
     case 'textarea':
       return { kind: 'scalar', presentation: 'textarea' };
+    case 'url':
+      return { kind: 'scalar', presentation: 'url' };
+    case 'email':
+      return { kind: 'scalar', presentation: 'email' };
     case 'text':
     default:
       return { kind: 'scalar', presentation: 'text' };
@@ -252,6 +256,10 @@ export function normaliseTypeToFieldType(type) {
       return 'date';
     case 'textarea':
       return 'textarea';
+    case 'url':
+      return 'url';
+    case 'email':
+      return 'email';
     case 'string':
     case 'text':
     default:
@@ -294,6 +302,12 @@ export function contractKindForFieldType(type) {
     case 'person':
       // T-0512: person fields use the 'person' catalog contract.
       return 'person';
+    case 'url':
+      // T-0516: url fields use the scalar contract with url presentation.
+      return 'scalar';
+    case 'email':
+      // T-0516: email fields use the scalar contract with email presentation.
+      return 'scalar';
     case 'string':
     case 'text':
     case 'textarea':
@@ -331,6 +345,7 @@ export function resolveFieldContract(field) {
   // A structural record-entry type (relation/collection/computed/money/multi-select/person)
   // maps directly to its catalog kind. multi-select carries `options` but we classify it
   // as structural BEFORE the options-force-enum scalar rule so it gets its own catalog kind.
+  // T-0516: url/email are handled via their typePresentation (scalar contract) below.
   const structuralKind =
     field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed' ||
     field?.type === 'money' || field?.type === 'multi-select' || field?.type === 'person'

@@ -2033,3 +2033,111 @@ describe('apps-schema T-0512 · person field type', () => {
     expect(r.valid).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0516: url and email field types
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0516 · url field type', () => {
+  it('FIELD_TYPES includes url with label "Ссылка (URL)"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'url');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Ссылка (URL)');
+  });
+
+  it('FIELD_TYPE_VALUES includes url', () => {
+    expect(FIELD_TYPE_VALUES).toContain('url');
+  });
+
+  it('buildRecordSchema: url emits { type:"string", "x-url":true } (not format — AJV would reject it)', () => {
+    const schema = buildRecordSchema([{ key: 'website', type: 'url', title: 'Сайт', required: false }]);
+    expect(schema.properties.website).toEqual({ type: 'string', 'x-url': true, title: 'Сайт' });
+    // x-url is stripped before AJV compile → backend accepts it
+    expect(backendAccepts(schema)).toBe(true);
+    // validateRecordSchemaDefinition also accepts it (same stripping path)
+    expect(validateRecordSchemaDefinition(schema).valid).toBe(true);
+  });
+
+  it('buildRecordSchema: url does NOT emit format (AJV strict rejects format:uri)', () => {
+    const schema = buildRecordSchema([{ key: 'link', type: 'url', required: false }]);
+    expect(JSON.stringify(schema)).not.toContain('"format"');
+  });
+
+  it('parseRecordSchema: url round-trips correctly', () => {
+    const original = [{ key: 'website', type: 'url', title: 'Сайт', required: true }];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'website', type: 'url', title: 'Сайт', required: true });
+  });
+
+  it('parseRecordSchema: url does NOT fall through to string', () => {
+    const schema = buildRecordSchema([
+      { key: 'link', type: 'url', required: false },
+      { key: 'name', type: 'string', required: false },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.find((f) => f.key === 'link').type).toBe('url');
+    expect(parsed.find((f) => f.key === 'name').type).toBe('string');
+  });
+
+  it('validateField: url type → no additional error (no options or target needed)', () => {
+    const err = validateField({ key: 'website', type: 'url' });
+    expect(Object.keys(err)).toHaveLength(0);
+  });
+
+  it('validateFields: accepts a url field', () => {
+    const r = validateFields([{ key: 'website', type: 'url', required: false }]);
+    expect(r.valid).toBe(true);
+  });
+});
+
+describe('apps-schema T-0516 · email field type', () => {
+  it('FIELD_TYPES includes email with label "Email"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'email');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Email');
+  });
+
+  it('FIELD_TYPE_VALUES includes email', () => {
+    expect(FIELD_TYPE_VALUES).toContain('email');
+  });
+
+  it('buildRecordSchema: email emits { type:"string", "x-email":true } (not format)', () => {
+    const schema = buildRecordSchema([{ key: 'contact_email', type: 'email', title: 'Email', required: false }]);
+    expect(schema.properties.contact_email).toEqual({ type: 'string', 'x-email': true, title: 'Email' });
+    expect(backendAccepts(schema)).toBe(true);
+    expect(validateRecordSchemaDefinition(schema).valid).toBe(true);
+  });
+
+  it('buildRecordSchema: email does NOT emit format', () => {
+    const schema = buildRecordSchema([{ key: 'em', type: 'email', required: false }]);
+    expect(JSON.stringify(schema)).not.toContain('"format"');
+  });
+
+  it('parseRecordSchema: email round-trips correctly', () => {
+    const original = [{ key: 'contact_email', type: 'email', title: 'Email', required: true }];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'contact_email', type: 'email', title: 'Email', required: true });
+  });
+
+  it('parseRecordSchema: email does NOT fall through to string', () => {
+    const schema = buildRecordSchema([
+      { key: 'em', type: 'email', required: false },
+      { key: 'name', type: 'string', required: false },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.find((f) => f.key === 'em').type).toBe('email');
+    expect(parsed.find((f) => f.key === 'name').type).toBe('string');
+  });
+
+  it('validateField: email type → no additional error', () => {
+    const err = validateField({ key: 'contact_email', type: 'email' });
+    expect(Object.keys(err)).toHaveLength(0);
+  });
+
+  it('validateFields: accepts an email field', () => {
+    const r = validateFields([{ key: 'contact_email', type: 'email', required: false }]);
+    expect(r.valid).toBe(true);
+  });
+});

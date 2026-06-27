@@ -2041,3 +2041,207 @@ describe('T-0512: formatCellValue person', () => {
     expect(formatCellValue('', 'person')).toBe('—');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0516: url and email field types
+// ---------------------------------------------------------------------------
+
+describe('T-0516: INPUT_KIND includes url and email', () => {
+  it('url maps to "url"', () => {
+    expect(INPUT_KIND.url).toBe('url');
+  });
+
+  it('email maps to "email"', () => {
+    expect(INPUT_KIND.email).toBe('email');
+  });
+});
+
+describe('T-0516: schemaToFormFields detects url/email by x-* annotation', () => {
+  const urlSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      website: { type: 'string', 'x-url': true, title: 'Сайт' },
+    },
+    required: ['website'],
+  };
+
+  const emailSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      contact: { type: 'string', 'x-email': true, title: 'Email контакта' },
+    },
+  };
+
+  it('detects url field (x-url) with correct inputKind', () => {
+    const fields = schemaToFormFields(urlSchema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].type).toBe('url');
+    expect(fields[0].inputKind).toBe('url');
+    expect(fields[0].required).toBe(true);
+    expect(fields[0].label).toBe('Сайт');
+  });
+
+  it('detects email field (x-email) with correct inputKind', () => {
+    const fields = schemaToFormFields(emailSchema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0].type).toBe('email');
+    expect(fields[0].inputKind).toBe('email');
+    expect(fields[0].required).toBe(false);
+    expect(fields[0].label).toBe('Email контакта');
+  });
+
+  it('url/email do NOT fall through to plain string', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        link: { type: 'string', 'x-url': true },
+        em: { type: 'string', 'x-email': true },
+        name: { type: 'string' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.find((f) => f.key === 'link').type).toBe('url');
+    expect(fields.find((f) => f.key === 'em').type).toBe('email');
+    expect(fields.find((f) => f.key === 'name').type).toBe('string');
+  });
+});
+
+describe('T-0516: validateRecordValues url/email', () => {
+  const urlField = { key: 'website', type: 'url', required: true, inputKind: 'url', label: 'Сайт' };
+  const emailField = { key: 'contact', type: 'email', required: true, inputKind: 'email', label: 'Email' };
+
+  // URL validation
+  it('url: required + valid url passes', () => {
+    const r = validateRecordValues([urlField], { website: 'https://example.com' });
+    expect(r.valid).toBe(true);
+  });
+
+  it('url: required + missing → error', () => {
+    const r = validateRecordValues([urlField], { website: '' });
+    expect(r.valid).toBe(false);
+    expect(r.errors.website).toBeTruthy();
+  });
+
+  it('url: required + malformed (no scheme) → error', () => {
+    const r = validateRecordValues([urlField], { website: 'example.com' });
+    expect(r.valid).toBe(false);
+    expect(r.errors.website).toBeTruthy();
+  });
+
+  it('url: required + http:// also valid', () => {
+    const r = validateRecordValues([urlField], { website: 'http://example.com' });
+    expect(r.valid).toBe(true);
+  });
+
+  it('url: optional + blank → no error (omit)', () => {
+    const optField = { ...urlField, required: false };
+    const r = validateRecordValues([optField], { website: '' });
+    expect(r.valid).toBe(true);
+  });
+
+  // Email validation
+  it('email: required + valid email passes', () => {
+    const r = validateRecordValues([emailField], { contact: 'user@example.com' });
+    expect(r.valid).toBe(true);
+  });
+
+  it('email: required + missing → error', () => {
+    const r = validateRecordValues([emailField], { contact: '' });
+    expect(r.valid).toBe(false);
+    expect(r.errors.contact).toBeTruthy();
+  });
+
+  it('email: required + malformed (no @) → error', () => {
+    const r = validateRecordValues([emailField], { contact: 'notanemail' });
+    expect(r.valid).toBe(false);
+    expect(r.errors.contact).toBeTruthy();
+  });
+
+  it('email: required + malformed (no domain) → error', () => {
+    const r = validateRecordValues([emailField], { contact: 'user@' });
+    expect(r.valid).toBe(false);
+    expect(r.errors.contact).toBeTruthy();
+  });
+
+  it('email: optional + blank → no error (omit)', () => {
+    const optField = { ...emailField, required: false };
+    const r = validateRecordValues([optField], { contact: '' });
+    expect(r.valid).toBe(true);
+  });
+});
+
+describe('T-0516: serializeRecordData url/email', () => {
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      website: { type: 'string', 'x-url': true },
+      contact: { type: 'string', 'x-email': true },
+      name: { type: 'string' },
+    },
+    required: ['website'],
+  };
+  const fields = schemaToFormFields(schema);
+
+  it('url: serialized as plain string', () => {
+    const data = serializeRecordData(fields, { website: 'https://example.com', contact: '', name: 'Test' });
+    expect(data.website).toBe('https://example.com');
+    expect(typeof data.website).toBe('string');
+  });
+
+  it('email: serialized as plain string', () => {
+    const data = serializeRecordData(fields, { website: 'https://example.com', contact: 'a@b.com', name: '' });
+    expect(data.contact).toBe('a@b.com');
+  });
+
+  it('url: optional blank → omitted', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { link: { type: 'string', 'x-url': true } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const data = serializeRecordData(optFields, { link: '' });
+    expect('link' in data).toBe(false);
+  });
+
+  it('email: optional blank → omitted', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { em: { type: 'string', 'x-email': true } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const data = serializeRecordData(optFields, { em: '' });
+    expect('em' in data).toBe(false);
+  });
+});
+
+describe('T-0516: formatCellValue url/email', () => {
+  it('url: returns the URL string for a non-empty value', () => {
+    expect(formatCellValue('https://example.com', 'url')).toBe('https://example.com');
+  });
+
+  it('url: returns "—" for null', () => {
+    expect(formatCellValue(null, 'url')).toBe('—');
+  });
+
+  it('url: returns "—" for empty string', () => {
+    expect(formatCellValue('', 'url')).toBe('—');
+  });
+
+  it('email: returns the email string for a non-empty value', () => {
+    expect(formatCellValue('user@example.com', 'email')).toBe('user@example.com');
+  });
+
+  it('email: returns "—" for null', () => {
+    expect(formatCellValue(null, 'email')).toBe('—');
+  });
+
+  it('email: returns "—" for empty string', () => {
+    expect(formatCellValue('', 'email')).toBe('—');
+  });
+});

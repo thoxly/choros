@@ -33,7 +33,9 @@
  *   string + enum[]   → "enum"     (select / radio; options = enum values)
  *   number / integer  → "number"   (numeric input)
  *   boolean           → "boolean"  (checkbox)
- *   string + format=date → "date"  (date picker; dd.MM.yyyy)
+ *   string + format=date  → "date"     (date picker; dd.MM.yyyy)
+ *   string + format=uri   → "url"      (URL input)
+ *   string + format=email → "email"    (email input)
  *   string + x-choros-widget=textarea → "textarea" (multi-line)
  *
  * form-defs.js widget class mapping (read-only ref for UI layer):
@@ -50,7 +52,11 @@ export type FieldType =
   | "number"
   | "date"
   | "enum"
-  | "boolean";
+  | "boolean"
+  | "url"
+  | "email"
+  | "person"
+  | "multi-select";
 
 // ---------------------------------------------------------------------------
 // form_binding FieldType vocabulary (DB layer: the stored type in form_binding.fields)
@@ -95,6 +101,10 @@ export function normaliseBindingType(raw: string): FieldType {
     case "date":
     case "enum":
     case "boolean":
+    case "url":
+    case "email":
+    case "person":
+    case "multi-select":
       return raw;
     default:
       // Unknown type: degrade to "text" (safe; server will accept strings).
@@ -136,9 +146,11 @@ export interface JsonSchemaProperty {
  *   2. type = "boolean"              → "boolean"
  *   3. type = "number" | "integer"   → "number"
  *   4. format = "date"               → "date"
- *   5. x-choros-widget = "textarea"  → "textarea"
- *   6. type = "string" (default)     → "text"
- *   7. unknown / absent              → "text"    (safe degradation)
+ *   5. format = "uri"                → "url"
+ *   6. format = "email"              → "email"
+ *   7. x-choros-widget = "textarea"  → "textarea"
+ *   8. type = "string" (default)     → "text"
+ *   9. unknown / absent              → "text"    (safe degradation)
  */
 export function deriveFieldType(prop: JsonSchemaProperty): FieldType {
   // 1. Enum (select / radio) — takes precedence over raw type.
@@ -159,7 +171,13 @@ export function deriveFieldType(prop: JsonSchemaProperty): FieldType {
   // 4. Date (string + format: date)
   if (rawType === "string" && prop.format === "date") return "date";
 
-  // 5. Multi-line text (string + x-choros-widget: textarea)
+  // 5. URL (string + format: uri)
+  if (rawType === "string" && prop.format === "uri") return "url";
+
+  // 6. Email (string + format: email)
+  if (rawType === "string" && prop.format === "email") return "email";
+
+  // 7. Multi-line text (string + x-choros-widget: textarea)
   if (rawType === "string" && prop["x-choros-widget"] === "textarea") return "textarea";
 
   // 6-7. Default to text
@@ -177,12 +195,16 @@ export function deriveFieldType(prop: JsonSchemaProperty): FieldType {
  */
 export function fieldTypeToWidgetClass(type: FieldType): string {
   switch (type) {
-    case "text":     return "fjs-form-field-textfield";
-    case "textarea": return "fjs-form-field-textarea";
-    case "number":   return "fjs-form-field-number";
-    case "date":     return "fjs-form-field-datetime";
-    case "enum":     return "fjs-form-field-select";
-    case "boolean":  return "fjs-form-field-checkbox";
+    case "text":         return "fjs-form-field-textfield";
+    case "textarea":     return "fjs-form-field-textarea";
+    case "number":       return "fjs-form-field-number";
+    case "date":         return "fjs-form-field-datetime";
+    case "enum":         return "fjs-form-field-select";
+    case "boolean":      return "fjs-form-field-checkbox";
+    case "url":          return "fjs-form-field-textfield";
+    case "email":        return "fjs-form-field-textfield";
+    case "person":       return "fjs-form-field-textfield";
+    case "multi-select": return "fjs-form-field-select";
     default: {
       // Exhaustiveness guard — the cast asserts all FieldType values are handled above.
       void (type as never);
