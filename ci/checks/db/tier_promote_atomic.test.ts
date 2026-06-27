@@ -283,25 +283,12 @@ describe('R-2: POST /api/artifacts/:id/promote on published artifact → 409 NOT
   let baseUrl: string;
 
   beforeAll(async () => {
-    // T-0486 made resolveActorTenant (src/db/org.ts) FAIL-CLOSED: an actor slug
-    // that matches no choros.employee row is now rejected at tenant resolution
-    // with 403 ACTOR_TENANT_UNRESOLVED before the promote handler ever runs. The
-    // R-2 probe posts as x-dev-user 'alice'; to reach the REAL 409 NOT_IN_DRAFT
-    // path the actor must genuinely resolve to the tenant the endpoint uses
-    // (DEV_TENANT_ID). Seed 'alice' as a real employee there (kind=human,
-    // position_id NULL — same minimal shape as the genesis owner seed). This does
-    // NOT bypass auth: the actor now resolves to its tenant and the promote logic
-    // runs normally, returning 409 because the artifact is already published.
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(
-        `INSERT INTO choros.employee
-           (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
-         VALUES ($1, $2, NULL, 'human', 'alice', 'Alice (R-2 probe)', 0, 0)
-         ON CONFLICT (tenant_id, slug) DO NOTHING`,
-        [DEV_TENANT_ID, uuid()],
-      );
-    });
-
+    // T-0513 added a fail-closed promote-authority gate: the actor must be either
+    // a genesis-owner or hold a delegated mgmt_object:tier_promote/transition grant.
+    // Actor 'e-owner' is the genesis-owner seeded by migration 026 in DEV_TENANT_ID:
+    // it holds the tenant-owner role_assignment (confirmed_by='seed') → isGenesisOwner
+    // short-circuits to { ok: true } in defaultCheckTierPromoteGrant.
+    // No additional seeding is needed — e-owner already exists in every migrated DB.
     server = createServer();
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', () => {
@@ -318,17 +305,12 @@ describe('R-2: POST /api/artifacts/:id/promote on published artifact → 409 NOT
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
-    // Remove the 'alice' probe employee so DEV_TENANT stays clean for other
-    // db-tests sharing the cloned DB (some count employee rows).
-    await withClient(migratorUrl(), async (c) => {
-      await c.query(`DELETE FROM choros.employee WHERE tenant_id=$1 AND slug=$2`, [DEV_TENANT_ID, 'alice']);
-    });
   });
 
   function postPromote(id: string): Promise<{ statusCode: number; body: string }> {
     return new Promise((resolve, reject) => {
       const url = new URL(`${baseUrl}/api/artifacts/${id}/promote`);
-      const req = http.request(url, { method: 'POST', headers: { 'x-dev-user': 'alice' } }, (res) => {
+      const req = http.request(url, { method: 'POST', headers: { 'x-dev-user': 'e-owner' } }, (res) => {
         let body = '';
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => resolve({ statusCode: res.statusCode ?? 0, body }));
