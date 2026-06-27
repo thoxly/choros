@@ -1774,3 +1774,270 @@ describe('T-0510: schemaToColumns — x-field-order ordering via schemaToFormFie
     expect(cols.map((c) => c.key)).toEqual(['zeta', 'alpha', 'mid']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0512: multi-select field type
+// ---------------------------------------------------------------------------
+
+const MULTI_SELECT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    tags: {
+      type: 'array',
+      title: 'Метки',
+      'x-multi-select': true,
+      items: { type: 'string', enum: ['red', 'green', 'blue'] },
+    },
+  },
+  required: ['tags'],
+};
+
+describe('T-0512: INPUT_KIND multi-select', () => {
+  it('INPUT_KIND maps "multi-select" to "multi-select"', () => {
+    expect(INPUT_KIND['multi-select']).toBe('multi-select');
+  });
+});
+
+describe('T-0512: schemaToFormFields multi-select', () => {
+  it('detects x-multi-select → type multi-select with options', () => {
+    const fields = schemaToFormFields(MULTI_SELECT_SCHEMA);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'tags',
+      type: 'multi-select',
+      label: 'Метки',
+      required: true,
+      inputKind: 'multi-select',
+      options: ['red', 'green', 'blue'],
+    });
+  });
+
+  it('multi-select does NOT interfere with collection parsing (both type:array)', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tags: { type: 'array', 'x-multi-select': true, items: { type: 'string', enum: ['a'] } },
+        items: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { v: { type: 'string' } } } },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.find((f) => f.key === 'tags').type).toBe('multi-select');
+    expect(fields.find((f) => f.key === 'items').type).toBe('collection');
+  });
+});
+
+describe('T-0512: blankRecordValues multi-select', () => {
+  it('starts as an empty array', () => {
+    const fields = schemaToFormFields(MULTI_SELECT_SCHEMA);
+    const values = blankRecordValues(fields);
+    expect(values.tags).toEqual([]);
+  });
+});
+
+describe('T-0512: validateRecordValues multi-select', () => {
+  const fields = schemaToFormFields(MULTI_SELECT_SCHEMA);
+
+  it('required multi-select with empty array → error', () => {
+    const { valid, errors } = validateRecordValues(fields, { tags: [] });
+    expect(valid).toBe(false);
+    expect(errors.tags).toBeTruthy();
+  });
+
+  it('required multi-select with valid values → no error', () => {
+    const { valid, errors } = validateRecordValues(fields, { tags: ['red', 'green'] });
+    expect(valid).toBe(true);
+    expect(errors.tags).toBeUndefined();
+  });
+
+  it('rejects a value not in options', () => {
+    const { valid, errors } = validateRecordValues(fields, { tags: ['red', 'purple'] });
+    expect(valid).toBe(false);
+    expect(errors.tags).toBeTruthy();
+  });
+
+  it('optional multi-select with empty array → no error', () => {
+    const optionalSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tags: { type: 'array', 'x-multi-select': true, items: { type: 'string', enum: ['a', 'b'] } },
+      },
+    };
+    const optFields = schemaToFormFields(optionalSchema);
+    const { valid } = validateRecordValues(optFields, { tags: [] });
+    expect(valid).toBe(true);
+  });
+});
+
+describe('T-0512: serializeRecordData multi-select', () => {
+  const fields = schemaToFormFields(MULTI_SELECT_SCHEMA);
+
+  it('emits an array of strings', () => {
+    const data = serializeRecordData(fields, { tags: ['red', 'blue'] });
+    expect(data.tags).toEqual(['red', 'blue']);
+  });
+
+  it('emits empty array for required field', () => {
+    const data = serializeRecordData(fields, { tags: [] });
+    expect(data.tags).toEqual([]);
+  });
+
+  it('omits optional empty multi-select', () => {
+    const optionalSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tags: { type: 'array', 'x-multi-select': true, items: { type: 'string', enum: ['a'] } },
+      },
+    };
+    const optFields = schemaToFormFields(optionalSchema);
+    const data = serializeRecordData(optFields, { tags: [] });
+    expect('tags' in data).toBe(false);
+  });
+});
+
+describe('T-0512: formatCellValue multi-select', () => {
+  it('joins selected values with ", "', () => {
+    expect(formatCellValue(['red', 'green'], 'multi-select')).toBe('red, green');
+  });
+
+  it('returns single selected value', () => {
+    expect(formatCellValue(['blue'], 'multi-select')).toBe('blue');
+  });
+
+  it('returns "—" for empty array', () => {
+    expect(formatCellValue([], 'multi-select')).toBe('—');
+  });
+
+  it('returns "—" for null', () => {
+    expect(formatCellValue(null, 'multi-select')).toBe('—');
+  });
+
+  it('returns "—" for undefined', () => {
+    expect(formatCellValue(undefined, 'multi-select')).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0512: person field type
+// ---------------------------------------------------------------------------
+
+const PERSON_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    assignee: { type: 'string', 'x-person': true, title: 'Исполнитель' },
+  },
+  required: ['assignee'],
+};
+
+describe('T-0512: INPUT_KIND person', () => {
+  it('INPUT_KIND maps "person" to "person"', () => {
+    expect(INPUT_KIND['person']).toBe('person');
+  });
+});
+
+describe('T-0512: schemaToFormFields person', () => {
+  it('detects x-person → type person', () => {
+    const fields = schemaToFormFields(PERSON_SCHEMA);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'assignee',
+      type: 'person',
+      label: 'Исполнитель',
+      required: true,
+      inputKind: 'person',
+    });
+  });
+
+  it('person does NOT fall through to string', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        emp: { type: 'string', 'x-person': true },
+        name: { type: 'string' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.find((f) => f.key === 'emp').type).toBe('person');
+    expect(fields.find((f) => f.key === 'name').type).toBe('string');
+  });
+});
+
+describe('T-0512: blankRecordValues person', () => {
+  it('starts as empty string', () => {
+    const fields = schemaToFormFields(PERSON_SCHEMA);
+    const values = blankRecordValues(fields);
+    expect(values.assignee).toBe('');
+  });
+});
+
+describe('T-0512: validateRecordValues person', () => {
+  const fields = schemaToFormFields(PERSON_SCHEMA);
+
+  it('required person with empty string → error', () => {
+    const { valid, errors } = validateRecordValues(fields, { assignee: '' });
+    expect(valid).toBe(false);
+    expect(errors.assignee).toBeTruthy();
+  });
+
+  it('required person with non-empty id → no error', () => {
+    const { valid, errors } = validateRecordValues(fields, { assignee: 'e-orlov' });
+    expect(valid).toBe(true);
+    expect(errors.assignee).toBeUndefined();
+  });
+
+  it('optional person with empty string → no error', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { emp: { type: 'string', 'x-person': true } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const { valid } = validateRecordValues(optFields, { emp: '' });
+    expect(valid).toBe(true);
+  });
+});
+
+describe('T-0512: serializeRecordData person', () => {
+  const fields = schemaToFormFields(PERSON_SCHEMA);
+
+  it('emits the employee id string', () => {
+    const data = serializeRecordData(fields, { assignee: 'e-orlov' });
+    expect(data.assignee).toBe('e-orlov');
+    expect(typeof data.assignee).toBe('string');
+  });
+
+  it('omits optional blank person', () => {
+    const optSchema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { emp: { type: 'string', 'x-person': true } },
+    };
+    const optFields = schemaToFormFields(optSchema);
+    const data = serializeRecordData(optFields, { emp: '' });
+    expect('emp' in data).toBe(false);
+  });
+});
+
+describe('T-0512: formatCellValue person', () => {
+  it('returns the employee name/id string when given a non-empty value', () => {
+    expect(formatCellValue('e-orlov', 'person')).toBe('e-orlov');
+    expect(formatCellValue('К. Орлов', 'person')).toBe('К. Орлов');
+  });
+
+  it('returns "—" for null', () => {
+    expect(formatCellValue(null, 'person')).toBe('—');
+  });
+
+  it('returns "—" for undefined', () => {
+    expect(formatCellValue(undefined, 'person')).toBe('—');
+  });
+
+  it('returns "—" for empty string', () => {
+    expect(formatCellValue('', 'person')).toBe('—');
+  });
+});

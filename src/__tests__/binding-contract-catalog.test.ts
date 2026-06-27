@@ -32,7 +32,7 @@ describe("catalog shape — closed, frozen, internally consistent", () => {
     }
   });
 
-  it("catalog has exactly the nine PD-18 contract kinds", () => {
+  it("catalog has exactly the eleven contract kinds (PD-18 + T-0512 multi-select/person)", () => {
     expect([...BINDING_CONTRACT_KINDS].sort()).toEqual(
       [
         "collection",
@@ -41,6 +41,8 @@ describe("catalog shape — closed, frozen, internally consistent", () => {
         "file",
         "matrix-lookup",
         "money",
+        "multi-select",
+        "person",
         "relation",
         "rollup",
         "scalar",
@@ -122,6 +124,70 @@ describe("resolvePresentation — never returns an unsupported mode", () => {
 
   it("unknown kind degrades to scalar's default (text)", () => {
     expect(resolvePresentation("nope", undefined)).toBe("text");
+  });
+});
+
+describe("T-0512: multi-select and person catalog entries", () => {
+  it("multi-select is in the catalog with correct descriptor", () => {
+    const d = BINDING_CONTRACT_CATALOG["multi-select"];
+    expect(d).toBeDefined();
+    expect(d.kind).toBe("multi-select");
+    expect(d.schemaSlot).toBe("property");
+    expect(d.presentations).toContain("multi-select");
+    expect(d.defaultPresentation).toBe("multi-select");
+    expect(d.editable).toBe(true);
+  });
+
+  it("person is in the catalog with correct descriptor", () => {
+    const d = BINDING_CONTRACT_CATALOG["person"];
+    expect(d).toBeDefined();
+    expect(d.kind).toBe("person");
+    expect(d.schemaSlot).toBe("property");
+    expect(d.presentations).toContain("person");
+    expect(d.defaultPresentation).toBe("person");
+    expect(d.editable).toBe(true);
+  });
+
+  it("isBindingContractKind accepts multi-select and person", () => {
+    expect(isBindingContractKind("multi-select")).toBe(true);
+    expect(isBindingContractKind("person")).toBe(true);
+  });
+
+  it("getBindingContract resolves multi-select and person correctly", () => {
+    expect(getBindingContract("multi-select").kind).toBe("multi-select");
+    expect(getBindingContract("person").kind).toBe("person");
+  });
+
+  it("resolvePresentation for multi-select and person uses their own mode", () => {
+    expect(resolvePresentation("multi-select", undefined)).toBe("multi-select");
+    expect(resolvePresentation("person", undefined)).toBe("person");
+  });
+
+  it("validateBindingFields accepts multi-select and person contracts", () => {
+    const r = validateBindingFields([
+      {
+        key: "tags",
+        type: "multi-select",
+        required: false,
+        label: "Теги",
+        contract: "multi-select",
+        presentation: "multi-select",
+        options: ["A", "B", "C"],
+      },
+      {
+        key: "owner",
+        type: "person",
+        required: false,
+        label: "Владелец",
+        contract: "person",
+        presentation: "person",
+      },
+    ]);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.fields[0].contract).toBe("multi-select");
+      expect(r.fields[1].contract).toBe("person");
+    }
   });
 });
 

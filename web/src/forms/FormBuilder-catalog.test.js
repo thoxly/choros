@@ -83,3 +83,79 @@ describe('FormBuilder process-catalog fetch branching (T-0487)', () => {
     await expect(fetchThatThrows()).rejects.toThrow('Failed to fetch');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0512: FormBuilder stamping logic — contract assignment for multi-select/person.
+//
+// We replicate the fieldTypeForContract + contractKindForFieldType + deriveContractFromFieldType
+// logic from FormBuilder.jsx as pure functions (same pattern as the fetch-branching tests
+// above). This lets us verify the stamping fix in isolation without React.
+//
+// KEY GUARD: a multi-select field (type='multi-select', options=[...]) must produce
+// contract:'multi-select', NOT contract:'enum'. Before the T-0512 fix the hasOptions
+// check fired before the type check, silently producing contract:'enum'.
+// ---------------------------------------------------------------------------
+
+import { deriveContractFromFieldType, contractKindForFieldType } from './field-contract.js';
+
+// Replicate fieldTypeForContract from FormBuilder.jsx (post-T-0512-fix version)
+function fieldTypeForContractFixed(field) {
+  if (field?.type === 'multi-select') return 'multi-select';
+  if (field?.type === 'person') return 'person';
+  if (Array.isArray(field?.options) && field.options.length > 0) return 'enum';
+  switch (field?.type) {
+    case 'select': return 'enum';
+    case 'boolean': return 'boolean';
+    case 'number':
+    case 'integer': return 'number';
+    case 'date': return 'date';
+    case 'textarea': return 'textarea';
+    default: return 'text';
+  }
+}
+
+// Replicate the handleSave contract-derivation logic from FormBuilder.jsx
+function deriveBindingContract(field) {
+  const ft = fieldTypeForContractFixed(field);
+  if (ft === 'multi-select' || ft === 'person') {
+    return { kind: contractKindForFieldType(ft), presentation: ft };
+  }
+  return deriveContractFromFieldType(ft);
+}
+
+describe('FormBuilder stamping — T-0512 multi-select + person contract assignment', () => {
+  it('T0512-FB-1: multi-select field with options → contract="multi-select" NOT "enum"', () => {
+    const field = { type: 'multi-select', options: ['A', 'B', 'C'] };
+    const { kind, presentation } = deriveBindingContract(field);
+    expect(kind).toBe('multi-select');
+    expect(presentation).toBe('multi-select');
+    expect(kind).not.toBe('enum');
+  });
+
+  it('T0512-FB-2: person field → contract="person"', () => {
+    const field = { type: 'person' };
+    const { kind, presentation } = deriveBindingContract(field);
+    expect(kind).toBe('person');
+    expect(presentation).toBe('person');
+  });
+
+  it('T0512-FB-3: plain enum field (type=select, options present) still → contract="enum"', () => {
+    const field = { type: 'select', options: ['X', 'Y'] };
+    const { kind, presentation } = deriveBindingContract(field);
+    expect(kind).toBe('enum');
+    expect(presentation).toBe('select');
+  });
+
+  it('T0512-FB-4: multi-select field WITHOUT options → contract="multi-select" (not scalar)', () => {
+    const field = { type: 'multi-select' };
+    const { kind } = deriveBindingContract(field);
+    expect(kind).toBe('multi-select');
+  });
+
+  it('T0512-FB-5: scalar text field remains scalar/text', () => {
+    const field = { type: 'string' };
+    const { kind, presentation } = deriveBindingContract(field);
+    expect(kind).toBe('scalar');
+    expect(presentation).toBe('text');
+  });
+});

@@ -83,6 +83,26 @@ const BINDING_CONTRACT_CATALOG = Object.freeze({
     label: 'Сумма',
     summary: 'Денежная сумма (значение и валюта).',
   },
+  // T-0512: multi-select — array of enum values chosen from a fixed option set.
+  'multi-select': {
+    kind: 'multi-select',
+    schemaSlot: 'property',
+    presentations: ['multi-select'],
+    defaultPresentation: 'multi-select',
+    editable: true,
+    label: 'Мультивыбор',
+    summary: 'Несколько значений из фиксированного набора вариантов.',
+  },
+  // T-0512: person — selects an employee from the org; stores the employee id as a string.
+  person: {
+    kind: 'person',
+    schemaSlot: 'property',
+    presentations: ['person'],
+    defaultPresentation: 'person',
+    editable: true,
+    label: 'Сотрудник',
+    summary: 'Ссылка на сотрудника организации (хранит id сотрудника).',
+  },
   file: {
     kind: 'file',
     schemaSlot: 'property',
@@ -268,6 +288,12 @@ export function contractKindForFieldType(type) {
     case 'money':
       // T-0509: money fields use the 'money' catalog contract (presentation: 'money').
       return 'money';
+    case 'multi-select':
+      // T-0512: multi-select fields use the 'multi-select' catalog contract.
+      return 'multi-select';
+    case 'person':
+      // T-0512: person fields use the 'person' catalog contract.
+      return 'person';
     case 'string':
     case 'text':
     case 'textarea':
@@ -302,11 +328,12 @@ export function contractKindForFieldType(type) {
 export function resolveFieldContract(field) {
   const hasOptions = Array.isArray(field?.options) && field.options.length > 0;
 
-  // A structural record-entry type (relation/collection/computed/money) maps directly
-  // to its catalog kind — these never carry top-level `options`, so we classify
-  // them BEFORE the options-force-enum scalar rule.
+  // A structural record-entry type (relation/collection/computed/money/multi-select/person)
+  // maps directly to its catalog kind. multi-select carries `options` but we classify it
+  // as structural BEFORE the options-force-enum scalar rule so it gets its own catalog kind.
   const structuralKind =
-    field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed' || field?.type === 'money'
+    field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed' ||
+    field?.type === 'money' || field?.type === 'multi-select' || field?.type === 'person'
       ? contractKindForFieldType(field.type)
       : undefined;
 

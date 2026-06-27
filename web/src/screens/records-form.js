@@ -64,9 +64,11 @@ export const INPUT_KIND = {
   integer: "number",
   boolean: "checkbox",
   select: "select",
+  "multi-select": "multi-select",
   date: "date",
   money: "money",
   relation: "relation",
+  person: "person",
   collection: "collection",
   computed: "computed",
 };
@@ -216,6 +218,24 @@ export function schemaToFormFields(recordSchema) {
         ? def.title
         : "";
 
+    // T-0512: detect multi-select fields by type:"array" + x-multi-select annotation.
+    // Must come BEFORE collection detection (both match type:"array").
+    const xMultiSelect = def && typeof def === "object" ? def["x-multi-select"] : undefined;
+    if (xMultiSelect && rawType === "array") {
+      const options = (def.items && Array.isArray(def.items.enum))
+        ? def.items.enum.filter((o) => typeof o === "string")
+        : [];
+      return {
+        key,
+        type: "multi-select",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "multi-select",
+        options,
+      };
+    }
+
     // T-0449: detect collection fields (T-0448 wire shape):
     //   { type: "array", title?, items: { type: "object", additionalProperties: false,
     //     properties: { <sub-fields> }, required?: [...] } }
@@ -330,6 +350,21 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0512: detect person fields by the presence of x-person annotation.
+    // Shape: { type: "string", "x-person": true }.
+    // Must be detected before the generic string fallthrough.
+    const xPerson = def && typeof def === "object" ? def["x-person"] : undefined;
+    if (xPerson) {
+      return {
+        key,
+        type: "person",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "person",
+      };
+    }
+
     // T-0294: detect select fields by the presence of a non-empty enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -381,6 +416,9 @@ export function blankRecordValues(formFields) {
       values[f.key] = false;
     } else if (f.type === "collection") {
       // T-0449: a collection starts as an empty row array; T-0450 renders the row table.
+      values[f.key] = [];
+    } else if (f.type === "multi-select") {
+      // T-0512: multi-select starts as an empty array (no options selected).
       values[f.key] = [];
     } else {
       values[f.key] = "";
@@ -503,6 +541,35 @@ export function validateRecordValues(formFields, values) {
         errors[f.key] = "Введите число";
       } else if (f.type === "integer" && !Number.isInteger(n)) {
         errors[f.key] = "Введите целое число";
+      }
+      continue;
+    }
+
+    // T-0512: multi-select — value is a string[]; each element must be in options.
+    // Required → at least one item must be selected (non-empty array).
+    if (f.type === "multi-select") {
+      const arr = Array.isArray(raw) ? raw : [];
+      if (arr.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
+        continue;
+      }
+      const opts = Array.isArray(f.options) ? f.options : [];
+      if (opts.length > 0) {
+        for (const item of arr) {
+          if (!opts.includes(item)) {
+            errors[f.key] = "Выберите значения из списка";
+            break;
+          }
+        }
+      }
+      continue;
+    }
+
+    // T-0512: person — value is the employee id string; non-empty when required.
+    if (f.type === "person") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0) {
+        if (f.required) errors[f.key] = "Обязательное поле";
       }
       continue;
     }
@@ -668,6 +735,24 @@ export function serializeRecordData(formFields, values) {
       continue;
     }
 
+    // T-0512: multi-select — emit an array of strings (each element in options).
+    // Empty array optional → omit; empty array required is caught by validateRecordValues.
+    if (f.type === "multi-select") {
+      const arr = Array.isArray(raw) ? raw.filter((s) => typeof s === "string") : [];
+      if (arr.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = arr; // string[] — passes AJV type:"array" + items.enum
+      continue;
+    }
+
+    // T-0512: person — the selected value IS the employee's id string.
+    // Blank optional → omit; blank required is caught by validateRecordValues.
+    if (f.type === "person") {
+      const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw).trim();
+      if (str.length === 0 && !f.required) continue; // omit blank optional
+      data[f.key] = str; // employee id string — passes AJV type:"string"
+      continue;
+    }
+
     // T-0446: relation — the picked value IS the referenced record's UUID string.
     // Emitted as a plain string (the schema stores it as type:"string"). Blank
     // optional ⇒ omit; blank required is caught by validateRecordValues.
@@ -721,6 +806,10 @@ export function schemaToColumns(recordSchema) {
       col.rollupOp = f.rollupOp;
       col.rollupValueField = f.rollupValueField;
       col.rollupFactorField = f.rollupFactorField;
+    }
+    // T-0512: thread options through for multi-select so formatCellValue can display values.
+    if (f.type === "multi-select") {
+      col.options = f.options;
     }
     return col;
   });
@@ -804,6 +893,26 @@ export function formatCellValue(value, type) {
     if (typeof value === "number" && Number.isFinite(value)) {
       return value.toLocaleString("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
     }
+    return "—";
+  }
+
+  // T-0512: multi-select value is a string[]; join with ", " or "—" if empty.
+  if (type === "multi-select") {
+    if (!Array.isArray(value) || value.length === 0) return "—";
+    return value.join(", ");
+  }
+
+  // T-0512: person value is an employee id string. The caller may pass the employee
+  // name as `value` (pre-resolved by the list cell renderer), or the raw id as fallback.
+  // formatCellValue itself cannot resolve the id async — it returns the raw id when
+  // given one, similar to how relation returns RELATION_CELL_ASYNC for async resolution.
+  // However, the person value is a plain string id (not a UUID needing a separate lookup
+  // endpoint that returns structured data) — we return it as-is (could be name or id).
+  // The display component in the list/card should pre-resolve the id to a name via the
+  // employees list from GET /api/org and pass the name in `value` if possible; otherwise
+  // the id is shown as fallback. null/empty → "—".
+  if (type === "person") {
+    if (typeof value === "string" && value.length > 0) return value;
     return "—";
   }
 

@@ -429,6 +429,146 @@ describe("validateFormSubmit — proto-key defence-in-depth (D7-2)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0512 — multi-select and person field validation
+// ---------------------------------------------------------------------------
+
+describe("validateFormSubmit — T-0512: multi-select field validation", () => {
+  it("T0512-MS-1: multi-select with valid array (all elements in options) → passes", () => {
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select", options: ["A", "B", "C"] },
+    ]);
+    const result = validateFormSubmit({ tags: ["A", "C"] }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["tags"]).toEqual(["A", "C"]);
+    }
+  });
+
+  it("T0512-MS-2: multi-select with empty array → passes (no elements to violate)", () => {
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select", options: ["A", "B", "C"] },
+    ]);
+    const result = validateFormSubmit({ tags: [] }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["tags"]).toEqual([]);
+    }
+  });
+
+  it("T0512-MS-3: multi-select with element not in options → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select", options: ["A", "B", "C"] },
+    ]);
+    const result = validateFormSubmit({ tags: ["A", "INVALID"] }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "tags");
+      expect(v?.type).toBe("enum_mismatch");
+      expect(v?.message).toMatch(/multi-select/);
+      expect(v?.message).toMatch(/"INVALID"/);
+    }
+  });
+
+  it("T0512-MS-4: multi-select with non-array value → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select", options: ["A", "B"] },
+    ]);
+    const result = validateFormSubmit({ tags: "A" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "tags");
+      expect(v?.type).toBe("enum_mismatch");
+      expect(v?.message).toMatch(/must be an array/);
+    }
+  });
+
+  it("T0512-MS-5: multi-select with numeric non-array → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select", options: ["A", "B"] },
+    ]);
+    const result = validateFormSubmit({ tags: 42 }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "tags");
+      expect(v?.type).toBe("enum_mismatch");
+    }
+  });
+
+  it("T0512-MS-6: multi-select with no options → array shape required, elements unchecked", () => {
+    // No options carried (backward compat) → only the array-shape requirement enforced.
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select" },
+    ]);
+    const result = validateFormSubmit({ tags: ["X", "Y"] }, fields, undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it("T0512-MS-7: multi-select with no options and non-array value → enum_mismatch violation", () => {
+    // Even without options, a non-array is rejected (the array shape invariant holds).
+    const fields = makeFields([
+      { key: "tags", type: "multi-select", contract: "multi-select" },
+    ]);
+    const result = validateFormSubmit({ tags: "not-an-array" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "tags");
+      expect(v?.type).toBe("enum_mismatch");
+      expect(v?.message).toMatch(/must be an array/);
+    }
+  });
+});
+
+describe("validateFormSubmit — T-0512: person field validation", () => {
+  it("T0512-P-1: person field with non-empty string → passes", () => {
+    const fields = makeFields([
+      { key: "owner", type: "person", contract: "person" },
+    ]);
+    const result = validateFormSubmit({ owner: "emp-123" }, fields, undefined);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.safeValues["owner"]).toBe("emp-123");
+    }
+  });
+
+  it("T0512-P-2: person field with empty string → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "owner", type: "person", contract: "person" },
+    ]);
+    const result = validateFormSubmit({ owner: "" }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "owner");
+      expect(v?.type).toBe("enum_mismatch");
+      expect(v?.message).toMatch(/person field/);
+    }
+  });
+
+  it("T0512-P-3: person field with whitespace-only string → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "owner", type: "person", contract: "person" },
+    ]);
+    const result = validateFormSubmit({ owner: "   " }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "owner");
+      expect(v?.type).toBe("enum_mismatch");
+    }
+  });
+
+  it("T0512-P-4: person field with non-string value → enum_mismatch violation", () => {
+    const fields = makeFields([
+      { key: "owner", type: "person", contract: "person" },
+    ]);
+    const result = validateFormSubmit({ owner: 42 }, fields, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const v = result.violations.find((x) => x.key === "owner");
+      expect(v?.type).toBe("enum_mismatch");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0404 [D7-9] — per-step field MODE enforcement (server-authoritative)
 //   read-only / hidden → write rejected; required-to-advance → must be present
 // ---------------------------------------------------------------------------

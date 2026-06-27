@@ -107,9 +107,11 @@ export const FIELD_TYPES = [
   { value: "integer", label: "Целое" },
   { value: "boolean", label: "Да/Нет" },
   { value: "select", label: "Список (select)" },
+  { value: "multi-select", label: "Мультивыбор" },
   { value: "date", label: "Дата" },
   { value: "money", label: "Сумма (₽)" },
   { value: "relation", label: "Ссылка на запись" },
+  { value: "person", label: "Сотрудник" },
   { value: "collection", label: "Список строк" },
   { value: "computed", label: "Итог" },
 ];
@@ -173,7 +175,8 @@ export function validateField(field, allFields) {
   }
 
   // T-0294: validate select options
-  if (type === "select") {
+  // T-0512: multi-select reuses the same options validation as select.
+  if (type === "select" || type === "multi-select") {
     const opts = Array.isArray(field?.options) ? field.options : [];
     const nonEmpty = opts.filter((o) => typeof o === "string" && o.trim().length > 0);
     if (nonEmpty.length === 0) {
@@ -459,6 +462,27 @@ export function buildRecordSchema(fields) {
       // compile (validateRecordSchemaDefinition). Stored value is a plain JSON number;
       // the x-money annotation is a display hint only (currency formatting on render).
       prop = { type: "number", "x-money": { currency: "RUB" } };
+    } else if (f.type === "multi-select") {
+      // T-0512: multi-select → type:array + items:{type:"string",enum:[...]} + x-multi-select extension.
+      // AJV validates element membership via items.enum automatically. The x-multi-select
+      // annotation is the round-trip discriminator (distinguishes from a plain array/collection).
+      // Same x-* strip convention — validateRecordSchemaDefinition strips it before AJV compile.
+      // The stored value is a JSON array of strings.
+      const rawOpts = Array.isArray(f.options) ? f.options : [];
+      const opts = [...new Set(
+        rawOpts.filter((o) => typeof o === "string" && o.trim().length > 0).map((o) => o.trim())
+      )];
+      prop = {
+        type: "array",
+        items: { type: "string", enum: opts.length > 0 ? opts : [""] },
+        "x-multi-select": true,
+      };
+    } else if (f.type === "person") {
+      // T-0512: person → type:string + x-person extension (employee selector).
+      // Stores the employee's id as a plain string. The x-person annotation is the
+      // round-trip discriminator; AJV strips it before compile (standard x-* convention).
+      // Display resolves the id to a name via GET /api/org.
+      prop = { type: "string", "x-person": true };
     } else {
       prop = emitScalarProp(f);
     }
@@ -470,6 +494,7 @@ export function buildRecordSchema(fields) {
     // record.data — T-0453). Even if the in-memory field carries required:true
     // (e.g. loaded from a stale persisted schema), we must never push the key into
     // the required array, or every subsequent record save will fail AJV validation.
+    // T-0512: multi-select and person CAN be required (they store real values).
     if (f.required && f.type !== "computed") required.push(key);
   }
 
@@ -551,6 +576,17 @@ export function parseRecordSchema(recordSchema) {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
 
+    // T-0512: detect multi-select fields by type:"array" + x-multi-select annotation.
+    // Must come BEFORE the generic collection detection (which also matches type:"array").
+    const xMultiSelect = def && typeof def === "object" ? def["x-multi-select"] : undefined;
+    if (xMultiSelect && rawType === "array") {
+      const title = typeof def.title === "string" ? def.title : "";
+      const options = (def.items && Array.isArray(def.items.enum))
+        ? def.items.enum.filter((o) => typeof o === "string")
+        : [];
+      return { key, type: "multi-select", title, required: requiredSet.has(key), options };
+    }
+
     // T-0448: detect collection fields by type:"array" + items being a typed object schema.
     if (
       def && typeof def === "object" && !Array.isArray(def) &&
@@ -617,6 +653,15 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "money", title, required: requiredSet.has(key) };
     }
 
+    // T-0512: detect person fields by the presence of x-person annotation.
+    // Shape: { type: "string", "x-person": true }.
+    // Must be detected before the generic string fallthrough.
+    const xPerson = def && typeof def === "object" ? def["x-person"] : undefined;
+    if (xPerson) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "person", title, required: requiredSet.has(key) };
+    }
+
     // T-0294: detect select fields by the presence of an enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -626,10 +671,13 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "select", title, required: requiredSet.has(key), options };
     }
 
-    // If the persisted type isn't one we offer (excluding select/relation/collection/money which
-    // are handled above), fall back to "string" so the dropdown stays valid; the user can re-pick.
-    // (Honest: never show a type option the backend wouldn't accept.)
-    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation" && v !== "collection" && v !== "money");
+    // If the persisted type isn't one we offer (excluding select/relation/collection/money/
+    // multi-select/person which are handled above), fall back to "string" so the dropdown
+    // stays valid; the user can re-pick. (Honest: never show a type option the backend wouldn't accept.)
+    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) =>
+      v !== "select" && v !== "relation" && v !== "collection" && v !== "money" &&
+      v !== "multi-select" && v !== "person"
+    );
     const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =
       def && typeof def === "object" && typeof def.title === "string" ? def.title : "";

@@ -31,11 +31,29 @@ import { parseRecordSchema, FIELD_TYPES } from '../screens/apps-schema.js';
 // into form_binding.fields — fixing the silent enum→text-input bug (spec §2).
 // Uses the web-local mirror of the catalog (field-contract.js) — not the server
 // src/core/ module — to keep the vite build self-contained (layer boundary).
-import { deriveContractFromFieldType } from './field-contract.js';
+// T-0512: also import contractKindForFieldType so multi-select/person use their
+// own catalog contract (not the generic hasOptions→'enum' path).
+import { deriveContractFromFieldType, contractKindForFieldType } from './field-contract.js';
 
 // Map an apps-schema field `type` (select/date/boolean/number/integer/string) to
 // the canonical FieldType the catalog speaks. A field with `options` is an enum.
+//
+// T-0512 FIX: check for multi-select and person BEFORE the generic hasOptions→enum
+// rule. Both field types carry `options` (multi-select uses them; person does not),
+// but they must NOT be stamped with contract:'enum' — they have their own catalog
+// contracts. Without this check a multi-select field was misclassified as 'enum',
+// rendered as a single <select>, and submitted a scalar string instead of an array,
+// causing an AJV 400 on the record write.
+//
+// Returns a FieldType string for scalar types (fed into deriveContractFromFieldType)
+// OR the string 'multi-select' / 'person' (fed directly to contractKindForFieldType).
 function fieldTypeForContract(field) {
+  // T-0512: structural types that have their own catalog contract — classified FIRST
+  // so the options-present rule below cannot misclassify them as 'enum'.
+  if (field?.type === 'multi-select') return 'multi-select';
+  if (field?.type === 'person') return 'person';
+  // A field with non-empty options[] is an enum (the snapshot bug fix for plain
+  // select/string fields that carry their option list).
   if (Array.isArray(field?.options) && field.options.length > 0) return 'enum';
   switch (field?.type) {
     case 'select': return 'enum';
@@ -393,13 +411,29 @@ function FormBuilder() {
     // presentation into the snapshot. Previously `options` were dropped here, so
     // an enum re-rendered as a plain text input in the inbox (spec §2 bug). The
     // contract + options now travel end-to-end through form_binding.fields.
+    //
+    // T-0512: for multi-select and person, fieldTypeForContract returns the field
+    // type string directly ('multi-select'/'person'). We derive the contract kind
+    // via contractKindForFieldType (which covers those types) and set the
+    // matching presentation rather than calling deriveContractFromFieldType (which
+    // only knows scalar FieldTypes: text/number/date/boolean/enum/textarea).
     const bindingFields = configOrder
       .filter((k) => configs[k]?.included !== false)
       .map((k, idx) => {
         const f = fields.find((ff) => ff.key === k);
         const cfg = configs[k] || {};
         const ft = fieldTypeForContract(f);
-        const { kind, presentation } = deriveContractFromFieldType(ft);
+        // ft is either a scalar FieldType (enum/boolean/number/date/textarea/text)
+        // OR a structural type string ('multi-select' / 'person'). Only the scalar
+        // FieldTypes go through deriveContractFromFieldType; the structural ones use
+        // contractKindForFieldType directly.
+        let kind, presentation;
+        if (ft === 'multi-select' || ft === 'person') {
+          kind = contractKindForFieldType(ft); // 'multi-select' or 'person'
+          presentation = ft;                   // same string is the presentation mode
+        } else {
+          ({ kind, presentation } = deriveContractFromFieldType(ft));
+        }
         const hasOptions = Array.isArray(f?.options) && f.options.length > 0;
         return {
           key: k,

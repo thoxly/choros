@@ -40,13 +40,150 @@
    colors. The control is theme-agnostic (works light/dark via tokens).
    ============================================================================ */
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 // Pure contract-resolution lives in a React-free sibling (field-contract.js) so
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
 import { resolveFieldContract, resolveFieldMode } from './field-contract.js';
 
 export { resolveFieldContract, resolveFieldMode };
+
+// ---------------------------------------------------------------------------
+// T-0512: PersonPicker — employee picker sourced from GET /api/org.
+//
+// Mirrors RelationPicker in screen-app-records.jsx: fetches the employee list
+// once (on mount), renders a <select> of human employees (display name, value =
+// employee id). Stores the employee id as a plain string (same as relation).
+//
+// Employee endpoint: GET /api/org returns { departments: [ { positions: [
+//   { people: [{ id, name, type }] } ] } ] }. We flatten and filter type:"human".
+// The endpoint is already used by bpmn-properties-panel.jsx, screen-agents.jsx,
+// and the hire-employee form in screen-org.jsx.
+//
+// Honest states: loading / error (surface the failure, not an empty dropdown) /
+// empty (no human employees in org) / populated (select).
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch human employees from GET /api/org and flatten to [{id, name}].
+ * Returns a promise that resolves to the employee list or throws on error.
+ */
+async function fetchEmployees() {
+  // Use the same auth headers pattern as the rest of the SPA: check for
+  // the authHeaders helper; fall back to empty headers (dev-no-db path).
+  // We can't import devHeaders/authHeaders from screen-app-records without
+  // a cross-boundary import, but for the same-origin /api/org call the browser
+  // sends cookies automatically (the auth middleware checks the session cookie
+  // in keycloak mode). In dev mode the x-dev-user header is injected by the
+  // dev-proxy layer. We pass no extra headers here to keep this component
+  // self-contained; if auth fails the component shows an honest error.
+  const res = await fetch('/api/org');
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  const employees = [];
+  const departments = Array.isArray(data.departments) ? data.departments : [];
+  for (const dept of departments) {
+    const positions = Array.isArray(dept.positions) ? dept.positions : [];
+    for (const pos of positions) {
+      const people = Array.isArray(pos.people) ? pos.people : [];
+      for (const p of people) {
+        if (p && p.type === 'human' && p.id) {
+          employees.push({ id: p.id, name: p.name || p.id });
+        }
+      }
+    }
+  }
+  return employees;
+}
+
+/**
+ * PersonPicker — inline employee selector for a record form.
+ * Renders a <select> of human employees from the org; stores the employee id.
+ *
+ * @param {{ field, value, onChange, error, idPrefix, isRequired, readOnly, invalid }} props
+ */
+export function PersonPicker({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
+  const label = field.label || field.title || field.key;
+  const invalid = Boolean(error);
+
+  const [employees, setEmployees] = useState(null); // null=loading
+  const [fetchError, setFetchError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFetchError(null);
+    fetchEmployees()
+      .then((list) => { if (!cancelled) setEmployees(list); })
+      .catch((err) => { if (!cancelled) { setFetchError(String(err?.message || err)); setEmployees([]); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+  const inputClass = `chs-input${invalid ? ' chs-input--invalid' : ''}`;
+
+  const labelNode = (
+    <label className="chs-label" htmlFor={id}>
+      {label}
+      {isRequired && (
+        <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+      )}
+    </label>
+  );
+  const errorNode = error ? (
+    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {error}
+    </span>
+  ) : null;
+
+  let control;
+  if (fetchError) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }} aria-live="polite">
+        Не удалось загрузить список сотрудников
+      </div>
+    );
+  } else if (employees === null) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }} aria-live="polite">
+        Загрузка…
+      </div>
+    );
+  } else if (employees.length === 0) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+        В организации нет сотрудников
+      </div>
+    );
+  } else {
+    control = (
+      <select
+        id={id}
+        className={inputClass}
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        disabled={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
+        style={inputStyle}
+      >
+        <option value="">— выберите сотрудника —</option>
+        {employees.map((emp) => (
+          <option key={emp.id} value={emp.id}>{emp.name}</option>
+        ))}
+      </select>
+    );
+  }
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {labelNode}
+      {control}
+      {errorNode}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // FieldControl — the single field component the schema-driven forms render.
@@ -107,10 +244,11 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   // do not have an authoring control here yet (delivered by D7-6/7/8). Rather
   // than silently render a text box that captures nothing useful, surface what
   // the field IS so the gap is visible, not hidden.
+  // T-0512: multi-select and person are scalarish (rendered inline by FieldControl).
   const isScalarish = presentation === 'text' || presentation === 'textarea'
     || presentation === 'number' || presentation === 'checkbox'
     || presentation === 'date' || presentation === 'select' || presentation === 'radio'
-    || presentation === 'money';
+    || presentation === 'money' || presentation === 'multi-select' || presentation === 'person';
 
   if (!isScalarish) {
     const note = editable
@@ -189,6 +327,73 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         {control}
         {errorNode}
       </div>
+    );
+  }
+
+  // ----- multi-select (T-0512) ------------------------------------------------
+  // Renders a set of checkboxes, one per option. Value is a string[].
+  // On change: toggle the option in/out of the array.
+  if (presentation === 'multi-select') {
+    const options = Array.isArray(field.options) ? field.options : [];
+    const selected = Array.isArray(value) ? value : [];
+    const handleToggle = (opt) => {
+      const next = selected.includes(opt)
+        ? selected.filter((s) => s !== opt)
+        : [...selected, opt];
+      onChange(field.key, next);
+    };
+    const control = (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)' }}>
+        {options.length === 0 && (
+          <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', fontStyle: 'italic' }}>
+            Нет вариантов
+          </span>
+        )}
+        {options.map((opt) => (
+          <label key={opt} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-sm)' }}>
+            <input
+              type="checkbox"
+              checked={selected.includes(opt)}
+              onChange={() => handleToggle(opt)}
+              disabled={readOnly || undefined}
+              aria-disabled={readOnly || undefined}
+            />
+            {opt}
+          </label>
+        ))}
+      </div>
+    );
+    if (hideLabel) {
+      return <>{control}{errorNode}</>;
+    }
+    return (
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+        <label className="chs-label" htmlFor={id}>
+          {label}
+          {isRequired && (
+            <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+          )}
+        </label>
+        {control}
+        {errorNode}
+      </div>
+    );
+  }
+
+  // ----- person (T-0512) -------------------------------------------------------
+  // Renders a PersonPicker component (async employee select from GET /api/org).
+  // PersonPicker owns its own label+wrapper so we return it directly.
+  if (presentation === 'person') {
+    return (
+      <PersonPicker
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
     );
   }
 

@@ -52,6 +52,7 @@ import type { FieldType } from "./field-type-dictionary.js";
  *   scalar        — a single primitive value (text / number / boolean / date /
  *                   textarea). The default contract for a flat JSON-Schema field.
  *   enum          — a single value constrained to a fixed option list.
+ *   multi-select  — an array of values chosen from a fixed option list.
  *   relation      — a reference to a record in another application (cross_app_ref).
  *   collection     — a one-to-many set of child rows (line-items).
  *   date-range    — a pair of dates (start / end), bound as one logical field.
@@ -59,22 +60,26 @@ import type { FieldType } from "./field-type-dictionary.js";
  *   file          — an uploaded file / attachment handle.
  *   rollup        — a read-only aggregate derived from related records (sum/count/…).
  *   matrix-lookup — a value looked up from a 2-axis table (a normative rule).
+ *   person        — a reference to an employee (stores the employee id as a string).
  */
 export type BindingContractKind =
   | "scalar"
   | "enum"
+  | "multi-select"
   | "relation"
   | "collection"
   | "date-range"
   | "money"
   | "file"
   | "rollup"
-  | "matrix-lookup";
+  | "matrix-lookup"
+  | "person";
 
 /** All contract kinds, in catalog order. */
 export const BINDING_CONTRACT_KINDS: readonly BindingContractKind[] = [
   "scalar",
   "enum",
+  "multi-select",
   "relation",
   "collection",
   "date-range",
@@ -82,6 +87,7 @@ export const BINDING_CONTRACT_KINDS: readonly BindingContractKind[] = [
   "file",
   "rollup",
   "matrix-lookup",
+  "person",
 ];
 
 // ---------------------------------------------------------------------------
@@ -97,19 +103,21 @@ export const BINDING_CONTRACT_KINDS: readonly BindingContractKind[] = [
  * contracts also declare read/widget modes that Floor-2 consumes.
  */
 export type PresentationMode =
-  | "text"        // single-line text input
-  | "textarea"    // multi-line text input
-  | "number"      // numeric input
-  | "checkbox"    // boolean checkbox
-  | "date"        // date picker
-  | "select"      // dropdown (enum)
-  | "radio"       // radio group (enum)
-  | "reference"   // record-picker (relation)
-  | "table"       // editable child-row table (collection)
-  | "range"       // two-date range picker (date-range)
-  | "money"       // amount + currency (money)
-  | "file"        // file upload control (file)
-  | "readout";    // read-only computed value (rollup / matrix-lookup)
+  | "text"          // single-line text input
+  | "textarea"      // multi-line text input
+  | "number"        // numeric input
+  | "checkbox"      // boolean checkbox
+  | "date"          // date picker
+  | "select"        // dropdown (enum)
+  | "radio"         // radio group (enum)
+  | "multi-select"  // multi-checkbox group (multi-select — array of enum values)
+  | "reference"     // record-picker (relation)
+  | "table"         // editable child-row table (collection)
+  | "range"         // two-date range picker (date-range)
+  | "money"         // amount + currency (money)
+  | "file"          // file upload control (file)
+  | "readout"       // read-only computed value (rollup / matrix-lookup)
+  | "person";       // employee picker from org (person — stores employee id)
 
 // ---------------------------------------------------------------------------
 // The schema slot a contract binds to
@@ -223,6 +231,26 @@ export const BINDING_CONTRACT_CATALOG: Readonly<
     editable: true,
     label: "Сумма",
     summary: "Денежная сумма (значение и валюта).",
+  },
+  // T-0512: multi-select — array of enum values chosen from a fixed option set.
+  "multi-select": {
+    kind: "multi-select",
+    schemaSlot: "property",
+    presentations: ["multi-select"],
+    defaultPresentation: "multi-select",
+    editable: true,
+    label: "Мультивыбор",
+    summary: "Несколько значений из фиксированного набора вариантов.",
+  },
+  // T-0512: person — selects an employee from the org; stores the employee id as a string.
+  person: {
+    kind: "person",
+    schemaSlot: "property",
+    presentations: ["person"],
+    defaultPresentation: "person",
+    editable: true,
+    label: "Сотрудник",
+    summary: "Ссылка на сотрудника организации (хранит id сотрудника).",
   },
   file: {
     kind: "file",

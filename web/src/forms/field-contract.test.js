@@ -282,6 +282,66 @@ describe('contractKindForFieldType', () => {
 });
 
 // ---------------------------------------------------------------------------
+// T-0512: contractKindForFieldType maps multi-select and person to their own kinds.
+// ---------------------------------------------------------------------------
+
+describe('contractKindForFieldType — T-0512 multi-select + person', () => {
+  it('multi-select → "multi-select"', () => {
+    expect(contractKindForFieldType('multi-select')).toBe('multi-select');
+  });
+
+  it('person → "person"', () => {
+    expect(contractKindForFieldType('person')).toBe('person');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0512: resolveFieldContract for multi-select and person fields.
+// ---------------------------------------------------------------------------
+
+describe('resolveFieldContract — T-0512 multi-select + person', () => {
+  it('type="multi-select" with options → multi-select contract (NOT misclassified as enum)', () => {
+    const result = resolveFieldContract({ type: 'multi-select', options: ['A', 'B', 'C'] });
+    expect(result.contractKind).toBe('multi-select');
+    expect(result.presentation).toBe('multi-select');
+    expect(result.editable).toBe(true);
+  });
+
+  it('type="multi-select" without options → multi-select contract', () => {
+    const result = resolveFieldContract({ type: 'multi-select' });
+    expect(result.contractKind).toBe('multi-select');
+    expect(result.presentation).toBe('multi-select');
+  });
+
+  it('explicit contract="multi-select" wins', () => {
+    const result = resolveFieldContract({ contract: 'multi-select', type: 'string' });
+    expect(result.contractKind).toBe('multi-select');
+    expect(result.presentation).toBe('multi-select');
+  });
+
+  it('type="person" → person contract (scalar employee id)', () => {
+    const result = resolveFieldContract({ type: 'person' });
+    expect(result.contractKind).toBe('person');
+    expect(result.presentation).toBe('person');
+    expect(result.editable).toBe(true);
+  });
+
+  it('explicit contract="person" wins', () => {
+    const result = resolveFieldContract({ contract: 'person', type: 'string' });
+    expect(result.contractKind).toBe('person');
+    expect(result.presentation).toBe('person');
+  });
+
+  it('multi-select with options is NOT classified as enum (structural-before-hasOptions rule)', () => {
+    // This is the key regression guard: a multi-select field that carries options must
+    // NOT fall into the hasOptions→enum branch.
+    const result = resolveFieldContract({ type: 'multi-select', options: ['X', 'Y'] });
+    expect(result.contractKind).not.toBe('enum');
+    expect(result.contractKind).toBe('multi-select');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-0480 [D7-K]: resolveFieldContract routes records-form STRUCTURAL types
 // (relation/collection/computed) to their catalog contracts, so the record
 // screen dispatches off the catalog — not a parallel `inputKind` string chain.

@@ -1783,3 +1783,253 @@ describe('apps-schema T-0509 · parseRecordSchema — money field round-trip', (
     expect(f).toMatchObject({ key: 'amount', type: 'money', title: 'Сумма', required: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0512: multi-select field type
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0512 · multi-select field type', () => {
+  it('FIELD_TYPES includes multi-select with label "Мультивыбор"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'multi-select');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Мультивыбор');
+  });
+
+  it('FIELD_TYPE_VALUES includes "multi-select"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('multi-select');
+  });
+
+  it('buildRecordSchema: multi-select emits array+items.enum+x-multi-select', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: ['red', 'green', 'blue'], required: false },
+    ]);
+    const prop = schema.properties.tags;
+    expect(prop.type).toBe('array');
+    expect(prop['x-multi-select']).toBe(true);
+    expect(prop.items).toMatchObject({ type: 'string', enum: ['red', 'green', 'blue'] });
+  });
+
+  it('buildRecordSchema: multi-select deduplicates and trims options', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: [' a ', 'b', ' a '], required: false },
+    ]);
+    expect(schema.properties.tags.items.enum).toEqual(['a', 'b']);
+  });
+
+  it('buildRecordSchema: multi-select with title emits title in property', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', title: 'Метки', options: ['x', 'y'], required: false },
+    ]);
+    expect(schema.properties.tags.title).toBe('Метки');
+  });
+
+  it('buildRecordSchema: multi-select with required → included in required array', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: ['a'], required: true },
+    ]);
+    expect(schema.required).toContain('tags');
+  });
+
+  it('buildRecordSchema: x-multi-select schema compiles after x-* strip (mirrors validator)', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: ['a', 'b'], required: false },
+    ]);
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('buildRecordSchema: x-multi-select schema does NOT compile raw (strip required)', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: ['a', 'b'], required: false },
+    ]);
+    expect(backendAcceptsRaw(schema)).toBe(false);
+  });
+
+  it('parseRecordSchema: detects array+x-multi-select → type multi-select + options', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        tags: {
+          type: 'array',
+          'x-multi-select': true,
+          items: { type: 'string', enum: ['red', 'green'] },
+          title: 'Метки',
+        },
+      },
+      required: ['tags'],
+    };
+    const fields = parseRecordSchema(schema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'tags',
+      type: 'multi-select',
+      title: 'Метки',
+      required: true,
+      options: ['red', 'green'],
+    });
+  });
+
+  it('parseRecordSchema: round-trips a multi-select field', () => {
+    const original = [{ key: 'tags', type: 'multi-select', title: 'Метки', options: ['a', 'b'], required: true }];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'tags', type: 'multi-select', title: 'Метки', options: ['a', 'b'], required: true });
+  });
+
+  it('parseRecordSchema: multi-select does NOT interfere with collection (also array) parsing', () => {
+    const schema = buildRecordSchema([
+      { key: 'tags', type: 'multi-select', options: ['x'], required: false },
+      { key: 'items', type: 'collection', required: false, subFields: [{ key: 'val', type: 'string', label: 'V', required: false }] },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.find((f) => f.key === 'tags').type).toBe('multi-select');
+    expect(parsed.find((f) => f.key === 'items').type).toBe('collection');
+  });
+
+  it('validateField: multi-select without options → error', () => {
+    const err = validateField({ key: 'tags', type: 'multi-select', options: [] });
+    expect(err.options).toBeTruthy();
+  });
+
+  it('validateField: multi-select with valid options → no error', () => {
+    const err = validateField({ key: 'tags', type: 'multi-select', options: ['a', 'b'] });
+    expect(err.options).toBeUndefined();
+  });
+
+  it('validateFields: accepts a multi-select field with valid options', () => {
+    const r = validateFields([{ key: 'tags', type: 'multi-select', options: ['x', 'y'], required: false }]);
+    expect(r.valid).toBe(true);
+  });
+
+  it('validateFields: rejects a multi-select field with no options', () => {
+    const r = validateFields([{ key: 'tags', type: 'multi-select', options: [], required: false }]);
+    expect(r.valid).toBe(false);
+    expect(r.fieldErrors[0].options).toBeTruthy();
+  });
+
+  it('emitted multi-select AJV validates an array of enum members (after strip)', () => {
+    // The x-multi-select annotation is a per-property x-* key; must be stripped
+    // before direct AJV compile (mirrors backendAccepts / validateRecordSchemaDefinition).
+    const schema = buildRecordSchema([{ key: 'tags', type: 'multi-select', options: ['a', 'b'], required: false }]);
+    // Build a stripped schema: root x-* removed (backendAccepts), then also strip
+    // per-property x-multi-select so the direct compile test works correctly.
+    const strippedRoot = {};
+    for (const [k, v] of Object.entries(schema)) {
+      if (!k.startsWith('x-')) strippedRoot[k] = v;
+    }
+    const strippedProps = {};
+    for (const [pk, pv] of Object.entries(strippedRoot.properties || {})) {
+      const strippedProp = {};
+      for (const [k, v] of Object.entries(pv || {})) {
+        if (!k.startsWith('x-')) strippedProp[k] = v;
+      }
+      strippedProps[pk] = strippedProp;
+    }
+    const stripped = { ...strippedRoot, properties: strippedProps };
+    const ajv = new Ajv();
+    const validate = ajv.compile(stripped);
+    expect(validate({ tags: ['a', 'b'] })).toBe(true);
+    expect(validate({ tags: ['a'] })).toBe(true);
+    expect(validate({ tags: [] })).toBe(true);
+    expect(validate({ tags: ['c'] })).toBe(false); // 'c' not in enum
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0512: person field type
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0512 · person field type', () => {
+  it('FIELD_TYPES includes person with label "Сотрудник"', () => {
+    const entry = FIELD_TYPES.find((t) => t.value === 'person');
+    expect(entry).toBeDefined();
+    expect(entry.label).toBe('Сотрудник');
+  });
+
+  it('FIELD_TYPE_VALUES includes "person"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('person');
+  });
+
+  it('buildRecordSchema: person emits { type:"string", "x-person": true }', () => {
+    const schema = buildRecordSchema([
+      { key: 'assignee', type: 'person', required: false },
+    ]);
+    const prop = schema.properties.assignee;
+    expect(prop).toMatchObject({ type: 'string', 'x-person': true });
+  });
+
+  it('buildRecordSchema: person with title emits title in property', () => {
+    const schema = buildRecordSchema([
+      { key: 'assignee', type: 'person', title: 'Исполнитель', required: false },
+    ]);
+    expect(schema.properties.assignee.title).toBe('Исполнитель');
+    expect(schema.properties.assignee['x-person']).toBe(true);
+  });
+
+  it('buildRecordSchema: person with required → included in required array', () => {
+    const schema = buildRecordSchema([
+      { key: 'assignee', type: 'person', required: true },
+    ]);
+    expect(schema.required).toContain('assignee');
+  });
+
+  it('buildRecordSchema: x-person schema compiles after x-* strip (mirrors validator)', () => {
+    const schema = buildRecordSchema([
+      { key: 'assignee', type: 'person', required: false },
+    ]);
+    expect(backendAccepts(schema)).toBe(true);
+  });
+
+  it('buildRecordSchema: x-person schema does NOT compile raw (strip required)', () => {
+    const schema = buildRecordSchema([
+      { key: 'assignee', type: 'person', required: false },
+    ]);
+    expect(backendAcceptsRaw(schema)).toBe(false);
+  });
+
+  it('parseRecordSchema: detects string+x-person → type person', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        assignee: { type: 'string', 'x-person': true, title: 'Исполнитель' },
+      },
+      required: ['assignee'],
+    };
+    const fields = parseRecordSchema(schema);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]).toMatchObject({
+      key: 'assignee',
+      type: 'person',
+      title: 'Исполнитель',
+      required: true,
+    });
+  });
+
+  it('parseRecordSchema: round-trips a person field', () => {
+    const original = [{ key: 'assignee', type: 'person', title: 'Исполнитель', required: true }];
+    const schema = buildRecordSchema(original);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed[0]).toMatchObject({ key: 'assignee', type: 'person', title: 'Исполнитель', required: true });
+  });
+
+  it('parseRecordSchema: person does NOT fall through to string', () => {
+    const schema = buildRecordSchema([
+      { key: 'emp', type: 'person', required: false },
+      { key: 'name', type: 'string', required: false },
+    ]);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.find((f) => f.key === 'emp').type).toBe('person');
+    expect(parsed.find((f) => f.key === 'name').type).toBe('string');
+  });
+
+  it('validateField: person type → no additional error (no targetRegistryId needed)', () => {
+    const err = validateField({ key: 'assignee', type: 'person' });
+    expect(Object.keys(err)).toHaveLength(0);
+  });
+
+  it('validateFields: accepts a person field', () => {
+    const r = validateFields([{ key: 'assignee', type: 'person', required: false }]);
+    expect(r.valid).toBe(true);
+  });
+});
