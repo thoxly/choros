@@ -65,6 +65,7 @@ export const INPUT_KIND = {
   boolean: "checkbox",
   select: "select",
   date: "date",
+  money: "money",
   relation: "relation",
   collection: "collection",
   computed: "computed",
@@ -296,6 +297,22 @@ export function schemaToFormFields(recordSchema) {
       };
     }
 
+    // T-0509: detect money fields by the presence of the x-money extension.
+    // Shape: { type: "number", "x-money": { currency: "RUB" } }.
+    // Must be detected before the generic number fallthrough so editing a money
+    // field restores type "money", not "number".
+    const xMoney = def && typeof def === "object" ? def["x-money"] : undefined;
+    if (xMoney && typeof xMoney === "object" && !Array.isArray(xMoney)) {
+      return {
+        key,
+        type: "money",
+        title,
+        label: title || key,
+        required: requiredSet.has(key),
+        inputKind: "money",
+      };
+    }
+
     // T-0294: detect select fields by the presence of a non-empty enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -457,7 +474,8 @@ export function validateRecordValues(formFields, values) {
       continue;
     }
 
-    if (f.type === "number" || f.type === "integer") {
+    if (f.type === "number" || f.type === "integer" || f.type === "money") {
+      // T-0509: money behaves identically to number for validation — stored as a plain number.
       const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw);
       if (str.length === 0) {
         if (f.required) errors[f.key] = "Обязательное поле";
@@ -617,7 +635,10 @@ export function serializeRecordData(formFields, values) {
       continue;
     }
 
-    if (f.type === "number" || f.type === "integer") {
+    if (f.type === "number" || f.type === "integer" || f.type === "money") {
+      // T-0509: money is stored as a plain JSON number (the x-money annotation is
+      // a display hint only and is stripped by AJV before validation). Treat identically
+      // to number: parse the string, emit a JS number, omit blank optionals.
       const str = typeof raw === "string" ? raw.trim() : raw == null ? "" : String(raw);
       if (str.length === 0) {
         // Blank: omit. Required-blank is rejected by validateRecordValues before
@@ -626,7 +647,7 @@ export function serializeRecordData(formFields, values) {
       }
       const n = Number(str);
       if (!Number.isFinite(n)) continue; // guard — should be unreachable post-validate
-      data[f.key] = n; // a JS number, NOT a string → passes AJV type:number/integer
+      data[f.key] = n; // a JS number, NOT a string → passes AJV type:number
       continue;
     }
 
@@ -754,6 +775,17 @@ export function formatCellValue(value, type) {
       // while still supporting legitimate fractional results (avg, factor multiplication).
       const rounded = Math.round(value * 1e10) / 1e10;
       return String(rounded);
+    }
+    return "—";
+  }
+
+  // T-0509: money value is a plain number; display with Russian currency formatting.
+  // Thousands separators + ₽ symbol via Intl.NumberFormat (locale 'ru-RU', style 'currency').
+  // maximumFractionDigits:0 keeps kopeks hidden (round rubles only — matches the
+  // constructor's "Сумма (₽)" intent; fractional amounts are uncommonly entered here).
+  if (type === "money") {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value.toLocaleString("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 });
     }
     return "—";
   }

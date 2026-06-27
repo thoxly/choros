@@ -1533,3 +1533,160 @@ describe('T-0507: list cell — computeRollup via column object from schemaToCol
     expect(formatCellValue(result, 'computed')).toBe('—');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0509: money field type in records-form
+// ---------------------------------------------------------------------------
+
+// A schema with a money field as emitted by buildRecordSchema (apps-schema.js).
+const SCHEMA_WITH_MONEY = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string', title: 'Название' },
+    amount: {
+      type: 'number',
+      title: 'Сумма',
+      'x-money': { currency: 'RUB' },
+    },
+  },
+  required: ['amount'],
+};
+
+// AJV schema for the stored form: x-money is stripped (unknown keyword),
+// leaving type:number. The server validator strips x-* before AJV compile.
+const MONEY_STORED_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    amount: { type: 'number' },
+  },
+  required: ['amount'],
+};
+
+describe('T-0509: money field type', () => {
+  it('INPUT_KIND maps money to "money"', () => {
+    expect(INPUT_KIND.money).toBe('money');
+  });
+
+  it('schemaToFormFields: detects money from x-money, emits type "money" and inputKind "money"', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_MONEY);
+    const moneyField = fields.find((f) => f.key === 'amount');
+    expect(moneyField).toBeDefined();
+    expect(moneyField).toMatchObject({
+      key: 'amount',
+      type: 'money',
+      label: 'Сумма',
+      required: true,
+      inputKind: 'money',
+    });
+    // Non-money field must remain unaffected.
+    const titleField = fields.find((f) => f.key === 'title');
+    expect(titleField).toMatchObject({ type: 'string', inputKind: 'text' });
+  });
+
+  it('blankRecordValues: money field starts as ""', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_MONEY);
+    const vals = blankRecordValues(fields);
+    expect(vals.amount).toBe('');
+  });
+
+  describe('validateRecordValues — money field', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_MONEY);
+
+    it('required money blank → error', () => {
+      const { valid, errors } = validateRecordValues(fields, { title: 'X', amount: '' });
+      expect(valid).toBe(false);
+      expect(errors.amount).toBeTruthy();
+    });
+
+    it('non-numeric input → error', () => {
+      const { valid, errors } = validateRecordValues(fields, { title: 'X', amount: 'abc' });
+      expect(valid).toBe(false);
+      expect(errors.amount).toMatch(/число/i);
+    });
+
+    it('valid numeric string → no error', () => {
+      const { valid, errors } = validateRecordValues(fields, { title: 'X', amount: '1234567' });
+      expect(valid).toBe(true);
+      expect(errors).toEqual({});
+    });
+
+    it('fractional amount is valid (money is type:number, not integer)', () => {
+      const { valid } = validateRecordValues(fields, { title: 'X', amount: '9999.99' });
+      expect(valid).toBe(true);
+    });
+  });
+
+  describe('serializeRecordData — money field round-trips as plain number', () => {
+    const fields = schemaToFormFields(SCHEMA_WITH_MONEY);
+
+    it('emits amount as a JS number (not string)', () => {
+      const data = serializeRecordData(fields, { title: 'Контракт', amount: '1234567' });
+      expect(data.amount).toBe(1234567);
+      expect(typeof data.amount).toBe('number');
+    });
+
+    it('serialized money value passes AJV type:number validation (x-money stripped)', () => {
+      const data = serializeRecordData(fields, { title: 'Оплата', amount: '99500' });
+      // Prove the plain-number output passes the server validator shape
+      // (x-money is stripped before AJV compile on the server side).
+      expect(backendValidate(MONEY_STORED_SCHEMA, data).valid).toBe(true);
+    });
+
+    it('a string amount would be REJECTED by the server (proves typing matters)', () => {
+      expect(backendValidate(MONEY_STORED_SCHEMA, { amount: '99500' }).valid).toBe(false);
+    });
+
+    it('optional blank money → omit (not NaN in payload)', () => {
+      const optSchema = {
+        type: 'object', additionalProperties: false,
+        properties: { budget: { type: 'number', 'x-money': { currency: 'RUB' } } },
+      };
+      const optFields = schemaToFormFields(optSchema);
+      const data = serializeRecordData(optFields, { budget: '' });
+      expect('budget' in data).toBe(false);
+    });
+  });
+
+  describe('formatCellValue — money field', () => {
+    it('formats a large integer with currency formatting and ₽ symbol', () => {
+      const result = formatCellValue(1234567, 'money');
+      expect(typeof result).toBe('string');
+      // Must contain the digits and the ₽ symbol (Intl formatting varies by environment
+      // but the symbol and digits are stable).
+      expect(result).toContain('₽');
+      expect(result).toMatch(/1.?234.?567/); // digits with possible separator chars
+    });
+
+    it('null → "—"', () => {
+      expect(formatCellValue(null, 'money')).toBe('—');
+    });
+
+    it('undefined → "—"', () => {
+      expect(formatCellValue(undefined, 'money')).toBe('—');
+    });
+
+    it('zero → formatted string (not "—")', () => {
+      const result = formatCellValue(0, 'money');
+      expect(result).not.toBe('—');
+      expect(result).toContain('₽');
+    });
+
+    it('NaN → "—"', () => {
+      expect(formatCellValue(NaN, 'money')).toBe('—');
+    });
+
+    it('Infinity → "—"', () => {
+      expect(formatCellValue(Infinity, 'money')).toBe('—');
+    });
+
+    it('is ADDITIVE: relation/collection/computed branches unchanged', () => {
+      const uuid = '3fa85f64-5717-4562-b3fc-2c963f66afa6';
+      expect(formatCellValue(uuid, 'relation')).toBe(RELATION_CELL_ASYNC);
+      expect(formatCellValue([], 'collection')).toBe('—');
+      expect(formatCellValue(42, 'computed')).toBe('42');
+    });
+  });
+});

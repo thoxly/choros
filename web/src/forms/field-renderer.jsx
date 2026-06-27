@@ -109,7 +109,8 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   // the field IS so the gap is visible, not hidden.
   const isScalarish = presentation === 'text' || presentation === 'textarea'
     || presentation === 'number' || presentation === 'checkbox'
-    || presentation === 'date' || presentation === 'select' || presentation === 'radio';
+    || presentation === 'date' || presentation === 'select' || presentation === 'radio'
+    || presentation === 'money';
 
   if (!isScalarish) {
     const note = editable
@@ -266,6 +267,27 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         aria-disabled={readOnly || undefined}
         style={inputStyle}
       />
+    );
+  } else if (presentation === 'money') {
+    // T-0509: money — numeric input with a ₽ suffix label. The user types a plain
+    // number (stored as type:number); the ₽ label makes the currency visible in input.
+    control = (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)' }}>
+        <input
+          id={id}
+          className={inputClass}
+          type="number"
+          step="any"
+          value={value ?? ''}
+          onChange={(e) => onChange(field.key, e.target.value)}
+          aria-required={isRequired || undefined}
+          aria-invalid={invalid || undefined}
+          readOnly={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+          style={{ ...inputStyle, flex: 1 }}
+        />
+        <span aria-hidden="true" style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', whiteSpace: 'nowrap' }}>₽</span>
+      </div>
     );
   } else if (presentation === 'date') {
     control = (
