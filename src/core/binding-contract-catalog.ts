@@ -117,7 +117,9 @@ export type PresentationMode =
   | "money"         // amount + currency (money)
   | "file"          // file upload control (file)
   | "readout"       // read-only computed value (rollup / matrix-lookup)
-  | "person";       // employee picker from org (person — stores employee id)
+  | "person"        // employee picker from org (person — stores employee id)
+  | "url"           // URL input (<input type="url">)
+  | "email";        // email input (<input type="email">)
 
 // ---------------------------------------------------------------------------
 // The schema slot a contract binds to
@@ -181,11 +183,11 @@ export const BINDING_CONTRACT_CATALOG: Readonly<
   scalar: {
     kind: "scalar",
     schemaSlot: "property",
-    presentations: ["text", "textarea", "number", "checkbox", "date"],
+    presentations: ["text", "textarea", "number", "checkbox", "date", "url", "email"],
     defaultPresentation: "text",
     editable: true,
     label: "Значение",
-    summary: "Одно простое значение (текст, число, дата, да/нет).",
+    summary: "Одно простое значение (текст, число, дата, да/нет, URL, email).",
   },
   enum: {
     kind: "enum",
@@ -313,6 +315,14 @@ export function deriveContractFromFieldType(
       return { kind: "scalar", presentation: "textarea" };
     case "text":
       return { kind: "scalar", presentation: "text" };
+    case "url":
+      return { kind: "scalar", presentation: "url" };
+    case "email":
+      return { kind: "scalar", presentation: "email" };
+    case "person":
+      return { kind: "person", presentation: "person" };
+    case "multi-select":
+      return { kind: "multi-select", presentation: "multi-select" };
     default: {
       // Exhaustiveness guard: every FieldType is handled above.
       void (type as never);

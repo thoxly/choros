@@ -120,8 +120,54 @@ function validateValue(def: FieldDef, value: unknown): FieldError | null {
       }
       return null;
     }
+    case "url": {
+      if (typeof value !== "string") {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be a string`);
+      }
+      // Basic URL validation: must start with http:// or https://
+      if (!/^https?:\/\/.+/.test(value.trim())) {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be a valid URL (starting with http:// or https://)`);
+      }
+      if (def.maxLength !== undefined && value.length > def.maxLength) {
+        return err(def.key, "TOO_LONG", `${def.key} exceeds maxLength ${def.maxLength}`);
+      }
+      return null;
+    }
+    case "email": {
+      if (typeof value !== "string") {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be a string`);
+      }
+      // Basic email validation: x@y.z pattern
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be a valid email address`);
+      }
+      if (def.maxLength !== undefined && value.length > def.maxLength) {
+        return err(def.key, "TOO_LONG", `${def.key} exceeds maxLength ${def.maxLength}`);
+      }
+      return null;
+    }
+    case "person": {
+      // person — stores the employee id as a non-empty string
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be a non-empty string (employee id)`);
+      }
+      return null;
+    }
+    case "multi-select": {
+      // multi-select — stores an array of strings
+      if (!Array.isArray(value)) {
+        return err(def.key, "WRONG_TYPE", `${def.key} must be an array`);
+      }
+      for (const item of value) {
+        if (typeof item !== "string") {
+          return err(def.key, "WRONG_TYPE", `${def.key} must be an array of strings`);
+        }
+      }
+      return null;
+    }
     default: {
       // Exhaustiveness guard — unreachable while FieldType is fully handled.
+      void (def.type as never);
       return err(def.key, "WRONG_TYPE", `${def.key} has an unsupported field type`);
     }
   }

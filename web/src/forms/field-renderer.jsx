@@ -245,10 +245,12 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   // than silently render a text box that captures nothing useful, surface what
   // the field IS so the gap is visible, not hidden.
   // T-0512: multi-select and person are scalarish (rendered inline by FieldControl).
+  // T-0516: url and email are also scalarish (rendered as typed text inputs).
   const isScalarish = presentation === 'text' || presentation === 'textarea'
     || presentation === 'number' || presentation === 'checkbox'
     || presentation === 'date' || presentation === 'select' || presentation === 'radio'
-    || presentation === 'money' || presentation === 'multi-select' || presentation === 'person';
+    || presentation === 'money' || presentation === 'multi-select' || presentation === 'person'
+    || presentation === 'url' || presentation === 'email';
 
   if (!isScalarish) {
     const note = editable
@@ -500,6 +502,38 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         id={id}
         className={inputClass}
         type="date"
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
+        style={inputStyle}
+      />
+    );
+  } else if (presentation === 'url') {
+    // T-0516: url — <input type="url"> for browser-native URL validation hint.
+    control = (
+      <input
+        id={id}
+        className={inputClass}
+        type="url"
+        value={value ?? ''}
+        onChange={(e) => onChange(field.key, e.target.value)}
+        aria-required={isRequired || undefined}
+        aria-invalid={invalid || undefined}
+        readOnly={readOnly || undefined}
+        aria-disabled={readOnly || undefined}
+        style={inputStyle}
+      />
+    );
+  } else if (presentation === 'email') {
+    // T-0516: email — <input type="email"> for browser-native email validation hint.
+    control = (
+      <input
+        id={id}
+        className={inputClass}
+        type="email"
         value={value ?? ''}
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}

@@ -109,6 +109,8 @@ export const FIELD_TYPES = [
   { value: "select", label: "Список (select)" },
   { value: "multi-select", label: "Мультивыбор" },
   { value: "date", label: "Дата" },
+  { value: "url", label: "Ссылка (URL)" },
+  { value: "email", label: "Email" },
   { value: "money", label: "Сумма (₽)" },
   { value: "relation", label: "Ссылка на запись" },
   { value: "person", label: "Сотрудник" },
@@ -483,6 +485,17 @@ export function buildRecordSchema(fields) {
       // round-trip discriminator; AJV strips it before compile (standard x-* convention).
       // Display resolves the id to a name via GET /api/org.
       prop = { type: "string", "x-person": true };
+    } else if (f.type === "url") {
+      // T-0516: url → type:string + x-url extension (URL input).
+      // AJV strict rejects format:"uri" (unknown format) — use x-url as the round-trip
+      // discriminator (same x-* convention as x-person/x-relation). Stored value is
+      // a plain string (the URL). The input renders as <input type="url">.
+      prop = { type: "string", "x-url": true };
+    } else if (f.type === "email") {
+      // T-0516: email → type:string + x-email extension (email input).
+      // AJV strict rejects format:"email" (unknown format) — use x-email as the
+      // round-trip discriminator (same x-* convention). Stored value is a plain string.
+      prop = { type: "string", "x-email": true };
     } else {
       prop = emitScalarProp(f);
     }
@@ -662,6 +675,24 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "person", title, required: requiredSet.has(key) };
     }
 
+    // T-0516: detect url fields by the presence of x-url annotation.
+    // Shape: { type: "string", "x-url": true }.
+    // Must be detected before the generic string fallthrough.
+    const xUrl = def && typeof def === "object" ? def["x-url"] : undefined;
+    if (xUrl) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "url", title, required: requiredSet.has(key) };
+    }
+
+    // T-0516: detect email fields by the presence of x-email annotation.
+    // Shape: { type: "string", "x-email": true }.
+    // Must be detected before the generic string fallthrough.
+    const xEmail = def && typeof def === "object" ? def["x-email"] : undefined;
+    if (xEmail) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "email", title, required: requiredSet.has(key) };
+    }
+
     // T-0294: detect select fields by the presence of an enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -672,11 +703,12 @@ export function parseRecordSchema(recordSchema) {
     }
 
     // If the persisted type isn't one we offer (excluding select/relation/collection/money/
-    // multi-select/person which are handled above), fall back to "string" so the dropdown
-    // stays valid; the user can re-pick. (Honest: never show a type option the backend wouldn't accept.)
+    // multi-select/person/url/email/computed which are handled above), fall back to "string"
+    // so the dropdown stays valid; the user can re-pick.
+    // (Honest: never show a type option the backend wouldn't accept.)
     const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) =>
       v !== "select" && v !== "relation" && v !== "collection" && v !== "money" &&
-      v !== "multi-select" && v !== "person"
+      v !== "multi-select" && v !== "person" && v !== "url" && v !== "email" && v !== "computed"
     );
     const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =

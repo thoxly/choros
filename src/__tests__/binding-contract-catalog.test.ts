@@ -76,6 +76,12 @@ describe("deriveContractFromFieldType — total over FieldType", () => {
     ["date", "scalar", "date"],
     ["boolean", "scalar", "checkbox"],
     ["enum", "enum", "select"],
+    // T-0516: url and email → scalar with their own presentation
+    ["url", "scalar", "url"],
+    ["email", "scalar", "email"],
+    // T-0516 Part 2: person and multi-select → their own catalog contracts
+    ["person", "person", "person"],
+    ["multi-select", "multi-select", "multi-select"],
   ];
   for (const [type, kind, presentation] of cases) {
     it(`${type} → contract ${kind} / presentation ${presentation}`, () => {
@@ -86,6 +92,30 @@ describe("deriveContractFromFieldType — total over FieldType", () => {
       expect(BINDING_CONTRACT_CATALOG[kind].presentations).toContain(r.presentation);
     });
   }
+});
+
+describe("T-0516: deriveContractFromFieldType person/multi-select — Part 2 residual fix", () => {
+  it("person → kind:'person', presentation:'person' (NOT scalar/text)", () => {
+    const r = deriveContractFromFieldType("person");
+    expect(r.kind).toBe("person");
+    expect(r.presentation).toBe("person");
+  });
+
+  it("multi-select → kind:'multi-select', presentation:'multi-select' (NOT scalar/text)", () => {
+    const r = deriveContractFromFieldType("multi-select");
+    expect(r.kind).toBe("multi-select");
+    expect(r.presentation).toBe("multi-select");
+  });
+
+  it("person derives to an editable catalog contract", () => {
+    const r = deriveContractFromFieldType("person");
+    expect(BINDING_CONTRACT_CATALOG[r.kind].editable).toBe(true);
+  });
+
+  it("multi-select derives to an editable catalog contract", () => {
+    const r = deriveContractFromFieldType("multi-select");
+    expect(BINDING_CONTRACT_CATALOG[r.kind].editable).toBe(true);
+  });
 });
 
 describe("isBindingContractKind / getBindingContract", () => {
