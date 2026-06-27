@@ -473,6 +473,16 @@ export function buildRecordSchema(fields) {
     if (f.required && f.type !== "computed") required.push(key);
   }
 
+  // T-0510: emit x-field-order — an array of field keys in the user-defined order.
+  // jsonb preserves ARRAY element order but NOT object key order, so properties keys
+  // may come back scrambled after a Postgres roundtrip. x-field-order is the
+  // authoritative ordering annotation; parseRecordSchema and schemaToFormFields
+  // both read it to restore the intended order. The array holds all keys that appear
+  // in properties (same loop order). The x-* convention is the same as x-relation /
+  // x-rollup / x-money; the server strips root-level x-* before AJV compile (T-0510
+  // extended stripXExtensions to cover root level in addition to property level).
+  const xFieldOrder = Object.keys(properties);
+
   const schema = {
     type: "object",
     additionalProperties: false,
@@ -482,6 +492,8 @@ export function buildRecordSchema(fields) {
   // omitting it keeps the persisted schema minimal — matches the 056 seed which
   // always lists required, and 073 which lists required; either is valid).
   if (required.length > 0) schema.required = required;
+  // Only emit x-field-order when there are fields (empty schema has nothing to order).
+  if (xFieldOrder.length > 0) schema["x-field-order"] = xFieldOrder;
   return schema;
 }
 
@@ -512,8 +524,30 @@ export function parseRecordSchema(recordSchema) {
   const requiredList = Array.isArray(recordSchema.required) ? recordSchema.required : [];
   const requiredSet = new Set(requiredList.filter((k) => typeof k === "string"));
 
-  // Object.keys preserves insertion order → field order is preserved.
-  return Object.keys(props).map((key) => {
+  // T-0510: resolve the field key order.
+  // x-field-order (a root-level array) is the authoritative order — it survives
+  // the jsonb roundtrip intact (arrays preserve element order; object keys don't).
+  // Algorithm: start with x-field-order keys (skip those absent from properties),
+  // then append any remaining properties keys not listed in x-field-order (for
+  // fields added out-of-band after the annotation was emitted). Legacy schemas
+  // without x-field-order fall back to Object.keys(props) insertion order.
+  const xFieldOrder = Array.isArray(recordSchema["x-field-order"]) ? recordSchema["x-field-order"] : null;
+  let orderedKeys;
+  if (xFieldOrder && xFieldOrder.length > 0) {
+    const propKeySet = new Set(Object.keys(props));
+    const ordered = xFieldOrder.filter((k) => typeof k === "string" && propKeySet.has(k));
+    const orderedSet = new Set(ordered);
+    // Append any keys in props that are not listed in x-field-order.
+    for (const k of Object.keys(props)) {
+      if (!orderedSet.has(k)) ordered.push(k);
+    }
+    orderedKeys = ordered;
+  } else {
+    // Legacy: no x-field-order annotation — fall back to properties insertion order.
+    orderedKeys = Object.keys(props);
+  }
+
+  return orderedKeys.map((key) => {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
 

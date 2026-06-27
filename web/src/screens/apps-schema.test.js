@@ -35,12 +35,54 @@ import {
   blankSubField,
 } from './apps-schema.js';
 
-// Mirror of src/core/record-schema-validator.ts::validateRecordSchemaDefinition.
-// If ajv.compile throws (strict-mode rejection), the schema would 400 at the API.
-function backendAccepts(schema) {
+// T-0510: strip root-level x-* keys from a schema for direct AJV compile in tests.
+// Used by tests that need a `validate` function (not just true/false) and must
+// strip root x-field-order to avoid strict-mode rejection.
+function stripRootX(schema) {
+  return Object.fromEntries(Object.entries(schema).filter(([k]) => !k.startsWith('x-')));
+}
+
+// T-0510: raw compile — does NOT strip any x-* keys. Used to prove that the
+// raw (un-stripped) schema is rejected by AJV strict, confirming that stripping is required.
+function backendAcceptsRaw(schema) {
   const ajv = new Ajv();
   try {
     ajv.compile(schema);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Mirror of src/core/record-schema-validator.ts::validateRecordSchemaDefinition.
+// If ajv.compile throws (strict-mode rejection), the schema would 400 at the API.
+// T-0510: strips root-level x-* keys (e.g. x-field-order) before compile,
+// mirroring the extended stripXExtensions in record-schema-validator.ts.
+function backendAccepts(schema) {
+  const ajv = new Ajv();
+  try {
+    // Strip root-level x-* keys (T-0510: x-field-order lives here)
+    const rootStripped = {};
+    for (const [k, v] of Object.entries(schema)) {
+      if (!k.startsWith('x-')) rootStripped[k] = v;
+    }
+    // Strip per-property x-* keys (T-0444: x-relation, T-0452: x-rollup, T-0509: x-money)
+    if (rootStripped.properties && typeof rootStripped.properties === 'object') {
+      const strippedProps = {};
+      for (const [pk, pv] of Object.entries(rootStripped.properties)) {
+        if (pv !== null && typeof pv === 'object' && !Array.isArray(pv)) {
+          const stripped = {};
+          for (const [k, v] of Object.entries(pv)) {
+            if (!k.startsWith('x-')) stripped[k] = v;
+          }
+          strippedProps[pk] = stripped;
+        } else {
+          strippedProps[pk] = pv;
+        }
+      }
+      rootStripped.properties = strippedProps;
+    }
+    ajv.compile(rootStripped);
     return true;
   } catch {
     return false;
@@ -94,6 +136,7 @@ describe('apps-schema · buildRecordSchema', () => {
       { key: 'active', type: 'boolean', title: '', required: false },
     ];
     const schema = buildRecordSchema(fields);
+    // T-0510: x-field-order is now emitted at the root level.
     expect(schema).toEqual({
       type: 'object',
       additionalProperties: false,
@@ -103,6 +146,7 @@ describe('apps-schema · buildRecordSchema', () => {
         active: { type: 'boolean' }, // no title → no empty title key emitted
       },
       required: ['company_name'],
+      'x-field-order': ['company_name', 'amount', 'active'],
     });
     expect(backendAccepts(schema)).toBe(true);
   });
@@ -246,8 +290,9 @@ describe('apps-schema T-0294 · select field type', () => {
 
   it('buildRecordSchema: select AJV enum validation rejects non-enum value', () => {
     const schema = buildRecordSchema([{ key: 's', type: 'select', options: ['a', 'b'], required: false }]);
+    // T-0510: strip root x-field-order before direct compile (backendAccepts does this).
     const ajv = new Ajv();
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(stripRootX(schema));
     expect(validate({ s: 'a' })).toBe(true);
     expect(validate({ s: 'c' })).toBe(false); // 'c' not in enum → rejected
   });
@@ -344,8 +389,9 @@ describe('apps-schema T-0294 · date field type', () => {
 
   it('buildRecordSchema: date schema accepts ISO date strings (as plain string validation)', () => {
     const schema = buildRecordSchema([{ key: 'd', type: 'date', required: true }]);
+    // T-0510: strip root x-field-order before direct compile (backendAccepts does this).
     const ajv = new Ajv();
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(stripRootX(schema));
     // AJV validates it as a string (format is not enforced); any non-empty string passes.
     expect(validate({ d: '2024-01-15' })).toBe(true);
     expect(validate({ d: 'not-a-date' })).toBe(true); // string type — AJV accepts it
@@ -396,24 +442,30 @@ describe('apps-schema T-0444 · relation field type', () => {
     const schema = buildRecordSchema([
       { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
     ]);
-    expect(backendAccepts(schema)).toBe(false); // raw schema fails AJV strict
+    expect(backendAcceptsRaw(schema)).toBe(false); // raw schema fails AJV strict
   });
 
   it('buildRecordSchema: x-relation schema compiles after x-* strip (mirrors validator)', () => {
     const schema = buildRecordSchema([
       { key: 'kontragent', type: 'relation', targetRegistryId: TEST_UUID, required: false },
     ]);
-    // Simulate the strip done by validateRecordSchemaDefinition.
+    // Simulate the strip done by validateRecordSchemaDefinition (T-0510: also strips root x-*).
+    // Strip root-level x-* keys (includes x-field-order added by T-0510).
+    const rootStripped = {};
+    for (const [k, v] of Object.entries(schema)) {
+      if (!k.startsWith('x-')) rootStripped[k] = v;
+    }
+    // Strip per-property x-* keys (includes x-relation).
     const strippedProps = {};
-    for (const [k, v] of Object.entries(schema.properties)) {
+    for (const [k, v] of Object.entries(rootStripped.properties)) {
       const stripped = {};
       for (const [pk, pv] of Object.entries(v)) {
         if (!pk.startsWith('x-')) stripped[pk] = pv;
       }
       strippedProps[k] = stripped;
     }
-    const stripped = { ...schema, properties: strippedProps };
-    expect(backendAccepts(stripped)).toBe(true);
+    const stripped = { ...rootStripped, properties: strippedProps };
+    expect(backendAcceptsRaw(stripped)).toBe(true);
   });
 
   it('parseRecordSchema: detects x-relation → type relation + targetRegistryId', () => {
@@ -631,8 +683,11 @@ describe('apps-schema T-0448 · collection field type — buildRecordSchema', ()
 
   it('emitted collection schema validates a conforming data row', () => {
     const schema = buildRecordSchema([positionsField]);
+    // T-0510: strip root-level x-* (x-field-order) before direct AJV compile.
+    // The backend validator (validateRecordSchemaDefinition) strips these via
+    // stripXExtensions; we mirror that here so the direct-compile tests remain valid.
     const ajv = new Ajv();
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(stripRootX(schema));
     // Valid: positions is an array of objects with required keys
     expect(validate({
       positions: [
@@ -645,7 +700,7 @@ describe('apps-schema T-0448 · collection field type — buildRecordSchema', ()
   it('emitted collection schema rejects a row with missing required sub-field', () => {
     const schema = buildRecordSchema([positionsField]);
     const ajv = new Ajv();
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(stripRootX(schema));
     // Missing required 'kolichestvo' in first item
     expect(validate({ positions: [{ tovar: 'Laptop' }] })).toBe(false);
   });
@@ -653,7 +708,7 @@ describe('apps-schema T-0448 · collection field type — buildRecordSchema', ()
   it('emitted collection schema rejects extra properties in items (additionalProperties:false)', () => {
     const schema = buildRecordSchema([positionsField]);
     const ajv = new Ajv();
-    const validate = ajv.compile(schema);
+    const validate = ajv.compile(stripRootX(schema));
     expect(validate({ positions: [{ tovar: 'x', kolichestvo: 1, extra_key: 'bad' }] })).toBe(false);
   });
 });
@@ -1204,7 +1259,7 @@ describe('apps-schema T-0452 · computed field type — buildRecordSchema', () =
   it('x-rollup schema does NOT compile with raw AJV strict (strip required)', () => {
     const schema = buildRecordSchema([positionsWithNumbers, validComputedSum]);
     // Proves the validator must strip x-* before AJV compile (same as x-relation)
-    expect(backendAccepts(schema)).toBe(false);
+    expect(backendAcceptsRaw(schema)).toBe(false);
   });
 
   it('validateRecordSchemaDefinition accepts the emitted schema (x-* strip works)', () => {
@@ -1531,6 +1586,159 @@ describe('apps-schema T-0509 · buildRecordSchema — money field', () => {
   it('optional money is NOT in required array', () => {
     const s = buildRecordSchema([{ key: 'budget', type: 'money', required: false }]);
     expect(s.required == null || !s.required.includes('budget')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0510: x-field-order — field order preserved across jsonb roundtrip
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0510 · buildRecordSchema — x-field-order emission', () => {
+  it('emits x-field-order array matching the input field key order', () => {
+    const fields = [
+      { key: 'zeta', type: 'string', required: false },
+      { key: 'alpha', type: 'number', required: false },
+      { key: 'mid', type: 'boolean', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema['x-field-order']).toEqual(['zeta', 'alpha', 'mid']);
+  });
+
+  it('x-field-order contains ALL field keys including relation/collection/computed/money', () => {
+    const fields = [
+      { key: 'name', type: 'string', required: true },
+      { key: 'ref', type: 'relation', targetRegistryId: '550e8400-e29b-41d4-a716-446655440000', required: false },
+      { key: 'items', type: 'collection', required: false, subFields: [{ key: 'val', type: 'string', label: '', required: false }] },
+      { key: 'total', type: 'computed', required: false, rollupSource: 'items', rollupOp: 'count', rollupValueField: '', rollupFactorField: '' },
+      { key: 'budget', type: 'money', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema['x-field-order']).toEqual(['name', 'ref', 'items', 'total', 'budget']);
+  });
+
+  it('x-field-order matches Object.keys(properties) exactly', () => {
+    const fields = [
+      { key: 'c', type: 'string', required: false },
+      { key: 'a', type: 'integer', required: false },
+      { key: 'b', type: 'boolean', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema['x-field-order']).toEqual(Object.keys(schema.properties));
+  });
+
+  it('omits x-field-order for an empty field list', () => {
+    const schema = buildRecordSchema([]);
+    expect('x-field-order' in schema).toBe(false);
+  });
+
+  it('schema with x-field-order passes validateRecordSchemaDefinition (root x-* stripped)', () => {
+    const fields = [
+      { key: 'b_field', type: 'string', required: false },
+      { key: 'a_field', type: 'number', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    expect(schema['x-field-order']).toBeDefined();
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('schema with x-field-order does NOT compile with raw AJV strict (strip required)', () => {
+    const fields = [
+      { key: 'b_field', type: 'string', required: false },
+      { key: 'a_field', type: 'number', required: false },
+    ];
+    const schema = buildRecordSchema(fields);
+    // Raw schema has x-field-order at root → AJV strict rejects it
+    expect(backendAcceptsRaw(schema)).toBe(false);
+  });
+});
+
+describe('apps-schema T-0510 · parseRecordSchema — x-field-order ordering', () => {
+  it('returns fields in x-field-order order even when properties keys are scrambled', () => {
+    // Simulate jsonb scrambling: build schema then reorder properties keys
+    const original = buildRecordSchema([
+      { key: 'zeta', type: 'string', required: false },
+      { key: 'alpha', type: 'number', required: false },
+      { key: 'mid', type: 'boolean', required: false },
+    ]);
+    // Scramble: rebuild properties in alphabetical order (as jsonb might return them)
+    const scrambled = {
+      ...original,
+      properties: {
+        alpha: original.properties.alpha,
+        mid: original.properties.mid,
+        zeta: original.properties.zeta,
+      },
+    };
+    // x-field-order is still ['zeta','alpha','mid']
+    expect(scrambled['x-field-order']).toEqual(['zeta', 'alpha', 'mid']);
+    const parsed = parseRecordSchema(scrambled);
+    expect(parsed.map((f) => f.key)).toEqual(['zeta', 'alpha', 'mid']);
+  });
+
+  it('appends properties keys not listed in x-field-order at the end', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['a', 'b'],
+      properties: {
+        c: { type: 'string' }, // not in x-field-order
+        b: { type: 'number' },
+        a: { type: 'string' },
+      },
+    };
+    const parsed = parseRecordSchema(schema);
+    // a, b from x-field-order; c appended from properties remainder
+    expect(parsed.map((f) => f.key)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('skips x-field-order keys that are absent from properties (no throw)', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['a', 'ghost', 'b'], // 'ghost' not in properties
+      properties: {
+        a: { type: 'string' },
+        b: { type: 'number' },
+      },
+    };
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.map((f) => f.key)).toEqual(['a', 'b']); // 'ghost' skipped
+  });
+
+  it('falls back to properties insertion order for legacy schemas without x-field-order', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        zeta: { type: 'string' },
+        alpha: { type: 'number' },
+        mid: { type: 'boolean' },
+      },
+    };
+    // No x-field-order → legacy fallback
+    expect('x-field-order' in schema).toBe(false);
+    const parsed = parseRecordSchema(schema);
+    expect(parsed.map((f) => f.key)).toEqual(['zeta', 'alpha', 'mid']);
+  });
+
+  it('round-trip: buildRecordSchema → scramble properties → parseRecordSchema restores order', () => {
+    const original = [
+      { key: 'company_name', type: 'string', title: 'Компания', required: true },
+      { key: 'amount', type: 'number', title: 'Сумма', required: false },
+      { key: 'status', type: 'select', title: 'Статус', options: ['new', 'done'], required: false },
+    ];
+    const schema = buildRecordSchema(original);
+    // Scramble properties alphabetically
+    const scrambled = {
+      ...schema,
+      properties: Object.fromEntries(
+        Object.entries(schema.properties).sort(([a], [b]) => a.localeCompare(b))
+      ),
+    };
+    const parsed = parseRecordSchema(scrambled);
+    expect(parsed.map((f) => f.key)).toEqual(['company_name', 'amount', 'status']);
   });
 });
 

@@ -1690,3 +1690,87 @@ describe('T-0509: money field type', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0510: x-field-order — field order preserved across jsonb roundtrip
+// ---------------------------------------------------------------------------
+
+describe('T-0510: schemaToFormFields — x-field-order ordering', () => {
+  it('returns fields in x-field-order order even when properties keys are scrambled', () => {
+    // Simulate jsonb scrambling: correct x-field-order, but properties keys reordered.
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['zeta', 'alpha', 'mid'],
+      properties: {
+        // Intentionally in alphabetical order (as jsonb might return them)
+        alpha: { type: 'number' },
+        mid: { type: 'boolean' },
+        zeta: { type: 'string' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.map((f) => f.key)).toEqual(['zeta', 'alpha', 'mid']);
+  });
+
+  it('appends properties keys not in x-field-order at the end', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['a', 'b'],
+      properties: {
+        c: { type: 'string' }, // not in x-field-order
+        b: { type: 'number' },
+        a: { type: 'string' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.map((f) => f.key)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('falls back to properties insertion order for legacy schemas without x-field-order', () => {
+    // No x-field-order → legacy fallback behavior unchanged
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        zeta: { type: 'string' },
+        alpha: { type: 'number' },
+        mid: { type: 'boolean' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.map((f) => f.key)).toEqual(['zeta', 'alpha', 'mid']);
+  });
+
+  it('skips x-field-order entries absent from properties', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['a', 'ghost', 'b'],
+      properties: {
+        a: { type: 'string' },
+        b: { type: 'number' },
+      },
+    };
+    const fields = schemaToFormFields(schema);
+    expect(fields.map((f) => f.key)).toEqual(['a', 'b']); // 'ghost' is skipped
+  });
+});
+
+describe('T-0510: schemaToColumns — x-field-order ordering via schemaToFormFields', () => {
+  it('schemaToColumns honours x-field-order (delegates through schemaToFormFields)', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['zeta', 'alpha', 'mid'],
+      properties: {
+        alpha: { type: 'number', title: 'Alpha' },
+        mid: { type: 'boolean', title: 'Mid' },
+        zeta: { type: 'string', title: 'Zeta' },
+      },
+    };
+    const cols = schemaToColumns(schema);
+    expect(cols.map((c) => c.key)).toEqual(['zeta', 'alpha', 'mid']);
+  });
+});

@@ -162,17 +162,25 @@ export function validateRecordSchemaDefinition(schema: unknown): ValidationResul
 }
 
 /**
- * T-0444: Produce a shallow-stripped copy of a record_schema where every
- * property definition has its `x-*` keys removed (AJV strict rejects them).
- * Only strips at the properties[key] level (where x-relation lives) — top-level
- * and nested sub-schemas are not recursed (record schemas are flat).
+ * T-0444 / T-0510: Produce a stripped copy of a record_schema where:
+ *   1. Every property definition has its `x-*` keys removed (AJV strict rejects them).
+ *      This covers x-relation (T-0444), x-rollup (T-0452), x-money (T-0509).
+ *   2. Root-level `x-*` keys are removed (T-0510 added `x-field-order` at the root
+ *      level; AJV strict rejects unknown root keywords just as it rejects unknown
+ *      per-property keywords).
  *
  * Returns a new object; the original is not mutated.
  */
 function stripXExtensions(schema: Record<string, unknown>): Record<string, unknown> {
-  const props = schema['properties'];
+  // Strip root-level x-* keys (T-0510: x-field-order lives here).
+  const rootStripped: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (!k.startsWith('x-')) rootStripped[k] = v;
+  }
+
+  const props = rootStripped['properties'];
   if (props === null || typeof props !== 'object' || Array.isArray(props)) {
-    return schema; // no properties to strip → return as-is (shallow copy not needed)
+    return rootStripped; // no properties to strip → return root-stripped copy
   }
   const strippedProps: Record<string, unknown> = {};
   for (const [key, propDef] of Object.entries(props as Record<string, unknown>)) {
@@ -186,5 +194,5 @@ function stripXExtensions(schema: Record<string, unknown>): Record<string, unkno
       strippedProps[key] = propDef;
     }
   }
-  return { ...schema, properties: strippedProps };
+  return { ...rootStripped, properties: strippedProps };
 }
