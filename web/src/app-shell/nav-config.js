@@ -93,7 +93,7 @@ export const NAV = [
         // Маршрут /processes/new/edit уже существует; route /modeler добавится в E16.
         path: "/processes/new/edit",
         screen: true,
-        status: "demo",
+        status: "live",
       },
     ],
   },

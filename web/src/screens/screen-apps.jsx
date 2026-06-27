@@ -201,7 +201,7 @@ function AppActions({ app, navigate }) {
           aria-haspopup="menu"
           aria-expanded={open}
           aria-label={`Действия · ${app.display_name}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         >
           …
         </Button>
@@ -315,7 +315,8 @@ function AppsScreen() {
                 {list.map((app) => (
                   <tr
                     key={app.id}
-                    style={app.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
+                    style={{ cursor: 'pointer', ...(app.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : {}) }}
+                    onClick={() => navigate(`/app-records/${app.id}`)}
                   >
                     <td>
                       <div className="chs-task">
