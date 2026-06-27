@@ -377,6 +377,17 @@ describe("process-defs routes (unit, no DB)", () => {
       expect(body.status).toBe("published");
       expect(body.deploymentId).toBe("deploy-abc-123");
       expect(flowableSuccess.deployBpmn).toHaveBeenCalledOnce();
+
+      // T-0505: the XML handed to Flowable must be normalized for deploy:
+      // isExecutable forced true (the draft is "false") and <process id> set to
+      // the choros process_key (the draft id is "Process_1"). Otherwise Flowable
+      // 500s on the non-executable process (misreported as «движок недоступен»)
+      // and start can't find the definition by the slug key.
+      const deployedXml = (flowableSuccess.deployBpmn as any).mock.calls[0][0] as string;
+      expect(deployedXml).toContain('isExecutable="true"');
+      expect(deployedXml).not.toContain('isExecutable="false"');
+      expect(deployedXml).toContain('<process id="pub-proc"');
+      expect(deployedXml).not.toContain('id="Process_1"');
     });
   });
 });

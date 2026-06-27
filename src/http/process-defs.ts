@@ -38,6 +38,7 @@ import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
 import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
+import { normalizeBpmnForDeploy } from "../core/bpmn-deploy-normalizer.js";
 import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole, filterProvisionedAgentEmployeeIds } from "../db/grants-dao.js";
@@ -624,8 +625,19 @@ export async function publishProcessByKey(
     return { status: "agent_unresolved", violations: agentRefViolations };
   }
 
+  // Step 2.7 [T-0505]: normalize for deploy. The modeler emits the process as
+  // isExecutable="false" (templates) and with a bpmn-js `<process id>` (e.g.
+  // "Process_1") that is unrelated to the choros process_key the start path sends
+  // as processDefinitionKey. Both break publish→run: a non-executable process
+  // makes Flowable answer 500 (misreported as «движок недоступен»), and the id
+  // mismatch makes startInstance unable to find the definition. Force the
+  // executable process to isExecutable="true" and rename its <process id> (and the
+  // matching BPMNDI plane bpmnElement) to row.process_key BEFORE deploy. Pure +
+  // idempotent; a no-op on a document the linter already accepted that needs no fix.
+  const deployBpmnXml = normalizeBpmnForDeploy(row.bpmn_xml, row.process_key);
+
   // Step 3: Deploy to Flowable
-  const deployResult = await flowable.deployBpmn(row.bpmn_xml);
+  const deployResult = await flowable.deployBpmn(deployBpmnXml);
   if (!deployResult.ok) {
     const { status, code, message } = flowableErrorToHttp(deployResult.code);
     return { status: "engine_unavailable", httpStatus: status, code, message };
