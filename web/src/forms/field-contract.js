@@ -265,6 +265,9 @@ export function contractKindForFieldType(type) {
       return 'collection';
     case 'computed':
       return 'rollup';
+    case 'money':
+      // T-0509: money fields use the 'money' catalog contract (presentation: 'money').
+      return 'money';
     case 'string':
     case 'text':
     case 'textarea':
@@ -299,11 +302,11 @@ export function contractKindForFieldType(type) {
 export function resolveFieldContract(field) {
   const hasOptions = Array.isArray(field?.options) && field.options.length > 0;
 
-  // A structural record-entry type (relation/collection/computed) maps directly
+  // A structural record-entry type (relation/collection/computed/money) maps directly
   // to its catalog kind — these never carry top-level `options`, so we classify
   // them BEFORE the options-force-enum scalar rule.
   const structuralKind =
-    field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed'
+    field?.type === 'relation' || field?.type === 'collection' || field?.type === 'computed' || field?.type === 'money'
       ? contractKindForFieldType(field.type)
       : undefined;
 

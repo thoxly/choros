@@ -1475,3 +1475,103 @@ describe('apps-schema T-0452 · computed field type — blankField defaults', ()
     expect(b.rollupFactorField).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0509: money field type
+// ---------------------------------------------------------------------------
+
+describe('apps-schema T-0509 · money field type — FIELD_TYPES', () => {
+  it('FIELD_TYPES includes a money entry with label "Сумма (₽)"', () => {
+    const money = FIELD_TYPES.find((t) => t.value === 'money');
+    expect(money).toBeDefined();
+    expect(money.label).toBe('Сумма (₽)');
+  });
+
+  it('FIELD_TYPE_VALUES includes "money"', () => {
+    expect(FIELD_TYPE_VALUES).toContain('money');
+  });
+});
+
+describe('apps-schema T-0509 · buildRecordSchema — money field', () => {
+  const schema = buildRecordSchema([
+    { key: 'price', type: 'money', title: 'Стоимость', required: true },
+  ]);
+
+  it('emits type:"number" with x-money annotation', () => {
+    expect(schema.properties.price).toMatchObject({
+      type: 'number',
+      'x-money': { currency: 'RUB' },
+      title: 'Стоимость',
+    });
+  });
+
+  it('x-money annotation does NOT block AJV compile (stripped by real validator)', () => {
+    // The real validator (validateRecordSchemaDefinition) strips x-* before AJV
+    // strict compile. A plain {type:"number"} is always AJV-valid.
+    const stripped = {
+      type: 'object',
+      additionalProperties: false,
+      properties: { price: { type: 'number', title: 'Стоимость' } },
+      required: ['price'],
+    };
+    expect(backendAccepts(stripped)).toBe(true);
+  });
+
+  it('buildRecordSchema output passes validateRecordSchemaDefinition (x-* stripped internally)', () => {
+    // The real validator in the server codebase strips x-* before compile.
+    const result = validateRecordSchemaDefinition(schema);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('money is required when f.required=true', () => {
+    expect(schema.required).toContain('price');
+  });
+
+  it('optional money is NOT in required array', () => {
+    const s = buildRecordSchema([{ key: 'budget', type: 'money', required: false }]);
+    expect(s.required == null || !s.required.includes('budget')).toBe(true);
+  });
+});
+
+describe('apps-schema T-0509 · parseRecordSchema — money field round-trip', () => {
+  const moneySchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string', title: 'Название' },
+      price: { type: 'number', title: 'Стоимость', 'x-money': { currency: 'RUB' } },
+    },
+    required: ['price'],
+  };
+
+  it('detects money from x-money, returns type "money"', () => {
+    const fields = parseRecordSchema(moneySchema);
+    const priceField = fields.find((f) => f.key === 'price');
+    expect(priceField).toBeDefined();
+    expect(priceField).toMatchObject({
+      key: 'price',
+      type: 'money',
+      title: 'Стоимость',
+      required: true,
+    });
+  });
+
+  it('non-money number field remains type "number" (no x-money → no misdetection)', () => {
+    const plainNumberSchema = {
+      type: 'object',
+      properties: { score: { type: 'number', title: 'Рейтинг' } },
+    };
+    const fields = parseRecordSchema(plainNumberSchema);
+    expect(fields[0]).toMatchObject({ key: 'score', type: 'number' });
+  });
+
+  it('buildRecordSchema → parseRecordSchema round-trip preserves type "money"', () => {
+    const built = buildRecordSchema([
+      { key: 'amount', type: 'money', title: 'Сумма', required: true },
+    ]);
+    const parsed = parseRecordSchema(built);
+    const f = parsed.find((p) => p.key === 'amount');
+    expect(f).toMatchObject({ key: 'amount', type: 'money', title: 'Сумма', required: true });
+  });
+});

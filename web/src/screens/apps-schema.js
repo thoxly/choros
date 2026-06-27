@@ -108,6 +108,7 @@ export const FIELD_TYPES = [
   { value: "boolean", label: "Да/Нет" },
   { value: "select", label: "Список (select)" },
   { value: "date", label: "Дата" },
+  { value: "money", label: "Сумма (₽)" },
   { value: "relation", label: "Ссылка на запись" },
   { value: "collection", label: "Список строк" },
   { value: "computed", label: "Итог" },
@@ -452,6 +453,12 @@ export function buildRecordSchema(fields) {
       const xRollup = { source: rollupSource, op: rollupOp, value_field: rollupValueField };
       if (rollupFactorField.length > 0) xRollup.factor_field = rollupFactorField;
       prop = { type: "number", "x-rollup": xRollup };
+    } else if (f.type === "money") {
+      // T-0509: money → type:number + x-money extension (currency annotation).
+      // Same x-* strip convention as x-relation / x-rollup — AJV strips x-money before
+      // compile (validateRecordSchemaDefinition). Stored value is a plain JSON number;
+      // the x-money annotation is a display hint only (currency formatting on render).
+      prop = { type: "number", "x-money": { currency: "RUB" } };
     } else {
       prop = emitScalarProp(f);
     }
@@ -567,6 +574,15 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "relation", title, required: requiredSet.has(key), targetRegistryId };
     }
 
+    // T-0509: detect money fields by the presence of x-money extension.
+    // Shape: { type: "number", "x-money": { currency: "RUB" } }.
+    // Must be detected before the generic number/string fallthrough.
+    const xMoney = def && typeof def === "object" ? def["x-money"] : undefined;
+    if (xMoney && typeof xMoney === "object" && !Array.isArray(xMoney)) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "money", title, required: requiredSet.has(key) };
+    }
+
     // T-0294: detect select fields by the presence of an enum array.
     const hasEnum = def && typeof def === "object" && Array.isArray(def.enum) && def.enum.length > 0;
     if (hasEnum) {
@@ -576,10 +592,10 @@ export function parseRecordSchema(recordSchema) {
       return { key, type: "select", title, required: requiredSet.has(key), options };
     }
 
-    // If the persisted type isn't one we offer (excluding select/relation/collection which are handled
-    // above), fall back to "string" so the dropdown stays valid; the user can re-pick.
+    // If the persisted type isn't one we offer (excluding select/relation/collection/money which
+    // are handled above), fall back to "string" so the dropdown stays valid; the user can re-pick.
     // (Honest: never show a type option the backend wouldn't accept.)
-    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation" && v !== "collection");
+    const nonSpecialTypes = FIELD_TYPE_VALUES.filter((v) => v !== "select" && v !== "relation" && v !== "collection" && v !== "money");
     const type = nonSpecialTypes.includes(rawType) ? rawType : "string";
     const title =
       def && typeof def === "object" && typeof def.title === "string" ? def.title : "";
