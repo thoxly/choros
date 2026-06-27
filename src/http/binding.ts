@@ -452,7 +452,7 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
           await client.query(
             `UPDATE choros.form_binding
                 SET fields = $1::jsonb,
-                    layout = $2::jsonb,
+                    layout = COALESCE($2::jsonb, form_binding.layout),
                     version = $3,
                     updated_at = $4
               WHERE tenant_id = $5

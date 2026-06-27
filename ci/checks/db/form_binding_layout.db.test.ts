@@ -223,6 +223,27 @@ describe('T-0506: POST /api/forms/binding — snake_case + layout', () => {
     });
   }));
 
+  it('(B) layout preserved after FormBuilder upsert (no layout sent) — regression guard', requireDb(async () => {
+    // The FormBuilder POST (test B above) sent NO layout. The FormDesigner layout saved in
+    // test A must still be present — COALESCE($2::jsonb, form_binding.layout) ensures this.
+    // If the UPDATE were layout = $2::jsonb unconditionally, layout would be NULL here.
+    await withClient(appUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
+      const { rows } = await c.query<{ layout: unknown }>(
+        `SELECT layout FROM choros.form_binding
+          WHERE tenant_id = $1 AND process_key = $2 AND form_key = $3`,
+        [TENANT, procKey, formKey],
+      );
+      await c.query('COMMIT');
+      expect(rows.length, 'row must still be present').toBe(1);
+      expect(
+        rows[0]!.layout,
+        'FormDesigner layout must be preserved after FormBuilder upsert (no layout sent)',
+      ).toEqual(LAYOUT_DOC);
+    });
+  }));
+
   it('400 when neither fields nor layout provided', requireDb(async () => {
     const res = await request(baseUrl, 'POST', '/api/forms/binding', {
       processKey: procKey,
