@@ -15,11 +15,11 @@
  *     (NF-2 / NF-3 / AC-4 / AC-5), sets SET LOCAL choros.promoting='1' to unlock
  *     the DB trigger (ADR §4.2b).
  *
- * AUTHORITY CHECK (ADR §4.5): production gates on
+ * AUTHORITY CHECK (ADR §4.5 / T-0513 security fix): gates on
  *   grant(resource_type='mgmt_object:tier_promote', operation='transition').
- *   Day-1 implementation: authority check is SKIPPED in dev mode (no PDP wired yet —
- *   same honest-degrade pattern as grants.ts for missing validator infra). The PDP
- *   wiring (T-0021) is a separate task; the authority check stub is clearly marked.
+ *   Injectable via ArtifactAuthzDeps (same pattern as ReportPageAuthzDeps / T-0171).
+ *   Default: loadAdminContext + genesis-owner short-circuit. Fail-closed: 403
+ *   NO_PROMOTE_GRANT when the actor lacks authority.
  *
  * SUPPORTED ARTIFACT TABLES (ADR §4.1 tier-bearing config class):
  *   application, registry_def, grant, agent_instruction
@@ -36,7 +36,7 @@ import pg from "pg";
 import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { findEmployee } from "./org.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+import { resolveActorSlugFromAuth, loadAdminContext } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { decidePromote } from "../core/env-tier.js";
 
@@ -107,6 +107,60 @@ async function withTenantTx<T>(
     client.release();
   }
 }
+
+// ---------------------------------------------------------------------------
+// ArtifactAuthzDeps — injectable PDP gate (T-0513 security fix / T-0021 seam)
+//
+// Checks mgmt_object:tier_promote with operation 'transition' (ADR §4.5).
+// Genesis-owner short-circuit mirrors report-pages.ts / T-0121d pattern.
+//
+// Injectable via ArtifactAuthzDeps so tests can stub the check without a DB.
+// ---------------------------------------------------------------------------
+
+export interface ArtifactAuthzDeps {
+  /**
+   * Check whether `actorId` holds grant `mgmt_object:tier_promote` / `transition`
+   * in `tenantId`. Returns `{ ok: true }` or `{ ok: false; reason: string }`.
+   */
+  checkTierPromoteGrant: (
+    pool: pg.Pool,
+    tenantId: string,
+    actorId: string,
+    nowMs: number,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+}
+
+async function defaultCheckTierPromoteGrant(
+  pool: pg.Pool,
+  tenantId: string,
+  actorId: string,
+  nowMs: number,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+
+  // Genesis owner is the un-parented delegation root — always allowed (T-0029 §2 step 3).
+  if (admin.isGenesisOwner) {
+    return { ok: true };
+  }
+
+  // For non-owners: check adminGrants for mgmt_object:tier_promote / transition.
+  // loadAdminContext fetches all LIKE 'mgmt_object:%' delegable grants.
+  const hasCovering = admin.adminGrants.some(
+    (g) =>
+      g.delegable &&
+      g.resourceType === "mgmt_object:tier_promote" &&
+      (g.operation as string) === "transition",
+  );
+
+  if (!hasCovering) {
+    return { ok: false, reason: "no_tier_promote_authority" };
+  }
+  return { ok: true };
+}
+
+const defaultArtifactAuthzDeps: ArtifactAuthzDeps = {
+  checkTierPromoteGrant: defaultCheckTierPromoteGrant,
+};
 
 // ---------------------------------------------------------------------------
 // extractActorWithType — derives actor id + actorType from the request.
@@ -273,17 +327,35 @@ export async function promoteTier(args: {
 // ---------------------------------------------------------------------------
 
 /**
+ * Reset the module-level pool singleton.
+ * FOR TESTING ONLY — allows tests to inject a controlled pool without live DB.
+ */
+export function resetPoolForTesting(): void {
+  _pool = null;
+}
+
+/**
  * T-0489 [SECURITY]: optional deps. `resolveActorTenant` derives the tenant from
  * the actor's OWN row (resolveActorTenant(getOrgPool(), slug), fail-closed) so the
  * promote runs in the caller's REAL tenant instead of the hardcoded Dev Silo. When
  * omitted, DEV_TENANT_ID is used (legacy / no-DB honest-degrade path unchanged).
+ *
+ * T-0513 [SECURITY]: `authzDeps` is the injectable PDP gate for the promote
+ * authority check. When omitted, the default loadAdminContext-based implementation
+ * is used (fail-closed: 403 unless the actor is genesis-owner or holds the
+ * mgmt_object:tier_promote/transition grant).
  */
 export interface ArtifactRoutesDeps {
   resolveActorTenant?: (actorSlug: string) => Promise<string>;
+  authzDeps?: ArtifactAuthzDeps;
 }
 
-export function registerArtifactRoutes(router: Router, deps: ArtifactRoutesDeps = {}): void {
-  const { resolveActorTenant } = deps;
+export function registerArtifactRoutes(
+  router: Router,
+  deps: ArtifactRoutesDeps = {},
+  _poolHint?: import("pg").Pool,
+): void {
+  const { resolveActorTenant, authzDeps = defaultArtifactAuthzDeps } = deps;
   /**
    * POST /api/artifacts/:id/promote
    *
@@ -305,7 +377,7 @@ export function registerArtifactRoutes(router: Router, deps: ArtifactRoutesDeps 
     const artifactId = params["id"] ?? "";
     assertUuidShape(artifactId, "artifact id");
 
-    const pool = getPool();
+    const pool = _poolHint ?? getPool();
 
     // 1. Extract actor + actorType from AUTHENTICATED source only.
     //    actorType is from the authenticated claim; NEVER from the body (T-0044 §9).
@@ -354,11 +426,14 @@ export function registerArtifactRoutes(router: Router, deps: ArtifactRoutesDeps 
       );
     }
 
-    // 4. AUTHORITY CHECK (ADR §4.5):
-    //    Production: assertGranted(actor, 'mgmt_object:tier_promote', 'transition', artifactRef)
-    //    via the existing PDP (T-0021). Day-1 dev mode: honest stub (PDP not wired).
-    //    The stub is clearly marked here as the T-0021 integration seam.
-    // TODO(T-0021): wire real grant PDP check here.
+    // 4. AUTHORITY CHECK (ADR §4.5 / T-0513 security fix):
+    //    gate on mgmt_object:tier_promote / transition (mirrors report-pages.ts promote gate).
+    //    Genesis-owner short-circuit; non-owners need an explicit delegated grant.
+    //    Fail-closed: 403 NO_PROMOTE_GRANT when the actor lacks authority.
+    const gateResult = await authzDeps.checkTierPromoteGrant(pool, tenantId, actor, Date.now());
+    if (!gateResult.ok) {
+      throw new HttpError(403, "NO_PROMOTE_GRANT", "mgmt_object:tier_promote/transition denied");
+    }
 
     // 5. Promote (transactional: tier flip + audit row).
     //    actorType is passed into promoteTier so decidePromote runs with the real
