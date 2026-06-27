@@ -38,7 +38,7 @@ import { generateUniqueProcessKey } from "../core/slugify-process-key.js";
 import { mapLanesToCandidateGroups } from "../core/lane-role-mapper.js";
 import { mapTimerEscalation } from "../core/timer-escalation-mapper.js";
 import { mapAgentTaskToExternal, extractAgentTaskConfigs } from "../core/agent-task-external-mapper.js";
-import { normalizeBpmnForDeploy } from "../core/bpmn-deploy-normalizer.js";
+import { normalizeBpmnForDeploy, InvalidProcessKeyForDeployError } from "../core/bpmn-deploy-normalizer.js";
 import { lintBpmn, type LintViolation } from "../core/bpmn-linter.js";
 import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
 import { getHoldersForRole, filterProvisionedAgentEmployeeIds } from "../db/grants-dao.js";
@@ -634,7 +634,22 @@ export async function publishProcessByKey(
   // executable process to isExecutable="true" and rename its <process id> (and the
   // matching BPMNDI plane bpmnElement) to row.process_key BEFORE deploy. Pure +
   // idempotent; a no-op on a document the linter already accepted that needs no fix.
-  const deployBpmnXml = normalizeBpmnForDeploy(row.bpmn_xml, row.process_key);
+  //
+  // [SECURITY] The process_key is client-supplied at draft time (POST /api/process-defs
+  // accepts body.processKey with only .trim()). A key carrying XML-attribute-breaking
+  // characters (quotes/angle-brackets/ampersand/whitespace) would otherwise corrupt the
+  // deploy XML when injected as <process id="…">. normalizeBpmnForDeploy honest-fails on
+  // such keys; map that to a 422 (NOT a 500, and NOT a deploy of corrupt XML). We do not
+  // escape — the id must stay byte-equal to the key the start path sends.
+  let deployBpmnXml: string;
+  try {
+    deployBpmnXml = normalizeBpmnForDeploy(row.bpmn_xml, row.process_key);
+  } catch (err) {
+    if (err instanceof InvalidProcessKeyForDeployError) {
+      throw new HttpError(422, "INVALID_PROCESS_KEY", err.message);
+    }
+    throw err;
+  }
 
   // Step 3: Deploy to Flowable
   const deployResult = await flowable.deployBpmn(deployBpmnXml);

@@ -43,6 +43,37 @@
 import { tokenize } from "./bpmn-xml-parser.js";
 
 /**
+ * Thrown when the choros process_key contains characters that cannot be safely
+ * injected as a BPMN `<process id>` / DI `bpmnElement` attribute value — i.e.
+ * characters that would break the XML attribute or corrupt the document
+ * (`" ' < > &` or any whitespace).
+ *
+ * We REJECT (honest-fail) rather than escape: the deployed `<process id>` MUST
+ * stay byte-equal to the process_key the start path sends as
+ * processDefinitionKey (process-start.ts), so silently escaping the id would
+ * reintroduce the deploy↔start identifier mismatch. The message is static and
+ * carries NO copy of the offending key (avoid reflecting attacker input).
+ */
+export class InvalidProcessKeyForDeployError extends Error {
+  constructor() {
+    super("process key contains characters invalid for BPMN deploy");
+    this.name = "InvalidProcessKeyForDeployError";
+  }
+}
+
+/**
+ * Characters that would break an XML attribute value or are unsafe as a BPMN id
+ * when the key is interpolated verbatim into `id="…"` / `bpmnElement="…"`:
+ *   - `"` and `'` close the attribute,
+ *   - `<` `>` `&` are XML-significant (would corrupt the element/document),
+ *   - whitespace is not valid inside an id token.
+ * NOTE: `$` is intentionally ALLOWED — it is a legal XML attribute-value char;
+ * the replacement-function (not replacement-string) fix below makes `$1`/`$&`
+ * etc. land literally, so e.g. "price$total" is safe.
+ */
+const XML_UNSAFE_KEY_RE = /["'<>&]|\s/;
+
+/**
  * Result of scanning the document for the process element to normalize.
  */
 interface ProcessTarget {
@@ -113,6 +144,15 @@ export function normalizeBpmnForDeploy(bpmnXml: string, processKey: string): str
   const target = findProcessTarget(bpmnXml);
   if (target === null) return bpmnXml;
 
+  // Honest-fail BEFORE injecting the key as an attribute value: a key carrying
+  // quote/angle-bracket/ampersand/whitespace would emit corrupt XML (e.g.
+  // id="evil"x"). Reject with a typed error the route maps to 422 — never deploy
+  // malformed XML, and never escape (escaping would break the deploy↔start id
+  // equality). Only runs once we KNOW there is a process to rewrite.
+  if (XML_UNSAFE_KEY_RE.test(processKey)) {
+    throw new InvalidProcessKeyForDeployError();
+  }
+
   let result = bpmnXml;
 
   // (1)+(2): rewrite the chosen <process> start-tag — set id=processKey and
@@ -155,22 +195,26 @@ function rewriteProcessTag(
     replaced = true;
     let newBody = body;
 
-    // Force id="<processKey>".
+    // Force id="<processKey>". Use a replacement FUNCTION so that `$`-sequences
+    // in processKey (e.g. "$1", "$&", "$`") are NOT interpreted as backreferences
+    // by String.prototype.replace and land verbatim in the output.
     if (/\bid=["'][^"']*["']/.test(newBody)) {
-      newBody = newBody.replace(/\bid=["'][^"']*["']/, `id="${processKey}"`);
+      newBody = newBody.replace(/\bid=["'][^"']*["']/, () => `id="${processKey}"`);
     } else {
-      // No id at all — insert one right after the element name.
+      // No id at all — insert one right after the element name. (m) is the matched
+      // tag-open; replacement function keeps both `m` and processKey literal.
       newBody = newBody.replace(
         /^(<(?:\w+:)?process\b)/,
-        `$1 id="${processKey}"`,
+        (m) => `${m} id="${processKey}"`,
       );
     }
 
-    // Force isExecutable="true".
+    // Force isExecutable="true". Static replacement (no dynamic value), but use a
+    // function for consistency/safety.
     if (/\bisExecutable=["'][^"']*["']/.test(newBody)) {
       newBody = newBody.replace(
         /\bisExecutable=["'][^"']*["']/,
-        `isExecutable="true"`,
+        () => `isExecutable="true"`,
       );
     } else {
       newBody = `${newBody} isExecutable="true"`;
