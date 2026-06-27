@@ -133,12 +133,31 @@ export function extractSchemaPropertyKeys(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true iff this BindingField describes an enum: the field carries an
- * explicit `contract: 'enum'` (T-0399 D7-K) OR its `type` is the legacy
+ * Returns true iff this BindingField describes a scalar enum: the field carries
+ * an explicit `contract: 'enum'` (T-0399 D7-K) OR its `type` is the legacy
  * `'enum'` string (pre-T-0399 snapshots that lack the contract field).
+ * Does NOT match 'multi-select' — that is a distinct contract with array semantics.
  */
 function isEnumField(field: BindingField): boolean {
   return field.contract === "enum" || field.type === "enum";
+}
+
+/**
+ * Returns true iff this BindingField describes a multi-select: the field carries
+ * an explicit `contract: 'multi-select'` (T-0512). Multi-select submits an
+ * ARRAY of strings; each element must be in options[].
+ */
+function isMultiSelectField(field: BindingField): boolean {
+  return field.contract === "multi-select";
+}
+
+/**
+ * Returns true iff this BindingField describes a person field: the field carries
+ * an explicit `contract: 'person'` (T-0512). Person submits a scalar string
+ * (employee id) — no options[] check is performed.
+ */
+function isPersonField(field: BindingField): boolean {
+  return field.contract === "person";
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +315,49 @@ export function validateFormSubmit(
       }
       // If options absent/empty: enum option list not carried → skip check
       // (backward compat with pre-T-0399 snapshots).
+    }
+
+    // Rule 2b (T-0512): multi-select validation.
+    // The submitted value MUST be an array; every element must be in options[].
+    if (isMultiSelectField(field)) {
+      const options = field.options;
+      if (!Array.isArray(value)) {
+        violations.push({
+          type: "enum_mismatch",
+          key,
+          message: `field "${key}" is a multi-select; submitted value must be an array, got ${JSON.stringify(value)}`,
+        });
+        continue;
+      }
+      if (Array.isArray(options) && options.length > 0) {
+        const invalidElements = (value as unknown[]).filter(
+          (el) => typeof el !== "string" || !options.includes(el),
+        );
+        if (invalidElements.length > 0) {
+          violations.push({
+            type: "enum_mismatch",
+            key,
+            message:
+              `field "${key}" is a multi-select; submitted elements ${JSON.stringify(invalidElements)} are not all in options [${options.map((o) => JSON.stringify(o)).join(", ")}]`,
+          });
+          continue;
+        }
+      }
+      // options absent/empty → skip element check (backward compat).
+    }
+
+    // Rule 2c (T-0512): person validation.
+    // Person is a scalar string (employee id) — must be a non-empty string.
+    // No options[] check; the employee list is dynamic and validated by the org layer.
+    if (isPersonField(field)) {
+      if (typeof value !== "string" || value.trim() === "") {
+        violations.push({
+          type: "enum_mismatch",
+          key,
+          message: `field "${key}" is a person field; submitted value must be a non-empty string (employee id), got ${JSON.stringify(value)}`,
+        });
+        continue;
+      }
     }
 
     // Value is valid: include in safeValues.
