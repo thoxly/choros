@@ -1430,3 +1430,106 @@ describe('T-0453: formatCellValue — computed branch', () => {
     expect(formatCellValue([], 'collection')).toBe('—');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0507: schemaToColumns — computed fields carry rollup props
+// ---------------------------------------------------------------------------
+
+describe('T-0507: schemaToColumns — computed columns carry rollup props', () => {
+  const cols = schemaToColumns(SCHEMA_WITH_COMPUTED);
+
+  it('computed column includes all four rollup props', () => {
+    const totalCol = cols.find((c) => c.key === 'total');
+    expect(totalCol).toBeDefined();
+    expect(totalCol).toMatchObject({
+      key: 'total',
+      label: 'Итого',
+      type: 'computed',
+      rollupSource: 'lines',
+      rollupOp: 'sum',
+      rollupValueField: 'price',
+      rollupFactorField: 'qty',
+    });
+  });
+
+  it('computed column without factor_field has empty rollupFactorField', () => {
+    const rowCountCol = cols.find((c) => c.key === 'row_count');
+    expect(rowCountCol).toBeDefined();
+    expect(rowCountCol.rollupFactorField).toBe('');
+  });
+
+  it('non-computed columns do NOT gain rollup props', () => {
+    const nameCol = cols.find((c) => c.key === 'order_name');
+    expect(nameCol).not.toHaveProperty('rollupSource');
+    expect(nameCol).not.toHaveProperty('rollupOp');
+    const linesCol = cols.find((c) => c.key === 'lines');
+    expect(linesCol).not.toHaveProperty('rollupSource');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0507: list-cell rendering — computeRollup(column, rowData) via schemaToColumns
+// ---------------------------------------------------------------------------
+
+describe('T-0507: list cell — computeRollup via column object from schemaToColumns', () => {
+  // Simulate the full path: schema → column objects, then use them in the list
+  // cell renderer exactly as screen-app-records.jsx does after T-0507.
+  const cols = schemaToColumns(SCHEMA_WITH_COMPUTED);
+  const totalCol = cols.find((c) => c.key === 'total');
+  const rowCountCol = cols.find((c) => c.key === 'row_count');
+
+  // A record's stored data: computed key is absent (never stored, by design).
+  const recordData = {
+    order_name: 'Тестовый заказ',
+    lines: [
+      { product: 'Товар А', qty: 3, price: 100 },
+      { product: 'Товар Б', qty: 2, price: 250 },
+    ],
+    // 'total' and 'row_count' deliberately absent (would be undefined in raw data)
+  };
+
+  it('computeRollup(col, data) yields correct sum×factor total (price×qty)', () => {
+    // 3×100 + 2×250 = 300 + 500 = 800
+    const result = computeRollup(totalCol, recordData);
+    expect(result).toBe(800);
+  });
+
+  it('formatCellValue of the computed result is NOT "—"', () => {
+    const cellVal = computeRollup(totalCol, recordData);
+    const rendered = formatCellValue(cellVal, 'computed');
+    expect(rendered).not.toBe('—');
+    expect(rendered).toBe('800');
+  });
+
+  it('reading raw data[col.key] for a computed field gives undefined → "—" (old broken behaviour)', () => {
+    // This documents the bug that T-0507 fixes.
+    const rawVal = recordData[totalCol.key]; // undefined (never stored)
+    expect(rawVal).toBeUndefined();
+    expect(formatCellValue(rawVal, 'computed')).toBe('—');
+  });
+
+  it('computeRollup count column yields row count', () => {
+    const result = computeRollup(rowCountCol, recordData);
+    expect(result).toBe(2);
+    expect(formatCellValue(result, 'computed')).toBe('2');
+  });
+
+  it('computeRollup with multiple line-items yields correct per-item sum', () => {
+    const data = {
+      lines: [
+        { product: 'X', qty: 5, price: 10 },
+        { product: 'Y', qty: 1, price: 200 },
+        { product: 'Z', qty: 2, price: 50 },
+      ],
+    };
+    // 5×10 + 1×200 + 2×50 = 50 + 200 + 100 = 350
+    expect(computeRollup(totalCol, data)).toBe(350);
+  });
+
+  it('no line items → computeRollup returns null → formatCellValue returns "—"', () => {
+    const emptyData = { order_name: 'Пусто', lines: [] };
+    const result = computeRollup(totalCol, emptyData);
+    expect(result).toBeNull();
+    expect(formatCellValue(result, 'computed')).toBe('—');
+  });
+});

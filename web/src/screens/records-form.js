@@ -674,11 +674,18 @@ export function serializeRecordData(formFields, values) {
  * @returns {Array<{ key, label, type }>}
  */
 export function schemaToColumns(recordSchema) {
-  return schemaToFormFields(recordSchema).map((f) => ({
-    key: f.key,
-    label: f.label,
-    type: f.type,
-  }));
+  return schemaToFormFields(recordSchema).map((f) => {
+    const col = { key: f.key, label: f.label, type: f.type };
+    // T-0507: thread rollup props through for computed fields so that
+    // computeRollup(col, rowData) works correctly in the list cell renderer.
+    if (f.type === "computed") {
+      col.rollupSource = f.rollupSource;
+      col.rollupOp = f.rollupOp;
+      col.rollupValueField = f.rollupValueField;
+      col.rollupFactorField = f.rollupFactorField;
+    }
+    return col;
+  });
 }
 
 /**

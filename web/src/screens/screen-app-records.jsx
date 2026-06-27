@@ -1029,7 +1029,9 @@ function AppRecordsScreen() {
                       style={rec.id === highlightId ? { background: 'var(--chs-color-success-soft)' } : undefined}
                     >
                       {columns.map((c) => {
-                        const rendered = formatCellValue(data[c.key], c.type);
+                        // T-0507: computed fields are never stored in data, so compute on-read.
+                        const cellVal = c.type === 'computed' ? computeRollup(c, data) : data[c.key];
+                        const rendered = formatCellValue(cellVal, c.type);
                         // T-0447: relation cells resolve async — use RelationCell.
                         if (rendered === RELATION_CELL_ASYNC) {
                           return (
