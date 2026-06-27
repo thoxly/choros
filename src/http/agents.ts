@@ -35,7 +35,7 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth, resolveActorTenant } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
+import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
 import { validateSecretHandleShape } from "../core/secret-handle-validator.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import type { AdminContext } from "../core/scoped-admin.js";
@@ -60,7 +60,7 @@ function assertUuidShape(value: string, label: string): void {
   }
 }
 
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 
 // ---------------------------------------------------------------------------
 // withTenantTx helper (write-path, mirrors grants.ts)
@@ -177,6 +177,7 @@ async function lookupPositionOrgScope(
 function holdsAgentMgmtUpdate(
   admin: AdminContext,
   agentOrgScope: ScopeElement,
+  oracle: AncestryOracle,
 ): boolean {
   if (admin.isGenesisOwner) return true;
   return admin.adminGrants.some(
@@ -184,7 +185,7 @@ function holdsAgentMgmtUpdate(
       g.resourceType === "mgmt_object:agent" &&
       g.operation === "update" &&
       g.delegable &&
-      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, SEED_ORACLE),
+      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, oracle),
   );
 }
 
@@ -277,7 +278,9 @@ async function handleSetAgentLlmConnection(
   await withTenantTx(pool, tenantId, async (client) => {
     // Gate: same predicate as secret-handle binding (mgmt_object:agent/update).
     const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
-    if (!holdsAgentMgmtUpdate(admin, agentOrgScope)) {
+    // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope, oracle)) {
       throw new HttpError(
         403,
         "ADMIN_GATE_REJECTED",
@@ -431,8 +434,11 @@ async function handleGetAgentActivity(
     //     agent row is present below to return 404 honestly.
     const agentOrgScope = await loadAgentOrgScope(client, agentId, tenantId);
 
+    // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+
     // (2) Gate: same predicate as agent management (mgmt_object:agent/update).
-    if (!holdsAgentMgmtUpdate(admin, agentOrgScope)) {
+    if (!holdsAgentMgmtUpdate(admin, agentOrgScope, oracle)) {
       throw new HttpError(
         403,
         "ADMIN_GATE_REJECTED",
@@ -537,10 +543,12 @@ export function registerAgentRoutes(
     // Gate: {kind:"assignment"} — the org-axis is the whole check for agent hire
     // (analogous to role-assignment gate in grants.ts; the position's org node is
     // the target scope the admin's grant must cover). Rejected before KC call or DB write.
+    // T-0515: build the oracle from the tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gateResult = validateAdminDelegation(
       admin,
       { kind: "assignment", targetOrgScope },
-      SEED_ORACLE,
+      oracle,
     );
 
     if (!gateResult.ok) {

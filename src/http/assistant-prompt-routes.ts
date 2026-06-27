@@ -33,8 +33,8 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth, loadAdminContext } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import {
   readAssistantPromptState,
@@ -126,6 +126,7 @@ async function withTenantTx<T>(
 function holdsAgentMgmtUpdate(
   admin: AdminContext,
   agentOrgScope: ScopeElement,
+  oracle: AncestryOracle,
 ): boolean {
   if (admin.isGenesisOwner) return true;
   return admin.adminGrants.some(
@@ -133,7 +134,7 @@ function holdsAgentMgmtUpdate(
       g.resourceType === "mgmt_object:agent" &&
       g.operation === "update" &&
       g.delegable &&
-      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, SEED_ORACLE),
+      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, oracle),
   );
 }
 
@@ -156,7 +157,9 @@ async function assertAdminGate(
     nodeId: "org",
     nodeLevel: "department",
   };
-  if (!holdsAgentMgmtUpdate(admin, orgRootScope)) {
+  // T-0515: build the oracle from the tenant's REAL department tree.
+  const oracle = await loadTenantOrgAncestry(pool, tenantId);
+  if (!holdsAgentMgmtUpdate(admin, orgRootScope, oracle)) {
     throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
   }
 }

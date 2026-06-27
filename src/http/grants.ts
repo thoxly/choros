@@ -36,7 +36,7 @@ import {
   validateAdminDelegation,
 } from "../core/scoped-admin.js";
 import type { Grant } from "../core/grant-lattice.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import {
   encodeGrantAuditEvent,
   encodeAssignmentAuditEvent,
@@ -822,10 +822,12 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
         ? { kind: "set", members: [] }
         : admin.adminOrgScope;
 
+    // T-0515: build the oracle from the tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gateResult = validateAdminDelegation(
       admin,
       { kind: "grant", childGrant, targetOrgScope },
-      SEED_ORACLE,
+      oracle,
     );
 
     if (!gateResult.ok) {
@@ -1002,10 +1004,12 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
     // Gate: admin must hold covering mgmt_object:grant authority (AC-08).
     const targetOrgScope = admin.adminOrgScope;
 
+    // T-0515: build the oracle from the tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gateResult = validateAdminDelegation(
       admin,
       { kind: "grant", childGrant: grantRow, targetOrgScope },
-      SEED_ORACLE,
+      oracle,
     );
 
     if (!gateResult.ok) {
@@ -1117,10 +1121,12 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
     // Load admin context and gate.
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    // T-0515: build the oracle from the tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gateResult = validateAdminDelegation(
       admin,
       { kind: "assignment", targetOrgScope: orgScope, assignsOwnerRole },
-      SEED_ORACLE,
+      oracle,
     );
 
     if (!gateResult.ok) {
@@ -1229,6 +1235,8 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
 
       // Load admin context and gate on assignment's org_scope.
       const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+      // T-0515: build the oracle from the tenant's REAL department tree.
+      const oracle = await loadTenantOrgAncestry(pool, tenantId);
       const gateResult = validateAdminDelegation(
         admin,
         {
@@ -1236,7 +1244,7 @@ export function registerGrantsRoutes(router: Router, pool: pg.Pool): void {
           targetOrgScope: raRow.orgScope,
           assignsOwnerRole,
         },
-        SEED_ORACLE,
+        oracle,
       );
 
       if (!gateResult.ok) {

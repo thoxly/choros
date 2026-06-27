@@ -25,8 +25,8 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { loadAdminContext } from "../db/org.js";
-import { isNarrowerOrEqual, type ScopeElement } from "../core/grant-lattice.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { isNarrowerOrEqual, type ScopeElement, type AncestryOracle } from "../core/grant-lattice.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import type { AdminContext } from "../core/scoped-admin.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
@@ -107,6 +107,7 @@ async function withTenantTx<T>(
 function holdsAgentMgmtUpdate(
   admin: AdminContext,
   agentOrgScope: ScopeElement,
+  oracle: AncestryOracle,
 ): boolean {
   if (admin.isGenesisOwner) return true;
   return admin.adminGrants.some(
@@ -114,7 +115,7 @@ function holdsAgentMgmtUpdate(
       g.resourceType === "mgmt_object:agent" &&
       g.operation === "update" &&
       g.delegable &&
-      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, SEED_ORACLE),
+      isNarrowerOrEqual(agentOrgScope, g.scope as ScopeElement, oracle),
   );
 }
 
@@ -242,7 +243,9 @@ async function handleGetLlmConfig(
       };
     }
     const orgScope = await loadAgentOrgScope(client, row.employee_id, tenantId);
-    if (!holdsAgentMgmtUpdate(admin, orgScope)) {
+    // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, orgScope, oracle)) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
     }
     return {
@@ -350,7 +353,9 @@ async function handlePutLlmConfig(
       );
     }
     const orgScope = await loadAgentOrgScope(client, row.employee_id, tenantId);
-    if (!holdsAgentMgmtUpdate(admin, orgScope)) {
+    // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+    const oracle = await loadTenantOrgAncestry(client, tenantId);
+    if (!holdsAgentMgmtUpdate(admin, orgScope, oracle)) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", "insufficient management authority");
     }
 
