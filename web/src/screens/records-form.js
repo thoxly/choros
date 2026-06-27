@@ -191,7 +191,24 @@ export function schemaToFormFields(recordSchema) {
   const requiredList = Array.isArray(recordSchema.required) ? recordSchema.required : [];
   const requiredSet = new Set(requiredList.filter((k) => typeof k === "string"));
 
-  return Object.keys(props).map((key) => {
+  // T-0510: resolve field key order using x-field-order (same logic as parseRecordSchema).
+  // x-field-order is a root-level array that survives jsonb roundtrip; object key order
+  // doesn't. Legacy schemas without x-field-order fall back to properties insertion order.
+  const xFieldOrder = Array.isArray(recordSchema["x-field-order"]) ? recordSchema["x-field-order"] : null;
+  let orderedKeys;
+  if (xFieldOrder && xFieldOrder.length > 0) {
+    const propKeySet = new Set(Object.keys(props));
+    const ordered = xFieldOrder.filter((k) => typeof k === "string" && propKeySet.has(k));
+    const orderedSet = new Set(ordered);
+    for (const k of Object.keys(props)) {
+      if (!orderedSet.has(k)) ordered.push(k);
+    }
+    orderedKeys = ordered;
+  } else {
+    orderedKeys = Object.keys(props);
+  }
+
+  return orderedKeys.map((key) => {
     const def = props[key];
     const rawType = def && typeof def === "object" ? def.type : undefined;
     const title =

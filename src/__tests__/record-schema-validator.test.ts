@@ -320,4 +320,63 @@ describe('record-schema-validator', () => {
     expect(result.valid).toBe(false);
     expect(result.errors.length).toBeGreaterThan(0);
   });
+
+  // -------------------------------------------------------------------------
+  // T-0510: root-level x-field-order — stripped before AJV compile
+  // -------------------------------------------------------------------------
+
+  it('T-0510 definition: schema with root x-field-order passes validateRecordSchemaDefinition', () => {
+    // x-field-order is a root-level annotation emitted by buildRecordSchema (T-0510).
+    // The server validator must strip it before AJV compile (AJV strict rejects
+    // unknown root-level keywords). This test proves the stripping is in effect.
+    const schemaWithOrder = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['name', 'amount'],
+      properties: {
+        name: { type: 'string', title: 'Название' },
+        amount: { type: 'number', title: 'Сумма' },
+      },
+      required: ['name'],
+    };
+    const result = validateRecordSchemaDefinition(schemaWithOrder);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('T-0510 record-write: schema with root x-field-order validates record data correctly', () => {
+    // The persisted schema (as stored in registry_schema_history after T-0510) will
+    // carry root x-field-order. validateRecordAgainstSchema must strip it so AJV
+    // does not throw "unknown keyword: x-field-order" and data validation works correctly.
+    const schemaWithOrder = {
+      type: 'object',
+      additionalProperties: false,
+      'x-field-order': ['name', 'amount'],
+      properties: {
+        name: { type: 'string', title: 'Название' },
+        amount: { type: 'number', title: 'Сумма' },
+      },
+      required: ['name'],
+    };
+
+    const schemaHistory: SchemaHistoryMap = new Map([[1, schemaWithOrder]]);
+
+    // Valid record: required name present, optional amount as number.
+    const validRecord = { data: { name: 'Акмэ', amount: 9999 }, schema_version: 1 };
+    const validResult = validateRecordAgainstSchema(validRecord, schemaHistory);
+    expect(validResult.valid).toBe(true);
+    expect(validResult.errors).toHaveLength(0);
+
+    // Invalid record: missing required name.
+    const missingRequired = { data: { amount: 100 }, schema_version: 1 };
+    const missingResult = validateRecordAgainstSchema(missingRequired, schemaHistory);
+    expect(missingResult.valid).toBe(false);
+    expect(missingResult.errors.length).toBeGreaterThan(0);
+
+    // Invalid record: amount as string instead of number.
+    const wrongType = { data: { name: 'X', amount: 'not-a-number' }, schema_version: 1 };
+    const typeResult = validateRecordAgainstSchema(wrongType, schemaHistory);
+    expect(typeResult.valid).toBe(false);
+    expect(typeResult.errors.length).toBeGreaterThan(0);
+  });
 });
