@@ -661,8 +661,17 @@ function buildRouter(
       : undefined,
   );
 
-  // Register grant trail endpoints (T-0031)
-  registerGrantTrailRoutes(router);
+  // Register grant trail endpoints (T-0031 / T-0514: real tenant via resolveActorTenant).
+  registerGrantTrailRoutes(
+    router,
+    grantsPool
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+        }
+      : undefined,
+  );
 
   // Register agent hire endpoint (T-0042 — additive, no existing routes modified)
   if (grantsPool) {

@@ -2,11 +2,15 @@
  * src/http/grant-trail.ts
  *
  * T-0031: HTTP route for the grant trail read API.
+ * T-0514: Tenant isolation — resolve actor's REAL tenant via resolveActorTenant
+ *         (same pattern as spend.ts / registry-defs.ts). Falls back to
+ *         DEV_TENANT_ID only when no resolver is wired (no-DB degrade).
  *
  * Registers: GET /api/grant-trail
  *
  * DESIGN INVARIANTS (ADR §4.3):
- *  - Auth: X-Dev-User header for tenantId resolution (dev day-1; prod auth = T-0054).
+ *  - Auth: X-Dev-User header (dev) or JWT sub (keycloak) for actor resolution.
+ *  - Tenant: actor's REAL tenant resolved via resolveActorTenant (fail-closed).
  *  - Static fallback: when DATABASE_URL is absent, returns TRAIL seed data reformatted
  *    to GrantTrailRow shape (NF-8 / AC-18).
  *  - Validation: limit 1..500; before_seq must be integer if present.
@@ -19,6 +23,18 @@ import { HttpError, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { queryGrantTrail, type GrantTrailRow } from "../db/audit-grant-trail.js";
 import { getOrgPool, DEV_TENANT_ID } from "../db/org.js";
+
+// ---------------------------------------------------------------------------
+// Deps — injectable for tests and server.ts wiring.
+// ---------------------------------------------------------------------------
+
+/** Resolver that maps an actor slug to their real tenant UUID (fail-closed). */
+export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
+
+export interface GrantTrailRouteDeps {
+  pool: pg.Pool;
+  resolveActorTenant: ActorTenantResolver;
+}
 
 // ---------------------------------------------------------------------------
 // Static seed — reformatted TRAIL from ra-data.jsx to GrantTrailRow shape.
@@ -202,36 +218,48 @@ function extractQueryParams(req: IncomingMessage): ParsedGrantTrailParams {
 }
 
 // ---------------------------------------------------------------------------
-// registerGrantTrailRoutes — main export. Registers GET /api/grant-trail.
-//
-// The pool parameter is optional — when absent (or when DATABASE_URL is not
-// set) the route returns the static TRAIL_SEED data (NF-8 / AC-18).
+// extractActor — mode-aware actor resolution (mirrors spend.ts).
+// Keycloak mode: JWT sub. Dev mode: x-dev-user header.
 // ---------------------------------------------------------------------------
 
-export function registerGrantTrailRoutes(router: Router, pool?: pg.Pool): void {
+function extractActor(req: IncomingMessage): string {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) return ctx.sub;
+  let devUser = req.headers[DEV_USER_HEADER];
+  if (Array.isArray(devUser)) devUser = devUser[0];
+  if (!devUser || typeof devUser !== "string") {
+    throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+  }
+  return devUser;
+}
+
+// ---------------------------------------------------------------------------
+// registerGrantTrailRoutes — main export. Registers GET /api/grant-trail.
+//
+// The deps parameter is optional for backwards-compatibility — when absent (or
+// when DATABASE_URL is not set) the route returns the static TRAIL_SEED data
+// (NF-8 / AC-18). When deps are provided, the actor's REAL tenant is resolved
+// via deps.resolveActorTenant (T-0514); falls back to DEV_TENANT_ID only when
+// no resolver is wired (no-DB degrade), exactly as registry-defs.ts does.
+// ---------------------------------------------------------------------------
+
+export function registerGrantTrailRoutes(router: Router, deps?: GrantTrailRouteDeps): void {
   router.register("GET", "/api/grant-trail", withAuth(async (req, res) => {
     const parsed = extractQueryParams(req);
 
     let rows: GrantTrailRow[];
     let hasMore: boolean;
 
-    const dbPool: pg.Pool | undefined = pool ?? (process.env["DATABASE_URL"] ? getOrgPool() : undefined);
+    const dbPool: pg.Pool | undefined = deps?.pool ?? (process.env["DATABASE_URL"] ? getOrgPool() : undefined);
 
     if (dbPool) {
-      // Resolve tenantId from X-Dev-User header; fall back to DEV_TENANT_ID.
-      // Day-1: all requests use the single dev tenant (T-0054 will add proper resolution).
-      let tenantId = DEV_TENANT_ID;
-      // Mode-aware actor resolution (T-0327): keycloak → JWT sub; dev → x-dev-user.
-      // Day-1: tenantId is still DEV_TENANT_ID regardless of actor (T-0054 will fix).
-      const authCtx = getAuthContext(req);
-      if (authCtx === undefined) {
-        // Dev mode — actor from x-dev-user (informational only here; tenantId stays DEV_TENANT_ID).
-        const devUser = req.headers[DEV_USER_HEADER];
-        if (typeof devUser === "string" && devUser.length > 0) {
-          tenantId = DEV_TENANT_ID;
-        }
-      }
-      // In keycloak mode authCtx.sub is the JWT subject; tenantId is still DEV_TENANT_ID (T-0054).
+      // T-0514: resolve actor's REAL tenant via resolveActorTenant (fail-closed).
+      // Falls back to DEV_TENANT_ID only when no resolver is wired (no-DB degrade).
+      // Mirrors the pattern established in registry-defs.ts (T-0177 fix) and spend.ts.
+      const actor = extractActor(req);
+      const tenantId = deps?.resolveActorTenant
+        ? await deps.resolveActorTenant(actor)
+        : DEV_TENANT_ID;
 
       const result = await queryGrantTrail(dbPool, tenantId, {
         roleId: parsed.roleId,
