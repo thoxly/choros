@@ -370,9 +370,12 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
 
     // POST /api/forms/binding
     // Actor-scoped upsert: saves a form binding for (processKey, stepKey).
-    // Body: { processKey: string, stepKey: string, fields: BindingField[] }
+    // Body (FormBuilder):   { processKey: string, stepKey: string, fields: BindingField[] }
+    // Body (FormDesigner):  { process_key: string, form_key: string, layout: object }
+    // Both casings are accepted; `fields` is optional when `layout` is provided.
     // → 201 (created) | 200 (updated) | 400 | 401 | 403
     // T-0418 [SECURITY] P0: withAuth-wrapped (keycloak REQUIRES a valid Bearer).
+    // T-0506: accept snake_case keys + optional layout column + optional fields.
     router.register("POST", "/api/forms/binding", withAuth(async (req, res, _params) => {
       const actor = await extractActorSlug(req, pool);
 
@@ -382,8 +385,16 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
       }
       const body = rawBody as Record<string, unknown>;
 
-      const processKey = typeof body["processKey"] === "string" ? body["processKey"].trim() : "";
-      const stepKey = typeof body["stepKey"] === "string" ? body["stepKey"].trim() : "";
+      // Accept camelCase (FormBuilder) OR snake_case (FormDesigner).
+      // form_key sent by FormDesigner is treated as stepKey (maps to form_binding.form_key).
+      const processKey = (
+        typeof body["processKey"] === "string" ? body["processKey"] :
+        typeof body["process_key"] === "string" ? body["process_key"] : ""
+      ).trim();
+      const stepKey = (
+        typeof body["stepKey"] === "string" ? body["stepKey"] :
+        typeof body["form_key"] === "string" ? body["form_key"] : ""
+      ).trim();
 
       if (!processKey) {
         throw new HttpError(400, "VALIDATION", "processKey must be a non-empty string");
@@ -392,13 +403,32 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         throw new HttpError(400, "VALIDATION", "stepKey must be a non-empty string");
       }
 
-      const validation = validateBindingFields(body["fields"]);
-      if (!validation.ok) {
-        throw new HttpError(400, "VALIDATION",
-          `invalid fields: ${validation.errors.map((e) => `[${e.index}] ${e.reason}`).join("; ")}`
-        );
+      // Optional layout document (FormDesigner path). When present it must be a JSON object.
+      const rawLayout = body["layout"];
+      let layout: Record<string, unknown> | null = null;
+      if (rawLayout !== undefined && rawLayout !== null) {
+        if (typeof rawLayout !== "object" || Array.isArray(rawLayout)) {
+          throw new HttpError(400, "VALIDATION", "layout must be a JSON object");
+        }
+        layout = rawLayout as Record<string, unknown>;
       }
-      const fields: BindingField[] = validation.fields;
+
+      // fields is optional when layout is provided; required otherwise (FormBuilder path).
+      let fields: BindingField[];
+      if (body["fields"] !== undefined) {
+        const validation = validateBindingFields(body["fields"]);
+        if (!validation.ok) {
+          throw new HttpError(400, "VALIDATION",
+            `invalid fields: ${validation.errors.map((e) => `[${e.index}] ${e.reason}`).join("; ")}`
+          );
+        }
+        fields = validation.fields;
+      } else if (layout !== null) {
+        // FormDesigner sends layout but not fields; store an empty array (column is NOT NULL).
+        fields = [];
+      } else {
+        throw new HttpError(400, "VALIDATION", "fields is required when layout is not provided");
+      }
 
       const tenantId = await resolveActorTenant(actor);
       assertUuidShape(tenantId, "tenantId");
@@ -411,9 +441,10 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
           const newId = randomUUID();
           await client.query(
             `INSERT INTO choros.form_binding
-               (tenant_id, id, process_key, form_key, fields, version, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6, $6)`,
-            [tenantId, newId, processKey, stepKey, JSON.stringify(fields), nowMs],
+               (tenant_id, id, process_key, form_key, fields, layout, version, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, 1, $7, $7)`,
+            [tenantId, newId, processKey, stepKey, JSON.stringify(fields),
+             layout !== null ? JSON.stringify(layout) : null, nowMs],
           );
           return { statusCode: 201, body: { id: newId, version: 1 } };
         } else {
@@ -421,12 +452,14 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
           await client.query(
             `UPDATE choros.form_binding
                 SET fields = $1::jsonb,
-                    version = $2,
-                    updated_at = $3
-              WHERE tenant_id = $4
-                AND process_key = $5
-                AND form_key = $6`,
-            [JSON.stringify(fields), newVersion, nowMs, tenantId, processKey, stepKey],
+                    layout = COALESCE($2::jsonb, form_binding.layout),
+                    version = $3,
+                    updated_at = $4
+              WHERE tenant_id = $5
+                AND process_key = $6
+                AND form_key = $7`,
+            [JSON.stringify(fields), layout !== null ? JSON.stringify(layout) : null,
+             newVersion, nowMs, tenantId, processKey, stepKey],
           );
           return { statusCode: 200, body: { id: existing.id, version: newVersion } };
         }
