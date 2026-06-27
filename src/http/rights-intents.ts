@@ -61,7 +61,7 @@ import {
   type AuditEventInput,
 } from "../core/audit-grant-encoder.js";
 import { DICT_PRESETS, type GrantPreset, type GrantPresetAtom } from "./grants.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
@@ -339,6 +339,9 @@ function registerHire(
     // The admitting org scope: the position's department node when a position is
     // given, else the admin's own org scope (the assignment ceiling).
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    // T-0515: build the oracle from the tenant's REAL department tree (used by
+    // both the assignment gate and every preset-atom grant gate below).
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     let ownScope: ScopeElement = admin.adminOrgScope;
     if (positionId) {
       ownScope = await lookupPositionOrgScope(pool, tenantId, positionId);
@@ -354,7 +357,7 @@ function registerHire(
     const asgGate = validateAdminDelegation(
       admin,
       { kind: "assignment", targetOrgScope: ownScope, assignsOwnerRole },
-      SEED_ORACLE,
+      oracle,
     );
     if (!asgGate.ok) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", asgGate.reason);
@@ -379,7 +382,7 @@ function registerHire(
       const gate = validateAdminDelegation(
         admin,
         { kind: "grant", childGrant, targetOrgScope: ownScope },
-        SEED_ORACLE,
+        oracle,
       );
       if (!gate.ok) {
         throw new HttpError(403, "ADMIN_GATE_REJECTED", `preset atom rejected: ${gate.reason}`);
@@ -547,6 +550,9 @@ function registerFire(
         }
       }
 
+      // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+      const oracle = await loadTenantOrgAncestry(client, tenantId);
+
       // GATE: the admin must cover EVERY assignment's org scope (no partial-cover
       // fire) AND may strip a tenant-owner assignment ONLY if they are the owner.
       // Rejected before any UPDATE — the whole tx aborts.
@@ -558,7 +564,7 @@ function registerFire(
             targetOrgScope: ra.org_scope as ScopeElement,
             assignsOwnerRole: ownerRoleIds.has(ra.role_id),
           },
-          SEED_ORACLE,
+          oracle,
         );
         if (!gate.ok) {
           throw new HttpError(403, "ADMIN_GATE_REJECTED", `assignment ${ra.id}: ${gate.reason}`);
@@ -696,10 +702,13 @@ function registerSubstitute(
     // GATE: the admin must cover the substitution's org scope (it issues authority
     // for the stand-in there). Rejected before any write.
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    // T-0515: oracle from the tenant's REAL department tree (reused by the inner
+    // validateNarrowing loop below — same tenant tree within this request).
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gate = validateAdminDelegation(
       admin,
       { kind: "assignment", targetOrgScope: orgScope, assignsOwnerRole },
-      SEED_ORACLE,
+      oracle,
     );
     if (!gate.ok) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", gate.reason);
@@ -772,7 +781,7 @@ function registerSubstitute(
             validUntil,
             createdAt: nowMs,
           };
-          const narrow = validateNarrowing(parent, child, SEED_ORACLE);
+          const narrow = validateNarrowing(parent, child, oracle);
           if (!narrow.ok) {
             // A substitution that could exceed the substituted principal is a
             // security defect — reject BEFORE persistence (I-2), never audit-after.
@@ -916,10 +925,12 @@ function registerUrgentRevoke(
     });
 
     const admin = await loadAdminContext(pool, tenantId, actorId, nowMs);
+    // T-0515: build the oracle from the tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, tenantId);
     const gate = validateAdminDelegation(
       admin,
       { kind: "grant", childGrant: grantRow, targetOrgScope: admin.adminOrgScope },
-      SEED_ORACLE,
+      oracle,
     );
     if (!gate.ok) {
       throw new HttpError(403, "ADMIN_GATE_REJECTED", gate.reason);

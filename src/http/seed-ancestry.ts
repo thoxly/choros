@@ -1,43 +1,81 @@
 /**
  * src/http/seed-ancestry.ts — shared seed-based AncestryOracle for HTTP handlers.
  *
- * Day-1 known gap: org ancestry is backed by a hardcoded tree that mirrors the
- * dev-seed departments (slugs from ORG_TREE + UUIDs from migration 014/026).
+ * HISTORICAL (T-0053 day-1 gap, NOW SUPERSEDED for production by T-0515):
+ * org ancestry used to be backed ONLY by a hardcoded tree (ORG_ANCESTRY_MAP)
+ * mirroring the dev-seed departments (slugs from ORG_TREE + UUIDs from migration
+ * 014/026). That oracle answered correctly ONLY for tenants whose org structure
+ * matched the seed topology — a production/self-registered tenant with its own
+ * department tree got WRONG ancestry answers, silently corrupting grant-scope
+ * and admin-delegation checks for org-node scopes.
  *
- * HONEST LIMITATION: this oracle answers correctly ONLY for tenants whose org
- * structure matches the seed topology. A production tenant with a different tree
- * (e.g. custom departments, deeper hierarchy) will get WRONG ancestry answers,
- * which means grant scope checks and admin delegation checks involving org-node
- * scopes will silently produce incorrect results.
+ * T-0515 FIX: HTTP handlers now build a per-request oracle from the tenant's
+ * REAL choros.department tree via `loadTenantOrgAncestry(pool, tenantId)`
+ * (src/db/org-ancestry.ts) and pass THAT to the validate-/covers-/isNarrower-
+ * calls. SEED_ORACLE is retained ONLY as a pure, DB-free fallback/fixture (its
+ * map mirrors the dev-seed and is used by unit tests that inject an oracle); it
+ * is no longer the source of truth in production handlers.
  *
- * The AncestryOracle interface is synchronous (boolean return), which prevents a
- * real per-request DB lookup without refactoring the lattice interface. DB-backed
- * ancestry is tracked as T-0053.
- *
- * All HTTP handlers that need an AncestryOracle MUST use SEED_ORACLE from this
- * module rather than redeclaring ORG_SEED_CHILDREN locally. This eliminates the
- * duplicate-seed check violation (FF-4 / ci/checks/seed/single-source.sh) and
- * makes the shared-gap visible in one place.
- *
- * Files that previously declared their own ORG_SEED_CHILDREN:
- *   src/http/grants.ts, src/http/invoke.ts, src/http/agents.ts,
- *   src/http/secret-handle.ts — T-0024/T-0025/T-0042 note these as pre-existing
- *   dups; dedup to this module is the follow-up (T-0053).
+ * The shared traversal (`makeOrgAncestryOracle`) is the SINGLE walk used by both
+ * SEED_ORACLE and the DB-backed oracle — they differ ONLY in the children map
+ * source, so containment semantics are byte-for-byte identical.
  */
 
-import type { AncestryOracle } from "../core/grant-lattice.js";
+import type { AncestryOracle, Hierarchy } from "../core/grant-lattice.js";
+
+// ---------------------------------------------------------------------------
+// Shared traversal — pure walk over an injected adjacency map (ancestor → children)
+// ---------------------------------------------------------------------------
+
+/**
+ * makeOrgAncestryOracle — build a synchronous AncestryOracle from a children map.
+ *
+ * `children[ancestorId]` lists the DIRECT children (department ids/slugs) of
+ * `ancestorId`. The oracle answers `isDescendantOrSelf(_, descendantId,
+ * ancestorId)` by a depth-first descent from `ancestorId` looking for
+ * `descendantId`:
+ *   - descendantId === ancestorId           → true  (self).
+ *   - descendantId reachable via the chain   → true  (containment).
+ *   - unknown ids / no path                  → false (conservative).
+ * Cycle-safe via a visited set (defends against a malformed/cyclic map).
+ *
+ * The `hierarchy` param is preserved for interface-compat but the org tree is
+ * the only hierarchy this map models (resource hierarchy is handled elsewhere,
+ * unchanged). The walk is hierarchy-agnostic — callers pass the org map.
+ */
+export function makeOrgAncestryOracle(
+  children: ReadonlyMap<string, readonly string[]> | Record<string, readonly string[]>,
+): AncestryOracle {
+  const get = (id: string): readonly string[] => {
+    if (children instanceof Map) return children.get(id) ?? [];
+    return (children as Record<string, readonly string[]>)[id] ?? [];
+  };
+
+  function descend(descendantId: string, ancestorId: string, visited: Set<string>): boolean {
+    if (descendantId === ancestorId) return true;
+    if (visited.has(ancestorId)) return false;
+    visited.add(ancestorId);
+    for (const c of get(ancestorId)) {
+      if (descend(descendantId, c, visited)) return true;
+    }
+    return false;
+  }
+
+  return {
+    isDescendantOrSelf(_hierarchy: Hierarchy, descendantId: string, ancestorId: string): boolean {
+      return descend(descendantId, ancestorId, new Set<string>());
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Seed org-tree (slug + UUID nodes from migrations 014/026 + ORG_TREE ra-data)
 // ---------------------------------------------------------------------------
 
 /**
- * Known-gap: mirrors only the dev-seed org topology.
- * Correct for the dev/demo tenant; wrong for any other org structure.
- * Do not add tenant-specific data here — fix the oracle interface instead (T-0053).
- *
- * Named without *_SEED suffix to avoid the FF-4 check (which flags per-file copies
- * of ORG_SEED; this is the ONE canonical source and should not be duplicated).
+ * Known-gap fixture: mirrors only the dev-seed org topology.
+ * NOT the source of truth in production handlers (T-0515) — those build the
+ * oracle from the real department tree. Kept for DB-free unit tests/fallback.
  */
 const ORG_ANCESTRY_MAP: Record<string, string[]> = {
   org: ["fin", "cs", "plat", "sales"],
@@ -50,26 +88,11 @@ const ORG_ANCESTRY_MAP: Record<string, string[]> = {
   "b0000000-0000-0000-0000-000000000003": [], // plat dept
 };
 
-function isDescendantOrSelf(
-  descendantId: string,
-  ancestorId: string,
-): boolean {
-  if (descendantId === ancestorId) return true;
-  const children = ORG_ANCESTRY_MAP[ancestorId] ?? [];
-  for (const c of children) {
-    if (isDescendantOrSelf(descendantId, c)) return true;
-  }
-  return false;
-}
-
 /**
- * Shared seed-based AncestryOracle.
+ * Shared seed-based AncestryOracle — DB-free fixture.
  *
- * Known gap: only correct for the dev-seed org structure (T-0053).
- * Use this single export instead of redeclaring ORG_SEED_CHILDREN per-handler.
+ * Production handlers now build the oracle from the tenant's real department
+ * tree via loadTenantOrgAncestry (T-0515). This export remains for unit tests
+ * and as a pure fallback; it uses the SAME traversal as the DB-backed oracle.
  */
-export const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy, descendantId, ancestorId): boolean {
-    return isDescendantOrSelf(descendantId, ancestorId);
-  },
-};
+export const SEED_ORACLE: AncestryOracle = makeOrgAncestryOracle(ORG_ANCESTRY_MAP);

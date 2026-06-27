@@ -56,7 +56,7 @@ import {
   validateAdminDelegation,
 } from "../core/scoped-admin.js";
 import { loadAdminContext } from "../db/org.js";
-import { SEED_ORACLE } from "./seed-ancestry.js";
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 
@@ -375,10 +375,12 @@ async function checkExplainAuthz(
       ? { kind: "set", members: [] }
       : admin.adminOrgScope;
 
+  // T-0515: build the oracle from the tenant's REAL department tree.
+  const oracle = await loadTenantOrgAncestry(pool, tenantId);
   const gateResult = validateAdminDelegation(
     admin,
     { kind: "grant", childGrant: syntheticChild, targetOrgScope },
-    SEED_ORACLE,
+    oracle,
   );
 
   if (!gateResult.ok) {
@@ -477,6 +479,9 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): 
     //   - ref.kind ∈ {registry, application}: sentinel (non-null); resolveFor reaches masking.
     //     These resource types are not stored as rows in choros.record; existence is not
     //     the gating concern — grant→scope coverage is (ADR §3.3).
+    // T-0515: build the org-ancestry oracle from the tenant's REAL department tree
+    // (pool is non-null here — guarded by the 503 check above).
+    const explainOracle = await loadTenantOrgAncestry(pool, tenantId);
     const explainDeps: ResolverDeps = {
       grants: {
         getGrants: async (_subject, _nowMs) => subjectGrants,
@@ -484,7 +489,7 @@ export function registerPdpExplainRoutes(router: Router, pool: pg.Pool | null): 
       records: {
         getRecord: async (ref) => fetchRecordForExplain(pool, tenantId, ref),
       },
-      ancestry: SEED_ORACLE,
+      ancestry: explainOracle,
       // classifications, effects, sod, keyedDigest: NOT wired for explain.
       // effects/sod are absent → invoke/approve/transition are rejected above (R-2).
       // classifications: omitted → masking step governed=false (no data-class governance).

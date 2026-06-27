@@ -45,7 +45,10 @@ import {
   resolveActorTenant,
 } from "../db/org.js";
 import { SEED_ORACLE } from "./seed-ancestry.js";
+// SEED_ORACLE re-exported for unit tests (invoke-grant.test.ts) — handlers below
+// build the oracle from the tenant's REAL department tree (T-0515).
 export { SEED_ORACLE };
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -375,9 +378,12 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
       // Load caller's invoke-grants (NF-4: fail-closed)
       const grants = await loadCallerInvokeGrants(client, tenantId, callerId);
 
+      // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+      const oracle = await loadTenantOrgAncestry(client, tenantId);
+
       // Find a covering grant
       const coveringGrant = grants.find((g) =>
-        coversInvoke(g, targetRoleId, targetOrgScope, nowMs, SEED_ORACLE),
+        coversInvoke(g, targetRoleId, targetOrgScope, nowMs, oracle),
       );
 
       // NF-4: fail-closed — no row, no audit if no grant
@@ -445,9 +451,12 @@ export function registerInvokeRoutes(router: Router, pool: pg.Pool): void {
       // Load caller's invoke-grants
       const grants = await loadCallerInvokeGrants(client, tenantId, callerId);
 
+      // T-0515: oracle from the tenant's REAL department tree (reuse this tx's client).
+      const oracle = await loadTenantOrgAncestry(client, tenantId);
+
       // Find a covering grant
       const coveringGrant = grants.find((g) =>
-        coversInvoke(g, targetRoleId, targetOrgScope, nowMs, SEED_ORACLE),
+        coversInvoke(g, targetRoleId, targetOrgScope, nowMs, oracle),
       );
 
       // Fail-closed

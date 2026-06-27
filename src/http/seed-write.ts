@@ -212,24 +212,11 @@ function fkConstraintName(err: unknown): string {
 // registerSeedWriteRoutes — called from server.ts after grants pool is ready
 // ---------------------------------------------------------------------------
 
-// Minimal oracle for the scope validation — same seed as grants.ts
+// T-0515: org-ancestry for scope validation is built from the tenant's REAL
+// department tree (loadTenantOrgAncestry), not a hardcoded seed map. The oracle
+// is loaded per-request in each route handler and threaded into the gate.
 import type { AncestryOracle } from "../core/grant-lattice.js";
-
-const SEED_ORACLE: AncestryOracle = {
-  isDescendantOrSelf(_hierarchy, descendantId, ancestorId) {
-    if (descendantId === ancestorId) return true;
-    const CHILDREN: Record<string, string[]> = {
-      "b0000000-0000-0000-0000-000000000001": [],
-      "b0000000-0000-0000-0000-000000000002": [],
-      "b0000000-0000-0000-0000-000000000003": [],
-    };
-    const children = CHILDREN[ancestorId] ?? [];
-    for (const c of children) {
-      if (this.isDescendantOrSelf(_hierarchy, descendantId, c)) return true;
-    }
-    return false;
-  },
-};
+import { loadTenantOrgAncestry } from "../db/org-ancestry.js";
 
 // ---------------------------------------------------------------------------
 // assertOrgObjectAuthority — T-0469 [auth]: the org-write authorization gate,
@@ -269,6 +256,7 @@ function assertOrgObjectAuthority(
   actorId: string,
   nowMs: number,
   notOwnerMessage: string,
+  oracle: AncestryOracle,
 ): void {
   // Genesis owner short-circuits (preserves the existing owner path verbatim).
   if (admin.isGenesisOwner) return;
@@ -289,7 +277,7 @@ function assertOrgObjectAuthority(
   const gate = validateAdminDelegation(
     admin,
     { kind: "grant", childGrant: syntheticChild, targetOrgScope: admin.adminOrgScope },
-    SEED_ORACLE,
+    oracle,
   );
 
   if (!gate.ok) {
@@ -430,10 +418,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // forest-owner). Cross-tenant writes by non-forest-owners → 403.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:department/create grant.
     assertOrgObjectAuthority(
       admin, "mgmt_object:department", "create", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:department grant required to create departments",
+      oracle,
     );
 
     const slug = b["slug"];
@@ -491,10 +482,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:position/create grant.
     assertOrgObjectAuthority(
       admin, "mgmt_object:position", "create", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:position grant required to create positions",
+      oracle,
     );
 
     const department_id = b["department_id"];
@@ -556,11 +550,14 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // tenant — a self-registered owner can add people to THEIR tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:employee/create grant.
     // (employee DELETION stays owner-only — see DELETE /api/employees below.)
     assertOrgObjectAuthority(
       admin, "mgmt_object:employee", "create", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:employee grant required to create employees",
+      oracle,
     );
 
     const kind = b["kind"];
@@ -642,10 +639,12 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
       createdAt: nowMs(),
     };
 
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     const gateResult = validateAdminDelegation(
       admin,
       { kind: "grant", childGrant: syntheticGrant as import("../core/grant-lattice.js").Grant, targetOrgScope: admin.adminOrgScope },
-      SEED_ORACLE,
+      oracle,
     );
 
     if (!gateResult.ok) {
@@ -705,10 +704,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:department/delete grant.
     assertOrgObjectAuthority(
       admin, "mgmt_object:department", "delete", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:department grant required to delete departments",
+      oracle,
     );
 
     const deptId = params["id"] as string;
@@ -756,10 +758,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:position/delete grant.
     assertOrgObjectAuthority(
       admin, "mgmt_object:position", "delete", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:position grant required to delete positions",
+      oracle,
     );
 
     const posId = params["id"] as string;
@@ -860,10 +865,13 @@ export function registerSeedWriteRoutes(router: Router, pool: pg.Pool): void {
     // T-0388: cross-tenant guard + gate against the resolved authority tenant.
     const { actorId, authTenantId } = await authorizeOrgWrite(req, pool, tenant_id, nowMs());
     const admin = await loadAdminContext(pool, authTenantId, actorId, nowMs());
+    // T-0515: oracle from the authority tenant's REAL department tree.
+    const oracle = await loadTenantOrgAncestry(pool, authTenantId);
     // T-0469: owner OR a covering delegable mgmt_object:role/delete grant.
     assertOrgObjectAuthority(
       admin, "mgmt_object:role", "delete", tenant_id, actorId, nowMs(),
       "owner or mgmt_object:role grant required to delete roles",
+      oracle,
     );
 
     const roleId = params["id"] as string;
