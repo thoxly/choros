@@ -488,7 +488,8 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
     set({ options: text.split('\n') });
   };
 
-  const hasSubRow = field.type === 'select' || field.type === 'relation'
+  // T-0512: multi-select also shows the options textarea (same as select).
+  const hasSubRow = field.type === 'select' || field.type === 'multi-select' || field.type === 'relation'
     || field.type === 'collection' || field.type === 'computed'
     || Boolean(errors.key) || Boolean(errors.type) || Boolean(errors.title)
     || Boolean(errors.options) || Boolean(errors.targetRegistryId)
@@ -561,7 +562,8 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
           {errors.type && <span style={errStyle}>Тип: {errors.type}</span>}
           {errors.title && <span style={errStyle}>Название: {errors.title}</span>}
           {/* T-0294: options input for select type */}
-          {field.type === 'select' && (
+          {/* T-0512: multi-select reuses the same options textarea as select */}
+          {(field.type === 'select' || field.type === 'multi-select') && (
             <div style={{ marginTop: 'var(--chs-space-3)', maxWidth: '420px' }}>
               <span style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
                 Варианты (по одному на строку):
@@ -572,7 +574,7 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
                 value={optionsText}
                 onChange={(e) => setOptionsFromText(e.target.value)}
                 placeholder={'вариант_1\nвариант_2\nвариант_3'}
-                aria-label="Варианты select"
+                aria-label={field.type === 'multi-select' ? 'Варианты мультивыбора' : 'Варианты select'}
                 aria-invalid={Boolean(errors.options) || undefined}
                 rows={3}
               />
