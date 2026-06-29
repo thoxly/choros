@@ -1,0 +1,104 @@
+{
+  "task_id": "T-0530",
+  "status": "ready",
+  "decision": "Адопция существующих kit-примитивов (LoadingState/EmptyState/ErrorState/Skeleton/Button[loading]) без создания новых компонентов. Каждый список/деталь рендерит 4 явных состояния (loading/empty/error/data); catch-блоки никогда не возвращают null — всегда setError+ErrorState с onRetry; submit/export-кнопки используют loading prop (aria-busy/disabled) для блокировки double-submit; shell auth-bootstrap заменяется на LoadingState с role=status aria-busy; CI-гейт G4 добавляется как ux-g4-state-primitives.sh.",
+  "rejected_alternatives": [
+    {
+      "option": "Добавить новый StateView компонент-обёртку (loading|empty|error|data) с единым switch-рендером",
+      "why_not": "Kit уже содержит все три примитива с правильной ARIA-семантикой. Обёртка добавляет слой без пользы, усложняет типизацию и скрывает намерение от читающего код. Существующие отдельные компоненты сохраняют гибкость compact/full и разные role (alert vs status)."
+    },
+    {
+      "option": "Централизованный useAsyncState хук с автоматическим рендером Loading/Error/Empty",
+      "why_not": "Многие экраны имеют нестандартные условия empty (зависит от фильтра, пермиссий, auth), retry-логику с разными зависимостями и partial-загрузку (несколько параллельных fetch). Единый хук не покрывает эти кейсы и создаёт ложное ощущение решённой задачи. Явный if-loading/if-error/if-empty понятен и auditable."
+    },
+    {
+      "option": "ErrorBoundary на уровне shell как единственный error-гейт",
+      "why_not": "ErrorBoundary ловит только thrown exceptions из render, не async fetch-ошибки. Fetch-ошибки живут в state, их рендер — ответственность самого компонента. ErrorBoundary нужен дополнительно (ra-shell subscreen fallback) но не заменяет per-screen ErrorState."
+    },
+    {
+      "option": "Skeleton-only (без LoadingState) для всех экранов",
+      "why_not": "Skeleton подходит для известной структуры (таблицы записей, списки). Для непредсказуемого контента (ошибки auth, динамические секции BPMN-панели) Skeleton misleading. LoadingState с label=текст точнее и семантически правильнее для screen-читателей."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "StateView",
+      "fields": [
+        { "name": "loading", "type": "boolean — fetch in-flight" },
+        { "name": "error", "type": "Error | null — catch-ошибка; никогда не null при реальном сбое" },
+        { "name": "data", "type": "T | null — результат успешного fetch" },
+        { "name": "load", "type": "() => Promise<void> — вызываемый fetch; передаётся в onRetry" }
+      ]
+    },
+    {
+      "entity": "RetryHandler",
+      "fields": [
+        { "name": "fn", "type": "useCallback — тот же fetch-хандлер что и при первом вызове" },
+        { "name": "resetError", "type": "() => setError(null) — вызывается перед retry" },
+        { "name": "setLoading", "type": "() => setLoading(true) — перед retry" }
+      ]
+    },
+    {
+      "entity": "BusyButton",
+      "fields": [
+        { "name": "loading", "type": "boolean — передаётся в Button loading prop" },
+        { "name": "disabled", "type": "boolean — равен loading для блокировки double-submit" },
+        { "name": "finally_reset", "type": "() => setSubmitting(false) — в finally блоке async handler" }
+      ]
+    }
+  ],
+  "contracts": [
+    "LoadingState: role=status aria-live=polite aria-busy=true — уже реализовано в kit, adoption only",
+    "EmptyState: role=status — уже реализовано в kit, adoption only; title обязателен; никогда не используется как fallback для сетевой ошибки",
+    "ErrorState: role=alert; onRetry обязателен кроме 401 (там CTA=Войти, не retry fetch); message маппит HTTP коды в русский текст без жаргона",
+    "Button loading prop: aria-busy=true + disabled=true + spinner — уже реализовано в kit; все submit/export-кнопки обязаны передавать loading={submitting}",
+    "Catch-контракт: любой catch(err) обязан вызывать setError(err); возврат null из catch — запрещён",
+    "Refresh-контракт: при повторной загрузке данные остаются видимыми (не setData(null)); контейнер получает aria-busy=true пока идёт fetch",
+    "shell.jsx auth-bootstrap: <LoadingState label='Инициализация…' /> вместо bare <div><p>Загрузка…</p></div>",
+    "Новый CI-скрипт: ci/checks/ux/ux-g4-state-primitives.sh — grep-гейт G4"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-UX-G4",
+      "rule": "Каждый файл в web/src/screens/ и web/src/canvas/ с паттерном useState(null)/useState([]) + useEffect fetch обязан рендерить LoadingState, ErrorState и EmptyState — статический grep-гейт проверяет отсутствие голых 'Загрузка' строк и bare null return в catch-ветках",
+      "ci_check": "ci/checks/ux/ux-g4-state-primitives.sh"
+    },
+    {
+      "id": "FF-530-ARIA-BUSY",
+      "rule": "LoadingState всегда имеет role=status и aria-busy=true — grep по компоненту в components.jsx",
+      "ci_check": "grep -n 'aria-busy' web/src/components/components.jsx | grep 'LoadingState\\|chs-state--loading' | grep -q 'true' || (echo 'FF-530-ARIA-BUSY FAIL: LoadingState missing aria-busy=true' && exit 1)"
+    },
+    {
+      "id": "FF-530-LOADING-ROLE",
+      "rule": "LoadingState в components.jsx содержит role=status — источник правды для всей адопции",
+      "ci_check": "grep -n 'role.*status' web/src/components/components.jsx | grep -q 'chs-state--loading\\|LoadingState' || (echo 'FF-530-LOADING-ROLE FAIL' && exit 1)"
+    },
+    {
+      "id": "FF-530-SUBMIT-BUSY",
+      "rule": "Submit/export-кнопки в перечисленных файлах используют loading prop — grep наличия loading= на Button рядом с handleSubmit/handleExport/handlePublish",
+      "ci_check": "ci/checks/ux/ux-g4-state-primitives.sh --check=submit-busy"
+    },
+    {
+      "id": "FF-530-NO-NULL-ON-ERROR",
+      "rule": "Ни один catch-блок в web/src/screens/ и web/src/canvas/ не возвращает null или не ставит пустой массив без setError",
+      "ci_check": "ci/checks/ux/ux-g4-state-primitives.sh --check=no-null-catch"
+    },
+    {
+      "id": "FF-530-SHELL-BOOTSTRAP",
+      "rule": "shell.jsx auth-bootstrap не содержит голый <p>Загрузка</p> без role=status",
+      "ci_check": "grep -n 'chs-login-loading' web/src/app-shell/shell.jsx && grep -A3 'chs-login-loading' web/src/app-shell/shell.jsx | grep -v 'role' && (echo 'FF-530-SHELL-BOOTSTRAP FAIL: bare loading без role=status' && exit 1) || exit 0"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-530-01: auth-bootstrap shell.jsx использует LoadingState(role=status aria-busy)", "covered_by": "FF-530-SHELL-BOOTSTRAP + FF-530-ARIA-BUSY" },
+    { "ac": "AC-530-02: все catch-ветки в screens/canvas вызывают setError, не возвращают null", "covered_by": "FF-530-NO-NULL-ON-ERROR" },
+    { "ac": "AC-530-03: submit/export-кнопки имеют loading prop (aria-busy + disabled)", "covered_by": "FF-530-SUBMIT-BUSY" },
+    { "ac": "AC-530-04: каждый список/деталь рендерит LoadingState/ErrorState(onRetry)/EmptyState", "covered_by": "FF-UX-G4" },
+    { "ac": "AC-530-05: ErrorState.onRetry вызывает тот же callable что и первый fetch (без дублирования логики)", "covered_by": "FF-530-NO-NULL-ON-ERROR + code review" },
+    { "ac": "AC-530-06: 401 ErrorState не имеет onRetry; имеет actionable CTA Войти или навигацию", "covered_by": "FF-UX-G4 + e2e/journeys/state-primitives.ux.journey.ts" },
+    { "ac": "AC-530-07: Refresh-операции не сбрасывают данные (setData(null) запрещён при повторной загрузке)", "covered_by": "FF-530-SUBMIT-BUSY --check=submit-busy" },
+    { "ac": "AC-530-08: CI-гейт G4 (ux-g4-state-primitives.sh) добавлен в ci/checks/ux/ и запускается в npm run fitness", "covered_by": "FF-UX-G4" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0530-state-primitives.design.md"
+}
