@@ -1,0 +1,269 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "choros/surface-document/v2",
+  "title": "Surface Document (v2)",
+  "description": "T-0543 — единый декларативный контракт UI-поверхности над named-binding. Обобщает form-document v1: форма записи (record-form), форма шага (step-form) и страница/дашборд (page) — конфигурации ОДНОГО документа. Узлы — закрытый набор дескрипторов реестра виджетов; data-bound узлы хранят ТОЛЬКО ключи (тип/опции резолвятся из живой схемы при рендере — анти-drift).",
+  "type": "object",
+  "required": ["schemaVersion", "surface", "root"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 2,
+      "description": "Версия surface-документа. v1 form-document авто-коэрсится в v2 record-form/step-form (coerceToSurface)."
+    },
+    "surface": { "$ref": "#/definitions/surface" },
+    "root": {
+      "$ref": "#/definitions/node",
+      "description": "Корень дерева узлов (как правило section)."
+    }
+  },
+  "definitions": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "surface": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "description": "Идентичность и контекст поверхности.",
+      "properties": {
+        "kind": {
+          "enum": ["record-form", "step-form", "page"],
+          "description": "record-form = форма одной записи; step-form = форма шага процесса; page = standalone-страница/дашборд."
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Контекст записи. Обязателен для record-form/step-form; опционален для page (страница может иметь только query/aggregate-виджеты со своими источниками).",
+          "properties": {
+            "applicationId": { "$ref": "#/definitions/uuid" },
+            "registryDefId": { "$ref": "#/definitions/uuid" }
+          }
+        },
+        "step": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ТОЛЬКО для step-form: привязка к шагу процесса.",
+          "required": ["processKey", "step"],
+          "properties": {
+            "processKey": { "type": "string" },
+            "step": { "type": "string" }
+          }
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "ТОЛЬКО для page: URL-safe идентичность standalone-страницы (дом в разделе/нав, E-NAV-IA)."
+        },
+        "title": { "type": "string" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["type"],
+      "description": "Узел дерева. type ∈ закрытый набор реестра виджетов (R-CLOSED). Поля узла зависят от type; data-bound узлы несут ТОЛЬКО ключи привязки.",
+      "properties": {
+        "type": {
+          "enum": [
+            "section", "columns", "tabs", "divider", "text",
+            "field", "table", "readout", "relation",
+            "list", "chart", "metric", "action",
+            "custom"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "description": "Editor-local id (НЕ привязка; бот может опускать). Не влияет на KEY_SET / round-trip."
+        },
+        "label": { "type": "string" },
+        "title": { "type": "string" },
+        "mode": {
+          "enum": ["editable", "readonly", "hidden", "required"],
+          "description": "Per-step режим узла (form-document-format §5)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "columns" } } },
+          "then": {
+            "properties": {
+              "count": { "type": "integer", "minimum": 2, "maximum": 4 },
+              "children": { "type": "array", "items": { "$ref": "#/definitions/node" } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["section"] } } },
+          "then": {
+            "properties": {
+              "children": { "type": "array", "items": { "$ref": "#/definitions/node" } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "tabs" } } },
+          "then": {
+            "properties": {
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["children"],
+                  "properties": {
+                    "title": { "type": "string" },
+                    "children": { "type": "array", "items": { "$ref": "#/definitions/node" } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "text" } } },
+          "then": { "properties": { "content": { "type": "string" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "field" } } },
+          "then": {
+            "required": ["fieldKey"],
+            "properties": {
+              "fieldKey": { "type": "string", "description": "named-binding: ключ поля в живой схеме. Тип/опции НЕ хранятся." },
+              "widget": { "type": "string", "description": "Presentation-override; совместимость проверяется против живого типа поля." }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "readout" } } },
+          "then": {
+            "required": ["fieldKey"],
+            "properties": { "fieldKey": { "type": "string" } }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "relation" } } },
+          "then": {
+            "required": ["fieldKey"],
+            "properties": {
+              "fieldKey": { "type": "string" },
+              "displayField": { "type": "string", "description": "named-binding канал 3: поле отображения связанной записи." },
+              "widget": { "type": "string" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "table" } } },
+          "then": {
+            "required": ["fieldKey"],
+            "properties": {
+              "fieldKey": { "type": "string" },
+              "columns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["subKey"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "subKey": { "type": "string", "description": "named-binding канал 2: ключ в sub-схеме коллекции." },
+                    "widget": { "type": "string" },
+                    "label": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "list" } } },
+          "then": {
+            "required": ["dataSource"],
+            "description": "list (query): таблица ДРУГИХ записей. Видимость гейтится read-грантом (T-0021).",
+            "properties": {
+              "dataSource": {
+                "type": "object",
+                "required": ["kind", "applicationId", "columns"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": { "const": "query" },
+                  "applicationId": { "$ref": "#/definitions/uuid" },
+                  "filter": { "type": "object", "description": "Декларативный фильтр (поля проверяются против живой схемы)." },
+                  "sort": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["fieldKey"],
+                      "properties": {
+                        "fieldKey": { "type": "string" },
+                        "dir": { "enum": ["asc", "desc"] }
+                      }
+                    }
+                  },
+                  "columns": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": ["fieldKey"],
+                      "properties": {
+                        "fieldKey": { "type": "string" },
+                        "label": { "type": "string" },
+                        "widget": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["chart", "metric"] } } },
+          "then": {
+            "required": ["dataSource"],
+            "description": "viz (aggregate): графики/сводки. Floor-1 агрегаты (поглощает report-page T-0121).",
+            "properties": {
+              "viz": { "enum": ["bar", "line", "pie", "number"], "description": "Только chart; metric подразумевает number." },
+              "dataSource": {
+                "type": "object",
+                "required": ["kind", "applicationId", "measure", "op"],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": { "const": "aggregate" },
+                  "applicationId": { "$ref": "#/definitions/uuid" },
+                  "groupBy": { "type": "string", "description": "Поле группировки (проверяется против живой схемы)." },
+                  "measure": { "type": "string", "description": "Поле меры (проверяется против живой схемы)." },
+                  "op": { "enum": ["count", "sum", "avg", "min", "max"] }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "action" } } },
+          "then": {
+            "required": ["outcomeRef"],
+            "description": "action: кнопка. Семантику исхода ВЛАДЕЕТ E16; узел несёт только ссылку.",
+            "properties": {
+              "outcomeRef": { "type": "string", "description": "Ссылка на исход/действие, определённый E16 (T-0349)." },
+              "triggerRef": { "type": "string" },
+              "variant": { "enum": ["primary", "secondary", "danger", "ghost"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "custom" } } },
+          "then": {
+            "required": ["componentId"],
+            "description": "Floor-2 код-escape (sandbox-iframe). Привязки — через bindings[] из живой схемы.",
+            "properties": {
+              "componentId": { "type": "string" },
+              "code": { "type": "string" },
+              "flagged": { "type": "boolean", "description": "FLOOR2_CUSTOM_FLAG_KEY: код монтируется ТОЛЬКО при явном флаге." },
+              "bindings": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
