@@ -69,6 +69,7 @@ function makeStubFlowableClient(deployResult: DeployResult): FlowableClient {
     // T-0443: engine-reconcile stubs — not exercised by process-defs tests.
     getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
     getMessageCatchWaits: vi.fn().mockResolvedValue({ ok: true, waits: [] }),
+    correlateMessage: vi.fn().mockResolvedValue({ ok: true }),
     isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
   };
 }

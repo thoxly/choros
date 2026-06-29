@@ -164,6 +164,16 @@ export type CompleteUserTaskResult =
   | { ok: false; code: FlowableErrorCode };
 
 /**
+ * T-0536: result of correlateMessage — signal a parked message-catch in the live
+ * engine. { ok: true } when the engine accepted the message-event trigger (the
+ * catch fired and the token advanced); { ok: false, code } on engine error so the
+ * delivery seam (deliverMessageEnvelope) can honest-degrade and retry.
+ */
+export type CorrelateMessageResult =
+  | { ok: true }
+  | { ok: false; code: FlowableErrorCode };
+
+/**
  * T-0443: A live active user task from the Flowable engine.
  * Maps the GET /runtime/tasks?processInstanceId wire shape.
  */
@@ -320,6 +330,27 @@ export interface FlowableClient {
    * Maps each subscription to { messageName (eventName), eventType }.
    */
   getMessageCatchWaits(instanceId: string): Promise<GetMessageCatchWaitsResult>;
+  /**
+   * T-0536 [D8-R4 delivery]: deliver a correlated message into a specific process
+   * instance — fire the parked message-catch (receiveTask / intermediateCatchEvent /
+   * message boundary) the instance is waiting on. The CORRELATION decision
+   * (tenant-fail-closed, business-key match) is made BEFORE this call in the pure
+   * core (correlateEnvelope); this method only carries the already-correlated signal
+   * to the engine for ONE instance.
+   *
+   * Flowable endpoint: PUT {baseUrl}/runtime/process-instances/{id}
+   *   body: { "action": "messageEventReceived", "messageName": <name>,
+   *           "variables": [ {name,value}, ... ] }
+   * Success: 200 (Flowable returns the updated instance) / 204.
+   *
+   * Returns { ok: true } on accept, { ok: false, code } on engine error (the
+   * delivery seam treats a failure as retriable — never throws past this boundary).
+   */
+  correlateMessage(
+    instanceId: string,
+    messageName: string,
+    payload: Record<string, unknown>,
+  ): Promise<CorrelateMessageResult>;
   /**
    * T-0443: Check whether a process instance has ended.
    * Strategy: GET /runtime/process-instances/{id} → 404 ⇒ ended (Flowable
@@ -876,6 +907,48 @@ export function makeFlowableClient(
   }
 
   // -------------------------------------------------------------------------
+  // T-0536 [D8-R4 delivery]: correlateMessage — fire a parked message-catch.
+  //
+  // PUT {baseUrl}/runtime/process-instances/{id}
+  //   body: { action: "messageEventReceived", messageName, variables: [...] }
+  // The correlation decision (tenant-fail-closed, business-key match) already
+  // happened in the pure core; this only carries the signal to the engine for ONE
+  // already-correlated instance. Payload is projected into Flowable's variables wire
+  // shape ([{ name, value }]) so the catch's downstream steps can read it.
+  // -------------------------------------------------------------------------
+  async function correlateMessage(
+    instanceId: string,
+    messageName: string,
+    payload: Record<string, unknown>,
+  ): Promise<CorrelateMessageResult> {
+    return withRetry(async () => {
+      const variables = Object.entries(payload).map(([name, value]) => ({
+        name,
+        value,
+      }));
+      const resp = await globalThis.fetch(
+        `${resolved.baseUrl}/runtime/process-instances/${encodeURIComponent(instanceId)}`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: auth,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "messageEventReceived",
+            messageName,
+            variables,
+          }),
+        },
+      );
+      if (resp.status === 200 || resp.status === 204) {
+        return { ok: true as const };
+      }
+      return { ok: false, code: httpStatusToCode(resp.status) };
+    }, resolved) as Promise<CorrelateMessageResult>;
+  }
+
+  // -------------------------------------------------------------------------
   // FR-9: isInstanceEnded — T-0443 engine-reconcile seam
   //
   // Strategy:
@@ -966,6 +1039,7 @@ export function makeFlowableClient(
     completeUserTask,
     getActiveUserTasks,
     getMessageCatchWaits,
+    correlateMessage,
     isInstanceEnded,
     pingEngine,
   };

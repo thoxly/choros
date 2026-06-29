@@ -129,6 +129,14 @@ class MockFlowableClient implements FlowableClient {
     return { ok: true, waits: [] };
   }
 
+  async correlateMessage(
+    _instanceId: string,
+    _messageName: string,
+    _payload: Record<string, unknown>,
+  ): Promise<import("../core/flowable-client.js").CorrelateMessageResult> {
+    return { ok: true };
+  }
+
   async isInstanceEnded(_instanceId: string): Promise<import("../core/flowable-client.js").IsInstanceEndedResult> {
     return { ok: true, ended: false };
   }
