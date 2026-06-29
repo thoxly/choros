@@ -1,0 +1,117 @@
+{
+  "task_id": "T-0526",
+  "status": "ready",
+  "decision": "Каждое деструктивное/необратимое действие гейтируется kit <ConfirmDialog tone='danger'> с именованным ConsequenceSummary (кто/что/обратимость). Обратимые bulk-удаления получают undo-тост (5 с, action=Отменить) через T-0528 ToastProvider. Единственный window.confirm() (ra-sod.jsx) заменяется на двух-фазный ConfirmDialog. Кнопки Publish/Save визуально разделяются: Publish→variant='danger' + отдельная ConfirmDialog. Dual-control reject reason встраивается в ConfirmDialog через опциональные props reason/onReasonChange/reasonRequired.",
+  "rejected_alternatives": [
+    {
+      "option": "Оставить window.confirm() в ra-sod.jsx как есть",
+      "why_not": "Нарушает конвенцию кита (principles.md §4), блокирует UI-тред, не поддерживает брендирование и a11y."
+    },
+    {
+      "option": "Глобальный ConfirmDialog-синглтон (provider + imperative confirm())",
+      "why_not": "Усложняет управление состоянием reason/loading; теряется типизация ConsequenceSummary; локальный двух-фазный паттерн (open/target) проще и уже работает в screen-org и screen-assistant."
+    },
+    {
+      "option": "Inline inline-предупреждение вместо модала для Publish",
+      "why_not": "Не блокирует действие — пользователь игнорирует баннеры; аудит §топ-1 явно требует ConfirmDialog для необратимых деплоев."
+    },
+    {
+      "option": "Undo-тост для всех деструктивных действий (включая Уволить)",
+      "why_not": "«Уволить» — server-side необратимо (revoke грантов в БД); undo невозможен без отдельного API reverse-интента. Только обратимые local/draft операции подходят для undo-тоста."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "ConfirmPolicy",
+      "fields": [
+        { "name": "site_id", "type": "string" },
+        { "name": "file", "type": "string" },
+        { "name": "action_label", "type": "string" },
+        { "name": "class", "type": "enum: CONFIRM-DANGER | CONFIRM-WARNING | UNDO-TOAST | NO-GATE" },
+        { "name": "consequence_summary_required", "type": "boolean" },
+        { "name": "reason_required", "type": "boolean" }
+      ]
+    },
+    {
+      "entity": "ConsequenceSummary",
+      "fields": [
+        { "name": "who", "type": "string — субъект(ы), затронутые действием" },
+        { "name": "what", "type": "string — что конкретно произойдёт" },
+        { "name": "reversibility", "type": "string — Необратимо | Обратимо через <способ>" }
+      ]
+    },
+    {
+      "entity": "ConfirmDialogExtended",
+      "fields": [
+        { "name": "open", "type": "boolean" },
+        { "name": "title", "type": "string" },
+        { "name": "message", "type": "ReactNode — включает ConsequenceSummary" },
+        { "name": "confirmLabel", "type": "string" },
+        { "name": "cancelLabel", "type": "string" },
+        { "name": "tone", "type": "enum: danger | default" },
+        { "name": "loading", "type": "boolean" },
+        { "name": "onConfirm", "type": "function" },
+        { "name": "onClose", "type": "function" },
+        { "name": "reason", "type": "string | undefined — опциональное поле причины" },
+        { "name": "onReasonChange", "type": "function | undefined" },
+        { "name": "reasonRequired", "type": "boolean | undefined" },
+        { "name": "reasonPlaceholder", "type": "string | undefined" }
+      ]
+    },
+    {
+      "entity": "UndoToast",
+      "fields": [
+        { "name": "tone", "type": "string: success" },
+        { "name": "title", "type": "string" },
+        { "name": "duration", "type": "number: 5000" },
+        { "name": "action", "type": "ReactNode: кнопка Отменить" },
+        { "name": "undo_fn", "type": "function — восстанавливает предыдущее состояние" }
+      ]
+    }
+  ],
+  "contracts": [
+    "ConfirmDialog (kit) расширяется props: reason, onReasonChange, reasonRequired, reasonPlaceholder — обратно совместимо (все новые props опциональны)",
+    "ConsequenceSummary — новый компонент-хелпер в web/src/components/confirm-helpers.jsx",
+    "useDestructiveConfirm — новый хук в web/src/components/confirm-helpers.jsx (инкапсулирует open/target/loading двух-фазный паттерн)",
+    "Undo-тост: duration=5000, tone='success', action=<button>Отменить</button>; временно через локальный useToasts, целевой — через T-0528 useAppToast()",
+    "Publish-кнопки: variant='danger' + иконка upload; визуальный разделитель от Save в тулбаре",
+    "Все window.confirm() заменены на <ConfirmDialog>; grep-гард добавляется в ci/checks/no-window-confirm.sh"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-526-01",
+      "rule": "В web/src/ не должно быть ни одного вызова window.confirm()",
+      "ci_check": "grep -rn 'window\\.confirm' web/src/ --include='*.jsx' --include='*.js' --include='*.tsx' --include='*.ts' && exit 1 || exit 0"
+    },
+    {
+      "id": "FF-526-02",
+      "rule": "Все 9 CONFIRM-DANGER сайтов гейтируются <ConfirmDialog tone='danger'>: ra-intents (Уволить, Срочно отозвать), ra-sod (Удалить правило), bpmn-properties-panel (Удалить исход), screen-process-editor (Опубликовать), screen-dmn-editor (Опубликовать), screen-reports (Опубликовать/promote), screen-llm-connections (Отвязать), screen-assistant (Опубликовать решение)",
+      "ci_check": "grep -rn 'tone=\"danger\"' web/src/ | grep 'ConfirmDialog' | wc -l | awk '{if($1>=9) exit 0; else exit 1}'"
+    },
+    {
+      "id": "FF-526-03",
+      "rule": "Кнопка Опубликовать в screen-process-editor и screen-dmn-editor имеет variant='danger'",
+      "ci_check": "grep -n 'variant=\"danger\"' web/src/screens/screen-process-editor.jsx | grep -i 'publish\\|опублик' && grep -n 'variant=\"danger\"' web/src/screens/screen-dmn-editor.jsx | grep -i 'publish\\|опублик'"
+    },
+    {
+      "id": "FF-526-04",
+      "rule": "Undo-тосты для обратимых сайтов (screen-reports метрика, screen-dmn-editor правило в черновике, screen-app-schema поле/колонка) используют duration=5000 и имеют action prop",
+      "ci_check": "grep -rn 'duration.*5000\\|5000.*duration' web/src/screens/screen-reports.jsx web/src/screens/screen-dmn-editor.jsx web/src/screens/screen-app-schema.jsx"
+    },
+    {
+      "id": "FF-526-05",
+      "rule": "ConsequenceSummary используется в ConfirmDialog для сайтов с высоким blast-radius (Уволить, Срочно отозвать, Отвязать, Опубликовать процесс)",
+      "ci_check": "grep -rn 'ConsequenceSummary' web/src/screens/rights/ra-intents.jsx web/src/screens/screen-llm-connections.jsx web/src/screens/screen-process-editor.jsx"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-526-01: window.confirm полностью выведен из кодовой базы web/src", "covered_by": "FF-526-01 + ra-sod.jsx impl" },
+    { "ac": "AC-526-02: все CONFIRM-DANGER сайты гейтируются danger ConfirmDialog", "covered_by": "FF-526-02" },
+    { "ac": "AC-526-03: ConsequenceSummary присутствует в диалогах с высоким blast-radius", "covered_by": "FF-526-05" },
+    { "ac": "AC-526-04: Publish визуально отделён от Save (variant=danger + разделитель)", "covered_by": "FF-526-03" },
+    { "ac": "AC-526-05: обратимые bulk-удаления получают undo-тост 5 с", "covered_by": "FF-526-04" },
+    { "ac": "AC-526-06: dual-control reject reason встраивается для crit=true ролей", "covered_by": "ConfirmDialogExtended props reason/reasonRequired" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0526-destructive-confirm.design.md"
+}
