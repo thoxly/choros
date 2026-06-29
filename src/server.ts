@@ -9,6 +9,7 @@ import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
+import { registerMessageIngestRoutes } from "./http/message-ingest.js";
 import { registerFormsRoutes } from "./http/forms.js";
 import { makeFormRecordPersister, makeFormDefResolver } from "./http/form-record-persister.js";
 import { registerAuditRoutes } from "./http/audit.js";
@@ -537,6 +538,24 @@ function buildRouter(
           // T-0443: optional FlowableClient for engine-drive post-approve (defKey resolution
           // + reconcile). Absent ⇒ linear audit-only behaviour unchanged (honest-degrade).
           flowableClient: flowableClient ?? undefined,
+        }
+      : undefined,
+  );
+
+  // T-0536 [D8-R4 delivery]: register the MESSAGE INGEST door (POST /api/message)
+  // — the producer that finally feeds deliverMessageEnvelope so a process parked on
+  // a message-catch can RECEIVE its message and continue. Only when a DB pool + a
+  // live engine are present (honest-degrade: no delivery path without both). Tenant
+  // is taken from the ACTOR'S identity (resolveActorTenant), never from the body —
+  // cross-tenant correlation is structurally impossible (tenant-fail-closed).
+  registerMessageIngestRoutes(
+    router,
+    grantsPool && flowableClient
+      ? {
+          pool: grantsPool,
+          resolveActorTenant: (actorSlug: string) =>
+            resolveActorTenant(getOrgPool(), actorSlug),
+          engine: flowableClient,
         }
       : undefined,
   );
