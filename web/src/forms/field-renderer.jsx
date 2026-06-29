@@ -469,6 +469,286 @@ export function DateRangeField({ field, value, onChange, error, idPrefix = 'fiel
 }
 
 // ---------------------------------------------------------------------------
+// T-0406 (D7-7): CollectionField — editable line-items table for a `collection`
+// contract (schemaSlot: child-rows).
+//
+// Renders a repeatable rows table where each row is an object with sub-fields.
+// Sub-field types come from field.subFields (built by schemaToFormFields in
+// records-form.js from the array items.properties — T-0448/T-0449). Each cell
+// is rendered via FieldControl recursively (hideLabel=true) so every scalar/enum
+// sub-field type is supported without duplication.
+//
+// onChange contract: onChange(field.key, rows[]) — the caller receives the
+// updated array of row objects and stores it as the field value.
+//
+// Value shape: Array<Record<string, string|boolean|number>> — same as
+// serializeRecordData's output for a collection field (records-form.js L732-778).
+//
+// UX-честность:
+//   - Empty collection → one empty row pre-added so the table is never blank;
+//     alternatively, a clear "Добавить строку" button when rows[] is empty.
+//     The component starts with an empty array (blankRecordValues gives [])
+//     and the "добавить" button is always visible (not hidden).
+//   - Validation errors per cell: passed via `error` shape
+//     { rows: [ { [subKey]: "message" } | undefined, … ], _collection?: string }
+//     (matches validateRecordValues output for collection — records-form.js L504-562).
+//     _collection error is shown as a top-level error (field-level); per-row/cell
+//     errors are shown inline under the cell.
+//   - add/remove buttons: always functional (add → new blank row; remove → splices row).
+//   - tokens: --chs-* only; .chs-input/.chs-label classes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Editable line-items table for a `collection` contract field.
+ * Each row is an object with sub-fields; each cell renders via FieldControl.
+ *
+ * @param {{ key, label?, title?, required?, subFields?: Array }} field
+ * @param {Array<Record<string,unknown>>} value  current rows array ([] = empty)
+ * @param {(key, rows) => void} onChange
+ * @param {{ rows?: Array<object|undefined>, _collection?: string }|string|undefined} error
+ * @param {string} idPrefix
+ * @param {boolean} isRequired
+ * @param {boolean} readOnly
+ */
+export function CollectionField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
+  const label = field.label || field.title || field.key;
+  const subFields = Array.isArray(field.subFields) ? field.subFields : [];
+  const rows = Array.isArray(value) ? value : [];
+
+  // Normalise the error prop:
+  //   string → top-level field error (e.g. "Добавьте хотя бы одну строку")
+  //   object → { rows: […], _collection?: string } shape from validateRecordValues
+  const collectionError = error && typeof error === 'object' && !Array.isArray(error)
+    ? (error._collection || null)
+    : (typeof error === 'string' ? error : null);
+  const rowErrors = error && typeof error === 'object' && Array.isArray(error.rows)
+    ? error.rows
+    : [];
+
+  // Add a blank row to the rows array. The row carries a non-enumerable, stable
+  // __rowKey so React can key <tr> on identity (not index) — removing a non-last
+  // row then no longer makes React reuse the wrong DOM (the value-flicker trap).
+  // The key is non-enumerable so serializeRecordData (records-form.js) never sees
+  // it (Object.keys / for…of over entries skip it) — the data payload stays clean.
+  const handleAdd = () => {
+    if (readOnly) return;
+    const blankRow = {};
+    for (const sf of subFields) {
+      blankRow[sf.key] = sf.type === 'boolean' ? false : '';
+    }
+    Object.defineProperty(blankRow, '__rowKey', {
+      value: `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+    onChange(field.key, [...rows, blankRow]);
+  };
+
+  // Remove a row at index i.
+  const handleRemove = (i) => {
+    if (readOnly) return;
+    const next = rows.filter((_, idx) => idx !== i);
+    onChange(field.key, next);
+  };
+
+  // Update a single cell in a row. Preserve the non-enumerable __rowKey (a plain
+  // `{ ...row }` spread would drop it, since spread only copies enumerable props)
+  // so the row keeps its stable React identity across edits.
+  const handleCellChange = (rowIdx, cellKey, cellValue) => {
+    if (readOnly) return;
+    const next = rows.map((row, idx) => {
+      if (idx !== rowIdx) return row;
+      const updated = { ...row, [cellKey]: cellValue };
+      const rowKey = row && typeof row === 'object' ? row.__rowKey : undefined;
+      if (typeof rowKey === 'string') {
+        Object.defineProperty(updated, '__rowKey', {
+          value: rowKey, enumerable: false, writable: false, configurable: true,
+        });
+      }
+      return updated;
+    });
+    onChange(field.key, next);
+  };
+
+  const tableStyle = {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 'var(--chs-text-sm)',
+  };
+  const thStyle = {
+    textAlign: 'left',
+    padding: 'var(--chs-space-2) var(--chs-space-2)',
+    borderBottom: '1px solid var(--chs-color-border)',
+    color: 'var(--chs-color-text-muted)',
+    fontWeight: 600,
+    whiteSpace: 'nowrap',
+  };
+  const tdStyle = {
+    padding: 'var(--chs-space-1) var(--chs-space-2)',
+    verticalAlign: 'top',
+    borderBottom: '1px solid var(--chs-color-border)',
+  };
+  const removeBtnStyle = {
+    background: 'none',
+    border: 'none',
+    cursor: readOnly ? 'default' : 'pointer',
+    color: readOnly ? 'var(--chs-color-text-muted)' : 'var(--chs-color-danger)',
+    fontSize: 'var(--chs-text-sm)',
+    padding: '0 var(--chs-space-1)',
+    opacity: readOnly ? 0.4 : 1,
+  };
+  const addBtnStyle = {
+    marginTop: 'var(--chs-space-2)',
+    padding: 'var(--chs-space-2) var(--chs-space-3)',
+    background: 'none',
+    border: '1px dashed var(--chs-color-border)',
+    borderRadius: 'var(--chs-radius)',
+    cursor: readOnly ? 'default' : 'pointer',
+    color: readOnly ? 'var(--chs-color-text-muted)' : 'var(--chs-color-primary)',
+    fontSize: 'var(--chs-text-sm)',
+    opacity: readOnly ? 0.5 : 1,
+  };
+
+  // Helper: make a cell onChange handler for a given row index.
+  // Returns (cellKey, cellValue) => void — matches FieldControl's onChange contract.
+  const makeCellOnChange = (rowIdx) => (cellKey, cellValue) => {
+    handleCellChange(rowIdx, cellKey, cellValue);
+  };
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {/* Field label — a real <label htmlFor> bound to the line-items table
+          (WCAG 1.3.1 / OBLIK G6), consistent with RelationPickerField/DateRangeField
+          and the scalar controls in this file (not a bare div). */}
+      <label className="chs-label" htmlFor={id} style={{ marginBottom: 'var(--chs-space-2)' }}>
+        {label}
+        {isRequired && (
+          <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+        )}
+      </label>
+
+      {/* Top-level collection error (e.g. "Добавьте хотя бы одну строку") */}
+      {collectionError && (
+        <span
+          role="alert"
+          style={{ display: 'block', marginBottom: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}
+        >
+          {collectionError}
+        </span>
+      )}
+
+      {/* Table */}
+      {subFields.length > 0 ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table id={id} style={tableStyle} aria-label={label}>
+            <thead>
+              <tr>
+                {subFields.map((sf) => (
+                  <th key={sf.key} scope="col" style={thStyle}>
+                    {sf.label || sf.key}
+                    {sf.required && (
+                      <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+                    )}
+                  </th>
+                ))}
+                {/* Remove-button column header */}
+                <th scope="col" style={{ ...thStyle, width: '2.5rem' }} aria-label="Действия" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={subFields.length + 1}
+                    style={{ ...tdStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', textAlign: 'center', paddingTop: 'var(--chs-space-4)', paddingBottom: 'var(--chs-space-4)' }}
+                  >
+                    Нет строк — нажмите «Добавить строку»
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row, rowIdx) => {
+                  const rowErr = rowErrors[rowIdx];
+                  // Stable React key: prefer the row's own __rowKey (set at handleAdd),
+                  // fall back to the index for rows loaded from data (no key). Stable
+                  // identity stops React reusing the wrong <tr> DOM when a non-last
+                  // row is removed (the value-flicker trap).
+                  const rowKey = (row && typeof row === 'object' && typeof row.__rowKey === 'string')
+                    ? row.__rowKey
+                    : `idx-${rowIdx}`;
+                  return (
+                    <tr key={rowKey}>
+                      {subFields.map((sf) => {
+                        const cellErr = rowErr && typeof rowErr === 'object' ? rowErr[sf.key] : undefined;
+                        const cellValue = row && typeof row === 'object' ? row[sf.key] : undefined;
+                        // B-1: thread readOnly down to the cell. FieldControl derives
+                        // its disabled state from resolveFieldMode(field).mode, but a
+                        // sub-field descriptor carries no `mode` — so the cell input
+                        // would render editable in a read-only collection. Stamp
+                        // mode:'read-only' onto the cell field so the <input> is really
+                        // disabled (not just the add/remove buttons).
+                        const cellField = readOnly ? { ...sf, mode: 'read-only' } : sf;
+                        return (
+                          <td key={sf.key} style={tdStyle}>
+                            {/* Reuse FieldControl for each cell — hideLabel=true since <th> carries the label */}
+                            <FieldControl
+                              field={cellField}
+                              value={cellValue}
+                              onChange={makeCellOnChange(rowIdx)}
+                              error={cellErr}
+                              idPrefix={`${idPrefix}-${field.key}-row${rowIdx}`}
+                              hideLabel={true}
+                            />
+                          </td>
+                        );
+                      })}
+                      <td style={{ ...tdStyle, textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          aria-label={`Удалить строку ${rowIdx + 1}`}
+                          onClick={() => handleRemove(rowIdx)}
+                          style={removeBtnStyle}
+                          disabled={readOnly || undefined}
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        /* No sub-fields configured — honest empty state */
+        <div
+          className="chs-input"
+          aria-readonly="true"
+          style={{ color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }}
+        >
+          Структура строк не настроена
+        </div>
+      )}
+
+      {/* Add row button */}
+      {subFields.length > 0 && (
+        <button
+          type="button"
+          onClick={handleAdd}
+          style={addBtnStyle}
+          disabled={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+        >
+          + Добавить строку
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // FieldControl — the single field component the schema-driven forms render.
 // ---------------------------------------------------------------------------
 
@@ -546,6 +826,23 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   if (presentation === 'range') {
     return (
       <DateRangeField
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
+    );
+  }
+
+  // T-0406 (D7-7): collection (presentation='table') → CollectionField.
+  // Renders an editable line-items table; delegates cell rendering back to
+  // FieldControl (hideLabel=true). Replaces the old "not yet" italic readout.
+  if (presentation === 'table') {
+    return (
+      <CollectionField
         field={field}
         value={value}
         onChange={onChange}
