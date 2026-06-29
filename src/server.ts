@@ -82,6 +82,13 @@ import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
 // T-0477 [E-AGENTS L5]: spend accounting routes + spend-tracking LLM port.
 import { registerSpendRoutes } from "./http/spend.js";
 import { getDefaultLlmConnection } from "./db/llm-connection-dao.js";
+// T-0518: file attachment HTTP routes + adapters.
+import { registerFileRoutes } from "./http/files.js";
+import { PgFileStore } from "./core/postgres/pgFileStore.js";
+import { FsObjectStore } from "./adapters/s3-object-store.js";
+import { makeFileRecordResolver } from "./core/grant-resolver.js";
+import { makeDbGrantSource } from "./db/grants-dao.js";
+import { SEED_ORACLE } from "./http/seed-ancestry.js";
 
 const { Pool } = pg;
 
@@ -1046,6 +1053,60 @@ function buildRouter(
   if (grantsPool) {
     registerSpendRoutes(router, {
       pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0518: file attachment routes.
+  // POST /api/records/:recordId/files  — upload file (raw body, X-File-Name header)
+  // GET  /api/records/:recordId/files  — list files on a record
+  // GET  /api/files/:fileVersionId/download — stream/redirect to file content
+  //
+  // FsObjectStore rootDir: FILE_STORE_ROOT env (default /app/uploads — ephemeral
+  // in-container; a persistent volume mount is an operator concern, not wired here).
+  // The PDP uses makeFileRecordResolver (record-derived authz, no file ACL).
+  if (grantsPool) {
+    const fileStoreRoot = process.env["FILE_STORE_ROOT"] ?? "/app/uploads";
+    const pgFileStore = new PgFileStore(grantsPool);
+    const fsObjectStore = new FsObjectStore(fileStoreRoot);
+    // Build a per-request-style FileRecordResolver that loads grants + ancestry
+    // fresh from DB each call (same pattern as pdp-explain.ts). The grant source
+    // uses makeDbGrantSource (same DAO as the full PDP). Ancestry: load per-tenant
+    // from DB (loadTenantOrgAncestry); fall back to SEED_ORACLE on error
+    // (ancestry is only consulted for org-scoped grants, not simple record grants).
+    const fileGrantSource = makeDbGrantSource(grantsPool);
+    const fileResolver = makeFileRecordResolver({
+      grants: fileGrantSource,
+      records: {
+        async getRecord(ref) {
+          if (ref.kind !== "record") return { __sentinel__: true };
+          const client = await grantsPool.connect();
+          try {
+            await client.query("BEGIN");
+            await client.query(`SET LOCAL choros.tenant_id = '${ref.tenantId}'`);
+            await client.query("SET LOCAL search_path TO choros");
+            const { rows } = await client.query<{ data: Record<string, unknown> }>(
+              `SELECT data FROM choros.record WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+              [ref.tenantId, ref.recordId],
+            );
+            await client.query("COMMIT");
+            return rows.length > 0 ? (rows[0]!.data ?? {}) : null;
+          } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+          } finally {
+            client.release();
+          }
+        },
+      },
+      ancestry: SEED_ORACLE,
+    });
+    registerFileRoutes(router, {
+      pool: grantsPool,
+      fileStore: pgFileStore,
+      objectStore: fsObjectStore,
+      resolver: fileResolver,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
     });

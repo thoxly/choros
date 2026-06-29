@@ -53,6 +53,55 @@ export function mapDomainError(code: string): HttpError {
 }
 
 // ---------------------------------------------------------------------------
+// readRawBody — mirrors readJsonBody but returns the raw Buffer (no JSON.parse)
+// ---------------------------------------------------------------------------
+
+/** Default max for file uploads: 25 MiB. */
+export const DEFAULT_RAW_MAX_BYTES = 26_214_400; // 25 MiB
+
+/**
+ * Read raw (non-JSON) request body bytes into a Buffer.
+ * Rejects with 413 if the body exceeds maxBytes (default 25 MiB).
+ * Callers receive the raw Buffer — content-type interpretation is their concern.
+ */
+export function readRawBody(
+  req: IncomingMessage,
+  maxBytes: number = DEFAULT_RAW_MAX_BYTES,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let done = false;
+
+    const finish = (err: HttpError): void => {
+      if (done) return;
+      done = true;
+      req.resume();
+      reject(err);
+    };
+
+    req.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        finish(new HttpError(413, "PAYLOAD_TOO_LARGE", "request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("error", () => {
+      finish(new HttpError(400, "READ_ERROR", "request read error"));
+    });
+
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // readJsonBody
 // ---------------------------------------------------------------------------
 
