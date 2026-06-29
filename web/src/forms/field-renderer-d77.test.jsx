@@ -521,6 +521,186 @@ describe('CollectionField D7-7 · readOnly', () => {
     // readOnly guard returns early — no onChange calls.
     expect(calls).toHaveLength(0);
   });
+
+  // B-1 (review): readOnly must reach the CELL inputs, not just the buttons.
+  // Each cell FieldControl gets field.mode='read-only' so the rendered control
+  // is really disabled (resolveFieldMode → readOnly).
+  it('readOnly=true → each cell FieldControl carries field.mode="read-only"', () => {
+    const rows = [{ name: 'Widget', qty: '3', unit: 'шт' }];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: rows,
+      onChange: noop,
+      readOnly: true,
+    });
+
+    const cellControls = findByComponent(tree, FieldControl);
+    expect(cellControls.length).toBe(3);
+    for (const fc of cellControls) {
+      expect(fc.props.field.mode).toBe('read-only');
+    }
+  });
+
+  it('readOnly=true → rendered cell inputs are actually disabled/readOnly (not just buttons)', () => {
+    const rows = [{ name: 'Widget', qty: '3', unit: 'шт' }];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: rows,
+      onChange: noop,
+      readOnly: true,
+    });
+
+    // Render each cell FieldControl one level deeper (call it as a function with
+    // its props) and assert the underlying control is disabled (select) or
+    // readOnly (text/number input).
+    const cellControls = findByComponent(tree, FieldControl);
+    for (const fc of cellControls) {
+      const rendered = FieldControl(fc.props);
+      const inputs = collectElements(rendered, (el) => el.type === 'input' || el.type === 'select' || el.type === 'textarea');
+      expect(inputs.length).toBeGreaterThan(0);
+      for (const ctrl of inputs) {
+        // select → disabled; text/number/textarea → readOnly. Either way the
+        // user cannot edit it. Assert at least one of the two is truthy.
+        const locked = ctrl.props.disabled === true || ctrl.props.readOnly === true;
+        expect(locked).toBe(true);
+      }
+    }
+  });
+
+  it('NOT readOnly → cell FieldControl has no forced read-only mode', () => {
+    const rows = [{ name: 'Widget', qty: '3', unit: 'шт' }];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: rows,
+      onChange: noop,
+      readOnly: false,
+    });
+    const cellControls = findByComponent(tree, FieldControl);
+    for (const fc of cellControls) {
+      // The sub-field descriptor carries no mode → editable.
+      expect(fc.props.field.mode).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B-2 (review): the field label is a real <label htmlFor> (WCAG 1.3.1 / G6),
+// not a bare <div className="chs-label">.
+// ---------------------------------------------------------------------------
+
+describe('CollectionField D7-7 · a11y label (B-2)', () => {
+  it('field label is a <label> element (not a div) with the field text', () => {
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: [],
+      onChange: noop,
+    });
+
+    const labels = findByType(tree, 'label');
+    const mainLabel = labels.find((l) => {
+      const c = l.props?.children;
+      if (typeof c === 'string') return c.includes('Позиции');
+      if (Array.isArray(c)) return c.some((x) => typeof x === 'string' && x.includes('Позиции'));
+      return false;
+    });
+    expect(mainLabel).toBeDefined();
+    expect(mainLabel.type).toBe('label');
+  });
+
+  it('field <label> has htmlFor bound to the table id', () => {
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: [{ name: 'X', qty: '1', unit: 'шт' }],
+      idPrefix: 'rec',
+      onChange: noop,
+    });
+
+    const labels = findByType(tree, 'label');
+    const mainLabel = labels.find((l) => l.props?.htmlFor === 'rec-line_items');
+    expect(mainLabel).toBeDefined();
+
+    // The table it points to carries the same id.
+    const tables = findByType(tree, 'table');
+    expect(tables.length).toBe(1);
+    expect(tables[0].props.id).toBe('rec-line_items');
+  });
+
+  it('the field label is NOT a div.chs-label (regression of B-2)', () => {
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: [],
+      onChange: noop,
+    });
+    // No top-level div with chs-label class carrying the field title.
+    const labelDivs = collectElements(tree, (el) => {
+      if (el.type !== 'div') return false;
+      const cn = el.props?.className || '';
+      if (!cn.split(' ').includes('chs-label')) return false;
+      const c = JSON.stringify(el.props?.children || '');
+      return c.includes('Позиции');
+    });
+    expect(labelDivs).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NON-BLOCKING (review): stable <tr> key from __rowKey (avoids index-reuse flicker).
+// ---------------------------------------------------------------------------
+
+describe('CollectionField D7-7 · stable row key (__rowKey)', () => {
+  it('handleAdd stamps a non-enumerable __rowKey on the new row', () => {
+    const calls = [];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: [],
+      onChange: (key, rows) => calls.push(rows),
+    });
+    const addBtn = findByType(tree, 'button').find((b) => JSON.stringify(b.props?.children || '').includes('Добавить'));
+    addBtn.props.onClick();
+
+    const newRow = calls[0][0];
+    // __rowKey is present...
+    expect(typeof newRow.__rowKey).toBe('string');
+    expect(newRow.__rowKey.length).toBeGreaterThan(0);
+    // ...but NON-enumerable, so serializeRecordData (Object.keys / for…of) never sees it.
+    expect(Object.keys(newRow)).not.toContain('__rowKey');
+    expect(Object.prototype.propertyIsEnumerable.call(newRow, '__rowKey')).toBe(false);
+  });
+
+  it('handleCellChange preserves the __rowKey on the edited row', () => {
+    // Seed a row that already has a __rowKey (as handleAdd would produce).
+    const seeded = { name: 'A', qty: '1', unit: 'шт' };
+    Object.defineProperty(seeded, '__rowKey', { value: 'r-stable-1', enumerable: false, configurable: true });
+
+    const calls = [];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: [seeded],
+      onChange: (key, rows) => calls.push(rows),
+    });
+
+    // Find the 'name' cell control and fire its onChange.
+    const cellControls = findByComponent(tree, FieldControl);
+    const nameControl = cellControls.find((fc) => fc.props.field.key === 'name');
+    nameControl.props.onChange('name', 'B');
+
+    const updatedRow = calls[0][0];
+    expect(updatedRow.name).toBe('B');
+    expect(updatedRow.__rowKey).toBe('r-stable-1'); // preserved across edit
+    expect(Object.keys(updatedRow)).not.toContain('__rowKey'); // still non-enumerable-clean
+  });
+
+  it('rows from data without __rowKey fall back to index key (no crash)', () => {
+    const rows = [{ name: 'A', qty: '1', unit: 'шт' }, { name: 'B', qty: '2', unit: 'кг' }];
+    const tree = CollectionField({
+      field: COLLECTION_FIELD,
+      value: rows,
+      onChange: noop,
+    });
+    // Two <tr> rendered (plus possibly the header tr). At least the body rows render.
+    const trs = findByType(tree, 'tr');
+    expect(trs.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

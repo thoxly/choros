@@ -511,6 +511,7 @@ export function DateRangeField({ field, value, onChange, error, idPrefix = 'fiel
  * @param {boolean} readOnly
  */
 export function CollectionField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
   const label = field.label || field.title || field.key;
   const subFields = Array.isArray(field.subFields) ? field.subFields : [];
   const rows = Array.isArray(value) ? value : [];
@@ -525,13 +526,23 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
     ? error.rows
     : [];
 
-  // Add a blank row to the rows array.
+  // Add a blank row to the rows array. The row carries a non-enumerable, stable
+  // __rowKey so React can key <tr> on identity (not index) — removing a non-last
+  // row then no longer makes React reuse the wrong DOM (the value-flicker trap).
+  // The key is non-enumerable so serializeRecordData (records-form.js) never sees
+  // it (Object.keys / for…of over entries skip it) — the data payload stays clean.
   const handleAdd = () => {
     if (readOnly) return;
     const blankRow = {};
     for (const sf of subFields) {
       blankRow[sf.key] = sf.type === 'boolean' ? false : '';
     }
+    Object.defineProperty(blankRow, '__rowKey', {
+      value: `r-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
     onChange(field.key, [...rows, blankRow]);
   };
 
@@ -542,12 +553,22 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
     onChange(field.key, next);
   };
 
-  // Update a single cell in a row.
+  // Update a single cell in a row. Preserve the non-enumerable __rowKey (a plain
+  // `{ ...row }` spread would drop it, since spread only copies enumerable props)
+  // so the row keeps its stable React identity across edits.
   const handleCellChange = (rowIdx, cellKey, cellValue) => {
     if (readOnly) return;
-    const next = rows.map((row, idx) =>
-      idx === rowIdx ? { ...row, [cellKey]: cellValue } : row
-    );
+    const next = rows.map((row, idx) => {
+      if (idx !== rowIdx) return row;
+      const updated = { ...row, [cellKey]: cellValue };
+      const rowKey = row && typeof row === 'object' ? row.__rowKey : undefined;
+      if (typeof rowKey === 'string') {
+        Object.defineProperty(updated, '__rowKey', {
+          value: rowKey, enumerable: false, writable: false, configurable: true,
+        });
+      }
+      return updated;
+    });
     onChange(field.key, next);
   };
 
@@ -598,13 +619,15 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
 
   return (
     <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
-      {/* Field label */}
-      <div className="chs-label" style={{ marginBottom: 'var(--chs-space-2)' }}>
+      {/* Field label — a real <label htmlFor> bound to the line-items table
+          (WCAG 1.3.1 / OBLIK G6), consistent with RelationPickerField/DateRangeField
+          and the scalar controls in this file (not a bare div). */}
+      <label className="chs-label" htmlFor={id} style={{ marginBottom: 'var(--chs-space-2)' }}>
         {label}
         {isRequired && (
           <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
         )}
-      </div>
+      </label>
 
       {/* Top-level collection error (e.g. "Добавьте хотя бы одну строку") */}
       {collectionError && (
@@ -619,7 +642,7 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
       {/* Table */}
       {subFields.length > 0 ? (
         <div style={{ overflowX: 'auto' }}>
-          <table style={tableStyle} aria-label={label}>
+          <table id={id} style={tableStyle} aria-label={label}>
             <thead>
               <tr>
                 {subFields.map((sf) => (
@@ -647,16 +670,30 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
               ) : (
                 rows.map((row, rowIdx) => {
                   const rowErr = rowErrors[rowIdx];
+                  // Stable React key: prefer the row's own __rowKey (set at handleAdd),
+                  // fall back to the index for rows loaded from data (no key). Stable
+                  // identity stops React reusing the wrong <tr> DOM when a non-last
+                  // row is removed (the value-flicker trap).
+                  const rowKey = (row && typeof row === 'object' && typeof row.__rowKey === 'string')
+                    ? row.__rowKey
+                    : `idx-${rowIdx}`;
                   return (
-                    <tr key={rowIdx}>
+                    <tr key={rowKey}>
                       {subFields.map((sf) => {
                         const cellErr = rowErr && typeof rowErr === 'object' ? rowErr[sf.key] : undefined;
                         const cellValue = row && typeof row === 'object' ? row[sf.key] : undefined;
+                        // B-1: thread readOnly down to the cell. FieldControl derives
+                        // its disabled state from resolveFieldMode(field).mode, but a
+                        // sub-field descriptor carries no `mode` — so the cell input
+                        // would render editable in a read-only collection. Stamp
+                        // mode:'read-only' onto the cell field so the <input> is really
+                        // disabled (not just the add/remove buttons).
+                        const cellField = readOnly ? { ...sf, mode: 'read-only' } : sf;
                         return (
                           <td key={sf.key} style={tdStyle}>
                             {/* Reuse FieldControl for each cell — hideLabel=true since <th> carries the label */}
                             <FieldControl
-                              field={sf}
+                              field={cellField}
                               value={cellValue}
                               onChange={makeCellOnChange(rowIdx)}
                               error={cellErr}
