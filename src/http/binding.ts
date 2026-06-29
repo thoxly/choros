@@ -48,6 +48,7 @@ import {
   type LiveSchemaView,
   type FormDocument,
 } from "../core/floor-boundary.js";
+import { resolveLiveSchemaFieldKeys } from "../db/live-form-schema.js";
 
 // ---------------------------------------------------------------------------
 // Injected deps for actor-scoped routes (T-0376)
@@ -436,54 +437,65 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         throw new HttpError(400, "VALIDATION", "fields is required when layout is not provided");
       }
 
-      // T-0520 [D7-5]: classifyFloorBoundary gate — FormDesigner / agent layout-emit path.
-      // When a layout (form-document) is provided, run the content gate BEFORE persisting.
-      // This intercepts agents and UI emitting a layout doc that carries code-signals or
-      // dangling fieldKey references. spec §4.2: «та же проверка на эмиссии форма-документа».
-      //
-      // LiveSchemaView is built from fields[] in the body (named-binding key-set).
-      // op.kind defaults to "relabel_field" (Floor-1) when the caller only provides
-      // a layout — the gate's R-1 lexical pass allows it; R-3/R-4 content checks run
-      // on the actual document tree. If floor==='2' the layout contains Floor-2 content
-      // and must be routed to the Floor-2 authoring path instead.
-      if (layout !== null) {
-        const layoutAsDoc = layout as FormDocument;
-        const bindingFieldKeys = fields.map((f: BindingField) => f.key);
-        const schemaView: LiveSchemaView = {
-          fieldKeys: bindingFieldKeys,
-          fields,
-        };
-        // Use a generic "layout_save" kind — unknown to FLOOR1_EDIT_KINDS → fails R-1
-        // immediately if the doc has code signals, OR passes if the doc is purely declarative.
-        // NOTE: we use a special sentinel kind "save_layout" which is neither Floor-1 nor
-        // Floor-2 in the existing vocabulary, so R-1 will raise it to Floor-2 on the lexical
-        // layer. Instead we want only content-based checks. We pass "relabel_field" as the
-        // nominal kind (the layout-save operation is semantically a declarative doc save) —
-        // the classifier then applies R-2/R-3/R-4 content checks on the actual tree.
-        // If the document tree contains code-signals (R-3) or dangling keys (R-4), floor=2.
-        const layoutFloorOp: FloorEditOp = {
-          kind: "relabel_field", // Floor-1 lexical anchor — content checks decide floor
-          changedKeys: ["label", "display_order", "hidden", "placeholder", "help_text", "mode", "widget", "title", "collapsible", "count", "content", "tabs"], // entire declarative whitelist — R-2 passes
-          doc: layoutAsDoc,
-        };
-        const layoutFloorResult = classifyFloorBoundary(layoutFloorOp, schemaView);
-        if (layoutFloorResult.floor === "2") {
-          throw new HttpError(
-            409,
-            "WRONG_FLOOR",
-            `Form layout classified as Floor-2 (content gate, T-0520). ` +
-              `Reasons: ${layoutFloorResult.reasons.join("; ")}. ` +
-              `Use the Floor-2 authoring path (route: ${layoutFloorResult.route}).`,
-          );
-        }
-      }
-
       const tenantId = await resolveActorTenant(actor);
       assertUuidShape(tenantId, "tenantId");
       const nowMs = Date.now();
 
       const { statusCode: sc, body: responseBody } = await withTenantTx(pool, tenantId, async (client) => {
         await checkRole(client, tenantId, actor);
+
+        // T-0520 [D7-5]: classifyFloorBoundary gate — FormDesigner / agent layout-emit path.
+        // When a layout (form-document) is provided, run the content gate BEFORE persisting.
+        // This intercepts agents and UI emitting a layout doc that carries code-signals or
+        // dangling fieldKey references. spec §4.2: «та же проверка на эмиссии форма-документа».
+        //
+        // BLOCKING #1 fix (adversarial review): LiveSchemaView.fieldKeys MUST come from the
+        // AUTHORITATIVE live registry_def.record_schema (DB), NOT from body.fields[] — that
+        // would let an attacker who controls both `layout` and `fields[]` whitelist a dangling
+        // key. resolveLiveSchemaFieldKeys reads the live schema inside this tenant-tx (RLS).
+        //
+        // R-2 is intentionally NOT the load-bearing check here (changedKeys spans the whole
+        // declarative whitelist, so R-2 always passes for a layout save). R-3 (code-signal)
+        // and R-4 (named-binding integrity vs the LIVE schema) are the load-bearing defenses.
+        // The nominal kind is "relabel_field" (Floor-1 lexical anchor — a declarative doc
+        // save); the classifier's content checks (R-3/R-4) decide the actual floor.
+        if (layout !== null) {
+          const liveKeys = await resolveLiveSchemaFieldKeys(client, tenantId, processKey);
+          if (liveKeys === null) {
+            // FAIL-CLOSED: live schema unresolvable (no registry_def for this process) →
+            // KEY_SET is unvalidatable → reject as Floor-2 rather than pass-through.
+            throw new HttpError(
+              409,
+              "WRONG_FLOOR",
+              `Form layout cannot be validated against a live record_schema for process ` +
+                `"${processKey}" (no registry binding). Fail-closed → Floor-2 path required (T-0520).`,
+            );
+          }
+          const schemaView: LiveSchemaView = {
+            fieldKeys: [...liveKeys],
+          };
+          const layoutFloorOp: FloorEditOp = {
+            kind: "relabel_field", // Floor-1 lexical anchor — content checks decide floor
+            // R-2 spans the full declarative whitelist (a layout save touches presentation
+            // slots only); R-3/R-4 against the LIVE schema are the real gate.
+            changedKeys: [
+              "label", "display_order", "hidden", "placeholder", "help_text",
+              "mode", "widget", "title", "collapsible", "count", "content", "tabs",
+            ],
+            doc: layout as FormDocument,
+          };
+          const layoutFloorResult = classifyFloorBoundary(layoutFloorOp, schemaView);
+          if (layoutFloorResult.floor === "2") {
+            throw new HttpError(
+              409,
+              "WRONG_FLOOR",
+              `Form layout classified as Floor-2 (content gate, T-0520). ` +
+                `Reasons: ${layoutFloorResult.reasons.join("; ")}. ` +
+                `Use the Floor-2 authoring path (route: ${layoutFloorResult.route}).`,
+            );
+          }
+        }
+
         const existing = await getBinding(client, tenantId, processKey, stepKey);
         if (!existing) {
           const newId = randomUUID();

@@ -77,6 +77,7 @@ import {
   type LiveSchemaView,
   type FormDocument,
 } from "../core/floor-boundary.js";
+import { resolveLiveSchemaFieldKeys } from "../db/live-form-schema.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -510,8 +511,6 @@ export function registerFloor1EditorRoutes(
       // check: even if kind is Floor-1 lexically, the actual diff / doc might carry a
       // code-signal or dangling fieldKey → Floor-2 (fail-up, spec §3.2).
       //
-      // LiveSchemaView is built from the parsed fields[] that the caller supplied in the
-      // body (the named-binding key-set — no DB read needed; purity is preserved in core).
       // op.doc comes from body.doc (optional FormDocument from FormDesigner / agent).
       // changedKeys is derived from the edit request's own key(s) (R-2 whitelist check).
       const rawDoc = (body as Record<string, unknown>)["doc"];
@@ -523,9 +522,49 @@ export function registerFloor1EditorRoutes(
       // Derive changedKeys from the edit request for R-2 (whitelist of declarative slots).
       const changedKeys = deriveChangedKeys(editRequest);
 
+      // BLOCKING #1 fix (adversarial review): R-4 (named-binding integrity) MUST validate
+      // the document's KEY_SET against the AUTHORITATIVE live registry_def.record_schema
+      // (DB), NOT against body.fields[] — the same untrusted request that carries `doc`.
+      // Sourcing fieldKeys from body.fields[] would let an attacker who controls both
+      // whitelist a dangling key (spec §3 R-4 lines 92-103 / §4.1 lines 164-166).
+      //
+      // When a `doc` IS present, resolve the live schema from DB inside a tenant-tx and
+      // build LiveSchemaView from it. Fail-closed when the live schema is unresolvable.
+      // When NO `doc` is present, R-4 is vacuous (empty KEY_SET) — the edit's own fieldKey
+      // is validated by applyFloor1Edit's UNKNOWN_FIELD check against the stateless body.fields
+      // (Mode A contract). No DB read is needed in that case.
+      let liveFieldKeys: string[];
+      if (opDoc !== undefined) {
+        // A document is being validated → R-4 needs the authoritative live schema.
+        if (!pool) {
+          // No DB wired → cannot resolve the authoritative schema → fail-closed.
+          throw new HttpError(
+            409,
+            "WRONG_FLOOR",
+            `Document validation requires a live record_schema but no database is wired; ` +
+              `fail-closed → Floor-2 path required (T-0520).`,
+          );
+        }
+        const resolved = await withTenantTx(pool, urlParts.tenantId, (client) =>
+          resolveLiveSchemaFieldKeys(client, urlParts.tenantId, urlParts.processKey),
+        );
+        if (resolved === null) {
+          // Live schema unresolvable (no registry_def for this process) → fail-closed.
+          throw new HttpError(
+            409,
+            "WRONG_FLOOR",
+            `Document cannot be validated against a live record_schema for process ` +
+              `"${urlParts.processKey}" (no registry binding). Fail-closed → Floor-2 path required (T-0520).`,
+          );
+        }
+        liveFieldKeys = [...resolved];
+      } else {
+        // No doc → R-4 KEY_SET is empty → live schema irrelevant; pass an empty projection.
+        liveFieldKeys = [];
+      }
+
       const schemaView: LiveSchemaView = {
-        fieldKeys: fields.map((f) => f.key),
-        fields,
+        fieldKeys: liveFieldKeys,
       };
       const floorOp: FloorEditOp = {
         kind: editRequest.kind,
