@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0539",
+  "status": "ready",
+  "decision": "Nav-видимость становится ПРОЕКЦИЕЙ существующего резолвера грантов (T-0021 / loadAdminContext), а НЕ вторым permission-слоем. Новый read-only эндпоинт GET /api/me/nav-capabilities возвращает NavCapabilitySet { isGenesisOwner, capabilities[], zones[] }, выведенный исключительно из грантов актора; фронт лишь скрывает зону/пункт, чьё объявленное capability отсутствует в наборе (никаких grant-решений и role-string-checков на клиенте). Каждый экран регистрируется в SCREEN_REGISTRY (расширение nav-config.js), объявляя {id,zone,capability,audience,frequency,order,path}; CI-гард валит сборку, если экран-Route не имеет записи с непустыми zone И capability (capability=null допустим ТОЛЬКО для зоны РАБОТА-пола и home). Маппинг зона→грант системно-фиксирован MVP: РАБОТА=пол (видна всем участникам; пункты по app/process гейтятся реальными ресурс-грантами), КОНСТРУКТОР=authoring_draft, НАБЛЮДАЕМОСТЬ=новый складываемый грант observability:read (capability-токен по прецеденту authoring_draft), АДМИНИСТРИРОВАНИЕ=любой mgmt_object:* грант ∨ isGenesisOwner; owner-only ломтики (SoD-редактор, free-form «всё», смена суперпользователя) рендерятся под isGenesisOwner (T-0409, НЕ переоткрываем). First-run нового тенанта: пол = только РАБОТА (PD-7, honest-empty E14/T-0306). Деградация fail-closed: резолвер/эндпоинт down ⇒ только зона РАБОТА, никогда не fail-open.",
+  "rejected_alternatives": [
+    {"option": "Отдельная таблица/конфиг nav_acl (role→visible-items)", "why_not": "Второй источник истины о видимости, дрейфует от реальных грантов (видимый-но-403 / скрытый-но-есть-право). Нарушает T-0018 NF-1 (одна authority-подсистема) и FF-UX-DEAD T-0538. Видимость обязана быть проекцией резолвера."},
+    {"option": "Хардкод role-checков в SPA (if user.role==='admin')", "why_not": "Роли = складываемые наборы грантов (нет enum-роли на фронте); дублирует RBAC в клиенте, который её авторитетно решать не может (advisory UI-фильтр ≠ enforcement, T-0021 §1 caveat). FF-NAV-PROJ линтит role-string-литералы."},
+    {"option": "Эндпоинт возвращает готовый отрендеренный список пунктов меню", "why_not": "Связывает серверный контракт с IA фронта; при каждой правке nav пришлось бы менять ответ. Эндпоинт отдаёт capability-проекцию (стабильный контракт), маппинг capability→пункт живёт в nav-config.js."},
+    {"option": "Клиент сам резолвит гранты (сырые grant-строки + иерархия на фронт)", "why_not": "Утечка авторитетной модели/иерархии в недоверенный клиент; нав-фильтр стал бы реимплементацией lattice-алгебры в JS (два резолвера, разойдутся). Резолвинг на сервере, фронт получает РЕШЕНИЕ."},
+    {"option": "Отдельный permission-axis (свой nav:see грант на каждый пункт)", "why_not": "Плодит N зеркальных грантов реальных capability (грант 'видеть Аудит' ⊥ грант 'читать аудит'). Видимость зоны = 'есть класс грантов этой зоны', без зеркала. Owner-only — через isGenesisOwner."},
+    {"option": "Fail-OPEN при недоступном резолвере (показать всё, потом фильтровать)", "why_not": "Показал бы админ/наблюдаемость без права при деградации — security-театр + мёртвые пункты (403). Fail-closed обязателен: резолвер down ⇒ только пол РАБОТА."},
+    {"option": "Гард реестра как runtime-исключение (экран без объявления падает в браузере)", "why_not": "Поздно/хрупко (ловится лишь при заходе). Гард — CI-static (screen-registry-declares.sh): экран-Route без {zone,capability} ⇒ красная сборка до деплоя."}
+  ],
+  "object_model": [
+    {
+      "entity": "NavCapabilitySet",
+      "fields": [
+        {"name": "isGenesisOwner", "type": "boolean"},
+        {"name": "capabilities", "type": "string[] (capability-токены актора: authoring_draft | observability:read | mgmt_object:grant | mgmt_object:role | ...; только классы, гейтящие зоны, не сырые ресурс-гранты)"},
+        {"name": "zones", "type": "NavZoneId[] (производное: ['work'] всегда; +constructor если authoring_draft; +observability если observability:read; +admin если mgmt_object:* ∨ isGenesisOwner)"},
+        {"name": "degraded", "type": "boolean? (true ⇒ частичная деградация, фронт трактует как fail-closed)"}
+      ]
+    },
+    {
+      "entity": "ScreenRegistryEntry",
+      "fields": [
+        {"name": "id", "type": "string (== NavItem.id, PK реестра)"},
+        {"name": "zone", "type": "NavZoneId | null (null только для home overview)"},
+        {"name": "capability", "type": "string | null (capability-токен видимости; null допустим ТОЛЬКО для zone:'work' и home — иначе CI-fail)"},
+        {"name": "audience", "type": "NavAudience (end-user|builder|manager|admin, информативно)"},
+        {"name": "frequency", "type": "NavFrequency (daily|weekly|rare, информативно)"},
+        {"name": "order", "type": "number"},
+        {"name": "path", "type": "string? (переопределение маршрута, инвариант T-0538 §6)"},
+        {"name": "ownerOnly", "type": "boolean? (true ⇒ виден только при isGenesisOwner — SoD/free-form/смена суперпользователя, T-0409)"},
+        {"name": "hidden", "type": "boolean? (скрыт из nav, маршрут жив — T-0538 forms)"},
+        {"name": "requestable", "type": "boolean? (задел: 'запросить доступ' вместо скрытия; MVP false)"}
+      ]
+    },
+    {
+      "entity": "ObservabilityReadGrant (новый capability-токен, §4.3)",
+      "fields": [
+        {"name": "resource_type", "type": "'observability:read' (free-text capability-токен, прецедент authoring_draft; нет DB CHECK, миграция не нужна)"},
+        {"name": "operation", "type": "'read'"},
+        {"name": "scope", "type": "BOTTOM/whole-tenant (capability не ресурс-scoped)"},
+        {"name": "predicate", "type": "holdsObservabilityRead(grants): boolean — src/core/capability-authz.ts"},
+        {"name": "issued_by", "type": "владелец (isGenesisOwner) ∨ scoped-admin с mgmt_object:grant через grant-редактор"}
+      ]
+    }
+  ],
+  "contracts": [
+    "GET /api/me/nav-capabilities → 200 NavCapabilitySet { isGenesisOwner, capabilities[], zones[], degraded? } | 401 UNAUTHENTICATED (fail-closed → фронт пол РАБОТА). Тонкая обёртка: resolveActorSlugFromAuth → resolveActorTenant → loadAdminContext(pool,tenantId,slug,now) + SELECT capability-грантов (authoring_draft, observability:read, in-window+confirmed). НЕ новый резолвер.",
+    "projectZones(capabilities: string[], isGenesisOwner: boolean): NavZoneId[] — единственное место маппинга capability→зона (карта §6); общий чистый хелпер для сервера и фронта.",
+    "holdsObservabilityRead(grants: readonly Grant[]): boolean — src/core/capability-authz.ts, рядом с holdsLlmConnectionConfigure; owner-короткое-замыкание у вызывающего.",
+    "visibleZones(navSet: NavCapabilitySet | null): NavZoneId[] — web/src/app-shell/nav-config.js; null/degraded ⇒ ['work'] (fail-closed).",
+    "visibleItems(zoneId: NavZoneId, navSet: NavCapabilitySet): NavItem[] — zone-гейт + фильтр it.ownerOnly по navSet.isGenesisOwner + it.hidden.",
+    "SCREEN_REGISTRY: Record<string, ScreenRegistryEntry> — индекс по id в nav-config.js; гард полноты против <Route>-множества shell.jsx."
+  ],
+  "fitness_functions": [
+    {"id": "FF-NAV-PROJ", "rule": "Нав-видимость выводится ТОЛЬКО из NavCapabilitySet (navSet.zones / navSet.isGenesisOwner / it.ownerOnly); нет хардкод role-string-checков (if role==='admin', slug==='owner') в нав-фильтре.", "ci_check": "ci/checks/ux/nav-projection-only.sh (grep nav-фильтра на role-string-литералы → fail)"},
+    {"id": "FF-SCREEN-DECL", "rule": "Каждый экран-<Route> в shell.jsx имеет ScreenRegistryEntry с непустым zone И определённым capability-полем; не-work/не-home зона с capability:null ⇒ fail; <Route> без записи реестра ⇒ fail.", "ci_check": "ci/checks/ux/screen-registry-declares.sh (сверка множества <Route path> ↔ SCREEN_REGISTRY ключей + проверка полей)"},
+    {"id": "FF-FAILCLOSED", "rule": "visibleZones(null) и visibleZones({degraded:true}) возвращают РОВНО ['work']; никакой путь деградации не возвращает admin/observability/constructor.", "ci_check": "vitest web/src/app-shell/nav-visibility.test.js"},
+    {"id": "FF-NAV-ZONEMAP", "rule": "projectZones детерминированно кодирует карту §6 (authoring_draft⇒constructor; observability:read⇒observability; mgmt_object:*∨owner⇒admin; всегда work; пустой+не-owner⇒['work']); фронт-хелпер == сервер-хелпер.", "ci_check": "vitest (фикстура capability→zones, обе стороны)"},
+    {"id": "FF-OWNERONLY", "rule": "Пункт с ownerOnly:true не виден при isGenesisOwner:false (SoD-редактор/free-form/смена суперпользователя скрыты не-владельцу); виден при true.", "ci_check": "vitest (фикстура visibleItems owner/не-owner)"},
+    {"id": "FF-NAV-NODEAD", "rule": "Видимый (после фильтра) пункт ведёт на роут, к которому у актора есть право (нет видимого-но-403): пересечение visibleItems × серверный gate непусто для каждого видимого пункта по 4 персонам (владелец/админ/менеджер/пользователь).", "ci_check": "e2e/journeys/nav-capability.ux.journey.ts (4 персоны против web/dist + живой эндпоинт; static-фикстура сейчас)"}
+  ],
+  "traceability": [
+    {"ac": "Нав-видимость = проекция grant-модели, не второй слой", "covered_by": "ADR §2/§2.1/§3; FF-NAV-PROJ"},
+    {"ac": "API заземлён на резолвер T-0021 (обёртка над loadAdminContext)", "covered_by": "ADR §4.1/§4.4; contracts GET /api/me/nav-capabilities"},
+    {"ac": "Возвращает набор грантов, фронт выводит зоны", "covered_by": "ADR §4.1/§5/§6; projectZones; FF-NAV-ZONEMAP"},
+    {"ac": "Реестр экранов объявляет {zone,capability,audience,frequency,order}", "covered_by": "ADR §4.2 ScreenRegistryEntry"},
+    {"ac": "Гард: экран без объявления не рендерится", "covered_by": "ADR §4.2; FF-SCREEN-DECL"},
+    {"ac": "Маппинг 4 зон → грант (карта фаундера)", "covered_by": "ADR §6"},
+    {"ac": "Owner-only ломтики через isGenesisOwner (T-0409, не переоткрывать)", "covered_by": "ADR §4.2 ownerOnly / §6 / §9 non-goal 5; FF-OWNERONLY"},
+    {"ac": "Новый грант observability:read — как заводится, кто выдаёт", "covered_by": "ADR §4.3/§11; holdsObservabilityRead"},
+    {"ac": "Honest first-run: пол нового тенанта = только РАБОТА (E14/T-0306, PD-7)", "covered_by": "ADR §7"},
+    {"ac": "Деградация резолвер down → fail-closed (только РАБОТА), не fail-open", "covered_by": "ADR §8; FF-FAILCLOSED; rejected fail-open §3"},
+    {"ac": "Новая серверная способность как impl-зависимость, не блокирует дизайн", "covered_by": "ADR §11"}
+  ],
+  "runtime_target": "Дизайн — локально (npm run ci: vitest нав-фильтра + ci/checks/ux/*.sh статич-гейты; e2e journey 4 персоны против web/dist). Новая серверная способность GET /api/me/nav-capabilities + capability-токен observability:read — impl-зависимость на реальном PG (T-0053-стек, founder-gated deploy), зафиксирована §11, НЕ блокирует дизайн.",
+  "adr_artifact_path": "docs/design/T-0539-capability-nav-visibility.adr.md"
+}
