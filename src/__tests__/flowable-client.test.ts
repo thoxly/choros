@@ -337,3 +337,37 @@ describe("T-0483 pingEngine", () => {
     expect(result).toEqual({ ok: true, reachable: false, code: "ENGINE_UNAVAILABLE" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0536 correlateMessage — fire a parked message-catch in the live engine.
+// ---------------------------------------------------------------------------
+
+describe("T-0536 correlateMessage", () => {
+  it("PUTs action=messageEventReceived with messageName + variables (ok on 200)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(200, { id: "inst-1" }));
+    const client = testConfig();
+    const result = await client.correlateMessage("inst-1", "contract-signed", { doc: "ref-1" });
+    expect(result).toEqual({ ok: true });
+    const [url, init] = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/runtime/process-instances/inst-1");
+    expect(init.method).toBe("PUT");
+    const body = JSON.parse(init.body as string);
+    expect(body.action).toBe("messageEventReceived");
+    expect(body.messageName).toBe("contract-signed");
+    expect(body.variables).toEqual([{ name: "doc", value: "ref-1" }]);
+  });
+
+  it("ok on 204 (no content)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(204));
+    const client = testConfig();
+    const result = await client.correlateMessage("inst-1", "m", {});
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("maps a non-2xx to { ok: false, code } (never throws)", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValueOnce(mockResponse(404));
+    const client = testConfig();
+    const result = await client.correlateMessage("inst-gone", "m", {});
+    expect(result.ok).toBe(false);
+  });
+});
