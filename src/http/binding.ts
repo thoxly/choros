@@ -42,6 +42,13 @@ import {
   validateBindingFields,
   type BindingField,
 } from "../core/binding-compat.js";
+import {
+  classifyFloorBoundary,
+  type FloorEditOp,
+  type LiveSchemaView,
+  type FormDocument,
+} from "../core/floor-boundary.js";
+import { resolveLiveSchemaFieldKeys } from "../db/live-form-schema.js";
 
 // ---------------------------------------------------------------------------
 // Injected deps for actor-scoped routes (T-0376)
@@ -436,6 +443,59 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
 
       const { statusCode: sc, body: responseBody } = await withTenantTx(pool, tenantId, async (client) => {
         await checkRole(client, tenantId, actor);
+
+        // T-0520 [D7-5]: classifyFloorBoundary gate — FormDesigner / agent layout-emit path.
+        // When a layout (form-document) is provided, run the content gate BEFORE persisting.
+        // This intercepts agents and UI emitting a layout doc that carries code-signals or
+        // dangling fieldKey references. spec §4.2: «та же проверка на эмиссии форма-документа».
+        //
+        // BLOCKING #1 fix (adversarial review): LiveSchemaView.fieldKeys MUST come from the
+        // AUTHORITATIVE live registry_def.record_schema (DB), NOT from body.fields[] — that
+        // would let an attacker who controls both `layout` and `fields[]` whitelist a dangling
+        // key. resolveLiveSchemaFieldKeys reads the live schema inside this tenant-tx (RLS).
+        //
+        // R-2 is intentionally NOT the load-bearing check here (changedKeys spans the whole
+        // declarative whitelist, so R-2 always passes for a layout save). R-3 (code-signal)
+        // and R-4 (named-binding integrity vs the LIVE schema) are the load-bearing defenses.
+        // The nominal kind is "relabel_field" (Floor-1 lexical anchor — a declarative doc
+        // save); the classifier's content checks (R-3/R-4) decide the actual floor.
+        if (layout !== null) {
+          const liveKeys = await resolveLiveSchemaFieldKeys(client, tenantId, processKey);
+          if (liveKeys === null) {
+            // FAIL-CLOSED: live schema unresolvable (no registry_def for this process) →
+            // KEY_SET is unvalidatable → reject as Floor-2 rather than pass-through.
+            throw new HttpError(
+              409,
+              "WRONG_FLOOR",
+              `Form layout cannot be validated against a live record_schema for process ` +
+                `"${processKey}" (no registry binding). Fail-closed → Floor-2 path required (T-0520).`,
+            );
+          }
+          const schemaView: LiveSchemaView = {
+            fieldKeys: [...liveKeys],
+          };
+          const layoutFloorOp: FloorEditOp = {
+            kind: "relabel_field", // Floor-1 lexical anchor — content checks decide floor
+            // R-2 spans the full declarative whitelist (a layout save touches presentation
+            // slots only); R-3/R-4 against the LIVE schema are the real gate.
+            changedKeys: [
+              "label", "display_order", "hidden", "placeholder", "help_text",
+              "mode", "widget", "title", "collapsible", "count", "content", "tabs",
+            ],
+            doc: layout as FormDocument,
+          };
+          const layoutFloorResult = classifyFloorBoundary(layoutFloorOp, schemaView);
+          if (layoutFloorResult.floor === "2") {
+            throw new HttpError(
+              409,
+              "WRONG_FLOOR",
+              `Form layout classified as Floor-2 (content gate, T-0520). ` +
+                `Reasons: ${layoutFloorResult.reasons.join("; ")}. ` +
+                `Use the Floor-2 authoring path (route: ${layoutFloorResult.route}).`,
+            );
+          }
+        }
+
         const existing = await getBinding(client, tenantId, processKey, stepKey);
         if (!existing) {
           const newId = randomUUID();

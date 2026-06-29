@@ -71,6 +71,13 @@ import {
   validateBindingFields,
   type BindingField,
 } from "../core/binding-compat.js";
+import {
+  classifyFloorBoundary,
+  type FloorEditOp,
+  type LiveSchemaView,
+  type FormDocument,
+} from "../core/floor-boundary.js";
+import { resolveLiveSchemaFieldKeys } from "../db/live-form-schema.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -394,6 +401,35 @@ function parseEditRequest(raw: unknown): Floor1EditRequest {
 }
 
 // ---------------------------------------------------------------------------
+// deriveChangedKeys — R-2 whitelist helper (T-0520)
+//
+// Maps a parsed Floor1EditRequest to the set of named-binding / ui-schema
+// slots it modifies (for FLOOR1_DECLARATIVE_WHITELIST check in classifyFloorBoundary).
+// All returned keys must be present in FLOOR1_DECLARATIVE_WHITELIST for the
+// operation to clear R-2. Unknown kinds resolve to an empty array (fail-closed:
+// the lexical R-1 will already catch them).
+// ---------------------------------------------------------------------------
+
+function deriveChangedKeys(req: Floor1EditRequest): string[] {
+  switch (req.kind) {
+    case "relabel_field":
+      // Modifies label (+ optionally placeholder) in both BindingField and FieldUiMeta.
+      return req.placeholder !== undefined ? ["label", "placeholder"] : ["label"];
+    case "toggle_required":
+      return ["required"];
+    case "hide_field":
+    case "show_field":
+      return ["hidden"];
+    case "reorder_fields":
+      return ["display_order"];
+    case "set_help_text":
+      return ["help_text"];
+    default:
+      return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -469,6 +505,84 @@ export function registerFloor1EditorRoutes(
       // Authz check (→ 403 if role process_designer missing, review R-1).
       // Same ordering as binding.ts: 401 → 400 (validation) → 403 → operation.
       await authorizeEditor(pool, urlParts.tenantId, actorId);
+
+      // T-0520 [D7-5]: classifyFloorBoundary — content gate (R-1..R-4) BEFORE applying.
+      // Extends the lexical WRONG_FLOOR guard in validateFloor1Request with a content-aware
+      // check: even if kind is Floor-1 lexically, the actual diff / doc might carry a
+      // code-signal or dangling fieldKey → Floor-2 (fail-up, spec §3.2).
+      //
+      // op.doc comes from body.doc (optional FormDocument from FormDesigner / agent).
+      // changedKeys is derived from the edit request's own key(s) (R-2 whitelist check).
+      const rawDoc = (body as Record<string, unknown>)["doc"];
+      const opDoc: FormDocument | undefined =
+        rawDoc !== undefined && rawDoc !== null && typeof rawDoc === "object" && !Array.isArray(rawDoc)
+          ? (rawDoc as FormDocument)
+          : undefined;
+
+      // Derive changedKeys from the edit request for R-2 (whitelist of declarative slots).
+      const changedKeys = deriveChangedKeys(editRequest);
+
+      // BLOCKING #1 fix (adversarial review): R-4 (named-binding integrity) MUST validate
+      // the document's KEY_SET against the AUTHORITATIVE live registry_def.record_schema
+      // (DB), NOT against body.fields[] — the same untrusted request that carries `doc`.
+      // Sourcing fieldKeys from body.fields[] would let an attacker who controls both
+      // whitelist a dangling key (spec §3 R-4 lines 92-103 / §4.1 lines 164-166).
+      //
+      // When a `doc` IS present, resolve the live schema from DB inside a tenant-tx and
+      // build LiveSchemaView from it. Fail-closed when the live schema is unresolvable.
+      // When NO `doc` is present, R-4 is vacuous (empty KEY_SET) — the edit's own fieldKey
+      // is validated by applyFloor1Edit's UNKNOWN_FIELD check against the stateless body.fields
+      // (Mode A contract). No DB read is needed in that case.
+      let liveFieldKeys: string[];
+      if (opDoc !== undefined) {
+        // A document is being validated → R-4 needs the authoritative live schema.
+        if (!pool) {
+          // No DB wired → cannot resolve the authoritative schema → fail-closed.
+          throw new HttpError(
+            409,
+            "WRONG_FLOOR",
+            `Document validation requires a live record_schema but no database is wired; ` +
+              `fail-closed → Floor-2 path required (T-0520).`,
+          );
+        }
+        const resolved = await withTenantTx(pool, urlParts.tenantId, (client) =>
+          resolveLiveSchemaFieldKeys(client, urlParts.tenantId, urlParts.processKey),
+        );
+        if (resolved === null) {
+          // Live schema unresolvable (no registry_def for this process) → fail-closed.
+          throw new HttpError(
+            409,
+            "WRONG_FLOOR",
+            `Document cannot be validated against a live record_schema for process ` +
+              `"${urlParts.processKey}" (no registry binding). Fail-closed → Floor-2 path required (T-0520).`,
+          );
+        }
+        liveFieldKeys = [...resolved];
+      } else {
+        // No doc → R-4 KEY_SET is empty → live schema irrelevant; pass an empty projection.
+        liveFieldKeys = [];
+      }
+
+      const schemaView: LiveSchemaView = {
+        fieldKeys: liveFieldKeys,
+      };
+      const floorOp: FloorEditOp = {
+        kind: editRequest.kind,
+        changedKeys,
+        doc: opDoc,
+      };
+      const floorResult = classifyFloorBoundary(floorOp, schemaView);
+      if (floorResult.floor === "2") {
+        // Fail-up: content gate detected Floor-2 signal (code / dangling binding / unknown key).
+        // If the route is 'sandbox', the operation should go through the Floor-2 authoring path
+        // (validateFloor2Descriptor / T-0076). This endpoint is Floor-1 only → 409.
+        throw new HttpError(
+          409,
+          "WRONG_FLOOR",
+          `Edit classified as Floor-2 (content gate, T-0520). Reasons: ${floorResult.reasons.join("; ")}. ` +
+            `Use the Floor-2 authoring path (route: ${floorResult.route}).`,
+        );
+      }
 
       // Apply transformation (pure core — includes validateFloor1Request)
       const result = applyFloor1Edit(editRequest, fields, uiSchema);
