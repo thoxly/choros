@@ -201,6 +201,77 @@ describe("FB-2: content detector beats lexical relabel_field", () => {
     expect(r.reasons.some((x) => x.startsWith("R-4"))).toBe(true);
   });
 
+  // B-1 regression: code signal / dangling binding ON THE ROOT must lift the floor.
+  const rootBypasses: Array<{ name: string; doc: FormDocument; ruleTag: string }> = [
+    {
+      name: "reactSource on root",
+      doc: { type: "root", reactSource: "evil()", children: [{ type: "field", fieldKey: "amount" }] },
+      ruleTag: "R-3",
+    },
+    {
+      name: "componentId on root",
+      doc: { type: "root", componentId: "evil-comp", children: [{ type: "field", fieldKey: "amount" }] } as never,
+      ruleTag: "R-3",
+    },
+    {
+      name: "script on root",
+      doc: { type: "root", script: "alert(1)", children: [{ type: "field", fieldKey: "amount" }] } as never,
+      ruleTag: "R-3",
+    },
+    {
+      name: "dangling fieldKey on root",
+      doc: { type: "root", fieldKey: "GHOST_ROOT", children: [{ type: "field", fieldKey: "amount" }] } as never,
+      ruleTag: "R-4",
+    },
+    {
+      name: "anomalous root type (outside whitelist)",
+      doc: { type: "weird_root", children: [{ type: "field", fieldKey: "amount" }] } as never,
+      ruleTag: "R-3",
+    },
+  ];
+
+  for (const { name, doc, ruleTag } of rootBypasses) {
+    it(`B-1: ${name} → Floor-2 (no root bypass)`, () => {
+      const r = classifyFloorBoundary(floor1Op({ doc }), SCHEMA);
+      expect(r.floor).toBe("2");
+      expect(r.route).toBe("sandbox");
+      expect(r.reasons.some((x) => x.startsWith(ruleTag))).toBe(true);
+    });
+  }
+
+  it("NB-1: reactSource inside table.columns[] object → Floor-2 (R-3)", () => {
+    const r = classifyFloorBoundary(
+      floor1Op({
+        doc: {
+          type: "root",
+          children: [
+            {
+              type: "table",
+              fieldKey: "items",
+              columns: [{ subKey: "amount", reactSource: "evil()" }],
+            },
+          ],
+        },
+      }),
+      SCHEMA,
+    );
+    expect(r.floor).toBe("2");
+    expect(r.reasons.some((x) => x.startsWith("R-3"))).toBe(true);
+  });
+
+  it("negative control: valid root type:'section' + valid children + Floor-1 kind → Floor-1", () => {
+    const r = classifyFloorBoundary(
+      {
+        kind: "relabel_field",
+        changedKeys: ["label"],
+        doc: { type: "section", title: "X", children: [{ type: "field", fieldKey: "amount" }] },
+      },
+      SCHEMA,
+    );
+    expect(r.floor).toBe("1");
+    expect(r.reasons).toEqual([]);
+  });
+
   it("empty reactSource is NOT a code signal (structural, not heuristic)", () => {
     const r = classifyFloorBoundary(
       floor1Op({

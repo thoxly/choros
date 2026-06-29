@@ -249,7 +249,12 @@ function scanDocument(doc: FormDocument | undefined): DocScan {
   if (doc == null || typeof doc !== "object") {
     return scan;
   }
-  visitNodes(doc.children, scan);
+  // B-1 fix: прогоняем САМ корневой узел через ту же логику, что и листья —
+  // visitNode инспектирует type (R-1 узлов), code-поля (R-3), fieldKey/columns/
+  // displayField (R-4) И рекурсит в children/tabs. Поэтому НЕ зовём visitNodes
+  // на children отдельно (это задвоило бы обход). Раньше корень обходился мимо
+  // visitNode → код-сигнал и висящий биндинг НА КОРНЕ давали ложный Floor-1.
+  visitNode(doc as FormDocNode, scan, /* isRoot */ true);
   return scan;
 }
 
@@ -263,38 +268,57 @@ function visitNodes(
   }
 }
 
-function visitNode(node: FormDocNode | undefined, scan: DocScan): void {
-  if (node == null || typeof node !== "object") return;
-
-  const type = typeof node.type === "string" ? node.type : undefined;
-
-  // --- §3.3 / §3.4: тип узла вне декларативного whitelist (напр. "custom") ---
-  if (type === undefined || !FLOOR1_DOC_NODE_TYPES.has(type)) {
-    scan.hasNonDeclarativeNode = true;
-    scan.hasCodeSignal = true; // custom-узел = код-сигнал (§3.4)
-  }
-
-  // --- §3.4: code-несущие поля на узле (структурный детектор) ---
+/**
+ * §3.4 структурный детектор code-несущих полей на ЛЮБОМ объекте (узел документа
+ * ИЛИ объект колонки таблицы — NB-1). reactSource/componentId считаются сигналом
+ * только при непустой строке; expression/condition/script — при любом присутствии.
+ */
+function scanCodeFields(obj: Record<string, unknown>, scan: DocScan): void {
   for (const f of EXPRESSION_FIELD_NAMES) {
-    const v = node[f];
+    const v = obj[f];
     if (f === "reactSource" || f === "componentId") {
       if (typeof v === "string" && v.trim().length > 0) scan.hasCodeSignal = true;
     } else if (v !== undefined && v !== null) {
       scan.hasCodeSignal = true;
     }
   }
+}
+
+function visitNode(node: FormDocNode | undefined, scan: DocScan, isRoot = false): void {
+  if (node == null || typeof node !== "object") return;
+
+  const type = typeof node.type === "string" ? node.type : undefined;
+
+  // --- §3.3 / §3.4: тип узла вне декларативного whitelist (напр. "custom") ---
+  // Корневой узел-обёртка `root` (form-document-format §3: «дерево root.children»)
+  // структурно-нейтрален и допустим ТОЛЬКО на корне. Любой иной нештатный type
+  // (на корне или в листе) → non-declarative → поднимает этаж (R-1 узлов).
+  const isAllowedNode =
+    type !== undefined &&
+    (FLOOR1_DOC_NODE_TYPES.has(type) || (isRoot && type === "root"));
+  if (!isAllowedNode) {
+    scan.hasNonDeclarativeNode = true;
+    scan.hasCodeSignal = true; // custom-узел / нештатный type = код-сигнал (§3.4)
+  }
+
+  // --- §3.4: code-несущие поля на узле (структурный детектор) ---
+  scanCodeFields(node, scan);
 
   // --- §3 R-4 канал 1: fieldKey на field/table/readout/relation ---
   if (typeof node.fieldKey === "string" && node.fieldKey.length > 0) {
     scan.keySet.add(node.fieldKey);
   }
 
-  // --- §3 R-4 канал 2: table.columns[].subKey ---
+  // --- §3 R-4 канал 2: table.columns[].subKey + NB-1: код-сигнал в объекте колонки ---
   if (Array.isArray(node.columns)) {
     for (const col of node.columns) {
-      if (col != null && typeof col.subKey === "string" && col.subKey.length > 0) {
+      if (col == null || typeof col !== "object") continue;
+      if (typeof col.subKey === "string" && col.subKey.length > 0) {
         scan.keySet.add(col.subKey);
       }
+      // NB-1: §3.4 «где бы ни лежал» — code-несущее поле внутри объекта колонки
+      // (мимо subKey) обязано поднимать этаж симметрично узлам.
+      scanCodeFields(col, scan);
     }
   }
 
