@@ -1,0 +1,115 @@
+{
+  "task_id": "T-0528",
+  "status": "ready",
+  "decision": "Добавить `ToastProvider` + `ToastContext` + `useToastContext()` в `web/src/app-shell/toast-context.jsx`. ToastProvider вызывает kit `useToasts()` один раз, кладёт `{push, dismiss}` в контекст, рендерит единственный `<ToastViewport>` в конце своего JSX. ToastProvider монтируется в `AppShell` (shell.jsx) снаружи `<CrumbContext.Provider>`, охватывая весь authenticated-tree. Любой компонент получает API через `useToastContext()` без локальной обвязки. Политика severity: success/info=polite/auto-dismiss, error/warning=assertive role=alert без авто-гашения (duration:0) + pause-on-hover через pointerenter/pointerleave на viewport. kit-примитивы Toast/ToastViewport/useToasts остаются неизменными (backward-compatible). Все window.alert() и console-only пути заменяются на push().",
+  "rejected_alternatives": [
+    {
+      "option": "Singleton store (Zustand/jotai/module-level state) без React-контекста",
+      "why_not": "Вводит внешнюю зависимость или global module state в проект, где нет bundle-менеджера для нескольких провайдеров. React-контекст достаточен, zero-dep, тестируется стандартными средствами, не нарушает demiurge-conventions (zero-dep stdlib). Singleton store затруднит изоляцию тестов."
+    },
+    {
+      "option": "Оставить useToasts локально в каждом экране, добавить ToastViewport в layout-обёртку через portal",
+      "why_not": "Не решает проблему: 30+ экранов по-прежнему требуют ручной обвязки, множественные viewports порождают конкурирующие live-region-объявления. Portal — лишняя сложность без выигрыша при position:fixed viewport."
+    },
+    {
+      "option": "Переписать useToasts в kit на singleton (заменить useState на module-level ref)",
+      "why_not": "Ломает showcase.jsx и любые изолированные стенды, нарушает принцип замены компонентов в тестах, делает state непредсказуемым при HMR. Kit-примитивы должны оставаться stateless-composable."
+    },
+    {
+      "option": "Использовать нативный Notification API / browser dialog вместо toast",
+      "why_not": "Нативные уведомления требуют permission-запроса, не стилизуются под дизайн-систему, теряются при смене фокуса. window.alert/confirm — прямо запрещены UX-политикой (blocking). Toast — уже готовый kit-компонент."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "ToastProvider",
+      "fields": [
+        {"name": "children", "type": "ReactNode"},
+        {"name": "_toasts", "type": "Toast[] (internal, через useToasts из kit)"},
+        {"name": "_timers", "type": "Record<number, TimerId> (internal, pause-on-hover)"},
+        {"name": "push", "type": "(toast: ToastInput) => number (возвращает id)"},
+        {"name": "dismiss", "type": "(id: number) => void"}
+      ]
+    },
+    {
+      "entity": "ToastContext",
+      "fields": [
+        {"name": "push", "type": "(input: ToastInput) => number"},
+        {"name": "dismiss", "type": "(id: number) => void"}
+      ]
+    },
+    {
+      "entity": "ToastInput",
+      "fields": [
+        {"name": "tone", "type": "'success' | 'error' | 'warning' | 'info'"},
+        {"name": "title", "type": "string"},
+        {"name": "message", "type": "string? (опциональный подзаголовок)"},
+        {"name": "duration", "type": "number? (ms; 0=нет авто-гашения; default: success/info=4000, error/warning=0)"},
+        {"name": "action", "type": "ReactNode? (кнопка Отменить для undo-тоста)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "useToastContext(): {push, dismiss} — бросает Error если вызван вне ToastProvider; импорт из 'app-shell/toast-context.jsx'.",
+    "push(input: ToastInput): number — ставит тост в очередь, возвращает id для dismiss(); duration по дефолту: error/warning→0 (no auto-dismiss), success/info→4000ms.",
+    "dismiss(id: number): void — немедленно убирает тост из очереди.",
+    "Единственный <ToastViewport> монтируется внутри ToastProvider; он рендерит все активные тосты; pause-on-hover реализован через onPointerEnter/onPointerLeave на viewport.",
+    "Политика a11y: tone=error|warning → role='alert' aria-live='assertive'; tone=success|info → role='status' aria-live='polite'. Унаследовано из kit Toast (components.jsx:521) — ToastProvider ничего не переопределяет.",
+    "Showcase.jsx — единственный разрешённый файл с прямым useToasts()+<ToastViewport> вне AppShell (изолированный стенд). Все остальные потребители обязаны использовать useToastContext().",
+    "ToastProvider оборачивает authenticated-дерево в AppShell (shell.jsx); login/register экраны (до аутентификации) — вне провайдера, не имеют доступа к push().",
+    "Формы в iframe (screen-forms.jsx sandbox) — общаются через postMessage; AppShell-хост принимает событие и вызывает push() сам.",
+    "window.alert() и window.confirm() в web/src/app-shell/shell.jsx (downloadAuditLog, 3 вызова) заменяются на push({tone:'error', duration:0}) / push({tone:'success'}).",
+    "window.confirm() в web/src/screens/rights/ra-sod.jsx (~90) заменяется на kit <ConfirmDialog tone='danger'>; исход — push({tone:'success'}) / push({tone:'error', duration:0}).",
+    "console.error в web/src/screens/screen-assistant.jsx:789 (Failed to create thread) дополняется push({tone:'error', title:'Не удалось создать тред', duration:0}).",
+    "screen-org.jsx и ra-criticality.jsx: убрать локальный useToasts()/ToastViewport, заменить на useToastContext().push.",
+    "Undo-тост (T-0526): push() принимает action:ReactNode (кнопка «Отменить»); push() возвращает id для dismiss() внутри обработчика undo."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-TOAST-NO-ALERT",
+      "rule": "Ни один файл в web/src (кроме *.test.* и showcase.jsx) не содержит window.alert( или window.confirm( — все UI-исходы через push({tone:'error'|'success'|...}).",
+      "ci_check": "ci/checks/ux/ux-no-alert.sh (grep -rn 'window\\.alert\\|window\\.confirm' web/src --include='*.jsx' --include='*.js' | grep -v showcase | grep -v '\\.test\\.' | grep -v node_modules — должен выдать 0 строк)"
+    },
+    {
+      "id": "FF-TOAST-NO-CONSOLE-ONLY",
+      "rule": "Ни один screen-файл не имеет console.error/console.warn как единственный исход операции для пользователя — допустим только в паре с push({tone:'error', ...}).",
+      "ci_check": "ci/checks/ux/ux-no-console-only.sh (проверяет что каждый catch-блок в web/src/screens с console.error содержит также push( в том же блоке или выше)"
+    },
+    {
+      "id": "FF-TOAST-ONE-VIEWPORT",
+      "rule": "В web/src строго 2 вхождения ToastViewport: определение в components.jsx и единственный рендер в toast-context.jsx. Showcase.jsx — исключение (grep считает его отдельно).",
+      "ci_check": "ci/checks/ux/ux-one-viewport.sh (grep -rn 'ToastViewport' web/src --include='*.jsx' | grep -v showcase | grep -v components.jsx — должен выдать ровно 1 строку: toast-context.jsx)"
+    },
+    {
+      "id": "FF-UX-A11Y-ASSERTIVE",
+      "rule": "Тосты tone=error и tone=warning рендерят role='alert' и aria-live='assertive'; тосты tone=success и tone=info рендерят role='status' и aria-live='polite'. Это унаследовано из kit Toast и не может быть переопределено.",
+      "ci_check": "e2e/journeys/toast-a11y.ux.journey.ts (Playwright: push error-тост → проверить aria-live=assertive; push success → aria-live=polite; оба — контраст >= 4.5:1 через axe-core)"
+    },
+    {
+      "id": "FF-UX-CONTRAST-TOAST",
+      "rule": "Фон и текст тостов всех четырёх tone дают контраст >= WCAG AA (4.5:1) в обеих темах (light/dark). Цвета через --chs-color-success/danger/warning/info и --chs-color-text-on-* токены, ноль хардкода hex.",
+      "ci_check": "e2e/journeys/toast-a11y.ux.journey.ts (axe-core color-contrast rule на смонтированный ToastViewport в обеих темах)"
+    },
+    {
+      "id": "FF-TOAST-PAUSE-HOVER",
+      "rule": "Тосты с duration>0 не гасятся пока pointerenter на ToastViewport активен; таймер возобновляется при pointerleave.",
+      "ci_check": "e2e/journeys/toast-a11y.ux.journey.ts (push success duration=4000 → hover viewport → ждать 5000ms → тост жив → unhover → ждать 4000ms → тост ушёл)"
+    }
+  ],
+  "traceability": [
+    {"ac": "ToastProvider + useToastContext — нет локальной обвязки", "covered_by": "design §2.2, contracts[0..1]"},
+    {"ac": "Единственный ToastViewport в app-root", "covered_by": "design §2.2, contracts[3]; FF-TOAST-ONE-VIEWPORT"},
+    {"ac": "Политика severity: error/warning без авто-гашения, assertive", "covered_by": "design §3, contracts[4]; FF-UX-A11Y-ASSERTIVE"},
+    {"ac": "Pause-on-hover для success/info тостов", "covered_by": "design §3; FF-TOAST-PAUSE-HOVER"},
+    {"ac": "Замена window.alert() в shell/downloadAuditLog", "covered_by": "design §4.1, contracts[8]"},
+    {"ac": "Замена window.confirm() в ra-sod.jsx", "covered_by": "design §4.1, contracts[9]"},
+    {"ac": "Замена console.error в screen-assistant.jsx:789", "covered_by": "design §4.2, contracts[10]"},
+    {"ac": "Миграция screen-org.jsx и ra-criticality.jsx", "covered_by": "design §7, contracts[11]"},
+    {"ac": "Undo-тост контракт (action prop + push возвращает id)", "covered_by": "design §6, contracts[12]"},
+    {"ac": "Showcase.jsx — исключение, совместимость kit-примитивов", "covered_by": "design §7, contracts[5]"},
+    {"ac": "Контраст AA обе темы", "covered_by": "design §3; FF-UX-CONTRAST-TOAST"},
+    {"ac": "Grep-гард нет window.alert/console-only", "covered_by": "FF-TOAST-NO-ALERT; FF-TOAST-NO-CONSOLE-ONLY"}
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0528-toast-provider.design.md"
+}
