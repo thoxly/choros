@@ -71,6 +71,12 @@ import {
   validateBindingFields,
   type BindingField,
 } from "../core/binding-compat.js";
+import {
+  classifyFloorBoundary,
+  type FloorEditOp,
+  type LiveSchemaView,
+  type FormDocument,
+} from "../core/floor-boundary.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -394,6 +400,35 @@ function parseEditRequest(raw: unknown): Floor1EditRequest {
 }
 
 // ---------------------------------------------------------------------------
+// deriveChangedKeys — R-2 whitelist helper (T-0520)
+//
+// Maps a parsed Floor1EditRequest to the set of named-binding / ui-schema
+// slots it modifies (for FLOOR1_DECLARATIVE_WHITELIST check in classifyFloorBoundary).
+// All returned keys must be present in FLOOR1_DECLARATIVE_WHITELIST for the
+// operation to clear R-2. Unknown kinds resolve to an empty array (fail-closed:
+// the lexical R-1 will already catch them).
+// ---------------------------------------------------------------------------
+
+function deriveChangedKeys(req: Floor1EditRequest): string[] {
+  switch (req.kind) {
+    case "relabel_field":
+      // Modifies label (+ optionally placeholder) in both BindingField and FieldUiMeta.
+      return req.placeholder !== undefined ? ["label", "placeholder"] : ["label"];
+    case "toggle_required":
+      return ["required"];
+    case "hide_field":
+    case "show_field":
+      return ["hidden"];
+    case "reorder_fields":
+      return ["display_order"];
+    case "set_help_text":
+      return ["help_text"];
+    default:
+      return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -469,6 +504,46 @@ export function registerFloor1EditorRoutes(
       // Authz check (→ 403 if role process_designer missing, review R-1).
       // Same ordering as binding.ts: 401 → 400 (validation) → 403 → operation.
       await authorizeEditor(pool, urlParts.tenantId, actorId);
+
+      // T-0520 [D7-5]: classifyFloorBoundary — content gate (R-1..R-4) BEFORE applying.
+      // Extends the lexical WRONG_FLOOR guard in validateFloor1Request with a content-aware
+      // check: even if kind is Floor-1 lexically, the actual diff / doc might carry a
+      // code-signal or dangling fieldKey → Floor-2 (fail-up, spec §3.2).
+      //
+      // LiveSchemaView is built from the parsed fields[] that the caller supplied in the
+      // body (the named-binding key-set — no DB read needed; purity is preserved in core).
+      // op.doc comes from body.doc (optional FormDocument from FormDesigner / agent).
+      // changedKeys is derived from the edit request's own key(s) (R-2 whitelist check).
+      const rawDoc = (body as Record<string, unknown>)["doc"];
+      const opDoc: FormDocument | undefined =
+        rawDoc !== undefined && rawDoc !== null && typeof rawDoc === "object" && !Array.isArray(rawDoc)
+          ? (rawDoc as FormDocument)
+          : undefined;
+
+      // Derive changedKeys from the edit request for R-2 (whitelist of declarative slots).
+      const changedKeys = deriveChangedKeys(editRequest);
+
+      const schemaView: LiveSchemaView = {
+        fieldKeys: fields.map((f) => f.key),
+        fields,
+      };
+      const floorOp: FloorEditOp = {
+        kind: editRequest.kind,
+        changedKeys,
+        doc: opDoc,
+      };
+      const floorResult = classifyFloorBoundary(floorOp, schemaView);
+      if (floorResult.floor === "2") {
+        // Fail-up: content gate detected Floor-2 signal (code / dangling binding / unknown key).
+        // If the route is 'sandbox', the operation should go through the Floor-2 authoring path
+        // (validateFloor2Descriptor / T-0076). This endpoint is Floor-1 only → 409.
+        throw new HttpError(
+          409,
+          "WRONG_FLOOR",
+          `Edit classified as Floor-2 (content gate, T-0520). Reasons: ${floorResult.reasons.join("; ")}. ` +
+            `Use the Floor-2 authoring path (route: ${floorResult.route}).`,
+        );
+      }
 
       // Apply transformation (pure core — includes validateFloor1Request)
       const result = applyFloor1Edit(editRequest, fields, uiSchema);
