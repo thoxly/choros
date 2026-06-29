@@ -1,0 +1,127 @@
+{
+  "task_id": "T-0538",
+  "status": "ready",
+  "decision": "Пересобрать nav Choros в плоскую модель NavZone[] → NavItem[] с четырьмя операционными зонами (РАБОТА · КОНСТРУКТОР · НАБЛЮДАЕМОСТЬ · АДМИНИСТРИРОВАНИЕ), заменив двухзначное space-разделение (authoring/work). Каждый NavItem несёт мета-поля {zone, audience, capability, frequency, order}; поля capability/audience объявляются как задел под capability-фильтр T-0539, но фильтрация НЕ реализуется — дефолт capability:null ⇒ видно всем. Идентичность переезжает из статичного подвала сайдбара в аккаунт-поповер (Профиль/Мои настройки=скоро, Уведомления, Тема, Сменить организацию, Выйти); плавающая кнопка «Выйти» (shell.jsx ~762) и ThemeToggle из топбара (shell.jsx ~354) удаляются. Справочники (Критичность, SoD, Каталог ролей, Повседневные операции) выносятся из суб-вкладок экрана «Права» (RIGHTS_TABS) в пункт «Справочники» зоны АДМИНИСТРИРОВАНИЕ; в «Доступе» остаётся операционный read-first просмотр грантов (Обзор ролей + Журнал). Все существующие маршруты сохраняются байт-в-байт (path-override инвариант): IA меняет только группировку, ярлыки, подвал и суб-таб-разбиение, не роутинг и не API.",
+  "rejected_alternatives": [
+    {
+      "option": "Оставить две оси АВТОРИНГ/РАБОТА, дочистив свалку внутри «Работы»",
+      "why_not": "Две оси не масштабируются: «наблюдаю» и «администрирую» — самостоятельные режимы с разной аудиторией и частотой. Системные/админские пункты (права, LLM-конфиг, промпт) остаются рядом с «Мои задачи» конечного пользователя — неверная ментальная модель, источник шума, который и зафиксировал nav-аудит."
+    },
+    {
+      "option": "Реализовать capability-фильтр видимости nav прямо здесь (одной задачей с rezoning)",
+      "why_not": "Раздувает скоуп и связывает IA-перекладку с моделью грантов (T-0018). Capability-словарь и его потребление — отдельная задача T-0539. T-0538 объявляет поля-задел и дефолт «видно всем», чтобы T-0539 встал поверх без переписывания модели."
+    },
+    {
+      "option": "Завести новые top-level маршруты под зоны/справочники (/reference, /admin/...)",
+      "why_not": "Нарушает несущий инвариант «маршруты НЕ меняются»: добавление/перецеливание Route ломает прямые ссылки, палитру и крошки, требует регрессии роутинга. Группировка достигается данными в nav-config поверх неизменных маршрутов; пункт «Справочники» открывает существующий /rights/criticality."
+    },
+    {
+      "option": "Сделать аккаунт-поповер ручным overlay-div'ом с кликом по строке идентичности",
+      "why_not": "Воспроизводит находки аудита #3/#5/#9 (fake-ARIA, нет фокус-трапа/Esc, причина disabled в native title). Поповер строится на kit Modal/Menu (фокус-трап, Esc, токены), триггер — настоящий button с aria-haspopup/aria-expanded, «скоро» — aria-disabled + видимая причина."
+    },
+    {
+      "option": "Оставить ThemeToggle в топбаре, добавив тему ещё и в меню (дублирование)",
+      "why_not": "Тема — разовая настройка аккаунта, а не действие текущего экрана; держать её на каждом экране в топбаре — постоянный шум места. Дублирование переключателя в двух местах создаёт два источника состояния. Тема переезжает в аккаунт-поповер единственным местом."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "NavZone",
+      "fields": [
+        {"name": "id", "type": "'work' | 'constructor' | 'observability' | 'admin'"},
+        {"name": "label", "type": "string (ru: Работа|Конструктор|Наблюдаемость|Администрирование)"},
+        {"name": "audience", "type": "'end-user' | 'builder' | 'manager' | 'admin' (дефолтная аудитория зоны)"},
+        {"name": "order", "type": "number (1..4 — порядок зон в сайдбаре)"},
+        {"name": "items", "type": "NavItem[] (в порядке item.order)"}
+      ]
+    },
+    {
+      "entity": "NavItem",
+      "fields": [
+        {"name": "id", "type": "string (стабильный id == screen-id, основа маршрута)"},
+        {"name": "label", "type": "string (человеко-понятный ru-ярлык)"},
+        {"name": "icon", "type": "string (kit Lucide icon name)"},
+        {"name": "zone", "type": "'work' | 'constructor' | 'observability' | 'admin' | null (null = home над зонами)"},
+        {"name": "audience", "type": "'end-user' | 'builder' | 'manager' | 'admin' (дефолт = zone.audience)"},
+        {"name": "capability", "type": "string | null (ЗАДЕЛ под T-0539: null ⇒ видно всем СЕЙЧАС; словарь ключей из модели грантов T-0018)"},
+        {"name": "frequency", "type": "'daily' | 'weekly' | 'rare' (информативно)"},
+        {"name": "order", "type": "number (порядок внутри зоны, возрастающий)"},
+        {"name": "subgroup", "type": "string? (опц. ярлык подгруппы внутри зоны admin: Исполнители|Доступ|Справочники|Интеграции и LLM)"},
+        {"name": "path", "type": "string? (переопределение маршрута; инвариант: существующий Route)"},
+        {"name": "screen", "type": "boolean? (есть реальный экран/маршрут)"},
+        {"name": "hidden", "type": "boolean? (скрыт из nav; маршрут жив — напр. forms)"},
+        {"name": "status", "type": "'live' | 'demo' | 'soon'"}
+      ]
+    },
+    {
+      "entity": "AccountMenuItem",
+      "fields": [
+        {"name": "id", "type": "'profile' | 'settings' | 'notifications' | 'theme' | 'switch-org' | 'logout'"},
+        {"name": "label", "type": "string (Профиль|Мои настройки|Уведомления|Тема|Сменить организацию|Выйти)"},
+        {"name": "action", "type": "'navigate' | 'inline-toggle' | 'logout' | 'disabled-soon' (theme=inline-toggle, logout=handleLogout)"},
+        {"name": "status", "type": "'live' | 'soon' | 'honest-disabled' (профиль/настройки=soon; switch-org=honest-disabled при 1 орг)"},
+        {"name": "disabledReason", "type": "string? (видимая причина для soon/honest-disabled — НЕ native title)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "nav-config экспортирует NAV_HOME (одиночный home-пункт «Обзор» над зонами) + ZONES: NavZone[4] в порядке РАБОТА(1)·КОНСТРУКТОР(2)·НАБЛЮДАЕМОСТЬ(3)·АДМИНИСТРИРОВАНИЕ(4); хелперы visibleItems(zone) (фильтр hidden) и effectiveStatus(item) (legacy soon) сохраняются.",
+    "Все 19 сегодняшних пунктов (overview, apps, forms[hidden], modeler, assistant, inbox, processes, org, agents, rights, ops-overview, notifications, audit, spend, reports, process-analytics, llm-connections, llm-config, assistant-prompt) присутствуют в новой модели; ни один не теряется/не задваивается (кроме сознательного быстрого-доступа notifications в аккаунт-поповере на тот же /notifications).",
+    "Маршруты НЕ меняются: каждый NavItem резолвится в item.path || '/'+item.id; ни один <Route> в shell.jsx не добавляется/не удаляется; новый пункт reference указывает path:/rights/criticality (существующий маршрут).",
+    "paletteDestinations() (CommandPalette) продолжает обходить все item.screen && status!=='soon' пункты по новой NAV — ни одно назначение палитры не теряется.",
+    "SCREEN_META-крошки обновляются на новые зоны-ярлыки (Работа/Конструктор/Наблюдаемость/Администрирование), маршруты те же.",
+    "Аккаунт-поповер строится на kit Modal/Menu (фокус-трап, Esc, токены); триггер — настоящий <button> с aria-haspopup/aria-expanded; «скоро»/honest-disabled пункты несут aria-disabled + ВИДИМУЮ причину (не native title).",
+    "Плавающая «Выйти» (shell.jsx ~762, chs-nav__logout-btn) и ThemeToggle из топбара (shell.jsx ~354, chs-topbar__right) удалены; тема-переключатель остаётся ТОЛЬКО внутри аккаунт-поповера.",
+    "Справочники: RIGHTS_TABS расщепляется на access-жанр [overview(/rights), trail(/rights/trail)] (остаётся в «Доступ») и reference-жанр [criticality(/rights/criticality), sod(/rights/sod), editor(/rights/editor → ярлык «Каталог ролей»), intents(/rights/intents)] (пункт «Справочники»); маршруты /rights/* не меняются; суб-таб-бар фильтруется по текущему пункту nav.",
+    "Мета-поля capability/audience объявлены, но фильтрация НЕ реализуется в T-0538: capability:null ⇒ видно всем; T-0539 потребляет поля и НЕ должен ломать дефолт «видно всем» для пунктов без capability."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-UX-DEAD",
+      "rule": "G1: нет мёртвых enabled-пунктов — каждый кликабельный (screen && status!=='soon') пункт nav и каждый enabled-пункт аккаунт-поповера ведёт на существующий маршрут/действие; «скоро»/honest-disabled помечены aria-disabled + видимой причиной (не native title на disabled).",
+      "ci_check": "ci/checks/ux/ux-g1-no-dead-nav.sh"
+    },
+    {
+      "id": "FF-UX-CONTRAST",
+      "rule": "G3/G4: текст и иконки нав-сайдбара, заголовков зон и аккаунт-поповера дают контраст >= WCAG AA в ОБЕИХ темах (light/dark); никаких hex-fallback в var() для нав-поверхностей.",
+      "ci_check": "e2e/journeys/nav-ia.ux.journey.ts"
+    },
+    {
+      "id": "FF-UX-JARGON",
+      "rule": "G5: ни один видимый ярлык зоны/пункта/подгруппы/аккаунт-меню не содержит дев-жаргона (en-enum, slug, UUID, HTTP-код, space:'authoring', control-plane).",
+      "ci_check": "ci/checks/ux/ux-g5-jargon-denylist.sh"
+    },
+    {
+      "id": "FF-NAV-PATHS",
+      "rule": "Каждый path, на который ссылается nav/палитра (явный item.path ИЛИ выведенный '/'+id), резолвится в существующий <Route> в shell.jsx; каждый сегодняшний маршрут по-прежнему достижим — нет осиротевших/битых ссылок.",
+      "ci_check": "ci/checks/ux/nav-paths-resolve.sh"
+    },
+    {
+      "id": "FF-NAV-MAP",
+      "rule": "Множество nav item.id (включая hidden) в новой модели == множеству сегодняшних id (полнота переноса: ничего не потеряно/не задвоено сверх сознательного быстрого-доступа notifications).",
+      "ci_check": "ci/checks/ux/nav-paths-resolve.sh"
+    },
+    {
+      "id": "FF-NAV-NOSYS",
+      "rule": "В зоне РАБОТА нет системных/админских пунктов: ни одного с zone:'work', чей id принадлежит {org, agents, rights, reference, llm-connections, llm-config, assistant-prompt, audit, spend}; системные пункты обязаны нести zone в {admin, observability}.",
+      "ci_check": "ci/checks/ux/nav-zone-purity.sh"
+    }
+  ],
+  "traceability": [
+    {"ac": "4 зоны Работа/Конструктор/Наблюдаемость/Администрирование", "covered_by": "design §2.1, §3.2-3.4"},
+    {"ac": "мета-поля {zone, audience, capability, frequency, order}", "covered_by": "design §3.1; object_model NavItem"},
+    {"ac": "capability — задел, фильтр НЕ реализован, дефолт «видно всем»", "covered_by": "design §3.1, §8; contracts[8]"},
+    {"ac": "маппинг каждого сегодняшнего пункта → зона", "covered_by": "design §3.3 (таблица 0-18); contracts[1]"},
+    {"ac": "меню пользователя (Профиль/Настройки=скоро, Уведомления, Тема, Орг, Выйти)", "covered_by": "design §4.1; object_model AccountMenuItem"},
+    {"ac": "убрать плавающую «Выйти» + ThemeToggle из топбара", "covered_by": "design §4.2; contracts[6]"},
+    {"ac": "вынос справочников (критичность/SoD/каталог ролей/интенты)", "covered_by": "design §5.1-5.3; contracts[7]"},
+    {"ac": "что остаётся в «Доступе» (обзор грантов + журнал)", "covered_by": "design §5.2"},
+    {"ac": "инвариант «маршруты НЕ меняются»", "covered_by": "design §6; FF-NAV-PATHS; contracts[2]"},
+    {"ac": "FF-UX-* G1/G3/G4 (нет мёртвых, AA, нет жаргона)", "covered_by": "FF-UX-DEAD, FF-UX-CONTRAST, FF-UX-JARGON"},
+    {"ac": "FF «каждый path резолвится»", "covered_by": "FF-NAV-PATHS"},
+    {"ac": "FF «системные пункты НЕ в зоне РАБОТА»", "covered_by": "FF-NAV-NOSYS"},
+    {"ac": "координация T-0528/T-0531/T-0539 как риск", "covered_by": "design §8"}
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0538-nav-ia-rezoning.design.md"
+}
