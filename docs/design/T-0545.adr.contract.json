@@ -1,0 +1,135 @@
+{
+  "task_id": "T-0545",
+  "status": "ready",
+  "decision": "Ввести инструмент emit_surface на стороне сервера (в assistant-configurator.ts), который принимает EmitSurfaceRequest (source, kind, layout), строит surface-document v2 через тот же emitFormDocument/nodeForField, что и человек-конструктор, затем прогоняет через тот же validateSurface (или validateDocument до T-0543-impl) и тот же floor-классификатор (classifyFloorBoundary / hasCustomNode). Результат (ok, doc, floor2Flag, validationErrors, canvasPath) возвращается ассистентом в ответе с deep-link на канвас T-0544 — человек открывает черновик и правит руками. Кодовый вывод AI (custom-узел, reactSource, componentId) → floor2Flag=true + требует FLOOR2_CUSTOM_FLAG_KEY + рендерится в Floor2Viewer, не inline. Неизвестный fieldKey → честный brokenKeys в DRAFT, не молчаливое удаление. Неизвестный тип узла (вне реестра) → полный отказ (ok=false, не сохраняется). При любой деградации LLM пользователь видит честное сообщение + кнопку открыть пустой конструктор.",
+  "rejected_alternatives": [
+    {
+      "option": "Параллельный AI-only валидатор (отдельный путь для бота, не тот что у человека)",
+      "why_not": "Ломает «бот==человек» (T-0543 §6). Два валидатора расходятся → drift. Один validateSurface — единственный авторитет для обоих драйверов."
+    },
+    {
+      "option": "Рендер сгенерированной формы прямо внутри чата (не deep-link на канвас)",
+      "why_not": "D8 §3.1 явно: «НЕ рендерим всё в диалоге — это переписать конструктор в чате». Канвас T-0544 — единственное место правки. Дублировать рендерер в чате — четвёртый редактор."
+    },
+    {
+      "option": "Молча отбрасывать неизвестные fieldKey из AI-вывода",
+      "why_not": "Нарушает honest-empty принцип. form-document-emit.js уже закодировал противоположное: unknown key эмитируется честно, потом флагается validateDocument. Тихое удаление скрывает ошибки LLM."
+    },
+    {
+      "option": "Позволять AI-выводу с custom-узлом сохраняться inline без Floor-2-флага",
+      "why_not": "Нарушает floor-boundary.spec §3.3/§3.4: custom-узел → Floor-2-операция → требует sandbox-iframe и FLOOR2_CUSTOM_FLAG_KEY. AI не обходит floor-классификатор — этаж из содержимого, не из намерений LLM."
+    },
+    {
+      "option": "emit_surface как клиентский инструмент (вызывается прямо из браузера)",
+      "why_not": "Нарушает границу: схема данных (record_schema) и реестр — серверные источники правды. Клиент не имеет полного доступа к живой схеме. Кроме того, LLM-вызов должен быть сервер-side (BYO-ключ в T-0382 — не в браузере)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "EmitTool",
+      "fields": [
+        { "name": "name", "type": "const 'emit_surface'" },
+        { "name": "description", "type": "string — описание инструмента для LLM" },
+        { "name": "input_schema", "type": "JSONSchema (EmitSurfaceRequest)" }
+      ]
+    },
+    {
+      "entity": "EmitSurfaceRequest",
+      "fields": [
+        { "name": "source", "type": "{ applicationId: uuid; registryDefId?: uuid }" },
+        { "name": "kind", "type": "enum(record-form|step-form|page)" },
+        { "name": "step", "type": "{ processKey: string; step: string }? — только kind=step-form" },
+        { "name": "slug", "type": "string? — только kind=page, url-safe" },
+        { "name": "layout", "type": "EmitBlock[]? — если отсутствует -> buildDefaultDocument (baseline)" },
+        { "name": "draftId", "type": "string? — DRAFT-бандл (D8 G1/G2, опциональная связь)" }
+      ]
+    },
+    {
+      "entity": "EmitResult",
+      "fields": [
+        { "name": "doc", "type": "SurfaceDocument|null — v2 surface-document; null при полном отказе" },
+        { "name": "ok", "type": "boolean — прошёл validateSurface (тот же путь, что человек)" },
+        { "name": "validationErrors", "type": "Array<{code,path,message}> — V-NODE/V-KEY/V-CONTRACT/V-WIDGET/V-SUBKEY/V-CUSTOM" },
+        { "name": "brokenKeys", "type": "string[] — fieldKey из AI-вывода, отсутствующие в живой схеме" },
+        { "name": "floor2Flag", "type": "boolean — true если doc содержит custom-узел (Floor-2-сигнал)" },
+        { "name": "errorMessage", "type": "string|null — честная причина полного отказа для пользователя" },
+        { "name": "canvasPath", "type": "string|null — '/constructor/{appId}?draft={draftId}'; присутствует при ok=true или brokenKeys>0" }
+      ]
+    }
+  ],
+  "contracts": [
+    "emitSurface(req: EmitSurfaceRequest, registry: WidgetRegistry, schema: LiveSchemaView): EmitSurfaceResult — чистая функция (без I/O), вызывается сервером при LLM tool_use. Внутри: emitFormDocument(intent, fields) [form-document-emit.js существующий] → coerceToSurface(v1→v2) [T-0543] → validateSurface(doc, fields, registry) [ОБЩИЙ ПУТЬ, тот же что человек] → classifyFloorBoundary(op, schema) [floor-boundary] → EmitSurfaceResult.",
+    "validateSurface(doc, fields, registry) — ТОТ ЖЕ вызов для AI-вывода и для человека-конструктора. Нет параллельного AI-only валидатора. До T-0543-impl fallback: validateDocument(doc, fields) из form-document.js.",
+    "classifyFloorBoundary: doc с custom-узлом/reactSource/componentId → floor2Flag=true, route:'sandbox'. До T-0402-impl fallback: hasCustomNode(doc) из form-document.js (уже реализован). AI не выбирает этаж — этаж из содержимого.",
+    "screen-assistant.jsx MessageBubble: если msg.surface присутствует → deep-link Button 'Открыть в конструкторе' (navigate(canvasPath)). Если floor2Flag → показать Floor-2-предупреждение. Если msg.errorMessage → честная ошибка + кнопка 'Собрать вручную'. НЕ рендерить форму inline.",
+    "Деградация: HTTP 503 от LLM → существующий путь screen-assistant.jsx строка 158. JSON.parse fail → { ok: false, errorMessage: 'LLM вернул невалидный формат' }. Timeout → abort + честная ошибка. Всегда: пользователь видит путь к пустому конструктору.",
+    "Неизвестный тип узла (вне registry): validateSurface V-NODE → ok=false, doc НЕ сохраняется. Неизвестный fieldKey: узел эмитируется честно, validateSurface V-KEY → ok=false, brokenKeys, doc сохраняется в DRAFT с маркерами (человек видит и правит). custom-узел без FLOOR2_CUSTOM_FLAG_KEY → 403/blocked сохранение."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-T0545-SAME-GATE",
+      "rule": "AI-вывод `emit_surface` проходит ТОТ ЖЕ `validateSurface` (или `validateDocument` до T-0543-impl), что и человек-конструктор. Нет параллельного AI-only валидатора. Общий путь (не параллельный): emitFormDocument → validateSurface → тот же результат что получил бы drag-n-drop конструктор для эквивалентного документа.",
+      "ci_check": "vitest: emitSurface({source, kind:'record-form', layout:[{kind:'table',fieldKey:'items'},{kind:'readout',fieldKey:'total'}]}, registry, SCHEMA) и validateSurface(buildDefaultDocument(source, SCHEMA), SCHEMA, registry) используют один и тот же validateSurface-вызов (grep: нет второго validate*-вызова в emit_surface handler). Плюс: emitSurface_result.ok === validateSurface(emitSurface_result.doc, SCHEMA, registry).ok (тавтология-тест на единый путь). exit 1 при расхождении."
+    },
+    {
+      "id": "FF-T0545-FLOOR2-FLAG",
+      "rule": "Кодовый вывод AI (custom-узел / reactSource / componentId в документе) → floor2Flag=true в EmitSurfaceResult. Сохранение документа с floor2Flag=true требует FLOOR2_CUSTOM_FLAG_KEY==='true' (governance-флаг). custom-узел рендерится через Floor2Viewer.jsx (Floor-2 sandbox-iframe), НЕ inline в SurfaceRenderer. AI не обходит floor-классификатор.",
+      "ci_check": "vitest: emitSurface с layout содержащим {kind:'custom', componentId:'x', bindings:[]} → result.floor2Flag === true. emitSurface с чисто декларативным layout → result.floor2Flag === false. Плюс grep-гард: screen-assistant.jsx MessageBubble показывает floor2-badge при floor2Flag (наличие условного рендера floor2Flag в JSX). exit 1 при нарушении."
+    },
+    {
+      "id": "FF-T0545-NO-BYPASS",
+      "rule": "emit_surface не сохраняет документ при ok=false с V-NODE (неизвестный тип узла вне реестра). brokenKeys-только (V-KEY) → DRAFT сохраняется с маркерами. Закрытость по умолчанию: нет implicit escape для неизвестных типов.",
+      "ci_check": "vitest: emitSurface с layout [{kind:'unknown_type'}] → result.ok === false, result.doc === null (не сохранён). emitSurface с [{kind:'field',fieldKey:'ghost'}] (несуществующий fieldKey) → result.ok === false, result.brokenKeys включает 'ghost', result.doc !== null (сохранён с маркером). exit 1 при нарушении."
+    },
+    {
+      "id": "FF-T0545-HONEST-DEGRADE",
+      "rule": "При LLM=недоступен (503) и при result.errorMessage !== null: пользователь видит честное сообщение + кнопку/путь к пустому конструктору. Ни при каких условиях ошибка не скрывается молча. Канвас T-0544 достижим независимо от статуса LLM.",
+      "ci_check": "vitest (server handler): mock LLM 503 → ответ содержит {errorMessage: string (non-null), surface: null}; mock LLM invalid-json → аналогично. Плюс JSX-тест (React Testing Library): MessageBubble с msg={errorMessage:'X', surface:null} рендерит текст ошибки И кнопку открыть конструктор. exit 1 при отсутствии."
+    },
+    {
+      "id": "FF-UX-G1",
+      "rule": "UI-элементы шва emit_surface в screen-assistant.jsx (кнопка «Открыть в конструкторе», floor2-badge, сообщения об ошибках валидации) используют только --chs-* CSS-токены и .chs-* классы. Нет hardcoded цветов, hex/rgb литералов. Honest-empty состояния (empty, error) через kit-компоненты.",
+      "ci_check": "ci/checks design-tokens grep-гард (уже существует): ноль hex/rgb-литералов в добавленных фрагментах screen-assistant.jsx (diff). Наличие EmptyState/ErrorState из компонент-кита при errorMessage и при пустом canvasPath. exit 1 при нарушении."
+    }
+  ],
+  "traceability": [
+    {
+      "ac": "emit_surface использует тот же emitFormDocument/nodeForField, что drag-n-drop конструктор (бот==человек)",
+      "covered_by": "FF-T0545-SAME-GATE; form-document-soglasovanie.test.js (существующий); form-document-emit.js (существующий emitFormDocument)"
+    },
+    {
+      "ac": "Результат AI проходит тот же validateSurface/validateDocument, что документ от человека (общий путь)",
+      "covered_by": "FF-T0545-SAME-GATE; contracts[0] (emitSurface → validateSurface common path)"
+    },
+    {
+      "ac": "Кодовый вывод AI (custom-узел) → floor2Flag + Floor-2-sandbox, не inline",
+      "covered_by": "FF-T0545-FLOOR2-FLAG; floor-boundary.spec §3.3/§3.4; T-0543 §8"
+    },
+    {
+      "ac": "Неизвестный fieldKey → brokenKeys, не молчаливое удаление",
+      "covered_by": "FF-T0545-NO-BYPASS; form-document-emit.js fieldNode (существующее поведение)"
+    },
+    {
+      "ac": "Неизвестный тип узла (вне реестра) → полный отказ, не сохраняется",
+      "covered_by": "FF-T0545-NO-BYPASS; T-0543 R-CLOSED"
+    },
+    {
+      "ac": "Результат эмиссии открывается на канвасе T-0544, не рендерится в чате",
+      "covered_by": "contracts[3] (screen-assistant.jsx deep-link); design §6 поток; D8 §3.1 (G4 ревью в разделах)"
+    },
+    {
+      "ac": "Деградация LLM → честная ошибка + путь к пустому конструктору",
+      "covered_by": "FF-T0545-HONEST-DEGRADE; design §7 (таблица деградаций)"
+    },
+    {
+      "ac": "Граница с D8/T-0455: emit_surface — один инструмент шва; весь текст-первый конструктор — там",
+      "covered_by": "design §2 (таблица границ); design §8 (граница с D8)"
+    },
+    {
+      "ac": "UI шва на дизайн-системе (--chs-* токены, kit-компоненты)",
+      "covered_by": "FF-UX-G1"
+    }
+  ],
+  "adr_artifact_path": "docs/design/T-0545-ai-emit-wiring.design.md",
+  "runtime_target": "локально"
+}
