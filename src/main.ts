@@ -32,6 +32,12 @@ import {
   type AgentDispatchHandle,
   type AgentDispatchDeps,
 } from "./server/agent-dispatch-loop.js";
+import {
+  startTimerFiringLoop,
+  buildTimerFiringDeps,
+  type TimerFiringHandle,
+  type TimerFiringDeps,
+} from "./server/timer-firing-loop.js";
 import { makeKeyedDigest, type KeyedDigest } from "./core/keyed-digest.js";
 
 export interface MainHandle {
@@ -45,6 +51,13 @@ export interface MainHandle {
    * alongside the lifecycle bridge (parallel background loop pattern).
    */
   agentDispatch: AgentDispatchHandle;
+  /**
+   * T-0535 [ENGINE-CORE]: the background timer-firing loop handle (no-op when
+   * degraded — no DB pool or no FLOWABLE_BASE_URL). Drives reconcileInstanceTimers
+   * across tenants on a schedule so step deadlines/timers fire WITHOUT a reader.
+   * Stopped in the graceful shutdown alongside the other background loops.
+   */
+  timerFiring: TimerFiringHandle;
   /**
    * T-0118 (E4.3-fu): the resolver-deps fragment assembled at the composition
    * root. Currently carries the per-tenant `KeyedDigest` port bound to the silo
@@ -85,6 +98,16 @@ export interface StartMainOptions {
   agentDispatchDeps?: AgentDispatchDeps;
   /** Override startAgentDispatchLoop (default: the real one). For composition only. */
   startDispatch?: typeof startAgentDispatchLoop;
+  /**
+   * T-0535 [ENGINE-CORE]: Override the timer-firing deps. In production these are
+   * built from the shared pool + FLOWABLE_BASE_URL via buildTimerFiringDeps. Tests
+   * inject in-memory deps (mock engine + tenant source) so the composition wiring is
+   * exercised without IO. When absent AND a pool+engine exist, built automatically;
+   * otherwise the loop degrades to a no-op (deps undefined).
+   */
+  timerFiringDeps?: TimerFiringDeps;
+  /** Override startTimerFiringLoop (default: the real one). For composition only. */
+  startTimerFiring?: typeof startTimerFiringLoop;
 }
 
 /**
@@ -144,6 +167,7 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   const listen = opts.listen ?? true;
   const start = opts.startBridge ?? startLifecycleBridge;
   const startDispatch = opts.startDispatch ?? startAgentDispatchLoop;
+  const startTimerFiring = opts.startTimerFiring ?? startTimerFiringLoop;
 
   let ownedPool: Pool | undefined;
   let lifecycleDeps: LifecycleBridgeDeps;
@@ -210,14 +234,32 @@ export function startMain(opts: StartMainOptions = {}): MainHandle {
   }
   const agentDispatch = startDispatch(agentDispatchDeps);
 
+  // T-0535 [ENGINE-CORE]: start the background timer-firing loop alongside the other
+  // background loops (same composition-root pattern — NEVER inside createServer). It
+  // drives reconcileInstanceTimers cross-tenant on a schedule so configured step
+  // deadlines/timers fire WITHOUT waiting for someone to open the inbox (the on-read
+  // reconcile from T-0458 remains as a safety net). Degraded to a no-op when there is
+  // no DB pool or no FLOWABLE_BASE_URL (buildTimerFiringDeps returns undefined →
+  // startTimerFiringLoop returns a noopHandle). The pool is shared with the other
+  // loops (each owns its own connections from it).
+  let timerFiringDeps: TimerFiringDeps | undefined;
+  if (opts.timerFiringDeps !== undefined) {
+    timerFiringDeps = opts.timerFiringDeps;
+  } else {
+    timerFiringDeps = buildTimerFiringDeps(lifecycleDeps.pool, env);
+  }
+  const timerFiring = startTimerFiring(timerFiringDeps);
+
   return {
     server,
     lifecycle,
     agentDispatch,
+    timerFiring,
     resolverDeps: resolverDepsObj, // same allocation as passed to createServer() (R-2 / AC-7)
     stop: () => {
       lifecycle.stop();
       agentDispatch.stop();
+      timerFiring.stop();
       server?.close();
       void ownedPool?.end();
     },
