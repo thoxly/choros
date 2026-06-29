@@ -491,14 +491,20 @@ describe("Block C — makeExternalTaskDeliver fail-path", () => {
 // Block E — DMN gateway wiring (T-0340 behavioral bridge test R-1)
 // ---------------------------------------------------------------------------
 /**
- * DG-16: makeExternalTaskDeliver — tel-intake topic triggers evaluateGatewayAtTriage
- * and injects approvalRequired into the completeTask variables map.
+ * DG-16: makeExternalTaskDeliver — the GENERIC triage seam (T-0524) re-evaluates
+ * the authored DMN rule tables on task completion and injects EVERY authored
+ * routing outcome (under its authored name) into the completeTask variables map.
  *
- * This is the BEHAVIORAL R-1 bridge test. Unlike DG-14 (grep) and DG-15 (isolated
+ * T-0524: the seam is NO LONGER gated on the "tel-intake" topic. ТЭЛ
+ * ("approvalRequired") is just one authored configuration. DG-16a/b keep the ТЭЛ
+ * rule table and prove the value reaches Flowable; DG-16c now proves the
+ * fail-closed path (a process with NO authored rule table → no injection).
+ *
+ * This is the BEHAVIORAL bridge test. Unlike DG-14 (grep) and DG-15 (isolated
  * evaluateGatewayAtTriage call), this test drives the FULL deliver() path end-to-end
- * through makeExternalTaskDeliver with a real task_completed row whose job topic is
- * "tel-intake". It asserts that completeTask() receives approvalRequired in its
- * variables — proving the DMN evaluation result actually reaches Flowable.
+ * through makeExternalTaskDeliver with a real task_completed row. It asserts that
+ * completeTask() receives the authored routing variable — proving the DMN
+ * evaluation result actually reaches Flowable.
  *
  * Pool contract (three concurrent connect() calls in the deliver() path):
  *   1. lookupExternalTaskId  → SELECT idempotency_key FROM choros.job
@@ -540,6 +546,8 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
     externalTaskId: string;
     jobTopic: string;
     jobVariables: Record<string, unknown>;
+    /** When true, the process has NO authored rule table (fail-closed path). */
+    noRuleTables?: boolean;
   }): unknown {
     const NOW_MS = Date.now();
     return {
@@ -579,6 +587,7 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
 
           // ── 3. DMN eval: rule-table queries ─────────────────────────────────
           if (/FROM choros\.dmn_rule_table/i.test(sqlText)) {
+            if (opts.noRuleTables) return { rows: [] };
             return {
               rows: [
                 {
@@ -695,15 +704,18 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
     expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBe("standard");
   });
 
-  it("DG-16c: non-tel-intake topic → completeTask does NOT receive approvalRequired", async () => {
-    // For a non-tel-intake topic, the bridge skips DMN evaluation.
-    // The variables from the payload are passed through unchanged (no approvalRequired added).
+  it("DG-16c (T-0524 fail-closed): process with NO authored rule table → no routing var injected", async () => {
+    // T-0524: the seam fires for ANY topic, but when the process has no authored
+    // DMN rule table the evaluation yields an empty routingOutcomes map → the
+    // bridge injects nothing → the gateway's BPMN default flow is taken
+    // (fail-closed, never a silent wrong route). This replaces the old
+    // topic-gated assertion (the seam is no longer special-cased on "tel-intake").
     const flowableClient = new MockFlowableClient();
     const jobStore = new MockJobStore();
 
-    const JOB_ID = "job-other-topic";
-    const EXTERNAL_TASK_ID = "ext-task-other";
-    // High amount but topic is NOT tel-intake → approvalRequired must NOT appear
+    const JOB_ID = "job-no-rule";
+    const EXTERNAL_TASK_ID = "ext-task-no-rule";
+    // High amount, but the process has NO authored rule table → no injection.
     const instanceVariables = { amount: 9_000_000 };
 
     jobStore.pool = makeDmnBridgeMockPool({
@@ -711,6 +723,7 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
       externalTaskId: EXTERNAL_TASK_ID,
       jobTopic: "some-other-topic",
       jobVariables: instanceVariables,
+      noRuleTables: true,
     });
 
     const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
@@ -728,10 +741,103 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
     expect(flowableClient.completeCalls).toHaveLength(1);
 
     const [, , calledVars] = flowableClient.completeCalls[0];
-    // approvalRequired must NOT be in the variables for a non-tel-intake topic
+    // No authored rule → no routing variable injected (fail-closed).
     if (calledVars !== undefined) {
       expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBeUndefined();
     }
+  });
+
+  it("DG-16d (T-0524 generic): NON-ТЭЛ process injects its AUTHORED routing var name", async () => {
+    // Proves the seam is process-agnostic: a different authored rule table (a
+    // leave process: days>14 → needsHeadApproval) reaches completeTask under its
+    // OWN authored name — NOT "approvalRequired".
+    const flowableClient = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+
+    const JOB_ID = "job-leave";
+    const EXTERNAL_TASK_ID = "ext-task-leave";
+    const instanceVariables = { days: 21 };
+
+    const LEAVE_TABLE = {
+      id: "d0de0018-e150-0005-d4f4-000000000018",
+      name: "Отпуск: > 14 дней → согласование руководителя",
+      hitPolicy: "FIRST",
+      rules: [
+        {
+          annotation: "Более 14 дней → согласование руководителя",
+          conditions: [{ field: "days", operator: "gt", value: 14 }],
+          effects: [{ kind: "set_routing_outcome", name: "needsHeadApproval", value: "yes" }],
+        },
+        {
+          annotation: "14 и меньше → без согласования",
+          conditions: [],
+          effects: [{ kind: "set_routing_outcome", name: "needsHeadApproval", value: "no" }],
+        },
+      ],
+    };
+
+    // Custom pool: same routing as makeDmnBridgeMockPool but with the LEAVE rule table.
+    const NOW_MS = Date.now();
+    jobStore.pool = {
+      connect: async () => ({
+        query: async (sql: unknown, params?: unknown[]) => {
+          const sqlText = typeof sql === "string" ? sql : ((sql as { text?: string }).text ?? "");
+          const upper = sqlText.trimStart().toUpperCase();
+          if (
+            upper.startsWith("BEGIN") || upper.startsWith("COMMIT") ||
+            upper.startsWith("ROLLBACK") || upper.startsWith("SET LOCAL") ||
+            upper.startsWith("SET SEARCH_PATH")
+          ) return { rows: [] };
+          if (/SELECT idempotency_key/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            return jobId === JOB_ID ? { rows: [{ idempotency_key: EXTERNAL_TASK_ID }] } : { rows: [] };
+          }
+          if (/SELECT topic, variables/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            return jobId === JOB_ID
+              ? { rows: [{ topic: "leave-intake", variables: instanceVariables }] }
+              : { rows: [] };
+          }
+          if (/FROM choros\.dmn_rule_table/i.test(sqlText)) {
+            return { rows: [{
+              id: LEAVE_TABLE.id, name: LEAVE_TABLE.name, definition: LEAVE_TABLE,
+              process_def_id: null, status: "published", updated_at: NOW_MS - 10_000,
+            }] };
+          }
+          if (
+            /INSERT INTO choros\.audit_head/i.test(sqlText) ||
+            /INSERT INTO choros\.audit_event/i.test(sqlText) ||
+            /UPDATE choros\.audit_head/i.test(sqlText)
+          ) return { rows: [] };
+          if (/FROM choros\.audit_head/i.test(sqlText) && /FOR UPDATE/i.test(sqlText)) {
+            return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+          }
+          if (/current_setting\('choros\.tenant_id'/i.test(sqlText)) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
+          return { rows: [] };
+        },
+        release: () => {/* no-op */},
+      }),
+    };
+
+    const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
+    const row = makeOutboxRow({
+      aggregateId: JOB_ID,
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      eventType: "task_completed",
+      payload: { workerId: WORKER_ID, variables: { submitted: true } },
+    });
+
+    const result = await deliver(row);
+    expect(result.ok).toBe(true);
+    expect(flowableClient.completeCalls).toHaveLength(1);
+
+    const [, , calledVars] = flowableClient.completeCalls[0];
+    expect(calledVars).toBeDefined();
+    // The AUTHORED routing var name reaches Flowable — NOT "approvalRequired".
+    expect((calledVars as Record<string, unknown>)["needsHeadApproval"]).toBe("yes");
+    expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBeUndefined();
   });
 });
 
