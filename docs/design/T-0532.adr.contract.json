@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0532",
+  "status": "ready",
+  "decision": "Ввести единый тонкий React-free модуль web/src/lib/format.js с пятью чистыми функциями (formatDate, formatEnum, formatError, formatRef, formatJsonReadable). Модуль хранит встроенный ENUM_LABELS-каталог для системных enum, принимает опциональный labelMap для пользовательских options из registry_def-схемы. Все JSX-компоненты импортируют форматтеры отсюда. Рендер raw UUID/JSON/HTTP-кода/ISO/slug в JSX запрещён правилом CI (grep-denylist). Граница с T-0528: T-0532 даёт содержимое, T-0528 — инфраструктуру доставки.",
+  "rejected_alternatives": [
+    {
+      "option": "Форматтеры прямо в components.jsx",
+      "why_not": "components.jsx — JSX-модуль с React-зависимостью; форматтеры должны быть React-free для unit-тестируемости без рантайма (конвенция codebase: field-contract.js, records-form.js)"
+    },
+    {
+      "option": "Отдельные хелперы в каждом экране (screen-*.jsx)",
+      "why_not": "Текущий антипаттерн — каждый экран дублирует toISOString/replace/JSON.stringify/HTTP-текст; единый модуль устраняет ~13 файлов дублирования"
+    },
+    {
+      "option": "i18n-библиотека (react-intl, i18next)",
+      "why_not": "Overkill для single-locale (ru-RU) приложения; добавляет внешнюю зависимость; Intl.DateTimeFormat и Intl.NumberFormat stdlib достаточны"
+    },
+    {
+      "option": "Async formatRef с прямым fetch внутри форматтера",
+      "why_not": "Нарушает конвенцию чистых функций; приводит к неконтролируемым side-effects; кэш в useState компонента — стандарт SPA без лишних зависимостей"
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "Formatter",
+      "fields": [
+        {"name": "formatDate", "type": "(value: Date|string|number|null, mode?: 'datetime'|'date'|'time') => string"},
+        {"name": "formatEnum", "type": "(value: string, labelMap?: Record<string,string>) => string"},
+        {"name": "formatError", "type": "(statusOrCode: number|string) => string"},
+        {"name": "formatRef", "type": "(value: string, cache: Map<string,string>, options?: {fallback?: string}) => string"},
+        {"name": "formatJsonReadable", "type": "(value: unknown) => string"},
+        {"name": "ENUM_LABELS", "type": "Record<string, string> — встроенный каталог системных enum"}
+      ]
+    },
+    {
+      "entity": "LabelSource",
+      "fields": [
+        {"name": "system", "type": "ENUM_LABELS в format.js — для draft/published/running/failed/human/agent/service/grant/revoke/…"},
+        {"name": "schema_options", "type": "field.options (string[] | {value,label}[]) из registry_def record_schema — caller строит labelMap и передаёт в formatEnum"},
+        {"name": "entity_cache", "type": "Map<id, label> в useState компонента — для UUID→имя (record/employee/role)"}
+      ]
+    }
+  ],
+  "contracts": [
+    "formatDate(value, mode?) → string: никогда не возвращает ISO/Z/T; null/undefined → '—'; locale='ru-RU'; без миллисекунд",
+    "formatEnum(value, labelMap?) → string: приоритет labelMap > ENUM_LABELS > value as-is; не бросает исключений",
+    "formatError(statusOrCode) → string: каждый HTTP 4xx/5xx и системный код (ENGINE_UNAVAILABLE, SUBSTITUTION_WIDENS) → понятный русский текст с шагом действия; неизвестное → 'Что-то пошло не так (${code}) — попробуйте ещё раз'",
+    "formatRef(value, cache, options?) → string: UUID без кэша → options.fallback ?? '—'; никогда не возвращает raw UUID пользователю",
+    "formatJsonReadable(value) → string: объект/массив → JSON.stringify обрезан до 120 символов + '…'; null/undefined → '—'; примитив → String(value)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-0532-no-raw-jargon",
+      "rule": "Ни один JSX-файл в web/src/ (кроме тестов и комментариев) не должен содержать: JSON.stringify( в JSX-возврате (не в body:/payload:); .toISOString() без mode='datetime-local'; паттерн UUID [0-9a-f]{8}-[0-9a-f]{4} в строковых литералах JSX; HTTP [0-9]{3} в пользовательских строках; английские enum-слова 'draft'|'published'|'running'|'failed'|'pending' в JSX-тексте (не в условиях)",
+      "ci_check": "ci/checks/ux/format-denylist.sh"
+    },
+    {
+      "id": "FF-UX-JARGON",
+      "rule": "Все файлы из web/src/screens/ и web/src/forms/ проходят проверку ux-g5-jargon-denylist: запрещены Tier-N, Floor-N, control-plane, validateNarrowing, PT[0-9]+H, mcp:// в UI-тексте (не в комментариях)",
+      "ci_check": "ci/checks/ux/ux-g5-jargon-denylist.sh"
+    },
+    {
+      "id": "FF-0532-format-module-pure",
+      "rule": "Модуль web/src/lib/format.js не импортирует React, ReactDOM и не содержит JSX. Проверяется статически.",
+      "ci_check": "ci/checks/ux/format-module-pure.sh"
+    }
+  ],
+  "traceability": [
+    {"ac": "UX-аудит 2026-06-29 §7: dev-jargon leaks into Russian no-code UI", "covered_by": "FF-0532-no-raw-jargon + FF-UX-JARGON"},
+    {"ac": "UX-аудит G5 honest-text gate", "covered_by": "FF-UX-JARGON"},
+    {"ac": "formatDate: ra-grant-trail.jsx L38 .toISOString().replace(T, ).replace(Z, )", "covered_by": "FF-0532-no-raw-jargon"},
+    {"ac": "formatJsonReadable: screen-process-editor.jsx L178 JSON.stringify(v) в violations list", "covered_by": "FF-0532-no-raw-jargon"},
+    {"ac": "formatJsonReadable: screen-record-detail.jsx L519 JSON.stringify(val) в fallback-render", "covered_by": "FF-0532-no-raw-jargon"},
+    {"ac": "formatError: field-renderer.jsx L90, L260 throw Error('HTTP ${res.status}') показывается пользователю", "covered_by": "FF-0532-no-raw-jargon"},
+    {"ac": "formatRef: screen-record-detail.jsx L497 {record.id} без MonoId/label", "covered_by": "FF-0532-no-raw-jargon"},
+    {"ac": "formatEnum: ra-intents.jsx L230 Tier-${r.data.tier} в user message", "covered_by": "FF-UX-JARGON"},
+    {"ac": "Граница T-0528: formatError как input для toast.error()", "covered_by": "contracts[2]"}
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0532-label-format-layer.design.md"
+}
