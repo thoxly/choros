@@ -1059,6 +1059,344 @@ export async function reconcileInstanceTimers(
 }
 
 // ---------------------------------------------------------------------------
+// T-0522 — durable, idempotent engine-drive reconcile (Option A hardening).
+//
+// Background: the post-approve engine-drive in inbox.ts (T-0443/T-0456) ran as a
+// `void (async()=>{…})()` fire-and-forget IIFE that swallowed every engine/DB error
+// to console.warn. A DMN-gateway-spawned second task («Доп.согласование» on the 6M
+// branch) could therefore SILENTLY never appear if the async lost the timing race
+// or the engine hiccuped — the prime suspect for CS-1 flakiness (ADR-T0432 §3.1).
+//
+// This function extracts that reconcile into ONE named, idempotent, error-EXPLICIT
+// operation reused by BOTH callers:
+//   1. the post-approve path (inbox.ts approve handler) — completes the engine user
+//      task then reconciles the resulting token set, and
+//   2. the reconcile-on-read net (inbox.ts GET /api/inbox) — re-drives any instance
+//      that is approved-but-not-ended-and-has-no-pending-next-task, so a gateway task
+//      the post-approve async missed self-heals on the next read.
+//
+// It is the engine-drive analogue of reconcileInstanceTimers (T-0458) /
+// deliverMessageEnvelope (T-0459): same dedup-by-defKey idempotency, same honest
+// engine port — but unlike the old IIFE it RETURNS the engine error instead of
+// swallowing it, so callers (and tests) can observe a failed reconcile rather than a
+// silent drop. NO schema change (additive — same process.next_task / instance.ended
+// event model).
+// ---------------------------------------------------------------------------
+
+/**
+ * Engine port for the durable engine-drive reconcile — the subset of FlowableClient
+ * the post-approve / reconcile-on-read drive needs. Kept structural so this module
+ * stays decoupled from the concrete client type (mirrors TimerReconcileEnginePort).
+ */
+export interface EngineDriveReconcilePort {
+  getActiveUserTasks(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; tasks: ActiveEngineTask[] }
+    | { ok: false; code: string }
+  >;
+  completeUserTask(
+    engineTaskId: string,
+  ): Promise<{ ok: true } | { ok: false; code: string }>;
+  isInstanceEnded(
+    instanceId: string,
+  ): Promise<
+    | { ok: true; ended: boolean }
+    | { ok: false; code: string }
+  >;
+}
+
+/** Outcome of a single engine-drive reconcile pass — explicit, never swallowed. */
+export type EngineDriveResult =
+  | {
+      /** The reconcile completed (engine reachable). */
+      readonly ok: true;
+      /** True when the engine confirmed the instance ended → instance.ended emitted. */
+      readonly ended: boolean;
+      /** Number of NEW process.next_task rows emitted this pass (0 when nothing new). */
+      readonly emitted: number;
+      /** True when a matching engine user-task was found+completed this pass. */
+      readonly completed: boolean;
+    }
+  | {
+      /** The engine could not be reached / returned an error — NOT swallowed. */
+      readonly ok: false;
+      /** Typed engine error code (e.g. ENGINE_UNAVAILABLE, NOT_FOUND). */
+      readonly code: string;
+      /** Which engine step failed (diagnostic). */
+      readonly stage: "poll" | "complete" | "ended" | "next-tasks";
+    };
+
+/**
+ * Durable, idempotent engine-drive reconcile for ONE instance.
+ *
+ * Flow (mirrors the original T-0443/T-0456 IIFE, but as a reusable error-explicit fn):
+ *  1. If `completeEngineTask` is set (post-approve path) AND `approvedTaskDefKey` is
+ *     given, poll the engine (up to pollTimeoutMs) for the user-task matching that
+ *     defKey, then completeUserTask(engineTaskId). On the reconcile-on-read path
+ *     `completeEngineTask` is false → step 1 is skipped (we only mirror state).
+ *  2. isInstanceEnded → emit instance.ended (engine-gated done), OR
+ *  3. surface EVERY live engine user-task not yet projected as a process.next_task
+ *     (the T-0456 AND-split fan-out; the 6M «Доп.согласование» gateway task included).
+ *
+ * IDEMPOTENT (the load-bearing property): re-running on the same engine token set
+ * does NOT duplicate tasks/events. Dedup is by taskDefKey against the live projection
+ * (listInstanceInboxTasks) + within-pass; instance.ended is hidden-folded once present
+ * and a re-emit is harmless (the projection treats a second ended row as the same done).
+ * Completing an already-completed engine task is tolerated (engine returns NOT_FOUND
+ * → idempotentSuccess-style; we proceed to reconcile regardless).
+ *
+ * ERROR-EXPLICIT: an unreachable engine returns { ok:false, code, stage } — the caller
+ * decides (post-approve logs + relies on the on-read net to retry; on-read swallows so
+ * the 200 is never blocked, but the NEXT read retries). Nothing is silently lost.
+ *
+ * @returns EngineDriveResult — never throws past this boundary for engine/DB hiccups
+ *   in the emit loop (a failed emit is retried on the next pass); a hard programmer
+ *   error (e.g. bad UUID) still throws as before.
+ */
+export async function reconcileInstanceEngineDrive(
+  pool: pg.Pool,
+  tenantId: string,
+  engine: EngineDriveReconcilePort,
+  args: {
+    readonly instanceId: string;
+    readonly procKey: string;
+    /** The defKey of the just-approved step (post-approve path). When omitted, no
+     *  user-task is completed — pure state-mirror (reconcile-on-read). */
+    readonly approvedTaskDefKey?: string;
+    /** When true (post-approve), complete the matching engine user-task before
+     *  reconciling. When false/absent (on-read), skip completion — only mirror. */
+    readonly completeEngineTask?: boolean;
+    readonly actor: string;
+    readonly nowMs?: number;
+    /** Poll budget for finding the engine task to complete (post-approve only). */
+    readonly pollTimeoutMs?: number;
+    readonly pollIntervalMs?: number;
+  },
+): Promise<EngineDriveResult> {
+  const nowMs = args.nowMs ?? Date.now();
+  const pollTimeoutMs = args.pollTimeoutMs ?? 10_000;
+  const pollIntervalMs = args.pollIntervalMs ?? 500;
+
+  let completed = false;
+
+  // 1. Post-approve completion (skipped on the reconcile-on-read net).
+  if (args.completeEngineTask && args.approvedTaskDefKey) {
+    let engineTaskId: string | null = null;
+    const pollStart = Date.now();
+    // Poll for the engine user-task matching the approved defKey (the triage external
+    // task / DMN gateway variable may still be in flight). The gateway routing variable
+    // (approvalRequired / TEL_GATEWAY_VAR) is injected UPSTREAM at the tel-intake seam
+    // (externalTaskBridge.ts) BEFORE this point — completeUserTask takes no variables,
+    // it only advances the already-routed token. We must not complete until the matching
+    // task is actually present (so we never complete the wrong/stale token).
+    for (;;) {
+      const tasksResult = await engine.getActiveUserTasks(args.instanceId);
+      if (!tasksResult.ok) {
+        return { ok: false, code: tasksResult.code, stage: "poll" };
+      }
+      const match = tasksResult.tasks.find(
+        (t) => t.taskDefinitionKey === args.approvedTaskDefKey,
+      );
+      if (match) {
+        engineTaskId = match.id;
+        break;
+      }
+      // No matching task and no tasks at all → instance may have ended; stop polling.
+      if (tasksResult.tasks.length === 0) break;
+      if (Date.now() - pollStart >= pollTimeoutMs) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+
+    if (engineTaskId) {
+      const completeResult = await engine.completeUserTask(engineTaskId);
+      // NOT_FOUND ⇒ already completed (idempotent re-run / concurrent drive). Proceed.
+      if (!completeResult.ok && completeResult.code !== "NOT_FOUND") {
+        return { ok: false, code: completeResult.code, stage: "complete" };
+      }
+      completed = true;
+    }
+  }
+
+  // 2. Reconcile: ended → instance.ended; else surface live engine tasks.
+  const endedResult = await engine.isInstanceEnded(args.instanceId);
+  if (!endedResult.ok) {
+    return { ok: false, code: endedResult.code, stage: "ended" };
+  }
+
+  if (endedResult.ended) {
+    // Engine confirms done. Emit instance.ended ONLY if not already present, so a
+    // re-run (on-read net after the post-approve already ended it) does not pile up
+    // duplicate ended rows. Best-effort emit (a failed write is retried next pass).
+    try {
+      const alreadyEnded = await isInstanceEndedProjected(pool, tenantId, args.instanceId);
+      if (!alreadyEnded) {
+        await withTenant(pool, tenantId, async (client) => {
+          await appendInstanceEnded(client as unknown as PgClientLike, {
+            taskId: randomUUID(),
+            instanceId: args.instanceId,
+            procKey: args.procKey,
+            actor: args.actor,
+            nowMs,
+            tenantId,
+          });
+        });
+      }
+    } catch {
+      // best-effort — next read reconciles.
+    }
+    return { ok: true, ended: true, emitted: 0, completed };
+  }
+
+  // 3. Engine has more tokens → surface EVERY live user-task not yet projected.
+  const nextTasksResult = await engine.getActiveUserTasks(args.instanceId);
+  if (!nextTasksResult.ok) {
+    return { ok: false, code: nextTasksResult.code, stage: "next-tasks" };
+  }
+
+  let emitted = 0;
+  if (nextTasksResult.tasks.length > 0) {
+    // Dedup against (a) the just-completed defKey and (b) tasks already projected as
+    // waiting for this instance (base process.started + prior process.next_task rows).
+    let alreadyProjectedDefKeys = new Set<string>();
+    try {
+      const projected = await listInstanceInboxTasks(pool, tenantId);
+      alreadyProjectedDefKeys = new Set(
+        projected.filter((t) => t.inst === args.instanceId).map((t) => t.taskDefKey),
+      );
+    } catch {
+      // read failed — fall through with empty set; dedup-within-pass still guards.
+    }
+
+    const emittedThisPass = new Set<string>();
+    for (const nextTask of nextTasksResult.tasks) {
+      const defKey = nextTask.taskDefinitionKey;
+      if (defKey === args.approvedTaskDefKey) continue; // step we just completed
+      if (alreadyProjectedDefKeys.has(defKey)) continue; // already on screen
+      if (emittedThisPass.has(defKey)) continue; // dedup within this pass
+      emittedThisPass.add(defKey);
+
+      const nextRole = nextTask.candidateGroups[0] ?? APPROVER_ROLE;
+      try {
+        await appendNextTaskEvent(pool, tenantId, {
+          instanceId: args.instanceId,
+          procKey: args.procKey,
+          actor: args.actor,
+          nowMs,
+          taskDefKey: defKey,
+          taskName: nextTask.name || APPROVE_TASK_NAME,
+          taskRole: nextRole,
+          taskStep: nextTask.name || APPROVE_STEP,
+          inboxTaskId: randomUUID(),
+        });
+        emitted++;
+      } catch {
+        // best-effort — a failed emit is retried on the next reconcile pass.
+      }
+    }
+  }
+
+  return { ok: true, ended: false, emitted, completed };
+}
+
+/**
+ * Has an instance.ended event already been projected for this instance? Used by the
+ * engine-drive reconcile to avoid emitting a duplicate ended row on a re-run (the
+ * on-read net re-driving an instance the post-approve already ended). Tenant-scoped
+ * read, BYPASSRLS guard via withTenant. Degrades to false on read error (the emit it
+ * gates is itself best-effort, and a duplicate ended row folds to the same `done`).
+ */
+async function isInstanceEndedProjected(
+  pool: pg.Pool,
+  tenantId: string,
+  instanceId: string,
+): Promise<boolean> {
+  try {
+    const projections = await listInstanceProjections(pool, tenantId);
+    const p = projections.find((x) => x.inst === instanceId);
+    return p?.status === "done";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reconcile-on-read engine-drive net (T-0522). The read-side analogue of
+ * reconcileInstanceTimers, but for the post-approve/gateway path: for each WAITING
+ * instance that has been APPROVED at least once but is not yet ended, ask the engine
+ * for its live token set and surface any gateway-spawned user-task the post-approve
+ * async missed. This is the durability safety net — even if the fire-and-forget
+ * post-approve drive lost the race or hit a transient engine error, the very next
+ * inbox read self-heals the missing «Доп.согласование» row.
+ *
+ * Idempotent (dedup by defKey inside reconcileInstanceEngineDrive); best-effort
+ * (engine/DB hiccups degrade silently — the NEXT read retries; the inbox 200 is never
+ * blocked). Pure state-mirror: completeEngineTask=false, so it NEVER completes a user
+ * task (that is the human's action) — it only reflects engine state the human's prior
+ * approve already advanced.
+ *
+ * @returns total number of next_task rows newly emitted across all instances.
+ */
+export async function reconcileInboxEngineDriveOnRead(
+  pool: pg.Pool,
+  tenantId: string,
+  engine: EngineDriveReconcilePort,
+  opts?: { nowMs?: number; actor?: string; limit?: number },
+): Promise<number> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const actor = opts?.actor ?? "system:engine-drive";
+
+  let projections: InstanceProjection[];
+  let projectedTasks: InstanceInboxTask[];
+  try {
+    projections = await listInstanceProjections(pool, tenantId, { limit: opts?.limit });
+    projectedTasks = await listInstanceInboxTasks(pool, tenantId);
+  } catch {
+    return 0; // read-projection — degrade silently.
+  }
+
+  // Candidate instances: WAITING (not done) AND already approved at least once (so the
+  // human acted and the engine should have advanced) BUT with no pending next_task /
+  // message-catch / escalation row already on screen for the post-gateway step. An
+  // instance with a base task still un-approved is on the normal approve path — the
+  // on-read net does not pre-empt it. We approximate "approved at least once" by: the
+  // instance is waiting AND has fewer un-approved base rows than it would if untouched —
+  // but simplest + safe: re-drive every WAITING instance; reconcileInstanceEngineDrive
+  // is a pure idempotent mirror (completeEngineTask=false) so re-driving an un-approved
+  // instance only re-confirms its current token (no duplicate, no premature completion).
+  const waiting = projections.filter((p) => p.status !== "done");
+  if (waiting.length === 0) return 0;
+
+  // Skip instances that are parked on a message-catch (T-0459 owns those) — their
+  // "next task" is a message arrival, not a gateway token; re-driving would just no-op
+  // but we avoid the engine round-trip.
+  const messageCatchInsts = new Set(
+    projectedTasks.filter((t) => t.messageCatch === true).map((t) => t.inst),
+  );
+
+  let total = 0;
+  for (const p of waiting) {
+    if (messageCatchInsts.has(p.inst)) continue;
+    let result: EngineDriveResult;
+    try {
+      result = await reconcileInstanceEngineDrive(pool, tenantId, engine, {
+        instanceId: p.inst,
+        procKey: p.procKey,
+        completeEngineTask: false, // PURE MIRROR — never complete a task on read.
+        actor,
+        nowMs,
+      });
+    } catch {
+      continue; // engine/DB hiccup for this instance — try others; next read retries.
+    }
+    if (result.ok) total += result.emitted;
+    // result.ok === false ⇒ engine unreachable for this instance; the next read retries.
+  }
+
+  return total;
+}
+
+// ---------------------------------------------------------------------------
 // T-0459 [D8-R4]: message/signal catch — waiting projection + correlated delivery.
 //
 // Two halves mirroring the timer reconcile pattern (T-0458) + the engine-drive
