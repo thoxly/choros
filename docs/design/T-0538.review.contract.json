@@ -1,0 +1,66 @@
+{
+  "task_id": "T-0538",
+  "verdict": "approved",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "nit",
+      "axis": 3,
+      "location": "design §7, adr.contract.json fitness_functions[4] FF-NAV-MAP",
+      "issue": "FF-NAV-MAP rule text states «new model id set == current id set» but the new model introduces a new nav entry id='reference' (paths to /rights/criticality) that is absent from the original 19 ids. The rule mentions only 'notifications' as a known carve-out, making the text technically false. The design intent is correct and documented in §3.3 and §5, but the FF assertion as worded would red-flag a well-formed implementation.",
+      "suggestion": "Amend FF-NAV-MAP rule to read: «…ничего не потеряно/не задвоено сверх сознательного быстрого-доступа notifications И новой группирующей точки входа reference (→ /rights/criticality)»."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "design §5.3, contracts[7]",
+      "issue": "The shell.jsx sub-tab trigger (line 770) is hard-coded to screen==='rights'. After rezoning, the new 'reference' nav item navigates to /rights/criticality, so both nav contexts ('rights' and 'reference') land inside the /rights/* route family. The design correctly delegates the filtration choice to the implementer (genre-field or two arrays), but does not explicitly state which screen-id will trigger sub-tab rendering for the reference entry. This could lead to the implementer omitting the sub-tab bar when entering via 'reference'.",
+      "suggestion": "Add one sentence to §5.3: «Шелл показывает суб-таб-бар для screen ∈ {rights, reference}; при rights — фильтр access-жанр; при reference — фильтр reference-жанр.»"
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "design §3.4, ZONES[3] admin items",
+      "issue": "The referential 'rights' nav item is relabeled from «Права и доступ» to «Доступ» in the new model. This is a correct UX label change (shorter, scope-accurate after reference tabs move out). However the contract does not explicitly call out this label change — a reader comparing old label to new might mistake it for a missing item or inconsistency.",
+      "suggestion": "Add a parenthetical to contracts[1] or §3.3 row 9: «ярлык меняется с «Права и доступ» → «Доступ» (scope сужен после выноса справочников в 'reference')»."
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "axis": 5,
+      "location": "design §3.4 ZONES[1] constructor items, forms entry",
+      "issue": "The design marks 'forms' with status:'demo' in §3.4, but in the current nav-config.js the forms item already has status:'demo' AND hidden:true. The design §3.3 row 2 correctly preserves hidden:true, but the §3.4 reference snippet omits status:'live'/'demo' disambiguation context — it simply says status:'demo'. This is consistent with source. Minor: the comment in §3.3 says «остаётся hidden:true; маршрут /forms жив» which is accurate. No actual defect.",
+      "suggestion": "Cosmetic only: no action required."
+    },
+    {
+      "id": "F5",
+      "severity": "nit",
+      "axis": 6,
+      "location": "design §4.1, contracts[5]",
+      "issue": "The account popover spec lists 'Сменить организацию' as live/honest-disabled; however the current codebase has no multi-tenant switcher logic and docs describe silo-only deploy today. The design correctly marks it honest-disabled when 1 org, but the ci_check for FF-UX-DEAD must validate that honest-disabled is shown (not a broken enabled button). The FF-UX-DEAD ci_check (ux-g1-no-dead-nav.sh) should cover this, but it is a static shell check that may not reach the popover DOM without a running e2e fixture.",
+      "suggestion": "Consider adding honest-disabled popover coverage to nav-ia.ux.journey.ts (the e2e journey already listed for FF-UX-CONTRAST) rather than relying solely on static shell grep."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "4 зоны Работа/Конструктор/Наблюдаемость/Администрирование", "covered": true},
+    {"ac": "мета-поля {zone, audience, capability, frequency, order} в NavItem", "covered": true},
+    {"ac": "capability — задел, фильтр НЕ реализован, дефолт видно всем", "covered": true},
+    {"ac": "маппинг каждого из 19 сегодняшних пунктов nav → зона (полнота, нет потерь)", "covered": true},
+    {"ac": "меню пользователя (Профиль/Настройки=скоро, Уведомления, Тема, Орг, Выйти)", "covered": true},
+    {"ac": "удалить плавающую «Выйти» и ThemeToggle из топбара", "covered": true},
+    {"ac": "вынос справочников (criticality/SoD/editor/intents) из прав в Справочники", "covered": true},
+    {"ac": "что остаётся в «Доступе» — операционный обзор грантов + журнал", "covered": true},
+    {"ac": "инвариант «маршруты НЕ меняются» (все path сохранены)", "covered": true},
+    {"ac": "системные пункты (org/agents/rights/llm-*/assistant-prompt/audit/spend) НЕ в зоне РАБОТА", "covered": true},
+    {"ac": "FF-UX-DEAD / FF-UX-CONTRAST / FF-UX-JARGON / FF-NAV-PATHS / FF-NAV-MAP / FF-NAV-NOSYS", "covered": true},
+    {"ac": "координация T-0528/T-0531/T-0539 как риски зафиксированы", "covered": true},
+    {"ac": "аккаунт-поповер — настоящий button с aria-haspopup, фокус-трап, kit Modal/Menu", "covered": true},
+    {"ac": "ThemeToggle подтверждён в топбаре shell.jsx ~354 — удаляется", "covered": true},
+    {"ac": "плавающая Выйти подтверждена shell.jsx ~762 chs-nav__logout-btn — удаляется", "covered": true},
+    {"ac": "RIGHTS_TABS расщеплены корректно: access=[overview,trail], reference=[criticality,sod,editor,intents]", "covered": true},
+    {"ac": "ADR контракт валиден против adr.schema.json", "covered": true}
+  ],
+  "role_gap_evidence": []
+}
