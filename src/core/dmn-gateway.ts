@@ -45,7 +45,7 @@
 
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { evaluate, type NamedBindings } from "./dmn-middle.js";
+import { evaluate, type NamedBindings, type DmnRuleTable } from "./dmn-middle.js";
 import {
   loadPublishedRuleTables,
   loadRuleTablesByVersions,
@@ -60,18 +60,32 @@ import {
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants — ТЭЛ is now ONE EXAMPLE of the generic mechanism, not engine wiring
 // ---------------------------------------------------------------------------
+//
+// T-0524 (constructor-foundation): the triage gateway seam is GENERIC. The
+// engine resolves the authored routing variable NAME from the DMN rule table's
+// `set_routing_outcome.name` effect (authored per-process in the rule-table
+// editor) and the branch VALUE from the rule conditions (field+operator+value).
+// NO process name, variable name, gateway id, or topic is hard-coded in the
+// engine path. The constants below remain ONLY as documentation of the seeded
+// ТЭЛ example and for the legacy ТЭЛ tests — they are NOT consulted by
+// evaluateGatewayAtTriage / preComputeGatewayVariable, which derive the
+// variable name purely from the authored rule tables.
 
 /**
- * The canonical gateway variable name used in the ТЭЛ process (telLinear).
- * The exclusiveGateway in tel-linear.bpmn reads this variable to pick the
- * branch (values: "standard" | "needs-approval").
+ * @deprecated Engine wiring no longer reads this. The ТЭЛ process's routing
+ * variable name ("approvalRequired") is just AUTHORED DATA in its rule table's
+ * `set_routing_outcome.name` effect — the generic mechanism reads it from there.
+ * Kept for the ТЭЛ example documentation / legacy tests only.
  */
 export const TEL_GATEWAY_VAR = "approvalRequired" as const;
 
 /**
- * The canonical gateway id in tel-linear.bpmn (the exclusiveGateway element id).
+ * @deprecated Cosmetic only — the gateway element id used in the audit event for
+ * the ТЭЛ example. The generic path derives the gateway id from the authored
+ * process when available (see GATEWAY_ID_UNKNOWN fallback in the triage seam).
+ * Kept for the ТЭЛ example documentation / legacy tests only.
  */
 export const TEL_GATEWAY_ID = "gw-approval-threshold" as const;
 
@@ -79,8 +93,17 @@ export const TEL_GATEWAY_ID = "gw-approval-threshold" as const;
  * Threshold for the ТЭЛ approval gate (DMN seed migration 080):
  * purchases over 5,000,000 ₽ require additional approval.
  * This constant mirrors the seeded rule table — the canonical truth is the DB row.
+ * It is AUTHORED DATA, not engine logic.
  */
 export const TEL_APPROVAL_THRESHOLD = 5_000_000 as const;
+
+/**
+ * Generic fallback gateway id for the audit event when the authoring layer did
+ * not (or could not) tell us which exclusiveGateway this triage seam feeds.
+ * The routing itself does NOT depend on the gateway id — it depends on the
+ * injected routing variable(s). The gateway id is purely an audit annotation.
+ */
+export const GATEWAY_ID_UNKNOWN = "gateway-unknown" as const;
 
 // ---------------------------------------------------------------------------
 // Shared audit writer
@@ -250,10 +273,27 @@ export async function preComputeGatewayVariable(
 
 export interface TriageGatewayResult {
   /**
-   * The freshly re-evaluated gateway variable value.
-   * null when no rule tables are found.
+   * The freshly re-evaluated gateway variable VALUE of the FIRST authored routing
+   * outcome. null when no rule tables / no routing outcomes are found.
+   *
+   * BACKWARD-COMPAT: this is the bare value of `routingOutcomes`' first entry,
+   * preserved so existing callers/tests that only need a single value keep working.
+   * GENERIC callers should prefer `routingOutcomes` (name→value) so they inject
+   * each variable under its AUTHORED name (T-0524) rather than assuming
+   * "approvalRequired".
    */
   readonly gatewayVar: string | null;
+  /**
+   * T-0524: ALL authored routing outcomes from the process's rule tables, keyed
+   * by the AUTHORED variable name (`set_routing_outcome.name`). This is the
+   * generic injection map — the caller merges these into the completeTask
+   * variables so Flowable's exclusiveGateway(s) route by the authored variable(s).
+   *
+   * Empty object ({}) when no rule tables matched / none are authored for the
+   * process — the fail-closed default (no variable injected → the gateway's BPMN
+   * `default` flow is taken, never a silent wrong route).
+   */
+  readonly routingOutcomes: Readonly<Record<string, string>>;
   /**
    * Whether this was a late-compute re-evaluation (always true for triage path).
    */
@@ -262,6 +302,55 @@ export interface TriageGatewayResult {
    * The pinned versions used for the evaluation (the old rule for in-flight instances).
    */
   readonly versions: DmnRuleTableVersion[];
+}
+
+// ---------------------------------------------------------------------------
+// dropAmbiguousOutcomes — fail-closed filter for UNSCOPED multi-process loads
+// ---------------------------------------------------------------------------
+
+/**
+ * Remove routing-outcome names that are AMBIGUOUS across the supplied tables.
+ *
+ * A name is ambiguous when it is authored (via `set_routing_outcome`) in MORE
+ * THAN ONE distinct table. This only matters in the UNSCOPED triage path, where
+ * the loaded NULL-scoped (process_def_id IS NULL) tables may belong to DIFFERENT
+ * processes: evaluate() resolves a shared name last-write-wins, which could
+ * inject another process's value (a silent WRONG route). Dropping the name makes
+ * the caller inject nothing for it → the BPMN gateway's `default` flow is taken
+ * (fail-closed). Names authored in at most one table are kept unchanged.
+ *
+ * Pure: derives ambiguity from the STATIC authored definitions (which tables
+ * declare each name), independent of which rows fired, so the verdict is stable.
+ */
+export function dropAmbiguousOutcomes(
+  outcomes: Readonly<Record<string, string>>,
+  tables: readonly DmnRuleTable[],
+): Readonly<Record<string, string>> {
+  // Count, per routing-outcome name, how many DISTINCT tables author it.
+  const authoringTables = new Map<string, Set<string>>();
+  for (const table of tables) {
+    for (const rule of table.rules) {
+      for (const effect of rule.effects) {
+        if (effect.kind === "set_routing_outcome") {
+          let set = authoringTables.get(effect.name);
+          if (set === undefined) {
+            set = new Set<string>();
+            authoringTables.set(effect.name, set);
+          }
+          set.add(table.id);
+        }
+      }
+    }
+  }
+
+  const filtered: Record<string, string> = {};
+  for (const [name, value] of Object.entries(outcomes)) {
+    const tablesAuthoringName = authoringTables.get(name);
+    // Ambiguous → authored by >1 distinct table → DROP (fail-closed).
+    if (tablesAuthoringName !== undefined && tablesAuthoringName.size > 1) continue;
+    filtered[name] = value;
+  }
+  return Object.freeze(filtered);
 }
 
 // ---------------------------------------------------------------------------
@@ -291,9 +380,23 @@ export interface TriageGatewayResult {
  * @param args.gatewayId      The BPMN gateway element id.
  * @param args.actor          Actor at the triage seam (usually the intake agent slug).
  * @param args.nowMs          Server clock epoch-ms.
- * @param args.bindings       Current named bindings at triage time.
+ * @param args.bindings       Current named bindings at triage time (record/app-data).
  * @param args.existingVariables Process variables map from the running instance.
  * @param args.procDefId      Optional process def id for scoped rule lookup (new-launch path).
+ *
+ * T-0524 (generic): the returned `routingOutcomes` is a name→value map derived
+ * ENTIRELY from the authored rule tables (`set_routing_outcome.name` = the
+ * authored variable name; the value comes from the matched field+operator+value
+ * conditions). The caller injects each outcome under its authored name. This
+ * works for ANY process+gateway authored in the rule-table editor; ТЭЛ
+ * ("approvalRequired") is just one such authored configuration.
+ *
+ * T-0524 fail-closed (review fix): when the load is UNSCOPED (no procDefId, no
+ * pinned version → all NULL-scoped tables of the tenant, possibly from different
+ * processes), any routing name authored in >1 distinct table is AMBIGUOUS and is
+ * DROPPED from `routingOutcomes` (→ BPMN default flow) rather than resolved
+ * last-write-wins (which could inject another process's value = silent wrong
+ * route). Scoped / pinned paths are never filtered.
  */
 export async function evaluateGatewayAtTriage(
   client: pg.PoolClient,
@@ -314,9 +417,17 @@ export async function evaluateGatewayAtTriage(
 
   let tables;
   let versions: DmnRuleTableVersion[];
+  // `unscoped` = the request could NOT pin the rule set to one process: neither a
+  // pinned in-flight version set NOR an explicit procDefId. In that mode the
+  // published-table load returns ALL process-agnostic (process_def_id IS NULL)
+  // tables of the tenant — possibly from DIFFERENT authored processes — so a
+  // routing-outcome NAME authored in two different tables is AMBIGUOUS and must
+  // NOT be injected (fail-closed), instead of evaluate()'s last-write-wins.
+  let unscoped = false;
 
   if (pinnedVersions.length > 0) {
-    // ALREADY-RUNNING instance: use the OLD rule (pinned at launch).
+    // ALREADY-RUNNING instance: use the OLD rule (pinned at launch). Scoped by
+    // the pinned version ids → no cross-process contamination.
     tables = await loadRuleTablesByVersions(client, args.tenantId, pinnedVersions);
     versions = pinnedVersions;
   } else {
@@ -324,10 +435,15 @@ export async function evaluateGatewayAtTriage(
     const loaded = await loadPublishedRuleTables(client, args.tenantId, args.procDefId);
     tables = loaded.tables;
     versions = loaded.versions;
+    // Only the procDefId-less load is unscoped (NULL-scoped tables of the tenant).
+    unscoped =
+      !(typeof args.procDefId === "string" && args.procDefId.trim().length > 0);
   }
 
   if (tables.length === 0) {
     // No rule tables found: emit gateway.evaluated with "no-rule-matched" verdict.
+    // Fail-closed default: no routing outcomes → caller injects nothing → the
+    // BPMN gateway's `default` flow is taken (never a silent wrong route).
     await emitGatewayEvaluated(client as unknown as PgClientLike, {
       tenantId: args.tenantId,
       instanceId: args.instanceId,
@@ -337,11 +453,25 @@ export async function evaluateGatewayAtTriage(
       nowMs: args.nowMs,
       verdict: "no-rule-matched",
     });
-    return { gatewayVar: null, isLateCompute: true, versions: [] };
+    return { gatewayVar: null, routingOutcomes: {}, isLateCompute: true, versions: [] };
   }
 
   const evalResult = evaluate(tables, args.bindings);
-  const outcomeEntries = Object.entries(evalResult.routingOutcomes);
+  // T-0524: GENERIC — surface ALL authored routing outcomes keyed by their
+  // AUTHORED variable name (set_routing_outcome.name). No hard-coded name.
+  //
+  // T-0524 review fix (BLOCKING — fail-closed, not fail-wrong): in UNSCOPED mode
+  // the loaded NULL-scoped tables may belong to DIFFERENT processes. A routing
+  // name authored in >1 distinct table is AMBIGUOUS — evaluate() would resolve it
+  // last-write-wins, which can inject a value from another process's table and
+  // cause a SILENT WRONG ROUTE. Drop ambiguous names so the caller injects
+  // nothing for them → the BPMN gateway's `default` flow is taken (fail-closed).
+  // Scoped (procDefId) and pinned (in-flight version) paths are NEVER filtered.
+  const routingOutcomes = unscoped
+    ? dropAmbiguousOutcomes(evalResult.routingOutcomes, tables)
+    : evalResult.routingOutcomes;
+  const outcomeEntries = Object.entries(routingOutcomes);
+  // Backward-compat single value: bare value of the FIRST outcome.
   const gatewayVar = outcomeEntries.length > 0 ? outcomeEntries[0][1] : null;
   const verdict = gatewayVar ?? "no-rule-matched";
 
@@ -356,5 +486,5 @@ export async function evaluateGatewayAtTriage(
     verdict,
   });
 
-  return { gatewayVar, isLateCompute: true, versions };
+  return { gatewayVar, routingOutcomes, isLateCompute: true, versions };
 }

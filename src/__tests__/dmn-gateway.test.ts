@@ -43,6 +43,7 @@ import {
   TEL_GATEWAY_ID,
   preComputeGatewayVariable,
   evaluateGatewayAtTriage,
+  dropAmbiguousOutcomes,
   type GatewayVarPair,
 } from "../core/dmn-gateway.js";
 
@@ -729,7 +730,14 @@ describe("DG-13: migration 080 is data-only (no DDL, no forbidden table tokens)"
 // DG-14: R-1 bridge wiring — externalTaskBridge.ts imports and wires DMN gateway
 // ---------------------------------------------------------------------------
 
-describe("DG-14: externalTaskBridge.ts wires evaluateGatewayAtTriage for tel-intake (R-1)", () => {
+// T-0524: DG-14 reworked. The triage seam is now GENERIC — it is NO LONGER
+// gated on the "tel-intake" topic, does NOT hard-code processKey=="telLinear",
+// and does NOT inject under a hard-coded variable name. The bridge resolves the
+// process key from variables and injects ALL authored routing outcomes under
+// their AUTHORED names. These structural assertions are updated accordingly:
+// the OLD assertions (DG-14b/d/e, which grepped for tel-intake / TEL_GATEWAY_VAR
+// / [TEL_GATEWAY_VAR]) are replaced by their generic equivalents.
+describe("DG-14: externalTaskBridge.ts wires GENERIC evaluateGatewayAtTriage (T-0524)", () => {
   const bridgePath = path.join(
     PROJECT_ROOT,
     "src/core/externalTaskBridge.ts",
@@ -748,8 +756,10 @@ describe("DG-14: externalTaskBridge.ts wires evaluateGatewayAtTriage for tel-int
     expect(bridgeContent).toMatch(/from.*dmn-gateway/);
   });
 
-  it("DG-14b: externalTaskBridge.ts imports TEL_GATEWAY_VAR from dmn-gateway", () => {
-    expect(bridgeContent).toMatch(/TEL_GATEWAY_VAR/);
+  it("DG-14b: resolves the process key generically (no hard-coded telLinear)", () => {
+    // Generic resolution replaces the old hard-coded processKey: "telLinear".
+    expect(bridgeContent).toMatch(/resolveAuthoredProcessKey/);
+    expect(bridgeContent).not.toMatch(/processKey:\s*["']telLinear["']/);
   });
 
   it("DG-14c: externalTaskBridge.ts calls evaluateGatewayAtTriage at runtime", () => {
@@ -757,14 +767,16 @@ describe("DG-14: externalTaskBridge.ts wires evaluateGatewayAtTriage for tel-int
     expect(bridgeContent).toMatch(/evaluateGatewayAtTriage\s*\(/);
   });
 
-  it("DG-14d: externalTaskBridge.ts checks for tel-intake topic before evaluating", () => {
-    // The wiring is topic-gated (only fires for the tel-intake external task).
-    expect(bridgeContent).toMatch(/tel-intake/);
+  it("DG-14d: triage seam is NOT gated on the tel-intake topic (fires for any process)", () => {
+    // T-0524: the seam no longer special-cases topic == "tel-intake".
+    expect(bridgeContent).not.toMatch(/===?\s*["']tel-intake["']/);
+    expect(bridgeContent).not.toMatch(/TEL_INTAKE_TOPIC/);
   });
 
-  it("DG-14e: externalTaskBridge.ts merges TEL_GATEWAY_VAR into completeTask payload", () => {
-    // The evaluated gateway variable must be spread into the payload sent to completeTask.
-    expect(bridgeContent).toMatch(/\[TEL_GATEWAY_VAR\]/);
+  it("DG-14e: injects ALL authored routing outcomes by spreading routingOutcomes (no hard-coded var name)", () => {
+    // The evaluated outcomes are spread into the payload under their authored names.
+    expect(bridgeContent).toMatch(/routingOutcomes/);
+    expect(bridgeContent).not.toMatch(/\[TEL_GATEWAY_VAR\]/);
   });
 });
 
@@ -1127,5 +1139,312 @@ describe("DG-17: T-0439 review Fix-1 — SAVEPOINT isolation on DB error in audi
     expect(launchVariables).toEqual(originalVariables);
     expect(Object.keys(launchVariables)).not.toContain("approvalRequired");
     expect(Object.keys(launchVariables)).not.toContain("scoreBranch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-18: T-0524 — GENERIC triage-seam (evaluateGatewayAtTriage) on a NON-ТЭЛ
+//        process. Proves the late-compute mechanism is process-agnostic: it
+//        resolves the AUTHORED routing variable name + value purely from the
+//        authored rule table, NOT from any hard-coded ТЭЛ constant.
+//
+//   (а) generic resolve of the authored condition by (process, gateway);
+//   (б) compute the routing variable from RECORD data — BOTH branches;
+//   (в) the injected variable uses the AUTHORED NAME (not "approvalRequired");
+//   (г) ТЭЛ is just ONE case of the same mechanism (computed correctly);
+//   (д) condition unresolvable (no rule table) → fail-closed (empty outcomes,
+//       no silent wrong route).
+//
+// Case: «Отпуск» — days > 14 → needsHeadApproval = "yes"; else "no".
+// The authored variable name is `needsHeadApproval` — deliberately NOT the ТЭЛ
+// name, to prove the mechanism reads the name from the rule table.
+// ---------------------------------------------------------------------------
+
+const LEAVE_PROC_KEY = "leaveRequest";
+const LEAVE_GATEWAY_ID = "gw-head-approval";
+
+// Authored rule table for the leave process (field+operator+value → routing var).
+const LEAVE_RULE_TABLE: DmnRuleTable = {
+  id: "d0de0018-e150-0005-d4f4-000000000018",
+  name: "Отпуск: длительность > 14 дней → согласование руководителя",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "Более 14 дней → нужно согласование руководителя",
+      conditions: [{ field: "days", operator: "gt", value: 14 }],
+      effects: [{ kind: "set_routing_outcome", name: "needsHeadApproval", value: "yes" }],
+    },
+    {
+      annotation: "14 дней и меньше → без согласования",
+      conditions: [],
+      effects: [{ kind: "set_routing_outcome", name: "needsHeadApproval", value: "no" }],
+    },
+  ],
+};
+
+describe("DG-18: T-0524 — GENERIC triage seam on a NON-ТЭЛ process («Отпуск»)", () => {
+  it("DG-18a (а+б+в): days=21 → routingOutcomes resolves AUTHORED name 'needsHeadApproval'='yes' from record data", async () => {
+    const { client } = makeCapturingClient([LEAVE_RULE_TABLE]);
+    // Record data of the instance (what the constructor user submitted).
+    const recordData: Record<string, unknown> = { days: 21, employee: "u-77" };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: LEAVE_PROC_KEY, // (а) resolved by (process, gateway), not ТЭЛ
+      gatewayId: LEAVE_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData, // (б) computed from record data
+      existingVariables: recordData,
+    });
+
+    // (в) the AUTHORED variable name — NOT the ТЭЛ "approvalRequired".
+    expect(result.routingOutcomes).toHaveProperty("needsHeadApproval", "yes");
+    expect(result.routingOutcomes).not.toHaveProperty("approvalRequired");
+    // The generic injection map carries exactly the authored outcome(s).
+    expect(Object.keys(result.routingOutcomes)).toEqual(["needsHeadApproval"]);
+  });
+
+  it("DG-18b (б other branch): days=7 → 'needsHeadApproval'='no' (both branches computed from data)", async () => {
+    const { client } = makeCapturingClient([LEAVE_RULE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 7, employee: "u-77" };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: LEAVE_PROC_KEY,
+      gatewayId: LEAVE_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    expect(result.routingOutcomes).toHaveProperty("needsHeadApproval", "no");
+  });
+
+  it("DG-18c (в): the bridge injection pattern spreads the AUTHORED name into the payload", async () => {
+    // Mirrors the bridge merge: payload = { ...payload, ...routingOutcomes }.
+    const { client } = makeCapturingClient([LEAVE_RULE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 30, employee: "u-77" };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: LEAVE_PROC_KEY,
+      gatewayId: LEAVE_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    const basePayload: Record<string, unknown> = { workerId: "choros-bridge" };
+    const merged = { ...basePayload, ...result.routingOutcomes };
+    // The downstream exclusiveGateway reads `needsHeadApproval` (authored name).
+    expect(merged["needsHeadApproval"]).toBe("yes");
+    expect(merged).not.toHaveProperty("approvalRequired");
+  });
+
+  it("DG-18d (г): ТЭЛ is ONE case of the SAME mechanism — approvalRequired computed correctly", async () => {
+    // Same evaluateGatewayAtTriage call, different authored rule table = ТЭЛ.
+    const { client } = makeCapturingClient([TEL_THRESHOLD_TABLE]);
+    const recordData: Record<string, unknown> = { amount: 6_000_000 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY, // telLinear
+      gatewayId: TEL_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    // ТЭЛ's authored name surfaces through the SAME generic map.
+    expect(result.routingOutcomes).toHaveProperty("approvalRequired", "needs-approval");
+    // Backward-compat single value still correct.
+    expect(result.gatewayVar).toBe("needs-approval");
+  });
+
+  it("DG-18e (д): no authored rule table for the process → fail-closed (empty outcomes, no wrong route)", async () => {
+    const { client } = makeCapturingClient([]); // no rule tables
+    const recordData: Record<string, unknown> = { days: 30 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "process-with-no-authored-condition",
+      gatewayId: LEAVE_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    // Fail-closed: empty injection map → bridge injects nothing → BPMN default flow.
+    expect(result.routingOutcomes).toEqual({});
+    expect(result.gatewayVar).toBeNull();
+    // The bridge merge is a no-op when outcomes are empty (no silent wrong route).
+    const basePayload: Record<string, unknown> = { workerId: "choros-bridge" };
+    const merged =
+      Object.keys(result.routingOutcomes).length > 0
+        ? { ...basePayload, ...result.routingOutcomes }
+        : basePayload;
+    expect(merged).toEqual(basePayload);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-19: T-0524 review fix (BLOCKING) — UNSCOPED name-collision is FAIL-CLOSED,
+//        not fail-wrong. Reproduces the adversarial scenario EXACTLY:
+//        two NULL-scoped rule tables from DIFFERENT processes both author the
+//        SAME routing name `decision`; procDefId undefined, no pinned versions.
+//        The ambiguous name MUST NOT be injected (→ BPMN default flow), instead
+//        of last-write-wins leaking a value from the "other" process's table.
+// ---------------------------------------------------------------------------
+
+// Process A («отпуск»): days>14 → decision="escalate".
+const PROC_A_LEAVE_TABLE: DmnRuleTable = {
+  id: "d0de0019-aaaa-0005-d4f4-00000000000a",
+  name: "A — отпуск: days>14 → escalate",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "days>14 → escalate",
+      conditions: [{ field: "days", operator: "gt", value: 14 }],
+      effects: [{ kind: "set_routing_outcome", name: "decision", value: "escalate" }],
+    },
+  ],
+};
+
+// Process B («расход»): unconditional → decision="auto".
+const PROC_B_SPEND_TABLE: DmnRuleTable = {
+  id: "d0de0019-bbbb-0005-d4f4-00000000000b",
+  name: "B — расход: → auto",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "always → auto",
+      conditions: [],
+      effects: [{ kind: "set_routing_outcome", name: "decision", value: "auto" }],
+    },
+  ],
+};
+
+describe("DG-19: T-0524 review fix — UNSCOPED name-collision is fail-closed", () => {
+  it("DG-19a (REPRO): two NULL-scoped tables share name 'decision', procDefId undefined → 'decision' NOT injected (default flow, no wrong route)", async () => {
+    // Both NULL-scoped tables are loaded (the unscoped published path). Process A's
+    // triage runs with days=21: A's row fires (escalate), B's unconditional row
+    // fires (auto). Last-write-wins would inject B's "auto" into A — wrong route.
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE, PROC_B_SPEND_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData, // no dmn_rtv_ pins → unscoped path
+      // procDefId intentionally undefined → unscoped (the real triage-seam state)
+    });
+
+    // FAIL-CLOSED: the ambiguous name is dropped entirely (neither "escalate" nor
+    // "auto" is injected) → the bridge injects nothing → BPMN default flow.
+    expect(result.routingOutcomes).not.toHaveProperty("decision");
+    expect(result.routingOutcomes).toEqual({});
+    expect(result.gatewayVar).toBeNull();
+  });
+
+  it("DG-19b: UNSCOPED but UNAMBIGUOUS (single NULL-scoped table) → still injected (no over-blocking)", async () => {
+    // Only ONE table authors "decision" → not ambiguous → works as before.
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    expect(result.routingOutcomes).toHaveProperty("decision", "escalate");
+  });
+
+  it("DG-19c: PINNED (version-scoped in-flight) path is NOT filtered — collisions allowed when scoped", async () => {
+    // existingVariables carry a dmn_rtv_ pin → loadRuleTablesByVersions path.
+    // The stub's pinned-load returns the ТЭЛ table only; the point is that the
+    // unscoped filter does NOT run on the pinned path (scoped = safe).
+    const pinVars = serializeVersionsAsVariables([
+      { id: TEL_THRESHOLD_TABLE.id, updatedAt: NOW_MS - 10_000 },
+    ]);
+    const { client } = makeCapturingClient();
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY,
+      gatewayId: TEL_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: { amount: 6_000_000 },
+      existingVariables: { ...pinVars, amount: 6_000_000 },
+    });
+    // Pinned path unaffected — ТЭЛ resolves normally.
+    expect(result.routingOutcomes).toHaveProperty("approvalRequired", "needs-approval");
+  });
+
+  it("DG-19d: SCOPED (procDefId given) path is NOT filtered", async () => {
+    // When a procDefId is supplied the load is process-scoped → no cross-process
+    // ambiguity → the filter is skipped. (Stub returns the supplied tables; we
+    // assert a shared name survives because the path is scoped.)
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+      procDefId: "leaveRequest", // scoped → filter skipped
+    });
+    expect(result.routingOutcomes).toHaveProperty("decision", "escalate");
+  });
+
+  // Pure-helper unit coverage (independent of the DB seam).
+  it("DG-19e: dropAmbiguousOutcomes drops names authored in >1 table, keeps singletons", () => {
+    const tableX: DmnRuleTable = {
+      id: "tbl-x", name: "X", hitPolicy: "FIRST",
+      rules: [{ conditions: [], effects: [
+        { kind: "set_routing_outcome", name: "shared", value: "x" },
+        { kind: "set_routing_outcome", name: "onlyX", value: "x1" },
+      ] }],
+    };
+    const tableY: DmnRuleTable = {
+      id: "tbl-y", name: "Y", hitPolicy: "FIRST",
+      rules: [{ conditions: [], effects: [
+        { kind: "set_routing_outcome", name: "shared", value: "y" },
+      ] }],
+    };
+    const filtered = dropAmbiguousOutcomes(
+      { shared: "y", onlyX: "x1" },
+      [tableX, tableY],
+    );
+    expect(filtered).not.toHaveProperty("shared"); // ambiguous → dropped
+    expect(filtered).toHaveProperty("onlyX", "x1"); // singleton → kept
+  });
+
+  it("DG-19f: dropAmbiguousOutcomes — same name authored twice in the SAME table is NOT ambiguous", () => {
+    // Authoring the name in one table (even across rows) is unambiguous.
+    const tableX: DmnRuleTable = {
+      id: "tbl-x", name: "X", hitPolicy: "FIRST",
+      rules: [
+        { conditions: [{ field: "n", operator: "gt", value: 1 }],
+          effects: [{ kind: "set_routing_outcome", name: "decision", value: "hi" }] },
+        { conditions: [],
+          effects: [{ kind: "set_routing_outcome", name: "decision", value: "lo" }] },
+      ],
+    };
+    const filtered = dropAmbiguousOutcomes({ decision: "hi" }, [tableX]);
+    expect(filtered).toHaveProperty("decision", "hi");
   });
 });
