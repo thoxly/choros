@@ -1,0 +1,168 @@
+{
+  "task_id": "T-0543",
+  "status": "ready",
+  "decision": "Ввести единый surface-контракт (v2, обобщение form-document v1) и единый декларативный реестр дескрипторов виджетов, потребляемый ОДНИМ рендерером, ОДНИМ конструктором и ОДНИМ серверным валидатором. Форма записи (record-form), форма шага (step-form) и страница/дашборд (page, поглощает report_page T-0121) — конфигурации ОДНОГО surface-документа. Любой блок добавляется ОДНОЙ записью реестра — без правок switch(node.type)/PALETTE/WIDGET_COMPAT/веток field-renderer/серверного binding-contract-catalog как отдельного источника. Named-binding инвариант и two-floor (Floor-1 декларатив / Floor-2 sandbox-iframe) сохраняются и обобщаются с форм на все поверхности. v1 form-document авто-коэрсится в v2 (FF-COERCE-1). Виджеты объявляют источник (current-record/query/aggregate/none); семантику действий владеет E16 (action несёт только outcomeRef); страницы живут в Раздел->App->Page (E-NAV-IA), видимость по грантам (T-0021).",
+  "rejected_alternatives": [
+    {
+      "option": "Отдельный page/dashboard-редактор поверх report_page (четвёртый редактор)",
+      "why_not": "Нарушает «не плодить механизмы» (T-0121 FR-2); дублирует named-binding, палитру, рендер; бот != человек снова."
+    },
+    {
+      "option": "Per-driver контракты (человек и бот эмитят разные формы)",
+      "why_not": "Ломает «бот==человек»; два валидатора и drift. Один документ — один валидатор."
+    },
+    {
+      "option": "Реестр как серверный исполняемый код-плагин (исполняемый дескриптор с сервера)",
+      "why_not": "Размывает Floor-границу (код вне sandbox), утолщает ядро. Реестр = декларативные метаданные + клиентский render; Floor-2 остаётся единственным код-escape."
+    },
+    {
+      "option": "Оставить хардкод, добавлять страницы ad-hoc",
+      "why_not": "Новый виджет = правка в 5 местах x 2 зеркала (PALETTE/WIDGET_COMPAT/switch/field-renderer/server-catalog); не масштабируется, нет шва для AI-emit."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "SurfaceDocument",
+      "fields": [
+        { "name": "schemaVersion", "type": "const 2" },
+        { "name": "surface", "type": "SurfaceMeta" },
+        { "name": "root", "type": "SurfaceNode" }
+      ]
+    },
+    {
+      "entity": "SurfaceMeta",
+      "fields": [
+        { "name": "kind", "type": "enum(record-form|step-form|page)" },
+        { "name": "source", "type": "object{applicationId?:uuid, registryDefId?:uuid} (record/step-form обязателен, page опционален)" },
+        { "name": "step", "type": "object{processKey,step} (только step-form)" },
+        { "name": "slug", "type": "string url-safe (только page)" },
+        { "name": "title", "type": "string?" }
+      ]
+    },
+    {
+      "entity": "SurfaceNode",
+      "fields": [
+        { "name": "type", "type": "enum(section|columns|tabs|divider|text|field|table|readout|relation|list|chart|metric|action|custom)" },
+        { "name": "id", "type": "string? (editor-local, не привязка)" },
+        { "name": "label", "type": "string?" },
+        { "name": "mode", "type": "enum(editable|readonly|hidden|required)?" },
+        { "name": "children", "type": "SurfaceNode[]? (layout)" },
+        { "name": "tabs", "type": "array{title?,children}? (tabs)" },
+        { "name": "fieldKey", "type": "string? (data-bound named-binding ключ; тип/опции НЕ хранятся)" },
+        { "name": "columns", "type": "array{subKey,widget?,label?}? (table канал 2)" },
+        { "name": "displayField", "type": "string? (relation канал 3)" },
+        { "name": "dataSource", "type": "QuerySource|AggregateSource? (list/chart/metric)" },
+        { "name": "outcomeRef", "type": "string? (action: ссылка на E16)" },
+        { "name": "componentId", "type": "string? (custom Floor-2)" },
+        { "name": "bindings", "type": "string[]? (custom: named-binding из живой схемы)" }
+      ]
+    },
+    {
+      "entity": "QuerySource",
+      "fields": [
+        { "name": "kind", "type": "const query" },
+        { "name": "applicationId", "type": "uuid" },
+        { "name": "filter", "type": "object?" },
+        { "name": "sort", "type": "array{fieldKey,dir?}?" },
+        { "name": "columns", "type": "array{fieldKey,label?,widget?} (каждый fieldKey проверяется против живой схемы)" }
+      ]
+    },
+    {
+      "entity": "AggregateSource",
+      "fields": [
+        { "name": "kind", "type": "const aggregate" },
+        { "name": "applicationId", "type": "uuid" },
+        { "name": "groupBy", "type": "string? (проверяется против живой схемы)" },
+        { "name": "measure", "type": "string (проверяется против живой схемы)" },
+        { "name": "op", "type": "enum(count|sum|avg|min|max)" }
+      ]
+    },
+    {
+      "entity": "WidgetDescriptor",
+      "fields": [
+        { "name": "id", "type": "WidgetId (= NodeType)" },
+        { "name": "class", "type": "enum(layout|presentational|data-bound|list|viz|action|custom)" },
+        { "name": "floor", "type": "1|2" },
+        { "name": "dataSource", "type": "enum(current-record|query|aggregate|none)" },
+        { "name": "contractKinds", "type": "BindingContractKind[]? (для data-bound; из каталога PD-18)" },
+        { "name": "paletteGroup", "type": "string" },
+        { "name": "icon", "type": "string" },
+        { "name": "label", "type": "string" },
+        { "name": "editorProps", "type": "PropDescriptor[]" },
+        { "name": "render", "type": "fn(node,ctx)->ReactNode (клиент: единственное место отрисовки)" },
+        { "name": "validate", "type": "fn(node,ctx)->Violation[]? (авторинг-время)" }
+      ]
+    },
+    {
+      "entity": "WidgetRegistry",
+      "fields": [
+        { "name": "register", "type": "fn(WidgetDescriptor)->void (дубликат id -> ошибка)" },
+        { "name": "get", "type": "fn(WidgetId)->WidgetDescriptor|undefined" },
+        { "name": "list", "type": "fn()->WidgetDescriptor[]" },
+        { "name": "byPaletteGroup", "type": "fn()->Record<string,WidgetDescriptor[]>" },
+        { "name": "has", "type": "fn(string)->boolean (closed-by-default)" },
+        { "name": "manifest", "type": "fn()->WidgetManifestEntry[] (общий клиент<->сервер источник)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "coerceToSurface(doc: FormDocumentV1 | SurfaceDocument): SurfaceDocument — авто-коэрсия v1->v2, детерминированная, чистая; v1 без step -> record-form, с step -> step-form; root байт-стабилен.",
+    "validateSurface(doc: SurfaceDocument, fields: unknown[], registry: WidgetRegistry): { ok, violations: Violation[], brokenKeys: string[] } — единый авторинг-валидатор: R-CLOSED (registry.has) + named-binding + descriptor.validate?(); заменяет switch-набор validateDocument.",
+    "WidgetRegistry.register/get/list/byPaletteGroup/has/manifest — единый реестр, читаемый рендерером, конструктором и серверным валидатором.",
+    "WidgetDescriptor.render(node, ctx: RenderCtx): ReactNode — единственное место отрисовки блока; замещает один case FormNode switch; layout делегирует детям через ctx.renderNode.",
+    "WidgetDescriptor.validate?(node, ctx: AuthoringCtx): Violation[] — авторинг-доп.проверки поверх общего обхода.",
+    "paletteFromRegistry(registry): PALETTE-форма — PALETTE/WIDGET_COMPAT становятся производными от реестра; экспорт-форма прежняя (совместимость импортёров form-document.js, ADR §10).",
+    "surface-document валидируется против docs/design/T-0543-surface-document.schema.json (draft-07)."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-REG-1",
+      "rule": "Новый виджет добавляется ОДНОЙ записью реестра. Нет switch(node.type), литерала PALETTE и литерала WIDGET_COMPAT вне модуля реестра/дескрипторов; рендер-диспетч идёт ТОЛЬКО через registry.get(node.type).render.",
+      "ci_check": "grep/eslint-гард: запретить 'switch (node.type)' и 'switch(node.type)' вне web/src/forms/widget-registry.js и descriptors; запретить второе определение PALETTE/WIDGET_COMPAT (grep -rn 'const PALETTE\\|const WIDGET_COMPAT' web/src | wc -l == 1, и оно derive-from-registry). exit 1 при нарушении."
+    },
+    {
+      "id": "FF-CONTRACT-1",
+      "rule": "Любой surface-document (record-form/step-form/page), порождённый человеком или ботом, валиден против T-0543-surface-document.schema.json.",
+      "ci_check": "vitest: для каждого фикстура-документа (buildDefaultDocument, emit_surface output, коэрснутый v1) validate(doc, surface-document.schema.json).length === 0. exit 1 при ошибке схемы."
+    },
+    {
+      "id": "FF-NAMED-BIND",
+      "rule": "Data-bound узел (field/table/readout/relation) НЕ хранит type/options — тип, опции и виджет-совместимость резолвятся из живой схемы при рендере (анти-snapshot-drift).",
+      "ci_check": "vitest: walkDocument(doc) — ни один data-узел не имеет ключей 'type'(как тип поля)/'options'; рендер-снапшот с двумя разными живыми схемами для одного fieldKey даёт разный тип контрола. Плюс grep-гард: surface-узлы не сериализуют resolved-options. exit 1 при нарушении."
+    },
+    {
+      "id": "FF-COERCE-1",
+      "rule": "v1 form-document авто-коэрсится в v2 surface (record-form/step-form) и рендерится БАЙТ-ИДЕНТИЧНО прежнему FormDocumentRenderer (поведенческий no-op миграции).",
+      "ci_check": "vitest: для корпуса v1-фикстур — coerceToSurface валиден против schema v2 И renderToStaticMarkup(SurfaceRenderer(coerce(v1))) === renderToStaticMarkup(FormDocumentRenderer(v1)). exit 1 при расхождении."
+    },
+    {
+      "id": "FF-SRC-DEP",
+      "rule": "Каждый источник query/aggregate объявляет ключи (columns/measure/groupBy/filter-поля), которые ОБЯЗАНЫ существовать в указанной схеме; отсутствующий ключ -> DepViolation (член bundle-coherence, как report_page_dep T-0121).",
+      "ci_check": "vitest: validateSurface для page-документа с источником на удалённое поле -> violations содержит DEP-VIOLATION; bundle-coherence.sh check-surface-deps для строк зависимостей страницы -> exit 1 при несуществующем field_key."
+    },
+    {
+      "id": "FF-UX-G1",
+      "rule": "Конструктор и SurfaceRenderer используют дизайн-систему: только --chs-* токены и .chs-* классы; honest-empty состояния; без хардкод-цветов (OBLIK G1/G6).",
+      "ci_check": "ci/checks design-tokens grep-гард: ноль hex/rgb-литералов в web/src/forms/SurfaceRenderer*/widget-registry* и конструкторе; honest-empty присутствует. exit 1 при нарушении."
+    },
+    {
+      "id": "FF-UX-G6",
+      "rule": "Без жаргона/раскрытия внутренних терминов в палитре/инспекторе конструктора (русская продуктовая копия; G6 OBLIK).",
+      "ci_check": "ci/checks jargon-lint по paletteGroup/label/editorProps копии дескрипторов: ноль запрещённых жаргон-токенов. exit 1 при нарушении."
+    }
+  ],
+  "traceability": [
+    { "ac": "Единый реестр заменяет PALETTE+WIDGET_COMPAT+switch(node.type)+ветки field-renderer+серверный каталог как отдельный источник", "covered_by": "FF-REG-1; T-0543-widget-registry.interface.ts (WidgetRegistry/WidgetDescriptor); ADR §4/§10" },
+    { "ac": "form-document обобщён в surface-document; форма = частный случай; page поглощает report_page", "covered_by": "FF-CONTRACT-1; T-0543-surface-document.schema.json; ADR §3/§7" },
+    { "ac": "Обратная совместимость v1->v2 под fitness-тест", "covered_by": "FF-COERCE-1; ADR §3.1/§9; coerceToSurface" },
+    { "ac": "Named-binding инвариант сохранён и обобщён на источники страниц", "covered_by": "FF-NAMED-BIND; FF-SRC-DEP; ADR §3/§5" },
+    { "ac": "Виджеты объявляют источник (current-record/query/aggregate/none)", "covered_by": "schema (dataSource per-type); WidgetDescriptor.dataSource; ADR §5" },
+    { "ac": "Семантику действий владеет E16 (action несёт только outcomeRef)", "covered_by": "schema (action.outcomeRef required); ADR §7" },
+    { "ac": "Страницы живут в Раздел->App->Page (E-NAV-IA), видимость по грантам (T-0021)", "covered_by": "schema (surface.slug для page); ADR §7" },
+    { "ac": "Floor-2 = sandbox-iframe сохранён (custom)", "covered_by": "WidgetDescriptor.floor; schema (custom node); ADR §8" },
+    { "ac": "report-pages СВЕДЕНЫ в surface{kind:page}, не форкнуты", "covered_by": "ADR §7; FF-SRC-DEP (report_page_dep переиспользован)" },
+    { "ac": "Конструктор интерфейсов на дизайн-системе (UX honest-gate)", "covered_by": "FF-UX-G1; FF-UX-G6" }
+  ],
+  "adr_artifact_path": "docs/design/T-0543-interface-builder-surface-contract.adr.md",
+  "runtime_target": "локально"
+}
