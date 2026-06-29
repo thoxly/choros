@@ -255,4 +255,56 @@ export class PgFileStore implements FileMetaSource {
       [tenantId, versionId, atMs],
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // T-0518 — list files for a record (HTTP list route)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List all non-deleted file rows owned by a record, joined to their current
+   * version for mime/size. Tenant-scoped via RLS (must run inside a tenant tx
+   * with SET LOCAL choros.tenant_id = '<tenantId>'). The LEFT JOIN on
+   * file_version returns null size/mime when current_version is NULL (newly
+   * created file with no version yet — should not normally appear on the list
+   * route since POST /files immediately adds a version).
+   */
+  async listFilesByRecord(
+    tenantId: string,
+    recordId: string,
+  ): Promise<
+    Array<{
+      fileId: string;
+      originalName: string;
+      currentVersionId: string | null;
+      mime: string | null;
+      sizeBytes: number | null;
+      createdAt: number;
+    }>
+  > {
+    const { rows } = await this.pool.query<{
+      id: string;
+      original_name: string;
+      current_version: string | null;
+      mime_type: string | null;
+      size_bytes: string | null;
+      created_at: string;
+    }>(
+      `SELECT f.id, f.original_name, f.current_version,
+              fv.mime_type, fv.size_bytes, f.created_at
+       FROM choros.file f
+       LEFT JOIN choros.file_version fv
+         ON fv.tenant_id = f.tenant_id AND fv.id = f.current_version
+       WHERE f.tenant_id = $1 AND f.record_id = $2
+       ORDER BY f.created_at ASC`,
+      [tenantId, recordId],
+    );
+    return rows.map((r) => ({
+      fileId: r.id,
+      originalName: r.original_name,
+      currentVersionId: r.current_version,
+      mime: r.mime_type,
+      sizeBytes: r.size_bytes !== null ? Number(r.size_bytes) : null,
+      createdAt: Number(r.created_at),
+    }));
+  }
 }
