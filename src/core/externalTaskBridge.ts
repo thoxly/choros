@@ -29,15 +29,67 @@ import type { FlowableClient } from "./flowable-client.js";
 import type { PostgresJobStore } from "./postgres/pgJobStore.js";
 import type { Deliver, OnDispatched } from "./outboxDispatcher.js";
 import type { OutboxRow } from "./outboxTypes.js";
-// T-0340 [E15-S5] R-1: DMN gateway wiring at the triage completeTask seam.
-// evaluateGatewayAtTriage is called when the tel-intake external task completes, so
-// that approvalRequired is set in the Flowable variable map BEFORE the engine
-// evaluates gw-approval-threshold (the exclusiveGateway in tel-linear.bpmn20.xml).
-import {
-  evaluateGatewayAtTriage,
-  TEL_GATEWAY_VAR,
-  TEL_GATEWAY_ID,
-} from "./dmn-gateway.js";
+// T-0340 [E15-S5] R-1 → T-0524 (constructor-foundation): GENERIC DMN gateway
+// wiring at the triage completeTask seam. When ANY external task completes, the
+// bridge re-evaluates the process's authored DMN rule tables and injects ALL
+// authored routing outcomes (keyed by their AUTHORED variable name) into the
+// completeTask variable map BEFORE the engine reaches the downstream
+// exclusiveGateway. ТЭЛ ("approvalRequired" → gw-approval-threshold) is ONE such
+// authored configuration; no process key, topic, variable name, or gateway id is
+// hard-coded in this seam — they all come from the authored rule tables.
+import { evaluateGatewayAtTriage, GATEWAY_ID_UNKNOWN } from "./dmn-gateway.js";
+
+// ---------------------------------------------------------------------------
+// resolveAuthoredProcessKey — generic process-key resolution at the triage seam
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the BPMN process definition key for the completed job from its
+ * captured Flowable variables, generically — no process is hard-coded.
+ *
+ * Flowable / Choros may surface the process key under a few conventional
+ * variable names depending on how the instance was started. We probe the known
+ * conventions in order and return the first non-empty string. When none is
+ * present we return `undefined`, which makes the rule-table lookup fall back to
+ * the tenant's process-agnostic (process_def_id IS NULL) published rule tables —
+ * still generic, still fail-closed (no rule table → no injection → BPMN default
+ * flow). This is intentionally data-driven: the process key is AUTHORED/runtime
+ * data, never engine logic.
+ */
+function resolveAuthoredProcessKey(
+  variables: Record<string, unknown>,
+): string | undefined {
+  // Conventional keys, most-specific first. (Choros set markers, then Flowable
+  // system variable names that may be projected into the variable map.)
+  const candidateKeys = [
+    "choros_processKey",
+    "processDefinitionKey",
+    "processKey",
+    "__processDefinitionKey",
+  ];
+  for (const key of candidateKeys) {
+    const v = variables[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the process instance id for the completed job from its captured
+ * variables, generically. Used only as the audit-event correlation id; falls
+ * back to the jobId when absent (best available correlation).
+ */
+function resolveInstanceId(
+  variables: Record<string, unknown>,
+  fallbackJobId: string,
+): string {
+  const candidateKeys = ["choros_instanceId", "processInstanceId", "__instanceId"];
+  for (const key of candidateKeys) {
+    const v = variables[key];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  }
+  return fallbackJobId;
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -261,15 +313,18 @@ export async function runBridgeOnce(
  *
  * T-0068 seam: optional onDispatched callback preserved in the factory signature.
  *
- * T-0340 [E15-S5] R-1: DMN gateway wiring at the triage seam.
- *   When the completed job's topic is "tel-intake", evaluateGatewayAtTriage is
- *   called with the process variables captured at fetchAndLock time, and the
- *   resulting `approvalRequired` value is merged into the completeTask variables
- *   map so Flowable evaluates gw-approval-threshold with a live variable.
+ * T-0340 R-1 → T-0524 (GENERIC): DMN gateway wiring at the triage seam.
+ *   When ANY external task completes, evaluateGatewayAtTriage is called with the
+ *   process variables captured at fetchAndLock time, and EVERY authored routing
+ *   outcome is merged — under its AUTHORED variable name — into the completeTask
+ *   variables map so Flowable evaluates the downstream exclusiveGateway(s) with
+ *   live variables. The process key is resolved generically from the variables
+ *   (resolveAuthoredProcessKey); ТЭЛ ("approvalRequired" → gw-approval-threshold)
+ *   is one authored configuration, not a special case in this code.
  *   The pool client is opened under the row's tenantId GUC (same pattern as
- *   lookupExternalTaskId). On any evaluation error the task is still completed
- *   but without the gateway variable (Flowable will error at the gateway, which
- *   is the correct fail-closed behaviour when the DMN evaluation fails).
+ *   lookupExternalTaskId). When no rule table is authored for the process, or on
+ *   any evaluation error, the task still completes but without any injected
+ *   routing variable → the gateway's BPMN `default` flow is taken (fail-closed).
  */
 export function makeExternalTaskDeliver(
   flowableClient: FlowableClient,
@@ -302,15 +357,22 @@ export function makeExternalTaskDeliver(
             ? (row.payload["variables"] as Record<string, unknown>)
             : undefined;
 
-        // T-0340 [E15-S5] R-1: MANDATORY late-compute at the triage seam.
-        // When the completed job is the tel-intake external task, look up the
-        // process-instance variables (captured at fetchAndLock time and stored in
-        // choros.job.variables), evaluate the DMN gateway, and inject
-        // `approvalRequired` into the completeTask variables map so Flowable can
-        // route through gw-approval-threshold correctly.
-        const TEL_INTAKE_TOPIC = "tel-intake";
+        // T-0340 R-1 → T-0524 (GENERIC): MANDATORY late-compute at the triage seam.
+        // For ANY completed external task, look up the process-instance variables
+        // (captured at fetchAndLock and stored in choros.job.variables), resolve the
+        // authored process key from those variables, re-evaluate the process's
+        // authored DMN rule tables, and inject ALL authored routing outcomes —
+        // EACH UNDER ITS AUTHORED VARIABLE NAME (set_routing_outcome.name) — into
+        // the completeTask variables so the downstream exclusiveGateway(s) route by
+        // the author's conditions. ТЭЛ ("approvalRequired") is one such authored
+        // case; nothing here is ТЭЛ-specific.
+        //
+        // Fail-closed: when no rule table is authored for the process, NO routing
+        // variable is injected → the gateway's BPMN `default` flow is taken (never
+        // a silent wrong route). On any evaluation error the task still completes
+        // without injection (same fail-closed behaviour).
         const jobInfo = await lookupJobTopicAndVariables(pool, row.tenantId, row.aggregateId);
-        if (jobInfo?.topic === TEL_INTAKE_TOPIC) {
+        if (jobInfo !== undefined) {
           try {
             const pgClient = await pool.connect();
             try {
@@ -320,34 +382,42 @@ export function makeExternalTaskDeliver(
               );
               await pgClient.query("SET LOCAL search_path TO choros");
               // The process variables from the Flowable instance (captured at
-              // fetchAndLock) carry the user-submitted field values including `amount`.
-              // existingVariables feeds the in-flight rule-change check (§8).
+              // fetchAndLock) carry the user-submitted field values (the bindings
+              // the authored conditions reference). existingVariables feeds the
+              // in-flight rule-change pin check (§8); procDefId scopes the rule
+              // lookup to this process when the key is known.
               const instanceVariables = jobInfo.variables;
+              const processKey = resolveAuthoredProcessKey(instanceVariables);
               const triageResult = await evaluateGatewayAtTriage(pgClient, {
                 tenantId: row.tenantId,
-                instanceId: row.aggregateId, // jobId as correlation id (best available; instanceId carried in variables when Flowable sets it)
-                processKey: "telLinear",
-                gatewayId: TEL_GATEWAY_ID,
+                instanceId: resolveInstanceId(instanceVariables, row.aggregateId),
+                // Process key is authored/runtime data — undefined falls back to
+                // the tenant's process-agnostic published rule tables.
+                processKey: processKey ?? jobInfo.topic,
+                // No authored gateway id is available at this seam (job rows carry
+                // only topic+variables); the gateway id is a pure audit annotation,
+                // the routing depends on the injected variable(s), not the id.
+                gatewayId: GATEWAY_ID_UNKNOWN,
                 actor: "choros-bridge", // service actor at the triage seam
                 nowMs: Date.now(),
                 bindings: instanceVariables as Record<string, number | string | boolean>,
                 existingVariables: instanceVariables,
+                procDefId: processKey,
               });
               await pgClient.query("COMMIT");
 
-              if (triageResult.gatewayVar !== null) {
-                // Merge approvalRequired into the completeTask variables.
-                // Downstream: Flowable reads this variable when it evaluates the
-                // exclusiveGateway conditionExpressions in tel-linear.bpmn20.xml.
-                payload = {
-                  ...(payload ?? {}),
-                  [TEL_GATEWAY_VAR]: triageResult.gatewayVar,
-                };
+              // GENERIC injection: merge EVERY authored routing outcome under its
+              // AUTHORED name. Empty map (no rule authored / no match) → no-op →
+              // BPMN default flow (fail-closed).
+              const outcomes = triageResult.routingOutcomes;
+              if (Object.keys(outcomes).length > 0) {
+                payload = { ...(payload ?? {}), ...outcomes };
               }
             } catch (evalErr) {
               await pgClient.query("ROLLBACK").catch(() => {/* swallow */});
               // Non-fatal: log and proceed with the original payload.
-              // Flowable will error at the gateway (fail-closed) when the variable is absent.
+              // The gateway's BPMN default flow is taken (fail-closed) when no
+              // routing variable is injected.
               console.error(
                 `[externalTaskBridge] evaluateGatewayAtTriage failed for job ${row.aggregateId}: ${String(evalErr)}`,
               );
