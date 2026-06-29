@@ -1,0 +1,102 @@
+{
+  "task_id": "T-0533",
+  "status": "ready",
+  "decision": "Два независимых механизма защиты данных: (а) dirty-state guard — в BPMN-редакторе (isDirty уже есть через commandStack.changed) и дизайнере форм (isDirty через JSON-snapshot deepEqual) добавить useBlocker (react-router v6) + beforeunload; при isDirty=true показывать <ConfirmDialog tone='danger'> «Несохранённые правки» с ConsequenceSummary (T-0526); логика выносится в разделяемый хук useDirtyGuard(isDirty) в web/src/hooks/useDirtyGuard.js; (б) optimistic-откат — в screen-reports.jsx при ошибке promote добавить ранний return чтобы onSaved({tier:'published'}) НЕ вызывался при провале; в screen-assistant.jsx patchThread (rename/pin) добавить snapshot + rollback при ошибке. Граница с T-0544: isDirty-источник в FormDesigner заменяется на historyIndex-сравнение когда T-0544 добавит undo-стек; guard-логика не меняется.",
+  "rejected_alternatives": [
+    {
+      "option": "Глобальный dirty-синглтон (context/store) для отслеживания isDirty по всему приложению",
+      "why_not": "Излишняя сложность: редакторы монтируются эксклюзивно (один открыт в момент времени), isDirty локален для компонента. Глобальный стор добавил бы coupling без выгоды."
+    },
+    {
+      "option": "Использовать window.confirm() в beforeunload вместо кастомного диалога для внутренней навигации",
+      "why_not": "window.confirm() запрещён конвенцией (principles.md §4, ban window.confirm). useBlocker + ConfirmDialog — правильный паттерн для react-router SPA."
+    },
+    {
+      "option": "Кэшировать isDirty в sessionStorage и восстанавливать при перезагрузке",
+      "why_not": "Out-of-scope для T-0533 — усложняет impl, требует сериализации BPMN XML + form-document; beforeunload достаточен для предупреждения пользователя."
+    },
+    {
+      "option": "Показывать inline-баннер 'несохранённые изменения' вместо route-guard диалога",
+      "why_not": "Баннер информирует, но не блокирует уход — тот же UX-дефект. useBlocker — единственный способ перехватить навигацию внутри SPA."
+    },
+    {
+      "option": "Для screen-reports optimistic bug: при ошибке вызывать onSaved({tier:'draft'}) вместо не вызывать вовсе",
+      "why_not": "onSaved с tier='draft' после попытки promote вводит в заблуждение (пользователь нажал 'Опубликовать'). Корректно: держать builder открытым с честной ошибкой — пользователь сам решает, что делать."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "DirtyState",
+      "fields": [
+        { "name": "isDirty", "type": "boolean — есть ли несохранённые правки" },
+        { "name": "savedSnapshot", "type": "object | null — последнее сохранённое состояние (FormDesigner: savedDocRef.current; BPMN: не нужен, isDirty из commandStack)" },
+        { "name": "editor", "type": "enum: bpmn | form-designer | prompt | connections" }
+      ]
+    },
+    {
+      "entity": "DirtyGuard",
+      "fields": [
+        { "name": "isDirty", "type": "boolean — вход в хук" },
+        { "name": "blockerState", "type": "enum: unblocked | blocked | proceeding" },
+        { "name": "proceed", "type": "function — подтвердить уход (blocker.proceed)" },
+        { "name": "reset", "type": "function — отменить уход (blocker.reset)" },
+        { "name": "beforeunload_registered", "type": "boolean — side-effect: window.addEventListener когда isDirty" }
+      ]
+    },
+    {
+      "entity": "OptimisticUpdate",
+      "fields": [
+        { "name": "prevSnapshot", "type": "T — состояние до оптимистичного апдейта" },
+        { "name": "optimisticValue", "type": "T — немедленно применённое значение" },
+        { "name": "serverResult", "type": "T | null — результат успешного запроса" },
+        { "name": "status", "type": "enum: pending | committed | rolled_back" }
+      ]
+    }
+  ],
+  "contracts": [
+    "useDirtyGuard(isDirty: boolean) → {blockerState, proceed, reset} — новый хук в web/src/hooks/useDirtyGuard.js; wire useBlocker + beforeunload; имеет no-op при isDirty=false",
+    "FormDesigner.jsx: добавить savedDocRef (useRef), вычислять isDirty через JSON.stringify deepEqual, подключить useDirtyGuard, рендерить ConfirmDialog при blockerState==='blocked'",
+    "screen-process-editor.jsx: подключить useDirtyGuard(isDirty) (isDirty уже есть); добавить ConfirmDialog + опциональную кнопку 'Сохранить и уйти'",
+    "screen-reports.jsx: в handleSubmit при promote-ошибке добавить `return` перед onSaved; строитель остаётся открытым с submitErr",
+    "screen-assistant.jsx patchThread: добавить optimistic snapshot + rollback при .catch(); error toast через T-0528",
+    "ConfirmDialog guard текст: title='Несохранённые правки', confirmLabel='Уйти без сохранения', cancelLabel='Остаться', tone='danger', message включает ConsequenceSummary из T-0526",
+    "Зависимость: ConsequenceSummary импортируется из web/src/components/confirm-helpers.jsx (T-0526 поставляет)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-533-01",
+      "rule": "Редакторы с isDirty=true имеют зарегистрированный beforeunload handler: grep на useDirtyGuard или addEventListener('beforeunload') в screen-process-editor.jsx и FormDesigner.jsx",
+      "ci_check": "grep -n 'useDirtyGuard\\|beforeunload' web/src/screens/screen-process-editor.jsx web/src/forms/FormDesigner.jsx | grep -c 'useDirtyGuard\\|beforeunload' | awk '{if($1>=2) exit 0; else exit 1}'"
+    },
+    {
+      "id": "FF-533-02",
+      "rule": "Редакторы используют useBlocker для route-guard: grep на useBlocker в хуке useDirtyGuard",
+      "ci_check": "grep -n 'useBlocker' web/src/hooks/useDirtyGuard.js | wc -l | awk '{if($1>=1) exit 0; else exit 1}'"
+    },
+    {
+      "id": "FF-533-03",
+      "rule": "screen-reports.jsx: при ошибке promote не вызывается onSaved с tier='published' — т.е. между блоком catch promote-error и onSaved есть return",
+      "ci_check": "python3 -c \"import sys; txt=open('web/src/screens/screen-reports.jsx').read(); idx=txt.find('promote'); blk=txt[idx:idx+1500]; sys.exit(0 if 'return' in blk[:blk.find('onSaved')] else 1)\""
+    },
+    {
+      "id": "FF-533-04",
+      "rule": "FormDesigner.jsx хранит savedDocRef и вычисляет isDirty: grep на savedDocRef",
+      "ci_check": "grep -n 'savedDocRef\\|isDirty' web/src/forms/FormDesigner.jsx | wc -l | awk '{if($1>=2) exit 0; else exit 1}'"
+    },
+    {
+      "id": "FF-UX-533-01",
+      "rule": "UX: ConfirmDialog для guard несохранённых правок содержит tone='danger' и confirmLabel='Уйти без сохранения' (или эквивалент)",
+      "ci_check": "grep -n \"Уйти без сохранения\\|confirmLabel\" web/src/screens/screen-process-editor.jsx web/src/forms/FormDesigner.jsx | wc -l | awk '{if($1>=2) exit 0; else exit 1}'"
+    }
+  ],
+  "traceability": [
+    { "ac": "AC-533-01: BPMN-редактор с isDirty=true блокирует внутреннюю навигацию через useBlocker", "covered_by": "FF-533-02 + screen-process-editor impl" },
+    { "ac": "AC-533-02: Дизайнер форм отслеживает isDirty через deepEqual snapshot и блокирует уход", "covered_by": "FF-533-01 + FF-533-04" },
+    { "ac": "AC-533-03: beforeunload зарегистрирован в обоих редакторах при isDirty=true", "covered_by": "FF-533-01" },
+    { "ac": "AC-533-04: screen-reports promote-ошибка не приводит к ложному состоянию 'published'", "covered_by": "FF-533-03" },
+    { "ac": "AC-533-05: patchThread в screen-assistant откатывается при ошибке (оптимистик не залипает)", "covered_by": "contracts: screen-assistant patchThread rollback" },
+    { "ac": "AC-533-06: Guard-диалог использует tone='danger' с ConsequenceSummary (T-0526)", "covered_by": "FF-UX-533-01" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0533-data-loss-guard.design.md"
+}
