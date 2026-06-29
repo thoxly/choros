@@ -1,0 +1,98 @@
+{
+  "task_id": "T-0531",
+  "status": "ready",
+  "decision": "Механический свип ~35 файлов по четырём классам: (1) raw <input>/<select>/<button> → kit <Field>/<Select>/<Button>; (2) Unicode/emoji-глифы → <KitIcon name> из расширенного реестра (icon-registry.js); (3) хардкод hex/px/fontWeight → семантические --chs-* токены tokens.css; (4) div/span-«таблицы» → kit <DataTable>/<Card>/<Badge> (добавить в components.jsx). Всё проверяется grep-гардами в ci/checks/ux/. bpmn-js-хром и forms/iframe — задокументированные исключения. Иконки виджетов T-0543 WidgetDescriptor.icon ссылаются на icon-registry.js — не дублируют SVG.",
+  "rejected_alternatives": [
+    {
+      "option": "Глобальный CSS-reset: переписать все стили на utility-классы вместо токен-переменных",
+      "why_not": "Сломает темизацию и принцип single-source-of-truth tokens.css; требует гораздо большего объёма изменений без выгоды для a11y."
+    },
+    {
+      "option": "Заменить нативный <select> в Select/kit на custom listbox (кастомный рендер опций)",
+      "why_not": "Нативный <select> обеспечивает клавиатурную доступность и AT-совместимость из коробки. Кастомный listbox — отдельная задача (searchable combobox), не входит в свип T-0531."
+    },
+    {
+      "option": "Импортировать иконки напрямую из пакета lucide-react вместо локального KitIcon",
+      "why_not": "KitIcon — самодостаточный inline-SVG, не требует npm-зависимости, грузится в showcase через babel-standalone. Добавление lucide-react увеличивает бандл и создаёт зависимость, решение принимается отдельно."
+    },
+    {
+      "option": "Отложить исправление iframe до отдельной задачи",
+      "why_not": "Iframe хардкод #222/system-ui/14px — критический баг WCAG AA (тёмный текст на тёмном фоне в dark-theme, аудит §11 severity:medium). Решение — инжект CSS-переменных — минимальное усилие, без рефакторинга iframe-кода."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "IconRegistryEntry",
+      "fields": [
+        { "name": "name",    "type": "string" },
+        { "name": "label",   "type": "string" },
+        { "name": "since",   "type": "string" },
+        { "name": "usedIn",  "type": "string[]" }
+      ]
+    },
+    {
+      "entity": "TokenMap",
+      "fields": [
+        { "name": "hardcoded",     "type": "string" },
+        { "name": "semanticToken", "type": "string" },
+        { "name": "context",       "type": "string" }
+      ]
+    },
+    {
+      "entity": "MigrationRule",
+      "fields": [
+        { "name": "wave",        "type": "0|1|2|3|4" },
+        { "name": "pattern",     "type": "string" },
+        { "name": "replacement", "type": "string" },
+        { "name": "scope",       "type": "string" },
+        { "name": "exception",   "type": "string | null" }
+      ]
+    }
+  ],
+  "contracts": [
+    "KitIcon.name MUST be a key in ICON_REGISTRY (web/src/design/icon-registry.js)",
+    "WidgetDescriptor.icon (T-0543) MUST be a key in ICON_REGISTRY — no duplicate SVG",
+    "After sweep: no raw hex/green/red/blue inside web/src style props except inside tokens.css",
+    "After sweep: no var(--chs-*, #hex-fallback) anywhere in web/src — remove fallbacks",
+    "After sweep: no raw <input>/<button> with chs-* classes outside components.jsx and field-renderer.jsx (allowlist: bpmn-js-chrome BPMN-JS-CHROME-EXCEPTION comment required)",
+    "CollectionField remove-button: replace Unicode ✕ with <KitIcon name='close'> (or 'trash' once added)",
+    "forms/iframe: inject --chs-color-bg/text/surface/font-sans as inline CSS props on load"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-RAW-CTRL-1",
+      "rule": "Нет raw <input> или <button> с классом chs-* вне components.jsx и field-renderer.jsx (разрешённый allowlist: canvas/ с маркером BPMN-JS-CHROME-EXCEPTION)",
+      "ci_check": "ci/checks/ux/no-raw-controls.sh"
+    },
+    {
+      "id": "FF-HEX-2",
+      "rule": "Нет хардкод hex (#rrggbb/#rgb), именованных цветов (red/green/blue), raw fontWeight:600/700 или pixel-literals в style-пропах web/src/**/*.jsx вне tokens.css и icon-registry.js",
+      "ci_check": "ci/checks/ux/no-hardcoded-tokens.sh"
+    },
+    {
+      "id": "FF-ICON-3",
+      "rule": "Нет Unicode/emoji-глифов как функциональных иконок в web/src; KitIcon name всегда в ICON_REGISTRY; fallback dev-warn в KitIcon для неизвестных имён",
+      "ci_check": "ci/checks/ux/no-unicode-glyphs.sh"
+    },
+    {
+      "id": "FF-UX-CONTRAST-4",
+      "rule": "WCAG AA: все foreground/background пары из --chs-color-* токенов сохраняют задокументированный контраст (проверяется через tokens.css комментарии ≥4.5:1 text / ≥3:1 UI)",
+      "ci_check": "ci/checks/ux/token-contrast-comments.sh"
+    },
+    {
+      "id": "FF-UX-JARGON-5",
+      "rule": "Нет паттернов dev-jargon (HTTP коды, stack traces) в user-facing строках web/src/screens (grep-исключение: aria-label, консоль, комментарии)",
+      "ci_check": "ci/checks/ux/no-jargon.sh"
+    }
+  ],
+  "traceability": [
+    { "ac": "UX-audit §10: Unicode/emoji glyphs as icons", "covered_by": "FF-ICON-3 + MigrationRule wave-1" },
+    { "ac": "UX-audit §11: Hardcoded colors/hex/weights bypass tokens", "covered_by": "FF-HEX-2 + MigrationRule wave-2" },
+    { "ac": "UX-audit §12: Ad-hoc div/span data tables", "covered_by": "MigrationRule wave-4 (DataTable/Card/Badge)" },
+    { "ac": "UX-audit §4: Field errors via aria-describedby", "covered_by": "FF-RAW-CTRL-1 + MigrationRule wave-3 (<Field> wires aria-describedby)" },
+    { "ac": "T-0543 WidgetDescriptor.icon contract", "covered_by": "FF-ICON-3 + IconRegistryEntry contract" },
+    { "ac": "OBLIK G2/G6: token-discipline gate", "covered_by": "FF-HEX-2 + FF-RAW-CTRL-1" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0531-kit-token-adoption.design.md"
+}
