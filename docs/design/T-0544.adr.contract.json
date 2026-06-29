@@ -1,0 +1,141 @@
+{
+  "task_id": "T-0544",
+  "status": "ready",
+  "decision": "Перестроить FormDesigner.jsx в конструктор интерфейсов: (1) CanvasNode v2 — вложенное дерево с DropSlot между узлами, path-aware drop-зоны (containerPath + tabIndex + insertAt), cross-container drag через существующий moveNodeAcross; (2) Палитра и инспектор читают registry.byPaletteGroup() / descriptor.editorProps — без хардкода GROUP_LABELS/switch; (3) Живое превью side-by-side (SurfaceRenderer, не <details>); (4) HistoryStack: past[]/present/future[] — push на каждый op, Undo Ctrl+Z / Redo Ctrl+Y; (5) Мультивыбор: Set<nodeId>, Shift+Click range, Ctrl+A в контейнере, удаление/дубликат множества; (6) Keyboard drag-фоллбэк: Alt+Up/Down внутри контейнера, Alt+Enter войти, Escape выйти (координация T-0529); (7) isDirty flag — граница с T-0533. doc-ops расширяются двумя сигнатурами: moveNode(fromPath, toPath) и insertAt(containerPath, node, index).",
+  "rejected_alternatives": [
+    {
+      "option": "Drag только корня (path всегда [])",
+      "why_not": "Не поддерживает вложенные контейнеры — section/columns/tabs. Пользователь не может положить поле внутрь секции drag-ом."
+    },
+    {
+      "option": "Превью в <details> (текущее)",
+      "why_not": "Скрытое превью — «мёртвая кнопка» в терминах G3; дизайн не виден до раскрытия. Side-by-side — единственный способ дать живую обратную связь."
+    },
+    {
+      "option": "Инспектор через if/switch по node.type (текущее)",
+      "why_not": "Хардкод — каждый новый виджет из реестра требует правки инспектора. descriptor.editorProps уже несёт всё необходимое."
+    },
+    {
+      "option": "Стек undo через глубокое клонирование всего дерева",
+      "why_not": "form-document-ops.js уже использует structural sharing (cloneNode + rebuildAtContainer). HistoryStack хранит иммутабельные объекты документа — клонирование бесплатно."
+    },
+    {
+      "option": "Отдельный реестр иконок/меток вне WidgetDescriptor",
+      "why_not": "Противоречит R-MANIFEST (T-0543): один дескриптор — метаданные для UI и сервера. Дублирование = расхождение."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "CanvasState",
+      "fields": [
+        { "name": "historyStack", "type": "HistoryStack" },
+        { "name": "selectedNodes", "type": "Set<string>" },
+        { "name": "focusedPath", "type": "PathSegment[] | null" },
+        { "name": "dragActive", "type": "boolean" },
+        { "name": "saveState", "type": "'idle' | 'saving' | 'saved' | 'error'" },
+        { "name": "isDirty", "type": "boolean" }
+      ]
+    },
+    {
+      "entity": "HistoryStack",
+      "fields": [
+        { "name": "past", "type": "SurfaceDocument[]" },
+        { "name": "present", "type": "SurfaceDocument" },
+        { "name": "future", "type": "SurfaceDocument[]" }
+      ]
+    },
+    {
+      "entity": "DropTarget",
+      "fields": [
+        { "name": "containerPath", "type": "PathSegment[]" },
+        { "name": "tabIndex", "type": "number | undefined" },
+        { "name": "insertAt", "type": "number | undefined" }
+      ]
+    },
+    {
+      "entity": "DragPayload",
+      "fields": [
+        { "name": "kind", "type": "'palette' | 'field' | 'reorder'" },
+        { "name": "widgetId", "type": "WidgetId | undefined" },
+        { "name": "fieldKey", "type": "string | undefined" },
+        { "name": "fromContainer", "type": "PathSegment[] | undefined" },
+        { "name": "fromIndex", "type": "number | undefined" },
+        { "name": "fromTab", "type": "number | undefined" }
+      ]
+    }
+  ],
+  "contracts": [
+    "moveNode(doc: SurfaceDocument, fromPath: PathSegment[], toPath: PathSegment[], fromTab?: number, toTab?: number): SurfaceDocument — sugar над moveNodeAcross; fromContainer=fromPath.slice(0,-1), fromIndex=fromPath.at(-1)",
+    "insertAt(doc: SurfaceDocument, containerPath: PathSegment[], node: SurfaceNode, index: number, tabIndex?: number): SurfaceDocument — alias insertNode с обязательным index, clamp к bounds",
+    "pushHistory(stack: HistoryStack, next: SurfaceDocument): HistoryStack — past=[...past.slice(-(MAX_HISTORY-1)), present], present=next, future=[]",
+    "undo(stack: HistoryStack): HistoryStack | null — null если past пуст",
+    "redo(stack: HistoryStack): HistoryStack | null — null если future пуст",
+    "registry.byPaletteGroup(): Record<string, WidgetDescriptor[]> — Palette читает только это, не хардкод",
+    "registry.get(node.type).editorProps: PropDescriptor[] — Inspector читает только это, не switch/if по типу"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-UX-G3-no-dead-buttons",
+      "rule": "Кнопки Undo/Redo disabled когда нет истории (past.length===0 / future.length===0). Превью всегда visible (не в <details>). Кнопка «Сохранить» disabled при validation.ok===false. Нет кнопок без обработчика.",
+      "ci_check": "e2e/journeys/form-designer-canvas.ux.journey.ts: проверить disabled-state Undo при чистой истории, Redo при пустом future, Save при validation errors, и что .chs-designer-preview не содержит <details>"
+    },
+    {
+      "id": "FF-UX-G4-empty-loading-error",
+      "rule": "Канвас без документа → EmptyState ('Выберите набор полей'). Загрузка applications/registry-defs → LoadingState. Ошибка fetch → ErrorState с сообщением. Пустой контейнер → EmptyDropZone с призывом drag.",
+      "ci_check": "e2e/journeys/form-designer-canvas.ux.journey.ts: проверить EmptyState при doc=null, LoadingState при pending fetch, ErrorState при 500, EmptyDropZone в пустой секции"
+    },
+    {
+      "id": "FF-UX-A11Y-WCAG-AA",
+      "rule": "Все интерактивные элементы канваса: контрастность ≥ 4.5:1 (текст) / 3:1 (UI), aria-label на каждом CanvasNode (descriptor.label + node.label), role=tree/treeitem на дереве узлов, keyboard drag-фоллбэк Alt+Up/Down работает без мыши.",
+      "ci_check": "ci/checks/ux/a11y-canvas.sh: axe-core на /forms/designer (WCAG 2.1 AA, координация T-0529)"
+    },
+    {
+      "id": "FF-REG-NO-HARDCODE",
+      "rule": "Конструктор не содержит switch(node.type), хардкод GROUP_LABELS, PALETTE-литерала или WIDGET_COMPAT-матрицы — только вызовы registry.byPaletteGroup(), registry.get(id).editorProps. Исключение: compat-фасад в form-document.js (ADR T-0543 §10) — он допустим до фазы deprecation.",
+      "ci_check": "ci/checks/ux/no-canvas-hardcode.sh: grep -rn 'switch.*node\\.type\\|GROUP_LABELS\\|PALETTE\\[\\|WIDGET_COMPAT' web/src/forms/FormDesigner.jsx -- должен вернуть 0 совпадений"
+    },
+    {
+      "id": "FF-UNDO-ROUNDTRIP",
+      "rule": "Undo после N операций возвращает документ байт-идентично состоянию до них. redo(undo(stack)) === stack (present-эквивалентность). Стек не растёт за MAX_HISTORY=50.",
+      "ci_check": "web/src/forms/form-designer-history.test.js: unit-тест pushHistory×51→past.length===50, undo×N→initial doc, redo после undo→recovered doc"
+    },
+    {
+      "id": "FF-DROP-PATH-AWARE",
+      "rule": "Drag поля из палитры в section[0].children (path [0]) кладёт узел внутрь section, не в корень. Cross-container drag через moveNodeAcross сохраняет fieldKey/subKey без изменений.",
+      "ci_check": "web/src/forms/form-designer-canvas.test.jsx: drop на DropTarget с containerPath=[0] → doc.root.children[0].children содержит новый узел; moveNodeAcross → fieldKey сохранён"
+    },
+    {
+      "id": "FF-DIRTY-GUARD",
+      "rule": "isDirty=true когда stack.past.length>0 и saveState!=='saved'. isDirty=false после сохранения или undo до начального состояния. Флаг доступен T-0533 через context/prop.",
+      "ci_check": "web/src/forms/form-designer-canvas.test.jsx: проверить isDirty после первого edit, после save, после undo-to-initial"
+    }
+  ],
+  "traceability": [
+    { "ac": "Drag кладёт узел внутрь контейнера (section/columns/tabs)", "covered_by": "FF-DROP-PATH-AWARE" },
+    { "ac": "Reorder внутри контейнера с непустым path", "covered_by": "FF-DROP-PATH-AWARE" },
+    { "ac": "Палитра из реестра (нет хардкода)", "covered_by": "FF-REG-NO-HARDCODE" },
+    { "ac": "Инспектор из editorProps (нет switch)", "covered_by": "FF-REG-NO-HARDCODE" },
+    { "ac": "Превью всегда видимо (не <details>)", "covered_by": "FF-UX-G3-no-dead-buttons" },
+    { "ac": "Undo/Redo работает корректно", "covered_by": "FF-UNDO-ROUNDTRIP" },
+    { "ac": "isDirty → T-0533 guard", "covered_by": "FF-DIRTY-GUARD" },
+    { "ac": "Keyboard drag-фоллбэк (T-0529)", "covered_by": "FF-UX-A11Y-WCAG-AA" },
+    { "ac": "WCAG AA на канвасе", "covered_by": "FF-UX-A11Y-WCAG-AA" },
+    { "ac": "Empty/Loading/Error на всех состояниях", "covered_by": "FF-UX-G4-empty-loading-error" }
+  ],
+  "runtime_target": "локально",
+  "adr_artifact_path": "docs/design/T-0544-canvas-rebuild.design.md",
+  "coordination_risks": [
+    {
+      "task": "T-0529",
+      "risk": "Keyboard drag-фоллбэк Alt+Up/Down может потребовать модальный сортировщик если T-0529 настаивает. Текущий дизайн: inline Alt+Up/Down без модалки. Impl должен уточнить с T-0529 до начала работы."
+    },
+    {
+      "task": "T-0533",
+      "risk": "isDirty flag должен быть доступен через React context или prop — T-0533 вешает beforeunload и блокирует навигацию. Оба должны договориться об имени context-key до impl."
+    },
+    {
+      "task": "T-0543 impl (SurfaceRenderer)",
+      "risk": "Превью канваса ждёт SurfaceRenderer. До готовности фазы 1 T-0543 — fallback через FormDocumentRenderer+coerceToSurface. Impl должен явно задать этот fallback и снять его как только SurfaceRenderer появится."
+    }
+  ]
+}
