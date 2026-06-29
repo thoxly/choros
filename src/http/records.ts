@@ -224,7 +224,42 @@ export interface RecordRoutesDeps {
    * is the runtime sentinel; we also enforce at projection time here).
    */
   flowable?: FlowableClient;
+  /**
+   * T-0536 [D8-R4 delivery]: OPTIONAL internal-signal emitter. When supplied, a
+   * successful record UPDATE (PUT /api/records/:id) broadcasts a generic
+   * `record-status-changed` signal WITHIN the record's tenant, correlated by the
+   * record id (the business key any process can bind a signal-catch to). This is
+   * the «смена статуса записи → внутренний сигнал» seam (spec §3.5 source b): a
+   * process parked on a signal-catch advances when the record it watches changes.
+   *
+   * Best-effort + tenant-bounded: the emitter is called with the ALREADY-RESOLVED
+   * record tenant (never a body field) AFTER the update commits; a failed/empty
+   * emit is non-fatal to the update (which already succeeded). When absent
+   * (memory-mode / no engine), the update behaves exactly as before (honest-degrade).
+   *
+   * GENERIC — no ТЭЛ hardcode: the signal name + record-id correlation key are
+   * registry-agnostic; any record of any application emits the same shape, and any
+   * process can author a signal-catch to receive it.
+   */
+  emitSignal?: RecordStatusSignalEmitter;
 }
+
+/**
+ * T-0536: emit a generic «record changed» internal signal within the record's
+ * tenant. Returns a best-effort result; the caller ignores failures (the originating
+ * update already committed). The implementation (wired in server.ts) delegates to
+ * emitInternalSignal in message-ingest.ts → the SAME deliverMessageEnvelope path.
+ */
+export type RecordStatusSignalEmitter = (args: {
+  readonly tenantId: string;
+  readonly recordId: string;
+  readonly registryDefId: string;
+  readonly actor: string;
+  readonly nowMs: number;
+}) => Promise<void>;
+
+/** T-0536: the generic record-status-change signal name (registry-agnostic). */
+export const RECORD_STATUS_SIGNAL = "record-status-changed";
 
 // ---------------------------------------------------------------------------
 // withTenantTx — canonical RLS pattern (mirrors applications.ts / registry-defs.ts)
@@ -1090,7 +1125,7 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, flowable } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, flowable, emitSignal } = deps;
 
   // Resolve the caller's field write-mask for a record (FF-10 / AC-10 hook-point).
   // Honest-degrade: when no resolveWriteFacet is wired (current bootstrap), every
@@ -1344,6 +1379,26 @@ export function registerRecordRoutes(
       if (outcome.denied) {
         // Field-mask guard blocked a system-only field write (already audited in-tx).
         throw denialError(outcome.blockedFields);
+      }
+
+      // T-0536 [D8-R4 delivery]: the update committed → broadcast the generic
+      // «record-status-changed» internal signal WITHIN the record's tenant, keyed by
+      // the record id (the business key a process binds its signal-catch to). A
+      // process parked on a signal-catch for this record now advances. Best-effort:
+      // a failed emit never fails the 200 (the update already succeeded). Skipped
+      // entirely when no emitter is wired (memory-mode — honest-degrade).
+      if (emitSignal) {
+        try {
+          await emitSignal({
+            tenantId,
+            recordId: outcome.row.id,
+            registryDefId: outcome.row.registry_id,
+            actor,
+            nowMs: Date.now(),
+          });
+        } catch (err) {
+          console.warn("[records T-0536] record-status signal emit failed (non-fatal):", err);
+        }
       }
 
       res.statusCode = 200;

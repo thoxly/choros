@@ -9,7 +9,8 @@ import { PostgresOutboxStore } from "./core/postgres/pgOutboxStore.js";
 import { registerExternalWorkerRoutes } from "./http/externalWorker.js";
 import { registerOrgRoutes } from "./http/org.js";
 import { registerInboxRoutes } from "./http/inbox.js";
-import { registerMessageIngestRoutes } from "./http/message-ingest.js";
+import { registerMessageIngestRoutes, emitInternalSignal } from "./http/message-ingest.js";
+import { RECORD_STATUS_SIGNAL } from "./http/records.js";
 import { registerFormsRoutes } from "./http/forms.js";
 import { makeFormRecordPersister, makeFormDefResolver } from "./http/form-record-persister.js";
 import { registerAuditRoutes } from "./http/audit.js";
@@ -775,6 +776,33 @@ function buildRouter(
       }),
       // T-0351 E16: wire the shared flowableClient for on_create trigger.
       flowable: flowableClient ?? undefined,
+      // T-0536 [D8-R4 delivery]: wire the internal-signal emitter so a committed
+      // record UPDATE broadcasts the generic «record-status-changed» signal WITHIN
+      // the record's tenant (keyed by the record id), advancing any process parked
+      // on a matching signal-catch. Reuses the SAME deliverMessageEnvelope path as
+      // POST /api/message via emitInternalSignal. Only when a live engine is present
+      // (honest-degrade: no signal path without an engine to fire the catch).
+      emitSignal: flowableClient
+        ? async ({ tenantId, recordId, registryDefId, actor, nowMs }) => {
+            await emitInternalSignal(
+              {
+                pool: grantsPool,
+                resolveActorTenant: (s: string) => resolveActorTenant(getOrgPool(), s),
+                engine: flowableClient,
+              },
+              {
+                tenantId,
+                signalName: RECORD_STATUS_SIGNAL,
+                // Generic business key: the record id. A process binds its
+                // signal-catch correlationField to resolve to this record's id.
+                correlationKey: recordId,
+                payload: { record_id: recordId, registry_def_id: registryDefId },
+                actor,
+                nowMs,
+              },
+            );
+          }
+        : undefined,
     });
   }
 
