@@ -42,6 +42,12 @@ import {
   validateBindingFields,
   type BindingField,
 } from "../core/binding-compat.js";
+import {
+  classifyFloorBoundary,
+  type FloorEditOp,
+  type LiveSchemaView,
+  type FormDocument,
+} from "../core/floor-boundary.js";
 
 // ---------------------------------------------------------------------------
 // Injected deps for actor-scoped routes (T-0376)
@@ -428,6 +434,48 @@ export function registerBindingRoutes(router: Router, pool: pg.Pool, deps?: Bind
         fields = [];
       } else {
         throw new HttpError(400, "VALIDATION", "fields is required when layout is not provided");
+      }
+
+      // T-0520 [D7-5]: classifyFloorBoundary gate — FormDesigner / agent layout-emit path.
+      // When a layout (form-document) is provided, run the content gate BEFORE persisting.
+      // This intercepts agents and UI emitting a layout doc that carries code-signals or
+      // dangling fieldKey references. spec §4.2: «та же проверка на эмиссии форма-документа».
+      //
+      // LiveSchemaView is built from fields[] in the body (named-binding key-set).
+      // op.kind defaults to "relabel_field" (Floor-1) when the caller only provides
+      // a layout — the gate's R-1 lexical pass allows it; R-3/R-4 content checks run
+      // on the actual document tree. If floor==='2' the layout contains Floor-2 content
+      // and must be routed to the Floor-2 authoring path instead.
+      if (layout !== null) {
+        const layoutAsDoc = layout as FormDocument;
+        const bindingFieldKeys = fields.map((f: BindingField) => f.key);
+        const schemaView: LiveSchemaView = {
+          fieldKeys: bindingFieldKeys,
+          fields,
+        };
+        // Use a generic "layout_save" kind — unknown to FLOOR1_EDIT_KINDS → fails R-1
+        // immediately if the doc has code signals, OR passes if the doc is purely declarative.
+        // NOTE: we use a special sentinel kind "save_layout" which is neither Floor-1 nor
+        // Floor-2 in the existing vocabulary, so R-1 will raise it to Floor-2 on the lexical
+        // layer. Instead we want only content-based checks. We pass "relabel_field" as the
+        // nominal kind (the layout-save operation is semantically a declarative doc save) —
+        // the classifier then applies R-2/R-3/R-4 content checks on the actual tree.
+        // If the document tree contains code-signals (R-3) or dangling keys (R-4), floor=2.
+        const layoutFloorOp: FloorEditOp = {
+          kind: "relabel_field", // Floor-1 lexical anchor — content checks decide floor
+          changedKeys: ["label", "display_order", "hidden", "placeholder", "help_text", "mode", "widget", "title", "collapsible", "count", "content", "tabs"], // entire declarative whitelist — R-2 passes
+          doc: layoutAsDoc,
+        };
+        const layoutFloorResult = classifyFloorBoundary(layoutFloorOp, schemaView);
+        if (layoutFloorResult.floor === "2") {
+          throw new HttpError(
+            409,
+            "WRONG_FLOOR",
+            `Form layout classified as Floor-2 (content gate, T-0520). ` +
+              `Reasons: ${layoutFloorResult.reasons.join("; ")}. ` +
+              `Use the Floor-2 authoring path (route: ${layoutFloorResult.route}).`,
+          );
+        }
       }
 
       const tenantId = await resolveActorTenant(actor);
