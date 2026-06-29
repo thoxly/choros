@@ -21,6 +21,9 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { registerFileRoutes, type FileRoutesDeps } from "../http/files.js";
 import { Router } from "../http/router.js";
@@ -776,5 +779,42 @@ describe("GET /api/files/:fileVersionId/download", () => {
     );
 
     expect(res.status).toBe(400);
+  });
+
+  it("AC-download-8: file:// branch — response carries X-Content-Type-Options: nosniff", async () => {
+    // Write a real temp file so createReadStream in the handler succeeds.
+    const tmpFile = path.join(os.tmpdir(), `choros-test-${Date.now()}.txt`);
+    fs.writeFileSync(tmpFile, "hello nosniff");
+
+    const expiresAt = Date.now() + 300_000;
+    const fileUrl = `file://${tmpFile}?expires=${expiresAt}`;
+
+    // Custom ObjectStore that presigns with a file:// URL pointing to our temp file.
+    const fsLikeStore: ObjectStore = {
+      async put(_key: string, _body: Uint8Array, _meta: { mime: string; size: number }): Promise<void> { /* no-op */ },
+      async presignGet(_key: string, _ttl: number): Promise<string> { return fileUrl; },
+      async erase(_key: string): Promise<void> { /* no-op */ },
+    };
+
+    const fileStore = new FakeFileStore();
+    fileStore.seedFile(makeFileRow({ currentVersion: VERSION_ID }));
+    fileStore.seedVersion(makeVersionRow({ mimeType: "text/plain" }));
+
+    const { server, baseUrl } = buildTestServer({ fileStore, objectStore: fsLikeStore as unknown as FakeObjectStore });
+    servers.push(server);
+    await listen(server);
+
+    const res = await httpGet(
+      `${baseUrl()}/api/files/${VERSION_ID}/download`,
+      { "x-dev-user": ACTOR_A },
+    );
+
+    // Cleanup temp file.
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+
+    expect(res.status).toBe(200);
+    // Security header must be present on streamed file responses.
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["content-disposition"]).toMatch(/attachment/);
   });
 });

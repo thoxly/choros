@@ -207,7 +207,14 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
             updatedAt: now,
           });
 
-          // addVersion: PDP → S3 put → insertVersion + setCurrentVersion.
+          // addVersion internally calls store.put (FsObjectStore: write to disk;
+          // S3: PutObject) BEFORE the DB insertVersion row is committed.
+          // If store.put succeeds but the subsequent DB insert or COMMIT fails,
+          // an orphan object is left on disk/S3 with no metadata row pointing to
+          // it. This is acceptable for dev/FsObjectStore (low risk, bounded disk
+          // usage). For production S3 transitions, a GC/lifecycle policy (e.g.
+          // S3 Object Lifecycle with an abort-incomplete-multipart or a
+          // periodic orphan-sweep job) MUST be added before shipping.
           const vResult = await addVersion(
             {
               resolver,
@@ -362,6 +369,9 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
             "Content-Disposition",
             `attachment; filename="${fileName}"`,
           );
+          // Prevent browsers from MIME-sniffing the response and executing it
+          // as a different content type (e.g. treating an octet-stream as HTML).
+          res.setHeader("X-Content-Type-Options", "nosniff");
 
           const stream = createReadStream(absPath);
           stream.on("error", (_err) => {
