@@ -45,6 +45,15 @@ import React, { useState, useEffect } from 'react';
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
 import { resolveFieldContract, resolveFieldMode } from './field-contract.js';
+// Auth headers — same helper every screen uses (mode-aware: dev X-Dev-User /
+// keycloak Bearer). RelationPickerField needs it to attach auth to the
+// tenant-scoped GET /api/records?registry_def_id= candidate fetch.
+import { devHeaders } from '../app-shell/dev-auth.js';
+// deriveRecordLabel — first non-empty string value in record.data (T-0447).
+// Already in records-form.js (canonical); re-used here to avoid duplicating the
+// label-derivation logic. Cross-boundary import is intentional: field-renderer is
+// a web/src/forms module that depends on the records-form label helper.
+import { deriveRecordLabel } from '../screens/records-form.js';
 
 export { resolveFieldContract, resolveFieldMode };
 
@@ -186,6 +195,280 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
 }
 
 // ---------------------------------------------------------------------------
+// T-0403 (D7-6): RelationPickerField — record-picker for a `relation` contract.
+//
+// Fetches GET /api/records?registry_def_id=<targetRegistryId> (the same
+// tenant-scoped endpoint used by RelationPicker in screen-app-records.jsx) and
+// renders a text-filtered <select> of the target registry's records.
+// Stored value: target record UUID. Displayed value: deriveRecordLabel (first
+// non-empty string/number field in record.data — T-0447 resolution reuse).
+//
+// TENANT-SAFETY: the /api/records endpoint is RLS-enforced at the server: every
+// query is scoped to the authenticated actor's tenant (session + server-side WHERE
+// tenant_id = actor.tenantId). We pass devHeaders() to carry the auth credential
+// (X-Dev-User in dev mode, Bearer in keycloak mode). No additional tenant filter
+// is needed client-side — the server rejects cross-tenant access.
+//
+// field.targetRegistryId — the registry_def UUID to fetch records from
+//   (set from the cross_app_ref definition at form-binding time).
+//
+// Honest states: loading / error / empty / populated — consistent with PersonPicker
+// and the RelationPicker in screen-app-records.jsx (OBLIK principle).
+// ---------------------------------------------------------------------------
+
+/**
+ * Record-picker for a `relation` contract field. Fetches the target registry's
+ * records tenant-scoped via GET /api/records?registry_def_id=<id>, shows a
+ * text-filtered <select>. Stores the selected record's UUID; displays its label
+ * (deriveRecordLabel — first non-empty data value). Owns label + wrapper.
+ *
+ * @param {{ key, label?, title?, required?, targetRegistryId? }} field
+ * @param {string} value  current value (record UUID or "")
+ * @param {(key, value) => void} onChange
+ * @param {string|undefined} error
+ * @param {string} idPrefix
+ * @param {boolean} isRequired
+ * @param {boolean} readOnly
+ */
+export function RelationPickerField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const id = `${idPrefix}-${field.key}`;
+  const label = field.label || field.title || field.key;
+  const invalid = Boolean(error);
+
+  const [candidates, setCandidates] = useState(null); // null=loading
+  const [fetchError, setFetchError] = useState(null);
+  const [filter, setFilter] = useState('');
+
+  useEffect(() => {
+    if (!field.targetRegistryId) {
+      // No target configured — render an empty picker rather than crashing.
+      setCandidates([]);
+      return;
+    }
+    let cancelled = false;
+    setCandidates(null);
+    setFetchError(null);
+    // Tenant-scoped endpoint: the server enforces RLS so only records belonging
+    // to the authenticated actor's tenant are returned. devHeaders() carries the
+    // auth credential (X-Dev-User dev / Bearer keycloak).
+    fetch(
+      `/api/records?registry_def_id=${encodeURIComponent(field.targetRegistryId)}`,
+      { headers: devHeaders() },
+    )
+      .then(async (res) => {
+        if (cancelled) return;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) setCandidates(Array.isArray(data.records) ? data.records : []);
+      })
+      .catch((err) => {
+        if (!cancelled) { setFetchError(String(err?.message || err)); setCandidates([]); }
+      });
+    return () => { cancelled = true; };
+  }, [field.targetRegistryId]);
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+  const inputClass = `chs-input${invalid ? ' chs-input--invalid' : ''}`;
+
+  const labelNode = (
+    <label className="chs-label" htmlFor={id}>
+      {label}
+      {isRequired && (
+        <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+      )}
+    </label>
+  );
+  const errorNode = error ? (
+    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+      {error}
+    </span>
+  ) : null;
+
+  let control;
+  if (fetchError) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }} aria-live="polite">
+        Не удалось загрузить связанные записи
+      </div>
+    );
+  } else if (candidates === null) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontStyle: 'italic', fontSize: 'var(--chs-text-sm)' }} aria-live="polite">
+        Загрузка…
+      </div>
+    );
+  } else if (candidates.length === 0) {
+    control = (
+      <div className="chs-input" style={{ ...inputStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
+        В связанном приложении пока нет записей
+      </div>
+    );
+  } else {
+    // Build display labels; filter by user search text.
+    const labeled = candidates.map((rec) => ({
+      id: rec.id,
+      display: deriveRecordLabel(rec),
+    }));
+    const filterLower = filter.toLowerCase();
+    const filtered = filterLower
+      ? labeled.filter((c) => c.display.toLowerCase().includes(filterLower) || c.id.toLowerCase().startsWith(filterLower))
+      : labeled;
+
+    control = (
+      <>
+        <input
+          type="text"
+          className="chs-input"
+          placeholder="Поиск…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          aria-label={`Поиск: ${label}`}
+          style={{ ...inputStyle, marginBottom: 'var(--chs-space-2)' }}
+          disabled={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+        />
+        <select
+          id={id}
+          className={inputClass}
+          value={value ?? ''}
+          onChange={(e) => onChange(field.key, e.target.value)}
+          aria-required={isRequired || undefined}
+          aria-invalid={invalid || undefined}
+          disabled={readOnly || undefined}
+          aria-disabled={readOnly || undefined}
+          style={inputStyle}
+          size={Math.min(filtered.length + 1, 6)}
+        >
+          <option value="">— выберите запись —</option>
+          {filtered.map((c) => (
+            <option key={c.id} value={c.id}>{c.display}</option>
+          ))}
+        </select>
+      </>
+    );
+  }
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      {labelNode}
+      {control}
+      {errorNode}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// T-0403 (D7-6): DateRangeField — two-date picker for a `date-range` contract.
+//
+// Renders two <input type="date"> controls (Начало / Конец) as one logical field.
+// Serialization: value is an object { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD' }.
+// Both are nullable (empty string = not set). Validation: start > end → inline
+// error (client-side hint; the server re-validates on submit).
+//
+// onChange contract: called as onChange(field.key, { start, end }). The caller
+// stores the object as the field value.
+// ---------------------------------------------------------------------------
+
+/**
+ * Two-date range picker for a `date-range` contract field.
+ * Value shape: `{ start: string, end: string }` (ISO date strings or "").
+ * Validation: inline error when start > end (non-empty both set, start after end).
+ *
+ * @param {{ key, label?, title?, required? }} field
+ * @param {{ start?: string, end?: string }|undefined} value
+ * @param {(key, { start, end }) => void} onChange
+ * @param {string|undefined} error  external validation error from the form
+ * @param {string} idPrefix
+ * @param {boolean} isRequired
+ * @param {boolean} readOnly
+ */
+export function DateRangeField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
+  const idStart = `${idPrefix}-${field.key}-start`;
+  const idEnd = `${idPrefix}-${field.key}-end`;
+  const label = field.label || field.title || field.key;
+  const invalid = Boolean(error);
+
+  const startVal = (value && typeof value.start === 'string') ? value.start : '';
+  const endVal = (value && typeof value.end === 'string') ? value.end : '';
+
+  // Inline validation: both dates present and start is after end.
+  const rangeError = (startVal && endVal && startVal > endVal)
+    ? 'Дата начала не может быть позже даты окончания'
+    : null;
+
+  const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
+  const inputClass = `chs-input${(invalid || rangeError) ? ' chs-input--invalid' : ''}`;
+
+  const handleStart = (e) => {
+    onChange(field.key, { start: e.target.value, end: endVal });
+  };
+  const handleEnd = (e) => {
+    onChange(field.key, { start: startVal, end: e.target.value });
+  };
+
+  return (
+    <div className="chs-field" style={{ marginBottom: 'var(--chs-space-4)' }}>
+      <label className="chs-label" htmlFor={idStart}>
+        {label}
+        {isRequired && (
+          <span aria-hidden="true" style={{ marginLeft: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}>*</span>
+        )}
+      </label>
+      <div style={{ display: 'flex', gap: 'var(--chs-space-2)', alignItems: 'center' }}>
+        <div style={{ flex: 1 }}>
+          <label className="chs-label" htmlFor={idStart} style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginBottom: 'var(--chs-space-1)' }}>
+            Начало
+          </label>
+          <input
+            id={idStart}
+            className={inputClass}
+            type="date"
+            value={startVal}
+            onChange={handleStart}
+            aria-required={isRequired || undefined}
+            aria-invalid={(invalid || Boolean(rangeError)) || undefined}
+            readOnly={readOnly || undefined}
+            aria-disabled={readOnly || undefined}
+            style={inputStyle}
+          />
+        </div>
+        <span aria-hidden="true" style={{ paddingTop: 'calc(var(--chs-space-4) + var(--chs-text-xs))', color: 'var(--chs-color-text-muted)' }}>—</span>
+        <div style={{ flex: 1 }}>
+          <label className="chs-label" htmlFor={idEnd} style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', marginBottom: 'var(--chs-space-1)' }}>
+            Конец
+          </label>
+          <input
+            id={idEnd}
+            className={inputClass}
+            type="date"
+            value={endVal}
+            onChange={handleEnd}
+            aria-required={isRequired || undefined}
+            aria-invalid={(invalid || Boolean(rangeError)) || undefined}
+            readOnly={readOnly || undefined}
+            aria-disabled={readOnly || undefined}
+            style={inputStyle}
+          />
+        </div>
+      </div>
+      {rangeError && (
+        <span
+          role="alert"
+          style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}
+        >
+          {rangeError}
+        </span>
+      )}
+      {error && (
+        <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // FieldControl — the single field component the schema-driven forms render.
 // ---------------------------------------------------------------------------
 
@@ -244,6 +527,36 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   // do not have an authoring control here yet (delivered by D7-6/7/8). Rather
   // than silently render a text box that captures nothing useful, surface what
   // the field IS so the gap is visible, not hidden.
+  // T-0403 (D7-6): relation (presentation='reference') → RelationPickerField.
+  if (presentation === 'reference') {
+    return (
+      <RelationPickerField
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
+    );
+  }
+
+  // T-0403 (D7-6): date-range (presentation='range') → DateRangeField.
+  if (presentation === 'range') {
+    return (
+      <DateRangeField
+        field={field}
+        value={value}
+        onChange={onChange}
+        error={error}
+        idPrefix={idPrefix}
+        isRequired={isRequired}
+        readOnly={readOnly}
+      />
+    );
+  }
+
   // T-0512: multi-select and person are scalarish (rendered inline by FieldControl).
   // T-0516: url and email are also scalarish (rendered as typed text inputs).
   const isScalarish = presentation === 'text' || presentation === 'textarea'
