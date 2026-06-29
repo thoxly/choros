@@ -1300,11 +1300,17 @@ export async function reconcileInstanceEngineDrive(
 }
 
 /**
- * Has an instance.ended event already been projected for this instance? Used by the
- * engine-drive reconcile to avoid emitting a duplicate ended row on a re-run (the
- * on-read net re-driving an instance the post-approve already ended). Tenant-scoped
- * read, BYPASSRLS guard via withTenant. Degrades to false on read error (the emit it
- * gates is itself best-effort, and a duplicate ended row folds to the same `done`).
+ * Has an `instance.ended` EVENT already been emitted for this instance? Used by the
+ * engine-drive reconcile to avoid piling up a duplicate ended row on a re-run (the
+ * on-read net re-driving an instance the post-approve already ended).
+ *
+ * IMPORTANT: this checks the raw instance.ended EVENT, NOT the folded `done` status —
+ * the projection's backward-compat fallback (process-projection §Fix-D) folds an
+ * approved-with-no-pending-next-task instance to `done` even BEFORE instance.ended is
+ * written, so using the folded status here would wrongly suppress the engine-gated
+ * ended emit (regressing the linear path). Tenant-scoped, BYPASSRLS guard via
+ * withTenant. Degrades to false on read error (a duplicate ended row folds harmlessly
+ * to the same `done`, so a false-negative only re-emits — never blocks done).
  */
 async function isInstanceEndedProjected(
   pool: pg.Pool,
@@ -1312,9 +1318,21 @@ async function isInstanceEndedProjected(
   instanceId: string,
 ): Promise<boolean> {
   try {
-    const projections = await listInstanceProjections(pool, tenantId);
-    const p = projections.find((x) => x.inst === instanceId);
-    return p?.status === "done";
+    return await withTenant(pool, tenantId, async (client) => {
+      const res = await client.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload
+           FROM choros.audit_event
+          WHERE type = $1
+            AND tenant_id = $2
+          ORDER BY occurred_at ASC`,
+        [INSTANCE_ENDED_TYPE, tenantId],
+      );
+      for (const r of res.rows) {
+        const p = (r.payload ?? {}) as Record<string, unknown>;
+        if (p["inst"] === instanceId) return true;
+      }
+      return false;
+    });
   } catch {
     return false;
   }
