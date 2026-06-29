@@ -43,6 +43,7 @@ import {
   TEL_GATEWAY_ID,
   preComputeGatewayVariable,
   evaluateGatewayAtTriage,
+  dropAmbiguousOutcomes,
   type GatewayVarPair,
 } from "../core/dmn-gateway.js";
 
@@ -1284,5 +1285,166 @@ describe("DG-18: T-0524 — GENERIC triage seam on a NON-ТЭЛ process («От�
         ? { ...basePayload, ...result.routingOutcomes }
         : basePayload;
     expect(merged).toEqual(basePayload);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-19: T-0524 review fix (BLOCKING) — UNSCOPED name-collision is FAIL-CLOSED,
+//        not fail-wrong. Reproduces the adversarial scenario EXACTLY:
+//        two NULL-scoped rule tables from DIFFERENT processes both author the
+//        SAME routing name `decision`; procDefId undefined, no pinned versions.
+//        The ambiguous name MUST NOT be injected (→ BPMN default flow), instead
+//        of last-write-wins leaking a value from the "other" process's table.
+// ---------------------------------------------------------------------------
+
+// Process A («отпуск»): days>14 → decision="escalate".
+const PROC_A_LEAVE_TABLE: DmnRuleTable = {
+  id: "d0de0019-aaaa-0005-d4f4-00000000000a",
+  name: "A — отпуск: days>14 → escalate",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "days>14 → escalate",
+      conditions: [{ field: "days", operator: "gt", value: 14 }],
+      effects: [{ kind: "set_routing_outcome", name: "decision", value: "escalate" }],
+    },
+  ],
+};
+
+// Process B («расход»): unconditional → decision="auto".
+const PROC_B_SPEND_TABLE: DmnRuleTable = {
+  id: "d0de0019-bbbb-0005-d4f4-00000000000b",
+  name: "B — расход: → auto",
+  hitPolicy: "FIRST",
+  rules: [
+    {
+      annotation: "always → auto",
+      conditions: [],
+      effects: [{ kind: "set_routing_outcome", name: "decision", value: "auto" }],
+    },
+  ],
+};
+
+describe("DG-19: T-0524 review fix — UNSCOPED name-collision is fail-closed", () => {
+  it("DG-19a (REPRO): two NULL-scoped tables share name 'decision', procDefId undefined → 'decision' NOT injected (default flow, no wrong route)", async () => {
+    // Both NULL-scoped tables are loaded (the unscoped published path). Process A's
+    // triage runs with days=21: A's row fires (escalate), B's unconditional row
+    // fires (auto). Last-write-wins would inject B's "auto" into A — wrong route.
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE, PROC_B_SPEND_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData, // no dmn_rtv_ pins → unscoped path
+      // procDefId intentionally undefined → unscoped (the real triage-seam state)
+    });
+
+    // FAIL-CLOSED: the ambiguous name is dropped entirely (neither "escalate" nor
+    // "auto" is injected) → the bridge injects nothing → BPMN default flow.
+    expect(result.routingOutcomes).not.toHaveProperty("decision");
+    expect(result.routingOutcomes).toEqual({});
+    expect(result.gatewayVar).toBeNull();
+  });
+
+  it("DG-19b: UNSCOPED but UNAMBIGUOUS (single NULL-scoped table) → still injected (no over-blocking)", async () => {
+    // Only ONE table authors "decision" → not ambiguous → works as before.
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+    });
+    expect(result.routingOutcomes).toHaveProperty("decision", "escalate");
+  });
+
+  it("DG-19c: PINNED (version-scoped in-flight) path is NOT filtered — collisions allowed when scoped", async () => {
+    // existingVariables carry a dmn_rtv_ pin → loadRuleTablesByVersions path.
+    // The stub's pinned-load returns the ТЭЛ table only; the point is that the
+    // unscoped filter does NOT run on the pinned path (scoped = safe).
+    const pinVars = serializeVersionsAsVariables([
+      { id: TEL_THRESHOLD_TABLE.id, updatedAt: NOW_MS - 10_000 },
+    ]);
+    const { client } = makeCapturingClient();
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: PROC_KEY,
+      gatewayId: TEL_GATEWAY_ID,
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: { amount: 6_000_000 },
+      existingVariables: { ...pinVars, amount: 6_000_000 },
+    });
+    // Pinned path unaffected — ТЭЛ resolves normally.
+    expect(result.routingOutcomes).toHaveProperty("approvalRequired", "needs-approval");
+  });
+
+  it("DG-19d: SCOPED (procDefId given) path is NOT filtered", async () => {
+    // When a procDefId is supplied the load is process-scoped → no cross-process
+    // ambiguity → the filter is skipped. (Stub returns the supplied tables; we
+    // assert a shared name survives because the path is scoped.)
+    const { client } = makeCapturingClient([PROC_A_LEAVE_TABLE]);
+    const recordData: Record<string, unknown> = { days: 21 };
+    const result = await evaluateGatewayAtTriage(client, {
+      tenantId: TENANT_ID,
+      instanceId: INSTANCE_ID,
+      processKey: "leaveRequest",
+      gatewayId: "gw-decision",
+      actor: "choros-bridge",
+      nowMs: NOW_MS,
+      bindings: recordData,
+      existingVariables: recordData,
+      procDefId: "leaveRequest", // scoped → filter skipped
+    });
+    expect(result.routingOutcomes).toHaveProperty("decision", "escalate");
+  });
+
+  // Pure-helper unit coverage (independent of the DB seam).
+  it("DG-19e: dropAmbiguousOutcomes drops names authored in >1 table, keeps singletons", () => {
+    const tableX: DmnRuleTable = {
+      id: "tbl-x", name: "X", hitPolicy: "FIRST",
+      rules: [{ conditions: [], effects: [
+        { kind: "set_routing_outcome", name: "shared", value: "x" },
+        { kind: "set_routing_outcome", name: "onlyX", value: "x1" },
+      ] }],
+    };
+    const tableY: DmnRuleTable = {
+      id: "tbl-y", name: "Y", hitPolicy: "FIRST",
+      rules: [{ conditions: [], effects: [
+        { kind: "set_routing_outcome", name: "shared", value: "y" },
+      ] }],
+    };
+    const filtered = dropAmbiguousOutcomes(
+      { shared: "y", onlyX: "x1" },
+      [tableX, tableY],
+    );
+    expect(filtered).not.toHaveProperty("shared"); // ambiguous → dropped
+    expect(filtered).toHaveProperty("onlyX", "x1"); // singleton → kept
+  });
+
+  it("DG-19f: dropAmbiguousOutcomes — same name authored twice in the SAME table is NOT ambiguous", () => {
+    // Authoring the name in one table (even across rows) is unambiguous.
+    const tableX: DmnRuleTable = {
+      id: "tbl-x", name: "X", hitPolicy: "FIRST",
+      rules: [
+        { conditions: [{ field: "n", operator: "gt", value: 1 }],
+          effects: [{ kind: "set_routing_outcome", name: "decision", value: "hi" }] },
+        { conditions: [],
+          effects: [{ kind: "set_routing_outcome", name: "decision", value: "lo" }] },
+      ],
+    };
+    const filtered = dropAmbiguousOutcomes({ decision: "hi" }, [tableX]);
+    expect(filtered).toHaveProperty("decision", "hi");
   });
 });
