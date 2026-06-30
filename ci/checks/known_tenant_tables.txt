@@ -57,3 +57,5 @@ process_app_binding
 user_task_claim
 llm_connection
 app_secret
+matrix_lookup_table
+matrix_lookup_cell
