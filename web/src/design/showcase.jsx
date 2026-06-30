@@ -2,6 +2,7 @@
    CHOROS — showcase.jsx  (страница-витрина фундамента дизайн-системы)
    ============================================================================ */
 import React, { useState } from 'react';
+import ReactDOM from 'react-dom/client';
 
 /* ---------- маленькие хелперы витрины ---------- */
 function Section({ num, title, desc, children }) {
@@ -144,24 +145,24 @@ function TypeSection() {
           <span className="chs-card__label">--chs-font-mono · моноширинный · всё «машинное»</span>
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--chs-space-6)", marginTop: "var(--chs-space-3)" }}>
             <div>
-              <div className="chs-type-meta" style={{ marginBottom: 6 }}>ID процесса / инстанса / задачи</div>
+              <div className="chs-type-meta" style={{ marginBottom: "var(--chs-space-3)" }}>ID процесса / инстанса / задачи</div>
               <div style={{ display: "flex", gap: "var(--chs-space-5)", flexWrap: "wrap" }}>
                 <MonoId chip>{"PRC-2041"}</MonoId><MonoId chip>{"INS-8837-A"}</MonoId><MonoId chip>{"TSK-0192"}</MonoId>
               </div>
             </div>
             <div>
-              <div className="chs-type-meta" style={{ marginBottom: 6 }}>Таймстамп</div>
+              <div className="chs-type-meta" style={{ marginBottom: "var(--chs-space-3)" }}>Таймстамп</div>
               <Mono style={{ fontSize: "var(--chs-text-md)" }}>2026-06-07 14:32:08.417 UTC+3</Mono>
             </div>
             <div>
-              <div className="chs-type-meta" style={{ marginBottom: 6 }}>Бюджет — токены / деньги</div>
+              <div className="chs-type-meta" style={{ marginBottom: "var(--chs-space-3)" }}>Бюджет — токены / деньги</div>
               <div style={{ display: "flex", gap: "var(--chs-space-8)", flexWrap: "wrap" }}>
                 <Mono style={{ fontSize: "var(--chs-text-lg)" }}>148 920 ткн</Mono>
                 <Mono style={{ fontSize: "var(--chs-text-lg)" }}>₽ 12 480,00</Mono>
               </div>
             </div>
             <div>
-              <div className="chs-type-meta" style={{ marginBottom: 6 }}>Табличные числа (tnum)</div>
+              <div className="chs-type-meta" style={{ marginBottom: "var(--chs-space-3)" }}>Табличные числа (tnum)</div>
               <Mono style={{ fontSize: "var(--chs-text-md)", display: "block", lineHeight: 1.5 }}>
                 1 204.50<br/>  87.00<br/>3 991.25
               </Mono>
@@ -212,12 +213,12 @@ function ScaleSection() {
           </div>
           <span className="chs-card__label" style={{ marginTop: "var(--chs-space-9)" }}>Тени — минимум, опора на границы</span>
           <div style={{ display: "flex", gap: "var(--chs-space-8)", marginTop: "var(--chs-space-5)" }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
-              <div style={{ width: 60, height: 48, background: "var(--chs-color-surface-raised)", borderRadius: "var(--chs-radius-3)", boxShadow: "var(--chs-shadow-1)", border: "1px solid var(--chs-color-border)" }} />
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--chs-space-4)", alignItems: "center" }}>
+              <div className="chs-shadow-demo" style={{ boxShadow: "var(--chs-shadow-1)" }} />
               <span className="chs-scale-name" style={{ width: "auto" }}>shadow-1</span>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "center" }}>
-              <div style={{ width: 60, height: 48, background: "var(--chs-color-surface-raised)", borderRadius: "var(--chs-radius-3)", boxShadow: "var(--chs-shadow-2)", border: "1px solid var(--chs-color-border)" }} />
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--chs-space-4)", alignItems: "center" }}>
+              <div className="chs-shadow-demo" style={{ boxShadow: "var(--chs-shadow-2)" }} />
               <span className="chs-scale-name" style={{ width: "auto" }}>shadow-2</span>
             </div>
           </div>
@@ -458,7 +459,7 @@ function KitSection() {
           >
             <div style={{ display: "flex", flexDirection: "column", minWidth: 160 }}>
               {["Открыть", "Дублировать", "Архивировать"].map((t) => (
-                <button key={t} className="chs-menuitem" onClick={() => setMenuOpen(false)}>{t}</button>
+                <button type="button" key={t} className="chs-menuitem" onClick={() => setMenuOpen(false)}>{t}</button>
               ))}
             </div>
           </Popover>
@@ -494,8 +495,8 @@ function App() {
           <span className="chs-brand__tag">brandbook preview · тёплая нейтраль + кобальт</span>
         </div>
         <div className="chs-theme-toggle" role="group" aria-label="Тема">
-          <button aria-pressed={theme==="light"} onClick={()=>setTheme("light")}>Светлая</button>
-          <button aria-pressed={theme==="dark"} onClick={()=>setTheme("dark")}>Тёмная</button>
+          <button type="button" aria-pressed={theme==="light"} onClick={()=>setTheme("light")}>Светлая</button>
+          <button type="button" aria-pressed={theme==="dark"} onClick={()=>setTheme("dark")}>Тёмная</button>
         </div>
       </header>
 
