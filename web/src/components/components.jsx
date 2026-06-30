@@ -518,7 +518,7 @@ function Tooltip({ label, children, placement = "top", className = "" }) {
 const TOAST_ICON = { success: "success", error: "error", info: "info", warning: "alert" };
 function Toast({ tone = "info", title, message, onClose, action }) {
   return (
-    <div className={`chs-toast chs-toast--${tone}`} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"}>
+    <div className={`chs-toast chs-toast--${tone}`} role={tone === "error" || tone === "warning" ? "alert" : "status"} aria-live={tone === "error" || tone === "warning" ? "assertive" : "polite"}>
       <span className="chs-toast__icon"><KitIcon name={TOAST_ICON[tone] || "info"} size={16} /></span>
       <div className="chs-toast__body">
         {title && <div className="chs-toast__title">{title}</div>}
@@ -550,9 +550,9 @@ function useToasts({ duration = 4000 } = {}) {
   return { toasts, push, dismiss };
 }
 
-function ToastViewport({ toasts = [], dismiss, position = "bottom-right" }) {
+function ToastViewport({ toasts = [], dismiss, position = "bottom-right", ...rest }) {
   return (
-    <div className={`chs-toast-viewport chs-toast-viewport--${position}`}>
+    <div className={`chs-toast-viewport chs-toast-viewport--${position}`} {...rest}>
       {toasts.map((t) => (
         <Toast key={t.id} tone={t.tone} title={t.title} message={t.message} action={t.action} onClose={() => dismiss && dismiss(t.id)} />
       ))}
