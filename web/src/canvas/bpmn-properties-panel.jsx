@@ -38,7 +38,8 @@ import {
 } from './outcome-presets.js';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
-import { Field, Select } from '../components/components.jsx';
+import { Field, Select, ConfirmDialog } from '../components/components.jsx';
+import { useDestructiveConfirm, ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { GatewayConditionPanel } from './gateway-condition-panel.jsx';
 /* T-0458 [D8-R3]: timer/deadline + escalation panel (NEW FILE — additive import). */
 import { TimerDeadlinePanel } from './timer-deadline-panel.jsx';
@@ -377,7 +378,7 @@ function readOutcomePreset(bo) {
 }
 
 /** One outcome row inside the outcomes editor. */
-function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
+function OutcomeRow({ outcome, index, onChange, onRemoveRequest, isCustom }) {
   return (
     <div
       style={{
@@ -482,11 +483,11 @@ function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
         </label>
       </div>
 
-      {/* Remove button (custom preset only) */}
+      {/* Remove button (custom preset only) — T-0546: gated by ConfirmDialog */}
       {isCustom && (
         <button
           type="button"
-          onClick={() => onRemove(index)}
+          onClick={() => onRemoveRequest(index, outcome.name)}
           style={{
             marginTop: 'var(--chs-space-3)',
             fontSize: 'var(--chs-text-xs)',
@@ -513,6 +514,10 @@ export function OutcomesPanel({ bo, modeler, element }) {
     // Nothing stored yet → derive from current preset
     return defaultOutcomesFor(readOutcomePreset(bo) ?? 'done');
   });
+
+  // T-0546: ConfirmDialog for destructive «Удалить исход» action.
+  // target = { index, name } — stored so the dialog can name the outcome being deleted.
+  const dc = useDestructiveConfirm();
 
   // Commit to businessObject + fire element.changed so the canvas is aware.
   const commit = useCallback((newPresetId, newOutcomes) => {
@@ -558,81 +563,111 @@ export function OutcomesPanel({ bo, modeler, element }) {
     });
   };
 
-  const handleRemoveOutcome = (index) => {
+  const handleRemoveOutcome = useCallback((index) => {
     setOutcomes((prev) => {
       const next = prev.filter((_, i) => i !== index);
       commit(presetId, next);
       return next;
     });
-  };
+  }, [commit, presetId]);
+
+  // T-0546: two-phase remove — first request (opens dialog), then confirm (executes).
+  const handleRemoveOutcomeRequest = useCallback((index, name) => {
+    dc.request({ index, name });
+  }, [dc]);
+
+  const handleRemoveOutcomeConfirm = useCallback(() => {
+    dc.confirm(({ index }) => handleRemoveOutcome(index));
+  }, [dc, handleRemoveOutcome]);
 
   const isCustom = presetId === CUSTOM_PRESET_ID;
 
+  // T-0546: ConfirmDialog is a sibling of PanelGroup; React fragment wraps both.
   return (
-    <PanelGroup title="Исходы шага" defaultOpen>
-      {/* Preset picker */}
-      <PPEntry label="Пресет исходов">
-        <div className="bio-properties-panel-select">
-          <select
-            value={presetId}
-            onChange={(e) => handlePresetChange(e.target.value)}
-          >
-            {OUTCOME_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>{p.label}</option>
-            ))}
-          </select>
-        </div>
-        <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-3)' }}>
-          {OUTCOME_PRESETS.find((p) => p.id === presetId)?.hint ?? ''}
-        </p>
-      </PPEntry>
-
-      {/* Separation note */}
-      <PPEntry>
-        <p className="bio-properties-panel-description">
-          Исход = ветку выбирает ЧЕЛОВЕК. DMN-шлюз (данные → ветка) настраивается отдельно на шлюзе.
-        </p>
-      </PPEntry>
-
-      {/* Per-outcome rows */}
-      {outcomes.length > 0 && (
-        <PPEntry>
-          <div style={{ width: '100%' }}>
-            {outcomes.map((outcome, i) => (
-              <OutcomeRow
-                key={i}
-                outcome={outcome}
-                index={i}
-                onChange={handleOutcomeChange}
-                onRemove={handleRemoveOutcome}
-                isCustom={isCustom}
-              />
-            ))}
+    <>
+      <PanelGroup title="Исходы шага" defaultOpen>
+        {/* Preset picker */}
+        <PPEntry label="Пресет исходов">
+          <div className="bio-properties-panel-select">
+            <select
+              value={presetId}
+              onChange={(e) => handlePresetChange(e.target.value)}
+            >
+              {OUTCOME_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
           </div>
+          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-3)' }}>
+            {OUTCOME_PRESETS.find((p) => p.id === presetId)?.hint ?? ''}
+          </p>
         </PPEntry>
-      )}
 
-      {/* Add outcome (custom only) */}
-      {isCustom && (
+        {/* Separation note */}
         <PPEntry>
-          <button
-            type="button"
-            onClick={handleAddOutcome}
-            style={{
-              fontSize: 'var(--chs-text-sm)',
-              color: 'var(--chs-color-accent)',
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              padding: 0,
-              textAlign: 'left',
-            }}
-          >
-            + Добавить исход
-          </button>
+          <p className="bio-properties-panel-description">
+            Исход = ветку выбирает ЧЕЛОВЕК. DMN-шлюз (данные → ветка) настраивается отдельно на шлюзе.
+          </p>
         </PPEntry>
-      )}
-    </PanelGroup>
+
+        {/* Per-outcome rows */}
+        {outcomes.length > 0 && (
+          <PPEntry>
+            <div style={{ width: '100%' }}>
+              {outcomes.map((outcome, i) => (
+                <OutcomeRow
+                  key={i}
+                  outcome={outcome}
+                  index={i}
+                  onChange={handleOutcomeChange}
+                  onRemoveRequest={handleRemoveOutcomeRequest}
+                  isCustom={isCustom}
+                />
+              ))}
+            </div>
+          </PPEntry>
+        )}
+
+        {/* Add outcome (custom only) */}
+        {isCustom && (
+          <PPEntry>
+            <button
+              type="button"
+              onClick={handleAddOutcome}
+              style={{
+                fontSize: 'var(--chs-text-sm)',
+                color: 'var(--chs-color-accent)',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: 0,
+                textAlign: 'left',
+              }}
+            >
+              + Добавить исход
+            </button>
+          </PPEntry>
+        )}
+      </PanelGroup>
+
+      {/* T-0546: ConfirmDialog для деструктивного «Удалить исход» */}
+      <ConfirmDialog
+        open={dc.open}
+        tone="danger"
+        title="Удалить исход?"
+        message={
+          <ConsequenceSummary
+            who={dc.target ? `Исход «${dc.target.name}»` : 'Исход'}
+            what="Исход будет удалён из списка кнопок этого шага."
+            reversibility="Необратимо — восстановить можно только добавив исход заново."
+          />
+        }
+        confirmLabel="Удалить"
+        onConfirm={handleRemoveOutcomeConfirm}
+        onClose={dc.cancel}
+        loading={dc.loading}
+      />
+    </>
   );
 }
 
