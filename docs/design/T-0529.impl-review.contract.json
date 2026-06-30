@@ -1,0 +1,164 @@
+{
+  "task_id": "T-0529",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "build": "vite 1.85s, 507 modules, no errors (chunk-size warning pre-existing, not T-0529)",
+    "tests": "974 passed, 2 pre-existing ajv failures (apps-schema.test.js + records-form.test.js — missing ajv package, not T-0529), 0 new failures",
+    "diff_stat": "9 files changed, 434 insertions(+), 93 deletions(-)",
+    "forms_canvas_regression": "NONE — widget-registry / soglasovanie / field-contract / form-document / FormDocumentRenderer / field-renderer / Floor2Sandbox / form-emit-seam all green"
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/components/components.jsx:590 (Tooltip)",
+      "issue": "Tooltip initialises `visible` state as `true` (useState(true)). Эффект Esc-dismiss устанавливает visible=false, но нет обработчика onBlur/onMouseLeave для восстановления visible=true при повторном появлении курсора после Esc. После первого нажатия Esc tooltip не появится снова пока пользователь не сфокусируется на триггере (onFocus сбрасывает обратно в true). Поведение для hover (CSS :hover) работает вне JS-state, поэтому мышиные юзеры не заметят — только клавиатурные.",
+      "suggestion": "Переименовать в `forcedHide` (initial false) и инвертировать логику: hidden={forcedHide}, onFocus/onMouseEnter → setForcedHide(false). Или добавить onMouseEnter={() => setVisible(true)} к обёртке span. Нит — не блокирует мерж."
+    },
+    {
+      "id": "F-002",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/app-shell/shell.jsx:534 (CommandPalette chs-palette__item--active)",
+      "issue": "`chs-palette__item--active` применяется к кнопке для выделения активной опции при стрелке-навигации, но этот CSS-класс нигде не определён в app.css (только `chs-palette__item:hover` и `:focus-visible`). Визуальная индикация активной строки при клавиатурной навигации отсутствует — только aria-selected для AT.",
+      "suggestion": "Добавить `.chs-palette__item--active { background: var(--chs-color-hover); }` в app.css. Нит — a11y через aria-selected работает, визуальный индикатор деградирован."
+    },
+    {
+      "id": "F-003",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/components/components.jsx — Popover (все вызовы)",
+      "issue": "Новый prop `isMenu` добавлен в Popover, но ни один из существующих callsites не передаёт `isMenu=true` — все popover'ы получают role=dialog по умолчанию (в том числе те, которые де-факто являются меню). Это консервативно (не хуже исходного состояния), но спека Д2 различала два сценария.",
+      "suggestion": "Follow-up задача при следующем касании popover: аудит callsites и проставление isMenu. Не блокирует — role=dialog безопаснее чем role=menu без menuitem-children."
+    },
+    {
+      "id": "F-004",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/screens/screen-apps.jsx:447 (кликабельная tr с первичным affordance-link)",
+      "issue": "Ссылка `<a href='/app-records/${id}' onClick={e => { e.preventDefault(); navigate(...) }}>` добавлена как primary affordance. Паттерн корректен. Однако `<tr onClick={() => navigate(...)}` тоже присутствует — при нажатии на ссылку сработают оба обработчика (link onClick сначала, потом tr onClick). e.stopPropagation() на link отсутствует.",
+      "suggestion": "Добавить e.stopPropagation() к onClick link или к td, чтобы tr-обработчик не дублировал навигацию. Нит — дублированный navigate не ломает UX, только лишний history-push."
+    },
+    {
+      "id": "F-005",
+      "severity": "nit",
+      "axis": 5,
+      "location": "Отложенные поверхности (OrgTree screen-org.jsx, FormDesigner Inspector полные tabs, rights tabs ra-shell.jsx)",
+      "issue": "Спека честно маркирует OrgTree / часть rights / forms-tabs как отложенные. Реализация это уважает — не трогает screen-org.jsx, ra-shell.jsx, rights-экраны. Приемлемый follow-up.",
+      "suggestion": "Задокументированный scope — не блокирует текущий мерж."
+    }
+  ],
+  "checks": {
+    "build_green": true,
+    "tests_no_new_failures": true,
+    "canvas_regression": {
+      "keyboard_drag_mouse_drag_coexist": true,
+      "note": "CanvasNode сохраняет draggable+onDragStart для mouse; новые onMoveUp/onMoveDown — отдельные button-контролы и handleKeyDown. Нет конфликта с drag. Undo-история (history-stack) не затронута — moveNodeUp/Down используют commit() как все мутации.",
+      "reorderNode_existing_api": true
+    },
+    "dirty_guard_intact": {
+      "note": "T-0533 dirty-guard работает через useHistory/commit — moveNodeUp/Down тоже используют commit, значит dirty-флаг взводится корректно. Модальный onBeforeClose упомянут в спеке но реализован в рамках T-0533, не T-0529 — корректный scope."
+    },
+    "bpmn_keyboard": {
+      "bindTo_containerRef": true,
+      "post_import_rebind": true,
+      "role_application": true,
+      "aria_label_set": true,
+      "sr_only_hint": true
+    },
+    "form_designer_a11y": {
+      "canvas_node_tabindex_0": true,
+      "keyboard_reorder_alt_up_down": true,
+      "move_buttons_group_role": true,
+      "fieldchip_aria_disabled_sr_only": true,
+      "inspector_label_htmlFor": true,
+      "tabs_canvas_roving_tabindex": true,
+      "tabs_canvas_tabpanel_role": true
+    },
+    "field_errors": {
+      "aria_describedby_errorId": true,
+      "role_alert_on_error_span": true,
+      "PersonPicker": "DONE",
+      "RelationPickerField": "DONE",
+      "FieldControl_all_scalar_inputs": "DONE"
+    },
+    "disabled_reason": {
+      "tooltip_on_disabled_replaced": true,
+      "topbar_org_button": "aria-disabled + sr-only span DONE",
+      "topbar_rights_export": "aria-disabled + sr-only span DONE",
+      "navitem_type_button_added": true,
+      "navitem_onclick_cleaned": true
+    },
+    "overlays": {
+      "modal_onMouseDown_to_onClick": true,
+      "drawer_onMouseDown_to_onClick": true,
+      "popover_focus_on_open": true,
+      "popover_aria_expanded_controls": true,
+      "popover_esc_stopPropagation": true,
+      "tooltip_clone_children_no_extra_span": true,
+      "tooltip_esc_dismiss": true,
+      "nested_aria_live_removed": "screen-assistant.jsx streaming-dots aria-live removed, dots aria-hidden DONE"
+    },
+    "toast_pause_on_hover": {
+      "implemented": true,
+      "pauseAll_resumeAll": true,
+      "onMouseEnter_onMouseLeave_onFocus_onBlur": true
+    },
+    "sla_meter": {
+      "role_progressbar": true,
+      "aria_valuenow_valuetext": true,
+      "decorative_fill_aria_hidden": true
+    },
+    "status_chip": {
+      "dot_aria_hidden": true
+    },
+    "palette_combobox": {
+      "role_combobox_on_input": true,
+      "aria_activedescendant": true,
+      "aria_controls_listbox": true,
+      "listbox_id_set": true,
+      "option_role_correct_parent": "option на li (WAI-ARIA допускает li[role=option] внутри ul[role=listbox])",
+      "arrow_key_navigation": true,
+      "active_class_css_missing": "F-002 нит"
+    },
+    "sr_only_utility": {
+      "chs_sr_only_in_components_css": true,
+      "clip_path_correct": false,
+      "note": "Используется clip:rect(0,0,0,0) — стандартный подход, не clip-path. Оба корректны для AT."
+    },
+    "screen_apps_primary_affordance": {
+      "link_added": true,
+      "stopPropagation_missing": "F-004 нит"
+    }
+  },
+  "acceptance_coverage": [
+    { "ac": "BUILD зелёный (D-056)", "covered": true },
+    { "ac": "НЕТ нового падения тестов (0 new, 2 pre-existing ajv)", "covered": true },
+    { "ac": "Форм-тесты зелёные (soglasovanie/widget-registry/field-contract/form-document/FormDocumentRenderer/field-renderer/Floor2Sandbox)", "covered": true },
+    { "ac": "Канвас-тесты зелёные (element-config-contract/gateway-condition-panel/typed-element-config/dmn-editor-api)", "covered": true },
+    { "ac": "keyboard-drag фоллбэк (Alt+↑/↓) не ломает mouse-drag — coexist", "covered": true },
+    { "ac": "dirty-guard (T-0533) не нарушен — moveNodeUp/Down через commit()", "covered": true },
+    { "ac": "BPMN keyboard.bindTo=containerRef + role=application + sr-only hint", "covered": true },
+    { "ac": "FieldChip used: aria-disabled + sr-only reason", "covered": true },
+    { "ac": "Tabs (FormDesigner): roving tabindex + arrow keys + tabpanel", "covered": true },
+    { "ac": "Tabs (InboxScreen): role=tablist/tab/tabpanel + roving + Home/End", "covered": true },
+    { "ac": "Field errors: error span id + aria-describedby + role=alert (FieldControl/PersonPicker/RelationPickerField)", "covered": true },
+    { "ac": "Disabled-причина: aria-disabled + sr-only (Tooltip-on-disabled заменён)", "covered": true },
+    { "ac": "Modal/Drawer: onMouseDown → onClick (не теряет text-select)", "covered": true },
+    { "ac": "Popover: focus-on-open + aria-haspopup/expanded/controls + Esc", "covered": true },
+    { "ac": "Tooltip: clone children (не лишний focusable span) + Esc-dismiss", "covered": true },
+    { "ac": "Вложенный aria-live в streaming-dots убран", "covered": true },
+    { "ac": "Toast pause-on-hover (pauseAll/resumeAll на enter/leave/focus/blur)", "covered": true },
+    { "ac": "SLA-meter: role=progressbar + aria-valuenow/valuetext", "covered": true },
+    { "ac": "StatusChip dot: aria-hidden=true", "covered": true },
+    { "ac": "CommandPalette: combobox + aria-activedescendant + arrow-key navigation", "covered": true },
+    { "ac": "RoleAssignment: button variant когда onOpen передан", "covered": true },
+    { "ac": "chs-sr-only utility class добавлен в components.css", "covered": true },
+    { "ac": "NavItem: type=button + очищен onClick при disabled", "covered": true },
+    { "ac": "ThemeToggle: type=button добавлен", "covered": true },
+    { "ac": "Отложенные (OrgTree/rights-tabs/forms-tabs-ra-shell) — допустимый follow-up, не блокер", "covered": true }
+  ],
+  "reviewer_notes": "T-0529 approved. Сборка зелёная (507 модулей, 1.85s). Тест-прогон: 974 passed, 0 новых падений (2 pre-existing ajv — не T-0529). Форм-тесты и канвас-тесты зелёные — регресса нет. Keyboard-drag (Alt+↑/↓) реализован как отдельные button-контролы и onKeyDown на CanvasNode, не конфликтует с mouse-drag. dirty-guard цел (moveNode через commit()). Все критические a11y-паттерны спеки выполнены: BPMN keyboard bindTo исправлен, field errors aria-describedby+role=alert, disabled-причина через sr-only (Tooltip-on-disabled убран), Modal/Drawer onMouseDown→onClick, Popover focus-on-open+aria, Tooltip clone+Esc, вложенный aria-live удалён, SLA progressbar, tabs roving tabindex, CommandPalette combobox. 5 нитов — все некритические: F-001 Tooltip visible-state minor keyboard edge-case, F-002 chs-palette__item--active CSS не определён (AT работает через aria-selected), F-003 Popover isMenu callsites не обновлены (консервативно безопасно), F-004 stopPropagation отсутствует на link в tr (дублированный navigate, не ломает), F-005 отложенные поверхности задокументированы."
+}

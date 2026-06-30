@@ -23,7 +23,7 @@
    Theming: --chs-* tokens + kit components only (gate G2/G6).
    ============================================================================ */
 
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { Button, EmptyState, LoadingState, ErrorState, Select, ConfirmDialog } from '../components/components.jsx';
 import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -121,19 +121,27 @@ function PaletteBlock({ descriptor, onAdd }) {
 }
 
 function FieldChip({ field, used, onAdd }) {
+  const usedHintId = used ? `field-used-${field.key}` : undefined;
   return (
-    <button
-      type="button"
-      className="chs-field-chip chs-btn chs-btn--ghost"
-      style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 'var(--chs-space-1)', opacity: used ? 0.5 : 1 }}
-      draggable
-      onDragStart={(e) => setDrag(e, { kind: 'field', fieldKey: field.key })}
-      onClick={() => onAdd(field.key)}
-      title={`Поле «${field.key}» (${field.type})`}
-    >
-      {field.label || field.title || field.key}
-      <span style={{ float: 'right', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>{field.type}</span>
-    </button>
+    <>
+      <button
+        type="button"
+        className="chs-field-chip chs-btn chs-btn--ghost"
+        style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 'var(--chs-space-1)', opacity: used ? 0.5 : 1 }}
+        draggable={!used}
+        onDragStart={!used ? (e) => setDrag(e, { kind: 'field', fieldKey: field.key }) : undefined}
+        onClick={!used ? () => onAdd(field.key) : undefined}
+        aria-disabled={used || undefined}
+        aria-describedby={usedHintId}
+        title={`Поле «${field.key}» (${field.type})`}
+      >
+        {field.label || field.title || field.key}
+        <span style={{ float: 'right', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>{field.type}</span>
+      </button>
+      {used && (
+        <span id={usedHintId} className="chs-sr-only">Поле уже добавлено на форму</span>
+      )}
+    </>
   );
 }
 
@@ -190,6 +198,7 @@ function EmptyDropZone({ containerPath, tabIndex, onDrop }) {
 function CanvasNode({
   node, containerPath, index, tabIndex,
   selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, brokenKeys,
+  siblingCount, onMoveUp, onMoveDown,
 }) {
   const descriptor = getWidget(node.type);
   const key = pathKey(containerPath, index, tabIndex);
@@ -200,12 +209,27 @@ function CanvasNode({
 
   const myPath = childContainerPath(containerPath, index, tabIndex);
 
+  // T-0529: keyboard handler for Alt+Up/Down reorder fallback
+  const handleKeyDown = (e) => {
+    if (e.altKey && e.key === 'ArrowUp') {
+      e.preventDefault(); e.stopPropagation();
+      if (onMoveUp && index > 0) onMoveUp(containerPath, index, tabIndex);
+    } else if (e.altKey && e.key === 'ArrowDown') {
+      e.preventDefault(); e.stopPropagation();
+      if (onMoveDown && index < siblingCount - 1) onMoveDown(containerPath, index, tabIndex);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault(); e.stopPropagation();
+      onSelectNode(key, e);
+    }
+  };
+
   return (
     <div
       className={`chs-canvas-node${selected ? ' chs-canvas-node--selected' : ''}`}
       role="treeitem"
       aria-selected={selected}
       aria-label={`${descriptor ? descriptor.label : node.type}: ${userLabel || node.fieldKey || 'без метки'}`}
+      tabIndex={0}
       style={{
         border: broken ? '2px solid var(--chs-color-danger)'
           : selected ? '2px solid var(--chs-color-accent)' : '1px solid var(--chs-color-border)',
@@ -215,6 +239,7 @@ function CanvasNode({
       draggable
       onDragStart={(e) => { e.stopPropagation(); setDrag(e, { kind: 'reorder', fromContainer: containerPath, fromIndex: index, fromTab: tabIndex ?? null }); }}
       onClick={(e) => { e.stopPropagation(); onSelectNode(key, e); }}
+      onKeyDown={handleKeyDown}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--chs-space-2)' }}>
         <span className="chs-canvas-node__type" style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
@@ -224,7 +249,21 @@ function CanvasNode({
             <span className="chs-chip" style={{ color: 'var(--chs-color-warning)' }}>код</span>
           )}
         </span>
-        <span style={{ display: 'flex', gap: 'var(--chs-space-1)' }}>
+        <span role="group" aria-label="Управление блоком" style={{ display: 'flex', gap: 'var(--chs-space-1)' }}>
+          {onMoveUp && (
+            <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm"
+              onClick={(e) => { e.stopPropagation(); onMoveUp(containerPath, index, tabIndex); }}
+              disabled={index === 0}
+              aria-label="Переместить блок выше (Alt+↑)"
+              title="Переместить выше">▲</button>
+          )}
+          {onMoveDown && (
+            <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm"
+              onClick={(e) => { e.stopPropagation(); onMoveDown(containerPath, index, tabIndex); }}
+              disabled={siblingCount !== undefined && index >= siblingCount - 1}
+              aria-label="Переместить блок ниже (Alt+↓)"
+              title="Переместить ниже">▼</button>
+          )}
           <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm" onClick={(e) => { e.stopPropagation(); onDuplicate(containerPath, index, tabIndex); }} aria-label="Дублировать блок" title="Дублировать">⧉</button>
           <button type="button" className="chs-btn chs-btn--ghost chs-btn--sm" onClick={(e) => { e.stopPropagation(); onRemove(containerPath, index, tabIndex); }} aria-label="Удалить блок" title="Удалить">×</button>
         </span>
@@ -239,18 +278,22 @@ function CanvasNode({
       {/* nested children for containers */}
       {isContainer && descriptor.isTabs && (
         <TabsCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
-          onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop} brokenKeys={brokenKeys} />
+          onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
+          onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+          brokenKeys={brokenKeys} />
       )}
       {isContainer && !descriptor.isTabs && (
         <ChildrenCanvas node={node} containerPath={myPath} selectedKeys={selectedKeys}
-          onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop} brokenKeys={brokenKeys} />
+          onSelectNode={onSelectNode} onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
+          onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+          brokenKeys={brokenKeys} />
       )}
     </div>
   );
 }
 
 /** Render a container's children with interleaved DropSlots (section/columns). */
-function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, brokenKeys }) {
+function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, brokenKeys }) {
   const kids = Array.isArray(node.children) ? node.children : [];
   return (
     <div className="chs-canvas-children" role="group" style={{ marginTop: 'var(--chs-space-2)', marginLeft: 'var(--chs-space-3)', paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}>
@@ -263,8 +306,11 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
             <React.Fragment key={child.id || `${child.type}-${i}`}>
               <CanvasNode
                 node={child} containerPath={containerPath} index={i}
+                siblingCount={kids.length}
                 selectedKeys={selectedKeys} onSelectNode={onSelectNode}
-                onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop} brokenKeys={brokenKeys}
+                onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
+                onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+                brokenKeys={brokenKeys}
               />
               <DropSlot containerPath={containerPath} insertAt={i + 1} onDrop={onDrop} />
             </React.Fragment>
@@ -276,26 +322,46 @@ function ChildrenCanvas({ node, containerPath, selectedKeys, onSelectNode, onRem
 }
 
 /** Render a tabs node's children: a tab switcher + the active tab's children. */
-function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, brokenKeys }) {
+function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove, onDuplicate, onDrop, onMoveUp, onMoveDown, brokenKeys }) {
   const tabs = Array.isArray(node.tabs) ? node.tabs : [];
   const [active, setActive] = useState(0);
   const tabIdx = Math.min(active, Math.max(0, tabs.length - 1));
   const kids = Array.isArray(tabs[tabIdx]?.children) ? tabs[tabIdx].children : [];
+
+  // T-0529: roving tabindex + arrow-key navigation for TabsCanvas tab buttons
+  const handleTabKeyDown = (e, i) => {
+    if (e.key === 'ArrowRight') {
+      e.preventDefault(); setActive((i + 1) % tabs.length);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault(); setActive((i - 1 + tabs.length) % tabs.length);
+    }
+  };
+
   return (
     <div className="chs-canvas-tabs" style={{ marginTop: 'var(--chs-space-2)', marginLeft: 'var(--chs-space-3)' }}>
       <div role="tablist" style={{ display: 'flex', gap: 'var(--chs-space-2)', marginBottom: 'var(--chs-space-2)' }}>
         {tabs.map((t, i) => (
           <button
-            key={i} type="button" role="tab" aria-selected={tabIdx === i}
+            key={i} type="button" role="tab"
+            id={`canvas-tab-${containerPath.join('-')}-${i}`}
+            aria-selected={tabIdx === i}
+            aria-controls={`canvas-tabpanel-${containerPath.join('-')}-${i}`}
+            tabIndex={tabIdx === i ? 0 : -1}
             className={`chs-btn chs-btn--ghost chs-btn--sm${tabIdx === i ? ' chs-btn--active' : ''}`}
             onClick={(e) => { e.stopPropagation(); setActive(i); }}
+            onKeyDown={(e) => handleTabKeyDown(e, i)}
             onDragOver={(e) => { e.preventDefault(); setActive(i); }}
           >
             {t.title || `Вкладка ${i + 1}`}
           </button>
         ))}
       </div>
-      <div role="group" style={{ paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}>
+      <div
+        id={`canvas-tabpanel-${containerPath.join('-')}-${tabIdx}`}
+        role="tabpanel"
+        aria-labelledby={`canvas-tab-${containerPath.join('-')}-${tabIdx}`}
+        style={{ paddingLeft: 'var(--chs-space-2)', borderLeft: '2px solid var(--chs-color-border)' }}
+      >
         {kids.length === 0 ? (
           <EmptyDropZone containerPath={containerPath} tabIndex={tabIdx} onDrop={onDrop} />
         ) : (
@@ -305,8 +371,11 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
               <React.Fragment key={child.id || `${child.type}-${i}`}>
                 <CanvasNode
                   node={child} containerPath={containerPath} index={i} tabIndex={tabIdx}
+                  siblingCount={kids.length}
                   selectedKeys={selectedKeys} onSelectNode={onSelectNode}
-                  onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop} brokenKeys={brokenKeys}
+                  onRemove={onRemove} onDuplicate={onDuplicate} onDrop={onDrop}
+                  onMoveUp={onMoveUp} onMoveDown={onMoveDown}
+                  brokenKeys={brokenKeys}
                 />
                 <DropSlot containerPath={containerPath} tabIndex={tabIdx} insertAt={i + 1} onDrop={onDrop} />
               </React.Fragment>
@@ -323,24 +392,26 @@ function TabsCanvas({ node, containerPath, selectedKeys, onSelectNode, onRemove,
 // ---------------------------------------------------------------------------
 
 function PropControl({ prop, node, schemaField, onPatch }) {
+  const autoId = useId();
+  const inputId = `chs-prop-${autoId}`;
   if (prop.control === 'text' && prop.multiline) {
     return (
-      <>
-        <label className="chs-label">{prop.label}</label>
-        <textarea className="chs-input" rows={2} value={node[prop.key] || ''}
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-3)' }}>
+        <label className="chs-label" htmlFor={inputId}>{prop.label}</label>
+        <textarea id={inputId} className="chs-input" rows={2} value={node[prop.key] || ''}
           onChange={(e) => onPatch({ [prop.key]: e.target.value })}
-          style={{ width: '100%', marginBottom: 'var(--chs-space-3)' }} />
-      </>
+          style={{ width: '100%' }} />
+      </div>
     );
   }
   if (prop.control === 'text') {
     return (
-      <>
-        <label className="chs-label">{prop.label}</label>
-        <input className="chs-input" type="text" value={node[prop.key] || ''}
+      <div className="chs-field" style={{ marginBottom: 'var(--chs-space-3)' }}>
+        <label className="chs-label" htmlFor={inputId}>{prop.label}</label>
+        <input id={inputId} className="chs-input" type="text" value={node[prop.key] || ''}
           onChange={(e) => onPatch({ [prop.key]: e.target.value })}
-          style={{ width: '100%', marginBottom: 'var(--chs-space-3)' }} />
-      </>
+          style={{ width: '100%' }} />
+      </div>
     );
   }
   if (prop.control === 'select' && prop.fromSchemaWidgets) {
@@ -592,6 +663,16 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     handleDrop({ containerPath: [], insertAt: rootChildren.length }, e);
   }, [handleDrop, rootChildren.length]);
 
+  // T-0529: keyboard-drag fallback — reorder via Alt+Up/Down button clicks.
+  const moveNodeUp = useCallback((containerPath, index, tabIndex) => {
+    if (index <= 0) return;
+    commit((d) => reorderNode(d, containerPath, index, index - 1, tabIndex));
+  }, [commit]);
+
+  const moveNodeDown = useCallback((containerPath, index, tabIndex) => {
+    commit((d) => reorderNode(d, containerPath, index, index + 1, tabIndex));
+  }, [commit]);
+
   // --- undo/redo ---
   const doUndo = useCallback(() => setHistory((h) => undoHistory(h) || h), []);
   const doRedo = useCallback(() => setHistory((h) => redoHistory(h) || h), []);
@@ -688,8 +769,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
               <React.Fragment key={node.id || `${node.type}-${i}`}>
                 <CanvasNode
                   node={node} containerPath={[]} index={i}
+                  siblingCount={rootChildren.length}
                   selectedKeys={selectedKeys} onSelectNode={selectNode}
                   onRemove={removeAt} onDuplicate={duplicateAt} onDrop={handleDrop}
+                  onMoveUp={moveNodeUp} onMoveDown={moveNodeDown}
                   brokenKeys={validation.brokenKeys}
                 />
                 <DropSlot containerPath={[]} insertAt={i + 1} onDrop={handleDrop} />

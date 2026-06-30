@@ -653,8 +653,11 @@ function StreamingBubble() {
   return (
     <div className="chs-asst__msg chs-asst__msg--asst chs-asst__msg--streaming">
       <div className="chs-asst__msg-role">Ассистент</div>
-      <div className="chs-asst__msg-text chs-asst__streaming-dots" aria-live="polite" aria-label="Ассистент печатает…">
-        <span /><span /><span />
+      {/* T-0529: removed nested aria-live (already inside role="log" aria-live="polite" container)
+          — nested live regions are invalid and cause double-announcements in some AT.
+          The aria-label stays for context when AT encounters the dots. */}
+      <div className="chs-asst__msg-text chs-asst__streaming-dots" aria-label="Ассистент печатает…">
+        <span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" />
       </div>
     </div>
   );

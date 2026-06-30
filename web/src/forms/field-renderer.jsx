@@ -115,6 +115,7 @@ async function fetchEmployees() {
  */
 export function PersonPicker({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
   const id = `${idPrefix}-${field.key}`;
+  const errorId = error ? `${id}-error` : undefined;
   const label = field.label || field.title || field.key;
   const invalid = Boolean(error);
 
@@ -141,8 +142,9 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
       )}
     </label>
   );
+  // T-0529: role=alert + id for aria-describedby (WCAG 1.3.1 / 4.1.3)
   const errorNode = error ? (
-    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+    <span id={errorId} role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
       {error}
     </span>
   ) : null;
@@ -175,6 +177,7 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         disabled={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -234,6 +237,7 @@ export function PersonPicker({ field, value, onChange, error, idPrefix = 'field'
  */
 export function RelationPickerField({ field, value, onChange, error, idPrefix = 'field', isRequired = false, readOnly = false }) {
   const id = `${idPrefix}-${field.key}`;
+  const errorId = error ? `${id}-error` : undefined;
   const label = field.label || field.title || field.key;
   const invalid = Boolean(error);
 
@@ -280,8 +284,9 @@ export function RelationPickerField({ field, value, onChange, error, idPrefix = 
       )}
     </label>
   );
+  // T-0529: role=alert + id for aria-describedby (WCAG 1.3.1 / 4.1.3)
   const errorNode = error ? (
-    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+    <span id={errorId} role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
       {error}
     </span>
   ) : null;
@@ -779,6 +784,7 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
  */
 export function FieldControl({ field, value, onChange, error, idPrefix = 'field', hideLabel = false }) {
   const id = `${idPrefix}-${field.key}`;
+  const errorId = error ? `${id}-error` : undefined;
   const label = field.label || field.title || field.key;
   // T-0404 [D7-9]: per-step field mode (read-only / required-to-advance / hidden),
   // bound to the BPMN node via form_binding.fields. Distinct from per-role
@@ -798,8 +804,10 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   const inputStyle = { display: 'block', width: '100%', boxSizing: 'border-box' };
   const inputClass = `chs-input${invalid ? ' chs-input--invalid' : ''}`;
 
+  // T-0529: error span has id + role=alert so AT reads it immediately on appearance.
+  // aria-describedby on the control links to errorId for full WCAG 1.3.1/4.1.3 compliance.
   const errorNode = error ? (
-    <span style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
+    <span id={errorId} role="alert" style={{ display: 'block', marginTop: 'var(--chs-space-1)', fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-danger)' }}>
       {error}
     </span>
   ) : null;
@@ -916,6 +924,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         disabled={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -1055,6 +1064,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
   }
 
   // ----- scalar inputs: text / textarea / number / date ----------------------
+  // T-0529: all scalar inputs carry aria-describedby={errorId} for WCAG 1.3.1.
   let control;
   if (presentation === 'textarea') {
     control = (
@@ -1065,6 +1075,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         rows={3}
@@ -1082,6 +1093,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -1101,6 +1113,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
           onChange={(e) => onChange(field.key, e.target.value)}
           aria-required={isRequired || undefined}
           aria-invalid={invalid || undefined}
+          aria-describedby={errorId}
           readOnly={readOnly || undefined}
           aria-disabled={readOnly || undefined}
           style={{ ...inputStyle, flex: 1 }}
@@ -1118,6 +1131,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -1134,6 +1148,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -1150,6 +1165,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
@@ -1166,6 +1182,7 @@ export function FieldControl({ field, value, onChange, error, idPrefix = 'field'
         onChange={(e) => onChange(field.key, e.target.value)}
         aria-required={isRequired || undefined}
         aria-invalid={invalid || undefined}
+        aria-describedby={errorId}
         readOnly={readOnly || undefined}
         aria-disabled={readOnly || undefined}
         style={inputStyle}
