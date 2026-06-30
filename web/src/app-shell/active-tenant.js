@@ -71,3 +71,48 @@ export async function resolveActiveTenant() {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// T-0539: nav-capability set cache
+// ---------------------------------------------------------------------------
+
+/** @type {{ isGenesisOwner: boolean, capabilities: string[], zones: string[], degraded?: boolean } | null} */
+let navCapabilities = null;
+
+/**
+ * Current NavCapabilitySet (from /api/me/nav-capabilities), or null if not yet resolved.
+ * Null → fail-closed (visibleZones returns ['work']).
+ */
+export function getNavCapabilities() {
+  return navCapabilities;
+}
+
+/** Test/seam setter. */
+export function setNavCapabilities(caps) {
+  navCapabilities = caps || null;
+}
+
+/** Clear cached nav-capabilities (e.g. on logout). */
+export function clearNavCapabilities() {
+  navCapabilities = null;
+}
+
+/**
+ * T-0539: Fetch nav-capability set from GET /api/me/nav-capabilities.
+ * Fail-closed: on any error returns null (visibleZones → ['work']).
+ * Returns the resolved NavCapabilitySet or null.
+ */
+export async function resolveNavCapabilities() {
+  try {
+    const res = await fetch('/api/me/nav-capabilities', { headers: { ...authHeaders() } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && typeof data.isGenesisOwner === 'boolean' && Array.isArray(data.zones)) {
+      navCapabilities = data;
+      return data;
+    }
+  } catch {
+    // network/parse error → fail-closed (null).
+  }
+  return null;
+}

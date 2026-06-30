@@ -116,9 +116,16 @@ describe('nav-config T-0538: 4-zone IA', () => {
     expect(ids.length).toBe(unique.size);
   });
 
-  it('all capability values are null (T-0539 задел, filter not implemented)', () => {
+  // T-0539: capability values are now SET (not null for non-work/non-home zones).
+  // ADR §4.2: null ONLY allowed for zone:'work' and home (zone:null).
+  it('T-0539: work/home items have capability:null; non-work zones have non-null capability', () => {
     for (const item of allItems()) {
-      expect(item.capability, `${item.id} capability must be null until T-0539`).toBeNull();
+      if (item.zone === null || item.zone === 'work') {
+        expect(item.capability, `${item.id} (zone:${item.zone}) must have capability:null`).toBeNull();
+      } else {
+        expect(item.capability, `${item.id} (zone:${item.zone}) must have non-null capability`).not.toBeNull();
+        expect(typeof item.capability, `${item.id} capability must be string`).toBe('string');
+      }
     }
   });
 

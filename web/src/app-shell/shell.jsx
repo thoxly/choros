@@ -9,10 +9,10 @@ import { Button, Modal, Tooltip, Popover } from '../components/components.jsx';
 import { ToastProvider, useToastContext } from './toast-context.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
-import { resolveActiveTenant } from './active-tenant.js';
+import { resolveActiveTenant, resolveNavCapabilities, getNavCapabilities, clearNavCapabilities } from './active-tenant.js';
 import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
-import { NAV, ZONES, NAV_HOME, visibleItems, effectiveStatus } from './nav-config.js';
+import { NAV, ZONES, NAV_HOME, visibleItems, visibleZones, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import RegisterScreen from '../screens/screen-register.jsx';
 import OverviewScreen from '../screens/screen-overview.jsx';
@@ -407,12 +407,23 @@ function RightsSubTabs({ genre }) {
  * control. Destinations are derived from the SAME nav-config source the sidebar
  * uses, so the palette can never drift from the live navigation.
  */
-function paletteDestinations() {
+/**
+ * T-0539: palette destinations filtered by navSet capability.
+ * Hidden items (it.hidden) and zone-gated items are excluded — skipping the
+ * capability gate here would let users navigate to zones they can't see (bypass).
+ * @param {object|null} navSet  NavCapabilitySet | null (fail-closed → only РАБОТА)
+ */
+function paletteDestinations(navSet) {
   const out = [];
+  const visZones = visibleZones(navSet);
   for (const grp of NAV) {
-    for (const item of visibleItems(grp)) {
+    for (const item of visibleItems(grp)) { // compat path: hidden filter only
       if (!item.screen) continue;
       if (effectiveStatus(item) === "soon") continue;
+      // T-0539: exclude items from zones not visible to this actor.
+      if (item.zone && !visZones.includes(item.zone)) continue;
+      // T-0539: ownerOnly ломтики — только genesis-owner.
+      if (item.ownerOnly && !(navSet && navSet.isGenesisOwner)) continue;
       // T-0355: respect `item.path` override (e.g. Модельер → /processes/new/edit).
       out.push({ id: item.id, label: item.label, group: grp.group, icon: item.icon, path: item.path || "/" + item.id });
     }
@@ -420,10 +431,10 @@ function paletteDestinations() {
   return out;
 }
 
-function CommandPalette({ open, onClose, onGo }) {
+function CommandPalette({ open, onClose, onGo, navSet }) {
   const [query, setQuery] = useState("");
   const inputRef = useRef(null);
-  const dests = paletteDestinations();
+  const dests = paletteDestinations(navSet);
   const q = query.trim().toLowerCase();
   const matches = q
     ? dests.filter((d) => d.label.toLowerCase().includes(q) || d.group.toLowerCase().includes(q))
@@ -639,6 +650,8 @@ function AppShell() {
   // dev mode, keycloak user in keycloak mode). authError surfaces login errors.
   const [authReady, setAuthReady] = useState(false);
   const [orgLabel, setOrgLabel] = useState(""); // resolved tenant label for the sidebar
+  // T-0539: nav-capability set — drives zone/item visibility (fail-closed: null → only РАБОТА).
+  const [navCaps, setNavCaps] = useState(null);
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -709,6 +722,14 @@ function AppShell() {
         }
       } catch {
         /* non-fatal */
+      }
+      // T-0539: resolve nav-capability set — drives zone/item visibility.
+      // Runs after tenant resolution. Fail-closed: null → only РАБОТА (visibleZones default).
+      try {
+        const caps = await resolveNavCapabilities();
+        if (!cancelled) setNavCaps(caps || null);
+      } catch {
+        /* fail-closed: navCaps stays null → only РАБОТА */
       }
       if (!cancelled) setAuthReady(true);
     })();
@@ -796,6 +817,8 @@ function AppShell() {
   };
 
   const handleLogout = () => {
+    clearNavCapabilities(); // T-0539: clear capability cache on logout
+    setNavCaps(null);
     if (keycloak) {
       kc.logout(authConfig.keycloak); // clears session + redirects to KC logout
       return;
@@ -858,6 +881,7 @@ function AppShell() {
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
           onGo={(path) => { setPaletteOpen(false); navigate(path); }}
+          navSet={navCaps}
         />
 
         <div className="chs-nav__scroll">
@@ -876,8 +900,12 @@ function AppShell() {
           </div>
 
           {/* Зоны */}
+          {/* T-0539: capability-filter — только зоны из navCaps.zones (fail-closed: null → ['work']) */}
           {ZONES.map((zone) => {
-            const items = visibleItems(zone);
+            // Zone-level capability gate (T-0539): скрываем зону если не в visibleZones.
+            if (!visibleZones(navCaps).includes(zone.id)) return null;
+            // Item-level filter: hidden + ownerOnly (T-0538/T-0409).
+            const items = visibleItems(zone.id, navCaps);
             if (items.length === 0) return null;
 
             // Для зоны admin — группируем пункты по subgroup.

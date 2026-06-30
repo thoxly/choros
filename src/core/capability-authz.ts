@@ -54,6 +54,19 @@ import type { Grant } from "./grant-lattice.js";
 export const LLM_CONNECTION_CONFIGURE =
   "llm_connection:configure" as Grant["resourceType"];
 
+/**
+ * T-0539: Grant resource_type for "read the Observability zone"
+ * (ops-overview / reports / process-analytics / audit / spend).
+ *
+ * Same widening-cast precedent as authoring_draft / llm_connection:configure.
+ * Free-text resource_type — no DB CHECK, no migration required.
+ * Capability-token (not org-scoped); scope = BOTTOM/whole-tenant by convention.
+ * Predicate: holdsObservabilityRead(grants).
+ * Owner short-circuit (isGenesisOwner ||) applied by the caller.
+ */
+export const OBSERVABILITY_READ =
+  "observability:read" as Grant["resourceType"];
+
 /** Grant resource_type for "configure/run a SYSTEM agent" (spec §6). */
 export const SYSTEM_AGENT_OPERATE =
   "system_agent:operate" as Grant["resourceType"];
@@ -82,6 +95,17 @@ export const AUTHORING_DRAFT = "authoring_draft" as Grant["resourceType"];
  */
 export function holdsLlmConnectionConfigure(grants: readonly Grant[]): boolean {
   return grants.some((g) => g.resourceType === LLM_CONNECTION_CONFIGURE);
+}
+
+/**
+ * holdsObservabilityRead — true iff the resolved grant set contains an
+ * effective `observability:read` grant (T-0539).
+ *
+ * The route/nav gate is `isGenesisOwner || holdsObservabilityRead(grants)` — the
+ * owner short-circuit is applied by the caller. Pure: only inspects resource_type.
+ */
+export function holdsObservabilityRead(grants: readonly Grant[]): boolean {
+  return grants.some((g) => g.resourceType === OBSERVABILITY_READ);
 }
 
 /**
