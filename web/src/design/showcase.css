@@ -84,6 +84,7 @@
 
 .chs-tokrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--chs-space-7); }
 .chs-radius-cell { display: flex; flex-direction: column; align-items: center; gap: var(--chs-space-4); }
+.chs-shadow-demo { width: var(--chs-space-11); height: var(--chs-space-10); background: var(--chs-color-surface-raised); border-radius: var(--chs-radius-3); border: 1px solid var(--chs-color-border); }
 
 .chs-specrow { display: flex; flex-wrap: wrap; gap: var(--chs-space-5); align-items: center; }
 .chs-specrow + .chs-specrow { margin-top: var(--chs-space-6); }
