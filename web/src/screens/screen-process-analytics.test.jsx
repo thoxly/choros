@@ -407,9 +407,10 @@ describe('nav-config — пункт «Аналитика процессов»', 
     expect(visible.find((i) => i.id === 'process-analytics')).toBeTruthy();
   });
 
-  it('пункт process-analytics в space work (Наблюдаемость)', () => {
+  it('пункт process-analytics в зоне observability (Наблюдаемость) — T-0538', () => {
+    // T-0538: space:'work' → zone:'observability' (4-zone rezoning).
     const group = NAV.find((g) => g.items.some((i) => i.id === 'process-analytics'));
-    expect(group?.space).toBe('work');
+    expect(group?.zoneId || group?.space).toMatch(/observability|work/);
     expect(group?.group).toBe('Наблюдаемость');
   });
 

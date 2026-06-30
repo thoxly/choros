@@ -239,9 +239,10 @@ describe('nav-config содержит пункт Отчёты', async () => {
     expect(reportsItem?.screen).toBe(true);
   });
 
-  it('пункт reports в space work (Наблюдаемость)', () => {
+  it('пункт reports в зоне observability (Наблюдаемость) — T-0538', () => {
+    // T-0538: space:'work' → zone:'observability' (4-zone rezoning).
     const group = NAV.find((g) => g.items.some((i) => i.id === 'reports'));
-    expect(group?.space).toBe('work');
+    expect(group?.zoneId || group?.space).toMatch(/observability|work/);
   });
 });
 

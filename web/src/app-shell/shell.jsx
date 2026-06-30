@@ -5,14 +5,14 @@
 
 import React, { useState, useEffect, useRef, useContext, useMemo, useCallback } from 'react';
 import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { Button, Modal, Tooltip } from '../components/components.jsx';
+import { Button, Modal, Tooltip, Popover } from '../components/components.jsx';
 import { ToastProvider, useToastContext } from './toast-context.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
 import { resolveActiveTenant } from './active-tenant.js';
 import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
-import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
+import { NAV, ZONES, NAV_HOME, visibleItems, effectiveStatus } from './nav-config.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import RegisterScreen from '../screens/screen-register.jsx';
 import OverviewScreen from '../screens/screen-overview.jsx';
@@ -53,61 +53,56 @@ import OpsOverviewScreen from '../screens/screen-ops-overview.jsx';
 
 export { Icon };
 
-const RIGHTS_TABS = [
-  { id: "overview",    label: "Обзор ролей",       path: "/rights",              status: "live" },
-  { id: "intents",     label: "Повседневные операции",  path: "/rights/intents",  status: "live" },
-  { id: "editor",      label: "Редактор роли",      path: "/rights/editor",       status: "demo" },
-  { id: "criticality", label: "Критичность",        path: "/rights/criticality",  status: "live" },
-  { id: "sod",         label: "SoD",                path: "/rights/sod",          status: "live" },
-  { id: "trail",       label: "Журнал",             path: "/rights/trail",        status: "live" },
+// T-0538: RIGHTS_TABS расщеплены на два жанра (§5).
+// ACCESS — операционный просмотр грантов (пункт nav 'rights' / «Доступ»).
+const ACCESS_TABS = [
+  { id: "overview", label: "Обзор ролей", path: "/rights",       status: "live" },
+  { id: "trail",    label: "Журнал",      path: "/rights/trail", status: "live" },
+];
+// REFERENCE — справочные конструкты (пункт nav 'reference' / «Справочники»).
+const REFERENCE_TABS = [
+  { id: "criticality", label: "Критичность",          path: "/rights/criticality", status: "live" },
+  { id: "sod",         label: "SoD",                  path: "/rights/sod",         status: "live" },
+  { id: "editor",      label: "Каталог ролей",         path: "/rights/editor",      status: "demo" },
+  { id: "intents",     label: "Повседневные операции", path: "/rights/intents",     status: "live" },
 ];
 
 // NAV is imported from ./nav-config.js
 
-// SCREEN_META (T-0317 → T-0355): static [group, leaf] crumb per top-level screen.
-// Group labels track the re-sectioned IA in nav-config.js (authoring/work split).
-// This is the BASE crumb; the dynamic builder below extends it for deep,
-// param-aware routes (app field-editor, records, record detail) by injecting
-// entity names.
-// T-0355: authoring space (Конструктор/Модельер/Ассистент) is now separate from
-// work space (Работа/Исполнители и доступ/Наблюдаемость).
+// SCREEN_META (T-0317 → T-0355 → T-0538): static [zone, leaf] crumb per top-level screen.
+// T-0538: зоны обновлены на 4 новые (Работа/Конструктор/Наблюдаемость/Администрирование).
 const SCREEN_META = {
   overview: { crumb: ["Обзор"] },
-  // Authoring space
+  // Конструктор
   apps:  { crumb: ["Конструктор", "Приложения"] },
   "app-schema": { crumb: ["Конструктор", "Приложения"] },
   "app-records": { crumb: ["Конструктор", "Приложения"] },
   // T-0482: «Формы задач» скрыт из nav; /forms доступен по прямой ссылке.
   forms:  { crumb: ["Конструктор", "Привязка форм"] },
-  // T-0355: Модельер lives under /processes/:id/edit — the breadcrumb reflects
-  // the authoring space. The screen id seen in the pathname is "processes" for
-  // editor deep-routes; "modeler" is a nav-config logical alias only.
-  modeler: { crumb: ["Модельер"] },
-  assistant: { crumb: ["Ассистент"] },
-  // Work space
+  modeler: { crumb: ["Конструктор", "Модельер"] },
+  assistant: { crumb: ["Конструктор", "Ассистент"] },
+  // Работа
   inbox: { crumb: ["Работа", "Мои задачи"] },
-  org:   { crumb: ["Исполнители и доступ", "Оргструктура"] },
   processes: { crumb: ["Работа", "Процессы"] },
-  agents: { crumb: ["Исполнители и доступ", "Агенты"] },
+  // Наблюдаемость
   notifications: { crumb: ["Наблюдаемость", "Уведомления"] },
   audit: { crumb: ["Наблюдаемость", "Аудит"] },
-  rights: { crumb: ["Исполнители и доступ", "Права и доступ"] },
-  // T-0494: операционный обзор — три сигнала (процессы + расход + отчёты).
   "ops-overview": { crumb: ["Наблюдаемость", "Операционный обзор"] },
-  // T-0477 (E-AGENTS L5): LLM spend accounting screen.
   spend: { crumb: ["Наблюдаемость", "Расход"] },
-  // T-0490: отчёты — просмотр report_page + Floor-1 агрегаты.
   reports: { crumb: ["Наблюдаемость", "Отчёты"] },
-  // T-0493: аналитика процессов — цикл-тайм + нагрузка по исполнителям.
   "process-analytics": { crumb: ["Наблюдаемость", "Аналитика процессов"] },
-  // T-0474 (E-AGENTS L2): LLM connection-profile registry.
-  "llm-connections": { crumb: ["Конфигурация", "LLM-соединения"] },
-  // T-0382 (D5): LLM connection screen.
-  "llm-config": { crumb: ["Конфигурация", "LLM-подключение"] },
-  // T-0383 (D5/PD-6): assistant system prompt editor.
-  "assistant-prompt": { crumb: ["Конфигурация", "Промпт ассистента"] },
-  // T-0435: branch-rules editor — /processes/:processKey/branch-rules
-  // The route starts with "processes" so SCREEN_META.processes crumb applies by default.
+  // Администрирование
+  org:   { crumb: ["Администрирование", "Оргструктура"] },
+  agents: { crumb: ["Администрирование", "Агенты"] },
+  // T-0538: «Права и доступ» → «Доступ» (scope сужен после выноса справочников).
+  rights: { crumb: ["Администрирование", "Доступ"] },
+  // T-0538: Справочники — новая точка входа (id='reference', path=/rights/criticality).
+  reference: { crumb: ["Администрирование", "Справочники"] },
+  "llm-connections": { crumb: ["Администрирование", "LLM-соединения"] },
+  "llm-config": { crumb: ["Администрирование", "LLM-подключение"] },
+  "assistant-prompt": { crumb: ["Администрирование", "Промпт ассистента"] },
+  // T-0435: branch-rules editor — маршрут /processes/:processKey/branch-rules
+  // → «processes» → SCREEN_META.processes по умолчанию.
 };
 
 /**
@@ -177,6 +172,18 @@ function buildCrumbs(pathname, entities) {
       { label: `«${appName(appId)}»`, path: `/app-records/${appId}` },
       { label: 'Данные', path: `/app-records/${appId}` },
       { label: `Запись ${shortId(recId)}` },
+    ];
+  }
+
+  // T-0538: /rights/* sub-routes для крошек — определяем жанр по пути.
+  // reference-жанр: /rights/criticality, /rights/sod, /rights/editor, /rights/intents
+  // access-жанр: /rights (точно), /rights/trail
+  if (root === 'rights' && parts[1] && ['criticality', 'sod', 'editor', 'intents'].includes(parts[1])) {
+    const tab = REFERENCE_TABS.find((t) => t.path === '/' + parts.join('/'));
+    return [
+      { label: 'Администрирование' },
+      { label: 'Справочники', path: '/rights/criticality' },
+      { label: tab ? tab.label : parts[1] },
     ];
   }
 
@@ -276,7 +283,7 @@ async function downloadAuditLog(push) {
   }
 }
 
-function Topbar({ screen, pathname, theme, setTheme }) {
+function Topbar({ screen, pathname }) {
   const { entities } = useContext(CrumbContext);
   const { push } = useToastContext();
   // T-0317: dynamic, param-aware crumbs (entity names injected, parents linkable).
@@ -285,11 +292,9 @@ function Topbar({ screen, pathname, theme, setTheme }) {
   const right =
     screen === "inbox" ? (
       // T-0374 (B17): inbox no longer links to a generic process launcher.
-      // Processes start from configured entry points (create record / record_action).
       null
     ) : screen === "processes" ? (
       // T-0374 (B17): generic «Запустить процесс» runtime launcher dissolved.
-      // The topbar on the processes screen leads to the modeler (design-time only).
       <Button
         variant="secondary"
         size="sm"
@@ -300,11 +305,7 @@ function Topbar({ screen, pathname, theme, setTheme }) {
         Новый процесс
       </Button>
     ) : screen === "org" ? (
-      // T-0484: this topbar button was INERT (no onClick — looked clickable, did
-      // nothing). The real "add executor" controls (+ Сотрудник / + Роль /
-      // Назначить роль) live in the org tree toolbar and are owner-gated there.
-      // Make the affordance HONEST: disabled with a tooltip pointing to the
-      // working controls, instead of a dead button that silently swallows clicks.
+      // T-0484: this topbar button was INERT — make it honest.
       <Tooltip label="Добавить исполнителя можно в панели оргструктуры слева (+ Сотрудник / Назначить роль). Доступно владельцу тенанта.">
         <Button
           variant="secondary"
@@ -316,13 +317,11 @@ function Topbar({ screen, pathname, theme, setTheme }) {
         </Button>
       </Tooltip>
     ) : screen === "audit" ? (
-      // T-0138: download current instance audit log via GET /api/audit/export
-      // T-0528: errors surfaced via toast (push) instead of alert()
+      // T-0138: download current instance audit log
+      // T-0528: errors surfaced via toast
       <Button variant="secondary" size="sm" onClick={() => downloadAuditLog(push)}>Экспорт лога</Button>
-    ) : screen === "rights" ? (
-      // T-0484: this button was INERT (no onClick). No export-rights endpoint is
-      // wired yet — make the affordance honest (disabled + reason) rather than a
-      // dead button that looks functional.
+    ) : (screen === "rights" || screen === "reference") ? (
+      // T-0484 / T-0538: «Доступ» и «Справочники» — нет export endpoint, честный disabled.
       <Tooltip label="Экспорт прав пока недоступен — функция в разработке.">
         <Button variant="secondary" size="sm" disabled>Экспорт прав</Button>
       </Tooltip>
@@ -337,7 +336,6 @@ function Topbar({ screen, pathname, theme, setTheme }) {
               <React.Fragment key={i}>
                 {i > 0 && <span className="chs-crumbs__sep" aria-hidden="true">/</span>}
                 {seg.path && !isLast ? (
-                  // Parent segment → clickable up-nav (real route, kit link styling).
                   <Link className="chs-crumbs__seg chs-crumbs__seg--link" to={seg.path}>
                     {seg.label}
                   </Link>
@@ -356,22 +354,25 @@ function Topbar({ screen, pathname, theme, setTheme }) {
       </div>
       <div className="chs-topbar__right">
         {right}
-        <ThemeToggle theme={theme} setTheme={setTheme} />
+        {/* T-0538: ThemeToggle удалён из топбара → аккаунт-поповер в подвале сайдбара */}
       </div>
     </header>
   );
 }
 
-function RightsSubTabs() {
+// T-0538 (F2 review): суб-таб-бар показывается для screen ∈ {rights, reference}.
+// При rights → access-жанр [overview, trail]; при reference → reference-жанр [criticality, sod, editor, intents].
+function RightsSubTabs({ genre }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const active = RIGHTS_TABS.find((t) =>
+  const tabs = genre === "reference" ? REFERENCE_TABS : ACCESS_TABS;
+  const active = tabs.find((t) =>
     t.path === location.pathname ||
     (t.path !== "/rights" && location.pathname.startsWith(t.path))
-  )?.id || "overview";
+  )?.id || tabs[0]?.id;
   return (
     <div className="chs-subtabs">
-      {RIGHTS_TABS.map((t) => (
+      {tabs.map((t) => (
         // The «демо» badge is rendered as a sibling of the button (not nested
         // inside it) so the kit Tooltip can wrap it without putting a focusable
         // tooltip-trigger inside an interactive <button> (invalid markup).
@@ -481,6 +482,154 @@ function CommandPalette({ open, onClose, onGo }) {
   );
 }
 
+/**
+ * T-0538: аккаунт-поповер в подвале сайдбара.
+ * Пункты: Профиль/Мои настройки=скоро, Уведомления, Тема, Сменить организацию, Выйти.
+ * Строится на kit Popover (Esc, клик-вне). Триггер — настоящий <button> с aria-haspopup.
+ * «скоро»/honest-disabled — aria-disabled + видимая причина (не native title).
+ */
+function AccountMenu({ user, theme, setTheme, onLogout, onNavigate, orgLabel }) {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+
+  const go = (path) => {
+    setOpen(false);
+    navigate(path);
+    if (onNavigate) onNavigate(path);
+  };
+
+  const glyph = user.name.split(' ').slice(0, 2).map((w) => w[0]).join('');
+
+  const trigger = (
+    <button
+      type="button"
+      className="chs-nav__account-trigger"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      onClick={() => setOpen((v) => !v)}
+    >
+      <div className="chs-nav__userglyph">{glyph}</div>
+      <div className="chs-nav__userinfo">
+        <span className="chs-nav__username">{user.name}</span>
+        <span className="chs-nav__userrole">{user.position}</span>
+      </div>
+      <Icon name="chevron-up" className={`chs-nav__account-chevron ${open ? "chs-nav__account-chevron--open" : ""}`} />
+    </button>
+  );
+
+  return (
+    <div className="chs-nav__foot">
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        trigger={trigger}
+        placement="top"
+        align="start"
+        className="chs-nav__account-popover-root"
+      >
+        <div className="chs-account-menu" role="menu" aria-label="Меню аккаунта">
+          {/* Карточка — заголовок (не кликабельная навигация, только идентичность) */}
+          <div className="chs-account-menu__header" aria-hidden="true">
+            <div className="chs-nav__userglyph chs-nav__userglyph--lg">{glyph}</div>
+            <div>
+              <div className="chs-account-menu__name">{user.name}</div>
+              <div className="chs-account-menu__org">{orgLabel || "—"}</div>
+            </div>
+          </div>
+
+          <div className="chs-account-menu__divider" />
+
+          {/* Профиль — скоро */}
+          <button
+            type="button"
+            role="menuitem"
+            className="chs-account-menu__item chs-account-menu__item--disabled"
+            aria-disabled="true"
+          >
+            <Icon name="org" className="chs-account-menu__icon" />
+            <span>Профиль</span>
+            <span className="chs-account-menu__badge">скоро</span>
+          </button>
+          <span className="chs-account-menu__reason">Страница профиля в разработке</span>
+
+          {/* Мои настройки — скоро */}
+          <button
+            type="button"
+            role="menuitem"
+            className="chs-account-menu__item chs-account-menu__item--disabled"
+            aria-disabled="true"
+          >
+            <Icon name="apps" className="chs-account-menu__icon" />
+            <span>Мои настройки</span>
+            <span className="chs-account-menu__badge">скоро</span>
+          </button>
+          <span className="chs-account-menu__reason">Пользовательские настройки в разработке</span>
+
+          {/* Уведомления */}
+          <button
+            type="button"
+            role="menuitem"
+            className="chs-account-menu__item"
+            onClick={() => go('/notifications')}
+          >
+            <Icon name="bell" className="chs-account-menu__icon" />
+            <span>Уведомления</span>
+          </button>
+
+          {/* Тема — inline-переключатель */}
+          <div className="chs-account-menu__item chs-account-menu__item--theme" role="group" aria-label="Тема оформления">
+            <Icon name="moon" className="chs-account-menu__icon" />
+            <span>Тема</span>
+            <div className="chs-theme-toggle chs-theme-toggle--compact">
+              <button
+                type="button"
+                aria-pressed={theme === "dark"}
+                className={theme === "dark" ? "chs-theme-toggle__btn--active" : ""}
+                onClick={() => setTheme("dark")}
+              >
+                <Icon name="moon" /> Тёмная
+              </button>
+              <button
+                type="button"
+                aria-pressed={theme === "light"}
+                className={theme === "light" ? "chs-theme-toggle__btn--active" : ""}
+                onClick={() => setTheme("light")}
+              >
+                <Icon name="sun" /> Светлая
+              </button>
+            </div>
+          </div>
+
+          {/* Сменить организацию — honest-disabled (silo-only deploy сейчас) */}
+          <button
+            type="button"
+            role="menuitem"
+            className="chs-account-menu__item chs-account-menu__item--disabled"
+            aria-disabled="true"
+          >
+            <Icon name="org" className="chs-account-menu__icon" />
+            <span>Сменить организацию</span>
+          </button>
+          <span className="chs-account-menu__reason">Несколько организаций недоступно в вашем тарифе</span>
+
+          <div className="chs-account-menu__divider" />
+
+          {/* Выйти */}
+          <button
+            type="button"
+            role="menuitem"
+            className="chs-account-menu__item chs-account-menu__item--danger"
+            onClick={() => { setOpen(false); onLogout(); }}
+          >
+            <Icon name="logout" className="chs-account-menu__icon" />
+            <span>Выйти</span>
+          </button>
+        </div>
+      </Popover>
+    </div>
+  );
+}
+
 function AppShell() {
   const [theme, setThemeState] = useState(() => localStorage.getItem("chs-theme") || "light");
   const [rightsFocus, setRightsFocus] = useState(null);
@@ -574,6 +723,8 @@ function AppShell() {
   // crumb honest during the redirect tick).
   const pathParts = location.pathname.split('/').filter(Boolean);
   const screen = pathParts[0] || "overview";
+  // T-0538: alias for readability in zone/subtab logic below.
+  const root = screen;
 
   // T-0317: which application id (if any) the current route is about. Deep
   // constructor routes carry it as the first param (/app-schema/:appId,
@@ -710,70 +861,112 @@ function AppShell() {
         />
 
         <div className="chs-nav__scroll">
-          {/* T-0355: two-space IA — АВТОРИНГ (authoring) then РАБОТА (work).
-              A visual space-divider is injected once, at the transition point,
-              so the user immediately sees which space they are in. The home
-              «Обзор» group sits above both spaces (no space label). */}
-          {(() => {
-            let renderedDivider = false;
-            return NAV.map((grp) => {
-              const items = visibleItems(grp);
-              if (items.length === 0) return null;
+          {/* T-0538: 4-zone IA.
+              1. NAV_HOME («Обзор») — одиночный пункт без заголовка зоны.
+              2. ZONES[0..3] — РАБОТА · КОНСТРУКТОР · НАБЛЮДАЕМОСТЬ · АДМИНИСТРИРОВАНИЕ.
+              Каждая зона: заголовок-разделитель + пункты (c подгруппами в admin).
+              Визуальный разделитель (chs-nav__space-divider) перед каждой зоной. */}
 
-              // Inject the space divider exactly once, before the first 'work' group.
-              let divider = null;
-              if (grp.space === "work" && !renderedDivider) {
-                renderedDivider = true;
-                divider = (
-                  <div key="__space-divider" className="chs-nav__space-divider" aria-hidden="true" />
-                );
-              }
-
-              const groupEl = (
-                <div className="chs-nav__group" key={grp.group}>
-                  {/* T-0326: home group («Обзор») renders as a single top item
-                      without a group label — a header over one choice is noise.
-                      T-0355: groups with a single visible item in authoring space
-                      (Модельер, Ассистент) still show their label — each is a
-                      distinct tool, not a spurious header. */}
-                  {!grp.home && <div className="chs-nav__grouplabel">{grp.group}</div>}
-                  {items.map((item) => {
-                    // T-0355: active detection for items with a `path` override.
-                    // Модельер (path=/processes/new/edit) should also highlight when
-                    // editing an existing process (/processes/:id/edit). We detect the
-                    // BPMN editor by checking for the /edit suffix in the pathname,
-                    // which only matches the deep editor route, not bare /processes.
-                    // Items without a path override use the standard screen-id match.
-                    const isActive = item.path
-                      ? location.pathname.endsWith('/edit')
-                      : screen === item.id;
-                    return (
-                      <NavItem key={item.id} item={item} active={isActive} />
-                    );
-                  })}
-                </div>
-              );
-
-              return divider ? [divider, groupEl] : groupEl;
-            });
-          })()}
-        </div>
-
-        <div className="chs-nav__foot">
-          <div className="chs-nav__userglyph">{devUser.name.split(' ').slice(0, 2).map((word) => word[0]).join('')}</div>
-          <div className="chs-nav__userinfo">
-            <span className="chs-nav__username">{devUser.name}</span>
-            <span className="chs-nav__userrole">{devUser.position}</span>
+          {/* Home: «Обзор» без заголовка */}
+          <div className="chs-nav__group">
+            <NavItem
+              item={NAV_HOME}
+              active={screen === NAV_HOME.id}
+            />
           </div>
-          <button onClick={handleLogout} title="Выйти" className="chs-nav__logout-btn">
-            Выйти
-          </button>
+
+          {/* Зоны */}
+          {ZONES.map((zone) => {
+            const items = visibleItems(zone);
+            if (items.length === 0) return null;
+
+            // Для зоны admin — группируем пункты по subgroup.
+            // Для остальных зон — плоский список.
+            const renderZoneItems = () => {
+              if (zone.id !== "admin") {
+                return items.map((item) => {
+                  const isActive = item.path
+                    // Модельер (path=/processes/new/edit): активен при /edit в pathname.
+                    ? (item.id === "modeler" ? location.pathname.endsWith('/edit') : location.pathname === item.path)
+                    : screen === item.id;
+                  return <NavItem key={item.id} item={item} active={isActive} />;
+                });
+              }
+              // Admin: сгруппировать по subgroup
+              const subgroups = [];
+              const seen = new Set();
+              for (const item of items) {
+                const sg = item.subgroup || "";
+                if (!seen.has(sg)) { seen.add(sg); subgroups.push(sg); }
+              }
+              return subgroups.map((sg) => {
+                const sgItems = items.filter((i) => (i.subgroup || "") === sg);
+                // Подгруппу с 1+ пунктами показываем с мини-заголовком, если группа не пустая.
+                return (
+                  <div className="chs-nav__subgroup" key={sg}>
+                    {sg && <div className="chs-nav__subgrouplabel">{sg}</div>}
+                    {sgItems.map((item) => {
+                      // T-0538: активность admin-пунктов с тонкой логикой /rights/*.
+                      // 'reference' (path=/rights/criticality): активен когда на reference-жанре.
+                      // 'rights' (no path): активен ТОЛЬКО на access-жанре (/rights, /rights/trail),
+                      //   но НЕ на reference-жанре (/rights/criticality|sod|editor|intents).
+                      // Остальные: path-точное совпадение ИЛИ screen-id.
+                      const isReferenceSubRoute = root === "rights" && ['criticality', 'sod', 'editor', 'intents'].includes(pathParts[1]);
+                      let itemActive;
+                      if (item.id === "reference") {
+                        itemActive = isReferenceSubRoute || location.pathname === (item.path || '/' + item.id);
+                      } else if (item.id === "rights") {
+                        // access-жанр: /rights или /rights/trail, но НЕ reference sub-routes
+                        itemActive = root === "rights" && !isReferenceSubRoute;
+                      } else if (item.path) {
+                        itemActive = location.pathname === item.path;
+                      } else {
+                        itemActive = screen === item.id;
+                      }
+                      return (
+                        <NavItem
+                          key={item.id}
+                          item={item}
+                          active={itemActive}
+                        />
+                      );
+                    })}
+                  </div>
+                );
+              });
+            };
+
+            return (
+              <React.Fragment key={zone.id}>
+                <div className="chs-nav__space-divider" aria-hidden="true" />
+                <div className="chs-nav__group">
+                  <div className="chs-nav__grouplabel">{zone.label}</div>
+                  {renderZoneItems()}
+                </div>
+              </React.Fragment>
+            );
+          })}
         </div>
+
+        {/* T-0538: аккаунт-поповер заменяет статичный подвал + плавающую «Выйти» */}
+        <AccountMenu
+          user={devUser}
+          theme={theme}
+          setTheme={setTheme}
+          onLogout={handleLogout}
+          orgLabel={orgLabel}
+        />
       </aside>
 
       <main className="chs-main">
-        <Topbar screen={screen} pathname={location.pathname} theme={theme} setTheme={setTheme} />
-        {screen === "rights" && <RightsSubTabs />}
+        <Topbar screen={screen} pathname={location.pathname} />
+        {/* T-0538 (F2): суб-таб-бар для screen ∈ {rights, reference}.
+            /rights и /rights/trail → access-жанр (обзор грантов + журнал).
+            /rights/criticality|sod|editor|intents → reference-жанр (справочники).
+            Примечание: 'reference' nav-id — path-override на /rights/criticality,
+            поэтому screen будет 'rights' для всех /rights/* маршрутов. */}
+        {root === "rights" && !['criticality','sod','editor','intents'].includes(pathParts[1]) && <RightsSubTabs genre="access" />}
+        {root === "rights" && ['criticality','sod','editor','intents'].includes(pathParts[1]) && <RightsSubTabs genre="reference" />}
         <div className="chs-screen">
           <Routes>
             {/* T-0326: default landing → «Обзор» (orienting home), not the bare

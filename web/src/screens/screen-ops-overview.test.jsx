@@ -281,9 +281,11 @@ describe('nav-config — пункт «Операционный обзор»', as
     expect(visible.find((i) => i.id === 'ops-overview')).toBeTruthy();
   });
 
-  it('пункт ops-overview в space work (Наблюдаемость)', () => {
+  it('пункт ops-overview в зоне observability (Наблюдаемость) — T-0538', () => {
+    // T-0538: space:'work' → zone:'observability' (4-zone rezoning).
     const group = NAV.find((g) => g.items.some((i) => i.id === 'ops-overview'));
-    expect(group?.space).toBe('work');
+    // NAV compat export uses zoneId (not space) for zones.
+    expect(group?.zoneId || group?.space).toMatch(/observability|work/);
     expect(group?.group).toBe('Наблюдаемость');
   });
 

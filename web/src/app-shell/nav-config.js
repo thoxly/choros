@@ -1,212 +1,152 @@
 /* ============================================================================
    CHOROS — nav-config.js
-   Конфигурация навигационных пунктов + статусная классификация.
+   Конфигурация навигационных зон и пунктов.
+
+   T-0538 (NAV-IA / Ф1): пересборка из 2 пространств (authoring/work) в
+   4 операционные зоны (work · constructor · observability · admin).
 
    status:
      'live' — реальные данные и действия работают на деплое
      'demo' — рендерит, но данные mock/seed или действия не функциональны
      'soon' — ещё не построено (disabled)
-   hidden: true — скрыть из навигации полностью
+   hidden: true — скрыть из навигации полностью (маршрут жив)
    path   — переопределяет маршрут перехода (по умолчанию '/' + id).
-            Используется для авторинг-инструментов, которые ещё не имеют
-            отдельного top-level маршрута (например, Модельер → /processes/new/edit).
+   zone   — операционная зона ('work'|'constructor'|'observability'|'admin'|null)
+   capability — ЗАДЕЛ под T-0539: null ⇒ видно всем (фильтрация НЕ реализована)
+   audience   — семантический ярлык (информативно, не gate)
+   frequency  — как часто нужен (информативно)
 
-   Классификация пересматривается при каждом новом подключении экрана к реальным API.
-   Каждый пункт nav со статусом 'demo' или 'soon' ОБЯЗАН быть помечен
-   соответствующим бейджем в NavItem; hidden-пункты не рендерятся вовсе.
-
-   ИА (T-0317 → T-0355):
-   Два чётких пространства — АВТОРИНГ и РАБОТА — разделены визуальным
-   разделителем в сайдбаре (shell.jsx).
-
-   АВТОРИНГ (space: 'authoring') — для внедренца и агента:
-     • КОНСТРУКТОР — собираю решение из примитивов (приложения, поля, формы);
-     • МОДЕЛЬЕР — рисую BPMN-процессы;
-     • АССИСТЕНТ — AI-консоль авторинга и аналитики.
-
-   РАБОТА (space: 'work') — для конечного пользователя:
-     • РАБОТА — делаю задачи и веду процессы;
-     • ИСПОЛНИТЕЛИ И ДОСТУП — модель исполнителя (оргструктура, агенты, права);
-     • НАБЛЮДАЕМОСТЬ — уведомления, аудит, бюджеты.
-
-   «Раздел» (Финансы/HR/Продажи) — лёгкий конструкт группировки приложений по
-   бизнес-функции, создаётся внедренцем/агентом. Пока не построен динамически:
-   приложения группируются статично в «Работа». E16 добавит динамические разделы
-   поверх этой IA-основы (T-0349).
+   Зоны в порядке рендера:
+   1 РАБОТА · 2 КОНСТРУКТОР · 3 НАБЛЮДАЕМОСТЬ · 4 АДМИНИСТРИРОВАНИЕ
 
    Группы с одним пунктом не заводим (заголовок без выбора — шум).
-   Пути маршрутов НЕ меняются — только ярлыки и группировка.
+   Пути маршрутов НЕ меняются — только ярлыки и группировка (инвариант §6).
    ============================================================================ */
 
 /**
  * @typedef {'live' | 'demo' | 'soon'} NavStatus
- * @typedef {'authoring' | 'work'} NavSpace
- * @typedef {{ id: string, label: string, icon: string, path?: string, screen?: boolean, soon?: boolean, hidden?: boolean, status: NavStatus, count?: number }} NavItem
- * @typedef {{ group: string, space?: NavSpace, items: NavItem[], home?: boolean }} NavGroup
+ * @typedef {'work' | 'constructor' | 'observability' | 'admin'} NavZoneId
+ * @typedef {'end-user' | 'builder' | 'manager' | 'admin'} NavAudience
+ * @typedef {'daily' | 'weekly' | 'rare'} NavFrequency
+ *
+ * @typedef {Object} NavItem
+ * @property {string}          id          стабильный id (== screen-id, основа маршрута)
+ * @property {string}          label       человеко-понятный ярлык (ru)
+ * @property {string}          icon        kit Lucide icon name
+ * @property {NavZoneId|null}  zone        зона (null = home над зонами)
+ * @property {NavAudience}     audience    для кого (дефолт = zone.audience)
+ * @property {string|null}     capability  ЗАДЕЛ под T-0539: null ⇒ видно всем
+ * @property {NavFrequency}    frequency   частота (информативно)
+ * @property {number}          order       порядок внутри зоны
+ * @property {string=}         subgroup    подгруппа внутри зоны admin
+ * @property {string=}         path        переопределение маршрута
+ * @property {boolean=}        screen      есть реальный экран/маршрут
+ * @property {boolean=}        hidden      скрыт из nav (маршрут жив)
+ * @property {NavStatus}       status      live | demo | soon
+ *
+ * @typedef {Object} NavZone
+ * @property {NavZoneId}    id        идентификатор зоны
+ * @property {string}       label     Работа|Конструктор|Наблюдаемость|Администрирование
+ * @property {NavAudience}  audience  дефолтная аудитория зоны
+ * @property {number}       order     порядок зон в сайдбаре (1..4)
+ * @property {NavItem[]}    items     пункты зоны (в порядке item.order)
  */
 
-/** @type {NavGroup[]} */
-export const NAV = [
+/** Одиночный home-пункт «Обзор» — НАД зонами, рендерится без заголовка.
+ *  @type {NavItem} */
+export const NAV_HOME = {
+  id: "overview", label: "Обзор", icon: "apps",
+  zone: null, audience: "end-user", capability: null, frequency: "daily", order: 0,
+  screen: true, status: "live",
+};
+
+/** Четыре операционные зоны. Экспортируется для рендера сайдбара и тестов.
+ *  @type {NavZone[]} */
+export const ZONES = [
+  // ── 1. РАБОТА — делаю задачи, веду процессы. Аудитория: конечный пользователь.
   {
-    // T-0326: домашний раздел «Обзор» — точка входа над группами. Это НЕ группа
-    // в смысле §«заголовок без выбора = шум»: помечен `home: true`, шелл рисует
-    // его как одиночный пункт БЕЗ заголовка-ярлыка (см. shell.jsx nav-рендер).
-    // Обзор стоит над двумя пространствами — не принадлежит ни одному.
-    group: "Обзор",
-    home: true,
+    id: "work", label: "Работа", audience: "end-user", order: 1,
     items: [
-      // Обзор: домашний дашборд. Живые счётчики тянет сам экран из live-API
-      // (applications / inbox / processes) — в nav счётчик не дублируем (T-0307 #5).
-      { id: "overview", label: "Обзор", icon: "apps", screen: true, status: "live" },
+      // Мои задачи: GET /api/inbox (live), claim/action (live).
+      { id: "inbox",     label: "Мои задачи", icon: "inbox",   zone: "work", audience: "end-user", capability: null, frequency: "daily",  order: 1, screen: true, status: "live" },
+      // Процессы: GET /api/processes (live), start (live).
+      { id: "processes", label: "Процессы",   icon: "process", zone: "work", audience: "end-user", capability: null, frequency: "daily",  order: 2, screen: true, status: "live" },
     ],
   },
 
-  // ── АВТОРИНГ ─────────────────────────────────────────────────────────────
-  // Инструменты для внедренца и агента: строить, моделировать, настраивать.
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── 2. КОНСТРУКТОР — собираю решение из примитивов. Аудитория: внедренец/агент.
   {
-    group: "Конструктор",
-    space: "authoring",
+    id: "constructor", label: "Конструктор", audience: "builder", order: 2,
     items: [
-      // Приложения: GET /api/applications (live), POST /api/applications (live) — T-0262/T-0265.
-      // Первый реальный create-экран продукта (E13): список + работающая «Создать приложение».
-      { id: "apps", label: "Приложения", icon: "apps", screen: true, status: "live" },
-      // Формы задач (T-0482): убрана из навигации — пункт был дублирующим.
-      // Привязка формы к шагу userTask → UserTaskFormBindingPanel в модельере (T-0461).
-      // Запись-форма автогенерируется через FieldControl (F1-рендерер, T-0480).
-      // Маршрут /forms сохранён для прямых ссылок; в сайдбар не попадает.
-      { id: "forms", label: "Формы задач", icon: "forms", screen: true, status: "demo", hidden: true },
-    ],
-  },
-  {
-    // Модельер (T-0323): BPMN-редактор процессов. Отдельная группа в авторинг-пространстве.
-    // Маршрут: /processes/new/edit (существующий deep-route через screen-processes.jsx).
-    // Собственный top-level маршрут /modeler появится в E16 (T-0349); пока — demo-вход.
-    group: "Модельер",
-    space: "authoring",
-    items: [
-      {
-        id: "modeler",
-        label: "Модельер",
-        icon: "process",
-        // Перенаправляет на существующий BPMN-редактор (новый процесс).
-        // Маршрут /processes/new/edit уже существует; route /modeler добавится в E16.
-        path: "/processes/new/edit",
-        screen: true,
-        status: "live",
-      },
-    ],
-  },
-  {
-    // Ассистент (E17 T-0358): AI-консоль авторинга и аналитики. КОНФИГУРАТОР (авторит
-    // модель E16 в DRAFT, promote человеком) + АНАЛИТИК (read-only по данным + журналу).
-    // Shell-only: LLM-роутинг = T-0359/T-0360. demo пока: реального бэкенда нет.
-    group: "Ассистент",
-    space: "authoring",
-    items: [
-      { id: "assistant", label: "Ассистент", icon: "assistant", screen: true, status: "demo" },
+      // Приложения: GET /api/applications (live), POST (live). E13.
+      { id: "apps",      label: "Приложения",  icon: "apps",      zone: "constructor", audience: "builder", capability: null, frequency: "weekly", order: 1, screen: true, status: "live" },
+      // Формы задач: убраны из nav (hidden), маршрут /forms жив. T-0482.
+      { id: "forms",     label: "Формы задач", icon: "forms",     zone: "constructor", audience: "builder", capability: null, frequency: "weekly", order: 2, screen: true, status: "demo", hidden: true },
+      // Модельер: BPMN-редактор. Маршрут /processes/new/edit (path-override). T-0323.
+      { id: "modeler",   label: "Модельер",    icon: "process",   zone: "constructor", audience: "builder", capability: null, frequency: "weekly", order: 3, path: "/processes/new/edit", screen: true, status: "live" },
+      // Ассистент: AI-консоль авторинга и аналитики. E17.
+      { id: "assistant", label: "Ассистент",   icon: "assistant", zone: "constructor", audience: "builder", capability: null, frequency: "weekly", order: 4, screen: true, status: "demo" },
     ],
   },
 
-  // ── РАБОТА ────────────────────────────────────────────────────────────────
-  // Пространство конечного пользователя: делать задачи, вести процессы,
-  // управлять исполнителями, наблюдать за системой.
-  // Функциональные домены (Финансы/HR/Продажи) — динамические разделы E16 (T-0349);
-  // статически группируем всё как «Работа» до их появления.
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── 3. НАБЛЮДАЕМОСТЬ — смотрю, как система работает. Аудитория: менеджер.
   {
-    group: "Работа",
-    space: "work",
+    id: "observability", label: "Наблюдаемость", audience: "manager", order: 3,
     items: [
-      // Мои задачи (бывш. «Инбокс задач»): GET /api/inbox (live), POST /api/inbox/:id/claim
-      // (live), POST /api/inbox/:id/action (live). Человеко-понятный ярлык вместо дев-«инбокс».
-      { id: "inbox",     label: "Мои задачи", icon: "inbox",   screen: true, status: "live" },
-      // Процессы: GET /api/processes (live), POST /api/processes/start (live)
-      { id: "processes", label: "Процессы",   icon: "process", screen: true, status: "live" },
-    ],
-  },
-  {
-    group: "Исполнители и доступ",
-    space: "work",
-    items: [
-      // Оргструктура (T-0269): дерево GET /api/org + РЕАЛЬНЫЙ CRUD над существующими
-      // эндпойнтами — POST /api/{departments,positions,employees,roles}, POST
-      // /api/role-assignments, DELETE /api/{…}/:id (genesis-owner gate). UUID для записи
-      // берутся из GET /api/org/tenant-state. Карточка исполнителя ещё иллюстративна
-      // (честно помечена), но дерево + создание/удаление/назначение — живые → live.
-      { id: "org",       label: "Оргструктура",  icon: "org",    screen: true, status: "live" },
-      // Агенты (T-0271): GET /api/agents (live, метаданные без секретов), POST
-      // /api/agents/hire (live), POST /api/agents/:id/secret-handle (live — привязка
-      // LLM через секрет-хэндл). Список + создание + привязка LLM — живые → live.
-      { id: "agents",    label: "Агенты",        icon: "org",    screen: true, status: "live" },
-      // Права: обзор GET /api/rights (live), интенты (live), журнал GET /api/grant-trail (live).
-      // Суб-вкладки «Редактор», «Критичность», «SoD» — mock-данные (demo, см. RIGHTS_TABS).
-      { id: "rights",    label: "Права и доступ", icon: "rights", screen: true, status: "live" },
-    ],
-  },
-  {
-    group: "Наблюдаемость",
-    space: "work",
-    items: [
-      // Операционный обзор (T-0494): три сигнала в одной панели (процессы + расход + отчёты).
-      // GET /api/process-analytics + /api/spend + /api/applications — живые → live.
-      // Первым в группе: точка входа в наблюдаемость.
-      { id: "ops-overview", label: "Операционный обзор", icon: "audit", screen: true, status: "live" },
-      // Уведомления: GET /api/notifications (live), mark-read/all (live), preferences (live)
-      { id: "notifications", label: "Уведомления", icon: "bell",   screen: true, status: "live" },
-      // Аудит: GET /api/audit (live), GET /api/audit/export (live)
-      { id: "audit",         label: "Аудит",       icon: "audit",  screen: true, status: "live" },
+      // Операционный обзор (T-0494): три сигнала в одной панели.
+      { id: "ops-overview",      label: "Операционный обзор",  icon: "audit",  zone: "observability", audience: "manager",  capability: null, frequency: "weekly", order: 1, screen: true, status: "live" },
+      // Отчёты (T-0490).
+      { id: "reports",           label: "Отчёты",              icon: "audit",  zone: "observability", audience: "manager",  capability: null, frequency: "weekly", order: 2, screen: true, status: "live" },
+      // Аналитика процессов (T-0493).
+      { id: "process-analytics", label: "Аналитика процессов", icon: "audit",  zone: "observability", audience: "manager",  capability: null, frequency: "weekly", order: 3, screen: true, status: "live" },
+      // Аудит: GET /api/audit (live).
+      { id: "audit",             label: "Аудит",               icon: "audit",  zone: "observability", audience: "manager",  capability: null, frequency: "weekly", order: 4, screen: true, status: "live" },
       // Расход (T-0477, E-AGENTS L5): учёт стоимости LLM-вызовов.
-      // GET /api/spend (aggregates) + GET /api/spend/recent — живые → live.
-      // Без лимитов/потолков (Stage-2, decision 3). Только учёт + показ.
-      { id: "spend",         label: "Расход",       icon: "budget", screen: true, status: "live" },
-      // Отчёты (T-0490): просмотр report_page + Floor-1 агрегаты.
-      // GET /api/report-pages + GET /api/report-pages/:id/render — живые → live.
-      { id: "reports",       label: "Отчёты",       icon: "audit",  screen: true, status: "live" },
-      // Аналитика процессов (T-0493): цикл-тайм + нагрузка по исполнителям.
-      // GET /api/process-analytics — живой → live.
-      { id: "process-analytics", label: "Аналитика процессов", icon: "audit", screen: true, status: "live" },
+      { id: "spend",             label: "Расход",              icon: "budget", zone: "observability", audience: "manager",  capability: null, frequency: "weekly", order: 5, screen: true, status: "live" },
+      // Уведомления (быстрый доступ дублируется в аккаунт-поповере на тот же /notifications).
+      { id: "notifications",     label: "Уведомления",         icon: "bell",   zone: "observability", audience: "end-user", capability: null, frequency: "daily",  order: 6, screen: true, status: "live" },
     ],
   },
-  // T-0382 (D5): LLM-подключение — настройка BYO LLM для тенанта.
-  // T-0383 (D5/PD-6): Промпт ассистента — редактор системного промпта.
-  // GET /api/llm-config (live), PUT /api/llm-config (live).
-  // GET/PUT /api/assistant/prompt/:role (live).
-  // Секрет-хэндл настраивается отдельно через экран «Агенты» → «Привязать LLM».
+
+  // ── 4. АДМИНИСТРИРОВАНИЕ — настраиваю исполнителей/доступ/справочники/интеграции.
+  //    Подгруппы: Исполнители · Доступ · Справочники · Интеграции и LLM
   {
-    group: "Конфигурация",
-    space: "work",
+    id: "admin", label: "Администрирование", audience: "admin", order: 4,
     items: [
-      // T-0474 (E-AGENTS L2): именованные профили LLM-подключений (реестр).
-      // GET/POST /api/llm-connections (live).
-      {
-        id: "llm-connections",
-        label: "LLM-соединения",
-        icon: "assistant",
-        screen: true,
-        status: "live",
-      },
-      {
-        id: "llm-config",
-        label: "LLM-подключение",
-        icon: "assistant",
-        screen: true,
-        status: "live",
-      },
-      {
-        id: "assistant-prompt",
-        label: "Промпт ассистента",
-        icon: "assistant",
-        screen: true,
-        status: "live",
-      },
+      // Исполнители
+      { id: "org",               label: "Оргструктура",       icon: "org",       zone: "admin", subgroup: "Исполнители",        audience: "admin", capability: null, frequency: "rare", order: 1, screen: true, status: "live" },
+      { id: "agents",            label: "Агенты",             icon: "org",       zone: "admin", subgroup: "Исполнители",        audience: "admin", capability: null, frequency: "rare", order: 2, screen: true, status: "live" },
+      // Доступ (T-0538): операционный просмотр грантов (overview + журнал).
+      // Ярлык изменён с «Права и доступ» → «Доступ» (scope сужен после выноса справочников в 'reference').
+      { id: "rights",            label: "Доступ",             icon: "rights",    zone: "admin", subgroup: "Доступ",             audience: "admin", capability: null, frequency: "rare", order: 3, screen: true, status: "live" },
+      // Справочники (T-0538): вынос из RIGHTS_TABS — критичность/SoD/каталог ролей/интенты.
+      // path:/rights/criticality — существующий маршрут (инвариант §6).
+      // F1 (review): в FF-NAV-MAP это новая точка входа, не потеря; id='reference' добавлен сознательно.
+      { id: "reference",         label: "Справочники",        icon: "rights",    zone: "admin", subgroup: "Справочники",        audience: "admin", capability: null, frequency: "rare", order: 4, screen: true, status: "live", path: "/rights/criticality" },
+      // Интеграции и LLM
+      { id: "llm-connections",   label: "LLM-соединения",     icon: "assistant", zone: "admin", subgroup: "Интеграции и LLM",  audience: "admin", capability: null, frequency: "rare", order: 5, screen: true, status: "live" },
+      { id: "llm-config",        label: "LLM-подключение",    icon: "assistant", zone: "admin", subgroup: "Интеграции и LLM",  audience: "admin", capability: null, frequency: "rare", order: 6, screen: true, status: "live" },
+      { id: "assistant-prompt",  label: "Промпт ассистента",  icon: "assistant", zone: "admin", subgroup: "Интеграции и LLM",  audience: "admin", capability: null, frequency: "rare", order: 7, screen: true, status: "live" },
     ],
   },
 ];
 
 /**
- * Возвращает только видимые пункты группы (hidden: true отфильтровывается).
- * @param {NavGroup} group
+ * NAV: совместимый экспорт для паллитры и SCREEN_META.
+ * paletteDestinations() итерирует по NAV (grp.items), item.screen && status!=='soon'.
+ * Сформирован из NAV_HOME + всех items всех ZONES — ни один пункт не теряется.
+ *
+ * Структура group/items сохранена для обратной совместимости CommandPalette.
+ * @type {Array<{group: string, home?: boolean, items: NavItem[]}>}
+ */
+export const NAV = [
+  { group: "Обзор", home: true, items: [NAV_HOME] },
+  ...ZONES.map((z) => ({ group: z.label, zoneId: z.id, items: z.items })),
+];
+
+/**
+ * Возвращает только видимые пункты (hidden: true отфильтровывается).
+ * @param {{ items: NavItem[] }} group  NavGroup или NavZone
  * @returns {NavItem[]}
  */
 export function visibleItems(group) {
