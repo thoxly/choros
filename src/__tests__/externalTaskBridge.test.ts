@@ -45,6 +45,9 @@ function makeExternalTask(over: Partial<ExternalTask> = {}): ExternalTask {
     id: over.id ?? "ext-task-aaaa",
     topic: over.topic ?? "invoice-process",
     processInstanceId: over.processInstanceId ?? "proc-1111",
+    // T-0534: processDefinitionKey is now a required ExternalTask field.
+    // Default empty string mirrors the pre-T-0534 behaviour (no wire field).
+    processDefinitionKey: over.processDefinitionKey ?? "",
     variables: over.variables ?? { approved: true },
     lockOwner: over.lockOwner ?? WORKER_ID,
     lockExpirationTime: over.lockExpirationTime ?? new Date(Date.now() + 30_000).toISOString(),
@@ -846,6 +849,343 @@ describe("DG-16: tel-intake bridge behavior — approvalRequired reaches complet
     // The AUTHORED routing var name reaches Flowable — NOT "approvalRequired".
     expect((calledVars as Record<string, unknown>)["needsHeadApproval"]).toBe("yes");
     expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Block F — T-0534 per-process scope (process_def_id / instance_id at enqueue)
+// ---------------------------------------------------------------------------
+describe("Block F — T-0534: processDefinitionKey + processInstanceId captured at enqueue", () => {
+  it("T0534-A1: runBridgeOnce passes processDefinitionKey + processInstanceId to enqueue", async () => {
+    // Verifies the bridge forwards process scope to the jobStore at enqueue time.
+    const client = new MockFlowableClient();
+
+    const capturedEnqueue: Array<{
+      topic: string;
+      variables: Record<string, unknown>;
+      retries: number;
+      idempotencyKey?: string;
+      processDefId?: string;
+      instanceId?: string;
+    }> = [];
+
+    const jobStore: PostgresJobStore = {
+      enqueue: async (
+        topic: string,
+        variables: Record<string, unknown>,
+        retries: number,
+        idempotencyKey?: string,
+        processDefId?: string,
+        instanceId?: string,
+      ) => {
+        capturedEnqueue.push({ topic, variables, retries, idempotencyKey, processDefId, instanceId });
+        return {
+          id: "job-capture-test", topic, variables, state: "CREATED", retries,
+          lockOwner: undefined, lockExpiry: undefined, createdAt: 0, available_at: 0,
+        };
+      },
+    } as unknown as PostgresJobStore;
+
+    const task = makeExternalTask({
+      id: "ext-scope-1",
+      topic: "scope-topic",
+      processInstanceId: "flowable-inst-abc",
+      // ExternalTask.processDefinitionKey is now a required field
+      processDefinitionKey: "myProcess",
+      variables: { amount: 100 },
+    });
+
+    client.fetchResults.set("scope-topic", { ok: true, tasks: [task] });
+
+    await runBridgeOnce(client, jobStore, ["scope-topic"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES);
+
+    expect(capturedEnqueue).toHaveLength(1);
+    expect(capturedEnqueue[0].processDefId).toBe("myProcess");
+    expect(capturedEnqueue[0].instanceId).toBe("flowable-inst-abc");
+    expect(capturedEnqueue[0].idempotencyKey).toBe("ext-scope-1");
+  });
+
+  it("T0534-A2: empty processDefinitionKey is NOT forwarded (treated as absent)", async () => {
+    // When the Flowable wire shape has no processDefinitionId, processDefinitionKey
+    // is an empty string. The bridge must NOT store an empty key — it passes undefined.
+    const client = new MockFlowableClient();
+
+    const capturedEnqueue: Array<{ processDefId?: string; instanceId?: string }> = [];
+    const jobStore: PostgresJobStore = {
+      enqueue: async (
+        _topic: string,
+        _vars: Record<string, unknown>,
+        _retries: number,
+        _idem?: string,
+        processDefId?: string,
+        instanceId?: string,
+      ) => {
+        capturedEnqueue.push({ processDefId, instanceId });
+        return { id: "j1", topic: "t", variables: {}, state: "CREATED", retries: 0, createdAt: 0, available_at: 0 };
+      },
+    } as unknown as PostgresJobStore;
+
+    const task = makeExternalTask({
+      id: "ext-empty-key",
+      topic: "no-scope-topic",
+      processDefinitionKey: "", // empty — bridge must NOT forward
+      processInstanceId: "inst-x",
+    });
+
+    client.fetchResults.set("no-scope-topic", { ok: true, tasks: [task] });
+    await runBridgeOnce(client, jobStore, ["no-scope-topic"], WORKER_ID, LOCK_MS, MAX_TASKS, RETRIES);
+
+    expect(capturedEnqueue).toHaveLength(1);
+    // Empty string → undefined (not stored as empty text)
+    expect(capturedEnqueue[0].processDefId).toBeUndefined();
+    // Instance id should still be forwarded
+    expect(capturedEnqueue[0].instanceId).toBe("inst-x");
+  });
+
+  it("T0534-B1: stored process_def_id scopes rule-table lookup to the correct process", async () => {
+    // When job.process_def_id is set, the triage seam uses it as procDefId for
+    // loadPublishedRuleTables — enabling per-process scoping (T-0534 keystone).
+    // Two processes share a tenant but only «telLinear» has a DMN rule table;
+    // the «leaveProcess» row should NOT see the ТЭЛ rule (process_def_id filter).
+    //
+    // This test proves that process_def_id from the job row reaches evaluateGatewayAtTriage
+    // as procDefId by examining the SQL WHERE predicate logged by the mock pool.
+    const flowableClient = new MockFlowableClient();
+    const jobStore = new MockJobStore();
+
+    const JOB_ID = "job-scoped";
+    const EXTERNAL_TASK_ID = "ext-scoped";
+    const STORED_PROC_DEF_ID = "telLinear";
+    const instanceVariables = { amount: 6_000_000 };
+
+    // Track the SQL params used on the dmn_rule_table SELECT to verify procDefId scope.
+    const dmnQueryParams: unknown[][] = [];
+
+    const NOW_MS = Date.now();
+    jobStore.pool = {
+      connect: async () => ({
+        query: async (sql: unknown, params?: unknown[]) => {
+          const sqlText = typeof sql === "string" ? sql : ((sql as { text?: string }).text ?? "");
+          const upper = sqlText.trimStart().toUpperCase();
+
+          if (
+            upper.startsWith("BEGIN") || upper.startsWith("COMMIT") ||
+            upper.startsWith("ROLLBACK") || upper.startsWith("SET LOCAL") ||
+            upper.startsWith("SET SEARCH_PATH")
+          ) return { rows: [] };
+
+          if (/SELECT idempotency_key/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            return jobId === JOB_ID ? { rows: [{ idempotency_key: EXTERNAL_TASK_ID }] } : { rows: [] };
+          }
+
+          // T-0534: lookupJobTopicAndVariables now selects process_def_id too
+          if (/SELECT topic, variables/i.test(sqlText)) {
+            const jobId = params && params.length > 0 ? (params[0] as string) : null;
+            if (jobId === JOB_ID) {
+              return {
+                rows: [{
+                  topic: "tel-intake",
+                  variables: instanceVariables,
+                  process_def_id: STORED_PROC_DEF_ID, // T-0534: stored key
+                }],
+              };
+            }
+            return { rows: [] };
+          }
+
+          if (/FROM choros\.dmn_rule_table/i.test(sqlText)) {
+            // Capture the query params to verify process-scoped WHERE clause.
+            if (params) dmnQueryParams.push([...params]);
+            // Return the ТЭЛ rule table when procDefId matches
+            const procDefParam = params && params.length > 1 ? String(params[1]) : null;
+            if (procDefParam === STORED_PROC_DEF_ID || procDefParam === null) {
+              return {
+                rows: [{
+                  id: "c0de0001-e150-0005-d4f4-000000000080",
+                  name: "ТЭЛ threshold",
+                  definition: {
+                    id: "c0de0001-e150-0005-d4f4-000000000080",
+                    name: "ТЭЛ threshold",
+                    hitPolicy: "FIRST",
+                    rules: [
+                      {
+                        annotation: ">5M",
+                        conditions: [{ field: "amount", operator: "gt", value: 5_000_000 }],
+                        effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "needs-approval" }],
+                      },
+                      {
+                        annotation: "standard",
+                        conditions: [],
+                        effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "standard" }],
+                      },
+                    ],
+                  },
+                  process_def_id: STORED_PROC_DEF_ID,
+                  status: "published",
+                  updated_at: NOW_MS - 10_000,
+                }],
+              };
+            }
+            return { rows: [] };
+          }
+
+          if (
+            /INSERT INTO choros\.audit_head/i.test(sqlText) ||
+            /INSERT INTO choros\.audit_event/i.test(sqlText) ||
+            /UPDATE choros\.audit_head/i.test(sqlText)
+          ) return { rows: [] };
+          if (/FROM choros\.audit_head/i.test(sqlText) && /FOR UPDATE/i.test(sqlText)) {
+            return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+          }
+          if (/current_setting\('choros\.tenant_id'/i.test(sqlText)) {
+            return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+          }
+          return { rows: [] };
+        },
+        release: () => {/* no-op */},
+      }),
+    };
+
+    const deliver = makeExternalTaskDeliver(flowableClient, asJobStore(jobStore));
+    const row = makeOutboxRow({
+      aggregateId: JOB_ID,
+      tenantId: "a0000000-0000-0000-0000-000000000001",
+      eventType: "task_completed",
+      payload: { workerId: WORKER_ID, variables: { submitted: true } },
+    });
+
+    const result = await deliver(row);
+
+    // Deliver succeeds
+    expect(result.ok).toBe(true);
+    expect(flowableClient.completeCalls).toHaveLength(1);
+
+    // THE T-0534 KEYSTONE: the dmn_rule_table query was called with the stored
+    // process_def_id as the second parameter (procDefId scoping).
+    // The scoped SQL includes a second param (procDefId) in addition to tenantId.
+    const scopedQuery = dmnQueryParams.find((p) => p.length >= 2 && p[1] === STORED_PROC_DEF_ID);
+    expect(scopedQuery).toBeDefined();
+
+    // AND the routing outcome is correctly resolved:
+    const [, , calledVars] = flowableClient.completeCalls[0];
+    expect((calledVars as Record<string, unknown>)["approvalRequired"]).toBe("needs-approval");
+  });
+
+  it("T0534-B2: two processes sharing same tenant do NOT cross-contaminate each other's rules", async () => {
+    // Process A (telLinear): has a rule → routingOutcomes non-empty
+    // Process B (leaveProcess): has NO rule → routingOutcomes empty (fail-closed)
+    // Each is scoped by process_def_id so neither leaks into the other.
+    //
+    // Simulates the edge case from T-0524 (NULL-union cross-contamination):
+    // when process_def_id is stored, the lookup is always SCOPED — no NULL-union.
+
+    const TEL_TABLE = {
+      id: "tel-rule-table-id-0001-0000000000001",
+      name: "ТЭЛ rule",
+      hitPolicy: "FIRST" as const,
+      rules: [
+        {
+          annotation: ">5M",
+          conditions: [{ field: "amount", operator: "gt", value: 5_000_000 }],
+          effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "needs-approval" }],
+        },
+        {
+          annotation: "standard",
+          conditions: [],
+          effects: [{ kind: "set_routing_outcome", name: "approvalRequired", value: "standard" }],
+        },
+      ],
+    };
+
+    function makeProcessPool(opts: {
+      jobId: string;
+      externalTaskId: string;
+      processDefId: string;
+      variables: Record<string, unknown>;
+      returnRuleForProcDef: string | null; // process key for which to return rule
+    }) {
+      const NOW_MS = Date.now();
+      return {
+        connect: async () => ({
+          query: async (sql: unknown, params?: unknown[]) => {
+            const sqlText = typeof sql === "string" ? sql : ((sql as { text?: string }).text ?? "");
+            const upper = sqlText.trimStart().toUpperCase();
+            if (
+              upper.startsWith("BEGIN") || upper.startsWith("COMMIT") ||
+              upper.startsWith("ROLLBACK") || upper.startsWith("SET LOCAL") ||
+              upper.startsWith("SET SEARCH_PATH")
+            ) return { rows: [] };
+            if (/SELECT idempotency_key/i.test(sqlText)) {
+              const id = params?.[0] as string;
+              return id === opts.jobId ? { rows: [{ idempotency_key: opts.externalTaskId }] } : { rows: [] };
+            }
+            if (/SELECT topic, variables/i.test(sqlText)) {
+              const id = params?.[0] as string;
+              return id === opts.jobId
+                ? { rows: [{ topic: "intake", variables: opts.variables, process_def_id: opts.processDefId }] }
+                : { rows: [] };
+            }
+            if (/FROM choros\.dmn_rule_table/i.test(sqlText)) {
+              const procParam = params && params.length > 1 ? String(params[1]) : null;
+              if (procParam === opts.returnRuleForProcDef) {
+                return { rows: [{
+                  id: TEL_TABLE.id, name: TEL_TABLE.name, definition: TEL_TABLE,
+                  process_def_id: opts.returnRuleForProcDef, status: "published",
+                  updated_at: NOW_MS - 10_000,
+                }] };
+              }
+              return { rows: [] }; // other processes: no rule
+            }
+            if (/INSERT INTO choros\.audit/i.test(sqlText) || /UPDATE choros\.audit/i.test(sqlText)) return { rows: [] };
+            if (/FROM choros\.audit_head/i.test(sqlText) && /FOR UPDATE/i.test(sqlText)) {
+              return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+            }
+            if (/current_setting\('choros\.tenant_id'/i.test(sqlText)) {
+              return { rows: [{ tenant_id: "a0000000-0000-0000-0000-000000000001" }] };
+            }
+            return { rows: [] };
+          },
+          release: () => {/* no-op */},
+        }),
+      };
+    }
+
+    const TENANT = "a0000000-0000-0000-0000-000000000001";
+
+    // ── Process A: telLinear — has a rule ─────────────────────────────────
+    const clientA = new MockFlowableClient();
+    const jobStoreA = new MockJobStore();
+    jobStoreA.pool = makeProcessPool({
+      jobId: "job-tel", externalTaskId: "ext-tel",
+      processDefId: "telLinear", variables: { amount: 7_000_000 },
+      returnRuleForProcDef: "telLinear",
+    });
+    const deliverA = makeExternalTaskDeliver(clientA, asJobStore(jobStoreA));
+    const rowA = makeOutboxRow({ aggregateId: "job-tel", tenantId: TENANT, eventType: "task_completed", payload: { workerId: WORKER_ID, variables: {} } });
+    const resultA = await deliverA(rowA);
+    expect(resultA.ok).toBe(true);
+    const [, , varsA] = clientA.completeCalls[0];
+    // Process A: ТЭЛ rule fires → approvalRequired
+    expect((varsA as Record<string, unknown>)["approvalRequired"]).toBe("needs-approval");
+
+    // ── Process B: leaveProcess — no rule ─────────────────────────────────
+    const clientB = new MockFlowableClient();
+    const jobStoreB = new MockJobStore();
+    jobStoreB.pool = makeProcessPool({
+      jobId: "job-leave", externalTaskId: "ext-leave",
+      processDefId: "leaveProcess", variables: { days: 21 },
+      returnRuleForProcDef: "telLinear", // ONLY telLinear gets a rule in the DB
+    });
+    const deliverB = makeExternalTaskDeliver(clientB, asJobStore(jobStoreB));
+    const rowB = makeOutboxRow({ aggregateId: "job-leave", tenantId: TENANT, eventType: "task_completed", payload: { workerId: WORKER_ID, variables: {} } });
+    const resultB = await deliverB(rowB);
+    expect(resultB.ok).toBe(true);
+    const [, , varsB] = clientB.completeCalls[0];
+    // Process B: no rule for leaveProcess → fail-closed, no injection
+    if (varsB !== undefined) {
+      expect((varsB as Record<string, unknown>)["approvalRequired"]).toBeUndefined();
+    }
   });
 });
 
