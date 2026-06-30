@@ -52,7 +52,12 @@ export type LintViolationType =
   | "parallel_gateway_imbalance"
   | "timer_malformed"
   | "message_event_incoherent"
-  | "agent_task_incoherent";
+  | "agent_task_incoherent"
+  // T-0559: publish-coherence — a live (published) process binds a sandbox (draft)
+  // application. Emitted by the publish-time DB-backed gate in process-defs.ts, NOT
+  // by the pure linter (which has no DB). Reuses the LintViolation envelope so the
+  // 422 response renders identically to the other publish-time violations.
+  | "app_binding_unpublished";
 
 export interface LintViolation {
   type: LintViolationType;

@@ -258,6 +258,62 @@ async function buildUnresolvedAgentRefViolations(
 }
 
 // ---------------------------------------------------------------------------
+// T-0559: publish-coherence gate — a published (LIVE) process must not depend on a
+// SANDBOX (draft) application.
+//
+// The constructor links a process DEFINITION to the application(s) it drives via
+// choros.process_app_binding (process_key → application_id). When that process is
+// published it becomes live; if a bound application is still tier='draft' (sandbox),
+// the live process would read/write a sandbox app — an incoherent live↔sandbox
+// dependency. We reject publish (HTTP 422) and list the offending app(s).
+//
+// Co-promote handling (bundle vs standalone): the bundle-promote path
+// (solution-bundles.ts §1→§2) promotes the bound apps via promoteTier FIRST, then
+// publishes the processes. So by the time publishProcessByKey runs inside a bundle,
+// any co-promoted app is ALREADY tier='published' and passes this gate. A standalone
+// modeler publish has no such pre-step, so a draft-bound app is correctly rejected.
+// The gate therefore needs NO bundle-context flag: "reject if any bound app is draft
+// at publish time" is exactly right for both callers (ordering verified in
+// solution-bundles.ts: app promoteTier loop precedes the publishProcessByKey loop).
+//
+// DB read inside the existing tenant-tx / FORCE-RLS envelope. The join is by
+// application_id (logical ref, no FK — same convention as the binding table). Empty
+// result = no binding, or every bound app already published → no violation.
+// ---------------------------------------------------------------------------
+
+async function buildUnpublishedAppBindingViolations(
+  pool: pg.Pool,
+  tenantId: string,
+  processKey: string,
+): Promise<LintViolation[]> {
+  const draftApps = await withTenantTx(pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ id: string; slug: string; display_name: string }>(
+      `SELECT a.id, a.slug, a.display_name
+         FROM choros.process_app_binding b
+         JOIN choros.application a
+           ON a.tenant_id = b.tenant_id
+          AND a.id = b.application_id
+        WHERE b.tenant_id = $1
+          AND b.process_key = $2
+          AND a.tier = 'draft'`,
+      [tenantId, processKey],
+    );
+    return rows;
+  });
+
+  return draftApps.map((app) => ({
+    type: "app_binding_unpublished" as const,
+    elementId: app.id,
+    elementKind: "application",
+    message:
+      `This process binds application "${app.display_name}" (slug="${app.slug}") ` +
+      `which is still a SANDBOX (draft) application — a published (live) process ` +
+      `must not depend on a draft app. Publish/promote the application first ` +
+      `(or promote both together in one solution bundle), then publish the process.`,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // DB queries
 // ---------------------------------------------------------------------------
 
@@ -530,6 +586,16 @@ export function registerProcessDefsRoutes(
       }));
       return;
     }
+    if (result.status === "app_binding_unpublished") {
+      // T-0559: 422 — a bound application is still a sandbox (draft). A published
+      // process must not depend on a draft app. Same envelope, distinct code.
+      res.statusCode = 422;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        error: { code: "APP_BINDING_UNPUBLISHED", violations: result.violations },
+      }));
+      return;
+    }
     if (result.status === "engine_unavailable") {
       throw new HttpError(result.httpStatus, result.code, result.message);
     }
@@ -570,6 +636,9 @@ export type PublishProcessResult =
   // pure linter passed; this is the DB-backed executor-resolution gate), surfaced
   // with the SAME 422 envelope shape so clients render the violations identically.
   | { status: "agent_unresolved"; violations: LintViolation[] }
+  // T-0559: a bound application is still tier='draft' (sandbox). A published process
+  // must not depend on a draft app. Same 422 envelope as the other publish gates.
+  | { status: "app_binding_unpublished"; violations: LintViolation[] }
   | { status: "engine_unavailable"; httpStatus: number; code: string; message: string }
   | {
       status: "published";
@@ -623,6 +692,18 @@ export async function publishProcessByKey(
   const agentRefViolations = await buildUnresolvedAgentRefViolations(pool, tenantId, row.bpmn_xml);
   if (agentRefViolations.length > 0) {
     return { status: "agent_unresolved", violations: agentRefViolations };
+  }
+
+  // Step 2.6: [T-0559] publish-coherence gate — a published (live) process must not
+  // depend on a SANDBOX (draft) application it binds via process_app_binding. DB read
+  // in the tenant-tx envelope; runs AFTER agent-resolve and BEFORE deploy (never
+  // deploy a live process bound to a draft app). Bundle-promote pre-promotes the bound
+  // apps (solution-bundles.ts §1) so they are already published by the time the
+  // process publishes within a bundle; standalone publish has no such pre-step, so a
+  // draft-bound app is correctly rejected. Mirrors the lint-failed 422 envelope.
+  const appBindingViolations = await buildUnpublishedAppBindingViolations(pool, tenantId, row.process_key);
+  if (appBindingViolations.length > 0) {
+    return { status: "app_binding_unpublished", violations: appBindingViolations };
   }
 
   // Step 2.7 [T-0505]: normalize for deploy. The modeler emits the process as

@@ -356,6 +356,9 @@ describe("process-defs routes (unit, no DB)", () => {
       const pool = makePool(async (sql) => {
         if (/BEGIN|COMMIT|ROLLBACK/.test(sql)) return { rows: [] };
         if (/SET LOCAL/.test(sql)) return { rows: [] };
+        // T-0559 publish-coherence gate: no draft-bound apps → gate passes.
+        // Must precede the broad /SELECT/ matcher below (this is also a SELECT).
+        if (/process_app_binding/.test(sql)) return { rows: [] };
         if (/SELECT/.test(sql)) return { rows: [fakeRow] };
         if (/UPDATE/.test(sql)) return { rows: [] };
         return { rows: [] };
