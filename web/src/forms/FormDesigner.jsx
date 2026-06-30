@@ -27,9 +27,11 @@
    Theming: --chs-* tokens + kit components only (gate G2/G6).
    ============================================================================ */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Button, EmptyState, LoadingState, ErrorState, Select } from '../components/components.jsx';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Button, EmptyState, LoadingState, ErrorState, Select, ConfirmDialog } from '../components/components.jsx';
+import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
+import { useDirtyGuard } from '../hooks/useDirtyGuard.js';
 import { parseRecordSchema } from '../screens/apps-schema.js';
 import FormDocumentRenderer from './FormDocumentRenderer.jsx';
 import {
@@ -210,6 +212,13 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [dragFrom, setDragFrom] = useState(null);
   const [saveState, setSaveState] = useState({ status: 'idle' });
   const [loadError, setLoadError] = useState(null);
+  // T-0533 F-01: saveGen increments after each successful save so that the
+  // useMemo for isDirty re-runs and picks up the updated savedDocRef.current.
+  const [saveGen, setSaveGen] = useState(0);
+
+  // T-0533: track last-saved doc snapshot for isDirty comparison.
+  // Initialised to the initial document (or null); updated after each successful save.
+  const savedDocRef = useRef(initialDocument ?? null);
 
   // Load applications (skip when fields injected for embedding/testing).
   useEffect(() => {
@@ -236,7 +245,11 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     if (!def) return;
     const parsed = parseRecordSchema(def.record_schema);
     setFields(parsed);
-    setDoc(buildDefaultDocument({ applicationId: selectedAppId, registryDefId: selectedDefId }, parsed, { withIds: true }));
+    const freshDoc = buildDefaultDocument({ applicationId: selectedAppId, registryDefId: selectedDefId }, parsed, { withIds: true });
+    setDoc(freshDoc);
+    // T-0533: treat newly generated default doc as the "saved" baseline so that
+    // merely opening a schema doesn't immediately trigger the dirty guard.
+    savedDocRef.current = freshDoc;
     setSelectedIndex(null);
   }, [selectedDefId, registryDefs, selectedAppId]);
 
@@ -252,6 +265,19 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
     rootChildren.forEach((n) => { if (n.fieldKey) set.add(n.fieldKey); });
     return set;
   }, [rootChildren]);
+
+  // T-0533: isDirty — JSON.stringify comparison against last-saved snapshot.
+  // form-document-ops.js guarantees deterministic key order (immutable ops),
+  // so stringify is a reliable structural equality check until T-0544 adds undo-stacks.
+  // F-01 fix: saveGen in deps forces re-evaluation after save (ref mutation alone
+  // is invisible to React and would keep isDirty=true permanently after first save).
+  const isDirty = useMemo(() => {
+    if (!doc || !savedDocRef.current) return false;
+    return JSON.stringify(doc) !== JSON.stringify(savedDocRef.current);
+  }, [doc, saveGen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // T-0533: beforeunload + react-router route-guard.
+  const guard = useDirtyGuard(isDirty);
 
   // --- editing ops (all via the pure layer) ---
   const addPaletteBlock = useCallback((type) => {
@@ -414,19 +440,47 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
           onPatch={(patch) => selectedIndex !== null && patchAt(selectedIndex, patch)}
         />
         {doc && (
-          <Button
-            variant="primary"
-            disabled={!validation.ok || saveState.status === 'saving'}
-            loading={saveState.status === 'saving'}
-            onClick={() => persistLayout(doc, setSaveState)}
-            style={{ marginTop: 'var(--chs-space-4)', width: '100%' }}
-          >
-            Сохранить раскладку
-          </Button>
+          <>
+            {isDirty && (
+              <p style={{ color: 'var(--chs-color-warning)', fontSize: 'var(--chs-text-xs)', marginTop: 'var(--chs-space-2)' }}>
+                Несохранённые изменения
+              </p>
+            )}
+            <Button
+              variant="primary"
+              disabled={!validation.ok || saveState.status === 'saving'}
+              loading={saveState.status === 'saving'}
+              onClick={() => persistLayout(doc, setSaveState, savedDocRef, setSaveGen)}
+              style={{ marginTop: 'var(--chs-space-2)', width: '100%' }}
+            >
+              Сохранить раскладку
+            </Button>
+          </>
         )}
         {saveState.status === 'saved' && <p style={{ color: 'var(--chs-color-success)', fontSize: 'var(--chs-text-sm)' }}>Сохранено.</p>}
         {saveState.status === 'error' && <p style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-sm)' }}>{saveState.message || 'Ошибка сохранения.'}</p>}
       </aside>
+
+      {/* T-0533: route-guard dialog — shown when useBlocker intercepts navigation */}
+      <ConfirmDialog
+        open={guard.blockerState === 'blocked'}
+        title="Несохранённые правки"
+        message={
+          <>
+            <p>В редакторе форм есть несохранённые изменения.</p>
+            <ConsequenceSummary
+              who="Текущий сеанс редактирования формы"
+              what="Все несохранённые правки будут потеряны"
+              reversibility="Необратимо — восстановить из браузера невозможно"
+            />
+          </>
+        }
+        confirmLabel="Уйти без сохранения"
+        cancelLabel="Остаться"
+        tone="danger"
+        onConfirm={guard.proceed}
+        onClose={guard.reset}
+      />
     </div>
   );
 }
@@ -434,8 +488,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
 /**
  * Persist the form-document layout via POST /api/forms/binding. The server stores
  * it in form_binding.layout (migration 105) and re-validates server-side.
+ *
+ * T-0533: savedDocRef is updated on success so isDirty resets to false.
+ * F-01 fix: setSaveGen increments the saveGen counter AFTER updating savedDocRef so
+ * that the useMemo([doc, saveGen]) re-runs and sees the fresh snapshot.
  */
-function persistLayout(doc, setSaveState) {
+function persistLayout(doc, setSaveState, savedDocRef, setSaveGen) {
   setSaveState({ status: 'saving' });
   const body = {
     process_key: doc.step?.processKey || 'record',
@@ -448,7 +506,13 @@ function persistLayout(doc, setSaveState) {
     body: JSON.stringify(body),
   })
     .then((r) => { if (!r.ok) throw new Error('save failed'); return r.json(); })
-    .then(() => setSaveState({ status: 'saved' }))
+    .then(() => {
+      // T-0533 F-01: update snapshot first, then increment saveGen so the
+      // useMemo re-evaluates isDirty = false in the same React render batch.
+      if (savedDocRef) savedDocRef.current = doc;
+      if (setSaveGen) setSaveGen((g) => g + 1);
+      setSaveState({ status: 'saved' });
+    })
     .catch(() => setSaveState({ status: 'error', message: 'Не удалось сохранить.' }));
 }
 

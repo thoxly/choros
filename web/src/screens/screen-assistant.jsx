@@ -816,11 +816,18 @@ export default function AssistantScreen() {
   }, [createThread, contextRef, navigate, pushToast]);
 
   // T-0384: rename thread
+  // T-0533: optimistic update with rollback on error.
   const handleRename = useCallback((id, newTitle) => {
-    patchThread(id, { title: newTitle });
+    // Snapshot previous title for rollback.
+    const prevTitle = threads?.find((t) => t.id === id)?.title;
     // Optimistically update active thread title in local state if it's active.
     setActiveThread((prev) => (prev && prev.id === id ? { ...prev, title: newTitle } : prev));
-  }, [patchThread]);
+    patchThread(id, { title: newTitle }).catch(() => {
+      // T-0533: rollback optimistic update on network/server error.
+      setActiveThread((prev) => (prev && prev.id === id ? { ...prev, title: prevTitle } : prev));
+      pushToast({ tone: 'error', title: 'Не удалось переименовать тред', duration: 5000 });
+    });
+  }, [patchThread, threads, pushToast]);
 
   // T-0384: pin/unpin thread
   const handlePin = useCallback((id, pinned) => {
