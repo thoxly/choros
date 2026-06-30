@@ -30,7 +30,8 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Button, Field, Select, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
+import { Button, Field, Select, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog, useToasts, ToastViewport } from '../components/components.jsx';
+import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { listRuleTables, getRuleTable, saveRuleTable, publishRuleTable } from '../canvas/dmn-editor-api.js';
 
@@ -411,6 +412,11 @@ function DmnEditorScreen() {
   const [actionError, setActionError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
 
+  // T-0526: undo-тосты для удаления правил (черновик)
+  const { toasts: dmnToasts, push: pushDmnToast, dismiss: dismissDmnToast } = useToasts();
+  // T-0526: confirm dialog для публикации
+  const [publishDmnConfirmOpen, setPublishDmnConfirmOpen] = useState(false);
+
   // Загрузка полей и существующих правил
   const load = useCallback(async () => {
     if (!processKey) return;
@@ -506,9 +512,39 @@ function DmnEditorScreen() {
     });
   }
 
-  // Удалить правило
+  // Удалить правило — undo-тост (сайт 8: черновик, обратимо)
   function removeRule(id) {
-    setRules((prev) => (prev || []).filter((r) => r.id !== id));
+    setRules((prev) => {
+      const arr = prev || [];
+      const removedRule = arr.find((r) => r.id === id);
+      const removedIdx = arr.findIndex((r) => r.id === id);
+      const next = arr.filter((r) => r.id !== id);
+
+      if (removedRule) {
+        const toastId = pushDmnToast({
+          tone: 'success',
+          title: 'Правило удалено',
+          duration: 5000,
+          action: (
+            <button
+              type="button"
+              className="chs-toast__undo"
+              onClick={() => {
+                setRules((cur) => {
+                  const copy = [...(cur || [])];
+                  copy.splice(Math.min(removedIdx, copy.length), 0, removedRule);
+                  return copy;
+                });
+                dismissDmnToast(toastId);
+              }}
+            >
+              Отменить
+            </button>
+          ),
+        });
+      }
+      return next;
+    });
   }
 
   // Обновить правило
@@ -665,13 +701,15 @@ function DmnEditorScreen() {
               >
                 Сохранить черновик
               </Button>
+              {/* T-0526: разделитель Save/Publish + danger variant */}
+              <span className="chs-edtoolbar__pub-sep" aria-hidden="true" style={{ display: 'inline-block', width: 1, background: 'var(--chs-color-border)', alignSelf: 'stretch', margin: '0 var(--chs-space-1)' }} />
               <Button
-                variant="primary"
+                variant="danger"
                 size="sm"
-                onClick={handlePublish}
+                onClick={() => setPublishDmnConfirmOpen(true)}
                 disabled={!tableId || saving || publishing}
                 loading={publishing}
-                title={!tableId ? 'Сначала сохраните черновик' : undefined}
+                title={!tableId ? 'Сначала сохраните черновик' : 'Опубликовать правила в движок'}
               >
                 Опубликовать
               </Button>
@@ -836,12 +874,12 @@ function DmnEditorScreen() {
                   Сохранить черновик
                 </Button>
                 <Button
-                  variant="primary"
+                  variant="danger"
                   size="sm"
-                  onClick={handlePublish}
+                  onClick={() => setPublishDmnConfirmOpen(true)}
                   disabled={!tableId || saving || publishing}
                   loading={publishing}
-                  title={!tableId ? 'Сначала сохраните черновик' : undefined}
+                  title={!tableId ? 'Сначала сохраните черновик' : 'Опубликовать правила в движок'}
                 >
                   Опубликовать
                 </Button>
@@ -850,6 +888,26 @@ function DmnEditorScreen() {
           )}
         </div>
       </div>
+
+      {/* T-0526: ConfirmDialog для публикации таблицы правил */}
+      <ConfirmDialog
+        open={publishDmnConfirmOpen}
+        tone="danger"
+        title="Опубликовать правила ветвления?"
+        message={
+          <ConsequenceSummary
+            who={`Таблица правил «${tableName || 'Правила ветвления'}» (процесс ${processKey})`}
+            what="Правила деплоятся в движок. Новые экземпляры процесса будут использовать эти условия."
+            reversibility="Необратимо в рамках этой версии. Откат — публикация предыдущей таблицы."
+          />
+        }
+        confirmLabel="Опубликовать"
+        onConfirm={() => { setPublishDmnConfirmOpen(false); handlePublish(); }}
+        onClose={() => setPublishDmnConfirmOpen(false)}
+        loading={publishing}
+      />
+
+      <ToastViewport toasts={dmnToasts} dismiss={dismissDmnToast} />
     </div>
   );
 }

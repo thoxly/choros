@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { Mono, Button, OpChip, KitIcon } from '../../components/components.jsx';
+import { Mono, Button, OpChip, KitIcon, useToasts, ToastViewport } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
@@ -144,7 +144,7 @@ function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
           {summary.length ? summary.map((s, i) => <ScopeToken key={i} kind={i === 0 ? "node" : "tag"}>{s}</ScopeToken>) : <span className="chs-gedit__scopeempty">задать охват</span>}
           <span className="chs-gedit__scopecaret">{open ? "закрыть" : "▾"}</span>
         </button>
-        <button type="button" className="chs-gedit__del" onClick={() => onRemove(idx)} title="Удалить грант" aria-label="Удалить грант"><KitIcon name="close" /></button>
+        <button type="button" className="chs-gedit__del" onClick={() => onRemove(idx, g)} title="Удалить грант" aria-label="Удалить грант"><KitIcon name="close" /></button>
       </div>
       {open && <ScopePicker grant={g} onChange={(ng) => onChange(idx, ng)} onClose={() => onOpen(-1)} />}
     </div>
@@ -266,6 +266,7 @@ function RoleEditorScreen() {
   const [mode, setMode] = useState("advanced");
   const [grants, setGrants] = useState(INITIAL_GRANTS);
   const [openIdx, setOpenIdx] = useState(-1);
+  const { toasts, push: pushToast, dismiss: dismissToast } = useToasts();
   const [presetSel, setPresetSel] = useState(["p-recon"]);
   const [llmText, setLlmText] = useState("Агент-помощник согласования: читает счёт и договор, распознаёт суммы со сканов, готовит решение до ₽50 000. Платежи не инициирует.");
   const [proposed, setProposed] = useState([]);
@@ -300,7 +301,34 @@ function RoleEditorScreen() {
   const axes = axesFromGrants(grants);
 
   const changeGrant = (idx, ng) => setGrants((gs) => gs.map((g, i) => (i === idx ? ng : g)));
-  const removeGrant = (idx) => { setGrants((gs) => gs.filter((_, i) => i !== idx)); setOpenIdx(-1); };
+  const removeGrant = (idx, removedGrant) => {
+    // Сайт 4: удаление гранта из черновика → undo-тост (5 с).
+    setGrants((gs) => gs.filter((_, i) => i !== idx));
+    setOpenIdx(-1);
+    const toastId = pushToast({
+      tone: 'success',
+      title: 'Грант удалён',
+      message: removedGrant ? (removedGrant.uri || 'Грант') : 'Грант',
+      duration: 5000,
+      action: (
+        <button
+          type="button"
+          className="chs-toast__undo"
+          onClick={() => {
+            setGrants((gs) => {
+              // Восстанавливаем на позицию idx или в конец
+              const copy = [...gs];
+              copy.splice(Math.min(idx, copy.length), 0, removedGrant);
+              return copy;
+            });
+            dismissToast(toastId);
+          }}
+        >
+          Отменить
+        </button>
+      ),
+    });
+  };
   const addGrant = () => {
     const used = new Set(grants.map((g) => g.uri));
     const next = RESOURCES.find((r) => !used.has(r.uri)) || RESOURCES[0];
@@ -713,6 +741,7 @@ function RoleEditorScreen() {
           </section>
         </div>
       </div>
+      <ToastViewport toasts={toasts} dismiss={dismissToast} />
     </div>
   );
 }

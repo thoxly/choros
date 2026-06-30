@@ -26,7 +26,8 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, Field, Select, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
+import { Button, Field, Select, LoadingState, ErrorState, EmptyState, ConfirmDialog, useToasts, ToastViewport } from '../components/components.jsx';
+import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   AGG_LABELS as BUILDER_AGG_LABELS,
@@ -679,6 +680,10 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
   const [submitErr, setSubmitErr] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // T-0526: undo-тосты для удаления метрик + confirm для публикации
+  const { toasts: builderToasts, push: pushBuilderToast, dismiss: dismissBuilderToast } = useToasts();
+  const [publishReportConfirmOpen, setPublishReportConfirmOpen] = useState(false);
+
   // Загрузка наборов полей выбранного приложения.
   const loadDefs = useCallback(async () => {
     if (!appId) return;
@@ -738,8 +743,36 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
   }, []);
   const addMetric = useCallback(() => setMetrics((prev) => [...prev, blankMetric()]), []);
   const removeMetric = useCallback((i) => {
-    setMetrics((prev) => prev.filter((_, idx) => idx !== i));
-  }, []);
+    // Сайт 10: удаление метрики — undo-тост (5 с)
+    setMetrics((prev) => {
+      const removed = prev[i];
+      const next = prev.filter((_, idx) => idx !== i);
+      if (removed) {
+        const toastId = pushBuilderToast({
+          tone: 'success',
+          title: 'Метрика удалена',
+          duration: 5000,
+          action: (
+            <button
+              type="button"
+              className="chs-toast__undo"
+              onClick={() => {
+                setMetrics((cur) => {
+                  const copy = [...cur];
+                  copy.splice(Math.min(i, copy.length), 0, removed);
+                  return copy;
+                });
+                dismissBuilderToast(toastId);
+              }}
+            >
+              Отменить
+            </button>
+          ),
+        });
+      }
+      return next;
+    });
+  }, [pushBuilderToast, dismissBuilderToast]);
 
   // При смене набора сбрасываем группировку и поля метрик (старые ключи невалидны).
   const handleRegistryChange = useCallback((newId) => {
@@ -925,12 +958,33 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
             <Button type="button" variant="secondary" size="sm" onClick={() => handleSubmit(false)} loading={submitting}>
               Сохранить черновик
             </Button>
-            <Button type="button" variant="primary" size="sm" onClick={() => handleSubmit(true)} loading={submitting}>
+            {/* T-0526: визуальный разделитель + danger variant */}
+            <span aria-hidden="true" style={{ display: 'inline-block', width: 1, background: 'var(--chs-color-border)', alignSelf: 'stretch', margin: '0 2px' }} />
+            <Button type="button" variant="danger" size="sm" onClick={() => setPublishReportConfirmOpen(true)} loading={submitting}>
               Опубликовать
             </Button>
           </div>
         </>
       )}
+
+      {/* T-0526: ConfirmDialog для публикации отчёта */}
+      <ConfirmDialog
+        open={publishReportConfirmOpen}
+        tone="danger"
+        title="Опубликовать отчёт?"
+        message={
+          <ConsequenceSummary
+            who={`Отчёт «${title || 'Новый отчёт'}»`}
+            what="Черновик публикуется. Отчёт становится доступен всем пользователям с правом просмотра."
+            reversibility="Необратимо. Для правки нужно создать новую версию."
+          />
+        }
+        confirmLabel="Опубликовать"
+        onConfirm={() => { setPublishReportConfirmOpen(false); handleSubmit(true); }}
+        onClose={() => setPublishReportConfirmOpen(false)}
+        loading={submitting}
+      />
+      <ToastViewport toasts={builderToasts} dismiss={dismissBuilderToast} />
     </div>
   );
 }

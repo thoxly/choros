@@ -31,6 +31,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, StatusChip, Field, Select, EmptyState, ErrorState, LoadingState, KitIcon,
+  useToasts, ToastViewport,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { validateAppForm } from './apps-validate.js';
@@ -726,6 +727,8 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
   const [formErr, setFormErr] = useState(null);     // field-list-level message
   const [metaErrs, setMetaErrs] = useState({});      // { slug?, display_name? }
   const [submitErr, setSubmitErr] = useState(null);  // general API error
+  // T-0526: undo-тосты для удаления полей (сайт 15, черновик)
+  const { toasts: schemaToasts, push: pushSchemaToast, dismiss: dismissSchemaToast } = useToasts();
   const [warnings, setWarnings] = useState(null);    // PUT soft warnings
   const [submitting, setSubmitting] = useState(false);
   // T-0444: tenant-wide набор полей list for the relation target dropdown.
@@ -771,8 +774,37 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
     });
   }, []);
   const removeField = useCallback((i) => {
-    setFields((prev) => prev.filter((_, idx) => idx !== i));
-  }, []);
+    // Сайт 15: удаление поля из черновика схемы — undo-тост (5 с).
+    setFields((prev) => {
+      const removed = prev[i];
+      const next = prev.filter((_, idx) => idx !== i);
+      if (removed) {
+        const toastId = pushSchemaToast({
+          tone: 'success',
+          title: 'Поле удалено',
+          message: removed.title || removed.key || 'Поле',
+          duration: 5000,
+          action: (
+            <button
+              type="button"
+              className="chs-toast__undo"
+              onClick={() => {
+                setFields((cur) => {
+                  const copy = [...cur];
+                  copy.splice(Math.min(i, copy.length), 0, removed);
+                  return copy;
+                });
+                dismissSchemaToast(toastId);
+              }}
+            >
+              Отменить
+            </button>
+          ),
+        });
+      }
+      return next;
+    });
+  }, [pushSchemaToast, dismissSchemaToast]);
   const addField = useCallback(() => {
     setFields((prev) => [...prev, blankField()]);
   }, []);
@@ -1017,6 +1049,7 @@ function FieldEditor({ applicationId, editingDef, onSaved, onCancel }) {
           {submitting ? 'Сохранение…' : isEdit ? 'Сохранить поля' : 'Создать набор'}
         </Button>
       </div>
+      <ToastViewport toasts={schemaToasts} dismiss={dismissSchemaToast} />
     </form>
   );
 }
