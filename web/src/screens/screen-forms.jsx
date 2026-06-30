@@ -16,6 +16,7 @@
    ============================================================================ */
 
 import React, { useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import FormDesigner from '../forms/FormDesigner.jsx';
 import FormBuilder from '../forms/FormBuilder.jsx';
 
@@ -26,8 +27,48 @@ const TABS = [
 
 function FormsScreen() {
   const [tab, setTab] = useState('designer');
+  const location = useLocation();
+
+  // T-0545: AI-emit → канвас. Ассистент передаёт документ через location.state.aiDraft
+  // (navigate('/forms', { state: { aiDraft: doc } })). FormDesigner принимает его как
+  // initialDocument и открывает для правки человеком (человек — финальный редактор).
+  const aiDraft = location.state?.aiDraft ?? null;
+  const floor2Flag = location.state?.floor2Flag ?? false;
+
   return (
     <div className="chs-forms-screen">
+      {/* T-0545: Floor-2 badge при кодовом выводе AI (FF-T0545-FLOOR2-FLAG). */}
+      {floor2Flag && (
+        <div
+          className="chs-forms-screen__floor2-banner"
+          role="alert"
+          style={{
+            background: 'var(--chs-color-warning-muted, #fff8e1)',
+            borderBottom: '1px solid var(--chs-color-warning, #f59e0b)',
+            padding: 'var(--chs-space-2) var(--chs-space-6)',
+            fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
+          }}
+        >
+          Черновик от ассистента содержит кастомный код-виджет (Floor-2). Проверьте перед сохранением.
+        </div>
+      )}
+      {/* T-0545: баннер «открыт черновик от ассистента» для прозрачности. */}
+      {aiDraft && !floor2Flag && (
+        <div
+          className="chs-forms-screen__ai-banner"
+          role="status"
+          style={{
+            background: 'var(--chs-color-accent-muted, #eff6ff)',
+            borderBottom: '1px solid var(--chs-color-accent, #3b82f6)',
+            padding: 'var(--chs-space-2) var(--chs-space-6)',
+            fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
+          }}
+        >
+          Черновик от ассистента. Отредактируйте и сохраните.
+        </div>
+      )}
       <div className="chs-forms-screen__tabs" role="tablist" style={{ display: 'flex', gap: 'var(--chs-space-2)', padding: 'var(--chs-space-4) var(--chs-space-6) 0' }}>
         {TABS.map((t) => (
           <button
@@ -43,7 +84,11 @@ function FormsScreen() {
         ))}
       </div>
       <div className="chs-forms-screen__canvas" style={{ padding: 'var(--chs-space-6)' }}>
-        {tab === 'designer' ? <FormDesigner /> : <FormBuilder />}
+        {/* T-0545: если есть aiDraft, FormDesigner открывается с ним (initialDocument).
+            Ключ {aiDraft ? 'ai' : 'clean'} гарантирует ремаунт при смене draft→clean. */}
+        {tab === 'designer'
+          ? <FormDesigner key={aiDraft ? 'ai-draft' : 'clean'} initialDocument={aiDraft ?? undefined} />
+          : <FormBuilder />}
       </div>
     </div>
   );

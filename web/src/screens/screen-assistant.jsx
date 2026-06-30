@@ -38,6 +38,9 @@ import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
+// T-0545: AI-emit seam — SAME gate as human editor (FF-T0545-SAME-GATE).
+import { emitSurfaceLocal, defaultEmitIntent } from '../forms/form-emit-seam.js';
+import { parseRecordSchema } from './apps-schema.js';
 
 /* ---------------------------------------------------------------------------
    TODO-SEAM T-0359/T-0360: заменить stub-вызовы реальными API-запросами.
@@ -500,6 +503,55 @@ function MessageBubble({ msg, activeThreadId }) {
       )}
       <div className="chs-asst__msg-text">{msg.text}</div>
 
+      {/* T-0545: server emitted a surface document → show "Открыть в конструкторе" deep-link.
+          This is the slot for T-0455 (server LLM routing): once the server calls emit_surface,
+          the response message carries msg.surface. Until T-0455 ships, this block is inert.
+          FF-T0545-FLOOR2-FLAG: floor2Flag renders a warning badge.
+          The document is NEVER rendered inline — only a button to the canvas (G4 principle). */}
+      {msg.surface && (
+        <div className="chs-asst__msg-surface">
+          {msg.surface.floor2Flag && (
+            <div
+              className="chs-asst__surface-floor2"
+              role="alert"
+              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning, #f59e0b)', marginBottom: 'var(--chs-space-2)' }}
+            >
+              Содержит кастомный код-виджет (Floor-2)
+            </div>
+          )}
+          {!msg.surface.ok && msg.surface.brokenKeys && msg.surface.brokenKeys.length > 0 && (
+            <div
+              className="chs-asst__surface-warn"
+              role="alert"
+              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning, #f59e0b)', marginBottom: 'var(--chs-space-2)' }}
+            >
+              {msg.surface.brokenKeys.length} {msg.surface.brokenKeys.length === 1 ? 'поле' : 'поля/полей'} не найдено в схеме — откройте и исправьте.
+            </div>
+          )}
+          {msg.surface.errorMessage && !msg.surface.doc && (
+            <div
+              className="chs-asst__surface-error"
+              role="alert"
+              style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-danger)', marginBottom: 'var(--chs-space-2)' }}
+            >
+              {msg.surface.errorMessage}
+            </div>
+          )}
+          {msg.surface.canvasPath && (msg.surface.doc || msg.surface.brokenKeys?.length > 0) && (
+            <Button
+              variant={msg.surface.ok ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => navigate(msg.surface.canvasPath, {
+                state: { aiDraft: msg.surface.doc, floor2Flag: msg.surface.floor2Flag ?? false },
+              })}
+              aria-label={msg.surface.ok ? 'Открыть черновик формы в конструкторе' : 'Открыть черновик с ошибками в конструкторе'}
+            >
+              {msg.surface.ok ? 'Открыть в конструкторе' : 'Открыть и исправить'}
+            </Button>
+          )}
+        </div>
+      )}
+
       {/* T-0465 (D8-G4): REVIEW-IN-SECTIONS. Deep-links into the actual sections
           (Приложения / Модельер) — the user reviews the generated DRAFT visually
           THERE, not via a constructor rendered in chat. */}
@@ -678,6 +730,173 @@ function Composer({ onSend, streaming, contextRef, onClearContext }) {
   );
 }
 
+/* ---------------------------------------------------------------------------
+   T-0545: AI-emit panel — «Собрать форму» (FF-T0545-SAME-GATE / FLOOR2-FLAG)
+
+   Deterministic client-side emit seam. The user picks an app + registry def,
+   the panel calls emitSurfaceLocal (which runs emitFormDocument → THE SAME
+   validateDocument the human editor uses), then navigates to /forms with the
+   result in location.state so FormDesigner opens the draft.
+
+   LLM CONNECT POINT (T-0455 / D8): this panel uses a deterministic "all fields
+   → flat layout" intent today. Once server LLM routing (T-0455) is live, the
+   LLM will call emit_surface server-side with a natural-language-derived intent;
+   the server response will carry msg.surface and the MessageBubble slot
+   (above) will render the deep-link. This panel is the graceful fallback that
+   stays useful without LLM (the "build by hand" escape per design §7).
+
+   Degrade: on any error → toast (T-0528) + offer to open FormDesigner empty.
+   --------------------------------------------------------------------------- */
+
+/**
+ * AiEmitPanel — ассистент «Собрать форму» (T-0545 шов).
+ * Встраивается под Composer в ThreadView.
+ * Показывается только когда contextRef указывает на app (kind='app') — нам
+ * нужен applicationId для загрузки схемы. Для record/process-контекстов кнопка
+ * недоступна (схема неизвестна без лишнего API-вызова).
+ *
+ * @param {{ contextRef: {kind:string, id:string, label:string} | null }} props
+ */
+function AiEmitPanel({ contextRef }) {
+  const navigate = useNavigate();
+  const { push: pushToast } = useToastContext();
+
+  const [building, setBuilding] = useState(false);
+
+  // Only available when contextRef is an 'app' (gives us the applicationId).
+  const appId = contextRef?.kind === 'app' ? contextRef.id : null;
+
+  if (!appId) return null;
+
+  const handleBuildForm = useCallback(async () => {
+    if (building) return;
+    setBuilding(true);
+    try {
+      // Fetch registry defs for the app to get the live schema.
+      const r = await fetch(`/api/registry-defs?application_id=${encodeURIComponent(appId)}`, {
+        headers: authHeaders(),
+      });
+      if (!r.ok) {
+        throw new Error(`HTTP ${r.status} — не удалось загрузить схему приложения`);
+      }
+      const data = await r.json();
+      const defs = data.registry_defs || [];
+      if (defs.length === 0) {
+        pushToast({ tone: 'error', title: 'Нет наборов полей', message: 'Приложение не имеет наборов полей. Добавьте поля в конструкторе.', duration: 7000 });
+        return;
+      }
+      // Use the first registry def (the default schema for the app).
+      const def = defs[0];
+      const fields = parseRecordSchema(def.record_schema);
+
+      // T-0545: build a default flat-layout intent from all fields.
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      // LLM CONNECT POINT (T-0455): replace this defaultEmitIntent with
+      // the LLM-derived intent when T-0455 server routing is live.
+      // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      const intent = defaultEmitIntent(
+        { applicationId: appId, registryDefId: def.id },
+        fields,
+      );
+
+      // FF-T0545-SAME-GATE: runs emitFormDocument → validateDocument (same gate as human).
+      const result = emitSurfaceLocal(intent, fields);
+
+      if (!result.doc) {
+        // Full failure — no document at all.
+        pushToast({
+          tone: 'error',
+          title: 'Ассистент не смог собрать форму',
+          message: result.errorMessage ?? 'Попробуйте снова или соберите вручную.',
+          duration: 0,
+        });
+        // Offer empty canvas.
+        navigate('/forms');
+        return;
+      }
+
+      if (!result.ok && result.validationErrors.some((e) => e.code === 'V-NODE')) {
+        // FF-T0545-NO-BYPASS: unknown node type → full reject, open empty canvas.
+        pushToast({
+          tone: 'error',
+          title: 'Тип блока вне реестра',
+          message: result.errorMessage ?? 'Неизвестный тип узла. Соберите форму вручную.',
+          duration: 0,
+        });
+        navigate('/forms');
+        return;
+      }
+
+      if (!result.ok || result.floor2Flag) {
+        // Partial result or Floor-2 — open with warning.
+        pushToast({
+          tone: 'warn',
+          title: result.floor2Flag ? 'Черновик содержит код-виджет (Floor-2)' : 'Форма с ошибками привязки',
+          message: result.errorMessage ?? 'Откройте черновик в конструкторе и исправьте.',
+          duration: 7000,
+        });
+      }
+
+      // Navigate to /forms with the emitted document in location state.
+      // FormDesigner will open it as initialDocument.
+      navigate('/forms', {
+        state: { aiDraft: result.doc, floor2Flag: result.floor2Flag },
+      });
+    } catch (err) {
+      // FF-T0545-HONEST-DEGRADE: честная ошибка + путь к ручной сборке.
+      pushToast({
+        tone: 'error',
+        title: 'Не удалось собрать форму',
+        message: err?.message ?? 'Попробуйте снова или соберите форму вручную в конструкторе.',
+        duration: 0,
+      });
+    } finally {
+      setBuilding(false);
+    }
+  }, [appId, building, navigate, pushToast]);
+
+  return (
+    <div
+      className="chs-asst__emit-panel"
+      style={{
+        borderTop: '1px solid var(--chs-color-border)',
+        padding: 'var(--chs-space-3) var(--chs-space-4)',
+        background: 'var(--chs-color-surface-muted, transparent)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--chs-space-3)',
+        flexWrap: 'wrap',
+      }}
+    >
+      <span
+        style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)', flex: '1 1 auto' }}
+      >
+        Приложение «{contextRef.label}» — собрать форму из схемы
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={building}
+        loading={building}
+        onClick={handleBuildForm}
+        aria-label="Собрать черновик формы из схемы приложения и открыть в конструкторе"
+        title="Ассистент соберёт черновик формы из всех полей схемы. Черновик откроется в конструкторе для вашей правки."
+      >
+        {building ? 'Сборка…' : 'Собрать форму'}
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => navigate('/forms')}
+        aria-label="Открыть конструктор форм"
+        title="Открыть конструктор и собрать форму вручную"
+      >
+        Открыть конструктор
+      </Button>
+    </div>
+  );
+}
+
 /**
  * Область сообщений треда.
  */
@@ -725,6 +944,11 @@ function ThreadView({ thread, messages, streaming, msgError, onSend, contextRef,
         contextRef={contextRef}
         onClearContext={onClearContext}
       />
+
+      {/* T-0545: AI-emit panel — «Собрать форму» (только при app-контексте).
+          FF-T0545-SAME-GATE: вызывает emitSurfaceLocal → тот же validateDocument.
+          FF-T0545-HONEST-DEGRADE: любая ошибка → тост + открыть конструктор пустым. */}
+      <AiEmitPanel contextRef={contextRef} />
     </div>
   );
 }
