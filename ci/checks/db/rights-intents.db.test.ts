@@ -102,14 +102,23 @@ describe('FF-HIRE-1: hire expands a DICT_PRESETS preset into grants (I-1)', () =
     const beforeAudit = await countAudit();
     const slug = `e-t0223-hire-${Date.now()}`;
     const res = await api('/api/rights/intents/hire', {
-      preset_id: 'p-budget-approver', // non-critical preset → active
+      // p-budget-approver carries an `approve` atom (mcp://ledger.invoices:approve).
+      // Under T-0397's read-path dual-control, an `approve` operation is axis-a
+      // CRITICAL, so the hire lands the grants SEMI-CONFIRMED (confirmed2_by NULL,
+      // not active until a second approver) — the M2-fold derives criticality from
+      // the FACTUAL atoms, not the preset's (absent) `critical:true` flag. The state
+      // is therefore 'semi-confirmed', NOT 'active'. (Was 'active' before the M2 fix,
+      // which would have left the approve grant permanently inactive — a silent
+      // authority outage.)
+      preset_id: 'p-budget-approver',
       role_id: ROLE_BUDGET,
       kind: 'human',
       slug,
       display_name: 'T-0223 Hire',
     });
     expect(res.status, JSON.stringify(res.json)).toBe(201);
-    expect(res.json.state).toBe('active');
+    expect(res.json.state).toBe('semi-confirmed');
+    expect(res.json.second_approver_required).toBe(true);
     expect(res.json.grants_issued).toBeGreaterThan(0);
     createdEmployees.push(res.json.employee_id);
     createdAssignments.push(res.json.role_assignment_id);
@@ -125,7 +134,10 @@ describe('FF-HIRE-1: hire expands a DICT_PRESETS preset into grants (I-1)', () =
       expect(grants.length).toBeGreaterThan(0);
       for (const g of grants) createdGrants.push(g.id);
 
-      // The role_assignment exists and is active.
+      // The role_assignment row exists with its first approver stamped
+      // (confirmed_by IS NOT NULL). For this critical hire it is SEMI-confirmed
+      // (confirmed2_by NULL) pending a second approver — so it is not yet PDP-active,
+      // but the row itself is created with the first confirmation.
       const { rows: ra } = await c.query(
         `SELECT id FROM choros.role_assignment WHERE tenant_id=$1 AND id=$2 AND confirmed_by IS NOT NULL`,
         [DEV_TENANT, res.json.role_assignment_id],
