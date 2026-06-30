@@ -23,9 +23,15 @@ import {
   resolveActorSlugFromAuth,
   resolveTenantBySlug,
   getTenantInfo,
+  loadAdminContext,
   type OrgPerson,
   type OrgDepartment,
 } from "../db/org.js";
+import {
+  AUTHORING_DRAFT,
+  OBSERVABILITY_READ,
+  holdsObservabilityRead,
+} from "../core/capability-authz.js";
 
 // ---------------------------------------------------------------------------
 // Types (re-exported for callers using OrgPerson shape)
@@ -276,6 +282,119 @@ export function registerOrgRoutes(router: Router, _store?: JobStore): void {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ tenantId, tenant }));
+  }));
+
+  // T-0539: GET /api/me/nav-capabilities — nav-visibility capability projection.
+  //
+  // Thin wrapper over loadAdminContext + getGrantsForSubject.
+  // Returns NavCapabilitySet { isGenesisOwner, capabilities[], zones[], degraded? }
+  // derived EXCLUSIVELY from the actor's grants — NOT a second permission layer.
+  //
+  // Zone map (ADR §6, projectZones):
+  //   'work'         — always (floor, no capability required)
+  //   'constructor'  — 'authoring_draft' ∈ capabilities
+  //   'observability'— 'observability:read' ∈ capabilities
+  //   'admin'        — any mgmt_object:* grant OR isGenesisOwner
+  //
+  // Fail-closed: any DB error → { isGenesisOwner:false, capabilities:[], zones:['work'], degraded:true }
+  // dev-no-db → same degraded response (SPA stays functional, only РАБОТА visible).
+  router.register("GET", "/api/me/nav-capabilities", withAuth(async (req, res) => {
+    // dev-no-db fast-path: no DB available → fail-closed floor.
+    if (!hasDb()) {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        isGenesisOwner: false,
+        capabilities: [],
+        zones: ["work"],
+        degraded: true,
+      }));
+      return;
+    }
+
+    try {
+      // Resolve actor slug — same pattern as /api/my-tenant.
+      const authCtx = getAuthContext(req);
+      let actorSlug: string | null | undefined;
+      if (authCtx !== undefined) {
+        actorSlug = await resolveActorSlugFromAuth(
+          getOrgPool(),
+          authCtx.sub,
+          authCtx.preferredUsername,
+        );
+        if (!actorSlug) {
+          throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+        }
+      } else {
+        let h = req.headers[DEV_USER_HEADER];
+        if (Array.isArray(h)) h = h[0];
+        actorSlug = typeof h === "string" && h.length > 0 ? h : undefined;
+        if (!actorSlug) {
+          throw new HttpError(401, "UNAUTHENTICATED", "missing x-dev-user header");
+        }
+      }
+
+      const tenantId = await resolveActorTenant(getOrgPool(), actorSlug);
+      const nowMs = Date.now();
+
+      // Load admin context (isGenesisOwner + mgmt_object:* grants via existing resolver).
+      // Also load all actor grants (getGrantsForSubject) for capability-token check.
+      // Both use the same pool/tenant pattern — existing, tested resolver paths.
+      const { getGrantsForSubject } = await import("../db/grants-dao.js");
+      const [adminCtx, actorGrants] = await Promise.all([
+        loadAdminContext(getOrgPool(), tenantId, actorSlug, nowMs),
+        getGrantsForSubject(getOrgPool(), tenantId, actorSlug, nowMs),
+      ]);
+
+      const { isGenesisOwner } = adminCtx;
+
+      // Capability-class set: capability tokens the actor holds.
+      const capTokens = new Set<string>();
+      for (const g of actorGrants) {
+        const rt = g.resourceType as string;
+        if (rt === (AUTHORING_DRAFT as string) || rt === (OBSERVABILITY_READ as string)) {
+          capTokens.add(rt);
+        }
+      }
+      // mgmt_object:* classes from adminCtx (for capabilities[] field completeness).
+      const mgmtTypes = new Set<string>();
+      for (const g of adminCtx.adminGrants) {
+        mgmtTypes.add(g.resourceType as string);
+      }
+
+      // Flat capability list for the response (deduplicated).
+      const capabilities: string[] = [
+        ...Array.from(capTokens),
+        ...Array.from(mgmtTypes),
+      ];
+
+      // projectZones — the SINGLE canonical zone-map (ADR §4.4 / §6).
+      const zones: string[] = ["work"]; // floor: always visible
+      if (isGenesisOwner || capTokens.has(AUTHORING_DRAFT as string)) {
+        zones.push("constructor");
+      }
+      if (isGenesisOwner || holdsObservabilityRead(actorGrants)) {
+        zones.push("observability");
+      }
+      if (isGenesisOwner || adminCtx.adminGrants.length > 0) {
+        zones.push("admin");
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ isGenesisOwner, capabilities, zones }));
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      // Unexpected DB/resolver error → fail-closed degraded response.
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({
+        isGenesisOwner: false,
+        capabilities: [],
+        zones: ["work"],
+        degraded: true,
+      }));
+    }
   }));
 
   // GET /api/org/employee/:id — return details of one employee
