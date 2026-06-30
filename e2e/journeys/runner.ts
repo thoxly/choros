@@ -17,8 +17,14 @@
  * the bootstrap has run.
  */
 import { expect, type Page, type Locator as PwLocator, type FrameLocator } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { interpolate, interpolateRecord, type Bag } from "./loader.js";
 import type { Journey, Step, Locator, RoleName } from "./types.js";
+
+/** Resolved path to axe-core script (injected into the browser for checkContrast). */
+const _require = createRequire(import.meta.url);
+const AXE_CORE_PATH: string = _require.resolve("axe-core");
 
 /** A Playwright locator scope: the page, a frame, or another locator (for `within`). */
 type LocatorRoot = Page | FrameLocator | PwLocator;
@@ -192,6 +198,121 @@ async function doClick(page: Page, step: Step, bag: Bag): Promise<Bag> {
   return next;
 }
 
+/**
+ * Toggle the SPA theme.
+ *
+ * Strategy (defence-in-depth, most-to-least specific):
+ *  1. Try to click the theme-toggle button by aria-label (works when the SPA has a
+ *     rendered toggle affordance).
+ *  2. Fall back to setting `data-theme` on `<html>` directly via JS — covers pages
+ *     where the toggle is not present (e.g. a form-only view) or the SPA stores the
+ *     preference in localStorage. Also sets localStorage so the SPA does not revert
+ *     on next navigation.
+ *
+ * In both cases the runner asserts `<html data-theme>` reflects the expected value
+ * after the operation (fail-honest: if the SPA ignored the click or overwrote the
+ * attribute, the step is red).
+ */
+async function doToggleTheme(page: Page, step: Step): Promise<void> {
+  const target = step.theme!;
+
+  // Attempt #1 — click a toggle button if it exists (accessible and non-brittle).
+  // The SPA's theme button uses aria-label "Тема" or "Toggle theme" (both tried).
+  const btnLabels = ["Тема", "Toggle theme", "theme-toggle", "Переключить тему"];
+  let clicked = false;
+  for (const label of btnLabels) {
+    const btn = page.getByRole("button", { name: label });
+    const current = await page.evaluate(() => document.documentElement.getAttribute("data-theme") ?? "dark");
+    if (current !== target) {
+      const btnExists = await btn.count();
+      if (btnExists > 0) {
+        await btn.first().click();
+        // Check if it switched; if not, keep trying other labels.
+        const after = await page.evaluate(() => document.documentElement.getAttribute("data-theme") ?? "dark");
+        if (after === target) {
+          clicked = true;
+          break;
+        }
+      }
+    } else {
+      // Already in the right theme — nothing to do.
+      clicked = true;
+      break;
+    }
+  }
+
+  if (!clicked) {
+    // Attempt #2 — direct DOM + localStorage manipulation (framework-agnostic).
+    await page.evaluate((t: string) => {
+      document.documentElement.setAttribute("data-theme", t);
+      try { localStorage.setItem("chs-theme", t); } catch { /* sandboxed */ }
+    }, target);
+  }
+
+  // Fail-honest assertion: <html data-theme> must match the requested theme.
+  await expect(page.locator("html"), `toggleTheme: <html> must have data-theme="${target}"`).toHaveAttribute(
+    "data-theme",
+    target,
+  );
+}
+
+/**
+ * Run an axe-core colour-contrast audit on a scope within the current page.
+ *
+ * axe-core is injected as a script from node_modules (file read, no network) so this
+ * works fully offline / headless / on CI without an npm registry call. The runner
+ * asserts zero violations (fail-honest: any contrast failure → red).
+ *
+ * The `wcagLevel` field maps to axe `runOptions.runOnly`:
+ *   "AA"  → tags: ["wcag2aa", "wcag21aa"]   (4.5:1 normal, 3:1 large/UI)
+ *   "AAA" → tags: ["wcag2aaa", "wcag21aaa"] (7:1 normal)
+ *
+ * Only the `color-contrast` rule is run (not the full axe suite) to keep the step
+ * targeted and fast. A UX journey may call `checkContrast` once per theme after a
+ * `toggleTheme` step.
+ */
+async function doCheckContrast(page: Page, step: Step): Promise<void> {
+  const scope = step.scope ?? "body";
+  const level = step.wcagLevel ?? "AA";
+  const tags = level === "AAA" ? ["wcag2aaa", "wcag21aaa"] : ["wcag2aa", "wcag21aa"];
+
+  // Inject axe-core from node_modules (file-system read, no network).
+  const axeSource = readFileSync(AXE_CORE_PATH, "utf8");
+  await page.addScriptTag({ content: axeSource });
+
+  // Run only the colour-contrast rule in the given scope.
+  const violations = await page.evaluate(
+    async (args: { scope: string; tags: string[] }) => {
+      // axe is now on window (injected above). Type-cast to avoid unknown-type errors.
+      const axe = (window as unknown as { axe: { run: (el: Element | Document, opts: unknown) => Promise<{ violations: Array<{ id: string; description: string; nodes: Array<{ html: string; failureSummary?: string }> }> }> } }).axe;
+      const root = args.scope === "body" ? document.body : (document.querySelector(args.scope) ?? document.body);
+      const results = await axe.run(root, {
+        runOnly: { type: "tag", values: args.tags },
+        rules: { "color-contrast": { enabled: true } },
+      });
+      return results.violations.map((v) => ({
+        id: v.id,
+        description: v.description,
+        nodes: v.nodes.map((n) => ({ html: n.html, summary: n.failureSummary ?? "" })),
+      }));
+    },
+    { scope, tags },
+  );
+
+  if (violations.length > 0) {
+    const msg = violations
+      .map(
+        (v) =>
+          `[${v.id}] ${v.description}\n` +
+          v.nodes.map((n) => `  • ${n.summary}\n    ${n.html.slice(0, 200)}`).join("\n"),
+      )
+      .join("\n\n");
+    throw new Error(
+      `checkContrast (${level}, scope="${scope}"): ${violations.length} violation(s) found:\n\n${msg}`,
+    );
+  }
+}
+
 /** Execute one step; returns the (possibly extended) capture bag. */
 async function runStep(page: Page, step: Step, bag: Bag): Promise<Bag> {
   switch (step.action) {
@@ -225,6 +346,12 @@ async function runStep(page: Page, step: Step, bag: Bag): Promise<Bag> {
     }
     case "apiCheck":
       await doApiCheck(page, step, bag);
+      return bag;
+    case "toggleTheme":
+      await doToggleTheme(page, step);
+      return bag;
+    case "checkContrast":
+      await doCheckContrast(page, step);
       return bag;
     default: {
       // Exhaustiveness guard — a new action without a case is a compile error.

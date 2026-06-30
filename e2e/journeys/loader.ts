@@ -24,6 +24,8 @@ export const VALID_ACTIONS: readonly StepAction[] = [
   "expectCount",
   "pollApi",
   "apiCheck",
+  "toggleTheme",
+  "checkContrast",
 ];
 
 /** A captured-value bag threaded through a journey run. */
@@ -137,6 +139,16 @@ export function validateStep(step: Step, idx: number): void {
       );
       break;
     }
+    case "toggleTheme":
+      assert(
+        step.theme === "light" || step.theme === "dark",
+        `${where}: toggleTheme needs theme: "light" | "dark"`,
+      );
+      break;
+    case "checkContrast":
+      // scope is optional (defaults to "body"); wcagLevel is optional (defaults to "AA").
+      // Nothing required — a bare { name, action: "checkContrast" } is valid.
+      break;
   }
 }
 

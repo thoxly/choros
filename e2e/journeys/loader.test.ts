@@ -24,6 +24,10 @@ import {
 } from "./loader.js";
 import type { Journey, Step } from "./types.js";
 import { journey as telJourney } from "./tel-linear.journey.js";
+import { journey as uxG1Journey } from "./ux-g1-contrast.ux.journey.js";
+import { journey as uxG3Journey } from "./ux-g3-dead-buttons.ux.journey.js";
+import { journey as uxG4Journey } from "./ux-g4-empty-loading-error.ux.journey.js";
+import { journey as uxCreationLight } from "./ux-creation-path-light.ux.journey.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -76,6 +80,8 @@ describe("VALID_ACTIONS", () => {
       "expectCount",
       "pollApi",
       "apiCheck",
+      "toggleTheme",   // T-0314: UX honest-gate — theme switch
+      "checkContrast", // T-0314: UX honest-gate — axe-core WCAG AA/AAA
     ]);
   });
 });
@@ -105,6 +111,11 @@ describe("validateStep — accepts well-formed steps", () => {
     { name: "api", action: "apiCheck", url: "/api/x", expectStatus: 403 },
     { name: "api-not", action: "apiCheck", url: "/api/x", expectStatusNot: 200 },
     { name: "api-oneof", action: "apiCheck", url: "/api/x", expectStatusOneOf: [403, 404] },
+    // T-0314 — new UX honest-gate actions
+    { name: "toggle-light", action: "toggleTheme", theme: "light" },
+    { name: "toggle-dark", action: "toggleTheme", theme: "dark" },
+    { name: "contrast-default", action: "checkContrast" },
+    { name: "contrast-scope", action: "checkContrast", scope: '[role="dialog"]', wcagLevel: "AAA" },
   ];
   ok.forEach((s, i) => {
     it(`accepts: ${s.name}`, () => {
@@ -136,6 +147,9 @@ describe("validateStep — rejects malformed steps with a precise message", () =
       step: { name: "x", action: "click", target: { role: { role: "button" }, css: "b" } },
       rx: /exactly one of/,
     },
+    // T-0314 — toggleTheme rejects missing / invalid theme value
+    { step: { name: "x", action: "toggleTheme" }, rx: /toggleTheme needs theme/ },
+    { step: { name: "x", action: "toggleTheme", theme: "purple" as "light" }, rx: /toggleTheme needs theme/ },
   ];
   bad.forEach(({ step, rx }, i) => {
     it(`rejects: ${step.action} (${rx.source})`, () => {
@@ -186,6 +200,63 @@ describe("discoverJourneyFiles", () => {
   it("returns absolute paths in the given dir", () => {
     const files = discoverJourneyFiles(HERE);
     for (const f of files) expect(f.startsWith(join(HERE, ""))).toBe(true);
+  });
+});
+
+describe("T-0314 UX honest-gate journeys", () => {
+  const uxJourneys = [
+    { name: "ux-g1-contrast", j: uxG1Journey },
+    { name: "ux-g3-dead-buttons", j: uxG3Journey },
+    { name: "ux-g4-empty-loading-error", j: uxG4Journey },
+    { name: "ux-creation-path-light", j: uxCreationLight },
+  ];
+
+  uxJourneys.forEach(({ name, j }) => {
+    it(`${name} is a valid journey (runner will accept it)`, () => {
+      expect(() => validateJourney(j)).not.toThrow();
+    });
+
+    it(`${name} has non-trivial step list`, () => {
+      expect(j.steps.length).toBeGreaterThan(2);
+    });
+  });
+
+  it("ux-g1-contrast uses toggleTheme and checkContrast actions", () => {
+    const actions = uxG1Journey.steps.map((s) => s.action);
+    expect(actions).toContain("toggleTheme");
+    expect(actions).toContain("checkContrast");
+  });
+
+  it("ux-g1-contrast toggles both light and dark", () => {
+    const themes = uxG1Journey.steps
+      .filter((s) => s.action === "toggleTheme")
+      .map((s) => s.theme);
+    expect(themes).toContain("light");
+    expect(themes).toContain("dark");
+  });
+
+  it("ux-g1-contrast uses wcagLevel AA", () => {
+    const contrastSteps = uxG1Journey.steps.filter((s) => s.action === "checkContrast");
+    expect(contrastSteps.length).toBeGreaterThan(0);
+    contrastSteps.forEach((s) => {
+      expect(s.wcagLevel === "AA" || s.wcagLevel === undefined).toBe(true);
+    });
+  });
+
+  it("ux-g3-dead-buttons targets the inbox path", () => {
+    expect(uxG3Journey.steps.some((s) => s.path === "/inbox")).toBe(true);
+  });
+
+  it("ux-g4-empty-loading-error creates an app and checks empty state", () => {
+    expect(uxG4Journey.steps.some((s) => s.awaitResponse?.urlIncludes === "/api/applications")).toBe(true);
+    expect(uxG4Journey.steps.some((s) => s.path?.includes("does-not-exist"))).toBe(true);
+  });
+
+  it("ux-creation-path-light uses checkContrast on dialog scope", () => {
+    const scopedContrast = uxCreationLight.steps.find(
+      (s) => s.action === "checkContrast" && s.scope === '[role="dialog"]',
+    );
+    expect(scopedContrast).toBeDefined();
   });
 });
 
