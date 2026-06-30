@@ -413,6 +413,19 @@ export async function addVersion(
   await deps.store.put(objectKey, body, { mime: attrs.mime, size: body.byteLength });
 
   // 5. INSERT the immutable version row (version_no = max+1) + repoint current.
+  //
+  //    ORPHAN-CLEANUP (T-0521 п.3): store.put above already wrote the bytes to
+  //    disk / S3. If any subsequent DB operation (insertVersion, setCurrentVersion,
+  //    or the outer COMMIT) fails, those bytes have no metadata row pointing to
+  //    them — an orphan object. We attempt a best-effort erase here in the catch
+  //    path to limit disk/S3 accumulation on the FsObjectStore dev path.
+  //
+  //    S3-ADAPTER NOTE (future): when the ObjectStore is backed by a real S3
+  //    provider (e.g. MinIO / AWS S3), the erase in catch is still best-effort
+  //    — a network partition after put and before erase leaves an orphan. Add a
+  //    server-side S3 lifecycle rule (e.g. delete objects with no tag after N
+  //    days, or an abort-incomplete-multipart rule) as a periodic GC backstop
+  //    before shipping a production S3 adapter.
   const prevMax = await deps.meta.maxVersionNo(subject.tenantId, fileId);
   const versionNo = prevMax + 1;
   const row: FileVersionRow = {
@@ -431,8 +444,22 @@ export async function addVersion(
     uploadedBy: subject.subjectId,
     uploadedAt: now,
   };
-  await deps.meta.insertVersion(row);
-  await deps.meta.setCurrentVersion(file.tenantId, file.id, versionId, now);
+  try {
+    await deps.meta.insertVersion(row);
+    await deps.meta.setCurrentVersion(file.tenantId, file.id, versionId, now);
+  } catch (dbErr) {
+    // DB write failed — attempt to erase the already-uploaded object so the
+    // orphan does not accumulate (best-effort; erase failure is swallowed and
+    // the original DB error re-thrown so the caller observes the true failure).
+    try {
+      await deps.store.erase(objectKey);
+    } catch {
+      // Erase failed (e.g. transient network error against S3). Log nothing here
+      // (pure-core, no logger injection) — rely on the S3 lifecycle GC backstop
+      // described in the note above.
+    }
+    throw dbErr;
+  }
 
   // First version ⇒ file.upload; subsequent ⇒ file.replace (rework cycle).
   const auditType = prevMax === 0 ? "file.upload" : "file.replace";

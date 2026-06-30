@@ -535,6 +535,58 @@ describe("addVersion immutable-version (FF-V)", () => {
     if (badMime.denied) expect(badMime.reason).toBe("mime_not_allowed");
     expect(store.versions.size).toBe(0);
   });
+
+  it("orphan-cleanup (T-0521 п.3): object erased from store when DB insertVersion throws", async () => {
+    // Verifies that addVersion calls store.erase(objectKey) when the DB write
+    // fails AFTER the store.put succeeded, to prevent orphan accumulation.
+    const store = new FakeFileStore();
+    seedFile(store);
+    const s3 = new InMemoryObjectStore();
+
+    // Wrap the real FakeFileStore to make insertVersion throw after put.
+    const dbError = new Error("DB write failed");
+    const failingMeta: FileMetaSource = {
+      getFile: store.getFile.bind(store),
+      getVersion: store.getVersion.bind(store),
+      maxVersionNo: store.maxVersionNo.bind(store),
+      async insertVersion(_row) { throw dbError; },
+      setCurrentVersion: store.setCurrentVersion.bind(store),
+      markContentErased: store.markContentErased.bind(store),
+      updateRetentionState: store.updateRetentionState.bind(store),
+    };
+
+    const eraseCalls: string[] = [];
+    const spyS3 = {
+      put: s3.put.bind(s3),
+      presignGet: s3.presignGet.bind(s3),
+      async erase(key: string) {
+        eraseCalls.push(key);
+        return s3.erase(key);
+      },
+    };
+
+    let thrown: unknown;
+    try {
+      await addVersion(
+        { resolver: allowResolver, store: spyS3, meta: failingMeta, hash: hashDep },
+        FILE_A,
+        subjectA,
+        new TextEncoder().encode("orphan-body"),
+        { mime: "text/plain" },
+      );
+    } catch (e) {
+      thrown = e;
+    }
+
+    // The original DB error must propagate.
+    expect(thrown).toBe(dbError);
+    // The cleanup erase must have been called exactly once.
+    expect(eraseCalls).toHaveLength(1);
+    // The erased key must be tenant-prefixed (FF-KEY shape).
+    expect(eraseCalls[0]).toMatch(new RegExp(`^${TENANT_A}/`));
+    // The object is gone from the in-memory store.
+    expect(s3.has(eraseCalls[0]!)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
