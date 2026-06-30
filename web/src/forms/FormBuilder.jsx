@@ -185,7 +185,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
           title="Вверх"
           aria-label="Переместить вверх"
         >
-          ↑
+          <KitIcon name="arrow-up" />
         </Button>
         <Button
           type="button"
@@ -196,7 +196,7 @@ function FieldConfigRow({ field, config, index, count, onChange, onMove }) {
           title="Вниз"
           aria-label="Переместить вниз"
         >
-          ↓
+          <KitIcon name="arrow-down" />
         </Button>
       </div>
     </div>

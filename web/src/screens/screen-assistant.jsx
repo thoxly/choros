@@ -32,7 +32,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog,
+  Button, EmptyState, LoadingState, ErrorState, Skeleton, ConfirmDialog, KitIcon,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -333,7 +333,7 @@ function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onR
                     title={t.pinned ? 'Открепить' : 'Закрепить'}
                     onClick={(e) => { e.stopPropagation(); onPin(t.id, !t.pinned); }}
                   >
-                    {t.pinned ? '★' : '☆'}
+                    <KitIcon name={t.pinned ? 'star' : 'star'} />
                   </button>
                   <button
                     type="button"
@@ -342,7 +342,7 @@ function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onR
                     title="Переименовать"
                     onClick={(e) => { e.stopPropagation(); setRenamingId(t.id); }}
                   >
-                    ✎
+                    <KitIcon name="pencil" />
                   </button>
                   <button
                     type="button"
@@ -351,7 +351,7 @@ function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onR
                     title="Удалить"
                     onClick={(e) => { e.stopPropagation(); onDelete(t.id); }}
                   >
-                    ✕
+                    <KitIcon name="close" />
                   </button>
                 </div>
               )}
@@ -514,7 +514,7 @@ function MessageBubble({ msg, activeThreadId }) {
             <div
               className="chs-asst__surface-floor2"
               role="alert"
-              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning, #f59e0b)', marginBottom: 'var(--chs-space-2)' }}
+              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning)', marginBottom: 'var(--chs-space-2)' }}
             >
               Содержит кастомный код-виджет (Floor-2)
             </div>
@@ -523,7 +523,7 @@ function MessageBubble({ msg, activeThreadId }) {
             <div
               className="chs-asst__surface-warn"
               role="alert"
-              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning, #f59e0b)', marginBottom: 'var(--chs-space-2)' }}
+              style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-warning)', marginBottom: 'var(--chs-space-2)' }}
             >
               {msg.surface.brokenKeys.length} {msg.surface.brokenKeys.length === 1 ? 'поле' : 'поля/полей'} не найдено в схеме — откройте и исправьте.
             </div>

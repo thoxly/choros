@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Button, MonoId, Mono, ExecutorBadge, StatusChip,
-  Drawer, EmptyState, LoadingState, ErrorState,
+  Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
@@ -704,7 +704,7 @@ function InboxScreen() {
           aria-pressed={sortSla ? "true" : undefined}
           onClick={() => setSortSla((s) => !s)}
         >
-          SLA ↑
+          SLA <KitIcon name="arrow-up" />
         </button>
       </div>
 

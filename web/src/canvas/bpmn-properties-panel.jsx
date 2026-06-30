@@ -490,7 +490,7 @@ function OutcomeRow({ outcome, index, onChange, onRemove, isCustom }) {
           style={{
             marginTop: 'var(--chs-space-3)',
             fontSize: 'var(--chs-text-xs)',
-            color: 'var(--chs-color-danger, #c00)',
+            color: 'var(--chs-color-danger)',
             background: 'none',
             border: 'none',
             cursor: 'pointer',
@@ -620,7 +620,7 @@ export function OutcomesPanel({ bo, modeler, element }) {
             onClick={handleAddOutcome}
             style={{
               fontSize: 'var(--chs-text-sm)',
-              color: 'var(--chs-color-brand, #2563eb)',
+              color: 'var(--chs-color-accent)',
               background: 'none',
               border: 'none',
               cursor: 'pointer',

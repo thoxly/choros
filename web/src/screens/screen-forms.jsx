@@ -43,8 +43,8 @@ function FormsScreen() {
           className="chs-forms-screen__floor2-banner"
           role="alert"
           style={{
-            background: 'var(--chs-color-warning-muted, #fff8e1)',
-            borderBottom: '1px solid var(--chs-color-warning, #f59e0b)',
+            background: 'var(--chs-color-warning-soft)',
+            borderBottom: '1px solid var(--chs-color-warning)',
             padding: 'var(--chs-space-2) var(--chs-space-6)',
             fontSize: 'var(--chs-text-sm)',
             color: 'var(--chs-color-text)',
@@ -59,8 +59,8 @@ function FormsScreen() {
           className="chs-forms-screen__ai-banner"
           role="status"
           style={{
-            background: 'var(--chs-color-accent-muted, #eff6ff)',
-            borderBottom: '1px solid var(--chs-color-accent, #3b82f6)',
+            background: 'var(--chs-color-accent-soft)',
+            borderBottom: '1px solid var(--chs-color-accent)',
             padding: 'var(--chs-space-2) var(--chs-space-6)',
             fontSize: 'var(--chs-text-sm)',
             color: 'var(--chs-color-text)',

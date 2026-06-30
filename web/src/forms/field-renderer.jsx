@@ -41,6 +41,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
+import { KitIcon } from '../components/components.jsx';
 // Pure contract-resolution lives in a React-free sibling (field-contract.js) so
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
@@ -605,9 +606,9 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
     padding: 'var(--chs-space-2) var(--chs-space-3)',
     background: 'none',
     border: '1px dashed var(--chs-color-border)',
-    borderRadius: 'var(--chs-radius)',
+    borderRadius: 'var(--chs-radius-2)',
     cursor: readOnly ? 'default' : 'pointer',
-    color: readOnly ? 'var(--chs-color-text-muted)' : 'var(--chs-color-primary)',
+    color: readOnly ? 'var(--chs-color-text-muted)' : 'var(--chs-color-accent)',
     fontSize: 'var(--chs-text-sm)',
     opacity: readOnly ? 0.5 : 1,
   };
@@ -712,7 +713,7 @@ export function CollectionField({ field, value, onChange, error, idPrefix = 'fie
                           style={removeBtnStyle}
                           disabled={readOnly || undefined}
                         >
-                          ✕
+                          <KitIcon name="close" size="0.9em" />
                         </button>
                       </td>
                     </tr>

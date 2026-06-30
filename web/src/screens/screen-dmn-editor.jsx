@@ -228,7 +228,7 @@ function RuleRow({ rule, index, fields, onChange, onRemove }) {
         <span
           style={{
             fontSize: 'var(--chs-text-xs)',
-            fontWeight: 600,
+            fontWeight: 'var(--chs-weight-semibold)',
             color: 'var(--chs-color-text-muted)',
             textTransform: 'uppercase',
             letterSpacing: '0.04em',
@@ -641,21 +641,16 @@ function DmnEditorScreen() {
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-1)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-2)' }}>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={handleBack}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--chs-color-accent)',
-                  padding: '0',
-                  fontSize: 'var(--chs-text-sm)',
-                }}
                 aria-label="Вернуться к процессам"
+                glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}
               >
-                ← Процессы
-              </button>
+                Процессы
+              </Button>
               <span style={{ color: 'var(--chs-color-text-muted)' }}>/</span>
               <span
                 style={{
@@ -670,7 +665,7 @@ function DmnEditorScreen() {
               style={{
                 margin: 0,
                 fontSize: 'var(--chs-text-lg)',
-                fontWeight: 600,
+                fontWeight: 'var(--chs-weight-semibold)',
               }}
             >
               Правила ветвления

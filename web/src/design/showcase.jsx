@@ -454,7 +454,7 @@ function KitSection() {
             onClose={() => setMenuOpen(false)}
             placement="bottom"
             align="start"
-            trigger={<Button variant="secondary" size="sm" onClick={() => setMenuOpen((v) => !v)}>Меню ▾</Button>}
+            trigger={<Button variant="secondary" size="sm" onClick={() => setMenuOpen((v) => !v)}>Меню <KitIcon name="chevron-down" /></Button>}
           >
             <div style={{ display: "flex", flexDirection: "column", minWidth: 160 }}>
               {["Открыть", "Дублировать", "Архивировать"].map((t) => (

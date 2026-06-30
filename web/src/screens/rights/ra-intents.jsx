@@ -14,7 +14,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useId } from 'react';
-import { Button, Field, KitIcon, ConfirmDialog, ErrorState } from '../../components/components.jsx';
+import { Button, Field, Select, KitIcon, ConfirmDialog, ErrorState } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
@@ -74,15 +74,12 @@ function OrgPicker({ label, value, onChange, options, placeholder = '— выб�
     );
   }
   return (
-    <label className="chs-field" htmlFor={selId}>
-      <span className="chs-label">{label}</span>
-      <select id={selId} className="chs-input" value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">{placeholder}</option>
-        {options.map((o) => (
-          <option key={o.id} value={o.id}>{o.label}</option>
-        ))}
-      </select>
-    </label>
+    <Select label={label} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">{placeholder}</option>
+      {options.map((o) => (
+        <option key={o.id} value={o.id}>{o.label}</option>
+      ))}
+    </Select>
   );
 }
 
@@ -144,25 +141,19 @@ function HireForm({ presets, dir }) {
       <div className="chs-intent__grid">
         <Field label="Slug сотрудника" value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="e-petrov" mono />
         <Field label="Имя" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="П. Петров" />
-        <label className="chs-field">
-          <span className="chs-label">Тип</span>
-          <select className="chs-input" value={kind} onChange={(e) => setKind(e.target.value)}>
-            <option value="human">Человек</option>
-            <option value="agent">Агент</option>
-          </select>
-        </label>
+        <Select label="Тип" value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="human">Человек</option>
+          <option value="agent">Агент</option>
+        </Select>
         <OrgPicker label="Роль (должность)" value={roleId} onChange={setRoleId}
           options={dir.roles} dirError={dir.error} placeholder="— выбрать роль —"
           fallbackPlaceholder="UUID роли" />
-        <label className="chs-field">
-          <span className="chs-label">Пресет-роль</span>
-          <select className="chs-input" value={presetId} onChange={(e) => setPresetId(e.target.value)}>
-            <option value="">— выбрать пресет —</option>
-            {presets.map((p) => (
-              <option key={p.id} value={p.id}>{p.label}{p.critical ? ' (критично)' : ''}</option>
-            ))}
-          </select>
-        </label>
+        <Select label="Пресет-роль" value={presetId} onChange={(e) => setPresetId(e.target.value)}>
+          <option value="">— выбрать пресет —</option>
+          {presets.map((p) => (
+            <option key={p.id} value={p.id}>{p.label}{p.critical ? ' (критично)' : ''}</option>
+          ))}
+        </Select>
       </div>
       {selected && (
         <p className="chs-section2__note">
@@ -311,13 +302,10 @@ function UrgentRevokeForm() {
       <SectionHead title="Срочно отозвать" aux="убрать право сейчас · для агента — остановка активных шагов (fail-closed)" />
       <div className="chs-intent__grid">
         <Field label="UUID гранта" value={grantId} onChange={(e) => setGrantId(e.target.value)} placeholder="g0000000-…" mono />
-        <label className="chs-field">
-          <span className="chs-label">Тип принципала</span>
-          <select className="chs-input" value={principalKind} onChange={(e) => setPrincipalKind(e.target.value)}>
-            <option value="human">Человек</option>
-            <option value="agent">Агент</option>
-          </select>
-        </label>
+        <Select label="Тип принципала" value={principalKind} onChange={(e) => setPrincipalKind(e.target.value)}>
+          <option value="human">Человек</option>
+          <option value="agent">Агент</option>
+        </Select>
       </div>
       <p className="chs-section2__note">
         Грант помечается <code>valid_until = now</code>; способность исчезает на <b>следующей</b> проверке PDP (без кэша).

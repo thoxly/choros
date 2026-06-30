@@ -312,7 +312,7 @@ function AppActions({ app, navigate, onAppUpdated }) {
             aria-label={`Действия · ${app.display_name}`}
             onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
           >
-            …
+            <KitIcon name="more-horizontal" />
           </Button>
         }
       >

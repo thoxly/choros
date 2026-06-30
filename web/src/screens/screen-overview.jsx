@@ -51,7 +51,7 @@ const tileIconStyle = {
   background: 'var(--chs-color-accent-soft)', color: 'var(--chs-color-accent)',
 };
 const tileTitleStyle = {
-  fontSize: 'var(--chs-text-md)', fontWeight: 600, color: 'var(--chs-color-text)',
+  fontSize: 'var(--chs-text-md)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)',
 };
 const tileDescStyle = {
   fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)',
@@ -63,7 +63,7 @@ const statsRowStyle = {
 };
 const statValStyle = {
   fontFamily: 'var(--chs-font-mono)', fontVariantNumeric: 'tabular-nums',
-  fontSize: 'var(--chs-text-2xl)', fontWeight: 600, color: 'var(--chs-color-text)',
+  fontSize: 'var(--chs-text-2xl)', fontWeight: 'var(--chs-weight-semibold)', color: 'var(--chs-color-text)',
   lineHeight: 1.1,
 };
 const statLabelStyle = {

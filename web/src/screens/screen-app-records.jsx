@@ -49,7 +49,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon,
+  Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
@@ -938,8 +938,8 @@ function AppRecordsScreen() {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)' }}>
             {/* Non-sidebar up-nav back to the application list (T-0319). */}
-            <Button variant="ghost" size="sm" onClick={() => navigate('/apps')} title="К списку приложений">
-              ← к приложению
+            <Button variant="ghost" size="sm" onClick={() => navigate('/apps')} title="К списку приложений" glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}>
+              к приложению
             </Button>
             <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
               Записи приложения {app ? `«${app.display_name}»` : ''}
@@ -949,8 +949,7 @@ function AppRecordsScreen() {
           <div style={{ display: 'flex', gap: 'var(--chs-space-5)', alignItems: 'center' }}>
             {/* >1 registry_def → user MUST pick which one (POST 409s otherwise). */}
             {defList.length > 1 && (
-              <select
-                className="chs-input"
+              <Select
                 style={{ width: 'auto' }}
                 value={selectedDefId || ''}
                 onChange={(e) => setSelectedDefId(e.target.value || null)}
@@ -960,7 +959,7 @@ function AppRecordsScreen() {
                 {defList.map((d) => (
                   <option key={d.id} value={d.id}>{d.display_name}</option>
                 ))}
-              </select>
+              </Select>
             )}
             <Button
               variant="primary"

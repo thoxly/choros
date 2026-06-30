@@ -214,7 +214,7 @@ function PromptEditor({ role, roleLabel, roleDesc }) {
       {/* Статус тира */}
       <div style={metaRowStyle}>
         <span style={tierBadgeStyle(state.tier)}>
-          {state.tier === 'published' ? '● ' : state.tier === 'draft' ? '◐ ' : '○ '}
+          <span className={`chs-tier-dot chs-tier-dot--${state.tier}`} aria-hidden="true" />{' '}
           {tierLabel(state.tier)}
         </span>
         {isUsingDefault && (

@@ -545,9 +545,9 @@ function FieldRow({ field, errors, index, count, onChange, onMove, onRemove, reg
       {/* reorder / remove */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', whiteSpace: 'nowrap' }}>
         <Button type="button" variant="ghost" size="sm" disabled={index === 0}
-          onClick={() => onMove(index, index - 1)} title="Вверх" aria-label="Переместить вверх">↑</Button>
+          onClick={() => onMove(index, index - 1)} title="Вверх" aria-label="Переместить вверх"><KitIcon name="arrow-up" /></Button>
         <Button type="button" variant="ghost" size="sm" disabled={index === count - 1}
-          onClick={() => onMove(index, index + 1)} title="Вниз" aria-label="Переместить вниз">↓</Button>
+          onClick={() => onMove(index, index + 1)} title="Вниз" aria-label="Переместить вниз"><KitIcon name="arrow-down" /></Button>
         <Button type="button" variant="ghost" size="sm"
           onClick={() => onRemove(index)} title="Удалить" aria-label="Удалить поле">
           <KitIcon name="close" />
@@ -1109,8 +1109,8 @@ function AppSchemaScreen() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-5)', minWidth: 0 }}>
           {/* Up-navigation: a non-sidebar exit back to the applications list. */}
-          <Button variant="ghost" size="sm" onClick={() => navigate('/apps')}>
-            ← к приложениям
+          <Button variant="ghost" size="sm" onClick={() => navigate('/apps')} glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}>
+            к приложениям
           </Button>
           <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             Поля приложения {app ? `«${app.display_name}»` : ''}

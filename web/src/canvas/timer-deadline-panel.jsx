@@ -209,7 +209,7 @@ export function TimerDeadlinePanel({ bo, modeler, element, PanelGroup, PPEntry, 
         {deadlineErr && deadline.trim() !== '' && (
           <p
             className="bio-properties-panel-description"
-            style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-danger, #c00)' }}
+            style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-danger)' }}
           >
             {deadlineErr}
           </p>
