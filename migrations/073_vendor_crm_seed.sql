@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 073 · vendor-crm seed (T-0244 / ADR §5 I-1-exception)
 --
 -- SCOPE — DATA ONLY (registry-content plane):
