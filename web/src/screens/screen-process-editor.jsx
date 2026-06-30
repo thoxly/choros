@@ -23,6 +23,7 @@ import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState, ConfirmDialog } from '../components/components.jsx';
 import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
+import { useDirtyGuard } from '../hooks/useDirtyGuard.js';
 import { formatJsonReadable } from '../lib/format.js';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
@@ -375,6 +376,9 @@ export default function ProcessEditorScreen() {
 
   // T-0526: publish confirm dialog state
   const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
+
+  // T-0533: beforeunload + react-router route-guard for unsaved BPMN edits.
+  const dirtyGuard = useDirtyGuard(isDirty);
 
   // T-0324: process key — the :id param (never "new" — that triggers blank template)
   const isNew = !id || id === 'new';
@@ -795,6 +799,27 @@ export default function ProcessEditorScreen() {
         onConfirm={() => { setPublishConfirmOpen(false); handlePublish(); }}
         onClose={() => setPublishConfirmOpen(false)}
         loading={isBusy}
+      />
+
+      {/* T-0533: route-guard для несохранённой BPMN-диаграммы */}
+      <ConfirmDialog
+        open={dirtyGuard.blockerState === 'blocked'}
+        title="Несохранённые правки"
+        message={
+          <>
+            <p>В редакторе процесса есть несохранённые изменения.</p>
+            <ConsequenceSummary
+              who={`BPMN-диаграмма «${processName}»`}
+              what="Все несохранённые правки будут потеряны"
+              reversibility="Необратимо — восстановить из браузера невозможно"
+            />
+          </>
+        }
+        confirmLabel="Уйти без сохранения"
+        cancelLabel="Остаться"
+        tone="danger"
+        onConfirm={dirtyGuard.proceed}
+        onClose={dirtyGuard.reset}
       />
     </div>
   );

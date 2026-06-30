@@ -832,7 +832,11 @@ function ReportBuilder({ appId, editing, onSaved, onCancel }) {
           if (res.status === 401) { setSubmitErr('Отчёт сохранён. Войдите в систему для публикации.'); return; }
           if (res.status === 403) { setSubmitErr('Публиковать отчёты может только человек с правом публикации.'); return; }
           setSubmitErr(await apiErr(res, 'Отчёт сохранён, но не опубликован'));
-          // Всё равно показываем сохранённый отчёт ниже.
+          // T-0533 FIX: early return — do NOT call onSaved with tier='published' when
+          // promote failed. Without this return the builder was closed and the user
+          // saw "опубликован" in the UI despite a server-side error. The builder stays
+          // open, shows the error, and lets the user retry.
+          return;
         }
       }
 
