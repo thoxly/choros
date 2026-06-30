@@ -62,27 +62,19 @@ ERRORS=0
 #  rights.ts             — read-only RBAC display plane (GET /api/rights[/:roleId]),
 #                          seed/pack fixtures, same public-read posture as the
 #                          processes.ts GETs. No identity-bearing write.
-#  report-page-render.ts — [KNOWN-GAP] reads x-dev-user via a mode-aware extractActor
-#  artifacts.ts             but is NOT withAuth-wrapped, so in keycloak mode getAuthContext
-#  report-pages.ts          is always undefined and it falls through to x-dev-user. These
-#                          three are OUTSIDE the 8 surfaces T-0328 closes (Floor-1 report
-#                          renderer + artifact / report-page CRUD); allowlisted HONESTLY
-#                          (the gap is enumerated, NOT hidden) and tracked as a follow-up
-#                          (wrap their register* in withAuth — or move to the actor-inject
-#                          façade — before the keycloak-prod flip). Listed so the guard is
-#                          green-but-honest and a genuinely NEW unwrapped surface is still
-#                          caught. See ADR §6 (these are NOT on the must-close-for-flip list
-#                          because they are not the 8 agent-facing surfaces, but they are
-#                          the same bug class and must close before multi-tenant prod).
+#
+# T-0489 CLOSED the former [KNOWN-GAP] trio (report-page-render.ts, artifacts.ts,
+# report-pages.ts): every handler in those files is now withAuth-wrapped at the
+# registration site (keycloak mode REQUIRES a valid Bearer → 401; x-dev-user no longer
+# bypasses), and their in-body resolvers are mode-aware (getAuthContext first, x-dev-user
+# only as the dev fallback). They are therefore NO LONGER on the allowlist — coverage is
+# real, not declared. A genuinely new unwrapped surface is still caught by FF-0328-1.
 # ---------------------------------------------------------------------------
 ALLOWLIST=(
   "secret-handle.ts"
   "vendor-activation.ts"
   "register.ts"
   "rights.ts"
-  "report-page-render.ts"
-  "artifacts.ts"
-  "report-pages.ts"
 )
 
 is_allowlisted() {
@@ -206,19 +198,16 @@ before=${ERRORS}
 FACADE_FILE="actor-inject-registrar.ts"
 # FF-0328-2 exceptions (ADR §5 FF-0328-2): files whose x-dev-user read is fed by the
 # registration-site actor-inject façade (the two FROZEN surfaces — the façade resolves
-# the JWT identity into x-dev-user, itself getAuthContext-gated), PLUS documented
-# [KNOWN-GAP] withAuth-wrapped surfaces whose in-body resolver still reads x-dev-user as
-# the sole identity (same shape, OUTSIDE the 8 surfaces; must close before keycloak-prod):
+# the JWT identity into x-dev-user, itself getAuthContext-gated):
 #   secret-handle.ts / process-start.ts — FROZEN, façade-fed (functional in keycloak).
-#   grant-propose.ts / rights-intents.ts — [KNOWN-GAP] withAuth-wrapped (bypass closed in
-#     keycloak: a Bearer is required), but their extractActor reads x-dev-user without
-#     consulting getAuthContext, so the body can't resolve the keycloak identity yet.
-#     Tracked as a follow-up (mode-aware extractActor or actor-inject façade).
+#
+# T-0489 CLOSED the former [KNOWN-GAP] pair (grant-propose.ts, rights-intents.ts): their
+# in-body resolvers are now mode-aware (consult getAuthContext FIRST, x-dev-user only as
+# the getAuthContext===undefined dev fallback), so they satisfy FF-0328-2 directly and
+# need NO exception. Removed from FF2_EXCEPT — the check enforces real mode-awareness.
 FF2_EXCEPT=(
   "secret-handle.ts"
   "process-start.ts"
-  "grant-propose.ts"
-  "rights-intents.ts"
 )
 in_ff2_except() {
   local name="$1" a
