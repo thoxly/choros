@@ -126,12 +126,14 @@ export const ZONES = [
       { id: "reports",           label: "Отчёты",              icon: "audit",  zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 2, screen: true, status: "live" },
       // Аналитика процессов (T-0493).
       { id: "process-analytics", label: "Аналитика процессов", icon: "audit",  zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 3, screen: true, status: "live" },
+      // Оперативная аналитика (T-0405, PD-20): нагрузка по периодам + xlsx/csv выгрузка.
+      { id: "operational-analytics", label: "Оперативная аналитика", icon: "audit", zone: "observability", audience: "manager", capability: "observability:read", frequency: "weekly", order: 4, screen: true, status: "live" },
       // Аудит: GET /api/audit (live).
-      { id: "audit",             label: "Аудит",               icon: "audit",  zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 4, screen: true, status: "live" },
+      { id: "audit",             label: "Аудит",               icon: "audit",  zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 5, screen: true, status: "live" },
       // Расход (T-0477, E-AGENTS L5): учёт стоимости LLM-вызовов.
-      { id: "spend",             label: "Расход",              icon: "budget", zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 5, screen: true, status: "live" },
+      { id: "spend",             label: "Расход",              icon: "budget", zone: "observability", audience: "manager",  capability: "observability:read", frequency: "weekly", order: 6, screen: true, status: "live" },
       // Уведомления (быстрый доступ дублируется в аккаунт-поповере на тот же /notifications).
-      { id: "notifications",     label: "Уведомления",         icon: "bell",   zone: "observability", audience: "end-user", capability: "observability:read", frequency: "daily",  order: 6, screen: true, status: "live" },
+      { id: "notifications",     label: "Уведомления",         icon: "bell",   zone: "observability", audience: "end-user", capability: "observability:read", frequency: "daily",  order: 7, screen: true, status: "live" },
     ],
   },
 
