@@ -1,4 +1,4 @@
--- 109 · matrix_lookup_table (T-0407 · D7-8) — normative parameter matrix.
+-- 112 · matrix_lookup_table (T-0407 · D7-8) — normative parameter matrix.
 --
 -- ADR: docs/specs/forms-data-contract-foundation.spec.md §3.1 / PD-20 / ADR §6.
 -- Foundations: T-0013 (RLS-contract), T-0017 (tenant-scoped FK discipline),
@@ -46,7 +46,7 @@
 -- Idempotency (NF-1): CREATE TABLE IF NOT EXISTS; DO-guard on policies and indexes;
 --   runner skips via schema_migrations; repeating this file is safe.
 --
--- Migration slot: 109 (108_app_section.sql is the highest occupied slot before this).
+-- Migration slot: 112 (109 dual-control / 110 timer on dev; 111 reserved by T-0534).
 
 -- ---------------------------------------------------------------------------
 -- matrix_lookup_table — the header/metadata row for a normative parameter table
