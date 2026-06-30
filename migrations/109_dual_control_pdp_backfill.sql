@@ -1,4 +1,6 @@
--- 108 · dual_control_pdp_backfill (T-0397) — close the PDP dual-control read-hole.
+-- 109 · dual_control_pdp_backfill (T-0397) — close the PDP dual-control read-hole.
+-- (Renumbered 108→109 at rebase reconciliation: 108_app_section.sql from a sibling
+--  task (T-0540) merged to dev first, so this backfill takes the next free prefix.)
 --
 -- PROBLEM (verified): src/db/grants-dao.ts activated a capability grant on
 -- `confirmed_by IS NOT NULL` ALONE — it ignored BOTH `confirmed2_by` AND
