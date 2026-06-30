@@ -66,50 +66,42 @@ export const journey: Journey = {
       target: { css: ".chs-nav__name" },
     },
 
-    // ───────────────────────────────────── S2 · Honest nav (T-0260)
+    // ───────────────────────────────────── S2 · Honest nav (T-0260 → T-0538)
     // T-0260 wired nav-config.js status fields into NavItem in shell.jsx:
     //   status === "demo" → <span class="chs-navitem__demo">демо</span>
     //   status === "soon" → <span class="chs-navitem__soon">скоро</span>
-    // The nav-config has: forms=demo, budgets=soon (org flipped to live in T-0269).
     // A missing badge means the honest-nav feature is broken.
+    //
+    // T-0548 (T-0538 fallout): the 4-zone rezoning (T-0538) + earlier nav churn
+    // moved the honest-status items. The DEMO item that renders in the live nav is
+    // «Ассистент» (constructor zone, nav-config.js status:'demo'). The previously
+    // asserted «Формы задач» is now hidden:true (T-0482 — route /forms stays live,
+    // but it is no longer a sidebar item), and «Бюджеты» was replaced by the live
+    // «Расход» screen back in T-0477 (d8953de) — so neither renders a badge today.
+    // The current IA has no `soon` NAV item (the «скоро» affordances moved into the
+    // account popover: Профиль / Мои настройки), so the sidebar `soon`-badge
+    // assertions are dropped rather than forced. The honest-nav gate is now proven
+    // by the demo badge on «Ассистент». NOTE: the demo badge lives in the
+    // capability-gated «Конструктор» zone; the canonical actor (e-orlov) holds the
+    // authoring_draft grant (migration 088) so the zone — and the badge — render.
     {
       name: "S2 · at least one «демо» badge is visible in the sidebar nav (honest-nav live)",
       action: "expectVisible",
       target: { css: ".chs-navitem__demo", first: true },
     },
     {
-      name: "S2 · at least one «скоро» badge is visible in the sidebar nav (honest-nav live)",
-      action: "expectVisible",
-      target: { css: ".chs-navitem__soon", first: true },
-    },
-    {
-      // Specifically assert the «Формы задач» nav item carries its demo badge
-      // (nav-config.js: { id: "forms", status: "demo" }). NavItem renders
+      // Specifically assert the «Ассистент» nav item carries its demo badge
+      // (nav-config.js: { id: "assistant", status: "demo" }). NavItem renders
       // <button class="chs-navitem"> with no title attribute; the label is a
       // child <span class="chs-navitem__label">. We narrow the button using the
       // `has` filter, then assert the demo badge span is visible inside it.
-      // «Оргструктура» was here before but correctly flipped to live in T-0269.
-      name: "S2 · «Формы задач» nav item has the «демо» badge (nav-config status=demo)",
+      name: "S2 · «Ассистент» nav item has the «демо» badge (nav-config status=demo)",
       action: "expectVisible",
       target: {
         css: ".chs-navitem__demo",
         within: {
           css: "button.chs-navitem",
-          has: { css: '.chs-navitem__label:text("Формы задач")' },
-        },
-      },
-    },
-    {
-      // Specifically assert the «Бюджеты» nav item carries its «скоро» badge
-      // (nav-config.js: { id: "budgets", status: "soon" }). Same selector
-      // pattern: no title attribute, narrow by label text using `has`.
-      name: "S2 · «Бюджеты» nav item has the «скоро» badge (nav-config status=soon)",
-      action: "expectVisible",
-      target: {
-        css: ".chs-navitem__soon",
-        within: {
-          css: "button.chs-navitem",
-          has: { css: '.chs-navitem__label:text("Бюджеты")' },
+          has: { css: '.chs-navitem__label:text("Ассистент")' },
         },
       },
     },

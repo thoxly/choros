@@ -41,6 +41,10 @@ function requireDb<T>(fn: () => Promise<T>): () => Promise<T | void> {
 
 const TENANT = uuid();
 const OWNER = `t0506-owner-${TENANT.slice(0, 8)}`;
+// Process/form keys are deterministic from TENANT so beforeAll (registry-binding
+// seed, T-0520) and the describe block reference the SAME process key.
+const PROC_KEY = `t0506-proc-${TENANT.slice(0, 8)}`;
+const FORM_KEY = `t0506-form-${TENANT.slice(0, 8)}`;
 
 async function stubResolveActorTenant(slug: string): Promise<string> {
   if (slug === OWNER) return TENANT;
@@ -62,6 +66,57 @@ async function seedMinimalTenant(c: pg.Client, tenantId: string, ownerSlug: stri
        (tenant_id, id, position_id, kind, slug, display_name, created_at, updated_at)
      VALUES ($1, $2, NULL, 'human', $3, $4, 0, 0)`,
     [tenantId, empId, ownerSlug, `Owner ${ownerSlug}`],
+  );
+  await c.query('COMMIT');
+}
+
+// ---------------------------------------------------------------------------
+// T-0520 [D7-5]: the POST /api/forms/binding layout path now runs the
+// classifyFloorBoundary content gate (binding.ts §447-497). It resolves the
+// LIVE record_schema via resolveLiveSchemaFieldKeys(): process_key →
+// process_app_binding.application_id → registry_def(slug='soglasovanie').
+// With NO such binding the resolver returns null → fail-closed 409 WRONG_FLOOR.
+//
+// A real FormDesigner save happens on a process that IS bound to an application
+// + registry, so this test must seed that binding for the layout path to be a
+// VALID Floor-1 save (the original T-0506 contract: snake_case layout → 201).
+// The LAYOUT_DOC below has empty children, so R-4 (named-binding integrity)
+// references zero field keys and passes against the (empty) live schema; the
+// load-bearing requirement is merely that the live schema RESOLVES (not null).
+// ---------------------------------------------------------------------------
+
+async function seedRegistryBinding(
+  c: pg.Client,
+  tenantId: string,
+  procKey: string,
+): Promise<void> {
+  await c.query('BEGIN');
+  await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  // application
+  const appId = uuid();
+  const appSlug = `t0506-app-${appId.slice(0, 8)}`;
+  await c.query(
+    `INSERT INTO choros.application
+       (tenant_id, id, slug, display_name, created_at, updated_at)
+     VALUES ($1, $2, $3, $3, 0, 0) ON CONFLICT DO NOTHING`,
+    [tenantId, appId, appSlug],
+  );
+  // process_app_binding: procKey → appId (resolveLiveSchemaFieldKeys step 1)
+  await c.query(
+    `INSERT INTO choros.process_app_binding
+       (tenant_id, id, process_key, application_id, form_key, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, NULL, 0, 0) ON CONFLICT DO NOTHING`,
+    [tenantId, uuid(), procKey, appId],
+  );
+  // registry_def: slug MUST be 'soglasovanie' (resolveLiveSchemaFieldKeys step 2).
+  // record_schema with one property so the live key-set resolves to a real set.
+  await c.query(
+    `INSERT INTO choros.registry_def
+       (tenant_id, id, application_id, slug, display_name, record_schema, created_at, updated_at)
+     VALUES ($1, $2, $3, 'soglasovanie', 'Согласование',
+             '{"properties":{"amount":{"type":"number"}}}'::jsonb, 0, 0)
+     ON CONFLICT DO NOTHING`,
+    [tenantId, uuid(), appId],
   );
   await c.query('COMMIT');
 }
@@ -137,6 +192,9 @@ beforeAll(async () => {
 
   await withClient(migratorUrl(), async (c) => {
     await seedMinimalTenant(c, TENANT, OWNER);
+    // T-0520: bind the test process to an application + registry so the
+    // FormDesigner layout path is a valid Floor-1 save (live schema resolves).
+    await seedRegistryBinding(c, TENANT, PROC_KEY);
   });
 });
 
@@ -146,6 +204,10 @@ afterAll(async () => {
     await c.query('BEGIN');
     await c.query(`SET LOCAL choros.tenant_id = '${TENANT}'`);
     await c.query(`DELETE FROM choros.form_binding WHERE tenant_id = $1`, [TENANT]);
+    // T-0520 registry-binding seed cleanup (order: child refs before application).
+    await c.query(`DELETE FROM choros.registry_def WHERE tenant_id = $1`, [TENANT]);
+    await c.query(`DELETE FROM choros.process_app_binding WHERE tenant_id = $1`, [TENANT]);
+    await c.query(`DELETE FROM choros.application WHERE tenant_id = $1`, [TENANT]);
     await c.query(`DELETE FROM choros.employee WHERE tenant_id = $1`, [TENANT]);
     await c.query('COMMIT');
     await c.query(`DELETE FROM choros.tenant WHERE id = $1`, [TENANT]);
@@ -158,15 +220,29 @@ afterAll(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
+// T-0520 [D7-5]: the layout POST runs classifyFloorBoundary's content gate
+// (binding.ts §447-497), passing the `layout` object DIRECTLY as the FormDocument.
+// The classifier treats the top-level object as the root node — it reads
+// `layout.type` / `layout.children`, it does NOT unwrap a nested `root` key
+// (see floor-boundary-wire.test.ts: `layout: { type: 'root', children: [...] }`).
+//
+// A VALID Floor-1 document therefore has top-level `type: 'root'` (the only
+// non-leaf type allowed at the root, form-document-format §3) with children
+// drawn from FLOOR1_DOC_NODE_TYPES. The original fixture nested the tree under a
+// `root` key whose type was 'column' — so `layout.type` was undefined and the
+// node fell outside the whitelist → R-3 flagged a non-declarative node → 409
+// Floor-2. A real FormDesigner save emits a top-level declarative root; this
+// fixture now mirrors that. Empty children → R-4 references zero field keys → passes.
 const LAYOUT_DOC = {
   schemaVersion: 1,
   source: 'FormDesigner',
-  root: { type: 'column', children: [] },
+  type: 'root',
+  children: [],
 };
 
 describe('T-0506: POST /api/forms/binding — snake_case + layout', () => {
-  const procKey = `t0506-proc-${TENANT.slice(0, 8)}`;
-  const formKey = `t0506-form-${TENANT.slice(0, 8)}`;
+  const procKey = PROC_KEY;
+  const formKey = FORM_KEY;
   let createdId: string;
 
   it('(A) snake_case { process_key, form_key, layout } → 201 (was 400)', requireDb(async () => {
