@@ -178,8 +178,8 @@ describe('visibleItems(zoneId, navSet) — T-0539 zone-gated path', () => {
     const navSet = { isGenesisOwner: false, capabilities: ['authoring_draft'], zones: ['work', 'constructor'] };
     const items = visibleItems('constructor', navSet);
     expect(items.length).toBeGreaterThan(0);
-    // forms is hidden, should not appear
-    expect(items.map((i) => i.id)).not.toContain('forms');
+    // T-0550: forms is now visible (hidden+demo removed, FormDesigner is live)
+    expect(items.map((i) => i.id)).toContain('forms');
     expect(items.map((i) => i.id)).toContain('apps');
   });
 
