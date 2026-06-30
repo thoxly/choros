@@ -18,6 +18,7 @@ import { Button, Field, KitIcon } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
+import { formatError } from '../../lib/format.js';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 // The tenant-state read is genesis-owner gated against the caller's OWN tenant.
@@ -38,7 +39,7 @@ function useOrgDirectory() {
   useEffect(() => {
     let alive = true;
     fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: { ...authHeaders() } })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(formatError(r.status)))))
       .then((d) => {
         if (!alive) return;
         const opt = (rows) => (Array.isArray(rows) ? rows : []).map((x) => ({ id: x.id, label: x.slug || x.id }));
@@ -95,7 +96,7 @@ async function postIntent(path, body) {
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) return { ok: true, data };
-    return { ok: false, status: resp.status, reason: data?.error?.reason || data?.error?.code || `HTTP ${resp.status}` };
+    return { ok: false, status: resp.status, reason: data?.error?.reason || (data?.error?.code ? formatError(data.error.code) : null) || formatError(resp.status) };
   } catch (e) {
     return { ok: false, reason: String(e?.message || e) };
   }
@@ -227,7 +228,7 @@ function SubstituteForm({ dir }) {
       valid_until: validUntil,
       org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
     });
-    setResult(r.ok ? { ...r, message: `Подмена объявлена (Tier-${r.data.tier})${r.data.ttl_grant_id ? ', выдан TTL-грант' : ''}` } : r);
+    setResult(r.ok ? { ...r, message: `Подмена объявлена${r.data.ttl_grant_id ? ' (с временным грантом)' : ''}` } : r);
   };
   return (
     <section className="chs-section2 chs-intent">
@@ -248,8 +249,8 @@ function SubstituteForm({ dir }) {
         <Field label="До (дата/время)" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
       </div>
       <p className="chs-section2__note">
-        Tier-1 (есть пул-держатель) — грант не выпускается; Tier-2 — выпускается TTL-грант над <b>подмножеством</b> прав замещаемой роли,
-        проверенным <code>validateNarrowing</code> до записи. Расширение прав отклоняется (422), <code>delegable=false</code>.
+        Права замещающего строго ограничены подмножеством прав замещаемой роли — расширение прав невозможно и отклоняется сервером.
+        Если замещение покрывается пулом, временный грант не выпускается; иначе выпускается ограниченный временный грант.
       </p>
       <div className="chs-intent__bar">
         <Button variant="primary" size="sm" disabled={result === 'loading' || !absentId || !substituteId || !roleId || !until || !orgNodeId} onClick={submit}>
@@ -307,7 +308,7 @@ function IntentsScreen() {
     // Пресеты приходят из словарей (определения сидит T-0224). Этот экран НЕ
     // содержит пресет-данных — только ссылается по ключу.
     fetch('/api/rights/dictionaries')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(formatError(r.status)))))
       .then((d) => setPresets(d.presets || []))
       .catch((e) => setLoadErr(e.message));
   }, []);

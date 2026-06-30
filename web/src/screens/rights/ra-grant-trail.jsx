@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
+import { formatDate } from '../../lib/format.js';
 
 const ACTION_META = {
   grant:  { label: "выдан",  cls: "grant" },
@@ -34,9 +35,7 @@ function apiRowToDisplay(r) {
   else action = "grant";
 
   // Format occurred_at (epoch-ms) to a display timestamp string.
-  const ts = r.occurred_at
-    ? new Date(r.occurred_at).toISOString().replace("T", " ").replace("Z", "")
-    : String(r.occurred_at);
+  const ts = formatDate(r.occurred_at);
 
   // Subject display: actor and subject are plain strings in the API response.
   const actorDisplay = { type: "human", name: r.actor };
