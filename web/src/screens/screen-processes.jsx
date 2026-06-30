@@ -87,8 +87,8 @@ function ProcessCatalogSection() {
 
   return (
     <div style={{
-      borderTop: '1px solid var(--chs-border, #30333d)',
-      padding: 'var(--chs-space-4, 16px)',
+      borderTop: '1px solid var(--chs-color-border)',
+      padding: 'var(--chs-space-4)',
     }}>
       <BindProcessModal
         open={bindOpen}
@@ -100,9 +100,9 @@ function ProcessCatalogSection() {
 
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        marginBottom: 'var(--chs-space-3, 12px)',
+        marginBottom: 'var(--chs-space-3)',
       }}>
-        <h2 style={{ margin: 0, fontSize: 'var(--chs-text-md, 14px)', fontWeight: 600 }}>
+        <h2 style={{ margin: 0, fontSize: 'var(--chs-text-md)', fontWeight: 'var(--chs-weight-semibold)' }}>
           Определения процессов · связь с приложениями
         </h2>
         <div style={{ display: 'flex', gap: 'var(--chs-space-3)' }}>
@@ -204,9 +204,9 @@ function ProcessCatalogSection() {
 
           {/* Bindings: процессы ↔ приложения */}
           <h3 style={{
-            margin: 'var(--chs-space-3, 12px) 0 var(--chs-space-2, 8px) 0',
-            fontSize: 'var(--chs-text-sm, 13px)', fontWeight: 600,
-            color: 'var(--chs-color-text-muted, #888)',
+            margin: 'var(--chs-space-3) 0 var(--chs-space-2) 0',
+            fontSize: 'var(--chs-text-sm)', fontWeight: 'var(--chs-weight-semibold)',
+            color: 'var(--chs-color-text-muted)',
           }}>
             Связи процессов с приложениями
           </h3>
@@ -237,7 +237,7 @@ function ProcessCatalogSection() {
                     <td>
                       {(b.start_form_key || b.form_key)
                         ? <Mono style={{ fontSize: 'var(--chs-text-sm)' }}>{b.start_form_key || b.form_key}</Mono>
-                        : <span style={{ color: 'var(--chs-color-text-muted, #888)' }}>—</span>}
+                        : <span style={{ color: 'var(--chs-color-text-muted)' }}>—</span>}
                     </td>
                   </tr>
                 ))}

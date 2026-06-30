@@ -890,6 +890,46 @@
   color: var(--chs-color-text-faint);
   font-family: var(--chs-font-mono);
 }
+.chs-asst__thread-actions {
+  display: flex;
+  gap: var(--chs-space-1);
+  flex: none;
+  margin-top: var(--chs-space-1);
+}
+.chs-asst__thread-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--chs-radius-1);
+  background: transparent;
+  color: var(--chs-color-text-faint);
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+.chs-asst__thread-action:hover {
+  background: var(--chs-color-hover);
+  color: var(--chs-color-text-muted);
+}
+.chs-asst__thread-action:focus-visible {
+  outline: 2px solid var(--chs-color-focus-ring);
+  outline-offset: 1px;
+}
+/* Active (pinned) state — filled star in accent colour */
+.chs-asst__thread-action--active {
+  color: var(--chs-color-accent);
+}
+.chs-asst__thread-action--active:hover {
+  color: var(--chs-color-accent-hover, var(--chs-color-accent));
+}
+/* Danger variant (delete) */
+.chs-asst__thread-action--danger:hover {
+  background: var(--chs-color-danger-soft);
+  color: var(--chs-color-danger);
+}
 
 /* Контекст-aware баннер в сайдбаре (когда есть предзаполненный contextRef) */
 .chs-asst__ctx-hint {
@@ -1213,4 +1253,25 @@
   background: var(--chs-color-surface-2);
   color: var(--chs-color-text-faint);
   cursor: not-allowed;
+}
+
+/* ---- Tier status dot (screen-assistant-prompt) ---- */
+.chs-tier-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--chs-color-text-faint);
+}
+.chs-tier-dot--published {
+  background: var(--chs-color-success, #16a34a);
+}
+.chs-tier-dot--draft {
+  background: var(--chs-color-warning, #d97706);
+}
+/* fallback for any other tier value */
+.chs-tier-dot--default,
+.chs-tier-dot--none {
+  background: var(--chs-color-text-muted);
 }

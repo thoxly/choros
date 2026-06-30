@@ -142,7 +142,7 @@ function GrantEditRow({ g, idx, open, onOpen, onChange, onRemove }) {
         </div>
         <button type="button" className={`chs-gedit__scope ${open ? "chs-gedit__scope--active" : ""}`} onClick={() => onOpen(open ? -1 : idx)}>
           {summary.length ? summary.map((s, i) => <ScopeToken key={i} kind={i === 0 ? "node" : "tag"}>{s}</ScopeToken>) : <span className="chs-gedit__scopeempty">задать охват</span>}
-          <span className="chs-gedit__scopecaret">{open ? "закрыть" : "▾"}</span>
+          <span className="chs-gedit__scopecaret">{open ? "закрыть" : <KitIcon name="chevron-down" />}</span>
         </button>
         <button type="button" className="chs-gedit__del" onClick={() => onRemove(idx, g)} title="Удалить грант" aria-label="Удалить грант"><KitIcon name="close" /></button>
       </div>

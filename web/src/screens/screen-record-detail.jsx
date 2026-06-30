@@ -443,8 +443,8 @@ function RecordDetailScreen() {
         <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Детали записи
         </span>
-        <Button variant="ghost" size="sm" onClick={() => navigate(backPath)}>
-          ← Назад к списку
+        <Button variant="ghost" size="sm" onClick={() => navigate(backPath)} glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}>
+          Назад к списку
         </Button>
       </div>
 

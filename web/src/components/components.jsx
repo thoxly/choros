@@ -6,6 +6,7 @@
 
 import React from 'react';
 const { useState, useEffect, useRef, useCallback, useId } = React;
+import { KNOWN_NAMES } from '../design/icon-registry.js';
 
 /* ----------------------------------------------------------------------------
    Kit-иконки — линейные, в стиле Lucide (stroke 1.6, currentColor, без эмодзи;
@@ -26,7 +27,31 @@ function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
       {name === "retry"     && (<><path {...p} d="M13 8a5 5 0 1 1-1.5-3.55" /><path {...p} d="M13 2.5V5h-2.5" /></>)}
       {name === "inbox"     && (<><path {...p} d="M2 4.5h12v7H2z" /><path {...p} d="M2 9.5h3l1 1.5h4l1-1.5h3" /></>)}
       {name === "plus"      && (<path {...p} d="M8 3v10M3 8h10" />)}
-      {name === "chevron-down" && (<path {...p} d="M3.5 6l4.5 4 4.5-4" />)}
+      {name === "chevron-down"    && (<path {...p} d="M3.5 6l4.5 4 4.5-4" />)}
+      {/* ── T-0531 additions ──────────────────────────────────────────── */}
+      {name === "star"            && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="currentColor" stroke="none" /></>)}
+      {name === "star-outline"    && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" /></>)}
+      {name === "pencil"          && (<><path {...p} d="M11.5 2.5l2 2-8 8-2.5.5.5-2.5z" /><path {...p} d="M10 4l2 2" /></>)}
+      {name === "trash"           && (<><path {...p} d="M3 4.5h10M5.5 4.5V3h5v1.5M6 7v4.5M10 7v4.5" /><rect {...p} x="4" y="4.5" width="8" height="9" rx="1" /></>)}
+      {name === "arrow-up"        && (<path {...p} d="M8 13V3M3.5 7.5L8 3l4.5 4.5" />)}
+      {name === "arrow-down"      && (<path {...p} d="M8 3v10M3.5 8.5L8 13l4.5-4.5" />)}
+      {name === "arrow-left"      && (<path {...p} d="M13 8H3M7.5 3.5L3 8l4.5 4.5" />)}
+      {name === "more-horizontal" && (<><circle cx="3.5" cy="8" r="1.2" fill="currentColor" stroke="none" /><circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" /><circle cx="12.5" cy="8" r="1.2" fill="currentColor" stroke="none" /></>)}
+      {name === "check"           && (<path {...p} d="M3 8.5l3.5 3.5 6.5-7" />)}
+      {name === "external-link"   && (<><path {...p} d="M7 3H3v10h10V9" /><path {...p} d="M10 2h4v4" /><path {...p} d="M8 8L14 2" /></>)}
+      {name === "search"          && (<><circle {...p} cx="7" cy="7" r="4.5" /><path {...p} d="M10.5 10.5l3 3" /></>)}
+      {name === "chevron-up"      && (<path {...p} d="M3.5 10l4.5-4 4.5 4" />)}
+      {name === "lock"            && (<><rect {...p} x="3" y="7" width="10" height="8" rx="1" /><path {...p} d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>)}
+      {/* ── fallback: unknown name → visible placeholder + dev-warn ─── */}
+      {!KNOWN_NAMES.has(name) && (
+        <>
+          {typeof process !== 'undefined' && process.env.NODE_ENV !== 'production' &&
+            // eslint-disable-next-line no-console
+            console.warn(`[KitIcon] Unknown name: "${name}". Add it to icon-registry.js.`)}
+          <rect x="2" y="2" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 2" />
+          <path d="M5 5l6 6M11 5l-6 6" fill="none" stroke="currentColor" strokeWidth="1" />
+        </>
+      )}
     </svg>
   );
 }

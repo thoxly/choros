@@ -194,7 +194,7 @@ function FlowRow({ flow, varName, defaultFlowId, onBranchValueChange, onSetDefau
         </div>
         {/* Fix 4: inline hint when EL-breaking chars are stripped */}
         {stripWarning && !isDefault && (
-          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-warning, #b45309)' }}>
+          <p className="bio-properties-panel-description" style={{ marginTop: 'var(--chs-space-1)', color: 'var(--chs-color-warning)' }}>
             Кавычки и обратный слэш в значении не допускаются и будут удалены.
           </p>
         )}
