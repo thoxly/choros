@@ -208,13 +208,12 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
           });
 
           // addVersion internally calls store.put (FsObjectStore: write to disk;
-          // S3: PutObject) BEFORE the DB insertVersion row is committed.
-          // If store.put succeeds but the subsequent DB insert or COMMIT fails,
-          // an orphan object is left on disk/S3 with no metadata row pointing to
-          // it. This is acceptable for dev/FsObjectStore (low risk, bounded disk
-          // usage). For production S3 transitions, a GC/lifecycle policy (e.g.
-          // S3 Object Lifecycle with an abort-incomplete-multipart or a
-          // periodic orphan-sweep job) MUST be added before shipping.
+          // S3: PutObject) BEFORE the DB insertVersion row is committed. If the
+          // subsequent DB write or the outer COMMIT fails, addVersion performs a
+          // best-effort erase of the uploaded object (honest-cleanup, T-0521 п.3).
+          // A best-effort erase after a network failure may still leave an orphan;
+          // a server-side S3 lifecycle GC is the backstop for production (see
+          // addVersion in core/file-attachment.ts for the full note).
           const vResult = await addVersion(
             {
               resolver,
@@ -263,6 +262,11 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
   // with the record's own read authz (the record-level grant is checked on
   // download individually via getFileContentUrl). The list surface is
   // metadata only — no bytes, no presign url.
+  //
+  // FF-NOACL by design — record-level metadata enumeration within a tenant is
+  // intentional (intra-tenant). Cross-tenant boundary is enforced by the tenant
+  // context derivation above (resolveActorTenant). Record-level read gating on
+  // the list response is a founder policy decision (T-0521 п.1).
   // -------------------------------------------------------------------------
   router.register(
     "GET",
@@ -398,6 +402,9 @@ export function registerFileRoutes(router: Router, deps: FileRoutesDeps): void {
         // mem:// or unknown scheme (test/dev in-memory store) — return the url directly.
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
+        // Nosniff on JSON fallback too — defence-in-depth; the file:// branch
+        // already sets it, keep the header consistent across all download paths.
+        res.setHeader("X-Content-Type-Options", "nosniff");
         res.end(JSON.stringify({ url: presignedUrl, expiresAt: urlResult.expiresAt }));
       },
     ),
