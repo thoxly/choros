@@ -174,10 +174,14 @@ async function lookupExternalTaskId(
 // ---------------------------------------------------------------------------
 
 /**
- * Reverse-map: given a Choros jobId, return the job's topic and variables as
- * stored in choros.job (the Flowable external-task process variables captured
- * at fetchAndLock time). These carry the binding values needed for DMN evaluation
- * (e.g. `amount` for the ТЭЛ threshold gate).
+ * Reverse-map: given a Choros jobId, return the job's topic, variables, and
+ * (T-0534) process_def_id as stored in choros.job (the Flowable external-task
+ * process variables captured at fetchAndLock time). These carry the binding
+ * values needed for DMN evaluation (e.g. `amount` for the ТЭЛ threshold gate).
+ *
+ * process_def_id is the BPMN processDefinitionKey stored at enqueue time
+ * (migration 109). When non-null it enables precise per-process scoping in
+ * loadPublishedRuleTables, eliminating the NULL-union cross-contamination risk.
  *
  * Returns undefined when the job row is not found or has no variables.
  * GUC requirement: the connection MUST have choros.tenant_id set before this query.
@@ -186,15 +190,15 @@ async function lookupJobTopicAndVariables(
   pool: pg.Pool,
   tenantId: string,
   jobId: string,
-): Promise<{ topic: string; variables: Record<string, unknown> } | undefined> {
+): Promise<{ topic: string; variables: Record<string, unknown>; processDefId: string | null } | undefined> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query(
       `SET LOCAL "choros.tenant_id" = '${tenantId.replace(/'/g, "''")}'`,
     );
-    const { rows } = await client.query<{ topic: string; variables: Record<string, unknown> }>(
-      `SELECT topic, variables
+    const { rows } = await client.query<{ topic: string; variables: Record<string, unknown>; process_def_id: string | null }>(
+      `SELECT topic, variables, process_def_id
        FROM choros.job
        WHERE id = $1
          AND tenant_id = current_setting('choros.tenant_id', false)::uuid`,
@@ -202,7 +206,11 @@ async function lookupJobTopicAndVariables(
     );
     await client.query("COMMIT");
     if (rows.length === 0) return undefined;
-    return { topic: rows[0].topic, variables: rows[0].variables ?? {} };
+    return {
+      topic: rows[0].topic,
+      variables: rows[0].variables ?? {},
+      processDefId: rows[0].process_def_id ?? null,
+    };
   } catch {
     await client.query("ROLLBACK").catch(() => {/* swallow */});
     return undefined;
@@ -286,7 +294,17 @@ export async function runBridgeOnce(
       }
 
       // Idempotent enqueue: idempotency_key = externalTask.id (FR-1 / ADR §2.A).
-      await jobStore.enqueue(topic, task.variables, retries, task.id);
+      // T-0534: pass processDefinitionKey + processInstanceId so the triage seam
+      // can scope rule-table lookups by process (stored in job.process_def_id /
+      // job.instance_id via migration 109).
+      await jobStore.enqueue(
+        topic,
+        task.variables,
+        retries,
+        task.id,
+        task.processDefinitionKey || undefined,
+        task.processInstanceId || undefined,
+      );
       result.enqueued += 1;
     }
   }
@@ -387,7 +405,15 @@ export function makeExternalTaskDeliver(
               // in-flight rule-change pin check (§8); procDefId scopes the rule
               // lookup to this process when the key is known.
               const instanceVariables = jobInfo.variables;
-              const processKey = resolveAuthoredProcessKey(instanceVariables);
+              // T-0534: prefer the stored process_def_id (captured at fetchAndLock
+              // from the Flowable wire, migration 109) over the variable-extracted
+              // fallback. The stored key scopes loadPublishedRuleTables precisely to
+              // this process, avoiding the NULL-union cross-contamination risk
+              // (T-0524 unscoped path). Fall back to resolveAuthoredProcessKey only
+              // when the column is NULL (legacy / pre-migration rows).
+              const storedProcessKey = jobInfo.processDefId ?? undefined;
+              const variableProcessKey = resolveAuthoredProcessKey(instanceVariables);
+              const processKey = storedProcessKey ?? variableProcessKey;
               const triageResult = await evaluateGatewayAtTriage(pgClient, {
                 tenantId: row.tenantId,
                 instanceId: resolveInstanceId(instanceVariables, row.aggregateId),
@@ -402,6 +428,8 @@ export function makeExternalTaskDeliver(
                 nowMs: Date.now(),
                 bindings: instanceVariables as Record<string, number | string | boolean>,
                 existingVariables: instanceVariables,
+                // T-0534: procDefId from the stored column scopes the rule lookup
+                // to this process's published rule tables (eliminates NULL-union).
                 procDefId: processKey,
               });
               await pgClient.query("COMMIT");

@@ -85,27 +85,41 @@ export class PostgresJobStore {
    * RLS: tenant_id is taken from the GUC (current behavior); the SELECT-back adds
    * an explicit `tenant_id = current_setting(...)` predicate as defense-in-depth.
    */
+  /**
+   * T-0534: optional 5th/6th parameters capture the Flowable process scope at
+   * enqueue time so the triage seam can scope rule-table lookups by process
+   * without relying on process variables.
+   *   processDefId — the BPMN processDefinitionKey (e.g. "telLinear")
+   *   instanceId   — the Flowable processInstanceId (correlation, audit)
+   * Both nullable; omit to get legacy behaviour (columns left NULL).
+   */
   async enqueue(
     topic: string,
     variables: Record<string, unknown>,
     retries: number,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    processDefId?: string,
+    instanceId?: string,
   ): Promise<Job> {
     const id = randomUUID();
     const now = this.clock.now();
+    const pdi = processDefId?.trim().length ? processDefId.trim() : null;
+    const iid = instanceId?.trim().length ? instanceId.trim() : null;
 
     if (idempotencyKey === undefined) {
       const { rows } = await this.pool.query<JobRow>(
         `INSERT INTO choros.job
            (tenant_id, id, topic, variables, state, retries,
-            lock_owner, lock_expiry, created_at, available_at, idempotency_key)
+            lock_owner, lock_expiry, created_at, available_at, idempotency_key,
+            process_def_id, instance_id)
          VALUES
            (current_setting('choros.tenant_id', false)::uuid,
             $1, $2, $3::jsonb, 'CREATED', $4,
-            NULL, NULL, $5, $5, NULL)
+            NULL, NULL, $5, $5, NULL,
+            $6, $7)
          RETURNING id, topic, variables, state, retries,
                    lock_owner, lock_expiry, created_at, available_at`,
-        [id, topic, JSON.stringify(variables), retries, now]
+        [id, topic, JSON.stringify(variables), retries, now, pdi, iid]
       );
       return rowToJob(rows[0]);
     }
@@ -114,16 +128,18 @@ export class PostgresJobStore {
     const ins = await this.pool.query<JobRow>(
       `INSERT INTO choros.job
          (tenant_id, id, topic, variables, state, retries,
-          lock_owner, lock_expiry, created_at, available_at, idempotency_key)
+          lock_owner, lock_expiry, created_at, available_at, idempotency_key,
+          process_def_id, instance_id)
        VALUES
          (current_setting('choros.tenant_id', false)::uuid,
           $1, $2, $3::jsonb, 'CREATED', $4,
-          NULL, NULL, $5, $5, $6)
+          NULL, NULL, $5, $5, $6,
+          $7, $8)
        ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
        DO NOTHING
        RETURNING id, topic, variables, state, retries,
                  lock_owner, lock_expiry, created_at, available_at`,
-      [id, topic, JSON.stringify(variables), retries, now, idempotencyKey]
+      [id, topic, JSON.stringify(variables), retries, now, idempotencyKey, pdi, iid]
     );
     if (ins.rows.length > 0) {
       return rowToJob(ins.rows[0]);

@@ -245,6 +245,14 @@ export interface ExternalTask {
   readonly id: string;
   readonly topic: string;
   readonly processInstanceId: string;
+  /**
+   * T-0534: BPMN process definition KEY extracted from the Flowable wire field
+   * `processDefinitionId` (format "key:version:uuid") at fetchAndLock time.
+   * Empty string when the engine does not supply the field. Stored in
+   * choros.job.process_def_id so the triage seam can scope rule-table lookups to
+   * the correct process without relying on process variables.
+   */
+  readonly processDefinitionKey: string;
   readonly variables: Record<string, unknown>;
   readonly lockOwner: string;
   readonly lockExpirationTime: string; // ISO 8601
@@ -653,17 +661,30 @@ export function makeFlowableClient(
           ? (data as Record<string, unknown>[])
           : [];
 
-        const tasks: ExternalTask[] = rawTasks.map((t) => ({
-          id: String(t["id"] ?? ""),
-          // Flowable wire shape has no "topic" field — echo the requested topic
-          topic,
-          processInstanceId: String(t["processInstanceId"] ?? ""),
-          variables: fromFlowableVars(
-            t["variables"] as { name: string; value: unknown }[] | undefined,
-          ),
-          lockOwner: String(t["lockOwner"] ?? ""),
-          lockExpirationTime: String(t["lockExpirationTime"] ?? ""),
-        }));
+        const tasks: ExternalTask[] = rawTasks.map((t) => {
+          // T-0534: Flowable wire field `processDefinitionId` has the format
+          // "key:version:uuid" (e.g. "telLinear:1:abc123…"). Extract the KEY
+          // (the first colon-delimited segment) as the canonical process key.
+          // When the field is absent or doesn't contain a colon, fall back to
+          // the full field value (may be empty string — handled at enqueue site).
+          const rawProcDefId = String(t["processDefinitionId"] ?? "");
+          const colonIdx = rawProcDefId.indexOf(":");
+          const processDefinitionKey =
+            colonIdx > 0 ? rawProcDefId.slice(0, colonIdx) : rawProcDefId;
+
+          return {
+            id: String(t["id"] ?? ""),
+            // Flowable wire shape has no "topic" field — echo the requested topic
+            topic,
+            processInstanceId: String(t["processInstanceId"] ?? ""),
+            processDefinitionKey,
+            variables: fromFlowableVars(
+              t["variables"] as { name: string; value: unknown }[] | undefined,
+            ),
+            lockOwner: String(t["lockOwner"] ?? ""),
+            lockExpirationTime: String(t["lockExpirationTime"] ?? ""),
+          };
+        });
 
         return { ok: true, tasks };
       }
