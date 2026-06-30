@@ -3,8 +3,8 @@
    ЭКРАН 4: ЖУРНАЛ ВЫДАЧИ ПРАВ (grant trail).
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
-import { ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon } from '../../components/components.jsx';
+import React, { useState, useEffect, useCallback } from 'react';
+import { ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState } from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
 
@@ -77,45 +77,57 @@ function apiRowToDisplay(r) {
 function GrantTrailScreen() {
   const [filter, setFilter] = useState("all");
   const [critOnly, setCritOnly] = useState(false);
-  const [allRows, setAllRows] = useState(() => TRAIL_SEED.map(apiRowToDisplay));
+  const [allRows, setAllRows] = useState(null); // null = loading, [] = empty, [...] = data
   const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [loadMoreError, setLoadMoreError] = useState(null);
 
-  useEffect(() => {
+  const load = useCallback(async () => {
     setLoading(true);
-    fetch('/api/grant-trail')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data.rows)) {
-          setAllRows(data.rows.map(apiRowToDisplay));
-          setHasMore(Boolean(data.hasMore));
-        }
-      })
-      .catch(() => {
-        // keep seed — NF-8: static fallback if API is unavailable
-      })
-      .finally(() => setLoading(false));
+    setLoadError(null);
+    try {
+      const r = await fetch('/api/grant-trail');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      if (Array.isArray(data.rows)) {
+        setAllRows(data.rows.map(apiRowToDisplay));
+        setHasMore(Boolean(data.hasMore));
+      } else {
+        setAllRows(TRAIL_SEED.map(apiRowToDisplay));
+      }
+    } catch (err) {
+      setLoadError(String(err?.message || err));
+      // NF-8: fall back to seed data so the screen is never fully blank
+      setAllRows(TRAIL_SEED.map(apiRowToDisplay));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  function loadMore() {
-    if (!hasMore || allRows.length === 0) return;
-    const minSeq = Math.min(...allRows.map((r) => r._seq));
-    setLoading(true);
-    fetch(`/api/grant-trail?before_seq=${minSeq}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data.rows)) {
-          setAllRows((prev) => [...prev, ...data.rows.map(apiRowToDisplay)]);
-          setHasMore(Boolean(data.hasMore));
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }
+  useEffect(() => { load(); }, [load]);
 
-  const rows = allRows.filter((r) => (filter === "all" || r.action === filter) && (!critOnly || r.crit));
+  const loadMore = useCallback(async () => {
+    if (!hasMore || !allRows || allRows.length === 0) return;
+    const minSeq = Math.min(...allRows.map((r) => r._seq));
+    setLoadMoreError(null);
+    try {
+      const r = await fetch(`/api/grant-trail?before_seq=${minSeq}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      if (Array.isArray(data.rows)) {
+        setAllRows((prev) => [...(prev || []), ...data.rows.map(apiRowToDisplay)]);
+        setHasMore(Boolean(data.hasMore));
+      }
+    } catch (err) {
+      setLoadMoreError(String(err?.message || err));
+    }
+  }, [hasMore, allRows]);
+
+  const displayRows = allRows || [];
+  const rows = displayRows.filter((r) => (filter === "all" || r.action === filter) && (!critOnly || r.crit));
   const counts = TRAIL_FILTERS.reduce((acc, f) => {
-    acc[f.id] = f.id === "all" ? allRows.length : allRows.filter((r) => r.action === f.id).length;
+    acc[f.id] = f.id === "all" ? displayRows.length : displayRows.filter((r) => r.action === f.id).length;
     return acc;
   }, {});
 
@@ -137,6 +149,12 @@ function GrantTrailScreen() {
         <span className="chs-trail__append"><span className="chs-trail__appenddot" />append-only</span>
         <Button variant="secondary" size="sm">Экспорт</Button>
       </div>
+
+      {/* T-0530: loading / error states */}
+      {loading && <LoadingState label="Загрузка журнала…" compact />}
+      {!loading && loadError && (
+        <ErrorState compact title="Не удалось загрузить журнал" message={loadError} onRetry={load} />
+      )}
 
       {/* таблица */}
       <div className="chs-trail__scroll">
@@ -183,9 +201,12 @@ function GrantTrailScreen() {
         <div className="chs-trail__foot">
           <span className="chs-trail__footglyph" />
           Журнал неизменяем (append-only). Каждая запись — часть единого аудит-лога инстанса; правки и удаления невозможны.
-          {hasMore && (
-            <Button variant="secondary" size="sm" onClick={loadMore} disabled={loading} style={{ marginLeft: "1rem" }}>
-              {loading ? "Загрузка…" : "Загрузить ещё"}
+          {loadMoreError && (
+            <ErrorState compact title="Не удалось загрузить ещё" message={loadMoreError} onRetry={loadMore} />
+          )}
+          {hasMore && !loadMoreError && (
+            <Button variant="secondary" size="sm" onClick={loadMore} loading={loading} disabled={loading} style={{ marginLeft: "1rem" }}>
+              Загрузить ещё
             </Button>
           )}
         </div>
