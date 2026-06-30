@@ -1306,6 +1306,19 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'section': {
+      // T-0551 (migration 113) — раздел-сущность. PK=(tenant_id, id), no cross-table
+      // FK (application.section_id FKs section, not the reverse). Standalone seed.
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.section
+           (tenant_id, id, name, sort_order, created_at, updated_at)
+         VALUES ($1, $2, $3, 0, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, `ct-section-${id.slice(0, 8)}`],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1668,6 +1681,7 @@ const SEEDED_TABLES = new Set<string>([
   'app_secret',
   'matrix_lookup_table',
   'matrix_lookup_cell',
+  'section',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {

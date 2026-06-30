@@ -23,6 +23,7 @@ import ProcessesScreen from '../screens/screen-processes.jsx';
 // T-0556: read-only process-instance detail view — /processes/:instanceId
 import ProcessInstanceScreen from '../screens/screen-process-instance.jsx';
 import AppsScreen from '../screens/screen-apps.jsx';
+import SectionsScreen from '../screens/screen-sections.jsx';
 import AppSchemaScreen from '../screens/screen-app-schema.jsx';
 import AppRecordsScreen from '../screens/screen-app-records.jsx';
 import AuditScreen from '../screens/screen-audit.jsx';
@@ -714,6 +715,9 @@ function AppShell() {
   // T-0540: приложения тенанта для динамических секций зоны РАБОТА.
   // Тянется отдельно от screen-apps (сайдбар=long-lived; экран=монтируется/демонтируется).
   const [navApps, setNavApps] = useState([]);
+  // T-0551: разделы-сущности тенанта (GET /api/sections) — задают порядок (sort_order)
+  // нав-групп зоны РАБОТА. Тянутся рядом с navApps (сайдбар = long-lived).
+  const [navSections, setNavSections] = useState([]);
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -859,6 +863,23 @@ function AppShell() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, location.pathname === '/apps' ? location.pathname : null]);
 
+  // T-0551: загрузка разделов-сущностей для порядка нав-групп зоны РАБОТА.
+  // Инвалидация при заходе на /sections (управление разделами) или /apps (назначение).
+  useEffect(() => {
+    if (!currentUser) { setNavSections([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/sections', { headers: devHeaders() });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setNavSections(Array.isArray(data.sections) ? data.sections : []);
+      } catch { /* non-fatal: нет порядка → группы по name */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser, (location.pathname === '/sections' || location.pathname === '/apps') ? location.pathname : null]);
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("chs-theme", theme);
@@ -1001,12 +1022,13 @@ function AppShell() {
                 const fixedItems = items.map((item) => (
                   <NavItem key={item.id} item={item} active={screen === item.id} />
                 ));
-                // T-0540: динамические секции из app.section-данных.
-                // Видимость: groupAppsBySection работает поверх навApps, которые
-                // уже отфильтрованы RLS / capability-фильтром T-0539 на сервере.
-                const navSections = groupAppsBySection(navApps);
-                const sectionItems = navSections.map((sec) => (
-                  <div className="chs-nav__subgroup" key={sec.section}>
+                // T-0551: динамические группы из раздела-сущности (section_id).
+                // Порядок — из navSections (sort_order). Видимость: groupAppsBySection
+                // работает поверх навApps, отфильтрованных RLS / capability-фильтром
+                // T-0539 на сервере. «Без раздела» — последней.
+                const navGroups = groupAppsBySection(navApps, navSections);
+                const sectionItems = navGroups.map((sec) => (
+                  <div className="chs-nav__subgroup" key={sec.section_id || '__none__'}>
                     <div className="chs-nav__subgrouplabel">{sec.section}</div>
                     {sec.apps.map((app) => {
                       const appPath = `/app-records/${app.id}`;
@@ -1120,6 +1142,8 @@ function AppShell() {
             <Route path="/" element={<Navigate to="/overview" replace />} />
             <Route path="/overview" element={<OverviewScreen />} />
             <Route path="/apps" element={<AppsScreen />} />
+            {/* T-0551: управление разделами-сущностями (создать/переименовать/порядок/удалить) */}
+            <Route path="/sections" element={<SectionsScreen />} />
             {/* T-0266: application field-constructor (registry_def editor) */}
             <Route path="/app-schema/:appId" element={<AppSchemaScreen />} />
             {/* T-0267: application records list + schema-driven create-record form */}

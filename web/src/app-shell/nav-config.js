@@ -105,12 +105,14 @@ export const ZONES = [
     items: [
       // Приложения: GET /api/applications (live), POST (live). E13.
       { id: "apps",      label: "Приложения",  icon: "apps",      zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 1, screen: true, status: "live" },
+      // Разделы: управление разделами-сущностями (ELMA-папки) — T-0551. Маршрут /sections.
+      { id: "sections",  label: "Разделы",     icon: "apps",      zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 2, screen: true, status: "live" },
       // Конструктор форм: конструктор форм/интерфейсов (T-0543/544/545). Маршрут /forms. T-0550: снят hidden+demo.
-      { id: "forms",     label: "Конструктор форм", icon: "forms",     zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 2, screen: true, status: "live" },
+      { id: "forms",     label: "Конструктор форм", icon: "forms",     zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 3, screen: true, status: "live" },
       // Модельер: BPMN-редактор. Маршрут /processes/new/edit (path-override). T-0323.
-      { id: "modeler",   label: "Модельер",    icon: "process",   zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 3, path: "/processes/new/edit", screen: true, status: "live" },
+      { id: "modeler",   label: "Модельер",    icon: "process",   zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 4, path: "/processes/new/edit", screen: true, status: "live" },
       // Ассистент: AI-консоль авторинга и аналитики. E17.
-      { id: "assistant", label: "Ассистент",   icon: "assistant", zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 4, screen: true, status: "demo" },
+      { id: "assistant", label: "Ассистент",   icon: "assistant", zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 5, screen: true, status: "demo" },
     ],
   },
 

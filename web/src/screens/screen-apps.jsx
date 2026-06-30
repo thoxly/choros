@@ -25,7 +25,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, StatusChip, Modal, Field, Popover,
+  Button, MonoId, Mono, StatusChip, Modal, Field, Select, Popover,
   EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
@@ -53,22 +53,22 @@ const fieldErrStyle = {
 
 /**
  * CreateAppModal — форма создания приложения.
- * Контролируемые поля slug/display_name/description/section; клиентская валидация
+ * Контролируемые поля slug/display_name/description; клиентская валидация
  * (apps-validate.js, точное зеркало серверного SLUG_RE) — UX-подсказка, но
  * источник истины = сервер (повторно проверяет, отдаёт 400/409).
- * T-0540: добавлено опциональное поле «Раздел» (section).
+ * T-0551: свободный ввод «Раздел» убран (РЕВЕРС T-0540) — раздел назначается после
+ * создания через «Изменить раздел» (выбор из сущностей), нет опечаток-призраков.
  */
 function CreateAppModal({ open, onClose, onCreated }) {
   const [slug, setSlug] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
-  const [section, setSection] = useState("");   // T-0540: бизнес-функция/раздел
   const [fieldErrors, setFieldErrors] = useState({}); // { slug?, display_name?, description? }
   const [submitErr, setSubmitErr] = useState(null);    // general (non-field) error message
   const [submitting, setSubmitting] = useState(false);
 
   const reset = useCallback(() => {
-    setSlug(""); setDisplayName(""); setDescription(""); setSection("");
+    setSlug(""); setDisplayName(""); setDescription("");
     setFieldErrors({}); setSubmitErr(null); setSubmitting(false);
   }, []);
 
@@ -86,7 +86,6 @@ function CreateAppModal({ open, onClose, onCreated }) {
     try {
       const body = { slug, display_name: displayName };
       if (description.trim().length > 0) body.description = description;
-      if (section.trim().length > 0) body.section = section.trim(); // T-0540
       const res = await fetch('/api/applications', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...devHeaders() },
@@ -171,17 +170,6 @@ function CreateAppModal({ open, onClose, onCreated }) {
           {fieldErrors.description && <span style={fieldErrStyle}>{fieldErrors.description}</span>}
         </div>
 
-        {/* T-0540: поле «Раздел» — бизнес-функция приложения для группировки в нав РАБОТА */}
-        <div style={{ marginBottom: 'var(--chs-space-4)' }}>
-          <Field
-            label="Раздел (опц.)"
-            value={section}
-            onChange={(e) => setSection(e.target.value)}
-            placeholder="Финансы, HR, Продажи…"
-            hint="Группирует приложение в боковой панели «Работа»"
-          />
-        </div>
-
         {submitErr && (
           <div role="alert" style={{
             marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
@@ -199,32 +187,77 @@ function CreateAppModal({ open, onClose, onCreated }) {
 }
 
 /**
- * T-0540: модалка «Изменить раздел» — PATCH /api/applications/:id { section }.
- * Открывается из AppActions. Поле section: строка или пустая = очистить (null).
+ * T-0551: модалка «Изменить раздел» — раздел теперь СУЩНОСТЬ (РЕВЕРС T-0540 строки).
+ * Выбор из существующих разделов (GET /api/sections) + инлайн «＋ Создать новый раздел»
+ * (POST /api/sections, затем выбрать). PATCH /api/applications/:id { section_id }.
+ * Свободный текстовый ввод убран → нет опечаток-призраков.
  */
 function SetSectionModal({ open, app, onClose, onUpdated }) {
-  const [sectionValue, setSectionValue] = useState(app.section || "");
+  const [sections, setSections] = useState(null); // null=loading, [...]=loaded
+  const [sectionId, setSectionId] = useState(app.section_id || ""); // "" = «Без раздела»
+  const [creating, setCreating] = useState(false); // inline create mode
+  const [newName, setNewName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState(null);
 
-  // Sync value when app changes (e.g. after save).
+  // Load sections + sync the current value when the modal opens / app changes.
   React.useEffect(() => {
-    setSectionValue(app.section || "");
-    setSubmitErr(null);
-  }, [app.section, open]);
+    if (!open) return;
+    setSectionId(app.section_id || "");
+    setCreating(false); setNewName(""); setSubmitErr(null); setSections(null);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/sections', { headers: devHeaders() });
+        if (!res.ok || cancelled) { if (!cancelled) setSections([]); return; }
+        const data = await res.json();
+        if (!cancelled) setSections(Array.isArray(data.sections) ? data.sections : []);
+      } catch { if (!cancelled) setSections([]); }
+    })();
+    return () => { cancelled = true; };
+  }, [open, app.section_id]);
 
   const handleClose = useCallback(() => { setSubmitErr(null); onClose(); }, [onClose]);
+
+  // Inline-create a section, then select it.
+  const handleCreateSection = useCallback(async () => {
+    const name = newName.trim();
+    if (name.length === 0) { setSubmitErr('Введите название раздела'); return; }
+    setSubmitErr(null); setSubmitting(true);
+    try {
+      const res = await fetch('/api/sections', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ name }),
+      });
+      if (res.status === 201) {
+        const created = await res.json();
+        setSections((prev) => ([...(prev || []), created]).sort(
+          (a, b) => (a.sort_order - b.sort_order) || a.name.localeCompare(b.name, 'ru'),
+        ));
+        setSectionId(created.id);
+        setCreating(false); setNewName("");
+        return;
+      }
+      let parsed = null; try { parsed = await res.json(); } catch { /* ignore */ }
+      setSubmitErr(res.status === 409 ? 'Раздел с таким названием уже есть' : (parsed?.message || `Ошибка ${res.status}`));
+    } catch (err) {
+      setSubmitErr(String(err?.message || err));
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newName]);
 
   const handleSubmit = useCallback(async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     setSubmitErr(null);
     setSubmitting(true);
     try {
-      const newSection = sectionValue.trim().length > 0 ? sectionValue.trim() : null;
+      const newSectionId = sectionId.length > 0 ? sectionId : null;
       const res = await fetch(`/api/applications/${app.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json', ...devHeaders() },
-        body: JSON.stringify({ section: newSection }),
+        body: JSON.stringify({ section_id: newSectionId }),
       });
       if (res.ok) {
         const updated = await res.json();
@@ -240,7 +273,7 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
     } finally {
       setSubmitting(false);
     }
-  }, [app.id, sectionValue, onUpdated, handleClose]);
+  }, [app.id, sectionId, onUpdated, handleClose]);
 
   return (
     <Modal
@@ -250,7 +283,7 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
       footer={
         <>
           <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
-          <Button type="submit" form="set-section-form" variant="primary" size="sm" loading={submitting}>
+          <Button type="submit" form="set-section-form" variant="primary" size="sm" loading={submitting} disabled={creating}>
             {submitting ? 'Сохранение…' : 'Сохранить'}
           </Button>
         </>
@@ -258,16 +291,50 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
     >
       <form id="set-section-form" onSubmit={handleSubmit}>
         <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-          Раздел группирует приложение в боковой панели «Работа». Оставьте пустым — приложение попадёт в «Другое».
+          Раздел группирует приложение в боковой панели «Работа». «Без раздела» — приложение видно без папки.
         </p>
-        <Field
-          label="Раздел"
-          value={sectionValue}
-          onChange={(e) => setSectionValue(e.target.value)}
-          placeholder="Финансы, HR, Продажи…"
-          autoFocus
-          hint="Пустое значение — убрать из раздела (→ «Другое»)"
-        />
+
+        {sections === null ? (
+          <LoadingState label="Загрузка разделов…" />
+        ) : creating ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-3)' }}>
+            <Field
+              label="Новый раздел"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Финансы, HR, Продажи…"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreateSection(); } }}
+            />
+            <div style={{ display: 'flex', gap: 'var(--chs-space-2)' }}>
+              <Button type="button" variant="primary" size="sm" loading={submitting} onClick={handleCreateSection}>
+                Создать и выбрать
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => { setCreating(false); setNewName(""); setSubmitErr(null); }}>
+                Отмена
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <Select
+              label="Раздел"
+              value={sectionId}
+              onChange={(e) => setSectionId(e.target.value)}
+            >
+              <option value="">Без раздела</option>
+              {sections.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </Select>
+            <div style={{ marginTop: 'var(--chs-space-3)' }}>
+              <Button type="button" variant="ghost" size="sm" glyph={<KitIcon name="plus" />} onClick={() => { setCreating(true); setSubmitErr(null); }}>
+                Создать новый раздел
+              </Button>
+            </div>
+          </>
+        )}
+
         {submitErr && (
           <div role="alert" style={{
             marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
@@ -453,11 +520,11 @@ function AppsScreen() {
                         </span>
                       </a>
                     </td>
-                    {/* T-0540: раздел (бизнес-функция) — атрибут группировки в нав РАБОТА */}
+                    {/* T-0551: раздел-сущность (section_name) — группировка в нав РАБОТА */}
                     <td>
-                      {app.section ? (
+                      {app.section_name ? (
                         <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
-                          {app.section}
+                          {app.section_name}
                         </span>
                       ) : (
                         <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-disabled)' }}>—</span>

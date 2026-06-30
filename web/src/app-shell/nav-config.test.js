@@ -38,7 +38,7 @@ const ORIGINAL_IDS = new Set([
 ]);
 // FF-NAV-MAP also accepts 'reference' (T-0538 new grouping entry-point) and
 // 'operational-analytics' (T-0405 PD-20, added to observability zone after FF-NAV-MAP snapshot).
-const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics']);
+const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics', 'sections']);
 
 // Systems/admin ids that must NOT appear in zone='work' (FF-NAV-NOSYS).
 const NOSYS_IDS = new Set([
