@@ -53,20 +53,22 @@ const fieldErrStyle = {
 
 /**
  * CreateAppModal — форма создания приложения.
- * Контролируемые поля slug/display_name/description; клиентская валидация
+ * Контролируемые поля slug/display_name/description/section; клиентская валидация
  * (apps-validate.js, точное зеркало серверного SLUG_RE) — UX-подсказка, но
  * источник истины = сервер (повторно проверяет, отдаёт 400/409).
+ * T-0540: добавлено опциональное поле «Раздел» (section).
  */
 function CreateAppModal({ open, onClose, onCreated }) {
   const [slug, setSlug] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
+  const [section, setSection] = useState("");   // T-0540: бизнес-функция/раздел
   const [fieldErrors, setFieldErrors] = useState({}); // { slug?, display_name?, description? }
   const [submitErr, setSubmitErr] = useState(null);    // general (non-field) error message
   const [submitting, setSubmitting] = useState(false);
 
   const reset = useCallback(() => {
-    setSlug(""); setDisplayName(""); setDescription("");
+    setSlug(""); setDisplayName(""); setDescription(""); setSection("");
     setFieldErrors({}); setSubmitErr(null); setSubmitting(false);
   }, []);
 
@@ -84,6 +86,7 @@ function CreateAppModal({ open, onClose, onCreated }) {
     try {
       const body = { slug, display_name: displayName };
       if (description.trim().length > 0) body.description = description;
+      if (section.trim().length > 0) body.section = section.trim(); // T-0540
       const res = await fetch('/api/applications', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...devHeaders() },
@@ -168,6 +171,103 @@ function CreateAppModal({ open, onClose, onCreated }) {
           {fieldErrors.description && <span style={fieldErrStyle}>{fieldErrors.description}</span>}
         </div>
 
+        {/* T-0540: поле «Раздел» — бизнес-функция приложения для группировки в нав РАБОТА */}
+        <div style={{ marginBottom: 'var(--chs-space-4)' }}>
+          <Field
+            label="Раздел (опц.)"
+            value={section}
+            onChange={(e) => setSection(e.target.value)}
+            placeholder="Финансы, HR, Продажи…"
+            hint="Группирует приложение в боковой панели «Работа»"
+          />
+        </div>
+
+        {submitErr && (
+          <div role="alert" style={{
+            marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+            background: 'var(--chs-color-danger-soft)',
+            border: '1px solid var(--chs-color-danger)',
+            borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
+          }}>
+            {submitErr}
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * T-0540: модалка «Изменить раздел» — PATCH /api/applications/:id { section }.
+ * Открывается из AppActions. Поле section: строка или пустая = очистить (null).
+ */
+function SetSectionModal({ open, app, onClose, onUpdated }) {
+  const [sectionValue, setSectionValue] = useState(app.section || "");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitErr, setSubmitErr] = useState(null);
+
+  // Sync value when app changes (e.g. after save).
+  React.useEffect(() => {
+    setSectionValue(app.section || "");
+    setSubmitErr(null);
+  }, [app.section, open]);
+
+  const handleClose = useCallback(() => { setSubmitErr(null); onClose(); }, [onClose]);
+
+  const handleSubmit = useCallback(async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    setSubmitErr(null);
+    setSubmitting(true);
+    try {
+      const newSection = sectionValue.trim().length > 0 ? sectionValue.trim() : null;
+      const res = await fetch(`/api/applications/${app.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', ...devHeaders() },
+        body: JSON.stringify({ section: newSection }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        onUpdated(updated);
+        handleClose();
+        return;
+      }
+      let parsed = null;
+      try { parsed = await res.json(); } catch { /* ignore */ }
+      setSubmitErr(parsed?.message || `Ошибка ${res.status}`);
+    } catch (err) {
+      setSubmitErr(String(err?.message || err));
+    } finally {
+      setSubmitting(false);
+    }
+  }, [app.id, sectionValue, onUpdated, handleClose]);
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title={`Раздел · ${app.display_name}`}
+      footer={
+        <>
+          <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
+          <Button type="submit" form="set-section-form" variant="primary" size="sm" loading={submitting}>
+            {submitting ? 'Сохранение…' : 'Сохранить'}
+          </Button>
+        </>
+      }
+    >
+      <form id="set-section-form" onSubmit={handleSubmit}>
+        <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+          Раздел группирует приложение в боковой панели «Работа». Оставьте пустым — приложение попадёт в «Другое».
+        </p>
+        <Field
+          label="Раздел"
+          value={sectionValue}
+          onChange={(e) => setSectionValue(e.target.value)}
+          placeholder="Финансы, HR, Продажи…"
+          autoFocus
+          hint="Пустое значение — убрать из раздела (→ «Другое»)"
+        />
         {submitErr && (
           <div role="alert" style={{
             marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
@@ -186,44 +286,62 @@ function CreateAppModal({ open, onClose, onCreated }) {
 
 // Per-row actions: keep BOTH "Настроить поля" and "Записи" reachable without
 // horizontal scroll (audit #2) via a "…" Popover menu anchored to the row.
-function AppActions({ app, navigate }) {
+// T-0540: добавлено действие «Изменить раздел» → PATCH /api/applications/:id { section }.
+function AppActions({ app, navigate, onAppUpdated }) {
   const [open, setOpen] = useState(false);
+  const [sectionModalOpen, setSectionModalOpen] = useState(false);
   return (
-    <Popover
-      open={open}
-      onClose={() => setOpen(false)}
-      placement="bottom"
-      align="end"
-      trigger={
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-haspopup="menu"
-          aria-expanded={open}
-          aria-label={`Действия · ${app.display_name}`}
-          onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        >
-          …
-        </Button>
-      }
-    >
-      <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '160px' }}>
-        <Button
-          variant="ghost" size="sm" role="menuitem"
-          style={{ justifyContent: 'flex-start', width: '100%' }}
-          onClick={() => { setOpen(false); navigate(`/app-schema/${app.id}`); }}
-        >
-          Настроить поля
-        </Button>
-        <Button
-          variant="ghost" size="sm" role="menuitem"
-          style={{ justifyContent: 'flex-start', width: '100%' }}
-          onClick={() => { setOpen(false); navigate(`/app-records/${app.id}`); }}
-        >
-          Записи
-        </Button>
-      </div>
-    </Popover>
+    <>
+      <SetSectionModal
+        open={sectionModalOpen}
+        app={app}
+        onClose={() => setSectionModalOpen(false)}
+        onUpdated={(updated) => { setSectionModalOpen(false); if (onAppUpdated) onAppUpdated(updated); }}
+      />
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        placement="bottom"
+        align="end"
+        trigger={
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-haspopup="menu"
+            aria-expanded={open}
+            aria-label={`Действия · ${app.display_name}`}
+            onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+          >
+            …
+          </Button>
+        }
+      >
+        <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '160px' }}>
+          <Button
+            variant="ghost" size="sm" role="menuitem"
+            style={{ justifyContent: 'flex-start', width: '100%' }}
+            onClick={() => { setOpen(false); navigate(`/app-schema/${app.id}`); }}
+          >
+            Настроить поля
+          </Button>
+          <Button
+            variant="ghost" size="sm" role="menuitem"
+            style={{ justifyContent: 'flex-start', width: '100%' }}
+            onClick={() => { setOpen(false); navigate(`/app-records/${app.id}`); }}
+          >
+            Записи
+          </Button>
+          {/* T-0540: управление разделом — PATCH /api/applications/:id { section } */}
+          <Button
+            variant="ghost" size="sm" role="menuitem"
+            style={{ justifyContent: 'flex-start', width: '100%' }}
+            onClick={(e) => { e.stopPropagation(); setOpen(false); setSectionModalOpen(true); }}
+          >
+            Изменить раздел
+          </Button>
+        </div>
+      </Popover>
+    </>
   );
 }
 
@@ -253,6 +371,12 @@ function AppsScreen() {
     if (created && created.id) setHighlightId(created.id);
     load();
   }, [load]);
+
+  // T-0540: обновление приложения (после PATCH section) — обновляем строку in-place.
+  const handleAppUpdated = useCallback((updated) => {
+    if (!updated || !updated.id) return;
+    setApps((prev) => prev ? prev.map((a) => a.id === updated.id ? { ...a, ...updated } : a) : prev);
+  }, []);
 
   const list = apps || [];
 
@@ -297,7 +421,8 @@ function AppsScreen() {
             <table className="chs-itable">
               <colgroup>
                 <col style={{ width: "auto" }} />
-                <col style={{ width: "180px" }} />
+                <col style={{ width: "140px" }} />
+                <col style={{ width: "120px" }} />
                 <col style={{ width: "120px" }} />
                 <col style={{ width: "160px" }} />
                 <col style={{ width: "56px" }} />
@@ -305,6 +430,7 @@ function AppsScreen() {
               <thead>
                 <tr>
                   <th>Приложение</th>
+                  <th>Раздел</th>
                   <th>Слаг</th>
                   <th>Статус</th>
                   <th>Создано</th>
@@ -326,6 +452,16 @@ function AppsScreen() {
                         </span>
                       </div>
                     </td>
+                    {/* T-0540: раздел (бизнес-функция) — атрибут группировки в нав РАБОТА */}
+                    <td>
+                      {app.section ? (
+                        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-muted)' }}>
+                          {app.section}
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 'var(--chs-text-xs)', color: 'var(--chs-color-text-disabled)' }}>—</span>
+                      )}
+                    </td>
                     <td><MonoId>{app.slug}</MonoId></td>
                     <td><StatusChip status={TIER_CHIP[app.tier] || "waiting"} label={app.tier} /></td>
                     <td>
@@ -335,7 +471,8 @@ function AppsScreen() {
                     </td>
                     <td style={{ textAlign: 'right' }}>
                       {/* T-0266/T-0267 actions: field-constructor + records, behind a "…" menu */}
-                      <AppActions app={app} navigate={navigate} />
+                      {/* T-0540: добавлено «Изменить раздел» */}
+                      <AppActions app={app} navigate={navigate} onAppUpdated={handleAppUpdated} />
                     </td>
                   </tr>
                 ))}

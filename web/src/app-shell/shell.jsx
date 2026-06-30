@@ -13,6 +13,7 @@ import { resolveActiveTenant, resolveNavCapabilities, getNavCapabilities, clearN
 import { loadAuthConfig, getAuthConfig, isKeycloakMode } from './auth-mode.js';
 import * as kc from './keycloak-auth.js';
 import { NAV, ZONES, NAV_HOME, visibleItems, visibleZones, effectiveStatus } from './nav-config.js';
+import { groupAppsBySection } from './nav-sections.js';
 import LoginScreen from '../screens/screen-login.jsx';
 import RegisterScreen from '../screens/screen-register.jsx';
 import OverviewScreen from '../screens/screen-overview.jsx';
@@ -652,6 +653,9 @@ function AppShell() {
   const [orgLabel, setOrgLabel] = useState(""); // resolved tenant label for the sidebar
   // T-0539: nav-capability set — drives zone/item visibility (fail-closed: null → only РАБОТА).
   const [navCaps, setNavCaps] = useState(null);
+  // T-0540: приложения тенанта для динамических секций зоны РАБОТА.
+  // Тянется отдельно от screen-apps (сайдбар=long-lived; экран=монтируется/демонтируется).
+  const [navApps, setNavApps] = useState([]);
   const [authConfig, setAuthConfig] = useState(() => getAuthConfig());
   const [currentUser, setCurrentUser] = useState(null);
   const [authError, setAuthError] = useState(null);
@@ -768,7 +772,9 @@ function AppShell() {
         const res = await fetch('/api/applications', { headers: devHeaders() });
         if (!res.ok || cancelled) return;
         const data = await res.json();
-        const found = (data.applications || []).find((a) => a.id === crumbAppId);
+        const apps = data.applications || [];
+        if (!cancelled) setNavApps(apps); // T-0540: кэш приложений для сайдбара
+        const found = apps.find((a) => a.id === crumbAppId);
         if (found && found.display_name && !cancelled) {
           setCrumbEntity(`app:${crumbAppId}`, found.display_name);
         }
@@ -776,6 +782,24 @@ function AppShell() {
     })();
     return () => { cancelled = true; };
   }, [currentUser, crumbAppId, crumbEntities, setCrumbEntity]);
+
+  // T-0540: загрузка приложений для нав-секций зоны РАБОТА при смене пользователя.
+  // Запускается при authReady+currentUser, но только если crumb-эффект не запустился первым.
+  // Обновляется также при переходе на экран /apps (invalidation hint через location).
+  useEffect(() => {
+    if (!currentUser) { setNavApps([]); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/applications', { headers: devHeaders() });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setNavApps(Array.isArray(data.applications) ? data.applications : []);
+      } catch { /* non-fatal: нет приложений → только inbox/processes */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser, location.pathname === '/apps' ? location.pathname : null]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -909,8 +933,42 @@ function AppShell() {
             if (items.length === 0) return null;
 
             // Для зоны admin — группируем пункты по subgroup.
+            // Для зоны work — плоский список + динамические секции приложений (T-0540).
             // Для остальных зон — плоский список.
             const renderZoneItems = () => {
+              if (zone.id === "work") {
+                // Фиксированные пункты (inbox, processes) — из nav-config.
+                const fixedItems = items.map((item) => (
+                  <NavItem key={item.id} item={item} active={screen === item.id} />
+                ));
+                // T-0540: динамические секции из app.section-данных.
+                // Видимость: groupAppsBySection работает поверх навApps, которые
+                // уже отфильтрованы RLS / capability-фильтром T-0539 на сервере.
+                const navSections = groupAppsBySection(navApps);
+                const sectionItems = navSections.map((sec) => (
+                  <div className="chs-nav__subgroup" key={sec.section}>
+                    <div className="chs-nav__subgrouplabel">{sec.section}</div>
+                    {sec.apps.map((app) => {
+                      const appPath = `/app-records/${app.id}`;
+                      const isActive = location.pathname === appPath;
+                      return (
+                        <button
+                          key={app.id}
+                          type="button"
+                          className="chs-navitem"
+                          aria-current={isActive ? "true" : undefined}
+                          onClick={() => navigate(appPath)}
+                        >
+                          <Icon name="apps" className="chs-navitem__icon" />
+                          <span className="chs-navitem__label">{app.display_name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ));
+                return [...fixedItems, ...sectionItems];
+              }
+
               if (zone.id !== "admin") {
                 return items.map((item) => {
                   const isActive = item.path
