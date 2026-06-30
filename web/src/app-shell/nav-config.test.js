@@ -36,8 +36,9 @@ const ORIGINAL_IDS = new Set([
   'ops-overview', 'notifications', 'audit', 'spend', 'reports', 'process-analytics',
   'llm-connections', 'llm-config', 'assistant-prompt',
 ]);
-// FF-NAV-MAP also accepts 'reference' as the intentional new grouping entry-point.
-const ALLOWED_NEW_IDS = new Set(['reference']);
+// FF-NAV-MAP also accepts 'reference' (T-0538 new grouping entry-point) and
+// 'operational-analytics' (T-0405 PD-20, added to observability zone after FF-NAV-MAP snapshot).
+const ALLOWED_NEW_IDS = new Set(['reference', 'operational-analytics']);
 
 // Systems/admin ids that must NOT appear in zone='work' (FF-NAV-NOSYS).
 const NOSYS_IDS = new Set([
@@ -156,7 +157,7 @@ describe('nav-config T-0538: 4-zone IA', () => {
     expect(ids).toContain('processes');
   });
 
-  it('CONSTRUCTOR zone contains apps, forms(hidden), modeler, assistant', () => {
+  it('CONSTRUCTOR zone contains apps, forms, modeler, assistant', () => {
     const cz = ZONES.find((z) => z.id === 'constructor');
     const ids = cz.items.map((i) => i.id);
     expect(ids).toContain('apps');
@@ -190,17 +191,19 @@ describe('nav-config T-0538: 4-zone IA', () => {
 
   // ── Конкретные инварианты пунктов ─────────────────────────────────────────
 
-  it('forms item is hidden (T-0482)', () => {
+  it('forms item is visible (T-0550: hidden+demo removed, FormDesigner is live)', () => {
     const cz = ZONES.find((z) => z.id === 'constructor');
     const formsItem = cz.items.find((i) => i.id === 'forms');
     expect(formsItem).toBeDefined();
-    expect(formsItem.hidden).toBe(true);
+    expect(formsItem.hidden).toBeFalsy();
+    expect(formsItem.status).toBe('live');
+    expect(formsItem.label).toBe('Конструктор форм');
   });
 
-  it('forms is filtered by visibleItems', () => {
+  it('forms IS returned by visibleItems (T-0550)', () => {
     const cz = ZONES.find((z) => z.id === 'constructor');
     const visible = visibleItems(cz);
-    expect(visible.map((i) => i.id)).not.toContain('forms');
+    expect(visible.map((i) => i.id)).toContain('forms');
   });
 
   it('modeler has path override (not /modeler)', () => {
