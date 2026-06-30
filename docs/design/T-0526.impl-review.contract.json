@@ -1,0 +1,82 @@
+{
+  "task_id": "T-0526",
+  "verdict": "approved",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "pass",
+      "axis": 6,
+      "location": "ci/checks/no-window-confirm.sh",
+      "issue": "FF-526-01: CI-гард создан и выдаёт OK. Все вызовы window.confirm() в web/src устранены. Единственное упоминание — комментарий в components.jsx (строка 565: «заменяет нативный window.confirm»). Команда `bash ci/checks/no-window-confirm.sh` возвращает exit 0.",
+      "suggestion": null
+    },
+    {
+      "id": "F2",
+      "severity": "pass",
+      "axis": 1,
+      "location": "web/src/components/components.jsx:575-608",
+      "issue": "ConfirmDialog расширен четырьмя опциональными props (reason, onReasonChange, reasonRequired, reasonPlaceholder). Все новые props имеют дефолты (reason=undefined, reasonRequired=false), поэтому существующие потребители — screen-org.jsx (строка 640) и screen-assistant.jsx (удалить разговор, строка 941) — вызывают ConfirmDialog без новых props и работают как прежде. Обратная совместимость подтверждена.",
+      "suggestion": null
+    },
+    {
+      "id": "F3",
+      "severity": "pass",
+      "axis": 2,
+      "location": "ra-intents.jsx:217-236, ra-intents.jsx:333-353, ra-sod.jsx:145-155, screen-process-editor.jsx:782-798, screen-dmn-editor.jsx:892-911, screen-reports.jsx:970-986, screen-llm-connections.jsx:361-377, screen-assistant.jsx:542-559",
+      "issue": "Все CONFIRM-DANGER сайты из таблицы дизайна гейтятся через ConfirmDialog tone='danger'. Сайт 3 (ra-sod.jsx window.confirm) заменён в T-0528 до слияния и подтверждён в этой ветке. Итого 9 danger-диалогов, что соответствует FF-526-02 (wc -l даёт 9). Сайты 1 и 2 (Уволить/Срочно отозвать) добавляют dual-control reason + reasonRequired=true. Кнопки Publish в screen-process-editor, screen-dmn-editor, screen-reports имеют variant='danger' и визуальный разделитель от Save.",
+      "suggestion": null
+    },
+    {
+      "id": "F4",
+      "severity": "pass",
+      "axis": 3,
+      "location": "ra-role-editor.jsx:304-330, screen-dmn-editor.jsx:515-540, screen-reports.jsx:746-770, screen-app-schema.jsx:786",
+      "issue": "Undo-тосты для обратимых сайтов: «Удалить грант» (ra-role-editor), «Удалить правило» DMN, «Удалить метрику», «Удалить поле/колонку» — все используют duration=5000, tone='success', action=<button>Отменить</button> с восстановлением состояния через setState. Паттерн правильный. Используется локальный useToasts (до миграции на useAppToast T-0528) — допустимо согласно §8 дизайна.",
+      "suggestion": null
+    },
+    {
+      "id": "F5",
+      "severity": "pass",
+      "axis": 6,
+      "location": "git diff dev...HEAD --name-only",
+      "issue": "shell.jsx не затронут. Grep `git diff dev...HEAD --name-only | grep shell.jsx` возвращает пустой вывод. Нав-задача T-0538 не задета.",
+      "suggestion": null
+    },
+    {
+      "id": "F6",
+      "severity": "info",
+      "axis": 2,
+      "location": "web/src/canvas/bpmn-properties-panel.jsx:486-501",
+      "issue": "Сайт 5 (BPMN «Удалить исход») отложен. Кнопка «Удалить исход» на строке 500 срабатывает на один клик без ConfirmDialog. В commit-сообщении явно указано: «Сайт 5: bpmn-properties-panel — «Удалить исход» оставлен pending (нет прямого действия в текущем коде)». Комментарий в коде отсутствует — отметка есть только в git-логе. Допустимый follow-up, не блокирует мерж согласно условиям ревью. Рекомендация: добавить TODO-комментарий в bpmn-properties-panel.jsx:485 для трассировки.",
+      "suggestion": "Добавить `{/* TODO T-0526-followup: ConfirmDialog danger для «Удалить исход» (сайт 5) */}` перед строкой 485, чтобы отложенный сайт был виден без погружения в git-лог."
+    },
+    {
+      "id": "F7",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/screens/screen-process-editor.jsx:795",
+      "issue": "В onConfirm ConfirmDialog для публикации процесса вызов `setPublishConfirmOpen(false)` и `handlePublish()` исполняются синхронно без await. handlePublish — async-функция, но результат не awaited. Это не баг: setBusy(true) внутри handlePublish немедленно блокирует повторный клик, а dialog закрывается до завершения публикации. Однако если handlePublish бросит синхронное исключение (крайне маловероятно), диалог останется закрытым без сигнала ошибки. Паттерн аналогичен screen-dmn-editor и screen-reports — консистентно.",
+      "suggestion": null
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-526-01: window.confirm полностью выведен из кодовой базы web/src", "covered": true },
+    { "ac": "AC-526-02: все CONFIRM-DANGER сайты гейтируются danger ConfirmDialog", "covered": true },
+    { "ac": "AC-526-03: ConsequenceSummary присутствует в диалогах с высоким blast-radius (Уволить, Срочно отозвать, Отвязать ключ, Опубликовать процесс, Опубликовать отчёт, Опубликовать решение)", "covered": true },
+    { "ac": "AC-526-04: Publish визуально отделён от Save (variant=danger + разделитель)", "covered": true },
+    { "ac": "AC-526-05: обратимые bulk-удаления получают undo-тост 5 с", "covered": true },
+    { "ac": "AC-526-06: dual-control reject reason встраивается для Уволить и Срочно отозвать (reasonRequired=true)", "covered": true },
+    { "ac": "FF-526-01: CI-гард no-window-confirm.sh создан и проходит", "covered": true },
+    { "ac": "FF-526-02: 9 CONFIRM-DANGER сайтов гейтируются (wc -l=9)", "covered": true },
+    { "ac": "FF-526-03: variant='danger' на кнопках Publish в process-editor и dmn-editor", "covered": true },
+    { "ac": "FF-526-04: undo-тосты duration=5000 + action prop в screen-reports, screen-dmn-editor, screen-app-schema", "covered": true },
+    { "ac": "FF-526-05: ConsequenceSummary в ra-intents, screen-llm-connections, screen-process-editor", "covered": true },
+    { "ac": "shell.jsx не тронут (нав-задача T-0538 изолирована)", "covered": true },
+    { "ac": "Существующие потребители ConfirmDialog (screen-org, screen-assistant удалить-разговор) не сломаны", "covered": true },
+    { "ac": "Build green (D-056): vite build 500 modules, exit 0", "covered": true },
+    { "ac": "Сайт 5 bpmn «Удалить исход» честно отмечен как pending в commit, не реализован", "covered": false }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "Реализация соответствует дизайн-спеке T-0526 по всем критичным осям. Build зелёный (500 модулей, exit 0). Все 9 CONFIRM-DANGER сайтов гейтированы, window.confirm полностью выведен и закрыт CI-гардом, reason-props обратносовместимы, shell.jsx не тронут. Единственный нереализованный сайт (bpmn «Удалить исход», сайт 5) задокументирован в commit-message — это допустимый follow-up, не блокер. Нит F6: рекомендую TODO-комментарий в bpmn-properties-panel.jsx для трассируемости без погружения в git-лог. Нит F7: async-обработчик в process-editor консистентен с остальными screen, риска нет. Verdict: approved."
+}

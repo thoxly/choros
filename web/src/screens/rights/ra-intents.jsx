@@ -14,11 +14,12 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useId } from 'react';
-import { Button, Field, KitIcon } from '../../components/components.jsx';
+import { Button, Field, KitIcon, ConfirmDialog } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 import { formatError } from '../../lib/format.js';
+import { ConsequenceSummary, useDestructiveConfirm } from '../../util/confirm-helpers.jsx';
 
 // Tenant id resolved at runtime from the caller's identity (see active-tenant.js).
 // The tenant-state read is genesis-owner gated against the caller's OWN tenant.
@@ -182,11 +183,18 @@ function HireForm({ presets, dir }) {
 function FireForm({ dir }) {
   const [employeeId, setEmployeeId] = useState('');
   const [result, setResult] = useState(null);
+  const dc = useDestructiveConfirm();
+  const [reason, setReason] = useState('');
+
+  const employeeLabel = dir.employees.find((e) => e.id === employeeId)?.label || employeeId;
+
   const submit = async () => {
     setResult('loading');
-    const r = await postIntent('/api/rights/intents/fire', { employee_id: employeeId });
+    const r = await postIntent('/api/rights/intents/fire', { employee_id: employeeId, reason });
     setResult(r.ok ? { ...r, message: `Отозвано назначений: ${r.data.revoked_assignments}, грантов: ${r.data.revoked_sole_grants}. Задачи требуют переназначения.` } : r);
+    setReason('');
   };
+
   return (
     <section className="chs-section2 chs-intent">
       <SectionHead title="Уволить" aux="атомарный revoke всех прав · затем переназначение задач" />
@@ -200,11 +208,32 @@ function FireForm({ dir }) {
         Активные задачи переназначаются/прерываются <b>после</b> фиксации revoke (порядок revoke→reassign).
       </p>
       <div className="chs-intent__bar">
-        <Button variant="primary" size="sm" disabled={result === 'loading' || !employeeId} onClick={submit}>
+        <Button variant="danger" size="sm" disabled={result === 'loading' || !employeeId} onClick={() => dc.request(employeeId)}>
           {result === 'loading' ? 'Увольнение…' : 'Отключить сотрудника'}
         </Button>
       </div>
       <ResultBanner result={result} />
+
+      <ConfirmDialog
+        open={dc.open}
+        tone="danger"
+        title="Уволить сотрудника?"
+        message={
+          <ConsequenceSummary
+            who={employeeLabel || 'Выбранный сотрудник'}
+            what={`Отзыв всех назначений и грантов. Активные задачи переназначаются/прерываются.`}
+            reversibility="Необратимо. Восстановление — ручное создание новых назначений."
+          />
+        }
+        confirmLabel="Уволить"
+        loading={dc.loading}
+        reason={reason}
+        onReasonChange={setReason}
+        reasonRequired={true}
+        reasonPlaceholder="Причина увольнения (обязательно)"
+        onConfirm={() => dc.confirm(submit)}
+        onClose={dc.cancel}
+      />
     </section>
   );
 }
@@ -267,11 +296,16 @@ function UrgentRevokeForm() {
   const [grantId, setGrantId] = useState('');
   const [principalKind, setPrincipalKind] = useState('human');
   const [result, setResult] = useState(null);
+  const dc = useDestructiveConfirm();
+  const [reason, setReason] = useState('');
+
   const submit = async () => {
     setResult('loading');
-    const r = await postIntent('/api/rights/intents/urgent-revoke', { grant_id: grantId, principal_kind: principalKind });
+    const r = await postIntent('/api/rights/intents/urgent-revoke', { grant_id: grantId, principal_kind: principalKind, reason });
     setResult(r.ok ? { ...r, message: `Право отозвано немедленно${r.data.halt_active_run ? ' · сигнал остановки активного прогона агента' : ''}` } : r);
+    setReason('');
   };
+
   return (
     <section className="chs-section2 chs-intent">
       <SectionHead title="Срочно отозвать" aux="убрать право сейчас · для агента — остановка активных шагов (fail-closed)" />
@@ -290,11 +324,32 @@ function UrgentRevokeForm() {
         Для агента активный прогон обязан прерваться на границе следующего шага (fail-closed).
       </p>
       <div className="chs-intent__bar">
-        <Button variant="primary" size="sm" disabled={result === 'loading' || !grantId} onClick={submit}>
+        <Button variant="danger" size="sm" disabled={result === 'loading' || !grantId} onClick={() => dc.request(grantId)}>
           {result === 'loading' ? 'Отзыв…' : 'Отозвать сейчас'}
         </Button>
       </div>
       <ResultBanner result={result} />
+
+      <ConfirmDialog
+        open={dc.open}
+        tone="danger"
+        title="Срочно отозвать право?"
+        message={
+          <ConsequenceSummary
+            who={`Грант ${(dc.target || '').slice(0, 8)}… (${principalKind === 'agent' ? 'Агент' : 'Человек'})`}
+            what="Право немедленно отзывается. Для агента — активный прогон прерывается (fail-closed)."
+            reversibility="Необратимо. Новый грант выдаётся через Rights Admin."
+          />
+        }
+        confirmLabel="Отозвать"
+        loading={dc.loading}
+        reason={reason}
+        onReasonChange={setReason}
+        reasonRequired={true}
+        reasonPlaceholder="Причина отзыва прав (обязательно)"
+        onConfirm={() => dc.confirm(submit)}
+        onClose={dc.cancel}
+      />
     </section>
   );
 }

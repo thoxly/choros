@@ -564,13 +564,22 @@ function ToastViewport({ toasts = [], dismiss, position = "bottom-right", ...res
 /* Тонкая обёртка над <Modal size="sm"> для подтверждения действия — заменяет
    нативный window.confirm. Footer = Отмена (ghost) + Подтвердить (вариант по
    tone: danger→danger, default→primary). a11y (фокус-ловушка/Esc/scroll-lock)
-   наследуется от Modal. principles.md §4 (опасное действие = модал). */
+   наследуется от Modal. principles.md §4 (опасное действие = модал).
+
+   Расширение T-0526: dual-control поле причины:
+     reason            — текущее значение (string)
+     onReasonChange    — callback(string), если передан — поле рендерится
+     reasonRequired    — если true, «Подтвердить» заблокирован пока reason пуст
+     reasonPlaceholder — placeholder текстового поля
+*/
 function ConfirmDialog({
   open, title, message,
   confirmLabel = "Подтвердить", cancelLabel = "Отмена",
   tone = "danger", onConfirm, onClose, loading = false,
+  reason, onReasonChange, reasonRequired = false, reasonPlaceholder = "Укажите причину",
 }) {
   const confirmVariant = tone === "danger" ? "danger" : "primary";
+  const confirmDisabled = loading || (reasonRequired && onReasonChange && (!reason || !reason.trim()));
   return (
     <Modal
       open={open}
@@ -579,10 +588,21 @@ function ConfirmDialog({
       title={title}
       footer={<>
         <Button variant="ghost" onClick={onClose} disabled={loading}>{cancelLabel}</Button>
-        <Button variant={confirmVariant} onClick={onConfirm} loading={loading}>{confirmLabel}</Button>
+        <Button variant={confirmVariant} onClick={onConfirm} loading={loading} disabled={confirmDisabled}>{confirmLabel}</Button>
       </>}
     >
       {message}
+      {onReasonChange && (
+        <div className="chs-confirm__reason">
+          <Field
+            label="Причина"
+            value={reason || ""}
+            onChange={(e) => onReasonChange(e.target.value)}
+            placeholder={reasonPlaceholder}
+            className="chs-confirm__reason-field"
+          />
+        </div>
+      )}
     </Modal>
   );
 }

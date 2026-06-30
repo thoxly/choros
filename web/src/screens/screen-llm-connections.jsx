@@ -18,7 +18,8 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, LoadingState, ErrorState, EmptyState, Field, Select } from '../components/components.jsx';
+import { Button, LoadingState, ErrorState, EmptyState, Field, Select, ConfirmDialog } from '../components/components.jsx';
+import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 
@@ -237,11 +238,13 @@ function ConnectionTester({ connectionId, secretBound }) {
      DELETE /api/llm-connections/:id/key         → 200 { secret_bound:false }
    503 "secret store not configured" when APP_SECRET_MASTER_KEY is unset (dormant).
    =========================================================================== */
-function ConnectionKeyBinder({ connectionId, secretBound, onChanged }) {
+function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChanged }) {
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);    // { kind: 'ok'|'err', text }
   const [open, setOpen] = useState(false);
+  // T-0526: confirm dialog для отвязки ключа (CONFIRM-DANGER)
+  const dc = useDestructiveConfirm();
 
   const submitKey = useCallback(async (e) => {
     e.preventDefault();
@@ -321,7 +324,7 @@ function ConnectionKeyBinder({ connectionId, secretBound, onChanged }) {
             {secretBound ? 'Заменить API-ключ' : 'Вставить API-ключ'}
           </Button>
           {secretBound && (
-            <Button variant="ghost" size="sm" type="button" onClick={clearKey} loading={busy} disabled={busy}>
+            <Button variant="danger" size="sm" type="button" onClick={() => dc.request(connectionId)} loading={dc.loading} disabled={dc.loading || busy}>
               Отвязать
             </Button>
           )}
@@ -353,6 +356,24 @@ function ConnectionKeyBinder({ connectionId, secretBound, onChanged }) {
         </form>
       )}
       {msg && <div style={msgStyle(msg.kind)}>{msg.text}</div>}
+
+      {/* T-0526: ConfirmDialog для отвязки API-ключа (CONFIRM-DANGER, сайт 11) */}
+      <ConfirmDialog
+        open={dc.open}
+        tone="danger"
+        title="Отвязать API-ключ?"
+        message={
+          <ConsequenceSummary
+            who={`LLM-соединение «${connectionName || connectionId}» и все агенты, использующие его`}
+            what="Зашифрованный ключ удаляется. Агенты теряют доступ к LLM."
+            reversibility="Необратимо. Новый ключ нужно ввести повторно."
+          />
+        }
+        confirmLabel="Отвязать ключ"
+        loading={dc.loading}
+        onConfirm={() => dc.confirm(clearKey)}
+        onClose={dc.cancel}
+      />
     </div>
   );
 }
@@ -695,6 +716,7 @@ export default function LlmConnectionsScreen() {
                 {/* T-0476 [E-AGENTS L3]: write-only app:// key binder (self-contained). */}
                 <ConnectionKeyBinder
                   connectionId={c.id}
+                  connectionName={c.name}
                   secretBound={!!c.secret_bound}
                   onChanged={loadConnections}
                 />

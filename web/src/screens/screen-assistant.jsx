@@ -37,6 +37,7 @@ import {
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { useToastContext } from '../app-shell/toast-context.jsx';
+import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 
 /* ---------------------------------------------------------------------------
    TODO-SEAM T-0359/T-0360: заменить stub-вызовы реальными API-запросами.
@@ -402,6 +403,8 @@ function MessageBubble({ msg, activeThreadId }) {
   const [promoting, setPromoting] = React.useState(false);
   const [promoted, setPromoted] = React.useState(false);
   const [promoteError, setPromoteError] = React.useState(null);
+  // T-0526: confirm dialog для bundle-promote (CONFIRM-DANGER, сайт 12)
+  const [bundlePromoteConfirmOpen, setBundlePromoteConfirmOpen] = React.useState(false);
 
   // T-0465: deep-links + bundle-promote are present only on a bot reply that
   // generated a solution bundle this turn.
@@ -523,11 +526,11 @@ function MessageBubble({ msg, activeThreadId }) {
       {bundlePromote && !promoted && (
         <div className="chs-asst__msg-actions">
           <Button
-            variant="primary"
+            variant="danger"
             size="sm"
             disabled={promoting}
             loading={promoting}
-            onClick={handleBundlePromote}
+            onClick={() => setBundlePromoteConfirmOpen(true)}
             aria-label={`Опубликовать всё решение (${bundlePromote.itemCount} элементов) одним действием`}
           >
             Опубликовать решение ({bundlePromote.itemCount})
@@ -535,6 +538,24 @@ function MessageBubble({ msg, activeThreadId }) {
           {promoteError && (
             <span className="chs-asst__save-error" role="alert">{promoteError}</span>
           )}
+
+          {/* T-0526: ConfirmDialog для bulk-publish (CONFIRM-DANGER, сайт 12) */}
+          <ConfirmDialog
+            open={bundlePromoteConfirmOpen}
+            tone="danger"
+            title="Опубликовать всё решение?"
+            message={
+              <ConsequenceSummary
+                who={`${bundlePromote.itemCount} элементов решения (приложения + процесс)`}
+                what="Все черновики публикуются одним действием. Пользователи сразу увидят изменения."
+                reversibility="Необратимо. Откат — публикация предыдущих версий вручную."
+              />
+            }
+            confirmLabel={`Опубликовать всё (${bundlePromote.itemCount})`}
+            loading={promoting}
+            onConfirm={() => { setBundlePromoteConfirmOpen(false); handleBundlePromote(); }}
+            onClose={() => setBundlePromoteConfirmOpen(false)}
+          />
         </div>
       )}
       {bundlePromote && promoted && (

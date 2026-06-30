@@ -21,7 +21,8 @@
 
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState } from '../components/components.jsx';
+import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState, ConfirmDialog } from '../components/components.jsx';
+import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { formatJsonReadable } from '../lib/format.js';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
@@ -313,13 +314,16 @@ function EditorToolbar({
         Сохранить
       </Button>
 
-      {/* T-0324: Publish = real lint + Flowable deploy */}
+      {/* T-0526: визуальный разделитель между сохранением и публикацией */}
+      <span className="chs-edtoolbar__pub-sep" aria-hidden="true" />
+
+      {/* T-0324/T-0526: Publish = danger + ConfirmDialog — деплой в живой движок */}
       <Button
-        variant="primary"
+        variant="danger"
         size="sm"
         onClick={onPublish}
         disabled={isBusy}
-        title="Опубликовать и задеплоить в движок"
+        title="Опубликовать — деплой в живой движок Flowable"
       >
         Опубликовать
       </Button>
@@ -368,6 +372,9 @@ export default function ProcessEditorScreen() {
 
   // T-0323: current canvas zoom
   const [zoomLevel, setZoomLevel] = useState(1);
+
+  // T-0526: publish confirm dialog state
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
 
   // T-0324: process key — the :id param (never "new" — that triggers blank template)
   const isNew = !id || id === 'new';
@@ -716,7 +723,7 @@ export default function ProcessEditorScreen() {
         onExport={handleExport}
         onLoad={handleLoad}
         onValidate={handleValidate}
-        onPublish={handlePublish}
+        onPublish={() => setPublishConfirmOpen(true)}
         // T-0437: navigate to branch-rules editor. Only provided when a real
         // processKey is known (not for unsaved new processes — G3: no dead affordance).
         onBranchRules={processKey ? () => navigate(`/processes/${encodeURIComponent(processKey)}/branch-rules`) : undefined}
@@ -771,6 +778,24 @@ export default function ProcessEditorScreen() {
         {/* Right: properties panel (T-0098) */}
         <BpmnPropertiesPanel modeler={liveModeler} />
       </div>
+
+      {/* T-0526: ConfirmDialog для публикации в живой движок */}
+      <ConfirmDialog
+        open={publishConfirmOpen}
+        tone="danger"
+        title="Опубликовать процесс?"
+        message={
+          <ConsequenceSummary
+            who={`Процесс «${processName}» (живой движок Flowable)`}
+            what="Черновик деплоится в движок. Запущенные экземпляры мигрируют на новую версию."
+            reversibility="Необратимо в рамках этой версии. Откат — публикация предыдущей версии."
+          />
+        }
+        confirmLabel="Опубликовать"
+        onConfirm={() => { setPublishConfirmOpen(false); handlePublish(); }}
+        onClose={() => setPublishConfirmOpen(false)}
+        loading={isBusy}
+      />
     </div>
   );
 }
