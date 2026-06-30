@@ -14,7 +14,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useId } from 'react';
-import { Button, Field, KitIcon, ConfirmDialog } from '../../components/components.jsx';
+import { Button, Field, KitIcon, ConfirmDialog, ErrorState } from '../../components/components.jsx';
 import { SectionHead } from './ra-data.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
@@ -170,8 +170,8 @@ function HireForm({ presets, dir }) {
         </p>
       )}
       <div className="chs-intent__bar">
-        <Button variant="primary" size="sm" disabled={result === 'loading' || !presetId || !roleId} onClick={submit}>
-          {result === 'loading' ? 'Найм…' : 'Нанять'}
+        <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !presetId || !roleId} onClick={submit}>
+          Нанять
         </Button>
       </div>
       <ResultBanner result={result} />
@@ -208,8 +208,8 @@ function FireForm({ dir }) {
         Активные задачи переназначаются/прерываются <b>после</b> фиксации revoke (порядок revoke→reassign).
       </p>
       <div className="chs-intent__bar">
-        <Button variant="danger" size="sm" disabled={result === 'loading' || !employeeId} onClick={() => dc.request(employeeId)}>
-          {result === 'loading' ? 'Увольнение…' : 'Отключить сотрудника'}
+        <Button variant="danger" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !employeeId} onClick={() => dc.request(employeeId)}>
+          Отключить сотрудника
         </Button>
       </div>
       <ResultBanner result={result} />
@@ -282,8 +282,8 @@ function SubstituteForm({ dir }) {
         Если замещение покрывается пулом, временный грант не выпускается; иначе выпускается ограниченный временный грант.
       </p>
       <div className="chs-intent__bar">
-        <Button variant="primary" size="sm" disabled={result === 'loading' || !absentId || !substituteId || !roleId || !until || !orgNodeId} onClick={submit}>
-          {result === 'loading' ? 'Объявление…' : 'Объявить подмену'}
+        <Button variant="primary" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !absentId || !substituteId || !roleId || !until || !orgNodeId} onClick={submit}>
+          Объявить подмену
         </Button>
       </div>
       <ResultBanner result={result} />
@@ -324,8 +324,8 @@ function UrgentRevokeForm() {
         Для агента активный прогон обязан прерваться на границе следующего шага (fail-closed).
       </p>
       <div className="chs-intent__bar">
-        <Button variant="danger" size="sm" disabled={result === 'loading' || !grantId} onClick={() => dc.request(grantId)}>
-          {result === 'loading' ? 'Отзыв…' : 'Отозвать сейчас'}
+        <Button variant="danger" size="sm" loading={result === 'loading'} disabled={result === 'loading' || !grantId} onClick={() => dc.request(grantId)}>
+          Отозвать сейчас
         </Button>
       </div>
       <ResultBanner result={result} />
@@ -381,9 +381,11 @@ function IntentsScreen() {
             </div>
           </div>
           {loadErr && (
-            <p className="chs-section2__note" style={{ color: 'var(--chs-color-danger, red)' }}>
-              Пресеты не загружены ({loadErr}) — поля пресета будут пусты, пока сид T-0224 не применён.
-            </p>
+            <ErrorState
+              compact
+              title="Пресеты не загружены"
+              message={`${loadErr} — поля пресета будут пусты, пока сид T-0224 не применён.`}
+            />
           )}
           <HireForm presets={presets} dir={dir} />
           <FireForm dir={dir} />

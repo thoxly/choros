@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef, useContext, useMemo, useCallback } from 'react';
 import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { Button, Modal, Tooltip, Popover } from '../components/components.jsx';
+import { Button, Modal, Tooltip, Popover, LoadingState, EmptyState } from '../components/components.jsx';
 import { ToastProvider, useToastContext } from './toast-context.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
@@ -290,6 +290,18 @@ function Topbar({ screen, pathname }) {
   // T-0317: dynamic, param-aware crumbs (entity names injected, parents linkable).
   const crumb = buildCrumbs(pathname, entities);
   const navigate = useNavigate();
+  const [exporting, setExporting] = useState(false);
+
+  const handleExportLog = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      await downloadAuditLog(push);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const right =
     screen === "inbox" ? (
       // T-0374 (B17): inbox no longer links to a generic process launcher.
@@ -319,8 +331,8 @@ function Topbar({ screen, pathname }) {
       </Tooltip>
     ) : screen === "audit" ? (
       // T-0138: download current instance audit log
-      // T-0528: errors surfaced via toast
-      <Button variant="secondary" size="sm" onClick={() => downloadAuditLog(push)}>Экспорт лога</Button>
+      // T-0528: errors surfaced via toast; T-0530: busy-state anti-double-submit
+      <Button variant="secondary" size="sm" loading={exporting} disabled={exporting} onClick={handleExportLog}>Экспорт лога</Button>
     ) : (screen === "rights" || screen === "reference") ? (
       // T-0484 / T-0538: «Доступ» и «Справочники» — нет export endpoint, честный disabled.
       <Tooltip label="Экспорт прав пока недоступен — функция в разработке.">
@@ -471,7 +483,9 @@ function CommandPalette({ open, onClose, onGo, navSet }) {
         />
         <ul className="chs-palette__list" role="listbox" aria-label="Разделы">
           {matches.length === 0 && (
-            <li className="chs-palette__empty" role="presentation">Ничего не найдено</li>
+            <li className="chs-palette__empty" role="presentation">
+              <EmptyState compact title="Ничего не найдено" />
+            </li>
           )}
           {matches.map((d) => (
             <li key={d.id} role="presentation">
@@ -855,7 +869,9 @@ function AppShell() {
   if (!authReady) {
     return (
       <div className="chs-login-screen">
-        <div className="chs-login-loading"><p>Загрузка…</p></div>
+        <div className="chs-login-loading">
+          <LoadingState label="Инициализация…" />
+        </div>
       </div>
     );
   }

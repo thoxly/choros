@@ -148,14 +148,10 @@ function LinkedSection({ title, links, loading, loadError }) {
         <div style={linkedSectionBodyStyle}>
           {loading && <LoadingState label="Загрузка связанных данных…" compact />}
           {!loading && loadError && (
-            <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-              Не удалось загрузить данные
-            </p>
+            <ErrorState compact title="Не удалось загрузить данные" />
           )}
           {!loading && !loadError && links && links.length === 0 && (
-            <p style={{ color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-sm)' }}>
-              —
-            </p>
+            <EmptyState compact title="—" />
           )}
           {!loading && !loadError && links && links.map((link) => {
             if (isHopAllowed(link.hop)) {

@@ -4,7 +4,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect } from 'react';
-import { Mono, Button, OpChip, KitIcon, useToasts, ToastViewport } from '../../components/components.jsx';
+import { Mono, Button, OpChip, KitIcon, useToasts, ToastViewport, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
@@ -550,19 +550,20 @@ function RoleEditorScreen() {
                   </h2>
                 )
               }
-              {rolesLoading && <h2 className="chs-roledetail__title" style={{ color: 'var(--chs-color-text-muted)' }}>Загрузка ролей…</h2>}
-              {rolesError && <h2 className="chs-roledetail__title" style={{ color: 'var(--chs-color-danger)' }}>Ошибка загрузки ролей: {rolesError}</h2>}
+              {rolesLoading && <LoadingState compact label="Загрузка ролей…" />}
+              {rolesError && <ErrorState compact title="Не удалось загрузить роли" message={rolesError} />}
             </div>
             <div className="chs-roledetail__actions">
               <Button variant="ghost" size="sm" onClick={() => setSubmitResult(null)}>Отмена</Button>
               <Button
                 variant="primary"
                 size="sm"
+                loading={submitResult === "loading"}
                 disabled={submitResult === "loading" || !EDITOR_ROLE_ID}
                 onClick={handleSubmit}
                 title={!EDITOR_ROLE_ID ? "Выберите роль для редактирования" : undefined}
               >
-                {submitResult === "loading" ? "Отправка…" : "Запросить применение"}
+                Запросить применение
               </Button>
             </div>
             {submitResult && submitResult !== "loading" && (
@@ -761,20 +762,12 @@ function RoleEditRail({ roles, loading, error, selectedRoleId, onSelect }) {
       </div>
       <div className="chs-rights__search"><Icon name="search" /><span>Поиск роли</span></div>
       <div className="chs-rights__roles">
-        {loading && (
-          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-            Загрузка ролей…
-          </div>
-        )}
+        {loading && <LoadingState compact label="Загрузка ролей…" />}
         {!loading && error && (
-          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-danger)' }}>
-            Ошибка загрузки ролей: {error}
-          </div>
+          <ErrorState compact title="Не удалось загрузить роли" message={error} />
         )}
         {!loading && !error && roles.length === 0 && (
-          <div style={{ padding: 'var(--chs-space-4)', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
-            Ролей нет. Создайте роль в «Оргструктуре».
-          </div>
+          <EmptyState compact title="Ролей нет" description="Создайте роль в «Оргструктуре»." />
         )}
         {!loading && !error && roles.map((role) => (
           <button

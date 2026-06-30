@@ -12,7 +12,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, Field, KitIcon } from '../components/components.jsx';
+import { Button, MonoId, Mono, StatusChip, ExecGlyph, Modal, EmptyState, LoadingState, ErrorState, Field, KitIcon } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import {
   validateBindingForm,
@@ -135,23 +135,21 @@ function ProcessCatalogSection() {
       </div>
 
       {error ? (
-        <div style={{ padding: 'var(--chs-space-4)', textAlign: 'center' }}>
-          <p style={{ marginBottom: 'var(--chs-space-3)' }}>Не удалось загрузить каталог: {error}</p>
-          <Button onClick={loadCatalog}>Повторить</Button>
-        </div>
+        <ErrorState
+          title="Не удалось загрузить каталог"
+          message={error}
+          onRetry={loadCatalog}
+        />
       ) : catalog === null ? (
-        <div style={{ padding: 'var(--chs-space-4)', textAlign: 'center' }}>Загрузка каталога…</div>
+        <LoadingState label="Загрузка каталога…" />
       ) : (
         <>
           {/* REAL definitions */}
           {defs.length === 0 ? (
-            <div style={{
-              padding: 'var(--chs-space-4)', textAlign: 'center',
-              color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)',
-            }}>
-              Пока нет ни одного определения процесса. Создайте процесс в конструкторе
-              или запустите канонический ТЭЛ — реальные определения появятся здесь.
-            </div>
+            <EmptyState
+              title="Пока нет ни одного определения процесса"
+              description="Создайте процесс в конструкторе или запустите канонический ТЭЛ — реальные определения появятся здесь."
+            />
           ) : (
             <table className="chs-itable" style={{ marginBottom: 'var(--chs-space-4, 16px)' }}>
               <thead>
@@ -213,12 +211,11 @@ function ProcessCatalogSection() {
             Связи процессов с приложениями
           </h3>
           {bindings.length === 0 ? (
-            <div style={{
-              padding: 'var(--chs-space-3)',
-              color: 'var(--chs-color-text-muted, #888)', fontSize: 'var(--chs-text-sm, 13px)',
-            }}>
-              Связей пока нет. Нажмите «Настроить триггер», чтобы привязать процесс к приложению.
-            </div>
+            <EmptyState
+              compact
+              title="Связей пока нет"
+              description="Нажмите «Настроить триггер», чтобы привязать процесс к приложению."
+            />
           ) : (
             <table className="chs-itable">
               <thead>
@@ -340,8 +337,8 @@ function BindProcessModal({ open, onClose, onBound, definitions, applications })
       footer={
         <>
           <Button variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
-          <Button variant="primary" size="sm" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? 'Сохранение…' : 'Сохранить'}
+          <Button variant="primary" size="sm" onClick={handleSubmit} loading={submitting} disabled={submitting}>
+            Сохранить
           </Button>
         </>
       }
@@ -498,14 +495,13 @@ function ProcessesScreen() {
             process↔app binding (on_create, record_action, launcher, auto). */}
       <div className="chs-inbox__scroll">
         {error ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            <p style={{ marginBottom: "var(--chs-space-3)" }}>Не удалось загрузить процессы: {error}</p>
-            <Button onClick={load}>Повторить</Button>
-          </div>
+          <ErrorState
+            title="Не удалось загрузить процессы"
+            message={error}
+            onRetry={load}
+          />
         ) : instances === null ? (
-          <div style={{ padding: "var(--chs-space-5)", textAlign: "center" }}>
-            Загрузка процессов…
-          </div>
+          <LoadingState label="Загрузка процессов…" />
         ) : list.length === 0 ? (
           <EmptyState
             title="Нет активных процессов"
