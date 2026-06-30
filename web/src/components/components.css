@@ -561,3 +561,18 @@
 }
 .chs-toast__close:hover { background: var(--chs-color-hover); color: var(--chs-color-text); }
 .chs-toast__close:focus-visible { outline: 2px solid var(--chs-color-focus-ring); outline-offset: 1px; }
+
+/* ---- T-0529: visually-hidden utility (screen-reader only) ---- */
+/* Visible to AT, hidden from sighted users. Standard clip-path approach avoids
+   display:none (removes from AT tree) and visibility:hidden (same). */
+.chs-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

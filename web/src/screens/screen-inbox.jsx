@@ -287,9 +287,23 @@ function SLACell({ sla, deadline }) {
   // Bar fill: proportion of the SLA window still remaining (0 when overdue, full bar in red).
   const pct = over ? 100 : Math.max(0, Math.min(100, (left / sla.min) * 100));
   const txt = over ? `−${Math.abs(left)} мин` : `${left} мин`;
+  const valueText = over
+    ? `Просрочено на ${Math.abs(left)} мин`
+    : `Осталось ${left} мин`;
   return (
     <span className="chs-sla">
-      <span className="chs-sla__bar"><span className={`chs-sla__fill ${cls ? "chs-sla__fill--" + cls : ""}`} style={{ width: pct + "%" }} /></span>
+      {/* T-0529: role=progressbar — conveys SLA urgency without colour-only meaning */}
+      <span
+        className="chs-sla__bar"
+        role="progressbar"
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuetext={valueText}
+        aria-label="SLA"
+      >
+        <span className={`chs-sla__fill ${cls ? "chs-sla__fill--" + cls : ""}`} style={{ width: pct + "%" }} aria-hidden="true" />
+      </span>
       <span className={`chs-sla__txt ${cls ? "chs-sla__txt--" + cls : ""}`}>{txt}</span>
     </span>
   );
@@ -684,9 +698,25 @@ function InboxScreen() {
     />
     <div className="chs-inbox">
       <div className="chs-inbox__bar">
-        <div className="chs-tabs">
-          {TABS.map((t) => (
-            <button key={t.id} className="chs-tab" aria-selected={tab === t.id ? "true" : undefined} onClick={() => setTab(t.id)}>
+        {/* T-0529: A4 — WAI-ARIA Tabs pattern: role=tablist/tab + roving tabindex + arrow keys */}
+        <div className="chs-tabs" role="tablist" aria-label="Фильтр задач">
+          {TABS.map((t, i) => (
+            <button
+              key={t.id}
+              id={`inbox-tab-${t.id}`}
+              role="tab"
+              className="chs-tab"
+              aria-selected={tab === t.id}
+              aria-controls={`inbox-tabpanel-${t.id}`}
+              tabIndex={tab === t.id ? 0 : -1}
+              onClick={() => setTab(t.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowRight') { e.preventDefault(); setTab(TABS[(i + 1) % TABS.length].id); }
+                else if (e.key === 'ArrowLeft') { e.preventDefault(); setTab(TABS[(i - 1 + TABS.length) % TABS.length].id); }
+                else if (e.key === 'Home') { e.preventDefault(); setTab(TABS[0].id); }
+                else if (e.key === 'End') { e.preventDefault(); setTab(TABS[TABS.length - 1].id); }
+              }}
+            >
               {t.label}<span className="chs-tab__count">{counts[t.id]}</span>
             </button>
           ))}
@@ -708,7 +738,13 @@ function InboxScreen() {
         </button>
       </div>
 
-      <div className="chs-inbox__scroll">
+      {/* T-0529: tabpanel wraps the content area for proper Tabs WAI-ARIA pattern */}
+      <div
+        id={`inbox-tabpanel-${tab}`}
+        role="tabpanel"
+        aria-labelledby={`inbox-tab-${tab}`}
+        className="chs-inbox__scroll"
+      >
         {error ? (
           <ErrorState
             title="Не удалось загрузить задачи"

@@ -445,12 +445,13 @@ function AppsScreen() {
                     onClick={() => navigate(`/app-records/${app.id}`)}
                   >
                     <td>
-                      <div className="chs-task">
+                      {/* T-0529: primary affordance as link — keyboard users can tab to it */}
+                      <a href={`/app-records/${app.id}`} className="chs-task chs-link" style={{ display: 'flex', textDecoration: 'none', color: 'inherit' }} onClick={(e) => { e.preventDefault(); navigate(`/app-records/${app.id}`); }}>
                         <span className="chs-task__txt">
                           <span className="chs-task__name">{app.display_name}</span>
                           {app.description && <span className="chs-task__step">{app.description}</span>}
                         </span>
-                      </div>
+                      </a>
                     </td>
                     {/* T-0540: раздел (бизнес-функция) — атрибут группировки в нав РАБОТА */}
                     <td>

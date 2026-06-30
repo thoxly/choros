@@ -90,10 +90,15 @@ function ExecGlyph({ type, size = 9, filled = true }) {
 /* ExecutorBadge — единый цвето-иконочный код типа исполнителя */
 function ExecutorBadge({ type = "human", label, name, bare = false, showLabel = true }) {
   const meta = EXEC_META[type] || EXEC_META.human;
+  const displayName = name || label || meta.label;
   return (
-    <span className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""}`} title={meta.label}>
+    <span
+      className={`chs-exec ${meta.cls} ${bare ? "chs-exec--bare" : ""}`}
+      aria-label={showLabel ? undefined : meta.label}
+      title={meta.label}
+    >
       <ExecGlyph type={type} />
-      {showLabel && <span>{name || label || meta.label}</span>}
+      {showLabel && <span>{displayName}</span>}
     </span>
   );
 }
@@ -135,7 +140,8 @@ function StatusChip({ status = "running", label }) {
   const meta = STATUS_META[status] || STATUS_META.running;
   return (
     <span className={`chs-chip ${meta.cls}`}>
-      <span className="chs-chip__dot" />
+      {/* Dot is decorative — colour/shape duplicates the text label (§1.4.1) */}
+      <span className="chs-chip__dot" aria-hidden="true" />
       {label || meta.label}
     </span>
   );
@@ -232,15 +238,33 @@ function ReservationMeter({ used = 0, instanceCap = 0, agentCap = 0, unit = "", 
   );
 }
 
-/* RoleAssignment — НАЗНАЧЕНИЕ роли (read): роль · орг-охват · срок действия */
+/* RoleAssignment — НАЗНАЧЕНИЕ роли (read): роль · орг-охват · срок действия.
+   A11y (T-0529): если onOpen передан — превращаем в button (keyboard-доступен). */
 function RoleAssignment({ role, scope, validity, expiring = false, onOpen }) {
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className={`chs-asgn chs-asgn--link`}
+        onClick={onOpen}
+        aria-label={`Роль ${role}, область ${scope}, действует ${validity}${expiring ? ', истекает скоро' : ''}`}
+      >
+        <div className="chs-asgn__main">
+          <span className="chs-asgn__dot" aria-hidden="true" />
+          <span className="chs-asgn__role">{role}</span>
+        </div>
+        <div className="chs-asgn__scope"><span className="chs-asgn__scopeglyph" aria-hidden="true" />{scope}</div>
+        <div className={`chs-asgn__validity ${expiring ? "chs-asgn__validity--exp" : ""}`}>{validity}</div>
+      </button>
+    );
+  }
   return (
-    <div className={`chs-asgn ${onOpen ? "chs-asgn--link" : ""}`} onClick={onOpen}>
+    <div className="chs-asgn">
       <div className="chs-asgn__main">
-        <span className="chs-asgn__dot" />
+        <span className="chs-asgn__dot" aria-hidden="true" />
         <span className="chs-asgn__role">{role}</span>
       </div>
-      <div className="chs-asgn__scope"><span className="chs-asgn__scopeglyph" />{scope}</div>
+      <div className="chs-asgn__scope"><span className="chs-asgn__scopeglyph" aria-hidden="true" />{scope}</div>
       <div className={`chs-asgn__validity ${expiring ? "chs-asgn__validity--exp" : ""}`}>{validity}</div>
     </div>
   );
@@ -375,7 +399,7 @@ function Modal({ open, onClose, title, children, footer, size = "md", closeOnOve
   useFocusTrap({ open, panelRef, onClose, closeOnEsc });
   if (!open) return null;
   return (
-    <div className="chs-overlay" onMouseDown={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+    <div className="chs-overlay" onClick={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
       <div
         ref={panelRef}
         className={`chs-modal chs-modal--${size}`}
@@ -408,7 +432,7 @@ function Drawer({ open, onClose, title, children, footer, side = "right", closeO
   useFocusTrap({ open, panelRef, onClose, closeOnEsc });
   if (!open) return null;
   return (
-    <div className={`chs-overlay chs-overlay--drawer chs-overlay--${side}`} onMouseDown={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
+    <div className={`chs-overlay chs-overlay--drawer chs-overlay--${side}`} onClick={(e) => { if (closeOnOverlay && e.target === e.currentTarget) onClose && onClose(); }}>
       <div
         ref={panelRef}
         className={`chs-drawer chs-drawer--${side}`}
@@ -494,27 +518,60 @@ function ErrorState({ title = "Что-то пошло не так", message, onR
 /* -------------------------------- Popover -------------------------------- */
 /* Привязанная плавающая панель (меню/пикеры). Клик-вне и Esc закрывают; базовое
    позиционирование (placement bottom|top|left|right + align start|end|center).
-   Триггер и панель оборачиваются в inline-relative контейнер. */
-function Popover({ open, onClose, trigger, children, placement = "bottom", align = "start", className = "" }) {
+   Триггер и панель оборачиваются в inline-relative контейнер.
+   A11y (T-0529): focus-on-open, aria-haspopup/expanded/controls на триггере,
+   role=dialog или menu в зависимости от isMenu prop. */
+function Popover({ open, onClose, trigger, children, placement = "bottom", align = "start", className = "", isMenu = false }) {
   const rootRef = useRef(null);
+  const panelRef = useRef(null);
+  const autoId = useId();
+  const panelId = `chs-popover-panel-${autoId}`;
+
   useEffect(() => {
     if (!open) return undefined;
+    // Focus the panel on open so keyboard users can interact
+    const t = setTimeout(() => {
+      if (panelRef.current) {
+        const focusable = panelRef.current.querySelector(
+          'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+        );
+        if (focusable) focusable.focus();
+        else panelRef.current.focus();
+      }
+    }, 0);
     function onDocPointer(e) {
       if (rootRef.current && !rootRef.current.contains(e.target)) onClose && onClose();
     }
-    function onKey(e) { if (e.key === "Escape") onClose && onClose(); }
+    function onKey(e) { if (e.key === "Escape") { e.stopPropagation(); onClose && onClose(); } }
     document.addEventListener("mousedown", onDocPointer, true);
     document.addEventListener("keydown", onKey, true);
     return () => {
+      clearTimeout(t);
       document.removeEventListener("mousedown", onDocPointer, true);
       document.removeEventListener("keydown", onKey, true);
     };
   }, [open, onClose]);
+
+  // Clone the trigger element to inject aria-haspopup / aria-expanded / aria-controls
+  const enhancedTrigger = trigger && React.isValidElement(trigger)
+    ? React.cloneElement(trigger, {
+        'aria-haspopup': isMenu ? 'menu' : 'dialog',
+        'aria-expanded': open,
+        'aria-controls': open ? panelId : undefined,
+      })
+    : trigger;
+
   return (
     <span className={`chs-popover-root ${className}`} ref={rootRef}>
-      {trigger}
+      {enhancedTrigger}
       {open && (
-        <div className={`chs-popover chs-popover--${placement} chs-popover--align-${align}`} role="dialog">
+        <div
+          id={panelId}
+          ref={panelRef}
+          className={`chs-popover chs-popover--${placement} chs-popover--align-${align}`}
+          role={isMenu ? "menu" : "dialog"}
+          tabIndex={-1}
+        >
           {children}
         </div>
       )}
@@ -524,14 +581,48 @@ function Popover({ open, onClose, trigger, children, placement = "bottom", align
 
 /* -------------------------------- Tooltip -------------------------------- */
 /* Подсказка по hover/focus; role=tooltip, доступна с клавиатуры (focus триггера).
-   CSS показывает .chs-tooltip__bubble на :hover/:focus-within — работает без JS. */
+   CSS показывает .chs-tooltip__bubble на :hover/:focus-within — работает без JS.
+   A11y (T-0529): клонирует children чтобы добавить aria-describedby без лишнего
+   focusable wrapper-span; Esc-dismiss. */
 function Tooltip({ label, children, placement = "top", className = "" }) {
   const autoId = useId();
   const tipId = `chs-tip-${autoId}`;
+  const [visible, setVisible] = useState(true);
+
+  // Clone children to inject aria-describedby (no extra wrapper focusable element).
+  // Falls back to wrapping span if children is not a single React element.
+  let inner;
+  if (React.isValidElement(children)) {
+    inner = React.cloneElement(children, {
+      'aria-describedby': tipId,
+      onKeyDown: (e) => {
+        if (e.key === 'Escape') { e.stopPropagation(); setVisible(false); }
+        // pass through original handler
+        if (children.props.onKeyDown) children.props.onKeyDown(e);
+      },
+      onFocus: (e) => {
+        setVisible(true);
+        if (children.props.onFocus) children.props.onFocus(e);
+      },
+    });
+  } else {
+    // Fallback: wrap in a span (for plain text children)
+    inner = (
+      <span className="chs-tooltip__trigger" tabIndex={0} aria-describedby={tipId}
+        onKeyDown={(e) => { if (e.key === 'Escape') setVisible(false); }}
+        onFocus={() => setVisible(true)}
+      >
+        {children}
+      </span>
+    );
+  }
+
   return (
     <span className={`chs-tooltip ${className}`}>
-      <span className="chs-tooltip__trigger" tabIndex={0} aria-describedby={tipId}>{children}</span>
-      <span className={`chs-tooltip__bubble chs-tooltip__bubble--${placement}`} role="tooltip" id={tipId}>{label}</span>
+      {inner}
+      {visible && (
+        <span className={`chs-tooltip__bubble chs-tooltip__bubble--${placement}`} role="tooltip" id={tipId}>{label}</span>
+      )}
     </span>
   );
 }
@@ -560,24 +651,62 @@ function Toast({ tone = "info", title, message, onClose, action }) {
 }
 
 /* useToasts — лёгкая очередь тостов + ToastViewport (фикс-стек). push() ставит
-   тост с авто-дисмиссом; компонент монтирует область сам. */
+   тост с авто-дисмиссом; компонент монтирует область сам.
+   A11y (T-0529): pause-on-hover — viewportRef передаётся для очистки таймеров. */
 function useToasts({ duration = 4000 } = {}) {
   const [toasts, setToasts] = useState([]);
   const idRef = useRef(0);
-  const dismiss = useCallback((id) => setToasts((ts) => ts.filter((t) => t.id !== id)), []);
+  const timersRef = useRef({});
+  const pausedRef = useRef(false);
+
+  const dismiss = useCallback((id) => {
+    clearTimeout(timersRef.current[id]);
+    delete timersRef.current[id];
+    setToasts((ts) => ts.filter((t) => t.id !== id));
+  }, []);
+
+  const scheduleTimer = useCallback((id, d) => {
+    clearTimeout(timersRef.current[id]);
+    if (d > 0 && !pausedRef.current) {
+      timersRef.current[id] = setTimeout(() => dismiss(id), d);
+    }
+  }, [dismiss]);
+
   const push = useCallback((toast) => {
     const id = ++idRef.current;
-    setToasts((ts) => [...ts, { ...toast, id }]);
     const d = toast.duration != null ? toast.duration : duration;
-    if (d > 0) setTimeout(() => dismiss(id), d);
+    setToasts((ts) => [...ts, { ...toast, id, _duration: d }]);
+    scheduleTimer(id, d);
     return id;
-  }, [duration, dismiss]);
-  return { toasts, push, dismiss };
+  }, [duration, scheduleTimer]);
+
+  const pauseAll = useCallback(() => {
+    pausedRef.current = true;
+    Object.keys(timersRef.current).forEach((id) => {
+      clearTimeout(timersRef.current[id]);
+    });
+  }, []);
+
+  const resumeAll = useCallback((toastList) => {
+    pausedRef.current = false;
+    toastList.forEach((t) => {
+      if (t._duration > 0) scheduleTimer(t.id, t._duration);
+    });
+  }, [scheduleTimer]);
+
+  return { toasts, push, dismiss, pauseAll, resumeAll };
 }
 
-function ToastViewport({ toasts = [], dismiss, position = "bottom-right", ...rest }) {
+function ToastViewport({ toasts = [], dismiss, pauseAll, resumeAll, position = "bottom-right", ...rest }) {
   return (
-    <div className={`chs-toast-viewport chs-toast-viewport--${position}`} {...rest}>
+    <div
+      className={`chs-toast-viewport chs-toast-viewport--${position}`}
+      onMouseEnter={() => pauseAll && pauseAll()}
+      onMouseLeave={() => resumeAll && resumeAll(toasts)}
+      onFocus={() => pauseAll && pauseAll()}
+      onBlur={() => resumeAll && resumeAll(toasts)}
+      {...rest}
+    >
       {toasts.map((t) => (
         <Toast key={t.id} tone={t.tone} title={t.title} message={t.message} action={t.action} onClose={() => dismiss && dismiss(t.id)} />
       ))}

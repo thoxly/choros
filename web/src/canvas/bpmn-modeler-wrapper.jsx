@@ -169,8 +169,10 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
 
     const modeler = new BpmnModeler({
       container: containerRef.current,
-      // Keyboard shortcuts disabled for now — no custom binding needed yet
-      keyboard: { bindTo: null },
+      // T-0529: bind keyboard to the container (was null — canvas was entirely
+      // inaccessible via keyboard). bpmn-js keyboard module handles arrow-key
+      // navigation, Delete, Ctrl+Z/Y, etc. when the container has focus.
+      keyboard: { bindTo: containerRef.current },
       // T-0098: inject custom Choros palette (human / agent / service task entries)
       additionalModules: [ChorosPaletteModule],
       // T-0099: register choros namespace so saveXML serialises choros:executorType
@@ -212,6 +214,10 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
         // T-0097: classify every element and apply chs-exec-* marker classes
         applyExecMarkers(modeler);
 
+        // T-0529: explicitly re-bind keyboard after import to ensure it is active
+        // even if bpmn-js initialised before the DOM element was fully ready.
+        try { modeler.get('keyboard').bind(containerRef.current); } catch { /* optional module */ }
+
         // T-0098: notify parent that the modeler is ready (panel can subscribe)
         if (typeof onReady === 'function') {
           onReady(modeler);
@@ -240,12 +246,24 @@ const BpmnModelerWrapper = forwardRef(function BpmnModelerWrapper(
   }, []); // mount once — diagram XML from backend is loaded before first render
 
   return (
-    <div
-      ref={containerRef}
-      className={`chs-bpmn-real-container ${className}`.trim()}
-      style={style}
-      // bpmn-js mounts its own DOM subtree (.djs-container) here
-    />
+    <>
+      {/* T-0529: sr-only keyboard hint — announced by AT when user enters the canvas */}
+      <span id="bpmn-keyboard-hint" className="chs-sr-only">
+        Редактор BPMN-диаграммы. Нажмите Tab для входа. Используйте стрелки для навигации по элементам,
+        Delete для удаления выбранного, Ctrl+Z/Y для отмены/повтора.
+        Нажмите Escape для возврата к навигации по странице.
+      </span>
+      <div
+        ref={containerRef}
+        className={`chs-bpmn-real-container ${className}`.trim()}
+        style={style}
+        role="application"
+        aria-label="Редактор BPMN-диаграммы"
+        aria-describedby="bpmn-keyboard-hint"
+        tabIndex={-1}
+        // bpmn-js mounts its own DOM subtree (.djs-container) here
+      />
+    </>
   );
 });
 

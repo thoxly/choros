@@ -199,10 +199,10 @@ function buildCrumbs(pathname, entities) {
 function ThemeToggle({ theme, setTheme }) {
   return (
     <div className="chs-theme-toggle" role="group" aria-label="Тема оформления">
-      <button aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>
+      <button type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>
         <Icon name="moon" /> Тёмная
       </button>
-      <button aria-pressed={theme === "light"} onClick={() => setTheme("light")}>
+      <button type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}>
         <Icon name="sun" /> Светлая
       </button>
     </div>
@@ -237,10 +237,11 @@ function NavItem({ item, active }) {
     isSoon ? <span className="chs-navitem__soon" aria-label="скоро — раздел ещё не готов">скоро</span> : null;
   return (
     <button
+      type="button"
       className="chs-navitem"
       aria-current={active ? "true" : undefined}
       disabled={!clickable}
-      onClick={() => clickable && navigate(targetPath)}
+      onClick={clickable ? () => navigate(targetPath) : undefined}
     >
       <Icon name={item.icon} className="chs-navitem__icon" />
       <span className="chs-navitem__label">{item.label}</span>
@@ -319,25 +320,37 @@ function Topbar({ screen, pathname }) {
       </Button>
     ) : screen === "org" ? (
       // T-0484: this topbar button was INERT — make it honest.
-      <Tooltip label="Добавить исполнителя можно в панели оргструктуры слева (+ Сотрудник / Назначить роль). Доступно владельцу тенанта.">
+      // T-0529: replaced Tooltip-on-disabled (AT can't reach disabled) with
+      // aria-disabled + visible helper span (В2 pattern).
+      <>
         <Button
           variant="secondary"
           size="sm"
-          disabled
+          aria-disabled="true"
+          aria-describedby="topbar-org-hint"
+          onClick={(e) => e.preventDefault()}
           glyph={<Icon name="plus" className="chs-btn__glyph" />}
         >
           Исполнитель
         </Button>
-      </Tooltip>
+        <span id="topbar-org-hint" className="chs-sr-only">
+          Добавить исполнителя можно в панели оргструктуры слева. Доступно владельцу тенанта.
+        </span>
+      </>
     ) : screen === "audit" ? (
       // T-0138: download current instance audit log
       // T-0528: errors surfaced via toast; T-0530: busy-state anti-double-submit
       <Button variant="secondary" size="sm" loading={exporting} disabled={exporting} onClick={handleExportLog}>Экспорт лога</Button>
     ) : (screen === "rights" || screen === "reference") ? (
       // T-0484 / T-0538: «Доступ» и «Справочники» — нет export endpoint, честный disabled.
-      <Tooltip label="Экспорт прав пока недоступен — функция в разработке.">
-        <Button variant="secondary" size="sm" disabled>Экспорт прав</Button>
-      </Tooltip>
+      // T-0529: replaced Tooltip-on-disabled with aria-disabled + sr-only reason (В2 pattern).
+      <>
+        <Button variant="secondary" size="sm" aria-disabled="true" aria-describedby="topbar-rights-export-hint"
+          onClick={(e) => e.preventDefault()}>
+          Экспорт прав
+        </Button>
+        <span id="topbar-rights-export-hint" className="chs-sr-only">Экспорт прав пока недоступен — функция в разработке.</span>
+      </>
     ) : null;
   return (
     <header className="chs-topbar">
@@ -446,6 +459,7 @@ function paletteDestinations(navSet) {
 
 function CommandPalette({ open, onClose, onGo, navSet }) {
   const [query, setQuery] = useState("");
+  const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef(null);
   const dests = paletteDestinations(navSet);
   const q = query.trim().toLowerCase();
@@ -453,10 +467,14 @@ function CommandPalette({ open, onClose, onGo, navSet }) {
     ? dests.filter((d) => d.label.toLowerCase().includes(q) || d.group.toLowerCase().includes(q))
     : dests;
 
+  // Reset activeIdx when matches change
+  useEffect(() => { setActiveIdx(0); }, [matches.length]);
+
   // Reset the query each time the palette opens, and focus the search input.
   useEffect(() => {
     if (open) {
       setQuery("");
+      setActiveIdx(0);
       // Focus after the Modal's own focus-trap has run.
       const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
       return () => clearTimeout(t);
@@ -466,8 +484,24 @@ function CommandPalette({ open, onClose, onGo, navSet }) {
 
   function onSubmit(e) {
     e.preventDefault();
-    if (matches.length > 0) onGo(matches[0].path);
+    if (matches.length > 0) onGo(matches[activeIdx]?.path || matches[0].path);
   }
+
+  // T-0529: A3 — keyboard arrow-key navigation for commandpalette listbox
+  function onInputKeyDown(e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveIdx((i) => Math.min(i + 1, matches.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (matches[activeIdx]) onGo(matches[activeIdx].path);
+    }
+  }
+
+  const optionId = (i) => `chs-palette-opt-${i}`;
 
   return (
     <Modal open={open} onClose={onClose} title="Перейти к разделу" size="sm">
@@ -478,23 +512,28 @@ function CommandPalette({ open, onClose, onGo, navSet }) {
           className="chs-input chs-palette__input"
           placeholder="Найти раздел…"
           aria-label="Поиск раздела"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-controls="chs-palette-list"
+          aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
+          aria-expanded={matches.length > 0}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onInputKeyDown}
         />
-        <ul className="chs-palette__list" role="listbox" aria-label="Разделы">
+        <ul id="chs-palette-list" className="chs-palette__list" role="listbox" aria-label="Разделы">
           {matches.length === 0 && (
             <li className="chs-palette__empty" role="presentation">
               <EmptyState compact title="Ничего не найдено" />
             </li>
           )}
-          {matches.map((d) => (
-            <li key={d.id} role="presentation">
+          {matches.map((d, i) => (
+            <li key={d.id} id={optionId(i)} role="option" aria-selected={i === activeIdx}>
               <button
                 type="button"
-                role="option"
-                aria-selected={false}
-                className="chs-palette__item"
+                className={`chs-palette__item${i === activeIdx ? ' chs-palette__item--active' : ''}`}
                 onClick={() => onGo(d.path)}
+                tabIndex={-1}
               >
                 <Icon name={d.icon} className="chs-palette__icon" />
                 <span className="chs-palette__label">{d.label}</span>
