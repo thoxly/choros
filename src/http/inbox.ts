@@ -26,7 +26,6 @@
  * write to a DB claim-lock table; the seed-layer contract is identical
  * (same HTTP shape, same error codes).
  */
-import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { JobStore } from "../core/jobStore.js";
@@ -45,12 +44,12 @@ import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
   appendTaskApproved,
-  appendInstanceEnded,
-  appendNextTaskEvent,
   findWaitingInstanceTask,
   listInstanceInboxTasks,
   listInstanceProjections,
   reconcileInstanceTimers,
+  reconcileInstanceEngineDrive,
+  reconcileInboxEngineDriveOnRead,
   surfaceMessageCatchWaits,
   makeEngineMessageSubscriptionSource,
 } from "./process-projection.js";
@@ -830,6 +829,29 @@ export function registerInboxRoutes(
       }
     }
 
+    // T-0522 [Option A]: engine-drive reconcile-on-read net. The post-approve engine
+    // drive is fire-and-forget — if it lost the timing race or hit a transient engine
+    // error, a DMN-gateway-spawned 2nd task («Доп.согласование» on the 6M branch) could
+    // silently never appear (ADR-T0432 §3.1, the prime CS-1 flakiness suspect). Here —
+    // the moment the inbox is read — we re-drive every WAITING instance against the live
+    // engine token set and surface any gateway task the async missed, so it self-heals.
+    // PURE MIRROR (completeEngineTask=false → never completes a task; that is the human's
+    // action). Idempotent (dedup by defKey); engine/DB hiccups degrade silently (the NEXT
+    // read retries; the inbox 200 is never blocked). Same honest-degrade gate as T-0458.
+    if (writeDeps?.flowableClient && hasDb()) {
+      try {
+        const driveTenantId = await resolveTenant(actor);
+        await reconcileInboxEngineDriveOnRead(
+          getOrgPool(),
+          driveTenantId,
+          writeDeps.flowableClient,
+          { actor: actor ?? "system:engine-drive" },
+        );
+      } catch (err) {
+        console.warn("[inbox T-0522] engine-drive reconcile-on-read failed (non-fatal):", err);
+      }
+    }
+
     // T-0459 [D8-R4]: message-catch WAITING projection (reconcile-on-read). An
     // instance PARKED on a message-catch (receiveTask / intermediateCatchEvent /
     // message boundary) is WAITING for a correlated message — it has no userTask, so
@@ -1430,164 +1452,53 @@ export function registerInboxRoutes(
         }
       });
 
-      // T-0443: engine-drive post-approve (best-effort / logged; NEVER fails the response).
+      // T-0443 / T-0522: engine-drive post-approve (fast-path; NEVER fails the response).
       // Honest-degrade: if writeDepsFlowable is absent, no engine call is made — unchanged
       // linear audit-only behaviour. The response is always 200 regardless of engine state.
+      //
+      // T-0522 (Option A hardening, ADR-T0432 §3.1): the reconcile is now a SINGLE named,
+      // idempotent, error-EXPLICIT operation (reconcileInstanceEngineDrive) shared with the
+      // reconcile-on-read net in GET /api/inbox. It completes the engine user-task for the
+      // approved step's defKey then reconciles the live token set (isInstanceEnded → emit
+      // instance.ended, else surface every gateway-spawned next_task incl. the 6M
+      // «Доп.согласование»). Unlike the old void IIFE it RETURNS engine errors instead of
+      // swallowing them — and even if THIS fast-path loses the timing race or hits a
+      // transient engine error, the reconcile-on-read net self-heals the missing task on
+      // the next inbox read (durability without a second queue).
+      //
+      // The gateway routing variable (approvalRequired / TEL_GATEWAY_VAR) is injected
+      // UPSTREAM at the tel-intake external-task seam (externalTaskBridge.ts) BEFORE this
+      // point; completeUserTask takes no variables — it only advances the already-routed
+      // token. The defKey-match poll guarantees we never complete a stale/wrong token.
       if (writeDepsFlowable) {
         const engineDriveInstanceId = task.inst;
         const engineDriveProcKey = task.procKey;
         // T-0443 Fix A: use the taskDefKey threaded from the projection (InstanceInboxTask).
-        // Base process.started rows carry taskDefKey="task-approve" (set in listInstanceInboxTasks).
-        // process.next_task rows carry the actual defKey written by appendNextTaskEvent
-        // (e.g. "task-extra-approve" on the 6M gateway branch).
-        // This enables N-step generality: every sequential human task completes by its own defKey.
+        // Base process.started rows carry taskDefKey="task-approve"; process.next_task rows
+        // carry the actual defKey (e.g. "task-extra-approve" on the 6M gateway branch).
         const approvedTaskDefKey: string = task.taskDefKey;
 
         void (async () => {
-          try {
-            // Poll up to ~10s for the engine task (triage external-task might still be in flight).
-            let engineTaskId: string | null = null;
-            const pollStart = Date.now();
-            const pollTimeoutMs = 10_000;
-            const pollIntervalMs = 500;
-
-            while (Date.now() - pollStart < pollTimeoutMs) {
-              const tasksResult = await writeDepsFlowable.getActiveUserTasks(engineDriveInstanceId);
-              if (!tasksResult.ok) {
-                console.warn(
-                  `[inbox T-0443] getActiveUserTasks failed: ${tasksResult.code} ` +
-                    `(instance ${engineDriveInstanceId}) — engine reconcile skipped`,
-                );
-                return;
-              }
-              // Find the engine task matching the approved step's defKey.
-              const match = tasksResult.tasks.find((t) => t.taskDefinitionKey === approvedTaskDefKey);
-              if (match) {
-                engineTaskId = match.id;
-                break;
-              }
-              // No matching task yet — might still be at triage service task. Wait and retry.
-              if (tasksResult.tasks.length === 0) break; // no tasks at all → instance may have ended
-              await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
-            }
-
-            if (engineTaskId) {
-              // Complete the engine user task identified by defKey.
-              const completeResult = await writeDepsFlowable.completeUserTask(engineTaskId);
-              if (!completeResult.ok) {
-                console.warn(
-                  `[inbox T-0443] completeUserTask(${engineTaskId}) failed: ${completeResult.code} ` +
-                    `(instance ${engineDriveInstanceId}) — continuing to reconcile`,
-                );
-              }
-            }
-
-            // Reconcile: isInstanceEnded → either emit instance.ended or process.next_task.
-            const endedResult = await writeDepsFlowable.isInstanceEnded(engineDriveInstanceId);
-            if (!endedResult.ok) {
-              console.warn(
-                `[inbox T-0443] isInstanceEnded failed: ${endedResult.code} ` +
-                  `(instance ${engineDriveInstanceId}) — reconcile skipped`,
-              );
-              return;
-            }
-
-            if (endedResult.ended) {
-              // Engine confirms instance done → emit instance.ended (engine-gated done signal).
-              try {
-                await withTenantTx(pool, tenantId, async (client) => {
-                  await appendInstanceEnded(
-                    client as unknown as import("../db/audit-writer.js").PgClientLike,
-                    {
-                      taskId,
-                      instanceId: engineDriveInstanceId,
-                      procKey: engineDriveProcKey,
-                      actor,
-                      nowMs: Date.now(),
-                      tenantId,
-                    },
-                  );
-                });
-              } catch (endedErr) {
-                console.warn(
-                  `[inbox T-0443] appendInstanceEnded failed (instance ${engineDriveInstanceId}):`,
-                  endedErr,
-                );
-              }
-            } else {
-              // Engine has more steps → surface EVERY waiting task as a pool task.
-              //
-              // T-0456 [D8-R1]: an AND-split (parallelGateway) leaves MULTIPLE
-              // concurrent user-tasks active on ONE instance. The inbox projection is a
-              // SEPARATE state machine from Flowable (two machines) — engine-drive must
-              // reconcile against the LIVE engine token set, NOT "first active". We
-              // therefore emit a process.next_task for EACH currently-active engine task
-              // that is not yet surfaced as a waiting inbox task, instead of only the
-              // first non-matching one (the pre-T-0456 single-token behaviour).
-              const nextTasksResult = await writeDepsFlowable.getActiveUserTasks(engineDriveInstanceId);
-              if (nextTasksResult.ok && nextTasksResult.tasks.length > 0) {
-                // Dedup against (a) the just-completed defKey and (b) tasks already
-                // projected as waiting for this instance. listInstanceInboxTasks reflects
-                // both base process.started rows and prior process.next_task rows, so a
-                // re-approve or a concurrent branch already on screen is NOT re-emitted.
-                let alreadyProjectedDefKeys = new Set<string>();
-                try {
-                  const projected = await listInstanceInboxTasks(pool, tenantId);
-                  alreadyProjectedDefKeys = new Set(
-                    projected
-                      .filter((t) => t.inst === engineDriveInstanceId)
-                      .map((t) => t.taskDefKey),
-                  );
-                } catch (projErr) {
-                  console.warn(
-                    `[inbox T-0443/T-0456] listInstanceInboxTasks failed during reconcile ` +
-                      `(instance ${engineDriveInstanceId}):`,
-                    projErr,
-                  );
-                }
-
-                // Emit each live engine task that isn't already on screen. Guard against
-                // double-emitting the SAME defKey within this reconcile pass (Flowable
-                // could return two concurrent tokens with the same task definition key —
-                // rare but possible with a parallel multi-instance-like authoring).
-                const emittedThisPass = new Set<string>();
-                for (const nextTask of nextTasksResult.tasks) {
-                  const defKey = nextTask.taskDefinitionKey;
-                  if (defKey === approvedTaskDefKey) continue; // the step we just completed
-                  if (alreadyProjectedDefKeys.has(defKey)) continue; // already on screen
-                  if (emittedThisPass.has(defKey)) continue; // dedup within this pass
-                  emittedThisPass.add(defKey);
-
-                  // candidateGroups from Flowable → role slug for inbox pool addressing.
-                  // Use first group if available; fallback to the original approver role.
-                  const nextRole = nextTask.candidateGroups[0] ?? task.role;
-                  const nextInboxTaskId = randomUUID();
-
-                  try {
-                    await appendNextTaskEvent(pool, tenantId, {
-                      instanceId: engineDriveInstanceId,
-                      procKey: engineDriveProcKey,
-                      actor,
-                      nowMs: Date.now(),
-                      taskDefKey: defKey,
-                      taskName: nextTask.name || APPROVE_TASK_NAME,
-                      taskRole: nextRole,
-                      taskStep: nextTask.name || "Согласование",
-                      inboxTaskId: nextInboxTaskId,
-                    });
-                  } catch (nextErr) {
-                    console.warn(
-                      `[inbox T-0443/T-0456] appendNextTaskEvent failed (instance ${engineDriveInstanceId}, defKey ${defKey}):`,
-                      nextErr,
-                    );
-                  }
-                }
-              }
-            }
-          } catch (engineErr) {
+          const result = await reconcileInstanceEngineDrive(
+            pool,
+            tenantId,
+            writeDepsFlowable,
+            {
+              instanceId: engineDriveInstanceId,
+              procKey: engineDriveProcKey,
+              approvedTaskDefKey,
+              completeEngineTask: true, // post-approve: complete the human's task.
+              actor,
+            },
+          );
+          if (!result.ok) {
+            // Error is EXPLICIT (not swallowed): log with the failing stage + code. The
+            // reconcile-on-read net (GET /api/inbox) will retry this instance, so a
+            // gateway-spawned task is never permanently lost — it self-heals on next read.
             console.warn(
-              `[inbox T-0443] engine-drive error (instance ${task.inst}):`,
-              engineErr,
+              `[inbox T-0522 engine-drive] reconcile failed at stage=${result.stage} ` +
+                `code=${result.code} (instance ${engineDriveInstanceId}) — ` +
+                `reconcile-on-read will retry on next inbox read`,
             );
           }
         })();

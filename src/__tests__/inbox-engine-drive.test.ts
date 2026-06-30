@@ -28,10 +28,13 @@ import {
   appendNextTaskEvent,
   listInstanceProjections,
   listInstanceInboxTasks,
+  reconcileInstanceEngineDrive,
+  reconcileInboxEngineDriveOnRead,
   INSTANCE_ENDED_TYPE,
   NEXT_TASK_TYPE,
   TASK_APPROVED_TYPE,
 } from "../http/process-projection.js";
+import type { EngineDriveReconcilePort } from "../http/process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 
 // ---------------------------------------------------------------------------
@@ -1218,5 +1221,287 @@ describe("T-0456 [D8-R1] parallelGateway multi-token reconciliation", () => {
 
     const inboxTasks = await listInstanceInboxTasks(pool, H_TENANT);
     expect(inboxTasks.filter((t) => t.inst === H_INST)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0522 [ADR-T0432 Option A hardening]: DIRECT unit tests for the extracted,
+// named, idempotent, error-EXPLICIT reconcile functions. The handler-level
+// tests (8a/8b/8c, 9a/9b/9c) exercise these THROUGH the HTTP approve path;
+// these tests pin the load-bearing properties of the functions themselves so a
+// future refactor cannot silently regress them:
+//   - idempotency: a second reconcile pass on the SAME engine token set emits
+//     no duplicate process.next_task / instance.ended rows.
+//   - reconcile-on-read net: re-drives a WAITING instance and self-heals a
+//     gateway-spawned task the fire-and-forget post-approve missed; PURE MIRROR
+//     (never calls completeUserTask).
+//   - injection-before-complete ordering: completeUserTask is only called once
+//     the matching-defKey task is present (the gateway routing variable is
+//     injected UPSTREAM at the tel-intake seam BEFORE this point — see
+//     externalTaskBridge.ts); the drive completes ONLY the already-routed token.
+//   - error-EXPLICIT: an unreachable engine returns { ok:false, code, stage }
+//     instead of swallowing — the on-read net retries on the next read.
+//   - linear non-regression (T-0443): ended → instance.ended, no next_task.
+// ---------------------------------------------------------------------------
+
+const D_TENANT = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+const D_INST   = "11111111-2222-3333-4444-555555555555";
+
+/** Seed a process.started so listInstanceProjections/InboxTasks return the inst. */
+async function seedStarted(pool: import("pg").Pool, tenantId: string, instId: string): Promise<string> {
+  const c = await pool.connect();
+  await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  const baseTaskId = await appendProcessStarted(c as unknown as PgClientLike, {
+    instanceId: instId,
+    procKey: PROC_KEY,
+    actor: ACTOR,
+    nowMs: 1000,
+    tenantId,
+  });
+  c.release();
+  return baseTaskId;
+}
+
+describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", () => {
+  it("linear: complete approved task → ended → instance.ended emitted, no next_task (T-0443 no-regress)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const order: string[] = [];
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => {
+        order.push("getActiveUserTasks");
+        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: ["role-approver"] }] };
+      }),
+      completeUserTask: vi.fn(async () => { order.push("completeUserTask"); return { ok: true as const }; }),
+      isInstanceEnded: vi.fn(async () => { order.push("isInstanceEnded"); return { ok: true as const, ended: true }; }),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) { expect(res.ended).toBe(true); expect(res.emitted).toBe(0); expect(res.completed).toBe(true); }
+    // Ordering: the matching task must be FOUND (getActiveUserTasks) BEFORE complete.
+    expect(order.indexOf("getActiveUserTasks")).toBeLessThan(order.indexOf("completeUserTask"));
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(0);
+  });
+
+  it("gateway: not-ended → surfaces the gateway-spawned next_task (excludes the just-approved defKey)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // After completing task-approve the engine has routed to task-extra-approve (6M branch).
+    let pass = 0;
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => {
+        pass++;
+        // first call (poll-for-complete) still sees task-approve; subsequent calls (reconcile)
+        // see the gateway-spawned task-extra-approve.
+        if (pass === 1) return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: ["role-approver"] }] };
+        return { ok: true as const, tasks: [{ id: "eng-extra", taskDefinitionKey: "task-extra-approve", name: "Доп. согласование", candidateGroups: ["role-approver"] }] };
+      }),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+
+    expect(res.ok).toBe(true);
+    if (res.ok) { expect(res.ended).toBe(false); expect(res.emitted).toBe(1); }
+    const nextRows = db.events.filter((e) => e.type === NEXT_TASK_TYPE);
+    expect(nextRows).toHaveLength(1);
+    expect(nextRows[0]?.payload["task_def_key"]).toBe("task-extra-approve");
+    // The just-approved defKey is NEVER re-surfaced as a next_task.
+    expect(nextRows.some((r) => r.payload["task_def_key"] === "task-approve")).toBe(false);
+  });
+
+  it("IDEMPOTENT: a second reconcile pass on the same token set emits NO duplicate next_task", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // Pure-mirror engine: instance not ended, one live gateway task (already routed).
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-extra", taskDefinitionKey: "task-extra-approve", name: "Доп. согласование", candidateGroups: ["role-approver"] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+
+    const a = { instanceId: D_INST, procKey: PROC_KEY, completeEngineTask: false, actor: ACTOR } as const;
+    const r1 = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+    const r2 = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+
+    if (r1.ok) expect(r1.emitted).toBe(1);
+    if (r2.ok) expect(r2.emitted).toBe(0); // already projected → dedup by defKey
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(1);
+    // completeUserTask is NEVER called in pure-mirror mode.
+    expect(engine.completeUserTask).not.toHaveBeenCalled();
+  });
+
+  it("IDEMPOTENT: re-running an ENDED instance does not pile up duplicate instance.ended rows", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const a = { instanceId: D_INST, procKey: PROC_KEY, completeEngineTask: false, actor: ACTOR } as const;
+    await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+    await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+  });
+
+  it("error-EXPLICIT: unreachable engine returns { ok:false, code, stage } (NOT swallowed)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: false as const, code: "ENGINE_UNAVAILABLE" })),
+    };
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, completeEngineTask: false, actor: ACTOR,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) { expect(res.code).toBe("ENGINE_UNAVAILABLE"); expect(res.stage).toBe("ended"); }
+    // Nothing emitted — the on-read net will retry on the next read.
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(0);
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(0);
+  });
+
+  it("injection-before-complete: does NOT complete until the matching-defKey task appears (poll)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // The triage seam routes the token after a tick: first poll has only the WRONG defKey
+    // (token not yet routed to the approved step); the matching task appears on the 2nd poll.
+    let polls = 0;
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => {
+        polls++;
+        if (polls === 1) return { ok: true as const, tasks: [{ id: "eng-other", taskDefinitionKey: "task-submit", name: "x", candidateGroups: ["role-approver"] }] };
+        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: ["role-approver"] }] };
+      }),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 200, pollIntervalMs: 5,
+    });
+    // Completed ONLY the correctly-routed token (never the stale task-submit id).
+    expect(engine.completeUserTask).toHaveBeenCalledWith("eng-base");
+    expect(engine.completeUserTask).not.toHaveBeenCalledWith("eng-other");
+  });
+
+  it("complete idempotent: NOT_FOUND on completeUserTask (already-completed) is tolerated, reconcile proceeds", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "x", candidateGroups: ["role-approver"] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: false as const, code: "NOT_FOUND" })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+    expect(res.ok).toBe(true); // NOT_FOUND tolerated → proceed to reconcile
+    expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+  });
+});
+
+describe("T-0522 reconcileInboxEngineDriveOnRead — self-healing net (mock engine)", () => {
+  it("re-drives a WAITING instance and surfaces a gateway task the post-approve async missed", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    // Instance waiting (started, no ended). Engine has a gateway-spawned task that the
+    // fire-and-forget post-approve never projected. The on-read net re-drives every
+    // WAITING instance (pure idempotent mirror) so the missing row self-heals.
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-extra", taskDefinitionKey: "task-extra-approve", name: "Доп. согласование", candidateGroups: ["role-approver"] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+
+    const total = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    expect(total).toBe(1);
+    const nextRows = db.events.filter((e) => e.type === NEXT_TASK_TYPE);
+    expect(nextRows).toHaveLength(1);
+    expect(nextRows[0]?.payload["task_def_key"]).toBe("task-extra-approve");
+    // PURE MIRROR — the read-side net NEVER completes a user task.
+    expect(engine.completeUserTask).not.toHaveBeenCalled();
+  });
+
+  it("idempotent across reads: a second read does not duplicate the self-healed next_task", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-extra", taskDefinitionKey: "task-extra-approve", name: "Доп. согласование", candidateGroups: ["role-approver"] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+    await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    const secondTotal = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    expect(secondTotal).toBe(0);
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(1);
+  });
+
+  it("does NOT re-drive a DONE instance (skips ended instances)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+    const c = await pool.connect();
+    await c.query(`SET LOCAL choros.tenant_id = '${D_TENANT}'`);
+    await appendInstanceEnded(c as unknown as PgClientLike, {
+      taskId: "00000000-0000-0000-0000-000000000099",
+      instanceId: D_INST, procKey: PROC_KEY, actor: ACTOR, nowMs: 3000, tenantId: D_TENANT,
+    });
+    c.release();
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+    const total = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    expect(total).toBe(0);
+    // A done instance is filtered out → the engine is never even polled for it.
+    expect(engine.getActiveUserTasks).not.toHaveBeenCalled();
+  });
+
+  it("engine unreachable degrades to 0 (never throws — the inbox 200 is never blocked)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: false as const, code: "ENGINE_UNAVAILABLE" })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: false as const, code: "ENGINE_UNAVAILABLE" })),
+    };
+    const total = await reconcileInboxEngineDriveOnRead(pool, D_TENANT, engine);
+    expect(total).toBe(0);
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(0);
   });
 });
