@@ -1,21 +1,20 @@
 /**
- * Unit tests for src/core/executor-resolver.ts — T-0380 (D4)
+ * Unit tests for src/core/executor-resolver.ts — T-0380 (D4) / T-0429 ladder fix.
  *
- * Tests cover the 4-step resolution order (spec §4):
- *   1. Direct assignee
- *   2. Role pool (confirmed holders)
- *   3. Substitution port (optional; DB-backed UUID-resolution pending T-0053)
- *   4. Fallback → owner (empty role, F6/F7)
- *   5. Unresolvable (empty role + no owner)
+ * T-0429 CONTRACT CHANGE: the resolution ladder now distinguishes:
+ *   "absent"   (rung 3): a KNOWN holder has a substitution_rule → suppress, add substitute
+ *   "unfilled" (rung 4): the role has NO holders → route to owner + F7 marking
  *
- * SUBSTITUTION NOTE: substitution_rule.absent_employee_id and role_id are UUIDs
- * in the DB (FK to employee/role — see migrations/036_substitution_rule.sql).
- * A correct DB-backed port must resolve role slug → UUID and holder slug → UUID
- * before querying, and translate substituteEmployeeId UUID → slug on return.
- * That port (T-0053) is NOT yet wired in production (makeExecutorResolverDeps in
- * inbox.ts does not inject substitution). Tests here assert the PORT INTERFACE
- * contract (the resolver calls the port and honours its return), not a slug-based
- * convention that the DB cannot satisfy.
+ * OLD behavior (pre-T-0429): substitution ran when the pool was EMPTY.
+ * NEW behavior (T-0429):     substitution runs PER-HOLDER when holders are PRESENT.
+ *                             When pool is empty → fallback (skip substitution entirely).
+ *
+ * Tests cover the 4-step resolution ladder (spec §4 / T-0429):
+ *   1. Direct assignee (short-circuits everything)
+ *   2. Role pool (confirmed holders present; substitution port IS queried per-holder)
+ *   3. Substitution rung (holder is absent → suppress, add substitute)
+ *   4. Fallback → owner (effective pool empty, role_unfilled)
+ *   5. Unresolvable (empty role + no fallback)
  *
  * All tests use in-memory stubs — no live DB required.
  */
@@ -29,6 +28,7 @@ import {
   type ExecutorSubstitutionPort,
 } from "../executor-resolver.js";
 import { BOTTOM } from "../grant-lattice.js";
+import type { SubstitutionRule } from "../substitution.js";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -38,47 +38,40 @@ const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 const NOW_MS = 1_700_000_000_000;
 
 /**
- * Build a minimal ExecutorSubstitutionPort stub that returns a fixed substituteSlug
- * when queried for absentId. This tests the RESOLVER's port-contract (it calls the
- * port and honours the returned rules) independently of the DB UUID-resolution
- * concern. The real port (T-0053) translates UUIDs; the stub just returns fixtures.
- *
- * The stub mimics what a correctly-wired port would return: SubstitutionRule objects
- * with `absentEmployeeId` matching the absent-id the resolver passes, and
- * `substituteEmployeeId` containing the resolved substitute slug (post UUID→slug
- * translation that the real port performs).
+ * Build a minimal ExecutorSubstitutionPort stub that returns a rule when
+ * queried for a specific absentId. absentId = holder slug (T-0429: port is
+ * called per-holder with holder slug as the absent key). The rule's roleId
+ * must match the roleSlug being resolved.
  */
 function makeSubPortStub(
-  absentId: string,
+  absentSlug: string,
+  roleSlug: string,
   substituteSlug: string,
 ): ExecutorSubstitutionPort {
   return {
     async getActiveSubstitutions(tenantId, queriedAbsentId, _nowMs) {
       if (tenantId !== TENANT_ID) return [];
-      if (queriedAbsentId !== absentId) return [];
-      // Return a rule that resolveSubstitution will match:
-      // absentEmployeeId === queriedAbsentId, roleId === queriedAbsentId (the
-      // resolver currently passes roleSlug for both; a future port may differ).
-      return [
-        {
-          tenantId,
-          id: "stub-rule-1",
-          absentEmployeeId: queriedAbsentId,
-          substituteEmployeeId: substituteSlug,
-          roleId: queriedAbsentId,
-          orgScope: BOTTOM,
-          ttlGrantId: null,
-          nonInheritableExcluded: false,
-          proposedBy: null,
-          confirmedBy: "e-owner",
-          validFrom: null,
-          validUntil: null,
-          source: "stub",
-          createdBy: "e-owner",
-          createdAt: NOW_MS - 1000,
-          updatedAt: NOW_MS - 1000,
-        },
-      ];
+      if (queriedAbsentId !== absentSlug) return [];
+      // Return a confirmed, open-window rule (T-0429: slug-valued IDs from mapRow).
+      const rule: SubstitutionRule = {
+        tenantId,
+        id: "stub-rule-1",
+        absentEmployeeId: absentSlug, // slug (as returned by DAO mapRow)
+        substituteEmployeeId: substituteSlug,
+        roleId: roleSlug,             // slug (as returned by DAO mapRow)
+        orgScope: BOTTOM,
+        ttlGrantId: null,
+        nonInheritableExcluded: false,
+        proposedBy: null,
+        confirmedBy: "e-owner",       // confirmed = effective
+        validFrom: null,
+        validUntil: null,
+        source: "stub",
+        createdBy: "e-owner",
+        createdAt: NOW_MS - 1000,
+        updatedAt: NOW_MS - 1000,
+      };
+      return [rule];
     },
   };
 }
@@ -121,7 +114,7 @@ describe("resolveExecutor — step 1: direct assignee", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolveExecutor — step 2: role pool", () => {
-  it("returns kind=pool with all candidates when role has holders", async () => {
+  it("returns kind=pool with all candidates when role has holders (no substitution rules)", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({
         "fin-ctrl": ["e-kravtsova", "e-sokolov"],
@@ -136,17 +129,20 @@ describe("resolveExecutor — step 2: role pool", () => {
     }
   });
 
-  it("does NOT trigger substitution or fallback when pool has holders", async () => {
-    let subQueried = false;
+  it("T-0429: substitution port IS queried per-holder when pool has holders", async () => {
+    // Under T-0429, the substitution port is called for each holder to check
+    // if they have an active absence rule. When no rules match, the holder
+    // stays in the pool (unchanged).
+    const subQueriedFor: string[] = [];
     let fallbackQueried = false;
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({
         "fin-ctrl": ["e-kravtsova"],
       }),
       substitution: {
-        async getActiveSubstitutions() {
-          subQueried = true;
-          return [];
+        async getActiveSubstitutions(_tenantId, absentId, _nowMs) {
+          subQueriedFor.push(absentId);
+          return []; // no absence rule → holder stays in pool
         },
       },
       fallback: {
@@ -158,46 +154,99 @@ describe("resolveExecutor — step 2: role pool", () => {
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("pool");
-    expect(subQueried).toBe(false);
+    // T-0429: substitution port is called for each holder (e-kravtsova)
+    expect(subQueriedFor).toContain("e-kravtsova");
+    // Fallback should NOT be queried (pool is non-empty)
     expect(fallbackQueried).toBe(false);
+  });
+
+  it("pool stays unchanged when no holders have active substitution rules", async () => {
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({
+        "fin-ctrl": ["e-kravtsova"],
+      }),
+      substitution: {
+        async getActiveSubstitutions() { return []; }, // no rules
+      },
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("pool");
+    if (result.kind === "pool") {
+      expect(result.candidates).toContain("e-kravtsova");
+    }
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. Substitution port — gated behind optional deps.substitution
+// 3. Substitution port — T-0429: called PER-HOLDER (not on empty pool)
 //
-// IMPORTANT: the substitution_rule DB table stores absent_employee_id and role_id
-// as UUIDs (FK columns — see migrations/036_substitution_rule.sql). A real port
-// (T-0053) must translate role slug → role.id and holder slug → employee.id before
-// querying, and map substituteEmployeeId UUID → slug before returning. These tests
-// assert the RESOLVER's port-call contract (it calls the port and honours the result)
-// NOT a slug-based matching convention that the DB cannot satisfy.
+// KEY BEHAVIORAL CHANGE from pre-T-0429:
+//   - BEFORE: substitution ran when the pool was EMPTY (absent_employee_id = roleSlug)
+//   - AFTER:  substitution runs PER-HOLDER when holders ARE present; port called with
+//             holderSlug as absentId; if rule matches → suppress holder, add substitute.
 //
-// Production wiring: makeExecutorResolverDeps in inbox.ts does NOT inject the
-// substitution port (T-0053 pending), so in production the step is always skipped
-// and control falls through to step 4 (fallback-owner). That is correct and safe.
+// When the pool is EMPTY: substitution step is SKIPPED → falls to fallback (rung 4).
+// This correctly implements "absent" ≠ "unfilled".
 // ---------------------------------------------------------------------------
 
-describe("resolveExecutor — step 3: substitution port contract", () => {
-  it("returns kind=substitution when pool is empty and port returns a matching rule", async () => {
-    // Stub port mimics a correctly-wired UUID-aware port returning a resolved rule.
+describe("resolveExecutor — step 3: substitution port contract (T-0429 ladder)", () => {
+  it("T-0429: returns kind=substitution when holder is absent AND port returns matching rule", async () => {
+    // Pool has one holder (e-kravtsova); she has an active substitution rule.
+    // Expected: e-kravtsova is suppressed, e-mironov substitutes → kind: "substitution".
     const deps: ResolverDeps = {
-      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": [] }),
-      substitution: makeSubPortStub("fin-ctrl", "e-mironov"),
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("substitution");
     if (result.kind === "substitution") {
       expect(result.substituteSlug).toBe("e-mironov");
+      expect(result.absentSlug).toBe("e-kravtsova");
       expect(result.roleSlug).toBe("fin-ctrl");
     }
   });
 
-  it("does NOT trigger fallback when substitution port returns a matching rule", async () => {
+  it("T-0429: empty pool → fallback (substitution is NOT invoked)", async () => {
+    // Under T-0429, an empty pool → role is UNFILLED → rung 4 (fallback), not substitution.
+    // The substitution port is NEVER called when pool is empty.
+    let subQueried = false;
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": [] }),
+      substitution: {
+        async getActiveSubstitutions() {
+          subQueried = true;
+          return [];
+        },
+      },
+      fallback: makeInMemoryFallbackPort("e-owner"),
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("fallback"); // unfilled → fallback (rung 4)
+    expect(subQueried).toBe(false);       // substitution NOT invoked for empty pool
+  });
+
+  it("T-0429: no holders (undefined in map) → fallback, substitution not invoked", async () => {
+    let subQueried = false;
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({}),  // role not even in map → []
+      substitution: {
+        async getActiveSubstitutions() {
+          subQueried = true;
+          return [];
+        },
+      },
+      fallback: makeInMemoryFallbackPort("e-owner"),
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("fallback");
+    expect(subQueried).toBe(false);
+  });
+
+  it("does NOT trigger fallback when holder is absent and substitute is available", async () => {
     let fallbackQueried = false;
     const deps: ResolverDeps = {
-      roleHolders: makeInMemoryRoleHolderSource({}),
-      substitution: makeSubPortStub("fin-ctrl", "e-mironov"),
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
       fallback: {
         async resolveFallbackSlug() {
           fallbackQueried = true;
@@ -210,20 +259,21 @@ describe("resolveExecutor — step 3: substitution port contract", () => {
     expect(fallbackQueried).toBe(false);
   });
 
-  it("falls through to fallback when substitution port returns no matching rule", async () => {
-    // Port returns nothing for "fin-ctrl" → resolver falls through.
+  it("falls through to fallback when substitution port returns no matching rule for the holder", async () => {
+    // Port queried for "e-kravtsova" but returns empty (no active rule).
+    // Holder stays in pool → kind: "pool".
     const deps: ResolverDeps = {
-      roleHolders: makeInMemoryRoleHolderSource({}),
-      substitution: makeSubPortStub("other-role", "e-mironov"), // wrong absent-id → no match
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      substitution: makeSubPortStub("other-person", "fin-ctrl", "e-mironov"), // wrong absentId
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
-    expect(result.kind).toBe("fallback");
+    // No matching rule for e-kravtsova → she stays in pool → kind: "pool"
+    expect(result.kind).toBe("pool");
   });
 
   it("falls through to fallback when substitution port is not injected (production default)", async () => {
-    // This is the production path: makeExecutorResolverDeps does not inject
-    // substitution (T-0053 pending). Without the port, the step is skipped.
+    // When pool is empty and no substitution port, go to fallback.
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({}),
       // no substitution port
@@ -233,14 +283,17 @@ describe("resolveExecutor — step 3: substitution port contract", () => {
     expect(result.kind).toBe("fallback");
   });
 
-  it("substitution step is skipped when port is absent (no-op, falls to step 4)", async () => {
-    // Verify that omitting deps.substitution entirely does not throw and routes correctly.
+  it("substitution step is skipped when port is absent, pool has holders → kind: 'pool'", async () => {
     const deps: ResolverDeps = {
-      roleHolders: makeInMemoryRoleHolderSource({}),
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      // No substitution port — step 3 is a no-op → pool returned unchanged
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
-    const result = await resolveExecutor(TENANT_ID, "any-role", NOW_MS, deps);
-    expect(result.kind).toBe("fallback");
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("pool");
+    if (result.kind === "pool") {
+      expect(result.candidates).toContain("e-kravtsova");
+    }
   });
 });
 
@@ -320,34 +373,52 @@ describe("resolveExecutor — step 5: unresolvable", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Priority invariants — pool > substitution > fallback
+// Priority invariants — T-0429 ladder: direct > pool > substitution > fallback
 // ---------------------------------------------------------------------------
 
-describe("resolveExecutor — priority invariants", () => {
-  it("pool wins over substitution when role has holders", async () => {
+describe("resolveExecutor — priority invariants (T-0429 ladder)", () => {
+  it("pool wins over substitution when role has holders AND no absence rules", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
-      substitution: makeSubPortStub("fin-ctrl", "e-mironov"),
+      substitution: {
+        async getActiveSubstitutions() { return []; }, // no absence rule
+      },
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("pool");
   });
 
-  it("substitution wins over fallback when port returns a matching rule", async () => {
+  it("substitution wins over fallback when holder is absent AND has active substitute", async () => {
+    // Pool has one holder (e-kravtsova) who is absent → Bob substitutes.
     const deps: ResolverDeps = {
-      roleHolders: makeInMemoryRoleHolderSource({}),
-      substitution: makeSubPortStub("fin-ctrl", "e-mironov"),
+      roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
     expect(result.kind).toBe("substitution");
+    if (result.kind === "substitution") {
+      expect(result.substituteSlug).toBe("e-mironov");
+    }
+  });
+
+  it("T-0429: empty pool → fallback (NOT substitution; unfilled ≠ absent)", async () => {
+    // Under T-0429 semantics: an EMPTY pool is "unfilled", not "absent".
+    // Unfilled → rung 4 (fallback), regardless of substitution port.
+    const deps: ResolverDeps = {
+      roleHolders: makeInMemoryRoleHolderSource({}), // empty = unfilled
+      substitution: makeSubPortStub("fin-ctrl", "fin-ctrl", "e-mironov"), // port present but skipped
+      fallback: makeInMemoryFallbackPort("e-owner"),
+    };
+    const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps);
+    expect(result.kind).toBe("fallback"); // NOT substitution
   });
 
   it("direct assignee wins over everything", async () => {
     const deps: ResolverDeps = {
       roleHolders: makeInMemoryRoleHolderSource({ "fin-ctrl": ["e-kravtsova"] }),
-      substitution: makeSubPortStub("fin-ctrl", "e-mironov"),
+      substitution: makeSubPortStub("e-kravtsova", "fin-ctrl", "e-mironov"),
       fallback: makeInMemoryFallbackPort("e-owner"),
     };
     const result = await resolveExecutor(TENANT_ID, "fin-ctrl", NOW_MS, deps, {

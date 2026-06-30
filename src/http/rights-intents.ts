@@ -274,6 +274,8 @@ export function registerRightsIntentRoutes(
   registerFire(router, pool, resolveActorTenant);
   registerSubstitute(router, pool, resolveActorTenant);
   registerUrgentRevoke(router, pool, resolveActorTenant);
+  // T-0429: self-service absence ("я в отпуске") — actor declares THEIR OWN absence.
+  registerSelfAbsence(router, pool, resolveActorTenant);
 }
 
 // ===========================================================================
@@ -1071,3 +1073,286 @@ async function isOwnerRoleScoped(
 // substitute auto-expiry both rely on it); referenced here to keep the binding
 // explicit for reviewers and avoid an unused-import lint.
 void isEffective;
+
+// ===========================================================================
+// T-0429: registerSelfAbsence — "я в отпуске" self-service absence declaration.
+//
+// POST /api/rights/intents/self-absence
+//
+// Unlike the ADMIN-path POST /api/rights/intents/substitute (which lets an admin
+// declare absence FOR another employee), this endpoint lets the actor declare
+// THEIR OWN absence and nominate a substitute. No admin gate on the absence WINDOW
+// itself — an employee is the sole authority over when they are away. BUT a
+// role-holding gate IS enforced (see below): an actor can only declare absence for
+// a role they themselves currently hold, so self-absence cannot be used to loan
+// authority for a role the actor does not own.
+//
+// Body:
+//   substitute_employee_id: UUID  — the employee who will cover the absent actor
+//   role_id:                UUID  — the role the absence applies to
+//   valid_from:             number — epoch ms (start of absence; defaults to now)
+//   valid_until:            number — epoch ms (end of absence; required)
+//   org_scope:              ScopeElement — org node scope of the absence
+//   force_tier2:            boolean (optional) — force Tier-2 grant mint
+//
+// The route is structurally identical to the admin substitute path EXCEPT:
+//   - absent_employee_id is derived from the authenticated actor (not from body).
+//   - No admin-gate check: the actor vouches for their own absence window. A
+//     separate approval flow (dual-control or manager sign-off) for the substitute
+//     grant is out of scope for this self-service intent (T-0429 D-061 discipline:
+//     no new authority table; Tier-2 mints still go through the same eligibleForTier2
+//     subset-gate for the grant side).
+//   - The substitution_rule carries confirmedBy = actorId (self-confirmed),
+//     consistent with the spec: the actor IS the absent party.
+//
+// on_behalf_of surface: the resulting substitution_rule.absent_employee_id = actorId,
+// .substitute_employee_id = substituteId. When the substitute later acts on a task,
+// the audit trail records performed_by = substitute, on_behalf_of = actor (the
+// absent party) via the resolveSubstitution → kind: "substitution" path.
+// ===========================================================================
+
+function registerSelfAbsence(
+  router: Router,
+  pool: pg.Pool,
+  resolveActorTenant?: ActorTenantResolver,
+): void {
+  router.register("POST", "/api/rights/intents/self-absence", withAuth(async (req, res) => {
+    // The actor declares THEIR OWN absence: actorId = absent_employee_id.
+    const actorId = await extractActor(req, pool);
+    const tenantId = await resolveTenant(actorId, resolveActorTenant);
+    const nowMs = Date.now();
+
+    const body = (await readJsonBody(req)) as Record<string, unknown>;
+    const substituteEmployeeId = body["substitute_employee_id"];
+    const roleId = body["role_id"];
+
+    if (typeof substituteEmployeeId !== "string" || typeof roleId !== "string") {
+      throw new HttpError(400, "VALIDATION", "substitute_employee_id and role_id are required");
+    }
+    assertUuidShape(substituteEmployeeId, "substitute_employee_id");
+    assertUuidShape(roleId, "role_id");
+
+    // Resolve the actor's own employee UUID (absent_employee_id = actorId).
+    // The actor is identified by their slug (dev mode) or KC sub→slug (KC mode).
+    // We resolve their UUID via employee.slug lookup (same pattern as hire/fire).
+    let absentEmployeeId: string;
+    {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+        await client.query("SET LOCAL search_path TO choros");
+        const { rows } = await client.query<{ id: string }>(
+          `SELECT id FROM choros.employee WHERE tenant_id = $1 AND slug = $2 LIMIT 1`,
+          [tenantId, actorId],
+        );
+        await client.query("COMMIT");
+        if (rows.length === 0) {
+          throw new HttpError(404, "NOT_FOUND", "actor employee record not found");
+        }
+        absentEmployeeId = rows[0]!.id;
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    if (absentEmployeeId === substituteEmployeeId) {
+      throw new HttpError(400, "VALIDATION", "substitute must differ from the absent actor");
+    }
+
+    const validUntil = typeof body["valid_until"] === "number" ? (body["valid_until"] as number) : null;
+    if (validUntil === null) {
+      throw new HttpError(400, "VALIDATION", "valid_until (epoch ms) is required for an absence declaration");
+    }
+    if (validUntil <= nowMs) {
+      throw new HttpError(400, "VALIDATION", "valid_until must be in the future");
+    }
+    const validFrom = typeof body["valid_from"] === "number" ? (body["valid_from"] as number) : nowMs;
+    const forceTier2 = body["force_tier2"] === true;
+
+    const rawOrgScope = body["org_scope"];
+    const orgScope = rawOrgScope ? (rawOrgScope as ScopeElement) : null;
+    if (!orgScope) {
+      throw new HttpError(400, "VALIDATION", "org_scope (ScopeElement, hierarchy:org) is required");
+    }
+
+    // T-0469: deny if the targeted role is the owner role (self-absence cannot
+    // issue owner-scope authority to a substitute).
+    const assignsOwnerRole = await isOwnerRoleScoped(pool, tenantId, roleId);
+    if (assignsOwnerRole) {
+      throw new HttpError(403, "ADMIN_GATE_REJECTED", "self-absence cannot cover the tenant-owner role");
+    }
+
+    // No admin-gate check for the absence WINDOW itself — an employee can declare
+    // their own absence freely. BUT the actor must HOLD the role (role-holding gate
+    // inside the tx below, fail-closed). The Tier-2 grant mint (if needed) is still
+    // subject to eligibleForTier2 (subset-gate, I-2).
+    const result = await withTenantTx(pool, tenantId, async (client) => {
+      // ---------------------------------------------------------------------
+      // ROLE-HOLDING GATE (T-0429 CRITICAL security fix).
+      //
+      // You can only declare absence for a role you yourself hold. role_id comes
+      // from the request body and is NOT otherwise tied to the actor: without this
+      // check, any employee could declare self-absence on a role they do not own
+      // (e.g. a financial/approval role), nominate an accomplice as substitute, and
+      // — on the Tier-2 path — have that role's confirmed grants minted to the
+      // accomplice. The downstream narrowing/owner-block do NOT catch this (they
+      // compare against the ROLE's grants, not the ACTOR's assignments).
+      //
+      // Fail-closed: the absent actor MUST hold a confirmed, in-window
+      // role_assignment for role_id. (orgScope-level narrowing of the assignment
+      // is out of scope for the assignment table, which is org-wide per role; the
+      // minted grants are still org-scope-narrowed + subset-gated below.)
+      // ---------------------------------------------------------------------
+      const { rows: actorHoldsRows } = await client.query<{ employee_id: string }>(
+        `SELECT employee_id FROM choros.role_assignment
+          WHERE tenant_id = $1 AND role_id = $2
+            AND employee_id = $3
+            AND confirmed_by IS NOT NULL
+            AND (valid_until IS NULL OR valid_until > $4)
+          LIMIT 1`,
+        [tenantId, roleId, absentEmployeeId, nowMs],
+      );
+      if (actorHoldsRows.length === 0) {
+        throw new HttpError(
+          403,
+          "ADMIN_GATE_REJECTED",
+          "you can only declare absence for a role you currently hold",
+        );
+      }
+
+      // Determine tier: Tier-1 if another pool holder holds the role in scope.
+      const { rows: poolRows } = await client.query<{ employee_id: string }>(
+        `SELECT employee_id FROM choros.role_assignment
+          WHERE tenant_id = $1 AND role_id = $2
+            AND employee_id <> $3 AND employee_id <> $4
+            AND confirmed_by IS NOT NULL
+            AND (valid_until IS NULL OR valid_until > $5)
+          LIMIT 1`,
+        [tenantId, roleId, absentEmployeeId, substituteEmployeeId, nowMs],
+      );
+      const tier2 = forceTier2 || poolRows.length === 0;
+
+      let ttlGrantId: string | null = null;
+
+      if (tier2) {
+        // Tier-2: mint a TTL'd delegation grant to the substitute (subset-gated).
+        const { rows: parentRows } = await client.query(
+          `SELECT ${GRANT_COLS} FROM choros."grant"
+            WHERE tenant_id = $1 AND role_id = $2 AND confirmed_by IS NOT NULL`,
+          [tenantId, roleId],
+        );
+        const parentGrants = (parentRows as Parameters<typeof mapGrantRow>[1][]).map((g) =>
+          mapGrantRow(tenantId, g),
+        );
+        const eligible = eligibleForTier2(
+          {
+            tenantId, id: randomUUID(), absentEmployeeId, substituteEmployeeId, roleId,
+            orgScope, ttlGrantId: null, nonInheritableExcluded: true,
+            proposedBy: null, confirmedBy: actorId, validFrom, validUntil,
+            source: "intent:self-absence", createdBy: actorId, createdAt: nowMs, updatedAt: nowMs,
+          },
+          parentGrants,
+        );
+        if (eligible.length === 0) {
+          throw new HttpError(
+            422,
+            "NO_DELEGABLE_GRANT",
+            "the absence role has no inheritable, delegable grant to loan to the substitute",
+          );
+        }
+
+        const mintedIds: string[] = [];
+        for (const parent of eligible) {
+          if (!parent.delegable) continue;
+          const narrowed: Grant = {
+            tenantId,
+            id: randomUUID(),
+            roleId,
+            resourceType: parent.resourceType,
+            resourceFacet: parent.resourceFacet,
+            operation: parent.operation,
+            scope: orgScope,
+            constraint: parent.constraint,
+            delegable: false, // loaned authority is NOT re-delegable (I-2)
+            grantedBy: `intent:self-absence`,
+            validFrom,
+            validUntil,
+            createdAt: nowMs,
+          };
+          const narrowCheck = validateNarrowing(parent, narrowed, {
+            isDescendantOrSelf: (_h, d, a) => d === a, // flat oracle for self-absence
+          });
+          if (!narrowCheck.ok) {
+            throw new HttpError(422, "SUBSTITUTION_WIDENS", narrowCheck.reason);
+          }
+          await client.query(
+            `INSERT INTO choros."grant"
+               (tenant_id, id, role_id, resource_type, resource_facet,
+                operation, scope, "constraint", delegable, granted_by,
+                valid_from, valid_until, created_at,
+                proposed_by, confirmed_by, confirmed2_by)
+             VALUES ($1, $2, $3, $4, $5::jsonb,
+                     $6, $7::jsonb, $8::jsonb, false, $9,
+                     $10, $11, $12,
+                     NULL, $13, NULL)`,
+            [
+              tenantId, narrowed.id, roleId, narrowed.resourceType,
+              narrowed.resourceFacet != null ? JSON.stringify(narrowed.resourceFacet) : null,
+              narrowed.operation, JSON.stringify(narrowed.scope),
+              narrowed.constraint != null ? JSON.stringify(narrowed.constraint) : null,
+              narrowed.grantedBy, validFrom, validUntil, nowMs,
+              actorId,
+            ],
+          );
+          mintedIds.push(narrowed.id);
+        }
+        if (mintedIds.length > 0) {
+          ttlGrantId = mintedIds[0]!;
+        }
+      }
+
+      // Insert the substitution_rule row (Tier-1 or Tier-2).
+      // confirmedBy = actorId (self-confirmed: the absent party vouches for their own window).
+      const ruleId = randomUUID();
+      await client.query(
+        `INSERT INTO choros.substitution_rule
+          (id, tenant_id, absent_employee_id, substitute_employee_id, role_id,
+           org_scope, ttl_grant_id, non_inheritable_excluded,
+           proposed_by, confirmed_by, valid_from, valid_until,
+           source, created_by, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`,
+        [
+          ruleId, tenantId, absentEmployeeId, substituteEmployeeId, roleId,
+          JSON.stringify(orgScope), ttlGrantId, true,
+          null, actorId, validFrom, validUntil,
+          "intent:self-absence", actorId, nowMs,
+        ],
+      );
+
+      return { ruleId, tier: tier2 ? "tier2" : "tier1", ttlGrantId };
+    });
+
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      rule_id: result.ruleId,
+      absent_employee_id: absentEmployeeId,
+      substitute_employee_id: substituteEmployeeId,
+      role_id: roleId,
+      valid_from: body["valid_from"] ?? nowMs,
+      valid_until: validUntil,
+      tier: result.tier,
+      ttl_grant_id: result.ttlGrantId,
+      // on_behalf_of provenance surface (T-0429):
+      //   When the substitute later acts on a task routed via this rule,
+      //   performed_by = substitute_employee_id, on_behalf_of = absent_employee_id.
+      //   The resolver emits kind: "substitution" { absentSlug, substituteSlug }
+      //   which the inbox/audit layer maps to these two fields.
+      on_behalf_of_hint: "substitute acts on behalf of absent_employee_id",
+    }));
+  }));
+}

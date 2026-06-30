@@ -1,34 +1,46 @@
 /**
- * src/core/executor-resolver.ts — T-0380 (D4): Unified executor resolver.
+ * src/core/executor-resolver.ts — T-0380/T-0429 (D4): Unified executor resolver.
  *
  * Single source of truth for task routing (§4 of process-execution-model.spec.md).
  * Called at task-routing time to decide WHO receives a process step.
  *
- * Resolution order (spec §4):
- *   1. Direct assignee — step explicitly names a person slug. Rare.
- *   2. Role pool — confirmed holders in window (getRoleSlugsForActor / role membership).
- *      The pool is the full set of slugs holding the named role.
- *   3. Substitution — a holder is absent → their substitute takes the task.
+ * Resolution ladder (spec §4 / T-0429 ladder fix):
+ *
+ *   1. Direct assignee — step explicitly names a person slug. Rare; short-circuits
+ *      everything else.
+ *
+ *   2. Role pool — confirmed holders in window. Returns the raw holder set.
+ *
+ *   3. Substitution — PER-HOLDER absence check (T-0429 fix):
+ *      For each holder in the pool, check if they have an active substitution rule
+ *      (they are declared absent). If yes: SUPPRESS the absent holder, ADD their
+ *      substitute to the effective pool. This is the "suppress-absent + add-substitute"
+ *      operation. Substitution is SINGLE-HOP ONLY: only the ORIGINAL holders are
+ *      checked for absence; if their substitute is themselves absent, that second
+ *      absence is NOT resolved (chains A→B→C are not followed). A single pass over
+ *      the holder set cannot loop, so this is cycle-safe by construction.
+ *
+ *      "absent" ≠ "unfilled" — these are DIFFERENT ladder rungs:
+ *        - "absent" (rung 3): a KNOWN holder has a substitution_rule → route via rule
+ *        - "unfilled" (rung 4): the role has NO holders at all → route to owner + F7
+ *
  *      The step is gated behind an optional `substitution` port in ResolverDeps.
- *      The DB-backed SubstitutionSource (which resolves UUIDs for absent_employee_id
- *      and role_id from the substitution_rule table) is a follow-up task (T-0053).
- *      Until that port is injected (it is NOT wired in production today), this step
- *      is a no-op and control falls through to step 4.
- *   4. Fallback → owner — role is empty (no confirmed holders in window).
- *      Executor is configurable per-tenant/process; DEFAULT = tenant owner (F6/PD-10).
- *      The task is MARKED with `fallbackReason: "role_unfilled"` so the UI/notification
- *      can say "роль не заполнена, поэтому вам" (F7).
- *   5. SLA escalation — out of scope (phase 3).
+ *      When absent, this step is a no-op (production default until T-0429 wires it).
+ *
+ *   4. Fallback → owner — effective pool is empty (role unfilled or all holders absent
+ *      with no substitute). Executor = tenant owner (F6/PD-10). Marked
+ *      `fallbackReason: "role_unfilled"` (F7) so the UI can say "роль не заполнена".
+ *
+ *   5. SLA escalation — out of scope (phase 3, D rejected).
  *
  * Design discipline:
  *   - PURE resolver contract: `resolveExecutor` takes injected ports (no direct DB/IO).
  *     Callers (inbox.ts) supply the ports with DB-backed implementations.
  *   - No new DB table (D-061). The fallback executor config is a future per-tenant/
  *     process table; for now the default-owner path is the only implementation.
- *   - Substitution path is gated behind an optional port that callers inject.
- *     The DB-backed implementation (UUID-based lookup per absent_employee_id)
- *     is a follow-up (T-0053). `resolveSubstitution` from substitution.ts is
- *     available for callers that inject a properly UUID-backed port.
+ *   - Substitution port is optional. When absent, the ladder falls through to step 4.
+ *     Production wiring: makeExecutorResolverDeps in inbox.ts injects the DB-backed
+ *     port (substitution-dao.ts). Older callers without substitution skip step 3.
  *
  * Fallback marking (F7): when the resolver falls back to owner, the returned
  * `ExecutorResolution` carries `fallbackReason: "role_unfilled"`. The inbox
@@ -184,58 +196,85 @@ export async function resolveExecutor(
   // --- Step 2: Role pool — confirmed holders in window ----------------------
   const holders = await deps.roleHolders.getHoldersForRole(tenantId, roleSlug, nowMs);
 
-  if (holders.length > 0) {
-    // Role has confirmed holders: deliver to the pool.
-    // (Substitution is not triggered when the role has live holders — the absent
-    //  holder's substitute is only relevant when THAT specific person is absent.
-    //  For a pool task addressed to a role, any pool member can take it — the
-    //  substitution path applies when a specific assignee in step 1 is absent,
-    //  which is not the current case. Future: per-person absence + substitution
-    //  for directed steps goes through step 1 + substitution lookup below.)
-    return { kind: "pool", roleSlug, candidates: holders };
-  }
-
-  // --- Step 3: Substitution — no holder present → try substitute -----------
-  // The substitution_rule table stores absent_employee_id and role_id as UUIDs
-  // (FK to employee and role respectively — see migrations/036_substitution_rule.sql).
-  // A correct DB-backed port must therefore resolve the role slug → role.id UUID
-  // and each holder's slug → employee.id UUID before calling getActiveSubstitutions,
-  // then map the returned substituteEmployeeId UUID back to a slug.
+  // --- Step 3: Substitution — per-holder absence check (T-0429 лесенка fix) --
   //
-  // That UUID-resolution layer (a DB-backed SubstitutionSource) is pending T-0053.
-  // Until callers inject a properly-wired port the step is a controlled no-op:
-  // `deps.substitution` is undefined in production (makeExecutorResolverDeps does
-  // not inject it), so the block below is never entered and control falls through
-  // to step 4 (fallback-owner). This is intentional and documented.
-  if (deps.substitution) {
-    // NOTE: the injected port is responsible for UUID resolution (slug→UUID→slug).
-    // When a correctly wired port is present it calls getActiveSubstitutions with
-    // the absent employee's UUID, then resolveSubstitution matches by UUID fields,
-    // and the returned substituteEmployeeId UUID is translated back to a slug by
-    // the port before returning.
+  // "absent" ≠ "unfilled" — these are DIFFERENT rungs:
+  //   absent  (rung 3): a KNOWN holder has a substitution_rule → suppress, add substitute
+  //   unfilled (rung 4): the role has NO holders at all → fallback owner + F7 marking
+  //
+  // For each holder in the pool: check if they have an active substitution rule.
+  // If yes: suppress that holder, add their substitute to the effective set.
+  // If no rules are active for any holder: pool is unchanged.
+  //
+  // The substitution port handles UUID↔slug resolution (DB DAO in substitution-dao.ts).
+  // When the port is absent, this step is a no-op and the raw holder set proceeds.
+  //
+  // Single-hop only: this pass checks each ORIGINAL holder for an absence rule.
+  // If a substitute added below is themselves absent, that is NOT resolved here
+  // (chains A→B→C are not followed). A single pass over the original holder set
+  // cannot loop, so there is no cycle to cap.
+  if (deps.substitution && holders.length > 0) {
     const orgScope: ScopeElement = opts.orgScope ?? BOTTOM;
     const oracle = deps.ancestry ?? NO_OP_ANCESTRY;
 
-    // The port provides rules already filtered for `absentEmployeeId` (as UUID).
-    // We pass a placeholder here; correct ports must supply their own absent-id
-    // from a prior role-holder lookup, not the raw roleSlug.
-    // For now no production port is wired, so this branch is never reached.
-    const rules = await deps.substitution.getActiveSubstitutions(tenantId, roleSlug, nowMs);
-    const matched = resolveSubstitution(rules, roleSlug, roleSlug, orgScope, oracle, nowMs);
-    if (matched !== null) {
-      return {
-        kind: "substitution",
-        roleSlug,
-        absentSlug: roleSlug,
-        substituteSlug: matched.substituteEmployeeId,
-      };
+    // Build the effective pool: suppress absent holders, add their substitutes.
+    const effectivePool = new Set<string>(holders);
+    let firstSubstitution: { absentSlug: string; substituteSlug: string } | null = null;
+
+    for (const holderSlug of holders) {
+      // Query the port for active substitution rules where this holder is absent.
+      const rules = await deps.substitution.getActiveSubstitutions(tenantId, holderSlug, nowMs);
+      // resolveSubstitution: first effective rule where absent=holderSlug, role=roleSlug,
+      // orgScope ⊑ rule.orgScope (i.e. the task's org-scope is covered by the rule's scope).
+      const matched = resolveSubstitution(rules, holderSlug, roleSlug, orgScope, oracle, nowMs);
+      if (matched !== null) {
+        // Suppress the absent holder; add their substitute.
+        effectivePool.delete(holderSlug);
+        effectivePool.add(matched.substituteEmployeeId);
+        // Record the first substitution for the "substitution" kind result.
+        if (firstSubstitution === null) {
+          firstSubstitution = {
+            absentSlug: holderSlug,
+            substituteSlug: matched.substituteEmployeeId,
+          };
+        }
+      }
     }
+
+    // If any substitution was applied AND there is exactly one absent→substitute
+    // mapping (common single-holder case), return kind: "substitution".
+    // For multi-holder pools with partial substitutions, return kind: "pool"
+    // with the effective (substituted) candidate set.
+    if (firstSubstitution !== null) {
+      const effectiveCandidates = [...effectivePool];
+      if (effectiveCandidates.length === 1 && firstSubstitution.substituteSlug === effectiveCandidates[0]) {
+        // Single substitution: canonical "substitution" result.
+        return {
+          kind: "substitution",
+          roleSlug,
+          absentSlug: firstSubstitution.absentSlug,
+          substituteSlug: firstSubstitution.substituteSlug,
+        };
+      }
+      if (effectiveCandidates.length > 0) {
+        // Mixed pool: some holders present, some substituted. Return as pool.
+        return { kind: "pool", roleSlug, candidates: effectiveCandidates };
+      }
+      // All holders absent with no substitutes → fall through to fallback (step 4).
+    } else if (holders.length > 0) {
+      // No substitution rules active → return pool unchanged.
+      return { kind: "pool", roleSlug, candidates: holders };
+    }
+  } else if (holders.length > 0) {
+    // No substitution port injected — pool path (substitution step skipped).
+    return { kind: "pool", roleSlug, candidates: holders };
   }
 
-  // --- Step 4: Fallback → owner (role empty, no substitution) ---------------
-  // The fallback executor is configurable per tenant/process (F6). Default = owner.
-  // Mark as `fallbackReason: "role_unfilled"` (F7) so the UI/notification can
-  // display "роль не заполнена, поэтому вам".
+  // --- Step 4: Fallback → owner (effective pool empty, role unfilled) -------
+  // "role_unfilled" covers both:
+  //   (a) role has no holders (never filled), and
+  //   (b) all holders are absent with no active substitutes (all suppressed).
+  // In both cases route to owner (F6) and mark F7 so UI says "роль не заполнена".
   if (deps.fallback) {
     const fallbackSlug = await deps.fallback.resolveFallbackSlug(tenantId, opts.procKey);
     if (fallbackSlug !== null) {
