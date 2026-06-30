@@ -1,8 +1,8 @@
 /**
- * src/keycloak/admin-port.ts — T-0042 (E5.2) + T-0342 (E14): Live Keycloak Admin REST adapter.
+ * src/keycloak/admin-port.ts — T-0042 (E5.2) + T-0342 (E14) + T-0470: Live Keycloak Admin REST adapter.
  *
  * Implements KeycloakAdminPort against the Keycloak Admin REST API:
- *   - Obtains an admin token via client_credentials (realm admin client).
+ *   - Obtains an admin token via client_credentials using choros-registrar (T-0470).
  *   - POST /admin/realms/<realm>/clients — creates the confidential OIDC client
  *     with serviceAccountsEnabled:true, directAccessGrantsEnabled:false.
  *   - Sets actor_type=agent attribute on the auto-created service-account user.
@@ -12,16 +12,21 @@
  *   - createHumanUser: POST /admin/realms/<realm>/users with actor_type=["human"] + password (FF-3)
  *   - deleteUser: DELETE /admin/realms/<realm>/users/<id> — best-effort compensation (FF-2)
  *
- * Admin credentials are read from environment variables (NF-6):
- *   KEYCLOAK_BASE_URL     — e.g. http://localhost:8080
- *   KEYCLOAK_REALM        — e.g. choros
- *   KEYCLOAK_ADMIN_CLIENT — e.g. admin-cli
- *   KEYCLOAK_ADMIN        — admin client_id (or username for direct grant)
- *   KEYCLOAK_ADMIN_PASSWORD — admin client_secret (or password)
+ * T-0470 (admin-port fix — Option A, least-change):
+ *   Admin operations (createServiceAccountClient / deleteClient) now use the SAME
+ *   choros-registrar confidential client that handles human-user creation. The
+ *   realm-choros.json fixture grants choros-registrar's service-account the
+ *   manage-clients role (in addition to existing manage-users/view-users) so one
+ *   client_credentials flow covers both operations. Previously resolveConfig()
+ *   defaulted to "admin-cli" (a public client) which KC rejects with
+ *   "unauthorized_client" on service-account token requests.
  *
- * Registrar credentials (T-0342 — human user creation via choros-registrar service-account):
- *   KC_REGISTRAR_CLIENT_ID     — e.g. choros-registrar
- *   KC_REGISTRAR_CLIENT_SECRET — registrar client_secret (DEV fixture only, RL-1)
+ * Credentials read from environment variables (NF-6):
+ *   KEYCLOAK_BASE_URL          — e.g. http://localhost:8080
+ *   KEYCLOAK_REALM             — e.g. choros
+ *   KC_REGISTRAR_CLIENT_ID     — confidential client used for ALL admin ops (default: choros-registrar)
+ *   KC_REGISTRAR_CLIENT_SECRET — its client_secret (DEV fixture only, RL-1)
+ *   KEYCLOAK_DEV_CLIENT_SECRET — optional dev secret stamped on newly created agent clients
  *
  * No production secrets are committed here (NF-6 / RL-1).
  *
@@ -73,17 +78,26 @@ export interface KeycloakUserPort {
 export interface KcAdminConfig {
   baseUrl: string;        // e.g. "http://localhost:8080"
   realm: string;          // e.g. "choros"
-  adminClient: string;    // client_id for admin token request (e.g. "admin-cli")
-  adminSecret: string;    // client_secret (or password for password grant)
+  adminClient: string;    // client_id for admin token request — MUST be a confidential client
+                          // with serviceAccountsEnabled + manage-clients role (T-0470)
+  adminSecret: string;    // client_secret for the confidential client
   devSecret?: string;     // optional dev client secret to set on created clients
 }
 
+/**
+ * resolveConfig — T-0470 fix: reads choros-registrar credentials (confidential,
+ * serviceAccountsEnabled, manage-clients role) instead of the former admin-cli
+ * default which is a public client and cannot obtain a service-account token.
+ *
+ * Env vars: KC_REGISTRAR_CLIENT_ID / KC_REGISTRAR_CLIENT_SECRET (both already
+ * injected into the app container by docker-compose via app-env).
+ */
 function resolveConfig(): KcAdminConfig {
   return {
     baseUrl: process.env["KEYCLOAK_BASE_URL"] ?? "http://localhost:8080",
     realm: process.env["KEYCLOAK_REALM"] ?? "choros",
-    adminClient: process.env["KEYCLOAK_ADMIN"] ?? "admin-cli",
-    adminSecret: process.env["KEYCLOAK_ADMIN_PASSWORD"] ?? "admin",
+    adminClient: process.env["KC_REGISTRAR_CLIENT_ID"] ?? "choros-registrar",
+    adminSecret: process.env["KC_REGISTRAR_CLIENT_SECRET"] ?? "",
     devSecret: process.env["KEYCLOAK_DEV_CLIENT_SECRET"],
   };
 }
