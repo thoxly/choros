@@ -1067,8 +1067,11 @@ void isEffective;
 //
 // Unlike the ADMIN-path POST /api/rights/intents/substitute (which lets an admin
 // declare absence FOR another employee), this endpoint lets the actor declare
-// THEIR OWN absence and nominate a substitute. No admin gate — an employee is
-// the sole authority over their own absence window.
+// THEIR OWN absence and nominate a substitute. No admin gate on the absence WINDOW
+// itself — an employee is the sole authority over when they are away. BUT a
+// role-holding gate IS enforced (see below): an actor can only declare absence for
+// a role they themselves currently hold, so self-absence cannot be used to loan
+// authority for a role the actor does not own.
 //
 // Body:
 //   substitute_employee_id: UUID  — the employee who will cover the absent actor
@@ -1170,9 +1173,43 @@ function registerSelfAbsence(
     }
 
     // No admin-gate check for the absence WINDOW itself — an employee can declare
-    // their own absence freely. The Tier-2 grant mint (if needed) is still subject
-    // to eligibleForTier2 (subset-gate, I-2).
+    // their own absence freely. BUT the actor must HOLD the role (role-holding gate
+    // inside the tx below, fail-closed). The Tier-2 grant mint (if needed) is still
+    // subject to eligibleForTier2 (subset-gate, I-2).
     const result = await withTenantTx(pool, tenantId, async (client) => {
+      // ---------------------------------------------------------------------
+      // ROLE-HOLDING GATE (T-0429 CRITICAL security fix).
+      //
+      // You can only declare absence for a role you yourself hold. role_id comes
+      // from the request body and is NOT otherwise tied to the actor: without this
+      // check, any employee could declare self-absence on a role they do not own
+      // (e.g. a financial/approval role), nominate an accomplice as substitute, and
+      // — on the Tier-2 path — have that role's confirmed grants minted to the
+      // accomplice. The downstream narrowing/owner-block do NOT catch this (they
+      // compare against the ROLE's grants, not the ACTOR's assignments).
+      //
+      // Fail-closed: the absent actor MUST hold a confirmed, in-window
+      // role_assignment for role_id. (orgScope-level narrowing of the assignment
+      // is out of scope for the assignment table, which is org-wide per role; the
+      // minted grants are still org-scope-narrowed + subset-gated below.)
+      // ---------------------------------------------------------------------
+      const { rows: actorHoldsRows } = await client.query<{ employee_id: string }>(
+        `SELECT employee_id FROM choros.role_assignment
+          WHERE tenant_id = $1 AND role_id = $2
+            AND employee_id = $3
+            AND confirmed_by IS NOT NULL
+            AND (valid_until IS NULL OR valid_until > $4)
+          LIMIT 1`,
+        [tenantId, roleId, absentEmployeeId, nowMs],
+      );
+      if (actorHoldsRows.length === 0) {
+        throw new HttpError(
+          403,
+          "ADMIN_GATE_REJECTED",
+          "you can only declare absence for a role you currently hold",
+        );
+      }
+
       // Determine tier: Tier-1 if another pool holder holds the role in scope.
       const { rows: poolRows } = await client.query<{ employee_id: string }>(
         `SELECT employee_id FROM choros.role_assignment
