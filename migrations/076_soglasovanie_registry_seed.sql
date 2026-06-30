@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 076 · «Согласование» (approvals) registry seed (T-0335 [E15-S1b])
 --
 -- SCOPE — DATA ONLY (registry-content plane):
