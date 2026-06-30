@@ -23,6 +23,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
+import { formatDate, formatError, formatJsonReadable } from '../lib/format.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
 import {
   groupLinksByLabel,
@@ -33,12 +34,6 @@ import {
   buildLinkSectionTitle,
 } from './record-links.js';
 
-function fmtTs(ms) {
-  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '—';
-  const d = new Date(ms);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 const fieldRowStyle = {
   display: 'flex',
@@ -421,7 +416,7 @@ function RecordDetailScreen() {
         return;
       }
       if (!res.ok) {
-        let detail = `HTTP ${res.status}`;
+        let detail = formatError(res.status);
         try { const j = await res.json(); detail = j?.message || detail; } catch { /* ignore */ }
         setError(detail);
         return;
@@ -516,7 +511,7 @@ function RecordDetailScreen() {
                             : typeof val === 'boolean'
                               ? (val ? 'Да' : 'Нет')
                               : typeof val === 'object'
-                                ? JSON.stringify(val)
+                                ? formatJsonReadable(val)
                                 : String(val)}
                         </span>
                       </div>
@@ -597,13 +592,13 @@ function RecordDetailScreen() {
               <div style={fieldRowStyle}>
                 <span style={labelStyle}>Создано</span>
                 <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
-                  {fmtTs(record.created_at)}
+                  {formatDate(record.created_at)}
                 </Mono>
               </div>
               <div style={fieldRowStyle}>
                 <span style={labelStyle}>Обновлено</span>
                 <Mono style={{ ...valueStyle, fontSize: 'var(--chs-text-xs)' }}>
-                  {fmtTs(record.updated_at)}
+                  {formatDate(record.updated_at)}
                 </Mono>
               </div>
               {record.created_by && (

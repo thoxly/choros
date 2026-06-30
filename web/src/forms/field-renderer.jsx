@@ -45,6 +45,7 @@ import React, { useState, useEffect } from 'react';
 // the load-bearing logic is unit-testable without a React runtime (codebase
 // convention — cf. records-form.js). Re-export it for callers/tests.
 import { resolveFieldContract, resolveFieldMode } from './field-contract.js';
+import { formatError } from '../lib/format.js';
 // Auth headers — same helper every screen uses (mode-aware: dev X-Dev-User /
 // keycloak Bearer). RelationPickerField needs it to attach auth to the
 // tenant-scoped GET /api/records?registry_def_id= candidate fetch.
@@ -87,7 +88,7 @@ async function fetchEmployees() {
   // dev-proxy layer. We pass no extra headers here to keep this component
   // self-contained; if auth fails the component shows an honest error.
   const res = await fetch('/api/org');
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error(formatError(res.status));
   const data = await res.json();
   const employees = [];
   const departments = Array.isArray(data.departments) ? data.departments : [];
@@ -257,7 +258,7 @@ export function RelationPickerField({ field, value, onChange, error, idPrefix = 
     )
       .then(async (res) => {
         if (cancelled) return;
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new Error(formatError(res.status));
         const data = await res.json();
         if (!cancelled) setCandidates(Array.isArray(data.records) ? data.records : []);
       })

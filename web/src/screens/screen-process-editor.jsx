@@ -22,6 +22,7 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button, MonoId, StatusChip, KitIcon, Tooltip, LoadingState, ErrorState } from '../components/components.jsx';
+import { formatJsonReadable } from '../lib/format.js';
 import { Icon } from '../app-shell/icon.jsx';
 import BpmnModelerWrapper from '../canvas/bpmn-modeler-wrapper.jsx';
 import BpmnPropertiesPanel from '../canvas/bpmn-properties-panel.jsx';
@@ -175,7 +176,7 @@ function StatusBanner({ message, isError, violations, onDismiss }) {
       </div>
       {violations && violations.length > 0 && (
         <ul className="chs-banner__list">
-          {violations.map((v, i) => <li key={i}>{typeof v === 'string' ? v : JSON.stringify(v)}</li>)}
+          {violations.map((v, i) => <li key={i}>{typeof v === 'string' ? v : formatJsonReadable(v)}</li>)}
         </ul>
       )}
     </div>
