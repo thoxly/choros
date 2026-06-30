@@ -282,6 +282,89 @@ function SubstituteForm({ dir }) {
   );
 }
 
+/* ---- Я в отпуске: самостоятельное объявление отсутствия (T-0429) ---- */
+/**
+ * Self-service absence form: the current user declares THEIR OWN absence
+ * and nominates a substitute. Unlike SubstituteForm (admin path), the
+ * actor IS the absent employee — no "absent" picker needed.
+ *
+ * Calls POST /api/rights/intents/self-absence.
+ * on_behalf_of semantics: when the substitute later acts on a task,
+ *   performed_by = substitute, on_behalf_of = absent actor.
+ *   The resolver emits kind: "substitution" { absentSlug, substituteSlug }
+ *   which maps to these two distinct provenance fields in the audit trail.
+ */
+function SelfAbsenceForm({ dir }) {
+  const [substituteId, setSubstituteId] = useState('');
+  const [roleId, setRoleId] = useState('');
+  const [from, setFrom] = useState('');
+  const [until, setUntil] = useState('');
+  const [orgNodeId, setOrgNodeId] = useState('');
+  const [result, setResult] = useState(null);
+
+  const submit = async () => {
+    setResult('loading');
+    const validFrom = from ? new Date(from).getTime() : undefined;
+    const validUntil = until ? new Date(until).getTime() : null;
+    const r = await postIntent('/api/rights/intents/self-absence', {
+      substitute_employee_id: substituteId,
+      role_id: roleId,
+      ...(validFrom ? { valid_from: validFrom } : {}),
+      valid_until: validUntil,
+      org_scope: { kind: 'node', hierarchy: 'org', nodeId: orgNodeId, nodeLevel: 'department' },
+    });
+    setResult(r.ok ? {
+      ...r,
+      message: `Отсутствие объявлено${r.data?.ttl_grant_id ? ' (с временным грантом для замещающего)' : ''} — маршрутизатор перенаправит ваши задачи замещающему.`,
+    } : r);
+  };
+
+  return (
+    <section className="chs-section2 chs-intent">
+      <SectionHead
+        title="Я в отпуске"
+        aux="Самостоятельное объявление отсутствия · замещающий получит ваши задачи (T-0429)"
+      />
+      <p className="chs-section2__note" style={{ marginBottom: '0.75rem' }}>
+        Назначьте замещающего и укажите период. Задачи по выбранной роли будут автоматически
+        перенаправлены замещающему, пока вы отсутствуете.
+        Замещающий действует <b>от вашего имени</b> (<i>on_behalf_of</i>), а не как самостоятельный
+        исполнитель — аудиторский след сохраняет оба поля: исполнитель и доверитель.
+      </p>
+      <div className="chs-intent__grid">
+        <OrgPicker label="Замещающий (кто будет покрывать вас)" value={substituteId} onChange={setSubstituteId}
+          options={dir.employees} dirError={dir.error} placeholder="— выберите замещающего —"
+          fallbackPlaceholder="UUID замещающего" />
+        <OrgPicker label="Роль (по какой роли вы отсутствуете)" value={roleId} onChange={setRoleId}
+          options={dir.roles} dirError={dir.error} placeholder="— роль отсутствия —"
+          fallbackPlaceholder="UUID роли" />
+        <OrgPicker label="Орг-узел (охват замещения)" value={orgNodeId} onChange={setOrgNodeId}
+          options={dir.departments} dirError={dir.error} placeholder="— отдел (орг-охват) —"
+          fallbackPlaceholder="UUID отдела" />
+        <Field label="С (начало отсутствия, необязательно)" type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
+        <Field label="До (конец отсутствия)" type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} />
+      </div>
+      <p className="chs-section2__note">
+        Если в роли есть другие активные держатели, временный грант не выпускается (Tier-1).
+        Если вы единственный держатель, замещающему выпускается ограниченный временный грант
+        (строго подмножество ваших прав; расширение прав невозможно — Tier-2).
+      </p>
+      <div className="chs-intent__bar">
+        <Button
+          variant="primary"
+          size="sm"
+          loading={result === 'loading'}
+          disabled={result === 'loading' || !substituteId || !roleId || !until || !orgNodeId}
+          onClick={submit}
+        >
+          Объявить отсутствие
+        </Button>
+      </div>
+      <ResultBanner result={result} />
+    </section>
+  );
+}
+
 /* ---- Срочно отозвать: убрать право X сейчас ---- */
 function UrgentRevokeForm() {
   const [grantId, setGrantId] = useState('');
@@ -378,6 +461,7 @@ function IntentsScreen() {
           <HireForm presets={presets} dir={dir} />
           <FireForm dir={dir} />
           <SubstituteForm dir={dir} />
+          <SelfAbsenceForm dir={dir} />
           <UrgentRevokeForm />
         </div>
       </div>
