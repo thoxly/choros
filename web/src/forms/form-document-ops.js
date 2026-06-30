@@ -226,3 +226,44 @@ function segEqual(a, b) {
   if (typeof a === 'number' || typeof b === 'number') return a === b;
   return a.tab === b.tab && a.index === b.index;
 }
+
+// ---------------------------------------------------------------------------
+// T-0544 — builder conveniences (semantic sugar; no new core logic)
+// ---------------------------------------------------------------------------
+
+/**
+ * moveNode — semantic sugar over moveNodeAcross for the builder's cross-container
+ * drag. Takes ABSOLUTE node paths (containerPath + [index]) instead of split
+ * (container, index) pairs, so a drag from one tree position to another is a
+ * single call. Delegates to moveNodeAcross (which owns adjustPathAfterRemoval) —
+ * no duplicated index-shift logic.
+ *
+ * @param {object} doc
+ * @param {Array}  fromPath absolute path to the node being moved (includes its index)
+ * @param {Array}  toPath   target path; last segment = INSERT position
+ * @param {number} [fromTab]
+ * @param {number} [toTab]
+ */
+export function moveNode(doc, fromPath, toPath, fromTab, toTab) {
+  if (!Array.isArray(fromPath) || fromPath.length === 0) return doc;
+  if (!Array.isArray(toPath) || toPath.length === 0) return doc;
+  const fromContainer = fromPath.slice(0, -1);
+  const fromSeg = fromPath[fromPath.length - 1];
+  const toContainer = toPath.slice(0, -1);
+  const toSeg = toPath[toPath.length - 1];
+  const fromIndex = typeof fromSeg === 'number' ? fromSeg : fromSeg.index;
+  const toIndex = typeof toSeg === 'number' ? toSeg : toSeg.index;
+  const ft = fromTab !== undefined ? fromTab : (typeof fromSeg === 'object' ? fromSeg.tab : undefined);
+  const tt = toTab !== undefined ? toTab : (typeof toSeg === 'object' ? toSeg.tab : undefined);
+  return moveNodeAcross(doc, fromContainer, fromIndex, toContainer, toIndex, ft, tt);
+}
+
+/**
+ * insertAt — insertNode with a REQUIRED index (drag into a specific slot). Out-of-
+ * bounds index clamps to [0, len] (insertNode already clamps; this alias makes the
+ * "index is mandatory" contract explicit for drop targets).
+ */
+export function insertAt(doc, containerPath, node, index, tabIndex) {
+  const at = typeof index === 'number' ? index : 0;
+  return insertNode(doc, containerPath, node, at, tabIndex);
+}

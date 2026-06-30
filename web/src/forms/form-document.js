@@ -51,6 +51,7 @@
  */
 
 import { resolveFieldContract } from './field-contract.js';
+import { paletteFromRegistry, WIDGET_COMPAT_TABLE } from './widget-registry.js';
 
 // ---------------------------------------------------------------------------
 // Node type vocabulary (form-document-format.spec §3, floor-boundary §3.3)
@@ -110,49 +111,14 @@ export function isDataNodeType(type) {
  *
  * The `custom` entry is class-b: it is in the palette (so the human/bot can reach
  * the escape) but it is flagged 'code' and renders in the sandbox-iframe.
+ *
+ * T-0544: PALETTE is now DERIVED from the ONE widget registry (widget-registry.js)
+ * — not a parallel literal (FF-REG-1: one source of truth). The export shape is
+ * unchanged (type/floorClass/data/contract/paletteGroup/label/summary), so every
+ * importer (paletteByGroup / isPaletteType / isClassBType / validateDocument)
+ * keeps working byte-identically. Adding a block is now ONE registry entry.
  */
-export const PALETTE = Object.freeze({
-  section: {
-    type: 'section', floorClass: 'a', data: false, contract: null,
-    paletteGroup: 'layout', label: 'Секция', summary: 'Озаглавленная группа полей.',
-  },
-  columns: {
-    type: 'columns', floorClass: 'a', data: false, contract: null,
-    paletteGroup: 'layout', label: 'Колонки', summary: 'Несколько колонок в ряд (2–4).',
-  },
-  tabs: {
-    type: 'tabs', floorClass: 'a', data: false, contract: null,
-    paletteGroup: 'layout', label: 'Вкладки', summary: 'Разбить форму на вкладки.',
-  },
-  divider: {
-    type: 'divider', floorClass: 'a', data: false, contract: null,
-    paletteGroup: 'layout', label: 'Разделитель', summary: 'Горизонтальная линия.',
-  },
-  text: {
-    type: 'text', floorClass: 'a', data: false, contract: null,
-    paletteGroup: 'layout', label: 'Текст', summary: 'Статичная подсказка/заголовок.',
-  },
-  field: {
-    type: 'field', floorClass: 'a', data: true, contract: 'scalar',
-    paletteGroup: 'data', label: 'Поле', summary: 'Скалярное поле (текст, число, дата, список).',
-  },
-  table: {
-    type: 'table', floorClass: 'a', data: true, contract: 'collection',
-    paletteGroup: 'data', label: 'Таблица', summary: 'Позиции (один-ко-многим, line-items).',
-  },
-  readout: {
-    type: 'readout', floorClass: 'a', data: true, contract: 'rollup',
-    paletteGroup: 'data', label: 'Итог', summary: 'Только чтение: сумма/количество (rollup).',
-  },
-  relation: {
-    type: 'relation', floorClass: 'a', data: true, contract: 'relation',
-    paletteGroup: 'data', label: 'Связь', summary: 'Ссылка на запись другого приложения.',
-  },
-  custom: {
-    type: 'custom', floorClass: 'b', data: false, contract: null,
-    paletteGroup: 'code', label: 'Код-виджет', summary: 'Кастомный виджет в песочнице (редко, флаг).',
-  },
-});
+export const PALETTE = Object.freeze(paletteFromRegistry());
 
 /** Palette entries grouped for the drag-n-drop palette UI. */
 export function paletteByGroup() {
@@ -186,21 +152,11 @@ export function isClassBType(type) {
  * Mirrors §6 of form-document-format.spec.md. The field types are the codes
  * parseRecordSchema (apps-schema.js) emits: string / number / integer / boolean /
  * select / date / relation / collection / computed.
+ *
+ * T-0544: DERIVED from the ONE widget registry (WIDGET_COMPAT_TABLE) so there is
+ * a single compatibility source. Export shape unchanged (frozen type→widgets map).
  */
-export const WIDGET_COMPAT = Object.freeze({
-  string: ['text', 'textarea', 'select'],
-  text: ['text', 'textarea', 'select'],
-  textarea: ['textarea', 'text'],
-  number: ['number', 'money'],
-  integer: ['number', 'money'],
-  boolean: ['switch', 'checkbox'],
-  select: ['select', 'radio'],
-  enum: ['select', 'radio'],
-  date: ['date', 'date-range'],
-  relation: ['record-picker'],
-  collection: ['table'],
-  computed: ['readout'],
-});
+export const WIDGET_COMPAT = Object.freeze(WIDGET_COMPAT_TABLE);
 
 /** Default widget for a field type (first compatible). */
 export function defaultWidgetForType(type) {
