@@ -20,7 +20,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, LoadingState, ErrorState, EmptyState } from '../components/components.jsx';
+import { Button, LoadingState, ErrorState, EmptyState, Card } from '../components/components.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
 import { fmtDuration } from './screen-process-analytics.jsx';
 
@@ -286,76 +286,69 @@ function ProcessCard() {
   // Top-3 steps by avg_duration_ms for the mini-list
   const topRows = rows.slice(0, 3);
 
+  // T-0547: Card kit-примитив (role=region + aria-labelledby автоматически)
   return (
-    <div style={cardStyle} role="region" aria-label="Пульс процессов">
-      <div style={cardHeadStyle}>
-        <h2 style={cardTitleStyle}>Процессы</h2>
-      </div>
-      <div style={cardBodyStyle}>
-        {loading && <LoadingState label="Загрузка аналитики…" />}
-        {data === false && (
-          <ErrorState
-            title="Не удалось загрузить аналитику"
-            message={errMsg ?? ''}
-            onRetry={reload}
-          />
-        )}
-        {isEmpty && (
-          <EmptyState
-            title="Пока нет данных"
-            description="Запустите процессы — аналитика появится после первых шагов."
-          />
-        )}
-        {data && !isEmpty && (
-          <div style={metricRowStyle}>
-            <div style={metricItemStyle}>
-              <span style={metricLabelStyle}>Узкое место</span>
-              {bottleneck ? (
-                <>
-                  <span style={accentValueStyle}>{bottleneck}</span>
-                  <span style={metricHintStyle}>самый долгий шаг</span>
-                </>
-              ) : (
-                <span style={{ ...metricValueStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-md)' }}>—</span>
-              )}
-            </div>
-
-            <div style={metricItemStyle}>
-              <span style={metricLabelStyle}>Всего шагов</span>
-              <span style={metricValueStyle}>{rows.length}</span>
-              <span style={metricHintStyle}>уникальных активностей</span>
-            </div>
-
-            {topRows.length > 0 && (
-              <>
-                <div style={separatorStyle} />
-                <div style={metricItemStyle}>
-                  <span style={metricLabelStyle}>Топ шаги (ср. время)</span>
-                  <div style={miniListStyle}>
-                    {topRows.map((r) => (
-                      <div key={r.activity} style={miniRowStyle}>
-                        <span style={miniLabelStyle} title={r.activity}>{r.activity}</span>
-                        <span style={miniValueStyle}>{fmtDuration(r.avg_duration_ms)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-      <div style={cardFootStyle}>
-        <Button
-          variant="ghost"
-          size="sm"
-          type="button"
-          onClick={() => navigate('/process-analytics')}
-        >
+    <Card
+      title="Процессы"
+      footer={
+        <Button variant="ghost" size="sm" type="button" onClick={() => navigate('/process-analytics')}>
           Подробнее →
         </Button>
-      </div>
-    </div>
+      }
+    >
+      {loading && <LoadingState label="Загрузка аналитики…" />}
+      {data === false && (
+        <ErrorState
+          title="Не удалось загрузить аналитику"
+          message={errMsg ?? ''}
+          onRetry={reload}
+        />
+      )}
+      {isEmpty && (
+        <EmptyState
+          title="Пока нет данных"
+          description="Запустите процессы — аналитика появится после первых шагов."
+        />
+      )}
+      {data && !isEmpty && (
+        <div style={metricRowStyle}>
+          <div style={metricItemStyle}>
+            <span style={metricLabelStyle}>Узкое место</span>
+            {bottleneck ? (
+              <>
+                <span style={accentValueStyle}>{bottleneck}</span>
+                <span style={metricHintStyle}>самый долгий шаг</span>
+              </>
+            ) : (
+              <span style={{ ...metricValueStyle, color: 'var(--chs-color-text-muted)', fontSize: 'var(--chs-text-md)' }}>—</span>
+            )}
+          </div>
+
+          <div style={metricItemStyle}>
+            <span style={metricLabelStyle}>Всего шагов</span>
+            <span style={metricValueStyle}>{rows.length}</span>
+            <span style={metricHintStyle}>уникальных активностей</span>
+          </div>
+
+          {topRows.length > 0 && (
+            <>
+              <div style={separatorStyle} />
+              <div style={metricItemStyle}>
+                <span style={metricLabelStyle}>Топ шаги (ср. время)</span>
+                <div style={miniListStyle}>
+                  {topRows.map((r) => (
+                    <div key={r.activity} style={miniRowStyle}>
+                      <span style={miniLabelStyle} title={r.activity}>{r.activity}</span>
+                      <span style={miniValueStyle}>{fmtDuration(r.avg_duration_ms)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -389,83 +382,76 @@ function SpendCard() {
     .sort((a, b) => Number(b.total_amount ?? 0) - Number(a.total_amount ?? 0))
     .slice(0, 2);
 
+  // T-0547: Card kit-примитив
   return (
-    <div style={cardStyle} role="region" aria-label="Расход LLM">
-      <div style={cardHeadStyle}>
-        <h2 style={cardTitleStyle}>Расход LLM</h2>
-      </div>
-      <div style={cardBodyStyle}>
-        {loading && <LoadingState label="Загрузка расхода…" />}
-        {data === false && (
-          <ErrorState
-            title="Не удалось загрузить расход"
-            message={errMsg ?? ''}
-            onRetry={reload}
-          />
-        )}
-        {isEmpty && (
-          <EmptyState
-            title="Расходов пока нет"
-            description="LLM-вызовы ещё не совершались или не настроены цены на соединениях."
-          />
-        )}
-        {data && !isEmpty && (
-          <div style={metricRowStyle}>
-            {/* Three time windows */}
-            <div style={{ display: 'flex', gap: 'var(--chs-space-6)', flexWrap: 'wrap' }}>
-              {[
-                { key: 'day', w: dayW },
-                { key: 'month', w: monthW },
-                { key: 'total', w: totalW },
-              ].map(({ key, w }) => (
-                <div key={key} style={metricItemStyle}>
-                  <span style={metricLabelStyle}>{WINDOW_LABELS[key]}</span>
-                  <span style={metricValueStyle}>
-                    {w ? fmtAmount(w.total_amount, w.currency) : '—'}
-                  </span>
-                  {w && (
-                    <span style={metricHintStyle}>
-                      {Number(w.total_tokens ?? 0).toLocaleString('ru-RU')} токенов
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {topConns.length > 0 && (
-              <>
-                <div style={separatorStyle} />
-                <div style={metricItemStyle}>
-                  <span style={metricLabelStyle}>По соединениям</span>
-                  <div style={miniListStyle}>
-                    {topConns.map((c, i) => (
-                      <div key={c.llm_connection_id ?? c.connection_name ?? `unknown-${i}`} style={miniRowStyle}>
-                        <span style={miniLabelStyle} title={c.connection_name ?? 'Без имени'}>
-                          {c.connection_name ?? 'Без имени'}
-                        </span>
-                        <span style={miniValueStyle}>
-                          {fmtAmount(c.total_amount, c.currency)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-      <div style={cardFootStyle}>
-        <Button
-          variant="ghost"
-          size="sm"
-          type="button"
-          onClick={() => navigate('/spend')}
-        >
+    <Card
+      title="Расход LLM"
+      footer={
+        <Button variant="ghost" size="sm" type="button" onClick={() => navigate('/spend')}>
           Подробнее →
         </Button>
-      </div>
-    </div>
+      }
+    >
+      {loading && <LoadingState label="Загрузка расхода…" />}
+      {data === false && (
+        <ErrorState
+          title="Не удалось загрузить расход"
+          message={errMsg ?? ''}
+          onRetry={reload}
+        />
+      )}
+      {isEmpty && (
+        <EmptyState
+          title="Расходов пока нет"
+          description="LLM-вызовы ещё не совершались или не настроены цены на соединениях."
+        />
+      )}
+      {data && !isEmpty && (
+        <div style={metricRowStyle}>
+          {/* Three time windows */}
+          <div style={{ display: 'flex', gap: 'var(--chs-space-6)', flexWrap: 'wrap' }}>
+            {[
+              { key: 'day', w: dayW },
+              { key: 'month', w: monthW },
+              { key: 'total', w: totalW },
+            ].map(({ key, w }) => (
+              <div key={key} style={metricItemStyle}>
+                <span style={metricLabelStyle}>{WINDOW_LABELS[key]}</span>
+                <span style={metricValueStyle}>
+                  {w ? fmtAmount(w.total_amount, w.currency) : '—'}
+                </span>
+                {w && (
+                  <span style={metricHintStyle}>
+                    {Number(w.total_tokens ?? 0).toLocaleString('ru-RU')} токенов
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {topConns.length > 0 && (
+            <>
+              <div style={separatorStyle} />
+              <div style={metricItemStyle}>
+                <span style={metricLabelStyle}>По соединениям</span>
+                <div style={miniListStyle}>
+                  {topConns.map((c, i) => (
+                    <div key={c.llm_connection_id ?? c.connection_name ?? `unknown-${i}`} style={miniRowStyle}>
+                      <span style={miniLabelStyle} title={c.connection_name ?? 'Без имени'}>
+                        {c.connection_name ?? 'Без имени'}
+                      </span>
+                      <span style={miniValueStyle}>
+                        {fmtAmount(c.total_amount, c.currency)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -485,68 +471,61 @@ function ReportsCard() {
   const apps = data && Array.isArray(data.applications) ? data.applications : [];
   const isEmpty = data && data !== false && apps.length === 0;
 
+  // T-0547: Card kit-примитив
   return (
-    <div style={cardStyle} role="region" aria-label="Отчёты">
-      <div style={cardHeadStyle}>
-        <h2 style={cardTitleStyle}>Отчёты</h2>
-      </div>
-      <div style={cardBodyStyle}>
-        {loading && <LoadingState label="Загрузка данных…" />}
-        {data === false && (
-          <ErrorState
-            title="Не удалось загрузить список приложений"
-            message={errMsg ?? ''}
-            onRetry={reload}
-          />
-        )}
-        {isEmpty && (
-          <EmptyState
-            title="Приложения не найдены"
-            description="Создайте приложение в разделе Конструктор, чтобы строить отчёты."
-          />
-        )}
-        {data && !isEmpty && (
-          <div style={metricRowStyle}>
-            <div style={metricItemStyle}>
-              <span style={metricLabelStyle}>Приложений</span>
-              <span style={metricValueStyle}>{apps.length}</span>
-              <span style={metricHintStyle}>доступных для построения отчётов</span>
-            </div>
-
-            {apps.length > 0 && (
-              <>
-                <div style={separatorStyle} />
-                <div style={metricItemStyle}>
-                  <span style={metricLabelStyle}>Последние</span>
-                  <div style={miniListStyle}>
-                    {apps.slice(0, 3).map((a) => (
-                      <div key={a.id} style={miniRowStyle}>
-                        <span style={miniLabelStyle} title={a.display_name}>
-                          {a.display_name}
-                        </span>
-                      </div>
-                    ))}
-                    {apps.length > 3 && (
-                      <span style={metricHintStyle}>и ещё {apps.length - 3}…</span>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-      <div style={cardFootStyle}>
-        <Button
-          variant="ghost"
-          size="sm"
-          type="button"
-          onClick={() => navigate('/reports')}
-        >
+    <Card
+      title="Отчёты"
+      footer={
+        <Button variant="ghost" size="sm" type="button" onClick={() => navigate('/reports')}>
           Перейти к отчётам →
         </Button>
-      </div>
-    </div>
+      }
+    >
+      {loading && <LoadingState label="Загрузка данных…" />}
+      {data === false && (
+        <ErrorState
+          title="Не удалось загрузить список приложений"
+          message={errMsg ?? ''}
+          onRetry={reload}
+        />
+      )}
+      {isEmpty && (
+        <EmptyState
+          title="Приложения не найдены"
+          description="Создайте приложение в разделе Конструктор, чтобы строить отчёты."
+        />
+      )}
+      {data && !isEmpty && (
+        <div style={metricRowStyle}>
+          <div style={metricItemStyle}>
+            <span style={metricLabelStyle}>Приложений</span>
+            <span style={metricValueStyle}>{apps.length}</span>
+            <span style={metricHintStyle}>доступных для построения отчётов</span>
+          </div>
+
+          {apps.length > 0 && (
+            <>
+              <div style={separatorStyle} />
+              <div style={metricItemStyle}>
+                <span style={metricLabelStyle}>Последние</span>
+                <div style={miniListStyle}>
+                  {apps.slice(0, 3).map((a) => (
+                    <div key={a.id} style={miniRowStyle}>
+                      <span style={miniLabelStyle} title={a.display_name}>
+                        {a.display_name}
+                      </span>
+                    </div>
+                  ))}
+                  {apps.length > 3 && (
+                    <span style={metricHintStyle}>и ещё {apps.length - 3}…</span>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 

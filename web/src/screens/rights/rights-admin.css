@@ -449,16 +449,13 @@
 .chs-conflict__rule:hover { text-decoration: underline; }
 .chs-conflict__act { display: flex; align-items: center; justify-content: flex-end; gap: var(--chs-space-4); margin-top: var(--chs-space-6); }
 
-/* реестр SoD */
+/* реестр SoD — T-0547: семантическая <table> (DataTable) */
 .chs-sodtable { border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-3); overflow: hidden; }
-.chs-sodtable__colhead, .chs-sodrow { display: grid; grid-template-columns: 132px 1.4fr 1.6fr 96px; gap: var(--chs-space-6); align-items: center; padding: 0 var(--chs-space-6); }
-.chs-sodtable__colhead { height: 30px; background: var(--chs-color-surface-2); border-bottom: 1px solid var(--chs-color-border); }
-.chs-sodtable__colhead span { font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; color: var(--chs-color-text-faint); }
-.chs-sodrow { min-height: 44px; padding-top: var(--chs-space-4); padding-bottom: var(--chs-space-4); border-bottom: 1px solid var(--chs-color-border-faint); }
-.chs-sodrow:last-child { border-bottom: none; }
-.chs-sodrow--live { background: var(--chs-color-danger-soft); }
-.chs-sodrow__id { display: flex; align-items: center; gap: var(--chs-space-3); }
-.chs-sodrow__livetag { font-family: var(--chs-font-mono); font-size: var(--chs-text-2xs); color: var(--chs-color-danger); letter-spacing: var(--chs-tracking-wide); }
+/* Колонки: ID 132px, Пара ролей auto, Описание auto, Тип 96px, Действия 80px */
+.chs-sodtable th:nth-child(1), .chs-sodtable td:nth-child(1) { width: 132px; }
+.chs-sodtable th:nth-child(4), .chs-sodtable td:nth-child(4) { width: 96px; }
+.chs-sodtable th:nth-child(5), .chs-sodtable td:nth-child(5) { width: 80px; }
+.chs-sodrow--live td { background: var(--chs-color-danger-soft); }
 .chs-sodrow__pair { display: flex; align-items: center; gap: var(--chs-space-4); font-size: var(--chs-text-sm); color: var(--chs-color-text); flex-wrap: wrap; }
 .chs-sodrow__vs { font-family: var(--chs-font-mono); color: var(--chs-color-danger); }
 .chs-sodrow__why { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); }
@@ -480,12 +477,21 @@
 .chs-trail__appenddot { width: 6px; height: 6px; border-radius: var(--chs-radius-full); background: var(--chs-color-success); flex: none; }
 
 .chs-trail__scroll { flex: 1; min-height: 0; overflow: auto; }
+/* T-0547: таблица-журнал — семантическая <table> (DataTable) с sticky-шапкой.
+   min-width сохранён для горизонтального скролла; колонки через фиксированные ширины td/th. */
 .chs-trailtable { min-width: 1180px; }
-.chs-trailrow { display: grid; grid-template-columns: 184px 108px 116px 150px 150px 1.4fr 1fr 1.3fr; gap: var(--chs-space-6); align-items: center; padding: 0 var(--chs-space-7); min-height: var(--chs-row-h); border-bottom: 1px solid var(--chs-color-border-faint); }
-.chs-trailrow--head { position: sticky; top: 0; z-index: 2; height: 30px; min-height: 30px; background: var(--chs-color-surface-2); border-bottom: 1px solid var(--chs-color-border); }
-.chs-trailrow--head span { font-size: var(--chs-text-2xs); font-weight: var(--chs-weight-semibold); letter-spacing: var(--chs-tracking-wide); text-transform: uppercase; color: var(--chs-color-text-faint); white-space: nowrap; }
-.chs-trailrow:not(.chs-trailrow--head):hover { background: var(--chs-color-hover); }
-.chs-trailrow--crit { box-shadow: inset 2px 0 0 var(--chs-color-danger); }
+/* Колонки таблицы: фиксированные ширины через nth-child (8 колонок). */
+.chs-trailtable th:nth-child(1), .chs-trailtable td:nth-child(1) { width: 184px; }
+.chs-trailtable th:nth-child(2), .chs-trailtable td:nth-child(2) { width: 108px; }
+.chs-trailtable th:nth-child(3), .chs-trailtable td:nth-child(3) { width: 116px; }
+.chs-trailtable th:nth-child(4), .chs-trailtable td:nth-child(4) { width: 150px; }
+.chs-trailtable th:nth-child(5), .chs-trailtable td:nth-child(5) { width: 150px; }
+/* col 6 / 7 / 8 = auto (flex 1.4/1/1.3 → просто auto) */
+/* Sticky head row */
+.chs-trailrow--head th { position: sticky; top: 0; z-index: 2; }
+/* Критичная строка: левый отступ-акцент */
+.chs-trailrow--crit td:first-child { box-shadow: inset 3px 0 0 var(--chs-color-danger); }
+/* Клетки таблицы */
 .chs-trailcell { min-width: 0; display: flex; align-items: center; gap: var(--chs-space-3); }
 .chs-trailcell--ts .chs-mono { font-size: var(--chs-text-xs); color: var(--chs-color-text-muted); white-space: nowrap; }
 .chs-trailcell--scope { font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); }

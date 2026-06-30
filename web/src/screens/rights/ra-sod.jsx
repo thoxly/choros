@@ -27,6 +27,7 @@ import {
   LoadingState,
   ErrorState,
   ConfirmDialog,
+  DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
 } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { useToastContext } from '../../app-shell/toast-context.jsx';
@@ -106,31 +107,34 @@ function SodRuleRow({ rule, onDelete }) {
     }
   }, [rule.id, onDelete, push]);
 
+  // T-0547: семантическая строка таблицы (DataTableRow → <tr>)
   return (
     <>
-      <div className="chs-sodrow">
-        <div className="chs-sodrow__id">
+      <DataTableRow className={rule._live ? "chs-sodrow--live" : ""}>
+        <DataTableCell>
           <span className="chs-mono" style={{ fontSize: 'var(--chs-text-2xs)', color: 'var(--chs-color-text-faint)' }}>
             {rule.id.slice(0, 8)}&hellip;
           </span>
-        </div>
-        <div className="chs-sodrow__pair">
-          {rule.roleA && <span>{rule.roleA.name ?? rule.roleA.id}</span>}
-          {rule.roleA && rule.roleB && <span className="chs-sodrow__vs">&times;</span>}
-          {rule.roleB && <span>{rule.roleB.name ?? rule.roleB.id}</span>}
-          {!rule.roleA && !rule.roleB && (
-            <span style={{ color: 'var(--chs-color-text-faint)' }}>Все роли</span>
-          )}
-        </div>
-        <div className="chs-sodrow__why">
+        </DataTableCell>
+        <DataTableCell>
+          <div className="chs-sodrow__pair">
+            {rule.roleA && <span>{rule.roleA.name ?? rule.roleA.id}</span>}
+            {rule.roleA && rule.roleB && <span className="chs-sodrow__vs">&times;</span>}
+            {rule.roleB && <span>{rule.roleB.name ?? rule.roleB.id}</span>}
+            {!rule.roleA && !rule.roleB && (
+              <span style={{ color: 'var(--chs-color-text-faint)' }}>Все роли</span>
+            )}
+          </div>
+        </DataTableCell>
+        <DataTableCell className="chs-sodrow__why">
           {rule.kind === 'dynamic' && rule.selfRecord
             ? 'Запрет самоподтверждения записи'
             : rule.kind === 'dynamic'
               ? 'Разделение этапов процесса'
               : 'Несовместимые роли'}
-        </div>
-        <KindChip kind={rule.kind} />
-        <div className="chs-sodrow__actions">
+        </DataTableCell>
+        <DataTableCell><KindChip kind={rule.kind} /></DataTableCell>
+        <DataTableCell>
           <button
             type="button"
             className="chs-btn chs-btn--ghost chs-btn--sm chs-btn--danger"
@@ -140,8 +144,8 @@ function SodRuleRow({ rule, onDelete }) {
           >
             {deleting ? '…' : 'Удалить'}
           </button>
-        </div>
-      </div>
+        </DataTableCell>
+      </DataTableRow>
       <ConfirmDialog
         open={confirmOpen}
         tone="danger"
@@ -168,19 +172,24 @@ function SodRulesTable({ rules, onDelete }) {
       />
     );
   }
+  // T-0547: семантическая DataTable вместо div-грида
   return (
-    <div className="chs-sodtable">
-      <div className="chs-sodtable__colhead">
-        <span>ID</span>
-        <span>Пара ролей</span>
-        <span>Описание</span>
-        <span>Тип</span>
-        <span>Действия</span>
-      </div>
-      {rules.map((rule) => (
-        <SodRuleRow key={rule.id} rule={rule} onDelete={onDelete} />
-      ))}
-    </div>
+    <DataTable label="Реестр правил разделения обязанностей" className="chs-sodtable">
+      <DataTableHead>
+        <tr>
+          <DataTableHeadCell>ID</DataTableHeadCell>
+          <DataTableHeadCell>Пара ролей</DataTableHeadCell>
+          <DataTableHeadCell>Описание</DataTableHeadCell>
+          <DataTableHeadCell>Тип</DataTableHeadCell>
+          <DataTableHeadCell>Действия</DataTableHeadCell>
+        </tr>
+      </DataTableHead>
+      <DataTableBody>
+        {rules.map((rule) => (
+          <SodRuleRow key={rule.id} rule={rule} onDelete={onDelete} />
+        ))}
+      </DataTableBody>
+    </DataTable>
   );
 }
 
