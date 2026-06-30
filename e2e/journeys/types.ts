@@ -59,6 +59,9 @@ export interface Locator {
 /** ARIA roles the journeys use (kept narrow on purpose — extend when needed). */
 export type RoleName = "button" | "dialog" | "link" | "textbox" | "heading" | "checkbox";
 
+/** WCAG conformance level for checkContrast. */
+export type WcagLevel = "AA" | "AAA";
+
 /** An HTTP write/read the step waits for, with a captured field + status assert. */
 export interface AwaitResponse {
   /** Substring the response url must include, e.g. "/api/processes/start". */
@@ -133,6 +136,27 @@ export interface Step {
   readonly expectStatusOneOf?: readonly number[];
   /** apiCheck: the response status must NOT equal this (e.g. not 200 for the approve moat). */
   readonly expectStatusNot?: number;
+
+  // --- toggleTheme -------------------------------------------------------
+  /**
+   * toggleTheme: the theme to switch TO. Sets `data-theme` on `<html>` and, when the
+   * app uses a ThemeProvider, calls its toggle so the SPA is coherent. One of
+   * "light" | "dark". The runner verifies `<html>` reflects the expected value.
+   */
+  readonly theme?: "light" | "dark";
+
+  // --- checkContrast -----------------------------------------------------
+  /**
+   * checkContrast: a CSS selector scoping the subtree to audit (default "body").
+   * The runner injects axe-core (colour-contrast rule) and fails if ANY violation
+   * is found in the given scope in the currently-active theme.
+   */
+  readonly scope?: string;
+  /**
+   * checkContrast: WCAG conformance level — "AA" (default, 4.5:1 text / 3:1 UI)
+   * or "AAA" (7:1 text). Drives the axe `runOptions` tag list.
+   */
+  readonly wcagLevel?: WcagLevel;
 }
 
 /** The closed set of step actions the runner dispatches. */
@@ -145,7 +169,9 @@ export type StepAction =
   | "expectText" // assert an element contains text/regex
   | "expectCount" // assert a locator resolves to exactly N matches
   | "pollApi" // poll a read API until pickExpr yields a value; capture it
-  | "apiCheck"; // run an API-only request and assert its status (fail-honest)
+  | "apiCheck" // run an API-only request and assert its status (fail-honest)
+  | "toggleTheme" // switch the SPA theme (light | dark) and assert <html data-theme>
+  | "checkContrast"; // inject axe-core and assert colour-contrast ≥ WCAG AA/AAA
 
 /**
  * A versioned user-journey. `version` lets a journey evolve with the product while
