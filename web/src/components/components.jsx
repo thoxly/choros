@@ -29,7 +29,8 @@ function KitIcon({ name, size, className = "", strokeWidth = 1.6 }) {
       {name === "plus"      && (<path {...p} d="M8 3v10M3 8h10" />)}
       {name === "chevron-down"    && (<path {...p} d="M3.5 6l4.5 4 4.5-4" />)}
       {/* ── T-0531 additions ──────────────────────────────────────────── */}
-      {name === "star"            && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" /></>)}
+      {name === "star"            && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="currentColor" stroke="none" /></>)}
+      {name === "star-outline"    && (<><path {...p} d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6z" /></>)}
       {name === "pencil"          && (<><path {...p} d="M11.5 2.5l2 2-8 8-2.5.5.5-2.5z" /><path {...p} d="M10 4l2 2" /></>)}
       {name === "trash"           && (<><path {...p} d="M3 4.5h10M5.5 4.5V3h5v1.5M6 7v4.5M10 7v4.5" /><rect {...p} x="4" y="4.5" width="8" height="9" rx="1" /></>)}
       {name === "arrow-up"        && (<path {...p} d="M8 13V3M3.5 7.5L8 3l4.5 4.5" />)}

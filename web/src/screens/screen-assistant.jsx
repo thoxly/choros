@@ -333,7 +333,7 @@ function ThreadList({ threads, activeId, onSelect, onCreate, loading, error, onR
                     title={t.pinned ? 'Открепить' : 'Закрепить'}
                     onClick={(e) => { e.stopPropagation(); onPin(t.id, !t.pinned); }}
                   >
-                    <KitIcon name={t.pinned ? 'star' : 'star'} />
+                    <KitIcon name={t.pinned ? 'star' : 'star-outline'} />
                   </button>
                   <button
                     type="button"

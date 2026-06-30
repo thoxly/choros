@@ -21,6 +21,7 @@ export const ICON_REGISTRY = {
   "chevron-down":    { label: "Раскрыть",        since: "kit-v1", usedIn: ["Select","Popover"] },
   // ── T-0531 additions ──────────────────────────────────────────────────────
   "star":            { label: "Избранное",       since: "T-0531", usedIn: [] },
+  "star-outline":    { label: "Не закреплено",   since: "T-0531", usedIn: [] },
   "pencil":          { label: "Редактировать",   since: "T-0531", usedIn: [] },
   "trash":           { label: "Удалить",         since: "T-0531", usedIn: ["CollectionField"] },
   "arrow-up":        { label: "Вверх",           since: "T-0531", usedIn: [] },
