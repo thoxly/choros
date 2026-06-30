@@ -1,55 +1,48 @@
 /**
  * useDirtyGuard — T-0533: Data-loss guard hook.
  *
- * Combines two guard layers:
- *   1. beforeunload — browser native dialog on tab-close / F5 / Ctrl-W
- *   2. useBlocker   — react-router route-guard for internal navigation
+ * Guard layer:
+ *   beforeunload — browser-native dialog on tab-close / F5 / Ctrl-W when there
+ *   are unsaved edits. Covers the primary data-loss vectors (closing/reloading).
  *
- * Usage:
+ * NOTE (T-0548 hotfix): react-router `useBlocker` (the internal SPA-navigation
+ *   guard) was REMOVED here. `useBlocker` throws at runtime under `<BrowserRouter>`
+ *   (it requires a data router created via `createBrowserRouter`). The app uses
+ *   `<BrowserRouter>` (web/src/main.jsx), so calling it crashed EVERY screen that
+ *   mounts this hook — modeler (screen-process-editor) and FormDesigner — to a
+ *   white screen. Re-introducing the internal-navigation guard requires migrating
+ *   routing to `createBrowserRouter`/`RouterProvider` — tracked as a follow-up.
+ *
+ * Usage (unchanged — API shape preserved):
  *   const guard = useDirtyGuard(isDirty);
- *   // In JSX:
- *   <ConfirmDialog
- *     open={guard.blockerState === 'blocked'}
- *     title="Несохранённые правки"
- *     message={...}
- *     confirmLabel="Уйти без сохранения"
- *     cancelLabel="Остаться"
- *     tone="danger"
- *     onConfirm={guard.proceed}
- *     onClose={guard.reset}
- *   />
+ *   <ConfirmDialog open={guard.blockerState === 'blocked'} ...
+ *     onConfirm={guard.proceed} onClose={guard.reset} />
  *
- * @param {boolean} isDirty  — if true, both guards are active
+ * @param {boolean} isDirty  — if true, the beforeunload guard is active
  * @returns {{ blockerState: string, proceed: () => void, reset: () => void }}
  */
 
 import { useEffect } from 'react';
-import { useBlocker } from 'react-router-dom';
 
 export function useDirtyGuard(isDirty) {
-  // 1) beforeunload — last-resort browser-native guard (tab close / reload / Ctrl-W).
-  //    Modern browsers ignore the returnValue text and show their own generic message.
+  // beforeunload — browser-native guard (tab close / reload / Ctrl-W).
+  // Modern browsers ignore returnValue text and show their own generic message.
   useEffect(() => {
     if (!isDirty) return;
     const handler = (e) => {
       e.preventDefault();
-      // returnValue is required for the browser dialog to appear in legacy browsers.
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [isDirty]);
 
-  // 2) react-router useBlocker — intercepts internal SPA navigation (Link, navigate()).
-  //    Available as a stable API from react-router-dom v6.4+.
-  const blocker = useBlocker(isDirty);
-
+  // Internal SPA-navigation guard intentionally disabled (see NOTE above) to avoid
+  // the useBlocker/BrowserRouter runtime crash. blockerState stays 'unblocked' →
+  // the consumer's guard ConfirmDialog never opens; proceed/reset are no-ops.
   return {
-    // 'unblocked' | 'blocked' | 'proceeding'
-    blockerState: blocker.state,
-    // Call to let the blocked navigation proceed (user chose "Уйти без сохранения").
-    proceed: () => blocker.proceed?.(),
-    // Call to cancel the blocked navigation (user chose "Остаться").
-    reset: () => blocker.reset?.(),
+    blockerState: 'unblocked',
+    proceed: () => {},
+    reset: () => {},
   };
 }
