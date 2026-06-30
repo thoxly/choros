@@ -320,14 +320,14 @@ function AppActions({ app, navigate, onAppUpdated }) {
           <Button
             variant="ghost" size="sm" role="menuitem"
             style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={() => { setOpen(false); navigate(`/app-schema/${app.id}`); }}
+            onClick={(e) => { e.stopPropagation(); setOpen(false); navigate(`/app-schema/${app.id}`); }}
           >
             Настроить поля
           </Button>
           <Button
             variant="ghost" size="sm" role="menuitem"
             style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={() => { setOpen(false); navigate(`/app-records/${app.id}`); }}
+            onClick={(e) => { e.stopPropagation(); setOpen(false); navigate(`/app-records/${app.id}`); }}
           >
             Записи
           </Button>

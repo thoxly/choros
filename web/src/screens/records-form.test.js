@@ -31,6 +31,7 @@ import {
   mapRecordError,
   extractFieldErrors,
   computeRollup,
+  humanizeKey,
 } from './records-form.js';
 
 // A representative record_schema exactly like the field-constructor emits.
@@ -70,8 +71,8 @@ describe('schemaToFormFields', () => {
     expect(fields.map((f) => f.key)).toEqual(['name', 'age', 'score', 'active', 'note']);
     expect(fields[0]).toMatchObject({ key: 'name', type: 'string', label: 'Имя', required: true, inputKind: 'text' });
     expect(fields[1]).toMatchObject({ key: 'age', type: 'integer', required: true, inputKind: 'number' });
-    // no title → label falls back to the raw key
-    expect(fields[2]).toMatchObject({ key: 'score', type: 'number', label: 'score', required: false, inputKind: 'number' });
+    // T-0552: no title → label falls back to a humanized key (not the raw key)
+    expect(fields[2]).toMatchObject({ key: 'score', type: 'number', label: 'Score', required: false, inputKind: 'number' });
     expect(fields[3]).toMatchObject({ key: 'active', type: 'boolean', required: false, inputKind: 'checkbox' });
     expect(fields[4].required).toBe(false);
   });
@@ -87,6 +88,48 @@ describe('schemaToFormFields', () => {
     expect(schemaToFormFields({})).toEqual([]);
     expect(schemaToFormFields({ properties: [] })).toEqual([]);
     expect(schemaToFormFields([])).toEqual([]);
+  });
+});
+
+describe('T-0552: humanizeKey label fallback', () => {
+  it('humanizes a raw snake/kebab key', () => {
+    expect(humanizeKey('vendor_inn')).toBe('Vendor inn');
+    expect(humanizeKey('TEST')).toBe('TEST');
+    expect(humanizeKey('first-name')).toBe('First name');
+    expect(humanizeKey('a__b--c')).toBe('A b c');
+    expect(humanizeKey('  spaced_key  ')).toBe('Spaced key');
+  });
+
+  it('returns "" for empty / non-string', () => {
+    expect(humanizeKey('')).toBe('');
+    expect(humanizeKey('___')).toBe('');
+    expect(humanizeKey(null)).toBe('');
+    expect(humanizeKey(undefined)).toBe('');
+    expect(humanizeKey(42)).toBe('');
+  });
+
+  it('schemaToFormFields uses humanizeKey when title is absent', () => {
+    const fields = schemaToFormFields({
+      type: 'object',
+      properties: { vendor_inn: { type: 'string' } },
+    });
+    expect(fields[0].label).toBe('Vendor inn');
+  });
+
+  it('a present title is NOT changed', () => {
+    const fields = schemaToFormFields({
+      type: 'object',
+      properties: { vendor_inn: { type: 'string', title: 'ИНН поставщика' } },
+    });
+    expect(fields[0].label).toBe('ИНН поставщика');
+  });
+
+  it('schemaToColumns headers fall back to humanized key', () => {
+    const cols = schemaToColumns({
+      type: 'object',
+      properties: { vendor_inn: { type: 'string' } },
+    });
+    expect(cols[0].label).toBe('Vendor inn');
   });
 });
 
@@ -178,7 +221,7 @@ describe('schemaToColumns', () => {
     const cols = schemaToColumns(SCHEMA);
     expect(cols.map((c) => c.key)).toEqual(['name', 'age', 'score', 'active', 'note']);
     expect(cols[0]).toEqual({ key: 'name', label: 'Имя', type: 'string' });
-    expect(cols[2]).toEqual({ key: 'score', label: 'score', type: 'number' });
+    expect(cols[2]).toEqual({ key: 'score', label: 'Score', type: 'number' }); // T-0552: humanized key fallback
   });
 });
 

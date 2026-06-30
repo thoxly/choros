@@ -76,6 +76,23 @@ export const INPUT_KIND = {
 };
 
 /**
+ * T-0552: Humanize a raw field key into a readable label fallback. Used wherever
+ * a field label is derived from a missing human title (`title?.trim() || humanizeKey(key)`)
+ * so the record list headers and the create/edit form never surface a raw snake_case
+ * key (e.g. `vendor_inn` → "Vendor inn"). PURE — replaces `_`/`-` with spaces, trims,
+ * collapses whitespace and capitalizes the first letter. Empty / non-string → "".
+ *
+ * @param {unknown} key a field key
+ * @returns {string}
+ */
+export function humanizeKey(key) {
+  if (typeof key !== "string") return "";
+  const words = key.replace(/[_-]+/g, " ").trim().replace(/\s+/g, " ");
+  if (words.length === 0) return "";
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
  * T-0453: Compute the rollup value for a computed/«Итог» field from a data object.
  *
  * PURE function — no side effects, no throws. Returns a JS number or null.
@@ -231,7 +248,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "multi-select",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "multi-select",
         options,
@@ -269,7 +286,7 @@ export function schemaToFormFields(recordSchema) {
           return {
             key: sfKey,
             type: "select",
-            label: sfTitle || sfKey,
+            label: sfTitle || humanizeKey(sfKey),
             required: itemRequired.has(sfKey),
             inputKind: "select",
             options: sfOptions,
@@ -283,7 +300,7 @@ export function schemaToFormFields(recordSchema) {
         return {
           key: sfKey,
           type: sfType,
-          label: sfTitle || sfKey,
+          label: sfTitle || humanizeKey(sfKey),
           required: itemRequired.has(sfKey),
           inputKind: INPUT_KIND[sfType] || "text",
         };
@@ -293,7 +310,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "collection",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "collection",
         subFields,
@@ -310,7 +327,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "computed",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: false, // computed fields are NEVER required
         inputKind: "computed",
         rollupSource: typeof xRollup.source === "string" ? xRollup.source : "",
@@ -329,7 +346,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "relation",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "relation",
         targetRegistryId: xRelation.target_registry_id,
@@ -346,7 +363,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "money",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "money",
       };
@@ -361,7 +378,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "person",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "person",
       };
@@ -376,7 +393,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "url",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "url",
       };
@@ -391,7 +408,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "email",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "email",
       };
@@ -405,7 +422,7 @@ export function schemaToFormFields(recordSchema) {
         key,
         type: "select",
         title,
-        label: title || key,
+        label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "select",
         options,
@@ -420,7 +437,7 @@ export function schemaToFormFields(recordSchema) {
       key,
       type,
       title,
-      label: title || key, // human label falls back to the raw key
+      label: title || humanizeKey(key), // human label falls back to the raw key
       required: requiredSet.has(key),
       inputKind: INPUT_KIND[type] || "text",
     };
@@ -850,7 +867,7 @@ export function serializeRecordData(formFields, values) {
 
 /**
  * Build the list of table columns for the record list from a record_schema.
- * Columns = the schema's field keys (label = title || key), in schema order.
+ * Columns = the schema's field keys (label = title || humanizeKey(key)), in schema order.
  *
  * @param {unknown} recordSchema
  * @returns {Array<{ key, label, type }>}
