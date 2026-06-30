@@ -98,6 +98,8 @@ import type { Grant } from "../core/grant-lattice.js";
 import { extractDerivedFields } from "../core/rollup-contract.js";
 import { computeAllDerivedFields } from "../db/derived-fields-dao.js";
 import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
+import { sandboxReadPredicate } from "../core/sandbox-gate.js";
+import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -183,6 +185,31 @@ export type FieldVisibilityResolver = (
   nowMs: number,
 ) => Promise<{ coveringGrants: Grant[]; policy: FieldVisibilityPolicy }>;
 
+/**
+ * T-0558 (sandbox gate): resolve the caller's sandbox-gate privilege — whether the
+ * actor may see DRAFT (sandbox) artifacts. Mirrors the resolved-facts shape consumed
+ * by core/sandbox-gate.ts (DraftVisibilityInput["actor"]).
+ *
+ * Production binding = resolveActorPrivilege(pool, tenantId, actorSlug) from
+ * src/db/sandbox-gate-dao.ts (loadAdminContext + getGrantsForSubject, both
+ * tenant-scoped + fail-closed). Injected so the unit suite can exercise the gate
+ * (privileged-sees-draft / unprivileged-hidden) without a live Postgres.
+ *
+ * HONEST-DEGRADE: OPTIONAL on RecordRoutesDeps. When absent, the LIST/GET handlers
+ * fall back to the REAL resolveActorPrivilege against the injected pool — the gate
+ * is ALWAYS on the read path (it is never silently disabled). The dep exists only so
+ * tests can stub the privilege resolution; production wiring may omit it.
+ *
+ * @param actorSlug  the caller identity (dev-user slug / OIDC sub — never a header value)
+ * @param tenantId   the caller's resolved tenant
+ * @param nowMs      current epoch ms (grant validity-window instant)
+ */
+export type ActorPrivilegeResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<ActorPrivilege>;
+
 export interface RecordRoutesDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
@@ -210,6 +237,18 @@ export interface RecordRoutesDeps {
    * grants from the SAME getGrantsForSubject DAO (single-resolver constraint).
    */
   resolveFieldVisibility?: FieldVisibilityResolver;
+  /**
+   * T-0558 (sandbox gate): OPTIONAL actor-privilege resolver for the runtime
+   * sandbox read gate. When supplied, the LIST/GET handlers use it to decide
+   * whether the caller may see DRAFT (sandbox) records; when absent they fall
+   * back to the REAL resolveActorPrivilege against `pool`. Either way the
+   * sandboxReadPredicate is appended to the record SELECTs (gated on the OWNING
+   * APPLICATION's tier — records inherit the app's sandbox state), so a
+   * non-privileged caller never sees records of a draft application. The
+   * predicate is an ADDITIONAL `AND` inside withTenantTx + RLS — never a
+   * replacement for the tenant scope (T-0013 isolation is sacred).
+   */
+  resolveSandboxPrivilege?: ActorPrivilegeResolver;
   /**
    * T-0351 E16 (on_create trigger): OPTIONAL FlowableClient for process-start
    * co-located with record creation. When supplied, POST /api/records checks for
@@ -894,10 +933,20 @@ async function listRecordsPaginated(
   registryDefId: string | null,
   limit: number,
   cursor: { createdAt: number; id: string } | null,
+  actorIsPrivileged: boolean,
 ): Promise<RecordsPage<RecordJoinedRow>> {
   return withTenantTx(pool, tenantId, async (client) => {
     const conds: string[] = ["r.tenant_id = $1"];
     const params: unknown[] = [tenantId];
+
+    // T-0558 (sandbox gate): hide records of a DRAFT (sandbox) application from a
+    // non-privileged caller. The gate is on the OWNING APPLICATION's tier (records
+    // inherit the app's sandbox state — see the `JOIN choros.application a` below).
+    // sandboxReadPredicate emits a $-placeholder-FREE fragment (TRUE for privileged,
+    // `a.tier = 'published'` otherwise) so it is an ADDITIONAL `AND` that never shifts
+    // the caller's parameter indices and never relaxes the tenant scope (RLS + the
+    // r.tenant_id guard remain). `a.tier` is a trusted code-level column constant.
+    conds.push(sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged }).sql);
 
     if (applicationId !== null) {
       params.push(applicationId);
@@ -932,6 +981,8 @@ async function listRecordsPaginated(
          FROM choros.record r
          JOIN choros.registry_def rd
            ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
+         JOIN choros.application a
+           ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
         WHERE ${conds.join(" AND ")}
         ORDER BY r.created_at DESC, r.id ASC
         LIMIT ${limitParam}`,
@@ -970,14 +1021,23 @@ async function getRecordDetail(
   pool: pg.Pool,
   tenantId: string,
   id: string,
+  actorIsPrivileged: boolean,
 ): Promise<RecordDetailRow | null> {
   return withTenantTx(pool, tenantId, async (client) => {
+    // T-0558 (sandbox gate): a non-privileged caller cannot OPEN a record whose
+    // owning application is still DRAFT (sandbox) — the row is filtered out and the
+    // route returns the same honest 404 as a cross-tenant / missing record. Appended
+    // as an EXTRA `AND` (gated on the owning application's tier via `JOIN
+    // choros.application a`), never relaxing the tenant scope (RLS + r.tenant_id).
+    const sandboxPred = sandboxReadPredicate({ tierColumn: "a.tier", actorIsPrivileged });
     const res = await client.query<RecordDetailRow>(
       `SELECT ${RECORD_DETAIL_SELECT_JOIN}
          FROM choros.record r
          JOIN choros.registry_def rd
            ON rd.tenant_id = r.tenant_id AND rd.id = r.registry_id
-        WHERE r.tenant_id = $1 AND r.id = $2`,
+         JOIN choros.application a
+           ON a.tenant_id = rd.tenant_id AND a.id = rd.application_id
+        WHERE r.tenant_id = $1 AND r.id = $2 AND ${sandboxPred.sql}`,
       [tenantId, id],
     );
     return res.rows[0] ?? null;
@@ -1127,7 +1187,22 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, flowable, emitSignal } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, resolveSandboxPrivilege, flowable, emitSignal } = deps;
+
+  // T-0558 (sandbox gate): resolve whether the caller may see DRAFT (sandbox) records.
+  // Honest-degrade: when no resolveSandboxPrivilege is injected, fall back to the REAL
+  // tenant-scoped, fail-closed resolveActorPrivilege against `pool` — the gate is NEVER
+  // silently disabled. actorIsPrivileged = owner/admin OR holds the authoring_draft grant.
+  async function sandboxPrivilegedFor(
+    actorSlug: string,
+    tenantId: string,
+    nowMs: number,
+  ): Promise<boolean> {
+    const priv = resolveSandboxPrivilege
+      ? await resolveSandboxPrivilege(actorSlug, tenantId, nowMs)
+      : await resolveActorPrivilege(pool, tenantId, actorSlug, nowMs);
+    return priv.isOwnerOrAdmin || priv.hasAuthoringDraftGrant;
+  }
 
   // Resolve the caller's field write-mask for a record (FF-10 / AC-10 hook-point).
   // Honest-degrade: when no resolveWriteFacet is wired (current bootstrap), every
@@ -1252,7 +1327,9 @@ export function registerRecordRoutes(
       fvPolicy = fv.policy;
     }
 
-    const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor);
+    // T-0558: resolve sandbox privilege once per request; drives the read gate below.
+    const actorIsPrivileged = await sandboxPrivilegedFor(actor, tenantId, nowMs);
+    const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor, actorIsPrivileged);
 
     // Apply field-visibility redaction to each row's data before serialization.
     // unionVisible = all keys in the row's data object (pre-T-0081 union floor:
@@ -1304,9 +1381,13 @@ export function registerRecordRoutes(
       const actor = await extractActor(req, pool);
       const tenantId = await resolveActorTenant(actor);
       const nowMs = Date.now();
-      const row = await getRecordDetail(pool, tenantId, id);
+      // T-0558: resolve sandbox privilege; a non-privileged caller cannot open a
+      // record whose owning application is still DRAFT (returns the same honest 404).
+      const actorIsPrivileged = await sandboxPrivilegedFor(actor, tenantId, nowMs);
+      const row = await getRecordDetail(pool, tenantId, id, actorIsPrivileged);
       if (row === null) {
-        // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
+        // Not in the caller's tenant (RLS-filtered), draft-hidden (sandbox gate),
+        // OR does not exist → 404.
         throw new HttpError(404, "NOT_FOUND", "record not found");
       }
 

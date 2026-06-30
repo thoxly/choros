@@ -79,10 +79,14 @@ async function seedApplicationDirect(c: pg.Client, tenantId: string, slug: strin
   const id = uuid();
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  // T-0558: seed as PUBLISHED — this probe exercises the field-mask write/read on a
+  // LIVE application read back by a non-privileged caller. A draft-tier app would be
+  // hidden by the sandbox gate (T-0558), 404-ing the reads and masking the behaviour
+  // under test (draft-visibility is covered by records-sandbox-gate.test.ts).
   await c.query(
     `INSERT INTO choros.application
        (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-     VALUES ($1, $2, $3, $3, NULL, 'draft', 0, 0)`,
+     VALUES ($1, $2, $3, $3, NULL, 'published', 0, 0)`,
     [tenantId, id, slug],
   );
   await c.query('COMMIT');
@@ -245,6 +249,9 @@ describe('records API — field-mask write guard (FF-10 / AC-10)', () => {
       if (maskAppId) {
         await c.query('BEGIN');
         await c.query(`SET LOCAL choros.tenant_id = '${MASK_TENANT}'`);
+        // T-0558: app is now seeded PUBLISHED; the tier_published_locked trigger needs
+        // the sanctioned-promote GUC to allow DELETE of a published config row.
+        await c.query(`SET LOCAL choros.promoting = '1'`);
         await c.query(`DELETE FROM choros.application WHERE tenant_id = $1 AND id = $2`, [MASK_TENANT, maskAppId]);
         await c.query('COMMIT');
       }

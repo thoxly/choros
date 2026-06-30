@@ -98,10 +98,16 @@ async function seedApplicationDirect(
   const id = uuid();
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+  // T-0558: seed as PUBLISHED. These CRUD probes exercise the record read/write
+  // surface for a LIVE application — a non-privileged actor-a/actor-b reads its own
+  // records back. The sandbox gate (T-0558) hides records of a DRAFT application from
+  // a non-privileged caller, so a draft-tier app here would (correctly) 404 the reads
+  // and obscure the CRUD behaviour under test. Draft-visibility itself is covered by
+  // ci/checks/db/records-sandbox-gate.test.ts.
   await c.query(
     `INSERT INTO choros.application
        (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-     VALUES ($1, $2, $3, $3, NULL, 'draft', 0, 0)`,
+     VALUES ($1, $2, $3, $3, NULL, 'published', 0, 0)`,
     [tenantId, id, slug],
   );
   await c.query('COMMIT');
@@ -290,6 +296,9 @@ afterAll(async () => {
     for (const { tenantId, id } of [...appCleanup].reverse()) {
       await c.query('BEGIN');
       await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      // T-0558: apps are now seeded PUBLISHED; the tier_published_locked trigger
+      // forbids DELETE of published config rows unless the sanctioned-promote GUC is set.
+      await c.query(`SET LOCAL choros.promoting = '1'`);
       await c.query(`DELETE FROM choros.application WHERE tenant_id = $1 AND id = $2`, [tenantId, id]);
       await c.query('COMMIT');
     }
