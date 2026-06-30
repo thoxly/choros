@@ -12,16 +12,21 @@
 -- (grants.ts lands escalating rows semi-confirmed, confirmed2_by = NULL) but the
 -- READ/PDP side never checked it.
 --
--- FIX (founder-approved option a): the PDP read-path (grants-dao.ts) now requires
--- `confirmed2_by IS NOT NULL` to ACTIVATE a CRITICAL grant/assignment, and honors
--- `valid_until` for the grant query too. "Critical" is the SQL-expressible subset
--- of the T-0040 criticality axes that a single grant row can carry:
+-- FIX (review B1 — fail-CLOSED across ALL axes): the PDP read-path (grants-dao.ts)
+-- now requires `confirmed2_by IS NOT NULL` to ACTIVATE a CRITICAL grant/assignment,
+-- and honors `valid_until` for the grant query too. "Critical" is the FULL
+-- T-0040/T-0044 escalation classification (criticalGrantPredicate — a fail-closed
+-- SQL superset of the write-side dualControlDecision over ALL FOUR axes):
 --   axis a — operation IN ('approve','transition')   (guarded-transition ops)
 --   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
--- (axis c, sensitive_read clearance, is a derived clearance computation over
---  data_classification + JSONB and is intentionally NOT replicated in SQL here;
---  the WRITE-side dual-control gate already forces confirmed2_by for axis-c
---  escalations, so those rows arrive with confirmed2_by already required.)
+--   axis c — operation = 'read' with a SENSITIVE clearance marker (confidential|restricted)
+--   Q-2   — operation = 'read' with a PRESENT-but-garbage clearance token (fail-closed)
+-- The clearance marker is read constraint-first, resource_facet fallback (mirrors
+-- data-classification.ts grantClearance). The original B1 read-hole was that the
+-- read-side checked ONLY axes a/b: a read grant escalated by axis c / Q-2 landed
+-- semi-confirmed write-side yet went PDP-active after ONE approver. This migration's
+-- backfill predicate MUST therefore match the read predicate over ALL FOUR axes so
+-- the tightening stays non-breaking for every axis (not just a/b).
 -- An assignment is critical iff the role it binds holds any such critical grant.
 --
 -- ── THIS MIGRATION IS PURE BACKFILL — NO DDL ──────────────────────────────────
@@ -68,7 +73,11 @@
 -- move a row across tenants, and the WHERE clauses never join across tenant_id.
 
 -- ── Backfill 1: critical GRANTS active under the old rule ─────────────────────
--- A grant is "critical" iff its own operation/resource_type matches axis a or b.
+-- A grant is "critical" iff it matches ANY of the four axes (a/b/c/Q-2) — the
+-- SAME criticalGrantPredicate the read-path now enforces (grants-dao.ts). We must
+-- grandfather axis c / Q-2 rows too: under the OLD read rule those read grants were
+-- PDP-active on confirmed_by alone, so leaving confirmed2_by NULL would deactivate
+-- them on deploy (a fail-closed regression for legitimately-granted access).
 -- "Active under old rule" = confirmed_by NOT NULL AND not expired at apply time.
 -- valid_until is bigint epoch-ms (migration 008); compare against NOW() epoch-ms.
 UPDATE choros."grant" g
@@ -76,18 +85,53 @@ UPDATE choros."grant" g
  WHERE g.confirmed2_by IS NULL
    AND g.confirmed_by IS NOT NULL
    AND (
+         -- axis a
          g.operation IN ('approve', 'transition')
+         -- axis b
          OR (g.resource_type = 'effect_resource' AND g.operation = 'invoke')
+         -- axis c + Q-2 — a READ grant with a sensitive OR garbage clearance marker.
+         -- Clearance is read constraint-first, resource_facet fallback, using the
+         -- jsonb key-exists `?` operator so a present-but-null token still counts.
+         OR (
+              g.operation = 'read'
+              AND (
+                    (g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance'))
+                    OR (g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance'))
+                  )
+              AND (
+                    COALESCE(
+                      CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                           THEN g."constraint"->>'clearance' END,
+                      CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                           THEN g.resource_facet->>'clearance' END
+                    ) IN ('confidential', 'restricted')
+                    OR COALESCE(
+                      CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                           THEN g."constraint"->>'clearance' END,
+                      CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                           THEN g.resource_facet->>'clearance' END
+                    ) IS NULL
+                    OR COALESCE(
+                      CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                           THEN g."constraint"->>'clearance' END,
+                      CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                           THEN g.resource_facet->>'clearance' END
+                    ) NOT IN ('public', 'internal', 'confidential', 'restricted')
+                  )
+            )
        )
    AND (g.valid_until IS NULL
         OR g.valid_until > (EXTRACT(EPOCH FROM now()) * 1000)::bigint);
 
 -- ── Backfill 2: role_assignments whose role holds a critical grant ────────────
--- An assignment is critical iff the role it binds holds ANY critical grant
--- (same axis a/b predicate). We backfill confirmed2_by for assignments that were
--- active under the old rule (confirmed_by NOT NULL, not expired) and whose role
--- carries a critical grant. tenant_id is matched on BOTH sides of the EXISTS so
--- no cross-tenant edge is introduced (NF-2: every join includes tenant_id).
+-- An assignment is critical iff the role it binds holds ANY EFFECTIVE critical
+-- grant (full four-axis predicate, same as backfill 1 and the read-path EXISTS).
+-- We backfill confirmed2_by for assignments that were active under the old rule
+-- (confirmed_by NOT NULL, not expired) and whose role carries a critical grant.
+-- The criticizing grant is window-scoped (M1: an expired critical grant confers no
+-- capability, so it must not criticize the assignment — matching the read-path).
+-- tenant_id is matched on BOTH sides of the EXISTS so no cross-tenant edge is
+-- introduced (NF-2: every join includes tenant_id).
 UPDATE choros.role_assignment ra
    SET confirmed2_by = ra.confirmed_by,
        updated_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
@@ -101,8 +145,40 @@ UPDATE choros.role_assignment ra
           WHERE g.tenant_id = ra.tenant_id
             AND g.role_id   = ra.role_id
             AND g.confirmed_by IS NOT NULL
+            AND (g.valid_until IS NULL
+                 OR g.valid_until > (EXTRACT(EPOCH FROM now()) * 1000)::bigint)
             AND (
+                  -- axis a
                   g.operation IN ('approve', 'transition')
+                  -- axis b
                   OR (g.resource_type = 'effect_resource' AND g.operation = 'invoke')
+                  -- axis c + Q-2 (read grant w/ sensitive or garbage clearance marker)
+                  OR (
+                       g.operation = 'read'
+                       AND (
+                             (g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance'))
+                             OR (g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance'))
+                           )
+                       AND (
+                             COALESCE(
+                               CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                                    THEN g."constraint"->>'clearance' END,
+                               CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                                    THEN g.resource_facet->>'clearance' END
+                             ) IN ('confidential', 'restricted')
+                             OR COALESCE(
+                               CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                                    THEN g."constraint"->>'clearance' END,
+                               CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                                    THEN g.resource_facet->>'clearance' END
+                             ) IS NULL
+                             OR COALESCE(
+                               CASE WHEN g."constraint" IS NOT NULL AND jsonb_typeof(g."constraint") = 'object' AND (g."constraint" ? 'clearance')
+                                    THEN g."constraint"->>'clearance' END,
+                               CASE WHEN g.resource_facet IS NOT NULL AND jsonb_typeof(g.resource_facet) = 'object' AND (g.resource_facet ? 'clearance')
+                                    THEN g.resource_facet->>'clearance' END
+                             ) NOT IN ('public', 'internal', 'confidential', 'restricted')
+                           )
+                     )
                 )
        );
