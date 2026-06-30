@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0533",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true,
+    "modules": 501,
+    "exit_code": 0
+  },
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "bug",
+      "axis": 1,
+      "location": "web/src/forms/FormDesigner.jsx:269-272",
+      "issue": "isDirty useMemo has dep=[doc] only, but correctness depends on savedDocRef.current. After persistLayout succeeds: savedDocRef.current = doc (ref mutation, invisible to React), then setSaveState({status:'saved'}) triggers a re-render. On re-render useMemo([doc]) checks: has doc changed? No. Returns cached true. isDirty stays true permanently after the first edit, even after a successful save. Effect: (1) 'Несохранённые изменения' warning keeps showing after save; (2) guard ConfirmDialog fires on navigation even after the user correctly saved. Comment on line 487 says 'savedDocRef is updated on success so isDirty goes false' — this intent is unmet. Fix: add a save-counter state (e.g. useState(0) → increment in setSaveState saved branch) and include it in the useMemo deps, or switch isDirty to useState and set it false explicitly in the save callback.",
+      "suggestion": "Add `const [saveGen, setSaveGen] = useState(0);` and include `saveGen` in useMemo deps. In persistLayout callback after setting savedDocRef.current, call `setSaveGen(g => g + 1)` to force memo re-evaluation."
+    },
+    {
+      "id": "F-02",
+      "severity": "pass",
+      "axis": 1,
+      "location": "web/src/screens/screen-reports.jsx:826-839",
+      "issue": "Bug-fix for the promote false-positive is correctly implemented. The T-0533 FIX `return` at line 839 sits between setSubmitErr (promote error) and the `if (pageId) { onSaved(...) }` block. Verified manually: the `return` is present in the correct position. Fitness function FF-533-03 in the ADR is a false negative — the script matches the first `promote` occurrence in a JSDoc comment, not the API call. The fix itself is correct and complete per design §4.2.",
+      "suggestion": null
+    },
+    {
+      "id": "F-03",
+      "severity": "pass",
+      "axis": 2,
+      "location": "web/src/hooks/useDirtyGuard.js",
+      "issue": "useDirtyGuard implementation is clean. beforeunload: registered only when isDirty=true (early return guards entry), cleaned up via useEffect return — no listener leak. useBlocker(isDirty): correctly passes boolean; returns blockerState/proceed/reset. proceed and reset use optional-chaining (?.) which is correct — blocker.proceed/reset are only defined when blocker.state === 'blocked'. No side-effect leak.",
+      "suggestion": null
+    },
+    {
+      "id": "F-04",
+      "severity": "pass",
+      "axis": 2,
+      "location": "web/src/screens/screen-process-editor.jsx:381, 804-823",
+      "issue": "BPMN editor guard wiring correct. isDirty already tracked via commandStack.changed (pre-existing). useDirtyGuard(isDirty) assigned to dirtyGuard. ConfirmDialog uses dirtyGuard.blockerState==='blocked', tone='danger', confirmLabel='Уйти без сохранения', cancelLabel='Остаться', ConsequenceSummary — all per spec §3.2. No leak, no regression on existing Publish ConfirmDialog (T-0526).",
+      "suggestion": null
+    },
+    {
+      "id": "F-05",
+      "severity": "pass",
+      "axis": 3,
+      "location": "web/src/screens/screen-assistant.jsx:820-829",
+      "issue": "Optimistic rollback for handleRename is correct. Snapshot prevTitle captured before optimistic setActiveThread. On catch: setActiveThread rolls back to prevTitle, pushToast fires error toast via useToastContext (T-0528). patchThread calls load() on success → thread sidebar refreshes from server. Minor UX asymmetry: only activeThread title is optimistically updated (header), not threads list (sidebar). Sidebar gets correct title after load() completes. This matches the design spec §4.4 and is acceptable.",
+      "suggestion": null
+    },
+    {
+      "id": "F-06",
+      "severity": "info",
+      "axis": 6,
+      "location": "web/src/screens/screen-reports.jsx (FF-533-03 in T-0533.adr.contract.json)",
+      "issue": "Fitness function FF-533-03 is a false negative. The python3 script finds 'promote' at position 1203 (in a JSDoc comment header), not at the actual API call at position 29865. The fix IS correct when inspected manually. The CI check will always report FAIL even when the code is correct. This misleads future maintainers.",
+      "suggestion": "Update FF-533-03 ci_check to target '/api/report-pages/' substring rather than bare 'promote' to skip comment matches."
+    },
+    {
+      "id": "F-07",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/forms/FormDesigner.jsx:32",
+      "issue": "FormDesigner imports ConsequenceSummary from '../util/confirm-helpers.jsx'. This path is consistent with all other consumers (screen-process-editor, screen-reports, screen-assistant). Build confirms resolution. No issue — confirming correctness.",
+      "suggestion": null
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "AC-533-01: BPMN-редактор с isDirty=true блокирует внутреннюю навигацию через useBlocker", "covered": true },
+    { "ac": "AC-533-02: Дизайнер форм отслеживает isDirty через deepEqual snapshot и блокирует уход", "covered": true, "note": "DEFECT F-01: isDirty не сбрасывается после save из-за stale useMemo dep" },
+    { "ac": "AC-533-03: beforeunload зарегистрирован в обоих редакторах при isDirty=true (cleanup корректен)", "covered": true },
+    { "ac": "AC-533-04: screen-reports promote-ошибка не приводит к ложному состоянию 'published' (return присутствует)", "covered": true },
+    { "ac": "AC-533-05: patchThread в screen-assistant откатывается при ошибке + error-toast", "covered": true },
+    { "ac": "AC-533-06: Guard-диалог использует tone='danger' с ConsequenceSummary (T-0526) в обоих редакторах", "covered": true },
+    { "ac": "FF-533-01: useDirtyGuard подключён в обоих редакторах (count=6, порог 2)", "covered": true },
+    { "ac": "FF-533-02: useBlocker присутствует в useDirtyGuard.js (count=4, порог 1)", "covered": true },
+    { "ac": "FF-533-03: return перед onSaved при promote-ошибке — fix корректен, CI-скрипт ошибочен (F-06)", "covered": true },
+    { "ac": "FF-533-04: savedDocRef и isDirty присутствуют в FormDesigner (count=14, порог 2)", "covered": true },
+    { "ac": "FF-UX-533-01: confirmLabel='Уйти без сохранения' в обоих редакторах (count=3, порог 2)", "covered": true },
+    { "ac": "Сборка D-056: npm run build зелёная (501 модулей, exit 0, 1.75s)", "covered": true },
+    { "ac": "shell.jsx не затронут", "covered": true },
+    { "ac": "Существующие потребители ConfirmDialog (T-0526) не сломаны", "covered": true }
+  ],
+  "blocking_defects": [
+    {
+      "id": "F-01",
+      "description": "isDirty не сбрасывается после успешного save в FormDesigner. useMemo dep=[doc] не включает триггер после мутации savedDocRef.current. Результат: guard ConfirmDialog ложно блокирует навигацию после правильно выполненного save; баннер 'Несохранённые изменения' остаётся видимым."
+    }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "Сборка зелёная (501 модулей). useDirtyGuard хук реализован правильно: beforeunload с cleanup в useEffect, useBlocker корректно, нет утечек. BPMN-редактор подключён верно. screen-reports баг-фикс (return при promote-ошибке) реализован правильно — F-02 pass. Optimistic-откат handleRename в screen-assistant корректен: snapshot+rollback+toast. Один реальный дефект (F-01): useMemo([doc]) не реагирует на ref-мутацию savedDocRef.current, поэтому isDirty не становится false после save в FormDesigner. Это нарушает AC-533-02 и вызывает ложный guard при навигации после сохранения. Дефект не критичен для данных (данные не теряются, save работает), но противоречит заявленному контракту и создаёт UX-проблему. Verdict: changes_requested до фикса F-01."
+}
