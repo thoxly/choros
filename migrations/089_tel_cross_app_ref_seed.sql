@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 089 · Seed cross_app_ref definition: «Согласование» → «Заявки» (T-0368, E16)
 --
 -- CONTEXT:
