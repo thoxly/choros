@@ -134,6 +134,13 @@ async function withTenantTx<T>(
 export function sanitizeProviderError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
 
+  // T-0497: SSRF guard blocked the endpoint (private/loopback/metadata range).
+  // The error name is checked first so we never echo the raw message (which
+  // contains the blocked-range classification, safe but unnecessary to expose).
+  if ((err instanceof Error && err.name === "SsrfBlockedError") || /SSRF guard/i.test(raw)) {
+    return "Эндпойнт заблокирован: адрес относится к приватному или зарезервированному диапазону.";
+  }
+
   // Dormant port (no live config) — the adapter/port refused before any network.
   if (/dormant/i.test(raw)) {
     return "LLM-порт не активен (подключение не сконфигурировано).";
