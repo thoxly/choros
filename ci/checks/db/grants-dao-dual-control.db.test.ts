@@ -51,19 +51,35 @@ function getPool(): pg.Pool {
 }
 
 const TENANT = uuid();
-const fx = {
-  // employees (slug → id)
-  empAxisCSingle: '',  // holds a role with a read+confidential grant, confirmed2_by NULL
-  empAxisCDual: '',    // same but confirmed2_by set
-  empQ2: '',           // holds a role with a read+GARBAGE clearance grant, no #2
-  empApproveSingle: '',// holds a role with an approve grant, no #2
-  empReadPlain: '',    // plain read grant (no clearance), no #2 → active
-  empReadInternal: '', // read + internal clearance (valid non-sensitive), no #2 → active
-  empExpiredCrit: '',  // role's ONLY critical grant is expired → assignment active
-  empAsgAxisC: '',     // assignment to an axis-c critical role, assignment confirmed2_by NULL
+// Each fixture carries BOTH the employee id (FK target for seedAssignment) and the
+// employee SLUG. The DAO under test (getGrantsForSubject / getRoleSlugsForActor)
+// resolves an actor by SLUG (employee.slug), not by id — passing the raw id makes
+// the lookup miss and every grant read return empty, which silently passed the
+// "expected 0" cases and broke the "expected ≥1" cases. So the DAO calls below
+// MUST use `.slug`; seedAssignment MUST use `.id`.
+type EmpFx = { id: string; slug: string };
+const EMPTY_EMP: EmpFx = { id: '', slug: '' };
+const fx: {
+  empAxisCSingle: EmpFx;
+  empAxisCDual: EmpFx;
+  empQ2: EmpFx;
+  empApproveSingle: EmpFx;
+  empReadPlain: EmpFx;
+  empReadInternal: EmpFx;
+  empExpiredCrit: EmpFx;
+  empAsgAxisC: EmpFx;
+} = {
+  empAxisCSingle: EMPTY_EMP,  // holds a role with a read+confidential grant, confirmed2_by NULL
+  empAxisCDual: EMPTY_EMP,    // same but confirmed2_by set
+  empQ2: EMPTY_EMP,           // holds a role with a read+GARBAGE clearance grant, no #2
+  empApproveSingle: EMPTY_EMP,// holds a role with an approve grant, no #2
+  empReadPlain: EMPTY_EMP,    // plain read grant (no clearance), no #2 → active
+  empReadInternal: EMPTY_EMP, // read + internal clearance (valid non-sensitive), no #2 → active
+  empExpiredCrit: EMPTY_EMP,  // role's ONLY critical grant is expired → assignment active
+  empAsgAxisC: EMPTY_EMP,     // assignment to an axis-c critical role, assignment confirmed2_by NULL
 };
 
-async function seedEmployee(c: pg.Client, slug: string): Promise<string> {
+async function seedEmployee(c: pg.Client, slug: string): Promise<EmpFx> {
   const deptId = uuid();
   await c.query(
     `INSERT INTO choros.department (tenant_id, id, parent_id, slug, display_name, created_at, updated_at)
@@ -82,7 +98,7 @@ async function seedEmployee(c: pg.Client, slug: string): Promise<string> {
      VALUES ($1, $2, $3, 'human', $4, $4, 0, 0)`,
     [TENANT, empId, posId, slug],
   );
-  return empId;
+  return { id: empId, slug };
 }
 
 async function seedRole(c: pg.Client, slug: string): Promise<string> {
@@ -169,43 +185,43 @@ beforeAll(async () => {
     fx.empAxisCSingle = await seedEmployee(c, `dc-axisc-single-${uuid().slice(0, 6)}`);
     const rAxisCSingle = await seedRole(c, `dc-r-axisc-single-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rAxisCSingle, operation: 'read', constraint: { clearance: 'confidential' }, confirmed2: false });
-    await seedAssignment(c, { empId: fx.empAxisCSingle, roleId: rAxisCSingle, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empAxisCSingle.id, roleId: rAxisCSingle, confirmed2: true });
 
     fx.empAxisCDual = await seedEmployee(c, `dc-axisc-dual-${uuid().slice(0, 6)}`);
     const rAxisCDual = await seedRole(c, `dc-r-axisc-dual-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rAxisCDual, operation: 'read', constraint: { clearance: 'confidential' }, confirmed2: true });
-    await seedAssignment(c, { empId: fx.empAxisCDual, roleId: rAxisCDual, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empAxisCDual.id, roleId: rAxisCDual, confirmed2: true });
 
     // Q-2: read grant w/ a GARBAGE clearance token → critical, single confirm.
     fx.empQ2 = await seedEmployee(c, `dc-q2-${uuid().slice(0, 6)}`);
     const rQ2 = await seedRole(c, `dc-r-q2-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rQ2, operation: 'read', constraint: { clearance: 'top-secret-garbage' }, confirmed2: false });
-    await seedAssignment(c, { empId: fx.empQ2, roleId: rQ2, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empQ2.id, roleId: rQ2, confirmed2: true });
 
     // axis-a: approve grant, single confirm.
     fx.empApproveSingle = await seedEmployee(c, `dc-approve-${uuid().slice(0, 6)}`);
     const rApprove = await seedRole(c, `dc-r-approve-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rApprove, operation: 'approve', confirmed2: false });
-    await seedAssignment(c, { empId: fx.empApproveSingle, roleId: rApprove, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empApproveSingle.id, roleId: rApprove, confirmed2: true });
 
     // regression: plain read grant (no clearance) single confirm → active.
     fx.empReadPlain = await seedEmployee(c, `dc-readplain-${uuid().slice(0, 6)}`);
     const rReadPlain = await seedRole(c, `dc-r-readplain-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rReadPlain, operation: 'read', confirmed2: false });
-    await seedAssignment(c, { empId: fx.empReadPlain, roleId: rReadPlain, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empReadPlain.id, roleId: rReadPlain, confirmed2: true });
 
     // regression: read + 'internal' (valid, non-sensitive DataClass) single confirm → active.
     fx.empReadInternal = await seedEmployee(c, `dc-readint-${uuid().slice(0, 6)}`);
     const rReadInternal = await seedRole(c, `dc-r-readint-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rReadInternal, operation: 'read', constraint: { clearance: 'internal' }, confirmed2: false });
-    await seedAssignment(c, { empId: fx.empReadInternal, roleId: rReadInternal, confirmed2: true });
+    await seedAssignment(c, { empId: fx.empReadInternal.id, roleId: rReadInternal, confirmed2: true });
 
     // M1: a role whose ONLY critical grant is EXPIRED → the assignment (single
     // confirm) must STAY active (the expired grant must not criticize it).
     fx.empExpiredCrit = await seedEmployee(c, `dc-expcrit-${uuid().slice(0, 6)}`);
     const rExpiredCrit = await seedRole(c, `dc-r-expcrit-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rExpiredCrit, operation: 'approve', confirmed2: true, validUntil: EXPIRED_UNTIL });
-    await seedAssignment(c, { empId: fx.empExpiredCrit, roleId: rExpiredCrit, confirmed2: false });
+    await seedAssignment(c, { empId: fx.empExpiredCrit.id, roleId: rExpiredCrit, confirmed2: false });
 
     // assignment-axis-c: role holds an ACTIVE axis-c critical grant (dual-confirmed
     // so the GRANT itself is active), but the ASSIGNMENT has confirmed2_by NULL →
@@ -213,7 +229,7 @@ beforeAll(async () => {
     fx.empAsgAxisC = await seedEmployee(c, `dc-asg-axisc-${uuid().slice(0, 6)}`);
     const rAsgAxisC = await seedRole(c, `dc-r-asg-axisc-${uuid().slice(0, 6)}`);
     await seedGrant(c, { roleId: rAsgAxisC, operation: 'read', constraint: { clearance: 'restricted' }, confirmed2: true });
-    await seedAssignment(c, { empId: fx.empAsgAxisC, roleId: rAsgAxisC, confirmed2: false });
+    await seedAssignment(c, { empId: fx.empAsgAxisC.id, roleId: rAsgAxisC, confirmed2: false });
 
     await c.query('COMMIT');
   } finally {
@@ -230,7 +246,7 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 describe('T-0397 B1 — axis-c (read + confidential clearance) PDP dual-control gate', () => {
   it('axis-c read grant, ONE approver (confirmed2_by NULL) → NOT PDP-active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAxisCSingle, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAxisCSingle.slug, NOW);
     // The ONLY grant on this actor's role is the read+confidential one; it must be
     // gated out because confirmed2_by is NULL. THIS is the hole the prior
     // axis-a/b-only predicate left open (a read op gave the left OR = TRUE).
@@ -238,7 +254,7 @@ describe('T-0397 B1 — axis-c (read + confidential clearance) PDP dual-control 
   });
 
   it('axis-c read grant, TWO approvers (confirmed2_by set) → PDP-active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAxisCDual, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAxisCDual.slug, NOW);
     expect(grants.length).toBe(1);
     expect(grants[0]!.operation).toBe('read');
   });
@@ -249,7 +265,7 @@ describe('T-0397 B1 — axis-c (read + confidential clearance) PDP dual-control 
 // ---------------------------------------------------------------------------
 describe('T-0397 B1 — Q-2 (garbage clearance token) fail-closed', () => {
   it('read grant with a NON-DataClass clearance token, ONE approver → NOT active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empQ2, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empQ2.slug, NOW);
     expect(grants.length).toBe(0);
   });
 });
@@ -259,7 +275,7 @@ describe('T-0397 B1 — Q-2 (garbage clearance token) fail-closed', () => {
 // ---------------------------------------------------------------------------
 describe('T-0397 — axis-a (approve) PDP dual-control gate', () => {
   it('approve grant, ONE approver → NOT active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empApproveSingle, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empApproveSingle.slug, NOW);
     expect(grants.length).toBe(0);
   });
 });
@@ -269,13 +285,13 @@ describe('T-0397 — axis-a (approve) PDP dual-control gate', () => {
 // ---------------------------------------------------------------------------
 describe('T-0397 — non-critical read grants remain single-confirm active', () => {
   it('plain read grant (no clearance marker), ONE approver → STILL active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empReadPlain, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empReadPlain.slug, NOW);
     expect(grants.length).toBe(1);
     expect(grants[0]!.operation).toBe('read');
   });
 
   it('read grant with VALID non-sensitive clearance (internal), ONE approver → STILL active', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empReadInternal, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empReadInternal.slug, NOW);
     expect(grants.length).toBe(1);
   });
 });
@@ -285,7 +301,7 @@ describe('T-0397 — non-critical read grants remain single-confirm active', () 
 // ---------------------------------------------------------------------------
 describe('T-0397 M1 — expired critical grant does not criticize the assignment', () => {
   it('assignment (single confirm) whose ONLY critical grant is EXPIRED → role slug INCLUDED', async () => {
-    const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empExpiredCrit, NOW);
+    const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empExpiredCrit.slug, NOW);
     // The expired approve grant must NOT force the assignment's second-approver
     // gate; the assignment (confirmed2_by NULL) must therefore stay active.
     expect(slugs.length).toBe(1);
@@ -297,12 +313,12 @@ describe('T-0397 M1 — expired critical grant does not criticize the assignment
 // ---------------------------------------------------------------------------
 describe('T-0397 — assignment dual-control gate over axis-c critical role', () => {
   it('assignment (confirmed2_by NULL) to an axis-c critical role → role slug excluded', async () => {
-    const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empAsgAxisC, NOW);
+    const slugs = await getRoleSlugsForActor(getPool(), TENANT, fx.empAsgAxisC.slug, NOW);
     expect(slugs).toEqual([]);
   });
 
   it('same assignment contributes ZERO grants on the PDP path', async () => {
-    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAsgAxisC, NOW);
+    const grants = await getGrantsForSubject(getPool(), TENANT, fx.empAsgAxisC.slug, NOW);
     expect(grants).toEqual([]);
   });
 });
