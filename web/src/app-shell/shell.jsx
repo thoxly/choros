@@ -20,6 +20,8 @@ import OverviewScreen from '../screens/screen-overview.jsx';
 import InboxScreen from '../screens/screen-inbox.jsx';
 import OrgScreen from '../screens/screen-org.jsx';
 import ProcessesScreen from '../screens/screen-processes.jsx';
+// T-0556: read-only process-instance detail view — /processes/:instanceId
+import ProcessInstanceScreen from '../screens/screen-process-instance.jsx';
 import AppsScreen from '../screens/screen-apps.jsx';
 import AppSchemaScreen from '../screens/screen-app-schema.jsx';
 import AppRecordsScreen from '../screens/screen-app-records.jsx';
@@ -1127,6 +1129,10 @@ function AppShell() {
             <Route path="/inbox" element={<InboxScreen />} />
             <Route path="/org" element={<OrgScreen onOpenRights={openRights} />} />
             <Route path="/processes" element={<ProcessesScreen />} />
+            {/* T-0556: read-only process-instance detail. Single-segment param —
+                distinct from the 2-segment /processes/:id/edit and
+                /processes/:processKey/branch-rules below (no route collision). */}
+            <Route path="/processes/:instanceId" element={<ProcessInstanceScreen />} />
             {/* T-0271: agents list + hire + LLM secret-handle bind */}
             <Route path="/agents" element={<AgentsScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />

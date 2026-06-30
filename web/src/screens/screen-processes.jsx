@@ -607,7 +607,9 @@ function ProcessesScreen() {
                     </div>
                   </td>
                   <td className="chs-r">
-                    <Button variant="ghost" size="sm" onClick={() => navigate('/audit')}>Открыть</Button>
+                    {/* T-0556: «Открыть» ведёт на detail-вью экземпляра
+                        /processes/:instanceId (раньше было захардкожено на /audit). */}
+                    <Button variant="ghost" size="sm" onClick={() => navigate(`/processes/${inst.id}`)}>Открыть</Button>
                   </td>
                 </tr>
               ))}
