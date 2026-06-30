@@ -77,6 +77,14 @@ export const NAV_HOME = {
  *  @type {NavZone[]} */
 export const ZONES = [
   // ── 1. РАБОТА — делаю задачи, веду процессы. Аудитория: конечный пользователь.
+  // «Раздел» (Финансы/HR/Продажи) — атрибут бизнес-функции приложения (app.section,
+  // migration 108). Сайдбар строит подсекции зоны РАБОТА динамически из данных:
+  // GET /api/applications → groupAppsBySection() → нав-секции. Управление разделами —
+  // пользовательское действие через screen-apps или агент (PATCH /api/applications/:id).
+  // Построено в T-0540 (E-NAV-IA), НЕ в E16. E16 — рантайм-привязка (триггеры/исходы).
+  //
+  // Функциональные домены (Финансы/HR/Продажи) — динамические разделы T-0540 (E-NAV-IA);
+  // app.section = поле бизнес-функции; groupAppsBySection() строит секции из данных.
   {
     id: "work", label: "Работа", audience: "end-user", order: 1,
     items: [
@@ -84,6 +92,8 @@ export const ZONES = [
       { id: "inbox",     label: "Мои задачи", icon: "inbox",   zone: "work", audience: "end-user", capability: null, frequency: "daily",  order: 1, screen: true, status: "live" },
       // Процессы: GET /api/processes (live), start (live).
       { id: "processes", label: "Процессы",   icon: "process", zone: "work", audience: "end-user", capability: null, frequency: "daily",  order: 2, screen: true, status: "live" },
+      // Динамические секции приложений добавляются в сайдбаре через groupAppsBySection()
+      // (shell.jsx) из GET /api/applications; не в items[] — не статичные пункты.
     ],
   },
 

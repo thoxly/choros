@@ -139,6 +139,7 @@ interface ApplicationRow {
   slug: string;
   display_name: string;
   description: string | null;
+  section: string | null;  // T-0540: бизнес-функция/раздел; NULL → fallback-секция «Другое»
   tier: string;
   created_at: string | number; // bigint comes back as a string from node-postgres
   updated_at: string | number;
@@ -150,6 +151,7 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
     slug: row.slug,
     display_name: row.display_name,
     description: row.description,
+    section: row.section ?? null,  // T-0540: null = «раздел не задан» → fallback-секция «Другое»
     tier: row.tier,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
@@ -157,7 +159,7 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
 }
 
 const APP_SELECT_COLS =
-  "id, slug, display_name, description, tier, created_at, updated_at";
+  "id, slug, display_name, description, section, tier, created_at, updated_at";
 
 // ---------------------------------------------------------------------------
 // Services
@@ -169,18 +171,19 @@ async function createApplication(args: {
   slug: string;
   displayName: string;
   description: string | null;
+  section: string | null;  // T-0540
   nowMs: number;
 }): Promise<ApplicationRow> {
-  const { pool, tenantId, slug, displayName, description, nowMs } = args;
+  const { pool, tenantId, slug, displayName, description, section, nowMs } = args;
   const id = randomUUID();
   return withTenantTx(pool, tenantId, async (client) => {
     try {
       const res = await client.query<ApplicationRow>(
         `INSERT INTO choros.application
-           (tenant_id, id, slug, display_name, description, tier, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'draft', $6, $6)
+           (tenant_id, id, slug, display_name, description, section, tier, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $7)
          RETURNING ${APP_SELECT_COLS}`,
-        [tenantId, id, slug, displayName, description, nowMs],
+        [tenantId, id, slug, displayName, description, section, nowMs],
       );
       return res.rows[0]!;
     } catch (err) {
@@ -190,6 +193,57 @@ async function createApplication(args: {
       }
       throw err;
     }
+  });
+}
+
+// T-0540: update section (and optionally display_name/description) for an existing application.
+async function patchApplication(
+  pool: pg.Pool,
+  tenantId: string,
+  id: string,
+  patch: { section?: string | null; display_name?: string; description?: string | null },
+  nowMs: number,
+): Promise<ApplicationRow | null> {
+  // Build dynamic SET clause from provided fields.
+  const setClauses: string[] = [];
+  const params: unknown[] = [tenantId, id];
+
+  if ("section" in patch) {
+    params.push(patch.section ?? null);
+    setClauses.push(`section = $${params.length}`);
+  }
+  if ("display_name" in patch && patch.display_name !== undefined) {
+    params.push(patch.display_name);
+    setClauses.push(`display_name = $${params.length}`);
+  }
+  if ("description" in patch) {
+    params.push(patch.description ?? null);
+    setClauses.push(`description = $${params.length}`);
+  }
+
+  if (setClauses.length === 0) {
+    // Nothing to update — return current row.
+    return withTenantTx(pool, tenantId, async (client) => {
+      const res = await client.query<ApplicationRow>(
+        `SELECT ${APP_SELECT_COLS} FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+      return res.rows[0] ?? null;
+    });
+  }
+
+  params.push(nowMs);
+  setClauses.push(`updated_at = $${params.length}`);
+
+  return withTenantTx(pool, tenantId, async (client) => {
+    const res = await client.query<ApplicationRow>(
+      `UPDATE choros.application
+          SET ${setClauses.join(", ")}
+        WHERE tenant_id = $1 AND id = $2
+        RETURNING ${APP_SELECT_COLS}`,
+      params,
+    );
+    return res.rows[0] ?? null;
   });
 }
 
@@ -278,6 +332,21 @@ export function registerApplicationRoutes(
       description = body["description"];
     }
 
+    // T-0540: optional section (бизнес-функция / раздел для группировки в нав РАБОТА).
+    let section: string | null = null;
+    if ("section" in body && body["section"] !== null && body["section"] !== undefined) {
+      if (typeof body["section"] !== "string") {
+        throw new HttpError(400, "VALIDATION", "section must be a string or null");
+      }
+      if (body["section"].trim().length === 0) {
+        throw new HttpError(400, "VALIDATION", "section must not be an empty string; use null to clear");
+      }
+      if (body["section"].length > 128) {
+        throw new HttpError(400, "VALIDATION", "section must be at most 128 chars");
+      }
+      section = body["section"];
+    }
+
     const tenantId = await resolveActorTenant(actor);
     const row = await createApplication({
       pool,
@@ -285,6 +354,7 @@ export function registerApplicationRoutes(
       slug,
       displayName,
       description,
+      section,
       nowMs: Date.now(),
     });
 
@@ -317,6 +387,78 @@ export function registerApplicationRoutes(
       const row = await getApplication(pool, tenantId, id);
       if (row === null) {
         // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
+        throw new HttpError(404, "NOT_FOUND", "application not found");
+      }
+
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(serializeApplication(row)));
+    }),
+  );
+
+  // PATCH /api/applications/:id — T-0540: update section (and optionally display_name/description).
+  // Primary use: управление разделами (screen-apps.jsx поповер + агент).
+  // Body: { section?: string | null, display_name?: string, description?: string | null }
+  // Returns 200 with updated application; 404 if not found in caller's tenant.
+  router.register(
+    "PATCH",
+    "/api/applications/:id",
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+      const id = params["id"] ?? "";
+      assertUuidShape(id, "application id");
+
+      const actor = await extractActor(req, pool);
+
+      const rawBody = await readJsonBody(req);
+      if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+        throw new HttpError(400, "VALIDATION", "request body must be a JSON object");
+      }
+      const body = rawBody as Record<string, unknown>;
+
+      // Build patch from provided fields (only what's present in body is updated).
+      const patch: { section?: string | null; display_name?: string; description?: string | null } = {};
+
+      if ("section" in body) {
+        if (body["section"] === null || body["section"] === undefined) {
+          patch.section = null;  // явная очистка раздела
+        } else {
+          if (typeof body["section"] !== "string") {
+            throw new HttpError(400, "VALIDATION", "section must be a string or null");
+          }
+          if ((body["section"] as string).trim().length === 0) {
+            throw new HttpError(400, "VALIDATION", "section must not be an empty string; use null to clear");
+          }
+          if ((body["section"] as string).length > 128) {
+            throw new HttpError(400, "VALIDATION", "section must be at most 128 chars");
+          }
+          patch.section = body["section"] as string;
+        }
+      }
+
+      if ("display_name" in body) {
+        if (typeof body["display_name"] !== "string" || (body["display_name"] as string).trim().length === 0) {
+          throw new HttpError(400, "VALIDATION", "display_name must be a non-empty string");
+        }
+        if ((body["display_name"] as string).length > 256) {
+          throw new HttpError(400, "VALIDATION", "display_name must be at most 256 chars");
+        }
+        patch.display_name = body["display_name"] as string;
+      }
+
+      if ("description" in body) {
+        if (body["description"] !== null && body["description"] !== undefined) {
+          if (typeof body["description"] !== "string") {
+            throw new HttpError(400, "VALIDATION", "description must be a string or null");
+          }
+          patch.description = body["description"] as string;
+        } else {
+          patch.description = null;
+        }
+      }
+
+      const tenantId = await resolveActorTenant(actor);
+      const row = await patchApplication(pool, tenantId, id, patch, Date.now());
+      if (row === null) {
         throw new HttpError(404, "NOT_FOUND", "application not found");
       }
 
