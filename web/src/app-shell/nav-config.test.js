@@ -1,146 +1,240 @@
 /**
  * web/src/app-shell/nav-config.test.js
  *
- * T-0355: IA reshuffle — authoring space ≠ work space.
- * T-0482: F3 IA cleanup — «Формы задач» nav item hidden (duplicate nav removed).
- *
- * Verifies invariants of the nav-config structure:
- *   1. All expected groups exist;
- *   2. Authoring space groups are correctly tagged;
- *   3. Work space groups are correctly tagged;
- *   4. All items have required fields (id, label, icon, status);
- *   5. Routes: items without a `path` override navigate to '/' + id;
- *   6. Items with a `path` override navigate to that path (not '/' + id);
- *   7. No two items share the same id (no duplicates);
- *   8. Every item's status is a valid NavStatus value;
- *   9. Home group (Обзор) has no space tag — it is above both spaces;
- *  10. visibleItems filters hidden items;
- *  11. effectiveStatus falls back to 'soon' for legacy soon:true items;
- *  12. «Формы задач» (id=forms) is hidden (T-0482 F3 cleanup);
- *  13. forms item still EXISTS in config (route /forms preserved for direct links).
+ * T-0538 (NAV-IA / Ф1): 4-zone nav rezoning.
+ * Verifies invariants of the new nav-config structure:
+ *   1. NAV_HOME exists and has no zone (above zones);
+ *   2. ZONES has exactly 4 zones in correct order;
+ *   3. All 19 original ids are present (FF-NAV-MAP);
+ *   4. No duplicate item ids (including 'reference' as intentional addition);
+ *   5. All items have required fields (id, label, icon, status, zone, audience, capability, frequency, order);
+ *   6. All item status values are valid NavStatus;
+ *   7. Capability is null for all items (задел под T-0539, filter not implemented);
+ *   8. WORK zone has no sys/admin items (FF-NAV-NOSYS);
+ *   9. Модельер has path override, not '/modeler';
+ *  10. forms item exists but is hidden (T-0482);
+ *  11. visibleItems filters hidden items;
+ *  12. effectiveStatus falls back to 'soon' for legacy soon:true items;
+ *  13. NAV (compat export) iterates all items for palette (no losses);
+ *  14. paletteDestinations-compatible: screen items accessible via NAV;
+ *  15. reference item has path=/rights/criticality (existing route);
+ *  16. ZONES order: work(1) · constructor(2) · observability(3) · admin(4).
  */
 
 import { describe, it, expect } from 'vitest';
-import { NAV, visibleItems, effectiveStatus } from './nav-config.js';
+import { NAV, NAV_HOME, ZONES, visibleItems, effectiveStatus } from './nav-config.js';
 
-const VALID_STATUSES = new Set(['live', 'demo', 'soon']);
-const VALID_SPACES   = new Set(['authoring', 'work', undefined]);
+const VALID_STATUSES  = new Set(['live', 'demo', 'soon']);
+const VALID_ZONES     = new Set(['work', 'constructor', 'observability', 'admin', null]);
+const VALID_AUDIENCES = new Set(['end-user', 'builder', 'manager', 'admin']);
+const VALID_FREQS     = new Set(['daily', 'weekly', 'rare']);
 
-describe('nav-config T-0355', () => {
-  it('has at least 7 groups (home + 3 authoring + 3 work)', () => {
-    expect(NAV.length).toBeGreaterThanOrEqual(7);
+// All 19 original item ids (overview through assistant-prompt).
+const ORIGINAL_IDS = new Set([
+  'overview', 'apps', 'forms', 'modeler', 'assistant',
+  'inbox', 'processes', 'org', 'agents', 'rights',
+  'ops-overview', 'notifications', 'audit', 'spend', 'reports', 'process-analytics',
+  'llm-connections', 'llm-config', 'assistant-prompt',
+]);
+// FF-NAV-MAP also accepts 'reference' as the intentional new grouping entry-point.
+const ALLOWED_NEW_IDS = new Set(['reference']);
+
+// Systems/admin ids that must NOT appear in zone='work' (FF-NAV-NOSYS).
+const NOSYS_IDS = new Set([
+  'org', 'agents', 'rights', 'reference',
+  'llm-connections', 'llm-config', 'assistant-prompt',
+  'audit', 'spend',
+]);
+
+describe('nav-config T-0538: 4-zone IA', () => {
+
+  // ── NAV_HOME ──────────────────────────────────────────────────────────────
+
+  it('NAV_HOME exists and has no zone (above zones)', () => {
+    expect(NAV_HOME).toBeDefined();
+    expect(NAV_HOME.id).toBe('overview');
+    expect(NAV_HOME.zone).toBeNull();
   });
 
-  it('first group is home (Обзор) with no space', () => {
-    const home = NAV[0];
-    expect(home.home).toBe(true);
-    expect(home.space).toBeUndefined();
+  it('NAV_HOME has all required fields', () => {
+    expect(typeof NAV_HOME.label).toBe('string');
+    expect(typeof NAV_HOME.icon).toBe('string');
+    expect(VALID_STATUSES).toContain(NAV_HOME.status);
+    expect(NAV_HOME.capability).toBeNull();
   });
 
-  it('has exactly one home group', () => {
-    const homes = NAV.filter((g) => g.home);
-    expect(homes).toHaveLength(1);
+  // ── ZONES ─────────────────────────────────────────────────────────────────
+
+  it('ZONES has exactly 4 zones', () => {
+    expect(ZONES).toHaveLength(4);
   });
 
-  it('authoring space includes Конструктор, Модельер, Ассистент groups', () => {
-    const authoringGroups = NAV.filter((g) => g.space === 'authoring').map((g) => g.group);
-    expect(authoringGroups).toContain('Конструктор');
-    expect(authoringGroups).toContain('Модельер');
-    expect(authoringGroups).toContain('Ассистент');
+  it('ZONES are in correct order (work·constructor·observability·admin)', () => {
+    expect(ZONES.map((z) => z.id)).toEqual(['work', 'constructor', 'observability', 'admin']);
+    expect(ZONES.map((z) => z.order)).toEqual([1, 2, 3, 4]);
   });
 
-  it('work space includes Работа, Исполнители и доступ, Наблюдаемость groups', () => {
-    const workGroups = NAV.filter((g) => g.space === 'work').map((g) => g.group);
-    expect(workGroups).toContain('Работа');
-    expect(workGroups).toContain('Исполнители и доступ');
-    expect(workGroups).toContain('Наблюдаемость');
+  it('ZONES have correct human-readable labels', () => {
+    const labels = ZONES.map((z) => z.label);
+    expect(labels).toContain('Работа');
+    expect(labels).toContain('Конструктор');
+    expect(labels).toContain('Наблюдаемость');
+    expect(labels).toContain('Администрирование');
   });
 
-  it('all group space values are valid (authoring | work | undefined)', () => {
-    for (const grp of NAV) {
-      expect(VALID_SPACES).toContain(grp.space);
+  // ── All items ─────────────────────────────────────────────────────────────
+
+  function allItems() {
+    return [NAV_HOME, ...ZONES.flatMap((z) => z.items)];
+  }
+
+  it('all items have required fields (id, label, icon, status, zone, audience, capability, frequency, order)', () => {
+    for (const item of allItems()) {
+      expect(typeof item.id,        `${item.id} missing id`).toBe('string');
+      expect(typeof item.label,     `${item.id} missing label`).toBe('string');
+      expect(typeof item.icon,      `${item.id} missing icon`).toBe('string');
+      expect(VALID_STATUSES,        `${item.id} invalid status: ${item.status}`).toContain(item.status);
+      expect(VALID_ZONES,           `${item.id} invalid zone: ${item.zone}`).toContain(item.zone);
+      expect(VALID_AUDIENCES,       `${item.id} invalid audience: ${item.audience}`).toContain(item.audience);
+      expect(VALID_FREQS,           `${item.id} invalid frequency: ${item.frequency}`).toContain(item.frequency);
+      expect(typeof item.order,     `${item.id} missing order`).toBe('number');
     }
   });
 
-  it('all items have id, label, icon, and status', () => {
-    for (const grp of NAV) {
-      for (const item of grp.items) {
-        expect(typeof item.id,    `${grp.group}/${item.label} missing id`).toBe('string');
-        expect(typeof item.label, `${grp.group}/${item.id} missing label`).toBe('string');
-        expect(typeof item.icon,  `${grp.group}/${item.id} missing icon`).toBe('string');
-        expect(VALID_STATUSES, `${grp.group}/${item.id} invalid status: ${item.status}`).toContain(item.status);
-      }
+  it('FF-NAV-MAP: all 19 original ids present, no unexpected new ids', () => {
+    const ids = new Set(allItems().map((i) => i.id));
+    for (const expected of ORIGINAL_IDS) {
+      expect(ids, `Missing original id: ${expected}`).toContain(expected);
     }
+    const unexpected = [...ids].filter((id) => !ORIGINAL_IDS.has(id) && !ALLOWED_NEW_IDS.has(id));
+    expect(unexpected, `Unexpected new ids: ${unexpected}`).toHaveLength(0);
   });
 
   it('no duplicate item ids', () => {
-    const ids = NAV.flatMap((g) => g.items.map((i) => i.id));
+    const ids = allItems().map((i) => i.id);
     const unique = new Set(ids);
     expect(ids.length).toBe(unique.size);
   });
 
-  it('items without path override use "/" + id as navigation target', () => {
-    for (const grp of NAV) {
-      for (const item of grp.items) {
-        if (!item.path) {
-          // The shell does: navigate('/' + item.id)
-          // No assertion on id format — just confirm path is absent so shell uses id.
-          expect(item.id).toBeTruthy();
-        }
+  it('all capability values are null (T-0539 задел, filter not implemented)', () => {
+    for (const item of allItems()) {
+      expect(item.capability, `${item.id} capability must be null until T-0539`).toBeNull();
+    }
+  });
+
+  it('all zone items have zone matching their parent zone id', () => {
+    for (const zone of ZONES) {
+      for (const item of zone.items) {
+        expect(item.zone, `${item.id} zone mismatch`).toBe(zone.id);
       }
     }
   });
 
-  it('Модельер item has a path override (not default "/" + id)', () => {
-    const modelerGroup = NAV.find((g) => g.group === 'Модельер');
-    expect(modelerGroup).toBeDefined();
-    const modeler = modelerGroup.items.find((i) => i.id === 'modeler');
+  // ── FF-NAV-NOSYS ──────────────────────────────────────────────────────────
+
+  it('FF-NAV-NOSYS: WORK zone has no system/admin items', () => {
+    const workZone = ZONES.find((z) => z.id === 'work');
+    expect(workZone).toBeDefined();
+    for (const item of workZone.items) {
+      expect(NOSYS_IDS, `System item ${item.id} must not be in WORK zone`).not.toContain(item.id);
+    }
+  });
+
+  // ── Zone-specific checks ──────────────────────────────────────────────────
+
+  it('WORK zone contains inbox and processes', () => {
+    const workZone = ZONES.find((z) => z.id === 'work');
+    const ids = workZone.items.map((i) => i.id);
+    expect(ids).toContain('inbox');
+    expect(ids).toContain('processes');
+  });
+
+  it('CONSTRUCTOR zone contains apps, forms(hidden), modeler, assistant', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const ids = cz.items.map((i) => i.id);
+    expect(ids).toContain('apps');
+    expect(ids).toContain('forms');
+    expect(ids).toContain('modeler');
+    expect(ids).toContain('assistant');
+  });
+
+  it('OBSERVABILITY zone contains ops-overview, reports, process-analytics, audit, spend, notifications', () => {
+    const oz = ZONES.find((z) => z.id === 'observability');
+    const ids = oz.items.map((i) => i.id);
+    for (const id of ['ops-overview', 'reports', 'process-analytics', 'audit', 'spend', 'notifications']) {
+      expect(ids, `Missing ${id} in observability zone`).toContain(id);
+    }
+  });
+
+  it('ADMIN zone contains org, agents, rights, reference, llm-connections, llm-config, assistant-prompt', () => {
+    const az = ZONES.find((z) => z.id === 'admin');
+    const ids = az.items.map((i) => i.id);
+    for (const id of ['org', 'agents', 'rights', 'reference', 'llm-connections', 'llm-config', 'assistant-prompt']) {
+      expect(ids, `Missing ${id} in admin zone`).toContain(id);
+    }
+  });
+
+  it('ADMIN items have subgroup field', () => {
+    const az = ZONES.find((z) => z.id === 'admin');
+    for (const item of az.items) {
+      expect(typeof item.subgroup, `${item.id} missing subgroup`).toBe('string');
+    }
+  });
+
+  // ── Конкретные инварианты пунктов ─────────────────────────────────────────
+
+  it('forms item is hidden (T-0482)', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const formsItem = cz.items.find((i) => i.id === 'forms');
+    expect(formsItem).toBeDefined();
+    expect(formsItem.hidden).toBe(true);
+  });
+
+  it('forms is filtered by visibleItems', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const visible = visibleItems(cz);
+    expect(visible.map((i) => i.id)).not.toContain('forms');
+  });
+
+  it('modeler has path override (not /modeler)', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const modeler = cz.items.find((i) => i.id === 'modeler');
     expect(modeler).toBeDefined();
     expect(modeler.path).toBeTruthy();
     expect(modeler.path).not.toBe('/modeler');
-  });
-
-  it('Модельер path is a valid existing deep-route path', () => {
-    const modelerGroup = NAV.find((g) => g.group === 'Модельер');
-    const modeler = modelerGroup.items.find((i) => i.id === 'modeler');
-    // Must route to the existing BPMN editor path, not a non-existent /modeler.
     expect(modeler.path).toMatch(/^\/processes\/.+\/edit$/);
   });
 
-  it('Ассистент is in the authoring space', () => {
-    const assistantGroup = NAV.find((g) => g.group === 'Ассистент');
-    expect(assistantGroup).toBeDefined();
-    expect(assistantGroup.space).toBe('authoring');
-    const assistant = assistantGroup.items.find((i) => i.id === 'assistant');
-    expect(assistant).toBeDefined();
+  it('reference item has path=/rights/criticality (existing route)', () => {
+    const az = ZONES.find((z) => z.id === 'admin');
+    const ref = az.items.find((i) => i.id === 'reference');
+    expect(ref).toBeDefined();
+    expect(ref.path).toBe('/rights/criticality');
   });
 
-  it('authoring groups come before work groups in NAV (after home)', () => {
-    const nonHome = NAV.filter((g) => !g.home);
-    let seenWork = false;
-    for (const grp of nonHome) {
-      if (grp.space === 'work') seenWork = true;
-      if (seenWork) {
-        expect(grp.space).not.toBe('authoring');
-      }
-    }
+  it('rights item (Доступ) has no path override (navigates to /rights)', () => {
+    const az = ZONES.find((z) => z.id === 'admin');
+    const rights = az.items.find((i) => i.id === 'rights');
+    expect(rights).toBeDefined();
+    expect(rights.path).toBeUndefined();
+    expect(rights.label).toBe('Доступ');
   });
 
-  it('visibleItems filters out hidden items', () => {
-    const grpWithHidden = {
-      group: 'Test',
+  // ── Utility functions ─────────────────────────────────────────────────────
+
+  it('visibleItems filters hidden items', () => {
+    const fake = {
       items: [
         { id: 'a', label: 'A', icon: 'x', status: 'live' },
         { id: 'b', label: 'B', icon: 'x', status: 'live', hidden: true },
       ],
     };
-    expect(visibleItems(grpWithHidden)).toHaveLength(1);
-    expect(visibleItems(grpWithHidden)[0].id).toBe('a');
+    expect(visibleItems(fake)).toHaveLength(1);
+    expect(visibleItems(fake)[0].id).toBe('a');
   });
 
   it('effectiveStatus falls back on legacy soon:true', () => {
-    const item = { id: 'x', label: 'X', icon: 'x', soon: true };
-    expect(effectiveStatus(item)).toBe('soon');
+    expect(effectiveStatus({ id: 'x', label: 'X', icon: 'x', soon: true })).toBe('soon');
   });
 
   it('effectiveStatus returns explicit status if set', () => {
@@ -148,56 +242,21 @@ describe('nav-config T-0355', () => {
     expect(effectiveStatus({ id: 'x', label: 'X', icon: 'x', status: 'live' })).toBe('live');
   });
 
-  it('no authoring item has status live except Приложения and Модельер (both have real backends)', () => {
-    // T-0508: Модельер (modeler) is a real working feature (bpmn-js + real save/publish
-    // to Flowable) so its status was updated from 'demo' to 'live'.
-    // This test now allows both 'apps' and 'modeler' to be live; assistant/forms remain demo.
-    const authoringItems = NAV
-      .filter((g) => g.space === 'authoring')
-      .flatMap((g) => g.items);
-    const liveAuthoring = authoringItems.filter((i) => i.status === 'live');
-    const liveIds = liveAuthoring.map((i) => i.id);
-    const unexpectedLive = liveIds.filter((id) => id !== 'apps' && id !== 'modeler');
-    expect(unexpectedLive).toHaveLength(0);
-    // Modeler must now be live (T-0508)
-    expect(liveIds).toContain('modeler');
+  // ── NAV compat export (CommandPalette) ────────────────────────────────────
+
+  it('NAV compat export has home group first + 4 zone groups = 5 total', () => {
+    expect(NAV).toHaveLength(5);
+    expect(NAV[0].home).toBe(true);
+    expect(NAV[0].group).toBe('Обзор');
   });
 
-  // T-0482 [F3]: «Формы задач» nav cleanup --------------------------------
-
-  it('T-0482: forms item (id=forms) exists in config (route /forms preserved)', () => {
-    // The /forms route is kept for power-user direct-link access (FormBuilder).
-    // The item must still exist in NAV; only its visibility changes.
-    const allItems = NAV.flatMap((g) => g.items);
-    const formsItem = allItems.find((i) => i.id === 'forms');
-    expect(formsItem).toBeDefined();
-  });
-
-  it('T-0482: forms item is hidden from sidebar (hidden: true)', () => {
-    // The standalone «Формы задач» entry is a duplicate nav path:
-    //   • step-form binding → modeler UserTaskFormBindingPanel (T-0461)
-    //   • record-form → FieldControl F1 renderer (T-0480)
-    // Setting hidden:true removes it from the sidebar while preserving /forms.
-    const allItems = NAV.flatMap((g) => g.items);
-    const formsItem = allItems.find((i) => i.id === 'forms');
-    expect(formsItem.hidden).toBe(true);
-  });
-
-  it('T-0482: forms item is NOT returned by visibleItems (not rendered in sidebar)', () => {
-    // visibleItems() is the filter the shell uses when building the nav list.
-    // forms must be filtered out so the sidebar stays clean.
-    const konstruktorGroup = NAV.find((g) => g.group === 'Конструктор');
-    expect(konstruktorGroup).toBeDefined();
-    const visible = visibleItems(konstruktorGroup);
-    const ids = visible.map((i) => i.id);
-    expect(ids).not.toContain('forms');
-  });
-
-  it('T-0482: Приложения is still visible in Конструктор after forms removal', () => {
-    // Guard against accidentally hiding Приложения.
-    const konstruktorGroup = NAV.find((g) => g.group === 'Конструктор');
-    const visible = visibleItems(konstruktorGroup);
-    const ids = visible.map((i) => i.id);
-    expect(ids).toContain('apps');
+  it('NAV compat: all ZONES items reachable via NAV.flatMap(g => g.items)', () => {
+    const navIds = new Set(NAV.flatMap((g) => g.items.map((i) => i.id)));
+    for (const zone of ZONES) {
+      for (const item of zone.items) {
+        expect(navIds, `${item.id} not in NAV compat export`).toContain(item.id);
+      }
+    }
+    expect(navIds).toContain('overview');
   });
 });
