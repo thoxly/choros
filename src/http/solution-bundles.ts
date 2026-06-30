@@ -245,6 +245,11 @@ export function registerSolutionBundleRoutes(router: Router, deps: SolutionBundl
           } else if (pubResult.status === "agent_unresolved") {
             // [SECURITY] an agentTask executor did not resolve to a provisioned agent.
             results.push({ kind: "process", ref: key, ok: false, detail: "AGENT_REF_UNRESOLVED" });
+          } else if (pubResult.status === "app_binding_unpublished") {
+            // T-0559: a bound application is still a draft (sandbox). In a bundle this
+            // should not occur — §1 promotes the bound apps before this loop — so it
+            // surfaces only if an app failed to promote; recorded as a partial failure.
+            results.push({ kind: "process", ref: key, ok: false, detail: "APP_BINDING_UNPUBLISHED" });
           } else if (pubResult.status === "engine_unavailable") {
             results.push({ kind: "process", ref: key, ok: false, detail: pubResult.code });
           } else {
