@@ -4,7 +4,10 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState } from '../../components/components.jsx';
+import {
+  ExecutorBadge, MonoId, Mono, OpChip, Button, KitIcon, LoadingState, ErrorState,
+  DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
+} from '../../components/components.jsx';
 import { TRAIL as TRAIL_SEED, ProvenanceTag, SectionHead } from './ra-data.jsx';
 import { formatDate } from '../../lib/format.js';
 
@@ -156,48 +159,56 @@ function GrantTrailScreen() {
         <ErrorState compact title="Не удалось загрузить журнал" message={loadError} onRetry={load} />
       )}
 
-      {/* таблица */}
+      {/* таблица — T-0547: семантическая <table> вместо div-грида */}
       <div className="chs-trail__scroll">
-        <div className="chs-trailtable">
-          <div className="chs-trailrow chs-trailrow--head">
-            <span>Время (UTC+3)</span>
-            <span>ID</span>
-            <span>Действие</span>
-            <span>Кто выдал</span>
-            <span>Кому</span>
-            <span>Роль · грант</span>
-            <span>Охват</span>
-            <span>Происхождение</span>
-          </div>
-          {rows.map((r) => {
-            const am = ACTION_META[r.action];
-            return (
-              <div key={r.id} className={`chs-trailrow ${r.crit ? "chs-trailrow--crit" : ""}`}>
-                <span className="chs-trailcell chs-trailcell--ts"><Mono>{r.ts}</Mono></span>
-                <span className="chs-trailcell"><MonoId chip>{r.id}</MonoId></span>
-                <span className="chs-trailcell">
-                  <span className={`chs-actchip chs-actchip--${am.cls}`}><span className="chs-actchip__dot" />{am.label}</span>
-                  {r.crit && <span className="chs-trailcrit" title="критичный грант">крит.</span>}
-                </span>
-                <span className="chs-trailcell"><ExecutorBadge type={r.actor.type} name={r.actor.name} /></span>
-                <span className="chs-trailcell"><ExecutorBadge type={r.subject.type} name={r.subject.name} /></span>
-                <span className="chs-trailcell chs-trailcell--grant">
-                  <span className="chs-trailrole">{r.role}</span>
-                  <span className="chs-trailgrant"><OpChip op={r.op} /><Mono className="chs-trailres">{r.res.replace(/^mcp:\/\//, "")}</Mono></span>
-                </span>
-                <span className="chs-trailcell chs-trailcell--scope">{r.scope}</span>
-                <span className="chs-trailcell chs-trailcell--prov">
-                  <ProvenanceTag by={r.proposed} />
-                  <span className="chs-trailconfirm">
-                    <KitIcon name="success" />{r.confirmed.length > 1 ? <KitIcon name="success" /> : null}{" "}
-                    {r.confirmed.join(", ")}
-                  </span>
-                </span>
-              </div>
-            );
-          })}
-          {rows.length === 0 && <div className="chs-trail__empty">Записей по фильтру нет.</div>}
-        </div>
+        <DataTable label="Журнал выдачи прав" className="chs-trailtable">
+          <DataTableHead>
+            <tr className="chs-trailrow--head">
+              <DataTableHeadCell>Время (UTC+3)</DataTableHeadCell>
+              <DataTableHeadCell>ID</DataTableHeadCell>
+              <DataTableHeadCell>Действие</DataTableHeadCell>
+              <DataTableHeadCell>Кто выдал</DataTableHeadCell>
+              <DataTableHeadCell>Кому</DataTableHeadCell>
+              <DataTableHeadCell>Роль · грант</DataTableHeadCell>
+              <DataTableHeadCell>Охват</DataTableHeadCell>
+              <DataTableHeadCell>Происхождение</DataTableHeadCell>
+            </tr>
+          </DataTableHead>
+          <DataTableBody>
+            {rows.map((r) => {
+              const am = ACTION_META[r.action];
+              return (
+                <DataTableRow key={r.id} className={r.crit ? "chs-trailrow--crit" : ""}>
+                  <DataTableCell className="chs-trailcell chs-trailcell--ts"><Mono>{r.ts}</Mono></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><MonoId chip>{r.id}</MonoId></DataTableCell>
+                  <DataTableCell className="chs-trailcell">
+                    <span className={`chs-actchip chs-actchip--${am.cls}`}><span className="chs-actchip__dot" />{am.label}</span>
+                    {r.crit && <span className="chs-trailcrit" title="критичный грант">крит.</span>}
+                  </DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ExecutorBadge type={r.actor.type} name={r.actor.name} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell"><ExecutorBadge type={r.subject.type} name={r.subject.name} /></DataTableCell>
+                  <DataTableCell className="chs-trailcell chs-trailcell--grant">
+                    <span className="chs-trailrole">{r.role}</span>
+                    <span className="chs-trailgrant"><OpChip op={r.op} /><Mono className="chs-trailres">{r.res.replace(/^mcp:\/\//, "")}</Mono></span>
+                  </DataTableCell>
+                  <DataTableCell className="chs-trailcell chs-trailcell--scope">{r.scope}</DataTableCell>
+                  <DataTableCell className="chs-trailcell chs-trailcell--prov">
+                    <ProvenanceTag by={r.proposed} />
+                    <span className="chs-trailconfirm">
+                      <KitIcon name="success" />{r.confirmed.length > 1 ? <KitIcon name="success" /> : null}{" "}
+                      {r.confirmed.join(", ")}
+                    </span>
+                  </DataTableCell>
+                </DataTableRow>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={8} className="chs-trail__empty">Записей по фильтру нет.</td>
+              </tr>
+            )}
+          </DataTableBody>
+        </DataTable>
         <div className="chs-trail__foot">
           <span className="chs-trail__footglyph" />
           Журнал неизменяем (append-only). Каждая запись — часть единого аудит-лога инстанса; правки и удаления невозможны.
