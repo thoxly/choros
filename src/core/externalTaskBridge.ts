@@ -180,7 +180,7 @@ async function lookupExternalTaskId(
  * values needed for DMN evaluation (e.g. `amount` for the ТЭЛ threshold gate).
  *
  * process_def_id is the BPMN processDefinitionKey stored at enqueue time
- * (migration 109). When non-null it enables precise per-process scoping in
+ * (migration 111). When non-null it enables precise per-process scoping in
  * loadPublishedRuleTables, eliminating the NULL-union cross-contamination risk.
  *
  * Returns undefined when the job row is not found or has no variables.
@@ -296,7 +296,7 @@ export async function runBridgeOnce(
       // Idempotent enqueue: idempotency_key = externalTask.id (FR-1 / ADR §2.A).
       // T-0534: pass processDefinitionKey + processInstanceId so the triage seam
       // can scope rule-table lookups by process (stored in job.process_def_id /
-      // job.instance_id via migration 109).
+      // job.instance_id via migration 111).
       await jobStore.enqueue(
         topic,
         task.variables,
@@ -406,7 +406,7 @@ export function makeExternalTaskDeliver(
               // lookup to this process when the key is known.
               const instanceVariables = jobInfo.variables;
               // T-0534: prefer the stored process_def_id (captured at fetchAndLock
-              // from the Flowable wire, migration 109) over the variable-extracted
+              // from the Flowable wire, migration 111) over the variable-extracted
               // fallback. The stored key scopes loadPublishedRuleTables precisely to
               // this process, avoiding the NULL-union cross-contamination risk
               // (T-0524 unscoped path). Fall back to resolveAuthoredProcessKey only
