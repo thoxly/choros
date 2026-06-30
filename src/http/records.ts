@@ -95,6 +95,8 @@ import {
   type RecordsPage,
 } from "../core/data-access-port.js";
 import type { Grant } from "../core/grant-lattice.js";
+import { extractDerivedFields } from "../core/rollup-contract.js";
+import { computeAllDerivedFields } from "../db/derived-fields-dao.js";
 import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 
 // ---------------------------------------------------------------------------
@@ -1331,6 +1333,44 @@ export function registerRecordRoutes(
         const unionVisible = new Set(Object.keys(rawData));
         const { redacted } = applyFieldVisibilityRedaction(rawData, fvGrants, unionVisible, fvPolicy);
         serialized["data"] = redacted;
+      }
+
+      // T-0407 [D7-8]: compute derived fields (rollup / matrix-lookup) on-read.
+      // PD-20: aggregates are computed by the DB (GROUP BY / PK scan); the browser
+      // receives the small result map. Derived values are NEVER stored in record.data
+      // (schemaSlot = "derived"); they are appended here as a separate `derived` key.
+      // ADR §6 / no-rollup-of-rollup: the DB query accesses raw record.data fields only.
+      const derivedSpecs = extractDerivedFields(row.record_schema);
+      if (derivedSpecs.length > 0) {
+        const recordData =
+          row.data !== null && typeof row.data === "object" && !Array.isArray(row.data)
+            ? (row.data as Record<string, unknown>)
+            : {};
+        // Run inside a tenant-scoped transaction so RLS + explicit WHERE guard applies.
+        const derivedMap = await (async () => {
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            await client.query(
+              `SET LOCAL choros.tenant_id = '${tenantId}'`,
+            );
+            const result = await computeAllDerivedFields(
+              client,
+              tenantId,
+              id,
+              recordData,
+              derivedSpecs,
+            );
+            await client.query("COMMIT");
+            return result;
+          } catch {
+            await client.query("ROLLBACK");
+            return {};
+          } finally {
+            client.release();
+          }
+        })();
+        serialized["derived"] = derivedMap;
       }
 
       res.statusCode = 200;
