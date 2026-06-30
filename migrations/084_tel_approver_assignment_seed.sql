@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 084 · TEL approver+initiator role seed + confirmed assignments (T-0362 E15-gap fix)
 --
 -- CONTEXT:

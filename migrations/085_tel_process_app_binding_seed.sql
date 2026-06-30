@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 085 · telLinear → tel-approval process_app_binding seed (E15 step→entity last mile, T-0362/T-0335)
 --
 -- CONTEXT:

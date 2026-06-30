@@ -24,6 +24,23 @@
 // SQL files may reference env placeholders of the form ${VAR:-default} (e.g. the
 // dev-only choros_app password); these are expanded before execution so prod
 // passwords are injected at deploy time and never committed (RL-1/NF-5).
+//
+// DEMO-SEED GATE (T-0549, founder decision 2026-06-30, flag T-0299-mock-removal):
+//   A migration whose FIRST line is the sentinel `-- @demo-seed` carries
+//   *demonstration* content (a fake reference company: TEL procurement process,
+//   vendor-CRM, ₽ catalogs, contractor directory) — NOT schema and NOT system
+//   bootstrap. Such files are applied only when CHOROS_SEED_DEMO is truthy.
+//
+//   CHOROS_SEED_DEMO defaults to ON (unset / '1' / 'true' / 'yes' / 'on') so dev,
+//   CI, and the db-fitness template keep their demo fixtures (many tests assert on
+//   them). The prod stack (docker-compose.prod.yml) sets CHOROS_SEED_DEMO=0, so a
+//   fresh production deploy comes up with NO fake company — a new human lands in a
+//   clean, empty tenant. The structural schema and the genesis-owner bootstrap silo
+//   (e.g. migrations 013/019/026, NOT sentinel-marked) always apply, in every mode.
+//
+//   When demo is off, sentinel files are simply never applied and never recorded in
+//   schema_migrations (they stay "pending" but inert); dependent later migrations
+//   (e.g. 086/087) are pure keyed UPDATEs that no-op on the absent rows.
 
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +54,23 @@ const SCHEMA = 'choros';
 const MIGRATION_FILE_RE = /^(\d{3,}_[A-Za-z0-9_]+)\.sql$/;
 // ${VAR} or ${VAR:-default}
 const ENV_PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
+// A demo-seed migration declares itself on its FIRST line (optional shebang-free).
+const DEMO_SENTINEL_RE = /^[ \t]*--[ \t]*@demo-seed\b/;
+
+/**
+ * Demo seed applies by default; only an explicit OFF value disables it.
+ * OFF ∈ {0, false, no, off} (case-insensitive). Anything else (incl. unset) = ON.
+ */
+function isDemoSeedEnabled() {
+  const v = (process.env.CHOROS_SEED_DEMO ?? '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'no' || v === 'off');
+}
+
+/** True iff the migration file's first line is the `-- @demo-seed` sentinel. */
+function isDemoSeedFile(rawSql) {
+  const firstLine = rawSql.slice(0, rawSql.indexOf('\n') === -1 ? undefined : rawSql.indexOf('\n'));
+  return DEMO_SENTINEL_RE.test(firstLine);
+}
 
 function expandEnv(sql) {
   return sql.replace(ENV_PLACEHOLDER_RE, (_m, name, dflt) => {
@@ -98,8 +132,22 @@ async function main() {
     }
 
     // 4. Apply each pending file in its own transaction.
+    const demoEnabled = isDemoSeedEnabled();
+    if (!demoEnabled) {
+      console.log('migrations: CHOROS_SEED_DEMO is off — demo-seed migrations will be skipped (clean prod).');
+    }
+    let applied_count = 0;
+    let skipped_demo = 0;
     for (const { version, file } of pending) {
       const raw = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+      // Demo-seed gate: a `-- @demo-seed` file is inert when demo is disabled.
+      // Not executed and not recorded (stays pending/inert) so toggling demo on
+      // later still applies it. No partial state: the txn below never opens.
+      if (!demoEnabled && isDemoSeedFile(raw)) {
+        skipped_demo += 1;
+        console.log(`migrations: skipped demo-seed ${version} (CHOROS_SEED_DEMO off)`);
+        continue;
+      }
       const sql = expandEnv(raw);
       try {
         await client.query('BEGIN;');
@@ -112,6 +160,7 @@ async function main() {
           [version],
         );
         await client.query('COMMIT;');
+        applied_count += 1;
         console.log(`migrations: applied ${version}`);
       } catch (err) {
         await client.query('ROLLBACK;');
@@ -121,7 +170,10 @@ async function main() {
       }
     }
 
-    console.log(`migrations: applied ${pending.length} file(s).`);
+    console.log(
+      `migrations: applied ${applied_count} file(s)` +
+        (skipped_demo > 0 ? `, skipped ${skipped_demo} demo-seed file(s).` : '.'),
+    );
   } finally {
     await client.end();
   }

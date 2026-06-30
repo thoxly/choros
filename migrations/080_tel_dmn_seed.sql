@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 080 · tel_dmn_seed (T-0340 E15-S5)
 --
 -- DATA-ONLY migration: seed the 5,000,000 ₽ approval-threshold DMN rule table

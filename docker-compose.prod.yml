@@ -48,6 +48,12 @@ services:
       CHOROS_AUTH_MODE: ${CHOROS_AUTH_MODE:?CHOROS_AUTH_MODE required for prod — set in .env.prod}
       NODE_ENV:         production
       PORT:             ${PORT:?PORT required for prod — set in .env.prod}
+      # T-0549 — clean prod: the migration runner (ops/docker-entrypoint.sh →
+      # migrations/run.mjs) skips every `-- @demo-seed` migration, so a fresh
+      # production deploy comes up with NO fake reference company (TEL process,
+      # vendor-CRM, ₽ catalogs, contractor directory). A new human lands in a
+      # clean, empty tenant. Override to "1" only to deliberately demo on prod.
+      CHOROS_SEED_DEMO: ${CHOROS_SEED_DEMO:-0}
 
 volumes:
   choros_pgdata_prod: {}   # physically isolated from choros_pgdata (dev)

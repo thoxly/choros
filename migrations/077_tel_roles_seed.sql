@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 077 · TEL process role seed (T-0336 / E15-S2)
 --
 -- Adds the two canonical TEL-linear roles that are referenced by
