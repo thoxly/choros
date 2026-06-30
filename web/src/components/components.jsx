@@ -804,6 +804,121 @@ function Select({
   );
 }
 
+/* ============================================================================
+   T-0547 — DataTable / Card / Badge
+   Семантические примитивы с ARIA-ролями и токенами.
+   ============================================================================ */
+
+/* -------------------------------- Badge ---------------------------------- */
+/* Inline-метка с тоном (нейтральный / info / success / warning / danger).
+   Дублирует тон цвет+текстом (§1.4.1).
+   a11y: aria-label если иконка без текста; иначе span декоративный. */
+const BADGE_TONES = {
+  neutral: "chs-badge--neutral",
+  info:    "chs-badge--info",
+  success: "chs-badge--success",
+  warning: "chs-badge--warning",
+  danger:  "chs-badge--danger",
+};
+function Badge({ tone = "neutral", children, className = "", ...rest }) {
+  const cls = BADGE_TONES[tone] || BADGE_TONES.neutral;
+  return (
+    <span className={`chs-badge ${cls} ${className}`} {...rest}>
+      {children}
+    </span>
+  );
+}
+
+/* --------------------------------- Card ---------------------------------- */
+/* Поверхность с заголовком (head), телом и опциональным подвалом (foot).
+   role=region + aria-labelledby привязывают заголовок к секции.
+   Доступен без CSS (семантика не зависит от отображения). */
+function Card({ title, children, footer, actions, className = "", labelId, role = "region", ...rest }) {
+  const autoId = useId();
+  const headingId = labelId || (title ? `chs-card-title-${autoId}` : undefined);
+  return (
+    <div
+      className={`chs-card ${className}`}
+      role={role}
+      aria-labelledby={headingId}
+      {...rest}
+    >
+      {title && (
+        <div className="chs-card__head">
+          <h2 className="chs-card__title" id={headingId}>{title}</h2>
+          {actions && <div className="chs-card__actions">{actions}</div>}
+        </div>
+      )}
+      <div className="chs-card__body">{children}</div>
+      {footer && <div className="chs-card__foot">{footer}</div>}
+    </div>
+  );
+}
+
+/* ------------------------------- DataTable ------------------------------- */
+/* Семантическая таблица: role=table + aria-label. Шапка sticky (top:0).
+   Использует нативные <table>/<thead>/<tbody>/<tr>/<th>/<td> — AT (скринридеры,
+   ВОЗ WCAG 2.1 SC 1.3.1) понимает таблицу без ARIA-обёрток.
+   Классы .chs-table/.chs-num/.chs-r/.chs-c уже в components.css (DenseTable canon).
+
+   Экспортируемые sub-компоненты: DataTableHead, DataTableBody,
+   DataTableRow, DataTableCell, DataTableHeadCell.
+   Позволяет миксовать нативный HTML (тонкая обёртка) без блокировки кастомизации. */
+
+function DataTable({ children, label, caption, className = "", ...rest }) {
+  return (
+    <div className="chs-table-wrap" style={{ overflowX: 'auto' }}>
+      <table
+        className={`chs-table ${className}`}
+        aria-label={label}
+        {...rest}
+      >
+        {caption && <caption className="chs-sr-only">{caption}</caption>}
+        {children}
+      </table>
+    </div>
+  );
+}
+
+function DataTableHead({ children, ...rest }) {
+  return <thead {...rest}>{children}</thead>;
+}
+
+function DataTableBody({ children, ...rest }) {
+  return <tbody {...rest}>{children}</tbody>;
+}
+
+function DataTableRow({ children, onClick, highlighted = false, faded = false, className = "", ...rest }) {
+  return (
+    <tr
+      className={`${highlighted ? "chs-table__row--hl" : ""} ${faded ? "chs-table__row--faded" : ""} ${className}`}
+      onClick={onClick}
+      style={onClick ? { cursor: 'pointer' } : undefined}
+      {...rest}
+    >
+      {children}
+    </tr>
+  );
+}
+
+function DataTableHeadCell({ children, numeric = false, right = false, center = false, className = "", ...rest }) {
+  const cls = [numeric || right ? "chs-num" : "", center ? "chs-c" : "", className].filter(Boolean).join(" ");
+  return (
+    <th className={cls || undefined} scope="col" {...rest}>
+      {children}
+    </th>
+  );
+}
+
+function DataTableCell({ children, numeric = false, right = false, center = false, className = "", ...rest }) {
+  const cls = [(numeric || right) ? "chs-num" : right ? "chs-r" : "", center ? "chs-c" : "", className].filter(Boolean).join(" ");
+  return (
+    <td className={cls || undefined} {...rest}>
+      {children}
+    </td>
+  );
+}
+
 export {
   ExecGlyph, ExecutorBadge, MonoId, Mono, StatusChip, Button, Field, Select,
   BudgetMeter, ReservationMeter, RoleAssignment, OpChip, DerivedChip,
@@ -811,4 +926,6 @@ export {
   KitIcon, Spinner,
   Modal, Drawer, ConfirmDialog, EmptyState, LoadingState, Skeleton, ErrorState,
   Popover, Tooltip, Toast, ToastViewport, useToasts,
+  Badge, Card,
+  DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
 };
