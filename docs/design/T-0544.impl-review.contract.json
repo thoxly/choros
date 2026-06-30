@@ -1,0 +1,91 @@
+{
+  "task_id": "T-0544",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true,
+    "web_build_green": true,
+    "forms_suite_passed": 235,
+    "forms_suite_failed": 0,
+    "forms_suite_files": 14,
+    "critical_tests": {
+      "form-document-soglasovanie.test.js": "6/6 PASS (incl. 'persists round-trip-safe (JSON serialisable + stable)')",
+      "form-document.test.js": "18/18 PASS (round-trip / PALETTE / WIDGET_COMPAT invariants)",
+      "FormDocumentRenderer.test.jsx": "7/7 PASS (registry-dispatched render, behavioral no-op)",
+      "widget-registry.test.js": "12/12 PASS (10-node 1:1, closed-by-default, manifest render-free, PALETTE shape)",
+      "history-stack.test.js": "7/7 PASS (push/undo/redo/cap/no-op)",
+      "form-document-ops-t0544.test.js": "8/8 PASS (moveNode/insertAt cross-container, binding verbatim, no-mutate)",
+      "form-document-ops.test.js": "10/10 PASS (pre-existing ops unchanged)"
+    },
+    "notes": "cd web && npm run build → vite build exits 0 (clean, only the pre-existing >500kB chunk-size advisory). npx vitest run src/forms → 235/235 across 14 files, ZERO failures. The named critical gates are all green: form-document-soglasovanie (round-trip-safe persist) 6/6 and form-document round-trip 18/18 — the registry refactor is a true behavioral no-op for form rendering. The 'Invalid hook call' stderr lines are pre-existing test-harness noise in field-renderer-d76/FormDocumentRenderer (static render of hook-using components), unrelated to T-0544, and those suites still pass."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "pass",
+      "axis": 1,
+      "location": "web/src/forms/widget-registry.js (DESCRIPTOR_META + register loop) + FormDocumentRenderer.jsx:357-371 (FormNode) + form-document.js:54,121,159 (PALETTE/WIDGET_COMPAT derived)",
+      "issue": "FF-REG-1 satisfied: ONE declarative registry is the single source. widget-registry.js holds exactly 10 descriptors = today's 10 node types (section/columns/tabs/divider/text/field/table/readout/relation/custom), seeded 1-to-1 at module load. FormDocumentRenderer.FormNode calls getWidget(node.type).render — the `switch (node.type)` is gone (grep finds it only in a comment). form-document.js's PALETTE is `Object.freeze(paletteFromRegistry())` and WIDGET_COMPAT is `Object.freeze(WIDGET_COMPAT_TABLE)` — both DERIVED from the registry, not parallel literals. There is no second floorClass/PALETTE literal anywhere in web/src/forms (grep confirms). The 10 render bodies were moved verbatim and re-attached via registerRender(id, fn), so render output is byte-identical (proven by the unchanged FormDocumentRenderer + soglasovanie round-trip tests). closed-by-default: getWidget(unknown)→undefined and FormNode surfaces an explicit 'Неизвестный узел' alert instead of an implicit default — matching the old switch `default:`.",
+      "suggestion": null
+    },
+    {
+      "id": "F2",
+      "severity": "pass",
+      "axis": 2,
+      "location": "web/src/forms/form-document.js:121,159 (PALETTE/WIDGET_COMPAT derivation) vs dev baseline",
+      "issue": "No regression / round-trip preserved. Compared the derived PALETTE against the dev literal field-by-field: same insertion order (DESCRIPTOR_META order = Map order = section→custom), same per-entry shape {type, floorClass, data, contract, paletteGroup(legacy key via LEGACY_GROUP_KEY), label, summary}. field.contract='scalar', table='collection', readout='rollup', relation='relation', custom floorClass='b' — all match the old literal. WIDGET_COMPAT_TABLE is byte-equal to the dev WIDGET_COMPAT (string/text/textarea/number/integer/boolean/select/enum/date/relation/collection/computed). Preserved public exports verified live: paletteByGroup, isPaletteType, isClassBType, validateDocument, defaultWidgetForType, isWidgetCompatible, nodeForField, buildDefaultDocument, childrenOf, keySet, walkDocument, indexSchema, isDataNodeType, FORM_DOCUMENT_SCHEMA_VERSION — all unchanged signatures, importers intact. form-document-soglasovanie round-trip (6/6) and form-document.test (18/18) are green — forms render exactly as before.",
+      "suggestion": null
+    },
+    {
+      "id": "F3",
+      "severity": "pass",
+      "axis": 4,
+      "location": "web/src/forms/FormDesigner.jsx:144-320 (DropSlot/EmptyDropZone/CanvasNode/ChildrenCanvas/TabsCanvas) + 562-592 (handleDrop) + form-document-ops.js:247 (moveNode)",
+      "issue": "Canvas rebuilt per design. Nested, path-aware drag: every container (root/section/columns/tabs) renders interleaved DropSlots and an EmptyDropZone, each carrying an explicit {containerPath, tabIndex, insertAt} DropTarget. handleDrop routes reorder-within-container → reorderNode, cross-container move → moveNode (which delegates to the existing moveNodeAcross, NOT reimplemented), palette drop → insertNode(defaultNodeForWidget), field drop → insertNode(nodeForField). Live preview is side-by-side and always-on via <FormDocumentRenderer> (no <details>), read-only (no onChange/submit). Palette + inspector are registry-driven: palette from byPaletteGroup() (no GROUP_LABELS hardcode), Inspector v2 dispatches on descriptor.editorProps via PropControl(prop.control) — there is no `if (node.type === ...)` branch left. moveNode/insertAt covered by form-document-ops-t0544.test.js (8/8) incl. binding-verbatim cross-container move and no-mutate.",
+      "suggestion": null
+    },
+    {
+      "id": "F4",
+      "severity": "pass",
+      "axis": 4,
+      "location": "web/src/forms/history-stack.js + FormDesigner.jsx:422,434-440,595-609,712-713",
+      "issue": "Undo/redo is a correct pure HistoryStack {past, present, future}: pushHistory caps at MAX_HISTORY=50 and clears future; undo/redo return null at the boundary (FormDesigner falls back to the same stack). doc = history.present is the single source of edits — every op goes through commit()→pushHistory. Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z and Ctrl/Cmd+Y = redo; toolbar buttons disabled via canUndo/canRedo. Multiselect implemented: Set<pathKey> with Ctrl/Cmd-toggle, Shift-add, plain-replace; inspector shows a multi-select notice when >1.",
+      "suggestion": null
+    },
+    {
+      "id": "F5",
+      "severity": "pass",
+      "axis": 2,
+      "location": "web/src/forms/FormDesigner.jsx:432,471,494-501,741 + useDirtyGuard.js + ConfirmDialog",
+      "issue": "T-0533 dirty-guard intact. savedDocRef holds the last-saved snapshot; isDirty = JSON.stringify(doc) !== JSON.stringify(savedDocRef.current); saveGen forces recompute after a save; useDirtyGuard(isDirty) + the route-guard ConfirmDialog (with ConsequenceSummary) are preserved verbatim. persistLayout(doc, setSaveState, savedDocRef, setSaveGen) is still the save path. Because doc=history.present and undo restores the exact saved present object by reference/equality, undo-to-baseline yields stringify-equality → isDirty=false (design §5.4) — no false 'unsaved' after fully undoing.",
+      "suggestion": null
+    },
+    {
+      "id": "F6",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/forms/FormDesigner.jsx:511-515 (Shift-click) + §2.3 / §6 deferred scope",
+      "issue": "Honestly-deferred follow-ups, NOT defects: (a) Shift+Click currently just ADDS the clicked node to the selection rather than selecting the full RANGE within a container (design §6.2). (b) Group multi-operations (delete/duplicate the whole multiselection) are not wired — duplicate/remove act on the single selected node; multiselect inspector shows an explicit 'появится позже' notice. (c) Keyboard-drag (Alt+Up/Down, role=tree is present but the key handlers are not) belongs to T-0529 per the design's risk-coordination, and page-class widgets (list/chart/metric/action) are Phase-3. All four are acceptable scope cuts the brief pre-authorizes; none breaks the delivered base case. Keyboard-drag should be tracked under T-0529.",
+      "suggestion": "Track range-select + group multi-ops as a small canvas follow-up; route keyboard-drag (Alt+Up/Down) to T-0529; list/chart/metric/action descriptors are the Phase-3 page task."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "D-056: cd web && npm run build green (vite exit 0)", "covered": true },
+    { "ac": "No regression: npx vitest run src/forms → 235/235 across 14 files", "covered": true },
+    { "ac": "round-trip green (form-document-soglasovanie 'persists round-trip-safe' + form-document.test 18/18)", "covered": true },
+    { "ac": "soglasovanie green (6/6) — forms render as before (behavioral no-op via registry)", "covered": true },
+    { "ac": "FormDocumentRenderer asks getWidget().render, no switch(node.type)", "covered": true },
+    { "ac": "FF-REG-1: widget-registry.js = 10 descriptors = today's 10 nodes; single source", "covered": true },
+    { "ac": "PALETTE/WIDGET_COMPAT in form-document.js derived from registry (no double source)", "covered": true },
+    { "ac": "Preserved exports: paletteByGroup/isPaletteType/validateDocument + importers intact", "covered": true },
+    { "ac": "Canvas: nested path-aware drag (DropSlot/EmptyDropZone with containerPath)", "covered": true },
+    { "ac": "Canvas: cross-container move uses existing moveNodeAcross (via moveNode), not reimpl", "covered": true },
+    { "ac": "Canvas: live preview side-by-side (FormDocumentRenderer), not in <details>, read-only", "covered": true },
+    { "ac": "Canvas: undo/redo via pure history-stack; Ctrl+Z / Ctrl+Y / toolbar disabled-state", "covered": true },
+    { "ac": "Canvas: multiselect (Set<pathKey>, Ctrl/Shift/plain)", "covered": true },
+    { "ac": "Palette + inspector from registry (byPaletteGroup / editorProps); no GROUP_LABELS, no node.type branch in inspector", "covered": true },
+    { "ac": "T-0533 preserved: isDirty/savedDocRef/saveGen/useDirtyGuard/persistLayout; undo-to-baseline resets isDirty", "covered": true },
+    { "ac": "Deferred honestly: keyboard-drag→T-0529, group multi-ops, page-widgets (Phase-3)", "covered": true }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "Faithful, disciplined implementation of T-0544. The hardcoded triad (PALETTE + WIDGET_COMPAT + the FormNode switch) collapses into ONE declarative widget-registry.js of 10 descriptors; the renderer dispatches through getWidget().render and form-document.js's PALETTE/WIDGET_COMPAT are now DERIVED from that registry with byte-compatible export shapes — a true single source (FF-REG-1) with no importer breakage. The critical no-regression gate holds: web build green and 235/235 forms tests pass, including the named round-trip (soglasovanie 6/6) and form-document 18/18 — forms render exactly as before, the registry refactor is a behavioral no-op. The canvas is genuinely rebuilt: nested path-aware drag (DropSlot/EmptyDropZone keyed by containerPath/tabIndex/insertAt), cross-container move delegating to the existing moveNodeAcross (no reimplementation), always-on side-by-side live preview (out of the <details>), a pure HistoryStack undo/redo with Ctrl+Z/Y, multiselect, a registry-driven palette (no GROUP_LABELS) and an Inspector v2 driven by descriptor.editorProps (no node.type branches). T-0533's dirty-guard is intact and undo-to-baseline correctly clears isDirty. The single non-pass finding (F6) is a set of honestly-scoped follow-ups the brief pre-authorizes — range-select / group multi-ops, keyboard-drag (→ T-0529), and Phase-3 page widgets — none of which breaks the delivered base case. Verdict: approved."
+}
