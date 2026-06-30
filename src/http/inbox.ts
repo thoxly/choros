@@ -71,6 +71,7 @@ import {
   type ClaimState,
 } from "./claim-projection.js";
 import type { FlowableClient } from "../core/flowable-client.js";
+import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
 // extractActorSlug — mode-aware, resolves the authenticated request → the
@@ -536,6 +537,72 @@ async function resolveExecutorFallbackBatch(
 }
 
 // ---------------------------------------------------------------------------
+// T-0558 (sandbox gate): suppress instance tasks whose originating process
+// DEFINITION is not published, for a NON-privileged caller.
+//
+// The inbox projection is audit-event-backed (it does not join process_definition),
+// so the gate is applied as a post-projection filter at the smallest correct seam:
+// given the DISTINCT procKeys across the unclaimed/instance tasks, query
+// process_definition.status (tenant-scoped) to learn which keys are PUBLISHED, then
+// drop tasks whose key is draft/unknown. Privileged actors (owner/admin OR
+// authoring_draft grant) are exempt — they may dry-run sandbox processes.
+//
+// Tenant isolation (T-0013) is preserved: the lookup runs inside a tenant-scoped RLS
+// tx with an explicit tenant_id WHERE guard — it NEVER broadens the tenant scope, it
+// only narrows the already-tenant-scoped result. Degrades fail-CLOSED in spirit but
+// safe in practice: a DB error leaves the unprivileged caller seeing nothing newly
+// surfaced beyond what was already projected (we return the unfiltered set only when
+// the lookup itself cannot run — see the no-DB short-circuit at the call site).
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the subset of `procKeys` that are POSITIVELY KNOWN to be DRAFT in this tenant
+ * — i.e. a process_definition row exists for the key AND its latest status is draft (no
+ * published version of the same key exists). Keys with a published version, or with NO
+ * process_definition row at all (legacy / directly-deployed engine processes), are NOT
+ * returned: absence of a draft record is not evidence of draft, so those tasks stay
+ * visible. This makes the gate hide ONLY what it can prove is sandbox.
+ *
+ * Tenant-scoped (SET LOCAL choros.tenant_id + explicit WHERE guard). An empty input or
+ * any DB error returns an empty set (fail-OPEN for visibility on a read projection — a
+ * lookup failure must not blank a legitimate inbox; the authored-draft hiding is a
+ * best-effort projection narrowing, never a tenant-scope relaxation).
+ */
+export async function draftOnlyProcessKeys(
+  pool: pg.Pool,
+  tenantId: string,
+  procKeys: readonly string[],
+): Promise<Set<string>> {
+  const draftOnly = new Set<string>();
+  const distinct = [...new Set(procKeys)].filter((k) => k.length > 0);
+  if (distinct.length === 0) return draftOnly;
+  if (!UUID_RE.test(tenantId)) return draftOnly;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+    // A key is draft-ONLY when it has at least one row but NO published row.
+    const res = await client.query<{ process_key: string }>(
+      `SELECT process_key
+         FROM choros.process_definition
+        WHERE tenant_id = $1
+          AND process_key = ANY($2::text[])
+        GROUP BY process_key
+        HAVING bool_or(status = 'published') = false`,
+      [tenantId, distinct],
+    );
+    await client.query("COMMIT");
+    for (const row of res.rows) draftOnly.add(row.process_key);
+  } catch {
+    await client.query("ROLLBACK").catch(() => {});
+  } finally {
+    client.release();
+  }
+  return draftOnly;
+}
+
+// ---------------------------------------------------------------------------
 // Data accessors
 // ---------------------------------------------------------------------------
 
@@ -713,6 +780,12 @@ async function findInboxItems(
   try {
     const instanceTasks = await listInstanceInboxTasks(getOrgPool(), tenantId);
 
+    // T-0558 (sandbox gate): remember each task's originating process key so we can
+    // suppress tasks of a DRAFT (unpublished) process definition for a non-privileged
+    // caller (the InboxItem wire shape does not carry procKey).
+    const procKeyByTaskId = new Map<string, string>();
+    for (const row of instanceTasks) procKeyByTaskId.set(row.id, row.procKey);
+
     // Build base items synchronously (no DB needed for the base shape).
     const baseItems = instanceTasks.map((row) => {
       const slaMin = 240; // default headroom for an approval task (no per-task SLA yet).
@@ -781,7 +854,32 @@ async function findInboxItems(
       }
       return base;
     });
-    instanceItems = rawInstanceItems;
+
+    // T-0558 (sandbox gate): for a NON-privileged caller, drop instance tasks whose
+    // originating process_definition is not published (draft/unknown). Privileged
+    // actors (owner/admin OR authoring_draft grant) see sandbox-process tasks so they
+    // can dry-run them. Resolved tenant-scoped + fail-closed (resolveActorPrivilege);
+    // a privilege-resolution error degrades to "not privileged" → drafts stay hidden.
+    let sandboxPrivileged = false;
+    if (devUserId) {
+      try {
+        const priv = await resolveActorPrivilege(getOrgPool(), tenantId, devUserId, nowMs);
+        sandboxPrivileged = priv.isOwnerOrAdmin || priv.hasAuthoringDraftGrant;
+      } catch {
+        sandboxPrivileged = false; // fail-closed: drafts remain hidden on resolution error.
+      }
+    }
+    if (sandboxPrivileged) {
+      instanceItems = rawInstanceItems;
+    } else {
+      const allProcKeys = [...procKeyByTaskId.values()];
+      const draftOnly = await draftOnlyProcessKeys(getOrgPool(), tenantId, allProcKeys);
+      instanceItems = rawInstanceItems.filter((item) => {
+        const key = procKeyByTaskId.get(item.id);
+        // Drop ONLY tasks whose process definition is positively known draft-only.
+        return key === undefined || !draftOnly.has(key);
+      });
+    }
   } catch {
     // Read-projection: degrade gracefully to no instance tasks (never a write path).
     instanceItems = [];

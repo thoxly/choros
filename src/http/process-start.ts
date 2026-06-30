@@ -43,6 +43,8 @@ import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-clien
 import { appendProcessStarted } from "./process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
+import { decideDraftVisibility } from "../core/sandbox-gate.js";
+import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
 // UUID guard — same shape as process-defs.ts withTenantTx
@@ -114,10 +116,115 @@ async function withTenantTx<T>(
  */
 export type ActorTenantResolver = (actorSlug: string) => Promise<string>;
 
+/**
+ * T-0558 (sandbox gate): resolve the caller's sandbox-gate privilege. Production
+ * binding = resolveActorPrivilege(pool, tenantId, actorSlug) from
+ * src/db/sandbox-gate-dao.ts (tenant-scoped, fail-closed). OPTIONAL on
+ * StartInstanceDeps — when absent the handler falls back to the REAL
+ * resolveActorPrivilege against `pool`; injected only so the unit suite can exercise
+ * the privileged-dry-run vs. unprivileged-refuse branches without a live DB.
+ */
+export type ActorPrivilegeResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<ActorPrivilege>;
+
 export interface StartInstanceDeps {
   pool: pg.Pool;
   flowable: FlowableClient;
   resolveActorTenant: ActorTenantResolver;
+  /**
+   * T-0558 (sandbox gate): OPTIONAL privilege resolver (see {@link ActorPrivilegeResolver}).
+   * When absent, the start handler uses the REAL resolveActorPrivilege against `pool`.
+   */
+  resolveSandboxPrivilege?: ActorPrivilegeResolver;
+  /**
+   * T-0558 (sandbox gate): OPTIONAL sandbox-state resolver for a process key. Returns
+   * the process definition's published-state and the tier of the bound application(s),
+   * tenant-scoped. When absent, the handler runs the REAL DB lookup against `pool`.
+   * Injected so unit tests can drive the refuse / allow branches without a live DB.
+   */
+  resolveProcessSandboxState?: ProcessSandboxStateResolver;
+}
+
+/**
+ * T-0558: the sandbox-relevant state of a process key, used to decide whether a start
+ * may proceed for a non-privileged caller.
+ *
+ * @property hasDefinitionRow   true iff at least one process_definition row exists for
+ *                              the key in this tenant. When false the key is a legacy /
+ *                              directly-deployed engine process with no authored
+ *                              definition — the definition-published gate does not apply.
+ * @property definitionPublished true iff a PUBLISHED process_definition row exists for
+ *                              the key. Only meaningful when hasDefinitionRow is true.
+ * @property boundAppDraft       true iff the process is bound (process_app_binding) to at
+ *                              least one application that is still in the DRAFT tier.
+ */
+export interface ProcessSandboxState {
+  hasDefinitionRow: boolean;
+  definitionPublished: boolean;
+  boundAppDraft: boolean;
+}
+
+export type ProcessSandboxStateResolver = (
+  tenantId: string,
+  processKey: string,
+) => Promise<ProcessSandboxState>;
+
+/**
+ * Resolve the sandbox state of `processKey` in `tenantId` against the live DB.
+ *
+ * Tenant-scoped: opens its OWN short tenant-scoped RLS tx (SET LOCAL choros.tenant_id +
+ * explicit WHERE guard) — it never broadens the tenant scope. Read-only; commits/rolls
+ * back cleanly. This runs BEFORE the engine is touched so a refused start creates no
+ * instance.
+ */
+export async function resolveProcessSandboxStateDb(
+  pool: pg.Pool,
+  tenantId: string,
+  processKey: string,
+): Promise<ProcessSandboxState> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+    await client.query("SET LOCAL search_path TO choros");
+
+    const defRes = await client.query<{ has_row: boolean; has_published: boolean }>(
+      `SELECT
+         count(*) > 0                       AS has_row,
+         bool_or(status = 'published')      AS has_published
+       FROM choros.process_definition
+       WHERE tenant_id = $1 AND process_key = $2`,
+      [tenantId, processKey],
+    );
+
+    // Is the process bound to any application still in the DRAFT tier?
+    const appRes = await client.query<{ draft_bound: boolean }>(
+      `SELECT bool_or(a.tier = 'draft') AS draft_bound
+         FROM choros.process_app_binding b
+         JOIN choros.application a
+           ON a.tenant_id = b.tenant_id AND a.id = b.application_id
+        WHERE b.tenant_id = $1 AND b.process_key = $2`,
+      [tenantId, processKey],
+    );
+
+    await client.query("COMMIT");
+
+    const defRow = defRes.rows[0];
+    const appRow = appRes.rows[0];
+    return {
+      hasDefinitionRow: defRow?.has_row === true,
+      definitionPublished: defRow?.has_published === true,
+      boundAppDraft: appRow?.draft_bound === true,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +232,7 @@ export interface StartInstanceDeps {
 // ---------------------------------------------------------------------------
 
 export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler {
-  const { pool, flowable, resolveActorTenant } = deps;
+  const { pool, flowable, resolveActorTenant, resolveSandboxPrivilege, resolveProcessSandboxState } = deps;
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // 1. Auth gate (401)
@@ -166,6 +273,42 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
         "NOT_ELIGIBLE",
         "actor is not entitled to start a process in this tenant",
       );
+    }
+
+    // 4b. SANDBOX GATE (T-0558): refuse — BEFORE the engine is touched — to start a
+    //     process whose authored definition is NOT published, OR that is bound to an
+    //     application still in the DRAFT (sandbox) tier. A PRIVILEGED caller (owner /
+    //     admin / authoring_draft grant) is EXEMPT: they may dry-run a sandbox process.
+    //     The privilege + sandbox-state lookups are tenant-scoped + fail-closed; an
+    //     UNPRIVILEGED caller who would be refused gets a clear 409 SANDBOX_NOT_RUNNABLE
+    //     and no instance is created. Legacy/directly-deployed processes (no
+    //     process_definition row) are NOT blocked by the definition-published check —
+    //     only the bound-draft-application check applies to them.
+    const sandboxState = resolveProcessSandboxState
+      ? await resolveProcessSandboxState(tenantId, processKey)
+      : await resolveProcessSandboxStateDb(pool, tenantId, processKey);
+
+    const definitionIsDraft =
+      sandboxState.hasDefinitionRow && !sandboxState.definitionPublished;
+    const wouldRunSandbox = definitionIsDraft || sandboxState.boundAppDraft;
+
+    if (wouldRunSandbox) {
+      const priv: ActorPrivilege = resolveSandboxPrivilege
+        ? await resolveSandboxPrivilege(actor, tenantId, Date.now())
+        : await resolveActorPrivilege(pool, tenantId, actor, Date.now());
+      // decideDraftVisibility codifies the privileged-sees-draft rule (fail-closed):
+      // artifactTier "draft" → visible ONLY to owner/admin OR authoring_draft holder.
+      const decision = decideDraftVisibility({ artifactTier: "draft", actor: priv });
+      if (!decision.visible) {
+        const reason = definitionIsDraft
+          ? "process definition is not published (still in sandbox)"
+          : "the bound application is still in sandbox (draft)";
+        throw new HttpError(
+          409,
+          "SANDBOX_NOT_RUNNABLE",
+          `cannot start a sandbox process: ${reason}`,
+        );
+      }
     }
 
     // 5. Engine call inside the tenant-scoped transaction (RLS via SET LOCAL).
