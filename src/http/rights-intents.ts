@@ -52,6 +52,7 @@ import {
   normalize,
 } from "../core/grant-lattice.js";
 import { eligibleForTier2 } from "../core/substitution.js";
+import { combineCriticality } from "../core/role-criticality.js";
 import { validateAdminDelegation } from "../core/scoped-admin.js";
 import { loadAdminContext } from "../db/org.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
@@ -392,7 +393,20 @@ function registerHire(
     // FF-CRITICAL-6: a critical preset lands its grants SEMI-CONFIRMED
     // (confirmed2_by NULL → not active on the read-path) pending a second
     // approver. The intent layer does NOT auto-activate a critical hire.
-    const critical = preset.critical === true;
+    //
+    // M2 FIX (review): gate on the FACTUAL criticality of the planned grant atoms,
+    // not the author's `preset.critical` flag. Several seed presets carry an axis-a
+    // atom (operation 'approve' — e.g. p-budget-approver / p-contract-approver /
+    // p-role-manager) yet have NO `critical:true` flag. Under T-0397's read-path
+    // dual-control gate those grants require confirmed2_by to ACTIVATE; if we kept
+    // landing them on the author flag alone (confirmed2_by NULL, state 'active',
+    // no second-approver flow) they would be PERMANENTLY INACTIVE — a silent
+    // authority outage. combineCriticality folds the actual atoms (all four axes)
+    // so an approve/transition/effect-invoke/sensitive-read preset is detected and
+    // routed through the same semi-confirmed second-approver path. OR-ed with the
+    // author flag so an author-marked-critical preset stays critical (fail-closed).
+    const factualCriticality = combineCriticality(plannedGrants, nowMs).level;
+    const critical = preset.critical === true || factualCriticality === "critical";
 
     const result = await withTenantTx(pool, tenantId, async (client) => {
       // 1. Resolve / create the employee.
