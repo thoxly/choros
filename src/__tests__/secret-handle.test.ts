@@ -8,12 +8,24 @@
  *   AC-18       — no management grant → 403 ADMIN_GATE_REJECTED, agent_card unchanged
  *   AC-19       — seed not mutated (FF-25-5: no non-NULL llm_secret_handle in 032)
  *
+ * T-0471 additions (HTTP route integration — keycloak-aware auth):
+ *   T471-1 — dev mode: x-dev-user header resolves actor+tenant, POST 200
+ *   T471-2 — dev mode: missing x-dev-user → 401 (fail-closed)
+ *   T471-3 — keycloak mode: getAuthContext resolves slug+tenant, POST 200
+ *   T471-4 — keycloak mode: resolveActorSlugFromAuth returns null → 401
+ *   T471-5 — tenant isolation: secret written into ACTOR's tenant (not DEV_TENANT_ID)
+ *   T471-6 — GET /status: keycloak mode resolves actor+tenant, returns bound=false
+ *
  * Tests that require live Postgres (AC-1, 7, 8, 9, 10) are not included here
  * (they require a DB fixture) — these rely on the route handlers exercised in
  * integration. The pure-validator AC-2..6 tests are the primary gate here.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import * as http from "node:http";
+import { Router } from "../http/router.js";
+import { registerSecretHandleRoutes } from "../http/secret-handle.js";
+import pg from "pg";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -356,5 +368,502 @@ describe("SecretResolverPort interface (ADR §8 — declared, never invoked)", (
     expect(routeSrc).not.toMatch(/\.resolveSecret\s*\(/);
     // And no direct call without object receiver.
     expect(routeSrc).not.toMatch(/\bresolveSecret\s*\(/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0471: keycloak-aware auth + tenant-isolation HTTP integration tests
+//
+// Strategy: a fake pool replays the minimal SQL needed by the route (slug exists
+// check, tenant lookup, admin context, agent-card UPDATE, audit). getAuthContext
+// is mocked via vi.mock to simulate keycloak mode without a real JWKS server.
+//
+// IMPORTANT: vi.mock calls are HOISTED to the top of the module by vitest. The
+// mock is defined here but applies to the whole file's module scope.
+// ---------------------------------------------------------------------------
+
+vi.mock("../http/auth.js", async () => {
+  const actual = await vi.importActual<typeof import("../http/auth.js")>("../http/auth.js");
+  return {
+    ...actual,
+    // Overridable stub — tests override this via vi.mocked() per-describe.
+    // Default: return undefined (dev-mode — no keycloak context).
+    getAuthContext: vi.fn().mockReturnValue(undefined),
+    // withAuth: dev mode pass-through by default (no-op, mirrors production dev mode).
+    withAuth: (handler: Parameters<typeof actual.withAuth>[0]) => handler,
+  };
+});
+
+// Minimal fake pool that handles the full secret-handle route SQL surface:
+//   - resolveActorSlugFromAuth (EXISTS query for slug + kind='human')
+//   - resolveActorTenant (employee JOIN tenant by slug → tenant_id)
+//   - loadAdminContext (tenant-owner role check → genesis owner)
+//   - loadAgentOrgScope (employee → position → department_id)
+//   - loadTenantOrgAncestry (org tree — returns empty, predicate passes for genesis)
+//   - withTenantTx lifecycle (BEGIN / SET LOCAL / COMMIT)
+//   - agent_card UPDATE (returns 1 row for the target agentId)
+//   - audit-writer queries (audit_head seed/advance, audit_event INSERT)
+//
+// Options:
+//   actorSlug         — the slug that resolveActorSlugFromAuth returns for the
+//                       keycloak sub/preferred_username (only used when keycloak mock active)
+//   tenantId          — the tenant returned by resolveActorTenant for actorSlug
+//   slugExists        — whether the EXISTS check returns true (default true)
+//   agentCardExists   — whether agent_card UPDATE finds a row (default true)
+//   capturedTenantIds — array populated with each SET LOCAL choros.tenant_id value seen
+function makeSecretHandleFakePool(opts: {
+  actorSlug?: string;
+  tenantId?: string;
+  slugExists?: boolean;
+  agentCardExists?: boolean;
+  capturedTenantIds?: string[];
+} = {}): pg.Pool {
+  const {
+    actorSlug = "genesis-owner",
+    tenantId = "a0000000-0000-0000-0000-000000000001",
+    slugExists = true,
+    agentCardExists = true,
+    capturedTenantIds,
+  } = opts;
+
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      // Transaction lifecycle
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+
+      // SET LOCAL — capture tenant_id for isolation test
+      if (sql.startsWith("SET LOCAL choros.tenant_id")) {
+        const match = /SET LOCAL choros\.tenant_id = '([^']+)'/.exec(sql);
+        if (match && capturedTenantIds) capturedTenantIds.push(match[1] as string);
+        return { rows: [] };
+      }
+      if (sql.startsWith("SET LOCAL")) return { rows: [] };
+
+      // resolveActorSlugFromAuth: EXISTS check (slug + kind='human')
+      if (sql.includes("FROM choros.employee") && sql.includes("EXISTS") && sql.includes("kind = 'human'")) {
+        const slug = String(params?.[0] ?? "");
+        return { rows: [{ exists: slug === actorSlug && slugExists }] };
+      }
+
+      // resolveActorTenant: employee JOIN tenant by slug
+      if (
+        sql.includes("FROM choros.employee e") &&
+        sql.includes("JOIN choros.tenant t") &&
+        sql.includes("e.slug = $1")
+      ) {
+        const slug = String(params?.[0] ?? "");
+        return { rows: slug === actorSlug ? [{ tenant_id: tenantId }] : [] };
+      }
+
+      // loadAdminContext — genesis owner check (tenant-owner role)
+      if (sql.includes("r.slug = 'tenant-owner'")) {
+        return { rows: [{ id: "ra-genesis" }] }; // genesis owner
+      }
+      // role_assignment for admin context
+      if (sql.includes("FROM choros.role_assignment ra") && sql.includes("ra.employee_id")) {
+        return { rows: [{ id: "ra-genesis", role_id: "role-owner", org_scope: { kind: "node", hierarchy: "org", nodeId: "org", nodeLevel: "department" } }] };
+      }
+      // grant load for admin grants
+      if (sql.includes('FROM choros."grant" g') && sql.includes("mgmt_object:%")) {
+        return { rows: [] };
+      }
+
+      // loadAgentOrgScope: employee → position → department
+      if (sql.includes("FROM choros.employee e") && sql.includes("LEFT JOIN choros.position p")) {
+        return { rows: [{ department_id: "dept-1" }] };
+      }
+
+      // loadTenantOrgAncestry: returns empty (genesis owner bypasses scope check)
+      if (sql.includes("FROM choros.department")) {
+        return { rows: [] };
+      }
+
+      // agent_card UPDATE (set/rotate/revoke handle)
+      if (sql.includes("UPDATE choros.agent_card") && sql.includes("llm_secret_handle")) {
+        return { rows: agentCardExists ? [{ employee_id: params?.[0] }] : [], rowCount: agentCardExists ? 1 : 0 };
+      }
+
+      // agent_card SELECT (status route)
+      if (sql.includes("SELECT llm_secret_handle") && sql.includes("FROM choros.agent_card")) {
+        return { rows: agentCardExists ? [{ llm_secret_handle: null }] : [] };
+      }
+
+      // Audit writer
+      if (sql.includes("INSERT INTO choros.audit_head")) return { rows: [] };
+      if (sql.includes("FROM choros.audit_head")) {
+        return { rows: [{ seq: 0, row_hash: Buffer.alloc(32), vocab_version: 1 }] };
+      }
+      if (sql.includes("INSERT INTO choros.audit_event")) return { rows: [] };
+      if (sql.includes("UPDATE choros.audit_head")) return { rows: [] };
+      if (sql.includes("current_setting")) {
+        return { rows: [{ tenant_id: tenantId }] };
+      }
+
+      return { rows: [] };
+    },
+    release: () => {},
+  };
+
+  return { connect: async () => client } as unknown as pg.Pool;
+}
+
+// Simple HTTP helper for secret-handle routes
+function secretHandleRequest(
+  baseUrl: string,
+  method: string,
+  agentId: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Promise<{ statusCode: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const raw = body !== undefined ? JSON.stringify(body) : undefined;
+    const path = `/api/agents/${agentId}/secret-handle`;
+    const url = new URL(baseUrl + path);
+    const req = http.request(
+      url,
+      {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(raw ? { "Content-Length": Buffer.byteLength(raw).toString() } : {}),
+          ...headers,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c: Buffer) => (data += c.toString()));
+        res.on("end", () => {
+          try {
+            resolve({ statusCode: res.statusCode ?? 0, body: JSON.parse(data) });
+          } catch {
+            resolve({ statusCode: res.statusCode ?? 0, body: data });
+          }
+        });
+      },
+    );
+    req.on("error", reject);
+    if (raw) req.write(raw);
+    req.end();
+  });
+}
+
+const AGENT_UUID = "b0000000-0000-0000-0000-000000000002";
+const VALID_HANDLE = "vault://secrets/llm-key";
+const GENESIS_USER = "genesis-owner";
+const TENANT_A = "a0000000-0000-0000-0000-000000000001";
+
+// ---------------------------------------------------------------------------
+// T471-1, T471-2: dev mode — x-dev-user resolves actor + tenant
+// ---------------------------------------------------------------------------
+
+describe("T-0471 dev mode — POST /api/agents/:id/secret-handle", () => {
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    // Ensure getAuthContext returns undefined (dev mode: no keycloak context).
+    const { getAuthContext } = await import("../http/auth.js");
+    vi.mocked(getAuthContext).mockReturnValue(undefined);
+
+    const pool = makeSecretHandleFakePool({ actorSlug: GENESIS_USER, tenantId: TENANT_A });
+    const router = new Router();
+    registerSecretHandleRoutes(router, pool);
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") baseUrl = `http://localhost:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("T471-1: dev mode — x-dev-user resolves actor+tenant, POST returns 200", async () => {
+    const resp = await secretHandleRequest(
+      baseUrl, "POST", AGENT_UUID,
+      { handle_value: VALID_HANDLE },
+      { "x-dev-user": GENESIS_USER },
+    );
+    expect(resp.statusCode).toBe(200);
+    expect((resp.body as Record<string, unknown>)["ok"]).toBe(true);
+  });
+
+  it("T471-2: dev mode — missing x-dev-user → 401 (fail-closed)", async () => {
+    const resp = await secretHandleRequest(
+      baseUrl, "POST", AGENT_UUID,
+      { handle_value: VALID_HANDLE },
+      {}, // no x-dev-user
+    );
+    expect(resp.statusCode).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T471-3, T471-4: keycloak mode — getAuthContext injects a token context
+// ---------------------------------------------------------------------------
+
+describe("T-0471 keycloak mode — POST /api/agents/:id/secret-handle", () => {
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const pool = makeSecretHandleFakePool({ actorSlug: GENESIS_USER, tenantId: TENANT_A });
+    const router = new Router();
+    registerSecretHandleRoutes(router, pool);
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") baseUrl = `http://localhost:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("T471-3: keycloak mode — getAuthContext returns context → slug resolved → 200", async () => {
+    const { getAuthContext } = await import("../http/auth.js");
+    // Simulate keycloak: getAuthContext returns an AuthContext for this request.
+    // The fake pool's EXISTS check returns true for GENESIS_USER slug.
+    vi.mocked(getAuthContext).mockReturnValue({
+      sub: GENESIS_USER,
+      preferredUsername: GENESIS_USER,
+      actorType: "human",
+      rawToken: "fake-token",
+    } as Parameters<typeof getAuthContext>[0] extends never ? never : ReturnType<typeof getAuthContext>);
+
+    const resp = await secretHandleRequest(
+      baseUrl, "POST", AGENT_UUID,
+      { handle_value: VALID_HANDLE },
+      {}, // no x-dev-user — keycloak context provides identity
+    );
+    expect(resp.statusCode).toBe(200);
+    expect((resp.body as Record<string, unknown>)["ok"]).toBe(true);
+
+    // Reset to dev mode for other test describes
+    vi.mocked(getAuthContext).mockReturnValue(undefined);
+  });
+
+  it("T471-4: keycloak mode — resolveActorSlugFromAuth null → 401 fail-closed", async () => {
+    const { getAuthContext } = await import("../http/auth.js");
+    // getAuthContext returns a context with an UNKNOWN sub — the fake pool's
+    // EXISTS check returns false for any slug not == actorSlug (GENESIS_USER),
+    // so resolveActorSlugFromAuth returns null → 401.
+    vi.mocked(getAuthContext).mockReturnValue({
+      sub: "unknown-sub",
+      preferredUsername: "unknown-user",
+      actorType: "human",
+      rawToken: "fake-token",
+    } as ReturnType<typeof getAuthContext>);
+
+    const resp = await secretHandleRequest(
+      baseUrl, "POST", AGENT_UUID,
+      { handle_value: VALID_HANDLE },
+      {},
+    );
+    expect(resp.statusCode).toBe(401);
+
+    vi.mocked(getAuthContext).mockReturnValue(undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T471-5: tenant isolation — secret is written into the ACTOR's tenant, not
+// the hardcoded DEV_TENANT_ID. We capture the SET LOCAL tenant_id value and
+// assert it matches the tenant returned by resolveActorTenant for the actor.
+// ---------------------------------------------------------------------------
+
+describe("T-0471 tenant isolation — POST writes into actor's tenant", () => {
+  it("T471-5: SET LOCAL choros.tenant_id uses resolveActorTenant result, not DEV_TENANT_ID", async () => {
+    const capturedTenantIds: string[] = [];
+    const ACTOR_TENANT = "c1111111-1111-1111-1111-111111111111"; // non-default tenant
+
+    const pool = makeSecretHandleFakePool({
+      actorSlug: GENESIS_USER,
+      tenantId: ACTOR_TENANT,
+      capturedTenantIds,
+    });
+    const router = new Router();
+    registerSecretHandleRoutes(router, pool);
+
+    const server = http.createServer((req, res) => router.dispatch(req, res));
+    const baseUrl = await new Promise<string>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") resolve(`http://localhost:${addr.port}`);
+      });
+    });
+
+    try {
+      const { getAuthContext } = await import("../http/auth.js");
+      vi.mocked(getAuthContext).mockReturnValue(undefined); // dev mode
+
+      const resp = await secretHandleRequest(
+        baseUrl, "POST", AGENT_UUID,
+        { handle_value: VALID_HANDLE },
+        { "x-dev-user": GENESIS_USER },
+      );
+      expect(resp.statusCode).toBe(200);
+
+      // The SET LOCAL must have used ACTOR_TENANT (from resolveActorTenant),
+      // NOT the old hardcoded DEV_TENANT_ID constant.
+      expect(capturedTenantIds).toContain(ACTOR_TENANT);
+      const devTenantId = process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
+      // Only fails if ACTOR_TENANT === devTenantId — we use a different value above.
+      if (ACTOR_TENANT !== devTenantId) {
+        expect(capturedTenantIds).not.toContain(devTenantId);
+      }
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T471-6: GET /status route — keycloak mode resolves actor+tenant (all 4 routes
+// share the same extractActor; GET /status was the only one that didn't store
+// the actor variable before T-0471).
+// ---------------------------------------------------------------------------
+
+describe("T-0471 GET /api/agents/:id/secret-handle/status — keycloak + dev modes", () => {
+  let server: http.Server;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const pool = makeSecretHandleFakePool({ actorSlug: GENESIS_USER, tenantId: TENANT_A });
+    const router = new Router();
+    registerSecretHandleRoutes(router, pool);
+    server = http.createServer((req, res) => router.dispatch(req, res));
+    await new Promise<void>((resolve) => {
+      server.listen(0, "localhost", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") baseUrl = `http://localhost:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("T471-6a: dev mode — GET /status returns {bound:false} for unset handle", async () => {
+    const { getAuthContext } = await import("../http/auth.js");
+    vi.mocked(getAuthContext).mockReturnValue(undefined); // dev mode
+
+    const resp = await new Promise<{ statusCode: number; body: unknown }>((resolve, reject) => {
+      const url = new URL(`${baseUrl}/api/agents/${AGENT_UUID}/secret-handle/status`);
+      const req = http.request(
+        url,
+        { method: "GET", headers: { "x-dev-user": GENESIS_USER } },
+        (res) => {
+          let data = "";
+          res.on("data", (c: Buffer) => (data += c.toString()));
+          res.on("end", () => {
+            try { resolve({ statusCode: res.statusCode ?? 0, body: JSON.parse(data) }); }
+            catch { resolve({ statusCode: res.statusCode ?? 0, body: data }); }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(resp.statusCode).toBe(200);
+    expect((resp.body as Record<string, unknown>)["bound"]).toBe(false);
+  });
+
+  it("T471-6b: keycloak mode — GET /status resolves actor from token → 200", async () => {
+    const { getAuthContext } = await import("../http/auth.js");
+    vi.mocked(getAuthContext).mockReturnValue({
+      sub: GENESIS_USER,
+      preferredUsername: GENESIS_USER,
+      actorType: "human",
+      rawToken: "fake-token",
+    } as ReturnType<typeof getAuthContext>);
+
+    const resp = await new Promise<{ statusCode: number; body: unknown }>((resolve, reject) => {
+      const url = new URL(`${baseUrl}/api/agents/${AGENT_UUID}/secret-handle/status`);
+      const req = http.request(
+        url,
+        { method: "GET" }, // no x-dev-user
+        (res) => {
+          let data = "";
+          res.on("data", (c: Buffer) => (data += c.toString()));
+          res.on("end", () => {
+            try { resolve({ statusCode: res.statusCode ?? 0, body: JSON.parse(data) }); }
+            catch { resolve({ statusCode: res.statusCode ?? 0, body: data }); }
+          });
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(resp.statusCode).toBe(200);
+    expect((resp.body as Record<string, unknown>)["bound"]).toBe(false);
+
+    vi.mocked(getAuthContext).mockReturnValue(undefined);
+  });
+
+  it("T471-6c: missing x-dev-user (dev mode) → 401 for GET /status", async () => {
+    const { getAuthContext } = await import("../http/auth.js");
+    vi.mocked(getAuthContext).mockReturnValue(undefined); // dev mode
+
+    const resp = await new Promise<{ statusCode: number; body: unknown }>((resolve, reject) => {
+      const url = new URL(`${baseUrl}/api/agents/${AGENT_UUID}/secret-handle/status`);
+      const req = http.request(url, { method: "GET" }, (res) => {
+        let data = "";
+        res.on("data", (c: Buffer) => (data += c.toString()));
+        res.on("end", () => {
+          try { resolve({ statusCode: res.statusCode ?? 0, body: JSON.parse(data) }); }
+          catch { resolve({ statusCode: res.statusCode ?? 0, body: data }); }
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(resp.statusCode).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T471: structural source check — DEV_TENANT_ID constant removed from module
+// (prevents regression — the constant must not reappear in the route module)
+// ---------------------------------------------------------------------------
+
+describe("T-0471: DEV_TENANT_ID removed from secret-handle.ts (regression guard)", () => {
+  const MODULE_SRC = readFileSync(
+    join(HERE, "..", "http", "secret-handle.ts"),
+    "utf8",
+  );
+
+  it("extractActor is now an async function (keycloak-aware)", () => {
+    expect(MODULE_SRC).toMatch(/async function extractActor/);
+  });
+
+  it("getAuthContext is imported from auth.js (keycloak identity path)", () => {
+    expect(MODULE_SRC).toContain("getAuthContext");
+    expect(MODULE_SRC).toContain("resolveActorSlugFromAuth");
+  });
+
+  it("resolveActorTenant is used instead of DEV_TENANT_ID for tenantId", () => {
+    expect(MODULE_SRC).toContain("resolveActorTenant");
+    // DEV_TENANT_ID const must NOT exist in the route module
+    expect(MODULE_SRC).not.toContain("const DEV_TENANT_ID");
+  });
+
+  it("withAuth wraps all four route registrations", () => {
+    const withAuthOccurrences = (MODULE_SRC.match(/\bwithAuth\b/g) ?? []).length;
+    // 1 import + 4 route registrations = at least 5 occurrences
+    expect(withAuthOccurrences).toBeGreaterThanOrEqual(5);
   });
 });

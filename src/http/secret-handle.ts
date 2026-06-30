@@ -9,7 +9,8 @@
  *   GET    /api/agents/:agentId/secret-handle/status   → getSecretHandleStatus (FR-4)
  *
  * Design invariants:
- *  - Auth via extractActor (x-dev-user header); 401 if absent.
+ *  - Auth via extractActor (keycloak-aware: getAuthContext → resolveActorSlugFromAuth;
+ *    dev fallback: x-dev-user header); 401 if absent.
  *  - Authz via loadAdminContext + holdsAgentMgmtUpdate predicate; 403 if denied.
  *  - All writes run inside withTenantTx (SET LOCAL + FORCE RLS) for tenant isolation (FR-7).
  *  - Audit via canonical appendAuditEventInput INSIDE the same withTenantTx (atomic, NF-4).
@@ -30,18 +31,12 @@ import type { AdminContext } from "../core/scoped-admin.js";
 import type { AuditEventInput } from "../core/audit-grant-encoder.js";
 import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { HttpError, readJsonBody, type Router } from "./router.js";
-import { DEV_USER_HEADER } from "./auth.js";
+import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
+import { resolveActorSlugFromAuth, resolveActorTenant } from "../db/org.js";
 import {
   validateSecretHandleShape,
   redactHandle,
 } from "../core/secret-handle-validator.js";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const DEV_TENANT_ID =
-  process.env["DEV_TENANT_ID"] ?? "a0000000-0000-0000-0000-000000000001";
 
 // Audit event type literals (NF-4 exact strings).
 const AUDIT_TYPE_SET    = "set_llm_secret_handle"    as const;
@@ -103,10 +98,27 @@ async function appendAuditEventInput(
 }
 
 // ---------------------------------------------------------------------------
-// Auth helper (pattern from grants.ts::extractActor)
+// Auth helper — mode-aware caller identity (mirrors agents.ts / process-defs.ts).
+//   - keycloak: identity from the VALIDATED token (sub/preferred_username → slug);
+//     null → 401 fail-closed. x-dev-user is NOT consulted once a token authenticated.
+//   - dev: getAuthContext is undefined (withAuth no-op) → x-dev-user, unchanged.
+// Previously dev-only — broke all four secret-handle routes under keycloak (always
+// 401 "missing x-dev-user header" despite a valid Bearer) and would have written
+// secrets into DEV_TENANT_ID (wrong tenant).
 // ---------------------------------------------------------------------------
 
-function extractActor(req: import("node:http").IncomingMessage): string {
+async function extractActor(
+  req: import("node:http").IncomingMessage,
+  pool: pg.Pool,
+): Promise<string> {
+  const ctx = getAuthContext(req);
+  if (ctx !== undefined) {
+    const slug = await resolveActorSlugFromAuth(pool, ctx.sub, ctx.preferredUsername);
+    if (slug === null) {
+      throw new HttpError(401, "UNAUTHENTICATED", "no employee matches authenticated identity");
+    }
+    return slug;
+  }
   let devUser = req.headers[DEV_USER_HEADER];
   if (Array.isArray(devUser)) devUser = devUser[0];
   if (!devUser || typeof devUser !== "string") {
@@ -181,8 +193,8 @@ async function handleSetSecretHandle(
   res: import("node:http").ServerResponse,
   agentId: string,
 ): Promise<void> {
-  const actor = extractActor(req);
-  const tenantId = DEV_TENANT_ID;
+  const actor = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actor);
   assertUuidShape(agentId, "agentId");
 
   const body = await readJsonBody(req);
@@ -251,8 +263,8 @@ async function handleRotateSecretHandle(
   res: import("node:http").ServerResponse,
   agentId: string,
 ): Promise<void> {
-  const actor = extractActor(req);
-  const tenantId = DEV_TENANT_ID;
+  const actor = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actor);
   assertUuidShape(agentId, "agentId");
 
   const body = await readJsonBody(req);
@@ -320,8 +332,8 @@ async function handleRevokeSecretHandle(
   res: import("node:http").ServerResponse,
   agentId: string,
 ): Promise<void> {
-  const actor = extractActor(req);
-  const tenantId = DEV_TENANT_ID;
+  const actor = await extractActor(req, pool);
+  const tenantId = await resolveActorTenant(pool, actor);
   assertUuidShape(agentId, "agentId");
 
   const nowMs = Date.now();
@@ -374,8 +386,8 @@ async function handleGetSecretHandleStatus(
   res: import("node:http").ServerResponse,
   agentId: string,
 ): Promise<void> {
-  extractActor(req); // 401 if absent
-  const tenantId = DEV_TENANT_ID;
+  const actor = await extractActor(req, pool); // 401 if absent
+  const tenantId = await resolveActorTenant(pool, actor);
   assertUuidShape(agentId, "agentId");
 
   const result = await withTenantTx(pool, tenantId, async (client) => {
@@ -414,19 +426,21 @@ async function handleGetSecretHandleStatus(
  * Called from server.ts alongside registerGrantsRoutes.
  */
 export function registerSecretHandleRoutes(router: Router, pool: pg.Pool): void {
-  router.register("POST", "/api/agents/:agentId/secret-handle", (req, res, params) =>
+  // withAuth: keycloak mode REQUIRES a valid Bearer JWT (401 otherwise; no x-dev-user
+  // bypass); dev mode is a no-op pass-through and the x-dev-user path is unchanged.
+  router.register("POST", "/api/agents/:agentId/secret-handle", withAuth((req, res, params) =>
     handleSetSecretHandle(pool, req, res, params["agentId"] ?? ""),
-  );
+  ));
 
-  router.register("PUT", "/api/agents/:agentId/secret-handle", (req, res, params) =>
+  router.register("PUT", "/api/agents/:agentId/secret-handle", withAuth((req, res, params) =>
     handleRotateSecretHandle(pool, req, res, params["agentId"] ?? ""),
-  );
+  ));
 
-  router.register("DELETE", "/api/agents/:agentId/secret-handle", (req, res, params) =>
+  router.register("DELETE", "/api/agents/:agentId/secret-handle", withAuth((req, res, params) =>
     handleRevokeSecretHandle(pool, req, res, params["agentId"] ?? ""),
-  );
+  ));
 
-  router.register("GET", "/api/agents/:agentId/secret-handle/status", (req, res, params) =>
+  router.register("GET", "/api/agents/:agentId/secret-handle/status", withAuth((req, res, params) =>
     handleGetSecretHandleStatus(pool, req, res, params["agentId"] ?? ""),
-  );
+  ));
 }
