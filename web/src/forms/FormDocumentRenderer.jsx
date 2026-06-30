@@ -30,6 +30,7 @@ import Floor2Sandbox from './Floor2Sandbox.jsx';
 import {
   childrenOf, isDataNodeType, indexSchema, defaultWidgetForType,
 } from './form-document.js';
+import { getWidget, registerRender } from './widget-registry.js';
 
 // The class-b (custom) node renders in Floor2Sandbox — the web-local
 // sandbox-iframe host that reuses the T-0101 isolation contract (opaque origin,
@@ -332,29 +333,41 @@ function BrokenBinding({ fieldKey }) {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Registry-driven dispatch (T-0544)
+//
+// Each of the 10 node renderers above is ATTACHED to its widget descriptor as
+// the descriptor's `render(node, ctx)`. FormNode no longer switches on
+// node.type — it asks the ONE registry for the descriptor and calls its render.
+// This is the behavioral no-op that turns the old `switch` into the registry:
+// the SAME component bodies, dispatched via the registry instead of a switch.
+// A new widget = one registry entry + its render attach, no edit here.
 // ---------------------------------------------------------------------------
+
+registerRender('section', (node, ctx) => <SectionNode node={node} ctx={ctx} />);
+registerRender('columns', (node, ctx) => <ColumnsNode node={node} ctx={ctx} />);
+registerRender('tabs', (node, ctx) => <TabsNode node={node} ctx={ctx} />);
+registerRender('divider', () => <DividerNode />);
+registerRender('text', (node) => <TextNode node={node} />);
+registerRender('field', (node, ctx) => <FieldNode node={node} ctx={ctx} />);
+registerRender('relation', (node, ctx) => <RelationNode node={node} ctx={ctx} />);
+registerRender('readout', (node, ctx) => <ReadoutNode node={node} ctx={ctx} />);
+registerRender('table', (node, ctx) => <TableNode node={node} ctx={ctx} />);
+registerRender('custom', (node, ctx) => <CustomNode node={node} ctx={ctx} />);
 
 export function FormNode({ node, ctx }) {
   if (!node || typeof node !== 'object') return null;
-  switch (node.type) {
-    case 'section': return <SectionNode node={node} ctx={ctx} />;
-    case 'columns': return <ColumnsNode node={node} ctx={ctx} />;
-    case 'tabs': return <TabsNode node={node} ctx={ctx} />;
-    case 'divider': return <DividerNode />;
-    case 'text': return <TextNode node={node} />;
-    case 'field': return <FieldNode node={node} ctx={ctx} />;
-    case 'relation': return <RelationNode node={node} ctx={ctx} />;
-    case 'readout': return <ReadoutNode node={node} ctx={ctx} />;
-    case 'table': return <TableNode node={node} ctx={ctx} />;
-    case 'custom': return <CustomNode node={node} ctx={ctx} />;
-    default:
-      return (
-        <div className="chs-fd-unknown" role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-sm)' }}>
-          Неизвестный узел: {String(node.type)}
-        </div>
-      );
+  const descriptor = getWidget(node.type);
+  if (!descriptor || typeof descriptor.render !== 'function') {
+    // R-CLOSED: an unregistered / un-attached node type is surfaced, never
+    // rendered through an implicit default (anti-snapshot-drift parity with the
+    // old switch `default:` case).
+    return (
+      <div className="chs-fd-unknown" role="alert" style={{ color: 'var(--chs-color-danger)', fontSize: 'var(--chs-text-sm)' }}>
+        Неизвестный узел: {String(node.type)}
+      </div>
+    );
   }
+  return descriptor.render(node, ctx);
 }
 
 /**
