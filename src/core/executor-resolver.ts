@@ -15,8 +15,10 @@
  *      For each holder in the pool, check if they have an active substitution rule
  *      (they are declared absent). If yes: SUPPRESS the absent holder, ADD their
  *      substitute to the effective pool. This is the "suppress-absent + add-substitute"
- *      operation. Chain substitutions (a substitute is also absent) are followed up
- *      to MAX_SUBSTITUTION_HOPS hops (carried by the injected port).
+ *      operation. Substitution is SINGLE-HOP ONLY: only the ORIGINAL holders are
+ *      checked for absence; if their substitute is themselves absent, that second
+ *      absence is NOT resolved (chains A→B→C are not followed). A single pass over
+ *      the holder set cannot loop, so this is cycle-safe by construction.
  *
  *      "absent" ≠ "unfilled" — these are DIFFERENT ladder rungs:
  *        - "absent" (rung 3): a KNOWN holder has a substitution_rule → route via rule
@@ -207,8 +209,10 @@ export async function resolveExecutor(
   // The substitution port handles UUID↔slug resolution (DB DAO in substitution-dao.ts).
   // When the port is absent, this step is a no-op and the raw holder set proceeds.
   //
-  // Chain substitutions (a substitute is also absent) are resolved by the port;
-  // the port enforces MAX_SUBSTITUTION_HOPS to prevent cycles.
+  // Single-hop only: this pass checks each ORIGINAL holder for an absence rule.
+  // If a substitute added below is themselves absent, that is NOT resolved here
+  // (chains A→B→C are not followed). A single pass over the original holder set
+  // cannot loop, so there is no cycle to cap.
   if (deps.substitution && holders.length > 0) {
     const orgScope: ScopeElement = opts.orgScope ?? BOTTOM;
     const oracle = deps.ancestry ?? NO_OP_ANCESTRY;

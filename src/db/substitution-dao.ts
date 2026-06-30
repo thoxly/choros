@@ -27,22 +27,17 @@
  *  - Tenant isolation: every query inside withTenantReadTx (RLS + SET LOCAL).
  *  - UUID↔slug: all UUID columns are resolved to slugs via JOINs so that
  *    resolveSubstitution (pure, operates on slugs) can match correctly.
- *  - Hop-cap: getActiveSubstitutionsForEmployee enforces MAX_SUBSTITUTION_HOPS
- *    at the DAO level by refusing to resolve a substitute who is themselves absent.
- *    Callers also honour the hop-cap at the resolver level.
+ *  - Single-hop only: substitution is resolved ONE level deep. The resolver
+ *    (executor-resolver.ts) checks each ORIGINAL role holder for an absence rule
+ *    and adds the named substitute to the effective pool; it does NOT then check
+ *    whether that substitute is also absent. Chains (A→B→C) are NOT followed.
+ *    This is functionally cycle-safe (a single pass over the holder set cannot
+ *    loop), so there is no traversal cap to enforce here.
  */
 
 import pg from "pg";
 import type { SubstitutionRule } from "../core/substitution.js";
 import type { ExecutorSubstitutionPort } from "../core/executor-resolver.js";
-
-// ---------------------------------------------------------------------------
-// Hop-cap — limits chain substitution depth (mirrors cross-app-ref HOP_CAP).
-// A substitute who is also absent triggers a second lookup; we cap the chain
-// at 3 hops to prevent infinite cycles (A→B→A) or deep chains.
-// ---------------------------------------------------------------------------
-
-export const MAX_SUBSTITUTION_HOPS = 3;
 
 // ---------------------------------------------------------------------------
 // UUID shape guard (mirrors grants-dao.ts — defence-in-depth, T-0116 R-3)

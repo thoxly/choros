@@ -5,8 +5,8 @@
  *   ER-1  — direct assignee short-circuits the ladder (kind: "direct")
  *   ER-2  — pool path (holders present, no substitution port): kind: "pool"
  *   ER-3  — substitution rung: holder is absent → substitute takes the task
- *   ER-4  — chain substitution: A absent → B; B also absent → B's substitute
- *           (up to MAX_SUBSTITUTION_HOPS); hop-cap prevents infinite cycles
+ *   ER-4  — chain semantics: A absent → B; if B is also absent it is NOT resolved
+ *           (single-hop only; chains A→B→C are not followed — cycle-safe by construction)
  *   ER-5  — absent ≠ unfilled: all holders have substitutes → kind: "pool" (substituted)
  *   ER-6  — all holders absent with no substitutes → fallback (rung 4, kind: "fallback")
  *   ER-7  — role unfilled (no holders at all) → fallback (kind: "fallback")
@@ -363,7 +363,7 @@ describe("ER-8: no fallback port → unresolvable", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ER-4: Chain substitution hop-cap
+// ER-4: Chain substitution — single-hop only (chains not followed)
 // ---------------------------------------------------------------------------
 
 describe("ER-4: chain substitution / hop semantics", () => {
@@ -388,8 +388,8 @@ describe("ER-4: chain substitution / hop semantics", () => {
   it("resolveExecutor does not chain beyond one hop in the single-task path (chain resolved by DAO)", async () => {
     // A → B, but B has a rule too. The CURRENT resolveExecutor only applies one
     // level of suppression (it looks up rules for each ORIGINAL holder, not for
-    // the substitutes added during the pass). Chain resolution beyond one hop is
-    // the DAO's responsibility (MAX_SUBSTITUTION_HOPS in substitution-dao.ts).
+    // the substitutes added during the pass). Chains beyond one hop are NOT
+    // resolved anywhere — substitution is single-hop by design (cycle-safe).
     // Here: Alice absent → Bob; Bob's rules are NOT checked by the resolver pass
     // (Bob is not in the original holder set). Result: kind: "substitution" with BOB.
     const deps: ResolverDeps = {

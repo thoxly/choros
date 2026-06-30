@@ -459,8 +459,8 @@ async function resolveExecutorFallbackBatch(
     // For the fallback-patch use-case (decide: fallback vs. pool?), a single-hop
     // check is sufficient: if A→B and B is also absent, the effective pool still
     // contains B's slug — a task will route there and the inbox will show B as the
-    // candidate. The chain is only material for the single-task resolver path (where
-    // MAX_SUBSTITUTION_HOPS applies via the per-task DB-backed port).
+    // candidate. Substitution is single-hop everywhere (the single-task resolver
+    // path does not follow chains either); chains A→B→C are never resolved.
     const effectivePoolByRole = new Map<string, readonly string[]>();
     await Promise.all(
       distinctRoles.map(async (roleSlug) => {
