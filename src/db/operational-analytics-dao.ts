@@ -143,8 +143,8 @@ const TRANSITION_EVENT_TYPES = [
 // loadPeriodWorkload — GROUP BY period из audit_event
 //
 // Counts transitions and unique process instances per period.
-// Uses to_char(to_timestamp(ts / 1000), '<format>') for period bucketing —
-// ts column is BIGINT (epoch ms). Indexed on (tenant_id, ts DESC) via mig 006.
+// Uses to_char(to_timestamp(occurred_at / 1000), '<format>') for period bucketing —
+// occurred_at column is BIGINT (epoch ms). Indexed on (tenant_id, occurred_at) via mig 079.
 // ---------------------------------------------------------------------------
 
 async function loadPeriodWorkload(
@@ -180,7 +180,7 @@ async function loadPeriodWorkload(
       instance_count: string;
     }>(
       `SELECT
-         to_char(to_timestamp(ts / 1000.0) AT TIME ZONE 'UTC', '${fmt}') AS period,
+         to_char(to_timestamp(occurred_at / 1000.0) AT TIME ZONE 'UTC', '${fmt}') AS period,
          COUNT(*)                                                           AS transition_count,
          COUNT(DISTINCT
            (payload -> 'transition_payload' ->> 'instance_id')
@@ -188,7 +188,7 @@ async function loadPeriodWorkload(
        FROM choros.audit_event
       WHERE tenant_id = $1
         AND type = ANY($2::text[])
-        AND ts >= $3
+        AND occurred_at >= $3
         AND payload ? 'transition_payload'
         ${processFilter}
       GROUP BY 1
@@ -231,13 +231,13 @@ export async function loadActorWorkload(
       cnt: string;
     }>(
       `SELECT
-         to_char(to_timestamp(ts / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS period,
+         to_char(to_timestamp(occurred_at / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS period,
          COALESCE(payload -> 'transition_payload' ->> 'actor', '(не указан)') AS actor,
          COUNT(*)                                                              AS cnt
        FROM choros.audit_event
       WHERE tenant_id = $1
         AND type = ANY($2::text[])
-        AND ts >= $3
+        AND occurred_at >= $3
         AND payload ? 'transition_payload'
         ${processFilter}
       GROUP BY 1, 2
