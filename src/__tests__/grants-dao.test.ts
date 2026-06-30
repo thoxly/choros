@@ -503,20 +503,25 @@ describe("getRoleSlugsForActor — T-0366 KC seed persona fallback", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-0397 — PDP dual-control read-path enforcement
+// T-0397 — PDP dual-control read-path enforcement (UNIT — predicate MIRROR)
+//
+// ⚠️ MIRROR, NOT THE REAL SQL: this fake pool RE-IMPLEMENTS the criticality
+// predicate in TS (isCriticalGrant below). It proves the DAO WIRING + the gate's
+// SHAPE, but it does NOT exercise the real grants-dao.ts SQL. The authoritative
+// proof that the ACTUAL SQL predicate gates every axis (incl. axis-c clearance
+// JSONB parsing) is the LIVE-Postgres probe ci/checks/db/grants-dao-dual-control
+// .db.test.ts (review B2 — that is what closes the test-theater). The mirror is
+// kept in sync with the SQL over all four axes so it is not actively misleading.
 //
 // A CRITICAL grant/assignment is PDP-active only when its SECOND distinct
 // approver is present (confirmed2_by IS NOT NULL); the grant query also honors
-// valid_until (previously ignored for grants). "Critical" = the SQL-expressible
-// criticality axes a grant row can carry (role-criticality.ts axis a/b):
+// valid_until (previously ignored for grants). "Critical" = the full escalation
+// classification (criticalGrantPredicate):
 //   axis a — operation IN ('approve','transition')
 //   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
+//   axis c — operation = 'read' with a sensitive clearance marker (confidential|restricted)
+//   Q-2   — operation = 'read' with a present-but-garbage clearance token
 // An assignment is critical iff the role it binds holds any such grant.
-//
-// This dedicated fake pool models the FULL T-0397 SQL semantics (confirmed2_by,
-// grant valid_until, role→grant criticality EXISTS) so the gating is verified
-// end-to-end through the real DAO queries. It is self-contained — it does NOT
-// reuse the legacy fixtures above (which predate confirmed2_by).
 // ---------------------------------------------------------------------------
 
 interface T0397Grant {
@@ -527,6 +532,9 @@ interface T0397Grant {
   confirmed2_by: string | null;
   valid_from: number | null;
   valid_until: number | null;
+  // T-0397 axis-c/Q-2 mirror: the clearance marker carried on the constraint
+  // surface ({ clearance: <DataClass | garbage> }). Absent = no marker.
+  constraint?: Record<string, unknown> | null;
 }
 interface T0397Assignment {
   role_id: string;
@@ -536,13 +544,32 @@ interface T0397Assignment {
   valid_until: number | null;
 }
 
-/** Is a single grant row "critical" under the axis-a/b SQL predicate? */
-function isCriticalGrant(g: { operation: string; resource_type: string }): boolean {
-  return (
-    g.operation === "approve" ||
-    g.operation === "transition" ||
-    (g.resource_type === "effect_resource" && g.operation === "invoke")
-  );
+const VALID_DATA_CLASSES = ["public", "internal", "confidential", "restricted"];
+const SENSITIVE_DATA_CLASSES = ["confidential", "restricted"];
+
+/** Is a single grant row "critical" under the full four-axis predicate (mirror)? */
+function isCriticalGrant(g: {
+  operation: string;
+  resource_type: string;
+  constraint?: Record<string, unknown> | null;
+}): boolean {
+  // axis a
+  if (g.operation === "approve" || g.operation === "transition") return true;
+  // axis b
+  if (g.resource_type === "effect_resource" && g.operation === "invoke") return true;
+  // axis c + Q-2 — read grant with a clearance marker (constraint-first; the unit
+  // fixtures only co-locate the marker on constraint, matching grantClearance order).
+  if (g.operation === "read") {
+    const c = g.constraint;
+    if (c !== null && c !== undefined && Object.prototype.hasOwnProperty.call(c, "clearance")) {
+      const v = c["clearance"];
+      // axis c: a sensitive DataClass token.
+      if (typeof v === "string" && SENSITIVE_DATA_CLASSES.includes(v)) return true;
+      // Q-2: present-but-not-a-derivable-DataClass token (incl. null / non-string).
+      if (typeof v !== "string" || !VALID_DATA_CLASSES.includes(v)) return true;
+    }
+  }
+  return false;
 }
 
 /** Does this role hold ANY confirmed critical grant? (assignment criticality) */
@@ -558,6 +585,9 @@ const T0397_EMP: Record<string, string> = {
   "e-reader": "d0000000-0000-0000-0000-0000000003a2",
   "e-expired": "d0000000-0000-0000-0000-0000000003a3",
   "e-ra-critical": "d0000000-0000-0000-0000-0000000003a4",
+  "e-axisc": "d0000000-0000-0000-0000-0000000003a5",
+  "e-q2": "d0000000-0000-0000-0000-0000000003a6",
+  "e-read-internal": "d0000000-0000-0000-0000-0000000003a7",
 };
 
 // Roles: id → { slug, grants }.
@@ -595,6 +625,42 @@ const T0397_ROLES: Record<string, { slug: string; grants: T0397Grant[] }> = {
         confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
     ],
   },
+  // (f) axis-c — read grant with a SENSITIVE clearance marker, single-confirm → NOT active.
+  "r-axisc-single": {
+    slug: "axisc-single",
+    grants: [
+      { id: "g-axisc-single", operation: "read", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null,
+        constraint: { clearance: "confidential" } },
+    ],
+  },
+  // (f') same axis-c read grant but dual-confirmed → active.
+  "r-axisc-dual": {
+    slug: "axisc-dual",
+    grants: [
+      { id: "g-axisc-dual", operation: "read", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null,
+        constraint: { clearance: "confidential" } },
+    ],
+  },
+  // (g) Q-2 — read grant with a GARBAGE clearance token, single-confirm → NOT active.
+  "r-q2-single": {
+    slug: "q2-single",
+    grants: [
+      { id: "g-q2-single", operation: "read", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null,
+        constraint: { clearance: "top-secret-garbage" } },
+    ],
+  },
+  // (h) read grant with a VALID non-sensitive clearance (internal), single-confirm → active.
+  "r-read-internal": {
+    slug: "read-internal",
+    grants: [
+      { id: "g-read-internal", operation: "read", resource_type: "record",
+        confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null,
+        constraint: { clearance: "internal" } },
+    ],
+  },
 };
 
 // Assignments per employee-id (for the role_assignment-level gate).
@@ -619,6 +685,20 @@ const T0397_ASSIGN: Record<string, T0397Assignment[]> = {
   // excludes it (this is the role_assignment confirmed2_by test, deliverable (e)).
   [T0397_EMP["e-ra-critical"]!]: [
     { role_id: "r-crit-dual", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
+  ],
+  // e-axisc: holds BOTH axisc-single (read+confidential, no #2) and axisc-dual (#2),
+  // each assignment dual-confirmed to isolate the GRANT-level axis-c gate.
+  [T0397_EMP["e-axisc"]!]: [
+    { role_id: "r-axisc-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+    { role_id: "r-axisc-dual",   confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+  ],
+  // e-q2: Q-2 garbage-clearance read grant, assignment dual-confirmed.
+  [T0397_EMP["e-q2"]!]: [
+    { role_id: "r-q2-single", confirmed_by: "seed", confirmed2_by: "seed2", valid_from: null, valid_until: null },
+  ],
+  // e-read-internal: valid non-sensitive clearance read grant, assignment single-confirm.
+  [T0397_EMP["e-read-internal"]!]: [
+    { role_id: "r-read-internal", confirmed_by: "seed", confirmed2_by: null, valid_from: null, valid_until: null },
   ],
 };
 
@@ -692,7 +772,7 @@ function makeT0397Pool(nowMs: number): import("pg").Pool {
               resource_facet: null,
               operation: g.operation,
               scope: { kind: "node", hierarchy: "org", nodeId: "x", nodeLevel: "department" },
-              constraint: null,
+              constraint: g.constraint ?? null,
               delegable: false,
               granted_by: "seed",
               valid_from: g.valid_from,
@@ -742,6 +822,30 @@ describe("getGrantsForSubject — T-0397 dual-control grant gate", () => {
     const grants = await getGrantsForSubject(pool, TENANT_ID, "e-reader", T0397_NOW);
     // read grant, confirmed2_by NULL → must remain active (non-critical path).
     expect(grants.map((g) => g.id)).toContain("g-noncrit");
+  });
+
+  it("(f) axis-c read+confidential grant, ONE approver → NOT active (B1 hole closed)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-axisc", T0397_NOW);
+    expect(grants.map((g) => g.id)).not.toContain("g-axisc-single");
+  });
+
+  it("(f') same axis-c capability with confirmed2_by set → active", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-axisc", T0397_NOW);
+    expect(grants.map((g) => g.id)).toContain("g-axisc-dual");
+  });
+
+  it("(g) Q-2 read+garbage-clearance grant, ONE approver → NOT active (fail-closed)", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-q2", T0397_NOW);
+    expect(grants.map((g) => g.id)).not.toContain("g-q2-single");
+  });
+
+  it("(h) read+internal (valid non-sensitive) clearance, ONE approver → STILL active", async () => {
+    const pool = makeT0397Pool(T0397_NOW);
+    const grants = await getGrantsForSubject(pool, TENANT_ID, "e-read-internal", T0397_NOW);
+    expect(grants.map((g) => g.id)).toContain("g-read-internal");
   });
 });
 
