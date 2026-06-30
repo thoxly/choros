@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useRef, useContext, useMemo, useCallback } from 'react';
 import { useNavigate, useLocation, Routes, Route, Navigate, Link } from 'react-router-dom';
 import { Button, Modal, Tooltip } from '../components/components.jsx';
+import { ToastProvider, useToastContext } from './toast-context.jsx';
 import { Icon } from './icon.jsx';
 import { getDevUser, clearDevUser, setDevUser, devHeaders } from './dev-auth.js';
 import { resolveActiveTenant } from './active-tenant.js';
@@ -243,17 +244,18 @@ function NavItem({ item, active }) {
 /**
  * T-0138: download audit log by fetching /api/audit/export and triggering
  * a browser file-save. Uses current devHeaders() for auth (x-dev-user).
- * Falls back to alert on auth/network error.
+ * T-0528: errors surfaced via push() toast instead of blocking window.alert().
+ * @param {(input: object) => void} push — from useToastContext()
  */
-async function downloadAuditLog() {
+async function downloadAuditLog(push) {
   try {
     const res = await fetch('/api/audit/export', { headers: devHeaders() });
     if (res.status === 401) {
-      alert('Войдите в систему, чтобы экспортировать лог аудита.');
+      push({ tone: 'error', title: 'Сессия истекла', message: 'Войдите в систему снова.', duration: 0 });
       return;
     }
     if (!res.ok) {
-      alert(`Ошибка экспорта: HTTP ${res.status}`);
+      push({ tone: 'error', title: 'Ошибка экспорта', message: `Сервер вернул ${res.status}.`, duration: 0 });
       return;
     }
     const blob = await res.blob();
@@ -268,13 +270,15 @@ async function downloadAuditLog() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    push({ tone: 'success', title: 'Лог экспортирован' });
   } catch {
-    alert('Не удалось выполнить экспорт лога аудита.');
+    push({ tone: 'error', title: 'Не удалось экспортировать лог', duration: 0 });
   }
 }
 
 function Topbar({ screen, pathname, theme, setTheme }) {
   const { entities } = useContext(CrumbContext);
+  const { push } = useToastContext();
   // T-0317: dynamic, param-aware crumbs (entity names injected, parents linkable).
   const crumb = buildCrumbs(pathname, entities);
   const navigate = useNavigate();
@@ -313,7 +317,8 @@ function Topbar({ screen, pathname, theme, setTheme }) {
       </Tooltip>
     ) : screen === "audit" ? (
       // T-0138: download current instance audit log via GET /api/audit/export
-      <Button variant="secondary" size="sm" onClick={downloadAuditLog}>Экспорт лога</Button>
+      // T-0528: errors surfaced via toast (push) instead of alert()
+      <Button variant="secondary" size="sm" onClick={() => downloadAuditLog(push)}>Экспорт лога</Button>
     ) : screen === "rights" ? (
       // T-0484: this button was INERT (no onClick). No export-rights endpoint is
       // wired yet — make the affordance honest (disabled + reason) rather than a
@@ -674,6 +679,7 @@ function AppShell() {
   const devUser = currentUser;
 
   return (
+    <ToastProvider>
     <CrumbContext.Provider value={crumbCtx}>
     <div className="chs-shell">
       <aside className="chs-nav">
@@ -820,6 +826,7 @@ function AppShell() {
       </main>
     </div>
     </CrumbContext.Provider>
+    </ToastProvider>
   );
 }
 
