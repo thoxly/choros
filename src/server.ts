@@ -83,6 +83,8 @@ import { registerAssistantPromptRoutes } from "./http/assistant-prompt-routes.js
 import { readPublishedAssistantPrompt } from "./db/assistant-prompt-dao.js";
 // T-0477 [E-AGENTS L5]: spend accounting routes + spend-tracking LLM port.
 import { registerSpendRoutes } from "./http/spend.js";
+// T-0405 [PD-20]: operational analytics routes (GROUP BY on index, xlsx export).
+import { registerOperationalAnalyticsRoutes } from "./http/operational-analytics.js";
 import { getDefaultLlmConnection } from "./db/llm-connection-dao.js";
 // T-0518: file attachment HTTP routes + adapters.
 import { registerFileRoutes } from "./http/files.js";
@@ -1099,6 +1101,16 @@ function buildRouter(
   // Auth: any tenant member (read-only accounting — no mutations, no ceilings).
   if (grantsPool) {
     registerSpendRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0405 [PD-20]: operational analytics — GROUP BY on index, lightweight result,
+  // xlsx/csv export. GET /api/operational-analytics, GET /api/operational-analytics/export.
+  if (grantsPool) {
+    registerOperationalAnalyticsRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),

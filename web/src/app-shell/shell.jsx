@@ -51,6 +51,8 @@ import ReportsScreen from '../screens/screen-reports.jsx';
 import ProcessAnalyticsScreen from '../screens/screen-process-analytics.jsx';
 // T-0494: Операционный обзор — три сигнала в одной панели.
 import OpsOverviewScreen from '../screens/screen-ops-overview.jsx';
+// T-0405 [PD-20]: Оперативная аналитика — GROUP BY на индексе + xlsx выгрузка.
+import OperationalAnalyticsScreen from '../screens/screen-operational-analytics.jsx';
 
 export { Icon };
 
@@ -92,6 +94,7 @@ const SCREEN_META = {
   spend: { crumb: ["Наблюдаемость", "Расход"] },
   reports: { crumb: ["Наблюдаемость", "Отчёты"] },
   "process-analytics": { crumb: ["Наблюдаемость", "Аналитика процессов"] },
+  "operational-analytics": { crumb: ["Наблюдаемость", "Оперативная аналитика"] },
   // Администрирование
   org:   { crumb: ["Администрирование", "Оргструктура"] },
   agents: { crumb: ["Администрирование", "Агенты"] },
@@ -1155,6 +1158,8 @@ function AppShell() {
             <Route path="/process-analytics" element={<ProcessAnalyticsScreen />} />
             {/* T-0494: Операционный обзор — три сигнала (процессы + расход + отчёты) */}
             <Route path="/ops-overview" element={<OpsOverviewScreen />} />
+            {/* T-0405 [PD-20]: Оперативная аналитика — нагрузка по периодам + xlsx выгрузка */}
+            <Route path="/operational-analytics" element={<OperationalAnalyticsScreen />} />
           </Routes>
         </div>
       </main>
