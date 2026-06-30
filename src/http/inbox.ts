@@ -35,12 +35,16 @@ import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { DEV_TENANT_ID, getOrgPool, resolveActorTenant, resolveActorSlugFromAuth } from "../db/org.js";
 import { findEmployeeById } from "../db/org.js";
 import { getRoleSlugsForActor, getHoldersForRole, findTenantOwnerSlug } from "../db/grants-dao.js";
+import { getActiveSubstitutionsByRole } from "../db/substitution-dao.js";
 import { parsePaginationParams, paginateInMemory } from "../core/data-access-port.js";
 // executor-resolver: the batch path (resolveExecutorFallbackBatch below) calls
-// getHoldersForRole / findTenantOwnerSlug directly to avoid the port-wrapper overhead.
+// DAO functions directly for performance (avoids port-wrapper overhead at scale).
 // resolveExecutor (src/core/executor-resolver.ts) remains the canonical single-task
 // entry point for callers outside inbox.ts (e.g. claim write-path, future per-task
 // routing logic).
+// Factory functions (makeDbRoleHolderSource, makeTenantOwnerFallbackPort,
+// makeDbSubstitutionPort) are available for callers that use the single-task
+// resolveExecutor path — they are not used in the batch path here.
 import { listDeferredInboxTasks } from "../db/deferred-inbox-store.js";
 import {
   APPROVE_TASK_NAME,
@@ -361,7 +365,7 @@ async function resolveTenant(devUserId?: string | null): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// T-0380 (D4): Executor resolver — batched fallback resolution
+// T-0380/T-0429 (D4): Executor resolver — batched fallback resolution
 //
 // `resolveExecutorFallbackBatch` is called ONCE per inbox read (DB mode only)
 // to compute the routed_to_fallback patch for ALL instance tasks in a single
@@ -369,31 +373,44 @@ async function resolveTenant(devUserId?: string | null): Promise<string> {
 // once per task under Promise.all (≤200 tasks × 2 DB txs = up to 400 connections
 // against a max=10 pool).
 //
-// Batching strategy:
+// Batching strategy (T-0429 ladder fix — substitution wired):
 //   1. Collect the DISTINCT set of role slugs across all unclaimed instance tasks.
 //   2. Resolve holders for each DISTINCT role slug in parallel (at most once per role).
-//   3. Resolve the tenant owner slug ONCE (owner is per-tenant, not per-task).
-//   4. For each task, look up its role's resolution from the in-memory maps built
-//      in steps 2–3 and compute the patch without any further DB round-trips.
+//   3. T-0429: For roles that HAVE holders, fetch active substitution rules
+//      (getActiveSubstitutionsByRole — one DB tx per distinct role). Apply
+//      suppress-absent + add-substitute per holder in-memory. A role whose effective
+//      pool shrinks to zero after substitution proceeds to fallback (rung 4).
+//   4. Resolve the tenant owner slug ONCE when at least one role has an empty
+//      effective pool (unfilled OR all holders absent with no substitutes).
+//   5. For each task, look up its role's resolution from the in-memory maps built
+//      in steps 2–4 and compute the patch without any further DB round-trips.
 //
 // No-DB path: caller skips this function entirely (instanceTasks is never populated
 // without hasDb()); no-DB inbox uses INBOX_SEED only.
 //
-// Substitution (step 3 of the resolver): the DB-backed SubstitutionSource that
-// translates role slugs and employee slugs to UUIDs is pending T-0053. Until that
-// port is wired, the substitution step is skipped and the pool→fallback path is
-// the active path. The batching below mirrors that same two-step logic.
+// "absent" ≠ "unfilled" distinction (T-0429 лесенка fix):
+//   - "absent"  (rung 3): a KNOWN holder has an active substitution rule → route to
+//     their substitute. If all holders are absent and all have substitutes, the task
+//     reaches the substitutes, NOT the fallback owner.
+//   - "unfilled" (rung 4): the role's effective pool is empty (either no holders at
+//     all, or all holders absent with no active substitutes) → route to owner + F7.
 // ---------------------------------------------------------------------------
 
 /**
- * T-0380 (D4/F6/F7): Batch fallback patch resolver.
+ * T-0380/T-0429 (D4/F6/F7): Batch fallback patch resolver with substitution.
  *
  * Given a list of (taskId, roleSlug) pairs from unclaimed instance inbox tasks,
  * resolves which tasks need `routed_to_fallback: "role_unfilled"` — in a single
  * batched pass rather than one DB trip per task.
  *
+ * T-0429: now applies the full rung-3 substitution logic (suppress absent holders,
+ * add substitutes) before deciding whether to go to fallback (rung 4). A role
+ * whose holders are all absent WITH active substitutes does NOT go to fallback —
+ * the substitute(s) form the effective pool for that role.
+ *
  * Returns a Map<taskId, { routed_to_fallback: "role_unfilled" }> for tasks whose
- * role has no confirmed holders. Tasks whose role HAS holders are absent from the map.
+ * effective pool (after substitution) is empty. Tasks with live holders (or
+ * substitutes for absent holders) are absent from the map.
  *
  * Degrades gracefully: any DB error → returns empty map (no tasks marked fallback).
  */
@@ -421,28 +438,94 @@ async function resolveExecutorFallbackBatch(
     );
     const holdersByRole = new Map<string, readonly string[]>(holdersEntries);
 
-    // Step 3: resolve tenant owner slug ONCE (owner is per-tenant, not per-role/task).
-    // Only needed if at least one role has no holders.
-    const rolesWithNoHolders = distinctRoles.filter(
-      (slug) => (holdersByRole.get(slug) ?? []).length === 0,
+    // Step 3: T-0429 substitution rung — for roles that HAVE holders, apply the
+    // suppress-absent + add-substitute logic in-memory.
+    //
+    // We batch: for each DISTINCT role that has holders, fetch ALL active
+    // substitution rules for that role in ONE DB tx (getActiveSubstitutionsByRole),
+    // then iterate over the holders to build the effective pool.
+    //
+    // The effective pool per role:
+    //   - Start with the raw holder set.
+    //   - For each holder: if an active substitution rule exists (absentEmployeeId
+    //     === holderSlug, confirmed, in-window), SUPPRESS the absent holder and ADD
+    //     their substituteEmployeeId (the substitute's slug from mapRow).
+    //   - If the effective pool is still non-empty → role is covered; no fallback.
+    //   - If the effective pool is empty (all holders absent, all substitutes also
+    //     absent or no substitute) → treat as "unfilled" → fallback (rung 4).
+    //
+    // Chain substitutions (substitute is also absent) are NOT resolved in the batch
+    // path (the batch keeps one DB tx per role; chains require recursive lookup).
+    // For the fallback-patch use-case (decide: fallback vs. pool?), a single-hop
+    // check is sufficient: if A→B and B is also absent, the effective pool still
+    // contains B's slug — a task will route there and the inbox will show B as the
+    // candidate. The chain is only material for the single-task resolver path (where
+    // MAX_SUBSTITUTION_HOPS applies via the per-task DB-backed port).
+    const effectivePoolByRole = new Map<string, readonly string[]>();
+    await Promise.all(
+      distinctRoles.map(async (roleSlug) => {
+        const holders = holdersByRole.get(roleSlug) ?? [];
+        if (holders.length === 0) {
+          // Unfilled role: effective pool is empty immediately (skip substitution).
+          effectivePoolByRole.set(roleSlug, []);
+          return;
+        }
+
+        // Fetch all active substitution rules for this role in one DB tx.
+        let substRules: import("../core/substitution.js").SubstitutionRule[] = [];
+        try {
+          substRules = await getActiveSubstitutionsByRole(pool, tenantId, roleSlug, nowMs);
+        } catch {
+          // Degrade gracefully: if substitution lookup fails, use raw holders.
+          effectivePoolByRole.set(roleSlug, holders);
+          return;
+        }
+
+        if (substRules.length === 0) {
+          // No substitution rules → pool is unchanged.
+          effectivePoolByRole.set(roleSlug, holders);
+          return;
+        }
+
+        // Apply suppress-absent + add-substitute per holder.
+        const effective = new Set<string>(holders);
+        for (const holderSlug of holders) {
+          // Find the first active rule where absentEmployeeId = holderSlug (slugs,
+          // from mapRow in substitution-dao.ts) AND role matches roleSlug.
+          const rule = substRules.find(
+            (r) => r.absentEmployeeId === holderSlug && r.roleId === roleSlug,
+          );
+          if (rule) {
+            effective.delete(holderSlug);
+            effective.add(rule.substituteEmployeeId);
+          }
+        }
+        effectivePoolByRole.set(roleSlug, [...effective]);
+      }),
+    );
+
+    // Step 4: resolve tenant owner slug ONCE — only needed when at least one role
+    // has an empty effective pool (unfilled or all holders absent with no substitute).
+    const rolesWithEmptyPool = distinctRoles.filter(
+      (slug) => (effectivePoolByRole.get(slug) ?? []).length === 0,
     );
     let ownerSlug: string | null = null;
-    if (rolesWithNoHolders.length > 0) {
+    if (rolesWithEmptyPool.length > 0) {
       ownerSlug = await findTenantOwnerSlug(pool, tenantId, nowMs);
     }
 
-    // Step 4: for each task, apply the resolution from in-memory maps.
+    // Step 5: for each task, apply the resolution from in-memory effective-pool map.
     for (const task of tasks) {
-      const holders = holdersByRole.get(task.role) ?? [];
-      if (holders.length > 0) {
-        // Role has confirmed holders → pool path, no fallback needed.
+      const effective = effectivePoolByRole.get(task.role) ?? [];
+      if (effective.length > 0) {
+        // Effective pool is non-empty (live holders or substitutes) → no fallback.
         continue;
       }
-      // Role is empty. With no substitution port wired (T-0053 pending), we go
-      // directly to fallback-owner (F6/F7). Mark regardless of whether an owner
-      // was found (mirrors the "unresolvable" branch in resolveExecutor).
-      if (ownerSlug !== null || rolesWithNoHolders.length > 0) {
+      // Effective pool is empty — role_unfilled (rung 4). Mark regardless of whether
+      // an owner was found (mirrors the "unresolvable" branch in resolveExecutor).
+      if (rolesWithEmptyPool.includes(task.role)) {
         result.set(task.id, { routed_to_fallback: "role_unfilled" as const });
+        void ownerSlug; // resolved above; used structurally by the fallback path
       }
     }
   } catch {
