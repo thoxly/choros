@@ -27,6 +27,9 @@ import type {
   ChatToolCall,
 } from "../core/llm-port.js";
 import { SecretResolverPort, validateSecretHandleShape, redactHandle } from "../core/secret-handle-validator.js";
+// T-0497: SSRF guard — validates endpoint against private/loopback/metadata IP ranges
+// (both literal IP and DNS-resolved) before shipping the bearer key.
+import { assertSafeEndpoint } from "./ssrf-guard.js";
 
 // ---------------------------------------------------------------------------
 // OpenAI chat completion response types (minimal, zero-dep).
@@ -235,7 +238,13 @@ export class OpenAILlmPort implements LlmPort {
   }
 
   /** Make a POST to the OpenAI chat completions endpoint. */
-  private _post(apiKey: string, body: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+  private async _post(apiKey: string, body: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+    // T-0497: SSRF guard — deny private/loopback/link-local/metadata targets.
+    // Must run BEFORE constructing the request so the bearer key is never sent
+    // to an attacker-controlled internal host. Covers both literal-IP and DNS-
+    // resolved cases (see ssrf-guard.ts for TOCTOU residual risk note).
+    await assertSafeEndpoint(this.config.endpoint);
+
     return new Promise<ChatCompletionResponse>((resolve, reject) => {
       const payload = JSON.stringify(body);
       const url = new URL(`${this.config.endpoint}/chat/completions`);
