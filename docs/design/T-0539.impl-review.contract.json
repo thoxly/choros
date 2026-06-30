@@ -1,0 +1,94 @@
+{
+  "task_id": "T-0539",
+  "verdict": "approved",
+  "ci_seen": {
+    "root_build_green": true,
+    "web_build_green": true,
+    "typecheck_green": true,
+    "nav_tests_passed": 53,
+    "nav_tests_failed": 0,
+    "web_suite_passed": 1350,
+    "web_suite_failed": 0,
+    "web_suite_files": 40,
+    "ci_guards": {
+      "nav-projection-only.sh": "OK (FF-NAV-PROJ)",
+      "nav-projection-only.sh --self-test": "PASS",
+      "screen-registry-declares.sh": "OK (FF-SCREEN-DECL)",
+      "screen-registry-declares.sh --self-test": "PASS"
+    },
+    "notes": "Root `npm run build` (tsc + seed tsc) exits 0 after installing root deps; the initial 'node:fs/process/Buffer' errors were a missing @types/node in an uninstalled node_modules, NOT introduced by T-0539. Web `vite build` green. All 53 new nav tests (nav-visibility 27 + nav-config 26) pass; full web suite 1350/1350 green — no regression to T-0538."
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "pass",
+      "axis": 4,
+      "location": "src/http/org.ts:299-402 (GET /api/me/nav-capabilities) + web/src/app-shell/active-tenant.js:resolveNavCapabilities + web/src/app-shell/nav-config.js:visibleZones",
+      "issue": "FAIL-CLOSED is correct on every branch. Server: (a) dev-no-db → degraded {zones:['work']}; (b) missing/invalid identity → 401 (HttpError re-thrown, never returns zones); (c) any unexpected DB/resolver error → catch returns degraded {zones:['work']}, never fail-open. Front: resolveNavCapabilities returns null on !res.ok / network / parse error; visibleZones(null) and visibleZones({degraded:true}) both return EXACTLY ['work']; shell defaults navCaps to null and renders work-only until the fetch resolves (no full-menu flash). No degradation path ever surfaces admin/observability/constructor. Unit-proven by FF-FAILCLOSED (7 cases).",
+      "suggestion": null
+    },
+    {
+      "id": "F2",
+      "severity": "pass",
+      "axis": 3,
+      "location": "src/http/org.ts:333-351 + src/core/capability-authz.ts:67-115",
+      "issue": "Endpoint is grounded on REAL existing symbols, no invented server API. loadAdminContext (src/db/org.ts:674), getGrantsForSubject (src/db/grants-dao.ts:87), resolveActorSlugFromAuth/resolveActorTenant/getOrgPool/getAuthContext/DEV_USER_HEADER all verified present with matching signatures (pool, tenantId, actorSlug, nowMs). observability:read is a free-text resource_type widening-cast (OBSERVABILITY_READ) following the exact authoring_draft / llm_connection:configure precedent — no DDL, no migration, no DB CHECK. Capability resolution reuses the same tested resolver paths as /api/my-tenant.",
+      "suggestion": null
+    },
+    {
+      "id": "F3",
+      "severity": "pass",
+      "axis": 5,
+      "location": "ci/checks/ux/nav-projection-only.sh + web/src/app-shell/shell.jsx + nav-config.js",
+      "issue": "No second permission layer, no role-string checks. Sidebar (shell.jsx) and nav-config.js filter EXCLUSIVELY by navSet.zones / navSet.isGenesisOwner / item.ownerOnly — there is no `role==='admin'`, `slug==='owner'`, currentUser.role, etc. FF-NAV-PROJ guard passes and its self-test detects an injected violation. ADR §3/§5 are explicit that nav-visibility is a UI projection over existing server-side route enforcement (T-0018/T-0021), not a replacement — front filter is advisory, server remains authoritative.",
+      "suggestion": null
+    },
+    {
+      "id": "F4",
+      "severity": "pass",
+      "axis": 6,
+      "location": "src/http/org.ts:367-380 + web/src/app-shell/nav-config.js:projectZones",
+      "issue": "Zone→capability map is correct and grants nobody extra. РАБОТА=always (floor, capability:null); КОНСТРУКТОР=authoring_draft; НАБЛЮДАЕМОСТЬ=observability:read; АДМИНИСТРИРОВАНИЕ=adminGrants.length>0 OR isGenesisOwner; owner-only slices gated by isGenesisOwner (not a separate grant, per T-0409). A plain user (no grants, not owner) projects to ['work'] only and never sees admin — verified by FF-NAV-ZONEMAP (9 cases) and visibleItems zone-gate tests. Server and front projectZones mirror each other; the server's NavCapabilitySet.zones is the authoritative source the front renders.",
+      "suggestion": null
+    },
+    {
+      "id": "F5",
+      "severity": "pass",
+      "axis": 7,
+      "location": "web/src/app-shell/shell.jsx (CommandPalette/paletteDestinations, ZONES.map render) + nav-config.test.js",
+      "issue": "Existing nav (T-0538) is intact. The full 19-item nav, all routes, modeler path-override (/processes/new/edit), reference path (/rights/criticality), and ToastProvider are unchanged. visibleItems is dual-mode (object→compat path for palette; (zoneId,navSet)→T-0539 path) so the command palette and old call-sites keep working — confirmed by the unchanged-and-passing T-0538 nav-config.test.js (its one assertion was coherently inverted from 'all capability null' to the new 'work/home null, non-work non-null' invariant, not deleted). Command palette also applies visibleZones + ownerOnly so hidden zones can't be reached via the palette (no visibility bypass).",
+      "suggestion": null
+    },
+    {
+      "id": "F6",
+      "severity": "nit",
+      "axis": 3,
+      "location": "src/http/org.ts:340-342 (dynamic import of grants-dao)",
+      "issue": "getGrantsForSubject is pulled in via a per-request `await import('../db/grants-dao.js')` inside the handler rather than a top-of-file static import (loadAdminContext is statically imported). Functionally fine (module cache makes it a one-time cost) and it compiles/builds green, but it is mildly inconsistent with the file's other imports and slightly harder to grep for the dependency. Not a defect — no behavior, security, or fail-closed impact.",
+      "suggestion": "Optionally hoist `import { getGrantsForSubject } from '../db/grants-dao.js';` to the top of org.ts alongside the other db/ imports for consistency. Cosmetic; safe to defer."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "Root build + typecheck green (tsc + seed tsc exit 0)", "covered": true },
+    { "ac": "Web vite build green", "covered": true },
+    { "ac": "nav-visibility.test.js (27) + nav-config.test.js (26) green", "covered": true },
+    { "ac": "Full web suite 1350/1350 green — no T-0538 regression", "covered": true },
+    { "ac": "Endpoint grounded on real loadAdminContext + getGrantsForSubject (verified signatures)", "covered": true },
+    { "ac": "observability:read is free-text capability-token (authoring_draft precedent), no DDL/migration", "covered": true },
+    { "ac": "FAIL-CLOSED: dev-no-db → degraded zones:['work']", "covered": true },
+    { "ac": "FAIL-CLOSED: missing/invalid identity → 401 (no zones leaked)", "covered": true },
+    { "ac": "FAIL-CLOSED: DB/resolver error → catch returns degraded zones:['work'] (not fail-open)", "covered": true },
+    { "ac": "FAIL-CLOSED front: resolveNavCapabilities error → null; visibleZones(null|degraded) → ['work']", "covered": true },
+    { "ac": "FAIL-CLOSED front: shell defaults navCaps=null → work-only until fetch resolves", "covered": true },
+    { "ac": "No role-string checks (FF-NAV-PROJ guard + self-test pass)", "covered": true },
+    { "ac": "Zone map correct: work=all, constructor=authoring_draft, observability=observability:read, admin=adminGrants||owner", "covered": true },
+    { "ac": "owner-only slices gated by isGenesisOwner, not a separate grant (T-0409)", "covered": true },
+    { "ac": "Plain user (no grants) sees only РАБОТА — no admin leak", "covered": true },
+    { "ac": "FF-SCREEN-DECL: every Route has SCREEN_REGISTRY entry with zone+capability (guard + self-test pass)", "covered": true },
+    { "ac": "Existing nav intact: 19 items, routes, modeler/reference path overrides, ToastProvider", "covered": true },
+    { "ac": "Command palette filtered by visibleZones+ownerOnly (no visibility bypass)", "covered": true },
+    { "ac": "Logout clears nav-capability cache (clearNavCapabilities + setNavCaps(null))", "covered": true }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "Faithful, security-correct implementation of the T-0539 design. The endpoint is a thin, grounded projection over the existing grant resolver (loadAdminContext + getGrantsForSubject) — NOT a second permission layer; the ADR and code both state nav-visibility is advisory UI projection over server-side route enforcement (T-0018/T-0021). Fail-closed is correct on every branch reviewed: dev-no-db, 401 identity, and unexpected DB error all reduce to zones:['work'] or a thrown 401 — no branch ever fails open to admin/observability/constructor, and the front mirrors this (null/degraded → ['work'], boot defaults to work-only). The zone→capability map is exact and leak-free (a grant-less non-owner gets only РАБОТА). No hardcoded role-string checks (FF-NAV-PROJ green + self-test). observability:read is a free-text resource_type widening-cast in the authoring_draft precedent — no DDL. Both new CI guards pass and self-test. All 1350 web tests green incl. 53 new nav cases; root and web builds green. The single non-pass finding (F6) is a cosmetic dynamic-import style nit with zero behavioral or security impact. Verdict: approved."
+}
