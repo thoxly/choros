@@ -36,6 +36,7 @@ import {
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
+import { useToastContext } from '../app-shell/toast-context.jsx';
 
 /* ---------------------------------------------------------------------------
    TODO-SEAM T-0359/T-0360: заменить stub-вызовы реальными API-запросами.
@@ -741,6 +742,7 @@ export default function AssistantScreen() {
     () => location.state?.contextRef || null,
   );
 
+  const { push: pushToast } = useToastContext();
   const { threads, error: threadsError, load: loadThreads, createThread, patchThread, deleteThread } = useThreadsStub();
   const loading = threads === null;
 
@@ -787,8 +789,10 @@ export default function AssistantScreen() {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('Failed to create thread:', err);
+      // T-0528: поверх console.error — тост для пользователя
+      pushToast({ tone: 'error', title: 'Не удалось создать тред', message: err?.message, duration: 0 });
     }
-  }, [createThread, contextRef, navigate]);
+  }, [createThread, contextRef, navigate, pushToast]);
 
   // T-0384: rename thread
   const handleRename = useCallback((id, newTitle) => {

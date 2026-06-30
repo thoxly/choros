@@ -26,8 +26,10 @@ import {
   EmptyState,
   LoadingState,
   ErrorState,
+  ConfirmDialog,
 } from '../../components/components.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
+import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { devHeaders } from '../../app-shell/dev-auth.js';
 
 // ---------------------------------------------------------------------------
@@ -84,60 +86,74 @@ function KindChip({ kind }) {
 
 function SodRuleRow({ rule, onDelete }) {
   const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // T-0528: push через глобальный ToastProvider — нет локального window.confirm()
+  const { push } = useToastContext();
 
-  const handleDelete = useCallback(async () => {
-    if (!window.confirm('Удалить правило разделения обязанностей?')) return;
+  const requestDelete = useCallback(() => {
+    setConfirmOpen(true);
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    setConfirmOpen(false);
     setDeleting(true);
-    setDeleteError(null);
     try {
       await onDelete(rule.id);
+      push({ tone: 'success', title: 'Правило SoD удалено' });
     } catch (err) {
-      setDeleteError(err.message);
+      push({ tone: 'error', title: 'Не удалось удалить правило', message: err.message, duration: 0 });
       setDeleting(false);
     }
-  }, [rule.id, onDelete]);
+  }, [rule.id, onDelete, push]);
 
   return (
-    <div className="chs-sodrow">
-      <div className="chs-sodrow__id">
-        <span className="chs-mono" style={{ fontSize: 'var(--chs-text-2xs)', color: 'var(--chs-color-text-faint)' }}>
-          {rule.id.slice(0, 8)}&hellip;
-        </span>
-      </div>
-      <div className="chs-sodrow__pair">
-        {rule.roleA && <span>{rule.roleA.name ?? rule.roleA.id}</span>}
-        {rule.roleA && rule.roleB && <span className="chs-sodrow__vs">&times;</span>}
-        {rule.roleB && <span>{rule.roleB.name ?? rule.roleB.id}</span>}
-        {!rule.roleA && !rule.roleB && (
-          <span style={{ color: 'var(--chs-color-text-faint)' }}>Все роли</span>
-        )}
-      </div>
-      <div className="chs-sodrow__why">
-        {rule.kind === 'dynamic' && rule.selfRecord
-          ? 'Запрет самоподтверждения записи'
-          : rule.kind === 'dynamic'
-            ? 'Разделение этапов процесса'
-            : 'Несовместимые роли'}
-      </div>
-      <KindChip kind={rule.kind} />
-      <div className="chs-sodrow__actions">
-        <button
-          type="button"
-          className="chs-btn chs-btn--ghost chs-btn--sm chs-btn--danger"
-          onClick={handleDelete}
-          disabled={deleting}
-          aria-label="Удалить правило"
-        >
-          {deleting ? '…' : 'Удалить'}
-        </button>
-        {deleteError && (
-          <span style={{ color: 'var(--chs-color-text-danger)', fontSize: 'var(--chs-text-xs)' }}>
-            {deleteError}
+    <>
+      <div className="chs-sodrow">
+        <div className="chs-sodrow__id">
+          <span className="chs-mono" style={{ fontSize: 'var(--chs-text-2xs)', color: 'var(--chs-color-text-faint)' }}>
+            {rule.id.slice(0, 8)}&hellip;
           </span>
-        )}
+        </div>
+        <div className="chs-sodrow__pair">
+          {rule.roleA && <span>{rule.roleA.name ?? rule.roleA.id}</span>}
+          {rule.roleA && rule.roleB && <span className="chs-sodrow__vs">&times;</span>}
+          {rule.roleB && <span>{rule.roleB.name ?? rule.roleB.id}</span>}
+          {!rule.roleA && !rule.roleB && (
+            <span style={{ color: 'var(--chs-color-text-faint)' }}>Все роли</span>
+          )}
+        </div>
+        <div className="chs-sodrow__why">
+          {rule.kind === 'dynamic' && rule.selfRecord
+            ? 'Запрет самоподтверждения записи'
+            : rule.kind === 'dynamic'
+              ? 'Разделение этапов процесса'
+              : 'Несовместимые роли'}
+        </div>
+        <KindChip kind={rule.kind} />
+        <div className="chs-sodrow__actions">
+          <button
+            type="button"
+            className="chs-btn chs-btn--ghost chs-btn--sm chs-btn--danger"
+            onClick={requestDelete}
+            disabled={deleting}
+            aria-label="Удалить правило"
+          >
+            {deleting ? '…' : 'Удалить'}
+          </button>
+        </div>
       </div>
-    </div>
+      <ConfirmDialog
+        open={confirmOpen}
+        tone="danger"
+        title="Удалить правило SoD?"
+        message="Удалить правило разделения обязанностей? Действие необратимо."
+        confirmLabel="Удалить"
+        cancelLabel="Отмена"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onClose={() => { if (!deleting) setConfirmOpen(false); }}
+      />
+    </>
   );
 }
 

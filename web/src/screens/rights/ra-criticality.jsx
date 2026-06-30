@@ -20,9 +20,8 @@ import {
   LoadingState,
   ErrorState,
   Button,
-  useToasts,
-  ToastViewport,
 } from '../../components/components.jsx';
+import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { Icon } from '../../app-shell/icon.jsx';
 import { devHeaders } from '../../app-shell/dev-auth.js';
 import { RES_BY_URI } from './ra-data.jsx';
@@ -164,7 +163,7 @@ function CriticalityScreen() {
   const [loadError, setLoadError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null); // "<id>:approve" | "<id>:reject" | null
-  const { toasts, push: pushToast } = useToasts();
+  const { push: pushToast } = useToastContext();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -273,7 +272,7 @@ function CriticalityScreen() {
           ))}
         </div>
       </div>
-      <ToastViewport toasts={toasts} />
+      {/* ToastViewport монтируется глобально в ToastProvider (toast-context.jsx) — локальный удалён (T-0528) */}
     </div>
   );
 }

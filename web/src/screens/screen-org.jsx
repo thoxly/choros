@@ -12,8 +12,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   ExecutorBadge, ExecGlyph, MonoId, Mono, Button, Field, Select, Modal, ConfirmDialog,
-  EmptyState, LoadingState, ErrorState, ToastViewport, useToasts, KitIcon,
+  EmptyState, LoadingState, ErrorState, KitIcon,
 } from '../components/components.jsx';
+import { useToastContext } from '../app-shell/toast-context.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, getDevUser } from '../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../app-shell/active-tenant.js';
@@ -517,7 +518,7 @@ function OrgScreen({ onOpenRights }) {
   // pendingDelete: { kind, uuid, label } while the kit ConfirmDialog is open, or null.
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
-  const { toasts, push, dismiss } = useToasts();
+  const { push, dismiss } = useToastContext();
 
   const actorId = (getDevUser() || {}).id || '';
 
@@ -647,7 +648,7 @@ function OrgScreen({ onOpenRights }) {
         onConfirm={confirmDelete}
         onClose={() => { if (!deleting) setPendingDelete(null); }}
       />
-      <ToastViewport toasts={toasts} dismiss={dismiss} position="bottom-right" />
+      {/* ToastViewport монтируется глобально в ToastProvider (toast-context.jsx) — локальный удалён (T-0528) */}
       {error ? (
         <ErrorState message={`Ошибка загрузки оргструктуры: ${error}`} onRetry={reload} />
       ) : departments === null ? (

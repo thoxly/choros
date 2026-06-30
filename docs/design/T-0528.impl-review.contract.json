@@ -1,0 +1,64 @@
+{
+  "task_id": "T-0528",
+  "verdict": "changes_requested",
+  "ci_seen": { "green": true },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "blocking",
+      "axis": 3,
+      "location": "web/src/components/components.jsx:553",
+      "issue": "ToastViewport does not spread extra props onto its root <div>. Signature is `({ toasts, dismiss, position })` — no `...rest`. The `onPointerEnter`/`onPointerLeave` passed from toast-context.jsx (lines 109-110) are silently dropped and never reach the DOM. Pause-on-hover is inert at runtime despite correct provider logic.",
+      "suggestion": "Change line 553 to `function ToastViewport({ toasts = [], dismiss, position = 'bottom-right', ...rest }) {` and add `{...rest}` to the root div at line 555: `<div className={...} {...rest}>`. This is a 2-line change entirely in components.jsx within the kit primitives layer — no provider changes needed."
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "web/src/components/components.jsx:521",
+      "issue": "Kit Toast sets role=alert/aria-live=assertive only for tone='error'; tone='warning' gets role=status/aria-live=polite. The design spec (§3 table) requires warning to be assertive/alert. The provider's defaultDuration correctly gates warning at duration:0, but the live-region semantics in the DOM are wrong for warning tone. T-0528 spec says 'не изменяя сами примитивы' — so strictly out of scope, but the gap is real.",
+      "suggestion": "Change the ternary in Toast line 521 to check `tone === 'error' || tone === 'warning'` for both role and aria-live. Track as follow-up if T-0528 scope is strict; otherwise fix here since it is 1-line and severity is a11y-correctness."
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "axis": 2,
+      "location": "web/src/app-shell/toast-context.jsx:82-88",
+      "issue": "pauseAll() clears timers but does not record how much time has already elapsed — remainingRef stores the full original duration, not the actual remaining time. On resume, a toast that had 3.8s left out of 4s restarts with the full 4s. This is noted as a deliberate simplification in a code comment, which is acceptable for MVP, but is a UX regression if toasts had nearly expired.",
+      "suggestion": "Record `startedAt` per timer alongside `timersRef` to compute elapsed on pause; resume with `original - elapsed`. Defer to T-0526 if complexity is undesirable now."
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/app-shell/shell.jsx:682-829",
+      "issue": "ToastProvider is placed INSIDE the currentUser guard (line 682) but OUTSIDE CrumbContext.Provider. This is correct for the authenticated tree. However, Topbar (line 775) calls useToastContext() which requires ToastProvider to be an ancestor — confirmed working. Indentation of ToastProvider/CrumbContext.Provider closing tags is inconsistent (no closing indentation alignment), making the JSX tree harder to audit visually.",
+      "suggestion": "Cosmetic: align closing tags. No functional issue."
+    },
+    {
+      "id": "F5",
+      "severity": "nit",
+      "axis": 5,
+      "location": "web/src/app-shell/toast-context.jsx:94",
+      "issue": "resumeAll() converts idStr to Number(idStr) to match toast ids. Kit useToasts uses `++idRef.current` which starts at 0 and increments as a number, but is stored in remainingRef with string keys via Object.entries(). Coercion works correctly in practice, but the mixed number/string key handling is fragile if id generation ever changes.",
+      "suggestion": "Store timer keys consistently as numbers: `timersRef.current[id] = ...` where id is already a number from kitPush return value. Then Object.entries keys can be coerced safely. Low risk as-is."
+    }
+  ],
+  "acceptance_coverage": [
+    { "ac": "ToastProvider mounts once in AppShell authenticated tree", "covered": true },
+    { "ac": "useToasts called exactly once (in ToastProvider)", "covered": true },
+    { "ac": "Single <ToastViewport> in authenticated tree (showcase excluded)", "covered": true },
+    { "ac": "window.alert() removed from web/src (excluding comments)", "covered": true },
+    { "ac": "window.confirm() removed from web/src (ra-sod migrated to ConfirmDialog)", "covered": true },
+    { "ac": "console.error supplemented with push in screen-assistant.jsx", "covered": true },
+    { "ac": "screen-org.jsx local useToasts+ToastViewport removed", "covered": true },
+    { "ac": "ra-criticality.jsx local useToasts+ToastViewport removed", "covered": true },
+    { "ac": "severity policy: error/warning duration:0 in provider", "covered": true },
+    { "ac": "severity policy: error/warning role=alert assertive in DOM (warning tone)", "covered": false },
+    { "ac": "pause-on-hover FF-TOAST-PAUSE-HOVER: provider logic correct", "covered": true },
+    { "ac": "pause-on-hover FF-TOAST-PAUSE-HOVER: events reach DOM viewport", "covered": false },
+    { "ac": "build green (D-056)", "covered": true }
+  ],
+  "role_gap_evidence": [],
+  "reviewer_notes": "BLOCKING F1 (pause-on-hover inert): ToastViewport does not accept/spread event props. Fix is exactly 2 lines in components.jsx — add `...rest` to destructuring, spread `{...rest}` on root div. This is T-0528 scope (design §3 explicitly requires pause-on-hover, FF-TOAST-PAUSE-HOVER). The provider implementation is correct and complete; only the kit primitive's prop-forwarding is missing. Once F1 is fixed, verdict flips to approved. F2 (warning a11y role) is a real gap but borderline scope — recommend fixing in the same pass since it is 1-line and co-located."
+}
