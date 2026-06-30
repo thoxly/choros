@@ -1,3 +1,4 @@
+-- @demo-seed (T-0549): fake reference-company content; skipped when CHOROS_SEED_DEMO=off (clean prod).
 -- 056 · external-participant directory seed (T-0205 / ADR T-0122 §2.1, FR-1)
 --
 -- SCOPE — v1 = DATA ONLY (founder decision, gap-map §3а; spec T-0122 FR-1):
