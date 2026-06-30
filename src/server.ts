@@ -30,6 +30,7 @@ import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
+import { registerSectionRoutes } from "./http/sections.js";
 import { registerRecordRoutes } from "./http/records.js";
 import { registerRecordLinksRoutes } from "./http/record-links.js";
 import { registerAssistantRoutes } from "./http/assistant.js";
@@ -744,6 +745,18 @@ function buildRouter(
   // Siblings T-0263 (registry_def) and T-0264 (record) add their own blocks below.
   if (grantsPool) {
     registerApplicationRoutes(router, {
+      pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // Register sections (разделы) CRUD API (T-0551 E-NAV-IA — раздел = первоклассная
+  // сущность/папка, РЕВЕРС T-0540 строки). Tenant-scoped via withTenantTx + RLS
+  // (policy section_tenant_isolation); actor's tenant resolved from the dev-user
+  // slug / KC sub, never from headers. Same deps as applications.
+  if (grantsPool) {
+    registerSectionRoutes(router, {
       pool: grantsPool,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),

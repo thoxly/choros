@@ -139,7 +139,9 @@ interface ApplicationRow {
   slug: string;
   display_name: string;
   description: string | null;
-  section: string | null;  // T-0540: бизнес-функция/раздел; NULL → fallback-секция «Другое»
+  section: string | null;  // T-0540 (DEPRECATED, T-0551): legacy free-text раздел.
+  section_id: string | null; // T-0551: FK на choros.section; NULL → «Без раздела».
+  section_name: string | null; // T-0551: denormalized section.name (LEFT JOIN), for nav/list.
   tier: string;
   created_at: string | number; // bigint comes back as a string from node-postgres
   updated_at: string | number;
@@ -151,15 +153,37 @@ function serializeApplication(row: ApplicationRow): Record<string, unknown> {
     slug: row.slug,
     display_name: row.display_name,
     description: row.description,
-    section: row.section ?? null,  // T-0540: null = «раздел не задан» → fallback-секция «Другое»
+    section: row.section ?? null,  // T-0540 legacy (DEPRECATED); kept until column drop.
+    section_id: row.section_id ?? null,    // T-0551: раздел-сущность; null = «Без раздела».
+    section_name: row.section_name ?? null, // T-0551: имя раздела (для нав/списка без доп.запроса).
     tier: row.tier,
     created_at: Number(row.created_at),
     updated_at: Number(row.updated_at),
   };
 }
 
-const APP_SELECT_COLS =
-  "id, slug, display_name, description, section, tier, created_at, updated_at";
+// T-0551: reads LEFT JOIN choros.section so the row carries section_id + section_name
+// (имя раздела для нав/списка без доп.запроса). NULL section_id → section_name NULL
+// = «Без раздела». INSERT/UPDATE re-select via this fragment to populate section_name.
+const APP_READ_SELECT = `
+  SELECT a.id, a.slug, a.display_name, a.description, a.section,
+         a.section_id, s.name AS section_name, a.tier, a.created_at, a.updated_at
+    FROM choros.application a
+    LEFT JOIN choros.section s
+      ON s.tenant_id = a.tenant_id AND s.id = a.section_id`;
+
+// Re-select one application (with section JOIN) inside an existing tenant tx client.
+async function selectAppByIdTx(
+  client: pg.PoolClient,
+  tenantId: string,
+  id: string,
+): Promise<ApplicationRow | null> {
+  const res = await client.query<ApplicationRow>(
+    `${APP_READ_SELECT} WHERE a.tenant_id = $1 AND a.id = $2`,
+    [tenantId, id],
+  );
+  return res.rows[0] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Services
@@ -178,14 +202,15 @@ async function createApplication(args: {
   const id = randomUUID();
   return withTenantTx(pool, tenantId, async (client) => {
     try {
-      const res = await client.query<ApplicationRow>(
+      await client.query(
         `INSERT INTO choros.application
            (tenant_id, id, slug, display_name, description, section, tier, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $7)
-         RETURNING ${APP_SELECT_COLS}`,
+         VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7, $7)`,
         [tenantId, id, slug, displayName, description, section, nowMs],
       );
-      return res.rows[0]!;
+      // Re-select with the section JOIN so section_name is populated (T-0551).
+      const row = await selectAppByIdTx(client, tenantId, id);
+      return row!;
     } catch (err) {
       // 23505 = unique_violation → slug already taken within this tenant (AC-8).
       if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23505") {
@@ -196,64 +221,84 @@ async function createApplication(args: {
   });
 }
 
-// T-0540: update section (and optionally display_name/description) for an existing application.
+// Sentinel thrown when a PATCH references a section_id not in the caller's tenant.
+// Surfaced as 404 by the route (ADR §2.1: чужой/несуществующий раздел → 404).
+class ForeignSectionError extends Error {}
+
+// T-0540/T-0551: update section_id (and optionally display_name/description/legacy section).
 async function patchApplication(
   pool: pg.Pool,
   tenantId: string,
   id: string,
-  patch: { section?: string | null; display_name?: string; description?: string | null },
+  patch: {
+    section?: string | null;
+    section_id?: string | null;
+    display_name?: string;
+    description?: string | null;
+  },
   nowMs: number,
 ): Promise<ApplicationRow | null> {
-  // Build dynamic SET clause from provided fields.
-  const setClauses: string[] = [];
-  const params: unknown[] = [tenantId, id];
-
-  if ("section" in patch) {
-    params.push(patch.section ?? null);
-    setClauses.push(`section = $${params.length}`);
-  }
-  if ("display_name" in patch && patch.display_name !== undefined) {
-    params.push(patch.display_name);
-    setClauses.push(`display_name = $${params.length}`);
-  }
-  if ("description" in patch) {
-    params.push(patch.description ?? null);
-    setClauses.push(`description = $${params.length}`);
-  }
-
-  if (setClauses.length === 0) {
-    // Nothing to update — return current row.
-    return withTenantTx(pool, tenantId, async (client) => {
-      const res = await client.query<ApplicationRow>(
-        `SELECT ${APP_SELECT_COLS} FROM choros.application WHERE tenant_id = $1 AND id = $2`,
-        [tenantId, id],
-      );
-      return res.rows[0] ?? null;
-    });
-  }
-
-  params.push(nowMs);
-  setClauses.push(`updated_at = $${params.length}`);
-
   return withTenantTx(pool, tenantId, async (client) => {
-    const res = await client.query<ApplicationRow>(
+    // T-0551: validate section_id belongs to the caller's tenant (RLS-scoped) BEFORE
+    // the update — a foreign/nonexistent id → 404 (ForeignSectionError), not a raw FK
+    // 23503. NULL is always allowed («Без раздела»).
+    if (patch.section_id !== undefined && patch.section_id !== null) {
+      const chk = await client.query(
+        `SELECT 1 FROM choros.section WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, patch.section_id],
+      );
+      if (chk.rowCount === 0) {
+        throw new ForeignSectionError("section not found in tenant");
+      }
+    }
+
+    // Build dynamic SET clause from provided fields.
+    const setClauses: string[] = [];
+    const params: unknown[] = [tenantId, id];
+
+    if ("section" in patch) {
+      params.push(patch.section ?? null);
+      setClauses.push(`section = $${params.length}`);
+    }
+    if ("section_id" in patch) {
+      params.push(patch.section_id ?? null);
+      setClauses.push(`section_id = $${params.length}`);
+    }
+    if ("display_name" in patch && patch.display_name !== undefined) {
+      params.push(patch.display_name);
+      setClauses.push(`display_name = $${params.length}`);
+    }
+    if ("description" in patch) {
+      params.push(patch.description ?? null);
+      setClauses.push(`description = $${params.length}`);
+    }
+
+    if (setClauses.length === 0) {
+      // Nothing to update — return current row.
+      return selectAppByIdTx(client, tenantId, id);
+    }
+
+    params.push(nowMs);
+    setClauses.push(`updated_at = $${params.length}`);
+
+    const upd = await client.query(
       `UPDATE choros.application
           SET ${setClauses.join(", ")}
-        WHERE tenant_id = $1 AND id = $2
-        RETURNING ${APP_SELECT_COLS}`,
+        WHERE tenant_id = $1 AND id = $2`,
       params,
     );
-    return res.rows[0] ?? null;
+    if ((upd.rowCount ?? 0) === 0) return null;
+    // Re-select with the section JOIN to return section_name (T-0551).
+    return selectAppByIdTx(client, tenantId, id);
   });
 }
 
 async function listApplications(pool: pg.Pool, tenantId: string): Promise<ApplicationRow[]> {
   return withTenantTx(pool, tenantId, async (client) => {
     const res = await client.query<ApplicationRow>(
-      `SELECT ${APP_SELECT_COLS}
-         FROM choros.application
-        WHERE tenant_id = $1
-        ORDER BY created_at DESC, slug ASC`,
+      `${APP_READ_SELECT}
+        WHERE a.tenant_id = $1
+        ORDER BY a.created_at DESC, a.slug ASC`,
       [tenantId],
     );
     return res.rows;
@@ -266,13 +311,7 @@ async function getApplication(
   id: string,
 ): Promise<ApplicationRow | null> {
   return withTenantTx(pool, tenantId, async (client) => {
-    const res = await client.query<ApplicationRow>(
-      `SELECT ${APP_SELECT_COLS}
-         FROM choros.application
-        WHERE tenant_id = $1 AND id = $2`,
-      [tenantId, id],
-    );
-    return res.rows[0] ?? null;
+    return selectAppByIdTx(client, tenantId, id);
   });
 }
 
@@ -396,10 +435,11 @@ export function registerApplicationRoutes(
     }),
   );
 
-  // PATCH /api/applications/:id — T-0540: update section (and optionally display_name/description).
-  // Primary use: управление разделами (screen-apps.jsx поповер + агент).
-  // Body: { section?: string | null, display_name?: string, description?: string | null }
-  // Returns 200 with updated application; 404 if not found in caller's tenant.
+  // PATCH /api/applications/:id — T-0540/T-0551: update section_id (раздел-сущность),
+  // legacy section string, display_name, description.
+  // Primary use: назначение раздела (screen-apps.jsx SetSectionModal + агент).
+  // Body: { section_id?: string|null, section?: string|null, display_name?: string, description?: string|null }
+  // Returns 200 with updated application; 404 if app OR referenced section_id not in caller's tenant.
   router.register(
     "PATCH",
     "/api/applications/:id",
@@ -416,7 +456,24 @@ export function registerApplicationRoutes(
       const body = rawBody as Record<string, unknown>;
 
       // Build patch from provided fields (only what's present in body is updated).
-      const patch: { section?: string | null; display_name?: string; description?: string | null } = {};
+      const patch: {
+        section?: string | null;
+        section_id?: string | null;
+        display_name?: string;
+        description?: string | null;
+      } = {};
+
+      // T-0551: section_id (раздел-сущность). null = «Без раздела». Foreign/unknown id → 404.
+      if ("section_id" in body) {
+        if (body["section_id"] === null || body["section_id"] === undefined) {
+          patch.section_id = null;
+        } else {
+          if (typeof body["section_id"] !== "string" || !UUID_RE.test(body["section_id"] as string)) {
+            throw new HttpError(400, "VALIDATION", "section_id must be a UUID or null");
+          }
+          patch.section_id = body["section_id"] as string;
+        }
+      }
 
       if ("section" in body) {
         if (body["section"] === null || body["section"] === undefined) {
@@ -457,7 +514,16 @@ export function registerApplicationRoutes(
       }
 
       const tenantId = await resolveActorTenant(actor);
-      const row = await patchApplication(pool, tenantId, id, patch, Date.now());
+      let row: ApplicationRow | null;
+      try {
+        row = await patchApplication(pool, tenantId, id, patch, Date.now());
+      } catch (err) {
+        if (err instanceof ForeignSectionError) {
+          // Referenced section_id is not in the caller's tenant (ADR §2.1).
+          throw new HttpError(404, "NOT_FOUND", "section not found");
+        }
+        throw err;
+      }
       if (row === null) {
         throw new HttpError(404, "NOT_FOUND", "application not found");
       }
