@@ -212,6 +212,9 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   const [dragFrom, setDragFrom] = useState(null);
   const [saveState, setSaveState] = useState({ status: 'idle' });
   const [loadError, setLoadError] = useState(null);
+  // T-0533 F-01: saveGen increments after each successful save so that the
+  // useMemo for isDirty re-runs and picks up the updated savedDocRef.current.
+  const [saveGen, setSaveGen] = useState(0);
 
   // T-0533: track last-saved doc snapshot for isDirty comparison.
   // Initialised to the initial document (or null); updated after each successful save.
@@ -266,10 +269,12 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
   // T-0533: isDirty — JSON.stringify comparison against last-saved snapshot.
   // form-document-ops.js guarantees deterministic key order (immutable ops),
   // so stringify is a reliable structural equality check until T-0544 adds undo-stacks.
+  // F-01 fix: saveGen in deps forces re-evaluation after save (ref mutation alone
+  // is invisible to React and would keep isDirty=true permanently after first save).
   const isDirty = useMemo(() => {
     if (!doc || !savedDocRef.current) return false;
     return JSON.stringify(doc) !== JSON.stringify(savedDocRef.current);
-  }, [doc]);
+  }, [doc, saveGen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // T-0533: beforeunload + react-router route-guard.
   const guard = useDirtyGuard(isDirty);
@@ -445,7 +450,7 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
               variant="primary"
               disabled={!validation.ok || saveState.status === 'saving'}
               loading={saveState.status === 'saving'}
-              onClick={() => persistLayout(doc, setSaveState, savedDocRef)}
+              onClick={() => persistLayout(doc, setSaveState, savedDocRef, setSaveGen)}
               style={{ marginTop: 'var(--chs-space-2)', width: '100%' }}
             >
               Сохранить раскладку
@@ -485,8 +490,10 @@ function FormDesigner({ initialDocument, initialFields } = {}) {
  * it in form_binding.layout (migration 105) and re-validates server-side.
  *
  * T-0533: savedDocRef is updated on success so isDirty resets to false.
+ * F-01 fix: setSaveGen increments the saveGen counter AFTER updating savedDocRef so
+ * that the useMemo([doc, saveGen]) re-runs and sees the fresh snapshot.
  */
-function persistLayout(doc, setSaveState, savedDocRef) {
+function persistLayout(doc, setSaveState, savedDocRef, setSaveGen) {
   setSaveState({ status: 'saving' });
   const body = {
     process_key: doc.step?.processKey || 'record',
@@ -500,8 +507,10 @@ function persistLayout(doc, setSaveState, savedDocRef) {
   })
     .then((r) => { if (!r.ok) throw new Error('save failed'); return r.json(); })
     .then(() => {
-      // T-0533: advance the snapshot so isDirty goes false.
+      // T-0533 F-01: update snapshot first, then increment saveGen so the
+      // useMemo re-evaluates isDirty = false in the same React render batch.
       if (savedDocRef) savedDocRef.current = doc;
+      if (setSaveGen) setSaveGen((g) => g + 1);
       setSaveState({ status: 'saved' });
     })
     .catch(() => setSaveState({ status: 'error', message: 'Не удалось сохранить.' }));
