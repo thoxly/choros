@@ -713,6 +713,9 @@ const seedState = {
   // T-0238 chain: doc_page → doc_ref / doc_log (both FK doc_page)
   docPageIdA: '',
   docPageIdB: '',
+  // T-0407 chain: matrix_lookup_table → matrix_lookup_cell (cell FKs table by id)
+  matrixLookupTableIdA: '',
+  matrixLookupTableIdB: '',
 };
 
 /**
@@ -1271,6 +1274,38 @@ async function seedRowForTable(c: pg.Client, tableName: string, tenantId: string
       );
       break;
     }
+    case 'matrix_lookup_table': {
+      // T-0407 (migration 112) — normative 2-axis parameter table header.
+      // PK=(tenant_id, id), no cross-table FK. Store the id so the
+      // matrix_lookup_cell case (next in KNOWN_TENANT_TABLES order) can FK it.
+      const id = uuid();
+      await c.query(
+        `INSERT INTO choros.matrix_lookup_table
+           (tenant_id, id, display_name, description, created_at, updated_at)
+         VALUES ($1, $2, $3, NULL, 0, 0)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, id, `ct-matrix-${id.slice(0, 8)}`],
+      );
+      if (tenantId === TENANT_A) seedState.matrixLookupTableIdA = id;
+      else seedState.matrixLookupTableIdB = id;
+      break;
+    }
+    case 'matrix_lookup_cell': {
+      // T-0407 (migration 112) — FK (tenant_id, table_id) → matrix_lookup_table.
+      // KNOWN_TENANT_TABLES order (…, matrix_lookup_table, matrix_lookup_cell)
+      // guarantees the parent table row is already seeded above.
+      const tableId = tenantId === TENANT_A
+        ? seedState.matrixLookupTableIdA
+        : seedState.matrixLookupTableIdB;
+      await c.query(
+        `INSERT INTO choros.matrix_lookup_cell
+           (tenant_id, table_id, axis_a_value, axis_b_value, numeric_value)
+         VALUES ($1, $2, 'crm', 'design', 40)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, tableId],
+      );
+      break;
+    }
     default:
       throw new Error(`seedRowForTable: unknown table ${tableName}`);
   }
@@ -1631,6 +1666,8 @@ const SEEDED_TABLES = new Set<string>([
   'process_app_binding',
   'llm_connection',
   'app_secret',
+  'matrix_lookup_table',
+  'matrix_lookup_cell',
 ]);
 
 describe('AC-CT-4 · T-0188: seeder completeness guard — every known_tenant table has a seeder', () => {
