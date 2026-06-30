@@ -187,6 +187,7 @@ _dc_mig083_failed=0                                                             
 _dc_mig104_failed=0                                                                # T0475-DC-MIG104-GUARD track when 104 triggers the FF-DC7 fail
 _dc_mig106_failed=0                                                                # T0476-DC-MIG106-GUARD track when 106 triggers the FF-DC7 fail
 _dc_mig107_failed=0                                                                # T0477-DC-MIG107-GUARD track when 107 triggers the FF-DC7 fail
+_dc_mig109_failed=0                                                                # T0397-DC-MIG109-GUARD track when 109 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -231,6 +232,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/107_spend_ledger_llm_tracking.sql" ]]; then   # T0477-DC-MIG107-GUARD
       _dc_mig107_failed=1                                                     # T0477-DC-MIG107-GUARD
     fi                                                                        # T0477-DC-MIG107-GUARD
+    # Track specifically when 109 triggers this FAIL (and nothing else).     # T0397-DC-MIG109-GUARD
+    if [[ "${m}" == "migrations/109_dual_control_pdp_backfill.sql" ]]; then   # T0397-DC-MIG109-GUARD
+      _dc_mig109_failed=1                                                     # T0397-DC-MIG109-GUARD
+    fi                                                                        # T0397-DC-MIG109-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -498,6 +503,39 @@ if [[ "${_dc_mig107_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0477-spend-ledger-llm-tracking]: migration 107_spend_ledger_llm_tracking.sql is an ADDITIVE extension of the existing spend_ledger (ALTER DROP NOT NULL + ADD COLUMN + index, no CREATE TABLE/RLS/POLICY) — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0477-DC-MIG107-GUARD
   fi                                                                           # T0477-DC-MIG107-GUARD
 fi                                                                             # T0477-DC-MIG107-GUARD
+# T-0397: relief for migration 109_dual_control_pdp_backfill.sql.            # T0397-DC-MIG109-GUARD
+# UNLIKE every other relief above (which are UNRELATED stores and must NOT   # T0397-DC-MIG109-GUARD
+# touch confirmed2_by), 109 is the PDP dual-control read-hole fix: it is a    # T0397-DC-MIG109-GUARD
+# PURE DML BACKFILL that DELIBERATELY writes confirmed2_by (UPDATE … SET      # T0397-DC-MIG109-GUARD
+# confirmed2_by = confirmed_by) for pre-existing active critical grants/      # T0397-DC-MIG109-GUARD
+# assignments, so tightening the grants-dao.ts read-path is NON-BREAKING.     # T0397-DC-MIG109-GUARD
+# This does NOT violate the FF-DC7 invariant — that invariant is "031 is the  # T0397-DC-MIG109-GUARD
+# ONLY migration that defines/ALTERS the confirmed2_by COLUMN STRUCTURE, and  # T0397-DC-MIG109-GUARD
+# confirmed2_by stays a derived additive column." 109 adds NO column, alters  # T0397-DC-MIG109-GUARD
+# NO schema, creates NO table/RLS/policy: it only SETS DATA. The relief       # T0397-DC-MIG109-GUARD
+# therefore ALLOWS the confirmed2_by reference (the backfill's whole point)   # T0397-DC-MIG109-GUARD
+# but FAIL-CLOSED forbids ANY DDL — CREATE/ALTER/DROP TABLE, ADD/DROP COLUMN, # T0397-DC-MIG109-GUARD
+# RLS, or POLICY. Cancels ONLY the _dc_mig109_failed increment (set in the    # T0397-DC-MIG109-GUARD
+# loop above exclusively when 109 is the unexpected file), scoped exactly.    # T0397-DC-MIG109-GUARD
+_dc_mig109_stem="migrations/109_dual_control_pdp_backfill.sql"                   # T0397-DC-MIG109-GUARD
+if [[ "${_dc_mig109_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig109_stem}"; then # T0397-DC-MIG109-GUARD
+  _dc_mig109_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig109_stem}" 2>/dev/null || true)"  # T0397-DC-MIG109-GUARD
+  _dc_mig109_bad=0                                                             # T0397-DC-MIG109-GUARD
+  # 109 must add NO table/RLS/policy (pure DML backfill only).                # T0397-DC-MIG109-GUARD
+  if echo "${_dc_mig109_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0397-DC-MIG109-GUARD
+    _dc_mig109_bad=1                                                           # T0397-DC-MIG109-GUARD introduces DDL/RLS
+  fi                                                                           # T0397-DC-MIG109-GUARD
+  # 109 must NOT ALTER any table structure (no ADD/DROP/ALTER COLUMN) — the   # T0397-DC-MIG109-GUARD
+  # confirmed2_by COLUMN STRUCTURE belongs to 031 alone; 109 only writes DATA.# T0397-DC-MIG109-GUARD
+  if echo "${_dc_mig109_content}" | grep -iqE "ALTER[[:space:]]+TABLE|ADD[[:space:]]+COLUMN|DROP[[:space:]]+COLUMN|DROP[[:space:]]+TABLE"; then # T0397-DC-MIG109-GUARD
+    _dc_mig109_bad=1                                                           # T0397-DC-MIG109-GUARD touches column/table structure
+  fi                                                                           # T0397-DC-MIG109-GUARD
+  if [[ "${_dc_mig109_bad}" -eq 0 ]]; then                                    # T0397-DC-MIG109-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0397-DC-MIG109-GUARD cancel false-red
+    _dc_mig109_failed=0                                                        # T0397-DC-MIG109-GUARD
+    echo "PASS [FF-DC7-T0397-pdp-dual-control-backfill]: migration 109_dual_control_pdp_backfill.sql is a PURE DML BACKFILL (UPDATE … SET confirmed2_by = confirmed_by for pre-existing active critical rows; no CREATE/ALTER/DROP TABLE, no ADD/DROP COLUMN, no RLS/POLICY) — the confirmed2_by COLUMN STRUCTURE is untouched (still owned by 031); enforcement is the grants-dao.ts read-path change — relief granted" # T0397-DC-MIG109-GUARD
+  fi                                                                           # T0397-DC-MIG109-GUARD
+fi                                                                             # T0397-DC-MIG109-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

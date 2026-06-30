@@ -12,11 +12,25 @@
  *    needed by the inbox (role-slug set for pool-task filtering).
  *  - Tenant-isolation: every query runs inside a `SET LOCAL choros.tenant_id`
  *    transaction (RLS). Follows the withTenant pattern from src/db/org.ts.
- *  - No `nowMs` time-window filtering for role slugs: the inbox only needs
- *    CONFIRMED assignments (confirmed_by IS NOT NULL) regardless of
- *    valid_from/valid_until. Time-window filtering is the PDP's responsibility
- *    (grant-resolver.ts step 3 / isEffective). The inbox role-check is a
- *    structural eligibility gate, not a full PDP decision.
+ *  - Validity windows: every assignment/grant read filters by the half-open
+ *    [valid_from, valid_until) window (bigint epoch-ms; NULL = unbounded). As of
+ *    T-0397 the GRANT query honors valid_until too (it previously did not), so a
+ *    grant past its valid_until is no longer PDP-active.
+ *  - Dual-control (T-0397): a CRITICAL grant/assignment is PDP-active only when
+ *    its SECOND distinct approver is present (confirmed2_by IS NOT NULL), not on
+ *    confirmed_by alone. "Critical" is the FULL T-0040/T-0044 escalation
+ *    classification (criticalGrantPredicate — a fail-CLOSED SQL superset of the
+ *    write-side dualControlDecision over ALL FOUR escalation axes):
+ *      axis a — operation ∈ {approve, transition}
+ *      axis b — resource_type = effect_resource AND operation = invoke
+ *      axis c — operation = read with a sensitive clearance marker (confidential|restricted)
+ *      Q-2   — operation = read with a present-but-garbage clearance token
+ *    An assignment is critical iff the role it binds holds any EFFECTIVE such grant.
+ *    This closes the B1 read-path hole (review): the WRITE side (grants.ts) lands
+ *    escalating rows semi-confirmed (confirmed2_by NULL = NOT active) on ALL axes,
+ *    but the read side previously only checked axes a/b — so a read grant escalated
+ *    by axis c / Q-2 went PDP-active after ONE approver. The gate now closes every
+ *    axis. Non-critical grants/assignments keep their single-confirm behaviour.
  *  - Reuse design: `getGrantsForSubject` provides the full Grant[] path for S2
  *    (executor-resolution, T-0336) and S1 (resolveFor seam, T-0335).
  *
@@ -41,6 +55,106 @@ function assertUuid(value: string, label: string): void {
     throw new Error(`${label} must be a valid UUID, got: ${JSON.stringify(value)}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// T-0397 — CRITICAL-grant SQL predicate (fail-CLOSED, all four escalation axes)
+//
+// A single SQL boolean expression that is TRUE iff a grant ROW carries a
+// criticality the WRITE-side dual-control gate (src/core/dual-control.ts +
+// role-criticality.ts) would escalate on — so the read-path can gate
+// `confirmed2_by IS NOT NULL` on the SAME classification the write-side used to
+// land the row semi-confirmed. This closes the original B1 hole: the read-side
+// previously only checked axes a/b, so a `read`-operation grant escalated by
+// axis c (sensitive clearance) or Q-2 (garbage clearance token) went PDP-active
+// after ONE approver.
+//
+// THE FOUR AXES (mirrors combineCriticality + nonDerivableReadClearance EXACTLY):
+//   axis a — operation IN ('approve','transition')                       (guarded-transition ops)
+//   axis b — resource_type = 'effect_resource' AND operation = 'invoke'  (T-0034 gateway)
+//   axis c — operation = 'read' AND the grant's clearance marker is a SENSITIVE
+//            DataClass (rank >= 'confidential'): { clearance: confidential|restricted }.
+//   Q-2   — operation = 'read' AND a `clearance` KEY is PRESENT but its value is
+//            NOT a derivable DataClass (a garbage token) — fail-closed implicit
+//            escalate (dual-control.ts nonDerivableReadClearance).
+//
+// CLEARANCE MARKER LOOKUP — mirrors data-classification.ts grantClearance:
+//   the marker is read from "constraint" FIRST; "resource_facet" is the fallback
+//   ONLY when "constraint" carries NO `clearance` KEY. We use the jsonb key-exists
+//   operator `?` to distinguish "key absent" from "key present with JSON null"
+//   (the latter is a present-but-garbage token → Q-2 escalates), matching the TS
+//   readClearancePresence/readClearanceMarker presence semantics precisely.
+//
+// FAIL-CLOSED DISCIPLINE (NF-2): this read gate is a DEFENCE-IN-DEPTH SUPERSET of
+// the write-side decision. The write-side (grants.ts → dualControlDecision) is the
+// single SOURCE of truth that lands NEW critical rows semi-confirmed; this SQL is
+// the read-side enforcement that the second approver actually gates ACTIVATION.
+// Any ambiguity (corrupt clearance, present-but-null) resolves toward MORE control
+// (treat as critical), never less — so the gate can only ever OVER-require the
+// second approver, never silently activate an escalating grant on one approver.
+//
+// SINGLE SOURCE / NO DRIFT: this fragment is defined ONCE and interpolated into
+// all three read predicates (grant query, both assignment EXISTS clauses + the
+// role-slug JOIN). A db-integration test (grants-dao.integration.test.ts) pins the
+// predicate against a REAL Postgres so it cannot silently diverge from the TS
+// criticality axes. The fragment references the bare column names (operation,
+// resource_type, "constraint", resource_facet) so it is valid both as a top-level
+// WHERE clause (grant query) and inside the `g.`-aliased EXISTS sub-queries via a
+// parametric alias.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the CRITICAL-grant SQL predicate for a given column alias (e.g. "g" or
+ * "" for the bare grant query). Returns a boolean SQL expression. Pure string
+ * builder — no interpolation of user data (alias is a hard-coded caller constant).
+ */
+function criticalGrantPredicate(alias: string): string {
+  const p = alias ? `${alias}.` : "";
+  // Clearance marker, constraint-first with resource_facet fallback ONLY when
+  // constraint carries no `clearance` key (mirrors grantClearance constraint-first).
+  const clearanceValue = `(
+        CASE
+          WHEN ${p}"constraint" IS NOT NULL AND jsonb_typeof(${p}"constraint") = 'object'
+               AND (${p}"constraint" ? 'clearance')
+            THEN ${p}"constraint"->>'clearance'
+          WHEN ${p}resource_facet IS NOT NULL AND jsonb_typeof(${p}resource_facet) = 'object'
+               AND (${p}resource_facet ? 'clearance')
+            THEN ${p}resource_facet->>'clearance'
+          ELSE NULL
+        END
+      )`;
+  // Is a `clearance` KEY present at all (constraint-first, then facet)? Uses the
+  // jsonb key-exists `?` operator so a present-but-JSON-null value still counts as
+  // present (→ Q-2 garbage token), exactly like readClearancePresence.
+  const clearancePresent = `(
+        (${p}"constraint" IS NOT NULL AND jsonb_typeof(${p}"constraint") = 'object' AND (${p}"constraint" ? 'clearance'))
+        OR (${p}resource_facet IS NOT NULL AND jsonb_typeof(${p}resource_facet) = 'object' AND (${p}resource_facet ? 'clearance'))
+      )`;
+  return `(
+        -- axis a — guarded-transition op-class
+        ${p}operation IN ('approve', 'transition')
+        -- axis b — T-0034 external-effect gateway
+        OR (${p}resource_type = 'effect_resource' AND ${p}operation = 'invoke')
+        -- axis c + Q-2 — a READ grant carrying a sensitive OR garbage clearance marker
+        OR (
+              ${p}operation = 'read'
+              AND ${clearancePresent}
+              AND (
+                    -- axis c: sensitive DataClass (rank >= 'confidential')
+                    ${clearanceValue} IN ('confidential', 'restricted')
+                    -- Q-2: present clearance KEY whose value is NOT a derivable
+                    -- DataClass token — a garbage/non-string/JSON-null value (the
+                    -- text extraction is NULL for JSON null) is fail-closed critical.
+                    OR ${clearanceValue} IS NULL
+                    OR ${clearanceValue} NOT IN ('public', 'internal', 'confidential', 'restricted')
+                  )
+           )
+      )`;
+}
+
+// The bare-column form (grant query top-level WHERE) and the g-aliased form
+// (assignment EXISTS sub-queries) — built once, reused everywhere (no drift).
+const CRITICAL_GRANT_PREDICATE_BARE = criticalGrantPredicate("");
+const CRITICAL_GRANT_PREDICATE_G = criticalGrantPredicate("g");
 
 // ---------------------------------------------------------------------------
 // withTenantReadTx — tenant-scoped read transaction (mirrors org.ts withTenant)
@@ -103,9 +217,18 @@ export async function getGrantsForSubject(
     }
     const employeeId = empRows[0]!.id;
 
-    // Step 2: load confirmed, in-window role_assignments for the employee.
+    // Step 2: load ACTIVE role_assignments for the employee.
     // confirmed_by IS NOT NULL = confirmed (NF per migration 020 contract).
     // valid_from/until window: NULL = unbounded on that side.
+    //
+    // T-0397 — dual-control on the assignment too: an assignment is CRITICAL iff
+    // the role it binds holds any EFFECTIVE critical grant (all four axes, same
+    // criticalGrantPredicate as the grant query). A critical assignment is
+    // PDP-active only when its second approver is present (confirmed2_by IS NOT
+    // NULL). Non-critical assignments keep single-confirm. The criticality EXISTS
+    // is tenant-scoped on BOTH sides (g.tenant_id = ra.tenant_id) — no cross-tenant
+    // edge (NF-2) — AND window-scoped on the grant (M1 review fix): an expired
+    // critical grant confers no capability, so it must not criticize the assignment.
     const { rows: raRows } = await client.query<{ role_id: string }>(
       `SELECT ra.role_id
          FROM choros.role_assignment ra
@@ -113,7 +236,23 @@ export async function getGrantsForSubject(
           AND ra.employee_id = $2
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND (
+                ra.confirmed2_by IS NOT NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM choros."grant" g
+                   WHERE g.tenant_id = ra.tenant_id
+                     AND g.role_id   = ra.role_id
+                     AND g.confirmed_by IS NOT NULL
+                     -- M1: only an EFFECTIVE (in-window) critical grant criticizes
+                     -- the assignment; an expired critical grant confers zero
+                     -- capability (combineCriticality counts effective grants only),
+                     -- so it must not force the assignment's second-approver gate.
+                     AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
+                     AND (g.valid_until IS NULL OR g.valid_until  > $3)
+                     AND ${CRITICAL_GRANT_PREDICATE_G}
+                )
+              )`,
       [tenantId, employeeId, nowMs],
     );
     if (raRows.length === 0) {
@@ -121,8 +260,32 @@ export async function getGrantsForSubject(
     }
     const roleIds = raRows.map((r) => r.role_id);
 
-    // Step 3: load confirmed grants for those roles.
-    // confirmed_by IS NOT NULL = active grant (migration 031 dual-control contract).
+    // Step 3: load ACTIVE grants for those roles.
+    //
+    // T-0397 — PDP dual-control read-path enforcement. A grant is PDP-active iff:
+    //   (1) confirmed_by IS NOT NULL                (first approver — migration 030/031), AND
+    //   (2) it is in its validity window            (valid_from/valid_until — migration 008,
+    //       previously IGNORED for grants → now honored, matching the role_assignment
+    //       query and grant-resolver.ts isEffective), AND
+    //   (3) if it is CRITICAL, confirmed2_by IS NOT NULL (second distinct approver —
+    //       migration 031 dual-control contract). Before T-0397 this column was
+    //       written by grants.ts on the WRITE side (escalating rows land semi-
+    //       confirmed, confirmed2_by NULL = NOT active) but NEVER checked on the
+    //       READ side, so a critical grant went PDP-active after ONE approver.
+    //
+    // "Critical" is the FULL T-0040/T-0044 escalation classification a single grant
+    // row can carry (criticalGrantPredicate — fail-closed superset of the write-side
+    // dualControlDecision over ALL FOUR axes; see its header):
+    //   axis a — operation IN ('approve','transition')
+    //   axis b — resource_type = 'effect_resource' AND operation = 'invoke'
+    //   axis c — operation = 'read' with a sensitive clearance marker (confidential|restricted)
+    //   Q-2   — operation = 'read' with a PRESENT-but-garbage clearance token (fail-closed)
+    // B1 FIX (review): the prior predicate checked ONLY axes a/b, so a read grant
+    // escalated by axis c / Q-2 landed semi-confirmed write-side (confirmed2_by NULL)
+    // yet the read gate treated it as non-critical → ACTIVE after one approver. The
+    // predicate now closes every axis fail-CLOSED.
+    //
+    // valid_from/until are bigint epoch-ms (NULL = unbounded); half-open [from, until).
     const { rows: grantRows } = await client.query<{
       id: string;
       role_id: string;
@@ -143,8 +306,14 @@ export async function getGrantsForSubject(
          FROM choros."grant"
         WHERE tenant_id = $1
           AND role_id = ANY($2::uuid[])
-          AND confirmed_by IS NOT NULL`,
-      [tenantId, roleIds],
+          AND confirmed_by IS NOT NULL
+          AND (valid_from  IS NULL OR valid_from  <= $3)
+          AND (valid_until IS NULL OR valid_until  > $3)
+          AND (
+                NOT ${CRITICAL_GRANT_PREDICATE_BARE}
+                OR confirmed2_by IS NOT NULL
+              )`,
+      [tenantId, roleIds, nowMs],
     );
 
     return grantRows.map((g) => ({
@@ -246,6 +415,12 @@ export async function getRoleSlugsForActor(
     }
 
     // Confirmed, in-window assignments → role slugs in one join.
+    //
+    // T-0397 — same dual-control gate as getGrantsForSubject step 2: a CRITICAL
+    // assignment (role holds an EFFECTIVE critical grant under any of the four
+    // axes, criticalGrantPredicate) contributes its role slug to the inbox
+    // eligibility set ONLY when confirmed2_by IS NOT NULL. This keeps the
+    // claim/approve eligibility gate consistent with the PDP grant read.
     const { rows } = await client.query<{ slug: string }>(
       `SELECT DISTINCT r.slug
          FROM choros.role_assignment ra
@@ -255,7 +430,20 @@ export async function getRoleSlugsForActor(
           AND ra.employee_id = $2
           AND ra.confirmed_by IS NOT NULL
           AND (ra.valid_from  IS NULL OR ra.valid_from  <= $3)
-          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)`,
+          AND (ra.valid_until IS NULL OR ra.valid_until  > $3)
+          AND (
+                ra.confirmed2_by IS NOT NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM choros."grant" g
+                   WHERE g.tenant_id = ra.tenant_id
+                     AND g.role_id   = ra.role_id
+                     AND g.confirmed_by IS NOT NULL
+                     -- M1: window-scope the criticizing grant (see getGrantsForSubject).
+                     AND (g.valid_from  IS NULL OR g.valid_from  <= $3)
+                     AND (g.valid_until IS NULL OR g.valid_until  > $3)
+                     AND ${CRITICAL_GRANT_PREDICATE_G}
+                )
+              )`,
       [tenantId, employeeId, nowMs],
     );
     return rows.map((r) => r.slug);

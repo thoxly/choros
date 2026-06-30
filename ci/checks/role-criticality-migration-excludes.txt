@@ -47,3 +47,4 @@
 082_process_app_binding_trigger # T-0351 — E16 trigger config: ALTER TABLE process_app_binding ADD COLUMN (trigger_type/start_form_key/field_mapping); owned by binding-trigger-dao.ts + records.ts on_create seam
 083_core_system_registries_seed # T-0354 — E16 §7 core system registries seed (pure INSERT seed, zero DDL, rides existing tables 003/004); owned by core-system-registries.ts
 084_tel_approver_assignment_seed # T-0362 — E15 approve→entity gap fix: seed role-initiator+role-approver (new non-colliding UUIDs) + confirmed role_assignment for e-orlov/e-larina; pure INSERT, zero DDL
+109_dual_control_pdp_backfill # T-0397 — PDP dual-control read-hole fix: pure BACKFILL of confirmed2_by for pre-existing active critical grants/assignments (no DDL, no new tenant table); enforcement lives in grants-dao.ts query change
