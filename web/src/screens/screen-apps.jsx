@@ -25,12 +25,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, StatusChip, Modal, Field, Select, Popover, Badge,
+  Button, MonoId, Mono, StatusChip, Modal, ConfirmDialog, Field, Select, Popover, Badge,
   EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { useToastContext } from '../app-shell/toast-context.jsx';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
+import { renameApplication, deleteApplication as deleteApplicationApi } from './apps-manage-api.js';
+import { ConsequenceSummary } from '../util/confirm-helpers.jsx';
 import { PublishSolutionDialog } from './apps-publish-dialog.jsx';
 import { fetchPublishPreview, hasUnpublishedChanges } from './apps-publish-api.js';
 
@@ -355,6 +357,91 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
 }
 
 /**
+ * T-0567: модалка «Переименовать» — правит человекочитаемое имя приложения.
+ * Поле предзаполнено текущим display_name. Валидация: непустое.
+ * PATCH /api/applications/:id { display_name } → 200 (контракт существует, T-0540).
+ * Успех → onUpdated(updated) обновляет строку in-place и закрывает модалку.
+ * slug (URL-идентификатор) НЕ трогаем — он неизменяем после создания.
+ */
+function RenameAppModal({ open, app, onClose, onUpdated }) {
+  const [name, setName] = useState(app.display_name || "");
+  const [fieldErr, setFieldErr] = useState(null);
+  const [submitErr, setSubmitErr] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Re-sync the prefilled value each time the modal opens (or app changes).
+  React.useEffect(() => {
+    if (!open) return;
+    setName(app.display_name || "");
+    setFieldErr(null); setSubmitErr(null); setSubmitting(false);
+  }, [open, app.display_name]);
+
+  const handleClose = useCallback(() => { setSubmitErr(null); onClose(); }, [onClose]);
+
+  const handleSubmit = useCallback(async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    setSubmitErr(null);
+    const trimmed = name.trim();
+    if (trimmed.length === 0) { setFieldErr('Введите название'); return; }
+    setFieldErr(null);
+    setSubmitting(true);
+    const result = await renameApplication(app.id, trimmed);
+    setSubmitting(false);
+    if (result.ok) {
+      onUpdated(result.app);
+      handleClose();
+      return;
+    }
+    setSubmitErr(result.message);
+  }, [app.id, name, onUpdated, handleClose]);
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Переименовать приложение"
+      footer={
+        <>
+          <Button type="button" variant="ghost" size="sm" onClick={handleClose}>Отмена</Button>
+          <Button type="submit" form="rename-app-form" variant="primary" size="sm" loading={submitting}>
+            {submitting ? 'Сохранение…' : 'Сохранить'}
+          </Button>
+        </>
+      }
+    >
+      <form id="rename-app-form" onSubmit={handleSubmit}>
+        <p style={{ margin: '0 0 var(--chs-space-6) 0', fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
+          Меняется отображаемое название. Слаг <MonoId>{app.slug}</MonoId> (идентификатор) остаётся прежним.
+        </p>
+        <div style={{ marginBottom: 'var(--chs-space-4)' }}>
+          <Field
+            label="Название"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Моё приложение"
+            autoFocus
+            invalid={Boolean(fieldErr)}
+          />
+          {fieldErr && <span style={fieldErrStyle}>{fieldErr}</span>}
+        </div>
+
+        {submitErr && (
+          <div role="alert" style={{
+            marginTop: 'var(--chs-space-5)', padding: 'var(--chs-space-4) var(--chs-space-5)',
+            background: 'var(--chs-color-danger-soft)',
+            border: '1px solid var(--chs-color-danger)',
+            borderRadius: 'var(--chs-radius-3)', fontSize: 'var(--chs-text-sm)',
+            color: 'var(--chs-color-text)',
+          }}>
+            {submitErr}
+          </div>
+        )}
+      </form>
+    </Modal>
+  );
+}
+
+/**
  * T-0565: гаситель всплытия клика для модалок, открытых из строки таблицы.
  *
  * <Modal> рендерится ИНЛАЙН (components.jsx — без createPortal), поэтому его
@@ -374,16 +461,67 @@ export function RowModalStopBubble({ children }) {
   return <span onClick={(e) => e.stopPropagation()}>{children}</span>;
 }
 
-// Per-row actions: keep BOTH "Настроить поля" and "Записи" reachable without
-// horizontal scroll (audit #2) via a "…" Popover menu anchored to the row.
-// T-0540: добавлено действие «Изменить раздел» → PATCH /api/applications/:id { section }.
-function AppActions({ app, navigate, onAppUpdated, onPublished, pushToast }) {
+/**
+ * T-0567: declarative «управление приложением» menu.
+ *
+ * Ordered item descriptors for the "…" row menu. Exported (pure, no hooks) so the
+ * order / labels are unit-testable in the node vitest tier — the project's
+ * "logic in testable siblings" doctrine. `run` receives the AppActions action
+ * bag (navigate + the modal openers) so the JSX below stays a thin renderer.
+ *
+ * Final order (founder-signed): Переименовать · Переместить в раздел ·
+ * Настроить поля · Записи · Опубликовать решение · Удалить приложение.
+ * `danger: true` marks the destructive item (rendered in danger color, last).
+ */
+export function buildAppMenuItems(app, actions) {
+  return [
+    { key: 'rename',   label: 'Переименовать',        run: () => actions.openRename() },
+    { key: 'section',  label: 'Переместить в раздел',  run: () => actions.openSection() },
+    { key: 'schema',   label: 'Настроить поля',        run: () => actions.navigate(`/app-schema/${app.id}`) },
+    { key: 'records',  label: 'Записи',                run: () => actions.navigate(`/app-records/${app.id}`) },
+    { key: 'publish',  label: 'Опубликовать решение',  run: () => actions.openPublish() },
+    { key: 'delete',   label: 'Удалить приложение',    run: () => actions.openDelete(), danger: true },
+  ];
+}
+
+// Per-row actions: full "manage application" menu behind a "…" Popover anchored
+// to the row (audit #2 — no horizontal scroll). T-0567 completes the menu (see
+// buildAppMenuItems for the ordered items). «Изменить раздел» → «Переместить в
+// раздел» (T-0540 action, clearer label). Every menuitem onClick calls
+// e.stopPropagation() so it never triggers the row's <tr onClick> navigate;
+// every modal/confirm is wrapped in <RowModalStopBubble> so inline-rendered
+// overlay clicks (Save/Confirm) don't bubble to the row either (T-0565).
+function AppActions({ app, navigate, onAppUpdated, onAppDeleted, onPublished, pushToast }) {
   const [open, setOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [sectionModalOpen, setSectionModalOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = useCallback(async () => {
+    setDeleting(true);
+    const result = await deleteApplicationApi(app.id);
+    setDeleting(false);
+    if (result.ok) {
+      setDeleteOpen(false);
+      if (pushToast) pushToast({ tone: 'success', message: `Приложение «${app.display_name}» удалено` });
+      if (onAppDeleted) onAppDeleted(app);
+      return;
+    }
+    // 409 (still referenced) / 404 / other — honest toast (server message preferred).
+    if (pushToast) pushToast({ tone: 'error', title: 'Не удалось удалить приложение', message: result.message, duration: 0 });
+  }, [app, onAppDeleted, pushToast]);
+
   return (
     <>
       <RowModalStopBubble>
+        <RenameAppModal
+          open={renameOpen}
+          app={app}
+          onClose={() => setRenameOpen(false)}
+          onUpdated={(updated) => { setRenameOpen(false); if (onAppUpdated) onAppUpdated(updated); }}
+        />
         <SetSectionModal
           open={sectionModalOpen}
           app={app}
@@ -397,6 +535,23 @@ function AppActions({ app, navigate, onAppUpdated, onPublished, pushToast }) {
           pushToast={pushToast}
           onClose={() => setPublishOpen(false)}
           onDone={(summary) => { if (onPublished) onPublished(app, summary); }}
+        />
+        {/* T-0567: удаление приложения — CONFIRM-DANGER (честное последствие) → DELETE. */}
+        <ConfirmDialog
+          open={deleteOpen}
+          tone="danger"
+          title={`Удалить «${app.display_name}»?`}
+          message={
+            <ConsequenceSummary
+              who={`Приложение «${app.display_name}» (${app.slug})`}
+              what="Приложение и все его записи и наборы полей будут удалены."
+              reversibility="Необратимо. Восстановить удалённые данные нельзя."
+            />
+          }
+          confirmLabel="Удалить приложение"
+          loading={deleting}
+          onConfirm={handleDelete}
+          onClose={() => { if (!deleting) setDeleteOpen(false); }}
         />
       </RowModalStopBubble>
       <Popover
@@ -417,37 +572,27 @@ function AppActions({ app, navigate, onAppUpdated, onPublished, pushToast }) {
           </Button>
         }
       >
-        <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '160px' }}>
-          <Button
-            variant="ghost" size="sm" role="menuitem"
-            style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={(e) => { e.stopPropagation(); setOpen(false); navigate(`/app-schema/${app.id}`); }}
-          >
-            Настроить поля
-          </Button>
-          <Button
-            variant="ghost" size="sm" role="menuitem"
-            style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={(e) => { e.stopPropagation(); setOpen(false); navigate(`/app-records/${app.id}`); }}
-          >
-            Записи
-          </Button>
-          {/* T-0540: управление разделом — PATCH /api/applications/:id { section } */}
-          <Button
-            variant="ghost" size="sm" role="menuitem"
-            style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={(e) => { e.stopPropagation(); setOpen(false); setSectionModalOpen(true); }}
-          >
-            Изменить раздел
-          </Button>
-          {/* T-0563: публикация связанного решения (само приложение + справочники + процессы + формы) */}
-          <Button
-            variant="ghost" size="sm" role="menuitem"
-            style={{ justifyContent: 'flex-start', width: '100%' }}
-            onClick={(e) => { e.stopPropagation(); setOpen(false); setPublishOpen(true); }}
-          >
-            Опубликовать решение
-          </Button>
+        <div role="menu" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-2)', minWidth: '180px' }}>
+          {buildAppMenuItems(app, {
+            navigate,
+            openRename: () => setRenameOpen(true),
+            openSection: () => setSectionModalOpen(true),
+            openPublish: () => setPublishOpen(true),
+            openDelete: () => setDeleteOpen(true),
+          }).map((item) => (
+            <Button
+              key={item.key}
+              variant="ghost" size="sm" role="menuitem"
+              style={{
+                justifyContent: 'flex-start', width: '100%',
+                ...(item.danger ? { color: 'var(--chs-color-danger)' } : {}),
+              }}
+              // stopPropagation: never let a menu click reach the row's navigate.
+              onClick={(e) => { e.stopPropagation(); setOpen(false); item.run(); }}
+            >
+              {item.label}
+            </Button>
+          ))}
         </div>
       </Popover>
     </>
@@ -511,6 +656,12 @@ function AppsScreen() {
     setApps((prev) => prev ? prev.map((a) => a.id === updated.id ? { ...a, ...updated } : a) : prev);
   }, []);
 
+  // T-0567: удаление приложения — убираем строку из списка in-place (без перезагрузки).
+  const handleAppDeleted = useCallback((deleted) => {
+    if (!deleted || !deleted.id) return;
+    setApps((prev) => prev ? prev.filter((a) => a.id !== deleted.id) : prev);
+  }, []);
+
   // T-0563: после публикации решения — перезагружаем список (tier мог смениться
   // draft→published; при полном успехе бейдж «неопубликованные» снимется).
   const handlePublished = useCallback((_app, summary) => {
@@ -535,9 +686,18 @@ function AppsScreen() {
           <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
             Приложения тенанта{apps !== null ? ` · ${list.length}` : ''}
           </span>
-          <Button variant="primary" size="sm" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>
-            Создать приложение
-          </Button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--chs-space-3)' }}>
+            {/* T-0567: discoverable entry to section CRUD (раздел-сущность живёт на /sections) */}
+            <Button
+              variant="ghost" size="sm"
+              onClick={() => navigate('/sections')}
+            >
+              Управление разделами
+            </Button>
+            <Button variant="primary" size="sm" glyph={<KitIcon name="plus" />} onClick={() => setCreateOpen(true)}>
+              Создать приложение
+            </Button>
+          </div>
         </div>
 
         <div className="chs-inbox__scroll">
@@ -624,6 +784,7 @@ function AppsScreen() {
                         app={app}
                         navigate={navigate}
                         onAppUpdated={handleAppUpdated}
+                        onAppDeleted={handleAppDeleted}
                         onPublished={handlePublished}
                         pushToast={pushToast}
                       />
