@@ -30,6 +30,7 @@ import { registerProcessCatalogRoutes } from "./http/process-catalog.js";
 import { registerArtifactRoutes } from "./http/artifacts.js";
 import { registerRegistryDefRoutes } from "./http/registry-defs.js";
 import { registerApplicationRoutes } from "./http/applications.js";
+import { registerSolutionPublishRoutes } from "./http/solution-publish.js";
 import { registerSectionRoutes } from "./http/sections.js";
 import { registerRecordRoutes } from "./http/records.js";
 import { registerRecordLinksRoutes } from "./http/record-links.js";
@@ -746,6 +747,23 @@ function buildRouter(
   if (grantsPool) {
     registerApplicationRoutes(router, {
       pool: grantsPool,
+      resolveActorTenant: (actorSlug: string) =>
+        resolveActorTenant(getOrgPool(), actorSlug),
+    });
+  }
+
+  // T-0562 (PD-26 / ADR T-0561): «Опубликовать связанное решение по кнопке».
+  //   GET  /api/applications/:id/publish-preview  — derive the connected set (1 hop:
+  //        app + x-relation справочники + bound processes + step forms) + per-item tier.
+  //   POST /api/applications/:id/publish-solution — promote each draft item, REUSING
+  //        promoteTier (application) + publishProcessByKey (process). Per-item results;
+  //        200 all-ok / 207 partial. NO stored 'partial' state — the response is truth.
+  // Privileged: owner/admin OR authoring_draft (resolveActorPrivilege, T-0557) → else 403.
+  // Needs flowableClient for the process-publish path (publishProcessByKey).
+  if (grantsPool && flowableClient) {
+    registerSolutionPublishRoutes(router, {
+      pool: grantsPool,
+      flowable: flowableClient,
       resolveActorTenant: (actorSlug: string) =>
         resolveActorTenant(getOrgPool(), actorSlug),
     });
