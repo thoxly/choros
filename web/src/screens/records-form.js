@@ -477,6 +477,45 @@ export function blankRecordValues(formFields) {
 }
 
 /**
+ * T-0568: Seed the form-VALUE state from an EXISTING record's `data` object (the
+ * inverse of serializeRecordData — used to prefill the edit form). Starts from
+ * blankRecordValues(formFields) and overlays the stored value per field, coerced
+ * back to the control's representation:
+ *   - boolean            → Boolean(stored)                (checkbox state)
+ *   - number/integer/money → stored as a String           (numeric inputs are controlled strings)
+ *   - collection         → the stored array of rows, else []
+ *   - multi-select       → the stored string[], else []
+ *   - computed           → skipped (never has editable state)
+ *   - everything else    → String(stored) when present, else "" (blank)
+ * Absent keys keep their blank default. PURE — no side effects.
+ *
+ * @param {Array} formFields output of schemaToFormFields
+ * @param {Record<string, unknown>} data a record's `data` object
+ * @returns {Record<string, string|boolean|Array>}
+ */
+export function recordDataToValues(formFields, data) {
+  const values = blankRecordValues(formFields);
+  const src = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  for (const f of Array.isArray(formFields) ? formFields : []) {
+    if (f.type === "computed") continue; // no editable state
+    if (!(f.key in src)) continue;       // absent → keep blank default
+    const stored = src[f.key];
+    if (stored === null || stored === undefined) continue;
+    if (f.type === "boolean") {
+      values[f.key] = Boolean(stored);
+    } else if (f.type === "collection") {
+      values[f.key] = Array.isArray(stored) ? stored : [];
+    } else if (f.type === "multi-select") {
+      values[f.key] = Array.isArray(stored) ? stored.filter((s) => typeof s === "string") : [];
+    } else {
+      // string / number / integer / money / select / date / relation / person / url / email
+      values[f.key] = typeof stored === "string" ? stored : String(stored);
+    }
+  }
+  return values;
+}
+
+/**
  * Client-side validation of the raw form values against the form fields. A UX
  * convenience ONLY — the server (AJV) is the source of truth and still 400s.
  * We check exactly what we can honestly check client-side:
