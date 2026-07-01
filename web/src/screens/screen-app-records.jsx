@@ -49,13 +49,15 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
-  Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select,
+  Button, Mono, Drawer, EmptyState, ErrorState, LoadingState, KitIcon, Select, ConfirmDialog,
 } from '../components/components.jsx';
+import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import {
   schemaToFormFields,
   schemaToColumns,
   blankRecordValues,
+  recordDataToValues,
   validateRecordValues,
   serializeRecordData,
   formatCellValue,
@@ -635,8 +637,14 @@ function fmtTs(ms) {
  * unbounded number of fields, which a modal scrolls badly; the drawer keeps the
  * records table visible and scrolls naturally. The kit Drawer owns the overlay,
  * focus-trap, Esc and scroll-lock — no hand-rolled overlay (gate G6).
+ *
+ * T-0568: the SAME drawer serves EDIT when `existingRecord` is passed — the form
+ * is prefilled from the record's data (recordDataToValues) and submit does
+ * PUT /api/records/:id (200) instead of POST (201). This reuses the entire
+ * field renderer/validation/serialization stack rather than duplicating it.
  */
-function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryDef }) {
+export function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryDef, existingRecord = null }) {
+  const isEdit = Boolean(existingRecord && existingRecord.id);
   const formFields = useMemo(
     () => (registryDef ? schemaToFormFields(registryDef.record_schema) : []),
     [registryDef],
@@ -647,14 +655,15 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
   const [submitting, setSubmitting] = useState(false);
 
   // Reset the value state whenever the modal (re)opens or the schema changes.
+  // T-0568: in edit mode, seed from the existing record's data instead of blank.
   useEffect(() => {
     if (open) {
-      setValues(blankRecordValues(formFields));
+      setValues(isEdit ? recordDataToValues(formFields, existingRecord.data) : blankRecordValues(formFields));
       setFieldErrors({});
       setSubmitErr(null);
       setSubmitting(false);
     }
-  }, [open, formFields]);
+  }, [open, formFields, isEdit, existingRecord]);
 
   const setVal = useCallback((key, v) => {
     setValues((prev) => ({ ...prev, [key]: v }));
@@ -671,19 +680,22 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
     const data = serializeRecordData(formFields, values);
     setSubmitting(true);
     try {
-      const body = {
-        application_id: applicationId,
-        registry_def_id: registryDef.id,
-        data,
-      };
-      const res = await fetch('/api/records', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...devHeaders() },
-        body: JSON.stringify(body),
-      });
-      if (res.status === 201) {
-        const created = await res.json();
-        onCreated(created);
+      // T-0568: EDIT → PUT /api/records/:id (200, body { data }); CREATE → POST (201).
+      const res = isEdit
+        ? await fetch(`/api/records/${encodeURIComponent(existingRecord.id)}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json', ...devHeaders() },
+            body: JSON.stringify({ data }),
+          })
+        : await fetch('/api/records', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...devHeaders() },
+            body: JSON.stringify({ application_id: applicationId, registry_def_id: registryDef.id, data }),
+          });
+      const okStatus = isEdit ? 200 : 201;
+      if (res.status === okStatus) {
+        const saved = await res.json();
+        onCreated(saved);
         return;
       }
       let parsed = null;
@@ -701,7 +713,7 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
     } finally {
       setSubmitting(false);
     }
-  }, [formFields, values, applicationId, registryDef, onCreated]);
+  }, [formFields, values, applicationId, registryDef, onCreated, isEdit, existingRecord]);
 
   const canSubmit = open && registryDef && formFields.length > 0;
 
@@ -709,13 +721,13 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
     <Drawer
       open={Boolean(open && registryDef)}
       onClose={onClose}
-      title="Новая запись"
+      title={isEdit ? 'Изменить запись' : 'Новая запись'}
       side="right"
       footer={
         <>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>Отмена</Button>
           <Button type="submit" form="create-record-form" variant="primary" size="sm" loading={submitting} disabled={!canSubmit}>
-            {submitting ? 'Сохранение…' : 'Создать запись'}
+            {submitting ? 'Сохранение…' : (isEdit ? 'Сохранить' : 'Создать запись')}
           </Button>
         </>
       }
@@ -805,6 +817,7 @@ function CreateRecordDrawer({ open, onClose, onCreated, applicationId, registryD
 function AppRecordsScreen() {
   const { appId } = useParams();
   const navigate = useNavigate();
+  const { push } = useToastContext();
 
   const [defs, setDefs] = useState(null);      // null = loading, [] = none, [...] = list
   const [defsError, setDefsError] = useState(null);
@@ -815,6 +828,9 @@ function AppRecordsScreen() {
   const [recordsError, setRecordsError] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [highlightId, setHighlightId] = useState(null);
+  // T-0568: record pending confirm-delete (whole record row), + in-flight flag.
+  const [toDelete, setToDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   // T-0401: cursor-based pagination state for load-more.
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMoreRecords, setLoadingMoreRecords] = useState(false);
@@ -912,6 +928,32 @@ function AppRecordsScreen() {
     loadRecords();
   }, [loadRecords]);
 
+  // T-0568: confirm-gated record delete. DELETE /api/records/:id (T-0566 frozen
+  // contract → 204 deleted / 404 already-gone — both settle to "drop the row").
+  // Removes the row locally on success + a toast; failures surface an error toast
+  // and leave the row in place.
+  const confirmDelete = useCallback(async () => {
+    if (!toDelete) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/records/${encodeURIComponent(toDelete.id)}`, {
+        method: 'DELETE',
+        headers: devHeaders(),
+      });
+      if (res.status === 204 || res.status === 404) {
+        setRecords((prev) => (prev || []).filter((r) => r.id !== toDelete.id));
+        setToDelete(null);
+        push({ tone: 'success', message: 'Запись удалена' });
+      } else {
+        push({ tone: 'error', title: 'Не удалось удалить запись', message: `HTTP ${res.status}` });
+      }
+    } catch (e) {
+      push({ tone: 'error', title: 'Не удалось удалить запись', message: String(e?.message || e) });
+    } finally {
+      setDeleting(false);
+    }
+  }, [toDelete, push]);
+
   const columns = useMemo(
     () => (selectedDef ? schemaToColumns(selectedDef.record_schema) : []),
     [selectedDef],
@@ -929,6 +971,17 @@ function AppRecordsScreen() {
         onCreated={handleCreated}
         applicationId={appId}
         registryDef={selectedDef}
+      />
+      {/* T-0568: destructive record delete — confirm-gated (kit ConfirmDialog). */}
+      <ConfirmDialog
+        open={Boolean(toDelete)}
+        title="Удалить запись?"
+        message="Запись будет удалена без возможности восстановления."
+        confirmLabel="Удалить"
+        tone="danger"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onClose={() => setToDelete(null)}
       />
       <div className="chs-inbox">
         <div style={{
@@ -1015,8 +1068,8 @@ function AppRecordsScreen() {
                 <tr>
                   {columns.map((c) => <th key={c.key}>{c.label}</th>)}
                   <th>Создано</th>
-                  {/* T-0295: detail view link column */}
-                  <th style={{ width: '64px' }} />
+                  {/* T-0295: detail view link column + T-0568: delete control */}
+                  <th style={{ width: '140px' }} />
                 </tr>
               </thead>
               <tbody>
@@ -1047,8 +1100,10 @@ function AppRecordsScreen() {
                           {fmtTs(rec.created_at)}
                         </Mono>
                       </td>
-                      {/* T-0295: open detail view for this record */}
-                      <td style={{ textAlign: 'right' }}>
+                      {/* T-0295: open detail view + T-0568: delete this record.
+                          Both stopPropagation so they never trigger the row's
+                          navigate-on-click (open the detail view). */}
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                         <Link
                           to={`/apps/${appId}/records/${rec.id}`}
                           style={{
@@ -1061,6 +1116,16 @@ function AppRecordsScreen() {
                         >
                           Открыть
                         </Link>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title="Удалить запись"
+                          aria-label="Удалить запись"
+                          style={{ marginLeft: 'var(--chs-space-3)' }}
+                          onClick={(e) => { e.stopPropagation(); setToDelete(rec); }}
+                        >
+                          Удалить
+                        </Button>
                       </td>
                     </tr>
                   );

@@ -21,10 +21,13 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon } from '../components/components.jsx';
+import { Button, Mono, LoadingState, ErrorState, EmptyState, KitIcon, ConfirmDialog } from '../components/components.jsx';
+import { useToastContext } from '../app-shell/toast-context.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
 import { formatDate, formatError, formatJsonReadable } from '../lib/format.js';
 import { schemaToFormFields, formatCellValue, RELATION_CELL_ASYNC, deriveRecordLabel, computeRollup } from './records-form.js';
+// T-0568: reuse the SAME create-drawer for editing (prefilled → PUT).
+import { CreateRecordDrawer } from './screen-app-records.jsx';
 import {
   groupLinksByLabel,
   isHopAllowed,
@@ -395,9 +398,14 @@ function RelationFieldValue({ targetId, recordId, appId }) {
 function RecordDetailScreen() {
   const { appId, id } = useParams();
   const navigate = useNavigate();
+  const { push } = useToastContext();
 
   const [record, setRecord] = useState(null); // null = loading
   const [error, setError] = useState(null);   // string | { notFound: true }
+  // T-0568: edit-drawer + confirm-delete state.
+  const [editOpen, setEditOpen] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const loadRecord = useCallback(async () => {
     if (!id) { setError('Не указан идентификатор записи'); return; }
@@ -426,14 +434,72 @@ function RecordDetailScreen() {
 
   useEffect(() => { loadRecord(); }, [loadRecord]);
 
+  // T-0568: edit committed (PUT 200) → close drawer + reload the fresh record.
+  const handleSaved = useCallback((saved) => {
+    setEditOpen(false);
+    if (saved) setRecord(saved);
+    push({ tone: 'success', message: 'Запись сохранена' });
+  }, [push]);
+
+  // T-0568: confirm-gated delete. DELETE /api/records/:id (T-0566 frozen contract
+  // → 204 / 404 both settle to "gone") → toast + navigate back to the list.
+  const confirmDelete = useCallback(async () => {
+    if (!id) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/records/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: devHeaders(),
+      });
+      if (res.status === 204 || res.status === 404) {
+        setConfirmDeleteOpen(false);
+        push({ tone: 'success', message: 'Запись удалена' });
+        navigate(appId ? `/app-records/${appId}` : '/apps');
+      } else {
+        push({ tone: 'error', title: 'Не удалось удалить запись', message: `HTTP ${res.status}` });
+      }
+    } catch (e) {
+      push({ tone: 'error', title: 'Не удалось удалить запись', message: String(e?.message || e) });
+    } finally {
+      setDeleting(false);
+    }
+  }, [id, appId, navigate, push]);
+
   // Derive an ordered list of display fields from record_schema (may be null/missing)
   const formFields = record ? schemaToFormFields(record.record_schema) : [];
   const data = record?.data && typeof record.data === 'object' ? record.data : {};
 
   const backPath = appId ? `/app-records/${appId}` : '/apps';
 
+  // T-0568: lightweight registryDef for the edit drawer — it needs record_schema
+  // (drives the form fields); .id is unused on the PUT path, display_name is cosmetic.
+  const editRegistryDef = record
+    ? { id: record.registry_def_id, record_schema: record.record_schema, display_name: '' }
+    : null;
+
   return (
     <div className="chs-inbox">
+      {/* T-0568: edit drawer (reuses the create form, prefilled → PUT) + confirm-delete. */}
+      {record && (
+        <CreateRecordDrawer
+          open={editOpen}
+          onClose={() => setEditOpen(false)}
+          onCreated={handleSaved}
+          applicationId={record.application_id}
+          registryDef={editRegistryDef}
+          existingRecord={record}
+        />
+      )}
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        title="Удалить запись?"
+        message="Запись будет удалена без возможности восстановления."
+        confirmLabel="Удалить"
+        tone="danger"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onClose={() => setConfirmDeleteOpen(false)}
+      />
       {/* Header bar */}
       <div style={{
         display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--chs-space-5)',
@@ -443,9 +509,22 @@ function RecordDetailScreen() {
         <span style={{ fontSize: 'var(--chs-text-sm)', color: 'var(--chs-color-text-muted)' }}>
           Детали записи
         </span>
-        <Button variant="ghost" size="sm" onClick={() => navigate(backPath)} glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}>
-          Назад к списку
-        </Button>
+        <div style={{ display: 'flex', gap: 'var(--chs-space-3)', alignItems: 'center' }}>
+          {/* T-0568: edit + delete — only when a record is loaded. */}
+          {record && !error && (
+            <>
+              <Button variant="secondary" size="sm" onClick={() => setEditOpen(true)} glyph={<KitIcon name="pencil" className="chs-btn__glyph" />}>
+                Редактировать
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteOpen(true)}>
+                Удалить
+              </Button>
+            </>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => navigate(backPath)} glyph={<KitIcon name="arrow-left" className="chs-btn__glyph" />}>
+            Назад к списку
+          </Button>
+        </div>
       </div>
 
       <div className="chs-inbox__scroll" style={{ padding: 'var(--chs-space-4, 16px) var(--chs-space-5, 20px)' }}>

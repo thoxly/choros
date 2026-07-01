@@ -22,6 +22,7 @@ import {
   INPUT_KIND,
   schemaToFormFields,
   blankRecordValues,
+  recordDataToValues,
   validateRecordValues,
   serializeRecordData,
   schemaToColumns,
@@ -137,6 +138,38 @@ describe('blankRecordValues', () => {
   it('starts strings/numbers as "" and booleans as false', () => {
     const v = blankRecordValues(schemaToFormFields(SCHEMA));
     expect(v).toEqual({ name: '', age: '', score: '', active: false, note: '' });
+  });
+});
+
+// T-0568: recordDataToValues — prefill the EDIT form from an existing record.data.
+describe('T-0568: recordDataToValues (edit-form prefill)', () => {
+  const fields = schemaToFormFields(SCHEMA);
+
+  it('seeds each field from stored data, numbers as strings, booleans as booleans', () => {
+    const v = recordDataToValues(fields, { name: 'Иван', age: 30, score: 4.5, active: true, note: 'x' });
+    expect(v).toEqual({ name: 'Иван', age: '30', score: '4.5', active: true, note: 'x' });
+  });
+
+  it('keeps blank defaults for keys absent from data', () => {
+    const v = recordDataToValues(fields, { name: 'Иван' });
+    expect(v).toEqual({ name: 'Иван', age: '', score: '', active: false, note: '' });
+  });
+
+  it('treats null/undefined values and non-object data as blank (no throw)', () => {
+    expect(recordDataToValues(fields, { name: null, age: undefined })).toEqual(
+      { name: '', age: '', score: '', active: false, note: '' },
+    );
+    expect(recordDataToValues(fields, null)).toEqual(blankRecordValues(fields));
+    expect(recordDataToValues(fields, [1, 2])).toEqual(blankRecordValues(fields));
+  });
+
+  it('round-trips: serialize(prefill(data)) reproduces the stored data', () => {
+    const stored = { name: 'Иван', age: 30, active: true, note: 'заметка' };
+    const prefilled = recordDataToValues(fields, stored);
+    const out = serializeRecordData(fields, prefilled);
+    expect(out).toEqual(stored);
+    // and the round-tripped payload still validates against the backend schema
+    expect(backendValidate(SCHEMA, out).valid).toBe(true);
   });
 });
 
