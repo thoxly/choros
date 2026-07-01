@@ -45,6 +45,8 @@ import pg from "pg";
 import { HttpError, readJsonBody, type Router } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
+import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
+import { resolveActorPrivilege } from "../db/sandbox-gate-dao.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -316,6 +318,211 @@ async function getApplication(
 }
 
 // ---------------------------------------------------------------------------
+// DELETE (T-0566): cascade hard-delete of an application + all it owns.
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of the cascade delete: not-found (→404), FK-conflict (→409, honest
+ * message), or success with the removed counts (→204 + audit).
+ */
+type DeleteAppOutcome =
+  | { kind: "not_found" }
+  | { kind: "conflict"; message: string }
+  | { kind: "deleted"; recordsRemoved: number; fieldsetsRemoved: number };
+
+/**
+ * Cascade hard-delete an application in ONE tenant-scoped tx (T-0566).
+ *
+ * Removes, in FK-safe order, everything the application owns:
+ *   - records of the app's registry_defs (+ their files/file_versions);
+ *   - the app's registry_defs (+ their dependents that have no ON DELETE CASCADE:
+ *     cross_app_ref, registry_schema_history, report_page_dep, template_dep/def);
+ *   - process_app_binding rows for the app (UNBIND — the process definitions and
+ *     report/doc pages are NOT deleted here);
+ *   - the application row itself.
+ *
+ * Published rows are locked by the tier_published_locked trigger (migration
+ * 049/050); delete is a legitimate lifecycle op, so we set
+ * `SET LOCAL choros.promoting = '1'` to unlock the trigger for this tx — the same
+ * sanctioned bypass promoteTier uses (artifacts.ts). Tenant isolation (RLS) is
+ * untouched; the GUC only relaxes the tier lock, never the tenant scope.
+ *
+ * A residual FK conflict (e.g. a record referenced by a cross-tenant-visible
+ * relation we cannot see under RLS) surfaces as { kind: "conflict" } → HTTP 409
+ * with an honest message, never a 500.
+ */
+async function deleteApplicationCascade(args: {
+  pool: pg.Pool;
+  tenantId: string;
+  id: string;
+  actor: string;
+  nowMs: number;
+}): Promise<DeleteAppOutcome> {
+  const { pool, tenantId, id, actor, nowMs } = args;
+  try {
+    return await withTenantTx(pool, tenantId, async (client) => {
+      // Unlock tier-locked (published) rows for this delete tx (sanctioned lifecycle
+      // op; RLS tenant scope is untouched). Same GUC promoteTier uses.
+      await client.query("SET LOCAL choros.promoting = '1'");
+
+      // 1. Confirm the application exists in the caller's tenant (RLS-scoped).
+      const appRes = await client.query<{ id: string }>(
+        `SELECT id FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+      if (appRes.rowCount === 0) {
+        return { kind: "not_found" as const };
+      }
+
+      // 2. Collect the app's registry_defs (fieldsets) — the schemas whose records
+      //    we cascade. tenant-scoped under RLS.
+      const regRes = await client.query<{ id: string }>(
+        `SELECT id FROM choros.registry_def WHERE tenant_id = $1 AND application_id = $2`,
+        [tenantId, id],
+      );
+      const registryDefIds = regRes.rows.map((r) => r.id);
+
+      let recordsRemoved = 0;
+      if (registryDefIds.length > 0) {
+        // 3a. Delete files + file_versions of the app's records (FK: file →
+        //     record, file_version → file; neither is ON DELETE CASCADE).
+        await client.query(
+          `DELETE FROM choros.file_version fv
+             USING choros.file f, choros.record r
+            WHERE fv.tenant_id = $1 AND fv.file_id = f.id AND f.tenant_id = $1
+              AND f.record_id = r.id AND r.tenant_id = $1
+              AND r.registry_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+        await client.query(
+          `DELETE FROM choros.file f
+             USING choros.record r
+            WHERE f.tenant_id = $1 AND f.record_id = r.id AND r.tenant_id = $1
+              AND r.registry_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+
+        // 3b. Delete the records themselves.
+        const recDel = await client.query(
+          `DELETE FROM choros.record
+            WHERE tenant_id = $1 AND registry_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+        recordsRemoved = recDel.rowCount ?? 0;
+
+        // 3c. Delete registry_def dependents that have NO ON DELETE CASCADE and FK
+        //     the registry_def (source OR target): cross_app_ref, schema-history,
+        //     report_page_dep, template_dep, template_def. Order: leaf → root.
+        await client.query(
+          `DELETE FROM choros.cross_app_ref
+            WHERE tenant_id = $1
+              AND (source_registry_id = ANY($2::uuid[]) OR target_registry_id = ANY($2::uuid[]))`,
+          [tenantId, registryDefIds],
+        );
+        await client.query(
+          `DELETE FROM choros.registry_schema_history
+            WHERE tenant_id = $1 AND registry_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+        await client.query(
+          `DELETE FROM choros.report_page_dep
+            WHERE tenant_id = $1 AND registry_def_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+        await client.query(
+          `DELETE FROM choros.template_dep
+            WHERE tenant_id = $1 AND registry_def_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+        await client.query(
+          `DELETE FROM choros.template_def
+            WHERE tenant_id = $1 AND registry_id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+
+        // 3d. Delete the registry_defs (fieldsets).
+        await client.query(
+          `DELETE FROM choros.registry_def
+            WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+          [tenantId, registryDefIds],
+        );
+      }
+
+      // 4. UNBIND processes: remove process_app_binding rows for this app. The
+      //    process DEFINITIONS are NOT deleted — only the app↔process link.
+      const bindingDel = await client.query(
+        `DELETE FROM choros.process_app_binding
+          WHERE tenant_id = $1 AND application_id = $2`,
+        [tenantId, id],
+      );
+
+      // 5. Delete the application row itself.
+      await client.query(
+        `DELETE FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+
+      // 6. Append ONE audit event (application.deleted) with the removal counts,
+      //    inside the same tx (T-0016 / T-0068 hash-chain) — a ROLLBACK undoes the
+      //    delete AND the audit entry atomically.
+      const writer = makePgAuditWriter();
+      await writer.appendAuditEvent(client as unknown as PgClientLike, {
+        id: randomUUID(),
+        type: "application.deleted",
+        actor,
+        subject: id,
+        scope: { resource: "application", application_id: id },
+        via: "applications-api",
+        proposed_by: null,
+        confirmed_by: actor,
+        payload: {
+          application_id: id,
+          records_removed: recordsRemoved,
+          fieldsets_removed: registryDefIds.length,
+          processes_unbound: bindingDel.rowCount ?? 0,
+        },
+        occurred_at: nowMs,
+      });
+
+      return {
+        kind: "deleted" as const,
+        recordsRemoved,
+        fieldsetsRemoved: registryDefIds.length,
+      };
+    });
+  } catch (err) {
+    // 23503 = foreign_key_violation — a hard FK we could not clear (e.g. a record
+    // referenced by an x-relation from another tenant-visible record). Honest 409,
+    // not a 500. Any other error propagates (router maps to 500).
+    if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23503") {
+      return {
+        kind: "conflict",
+        message:
+          "application cannot be deleted: one of its records is still referenced by a relation from another record; remove the reference first",
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Authz for DELETE (T-0566): same privilege level as editing config artifacts —
+ * owner/admin OR the authoring_draft grant (resolveActorPrivilege, T-0557). A caller
+ * without it gets 403. Mirrors the solution-publish / sandbox-gate privilege posture.
+ */
+async function assertMayDeleteConfig(
+  pool: pg.Pool,
+  tenantId: string,
+  actor: string,
+  nowMs: number,
+): Promise<void> {
+  const priv = await resolveActorPrivilege(pool, tenantId, actor, nowMs);
+  if (!priv.isOwnerOrAdmin && !priv.hasAuthoringDraftGrant) {
+    throw new HttpError(403, "FORBIDDEN", "not permitted to delete this application");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -531,6 +738,39 @@ export function registerApplicationRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeApplication(row)));
+    }),
+  );
+
+  // DELETE /api/applications/:id — T-0566: cascade hard-delete the application and
+  // everything it owns (its registry_defs + those defs' records + dependents), and
+  // UNBIND its processes (remove process_app_binding rows; the process defs stay).
+  //   204 on success (+ application.deleted audit with removed counts);
+  //   404 if the app is not in the caller's tenant (RLS-filtered or absent);
+  //   403 if the caller lacks the config-edit privilege (owner/admin | authoring_draft);
+  //   409 if a hard FK (e.g. a record referenced by another record's relation) blocks it.
+  router.register(
+    "DELETE",
+    "/api/applications/:id",
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+      const id = params["id"] ?? "";
+      assertUuidShape(id, "application id");
+
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveActorTenant(actor);
+      const nowMs = Date.now();
+
+      await assertMayDeleteConfig(pool, tenantId, actor, nowMs);
+
+      const outcome = await deleteApplicationCascade({ pool, tenantId, id, actor, nowMs });
+      if (outcome.kind === "not_found") {
+        throw new HttpError(404, "NOT_FOUND", "application not found");
+      }
+      if (outcome.kind === "conflict") {
+        throw new HttpError(409, "CONFLICT", outcome.message);
+      }
+
+      res.statusCode = 204;
+      res.end();
     }),
   );
 }
