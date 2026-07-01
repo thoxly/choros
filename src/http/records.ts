@@ -1136,6 +1136,98 @@ async function updateRecord(args: {
 }
 
 // ---------------------------------------------------------------------------
+// DELETE (T-0566): hard-delete one record (+ its files), audited.
+// ---------------------------------------------------------------------------
+
+/** deleteRecord outcome: not-found (404), FK-conflict (409), or deleted (204). */
+type DeleteRecordOutcome =
+  | { kind: "not_found" }
+  | { kind: "conflict"; message: string }
+  | { kind: "deleted"; registryDefId: string };
+
+/**
+ * Hard-delete a single record in ONE tenant-scoped tx (T-0566).
+ *
+ * Removes the record and its owned files (file_version → file → record; neither FK
+ * is ON DELETE CASCADE), then appends ONE `record.deleted` audit event in-tx
+ * (T-0016 hash-chain). 404 if the record is not in the caller's tenant (RLS). A
+ * residual FK conflict (the record is referenced by another record's relation)
+ * surfaces as { kind: "conflict" } → HTTP 409 with an honest message, never a 500.
+ */
+async function deleteRecord(args: {
+  pool: pg.Pool;
+  tenantId: string;
+  id: string;
+  actor: string;
+  nowMs: number;
+}): Promise<DeleteRecordOutcome> {
+  const { pool, tenantId, id, actor, nowMs } = args;
+  try {
+    return await withTenantTx(pool, tenantId, async (client) => {
+      // 1. Lock + read the record (tenant-scoped). Absent → 404.
+      const cur = await client.query<{ registry_id: string }>(
+        `SELECT registry_id FROM choros.record
+          WHERE tenant_id = $1 AND id = $2
+          FOR UPDATE`,
+        [tenantId, id],
+      );
+      if (cur.rows.length === 0) {
+        return { kind: "not_found" as const };
+      }
+      const registryId = cur.rows[0]!.registry_id;
+
+      // 2. Delete owned files + file_versions (FK: file → record; file_version →
+      //    file; neither ON DELETE CASCADE) so the record delete is not FK-blocked.
+      await client.query(
+        `DELETE FROM choros.file_version fv
+           USING choros.file f
+          WHERE fv.tenant_id = $1 AND fv.file_id = f.id AND f.tenant_id = $1
+            AND f.record_id = $2`,
+        [tenantId, id],
+      );
+      await client.query(
+        `DELETE FROM choros.file WHERE tenant_id = $1 AND record_id = $2`,
+        [tenantId, id],
+      );
+
+      // 3. Delete the record.
+      await client.query(
+        `DELETE FROM choros.record WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+
+      // 4. Append ONE audit event (record.deleted) inside the same tx.
+      const writer = makePgAuditWriter();
+      await writer.appendAuditEvent(client as unknown as PgClientLike, {
+        id: randomUUID(),
+        type: "record.deleted",
+        actor,
+        subject: id,
+        scope: { registry_def_id: registryId },
+        via: "records-api",
+        proposed_by: null,
+        confirmed_by: actor,
+        payload: { record_id: id, registry_def_id: registryId },
+        occurred_at: nowMs,
+      });
+
+      return { kind: "deleted" as const, registryDefId: registryId };
+    });
+  } catch (err) {
+    // 23503 = foreign_key_violation → the record is referenced by a relation from
+    // another record. Honest 409, not a 500.
+    if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23503") {
+      return {
+        kind: "conflict",
+        message:
+          "record cannot be deleted: it is still referenced by a relation from another record; remove the reference first",
+      };
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Query-param parsing
 // ---------------------------------------------------------------------------
 
@@ -1525,6 +1617,44 @@ export function registerRecordRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeRecord(outcome.row)));
+    }),
+  );
+
+  // DELETE /api/records/:id — T-0566: hard-delete one record (+ its files), audited.
+  //   204 on success (+ record.deleted audit);
+  //   404 if the record is not in the caller's tenant (RLS-filtered or absent);
+  //   403 if the caller lacks the config-edit privilege (owner/admin | authoring_draft);
+  //   409 if the record is referenced by another record's relation (honest, not 500).
+  router.register(
+    "DELETE",
+    "/api/records/:id",
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+      const id = params["id"] ?? "";
+      assertUuidShape(id, "record id");
+
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveActorTenant(actor);
+      const nowMs = Date.now();
+
+      // Authz: same privilege level as editing — owner/admin OR authoring_draft.
+      // Reuses the SAME resolveActorPrivilege path the sandbox gate uses.
+      const priv = resolveSandboxPrivilege
+        ? await resolveSandboxPrivilege(actor, tenantId, nowMs)
+        : await resolveActorPrivilege(pool, tenantId, actor, nowMs);
+      if (!priv.isOwnerOrAdmin && !priv.hasAuthoringDraftGrant) {
+        throw new HttpError(403, "FORBIDDEN", "not permitted to delete this record");
+      }
+
+      const outcome = await deleteRecord({ pool, tenantId, id, actor, nowMs });
+      if (outcome.kind === "not_found") {
+        throw new HttpError(404, "NOT_FOUND", "record not found");
+      }
+      if (outcome.kind === "conflict") {
+        throw new HttpError(409, "CONFLICT", outcome.message);
+      }
+
+      res.statusCode = 204;
+      res.end();
     }),
   );
 }
