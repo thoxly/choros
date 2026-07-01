@@ -280,6 +280,33 @@ export function registerProcessesRoutes(
     }
   }
 
+  // T-0564: resolve the authenticated actor → employee SLUG (mode-aware), mirroring
+  // src/http/inbox.ts. In keycloak mode the JWT `sub` is a random UUID (≠ employee
+  // slug) — feeding it straight into resolveActorTenant fail-closes (403) and the
+  // handler silently degrades to an EMPTY list for every real KC persona. We must
+  // resolve sub→slug via the injected actorSlugResolver (resolveActorSlugFromAuth,
+  // kind='human') BEFORE resolveActorTenant. In dev mode the x-dev-user header value
+  // IS the slug (unchanged). Returns null when no actor / no employee matches.
+  //
+  // Kept LOCAL to the read GETs (this file stays display-plane-pure — it reaches the
+  // DB only via startDeps/process-projection, never pg/src/db/* directly; FF-DISPLAY-4).
+  async function resolveActorSlugForRead(
+    req: import("node:http").IncomingMessage,
+  ): Promise<string | null> {
+    const authCtx = getAuthContext(req);
+    if (authCtx !== undefined) {
+      // Keycloak mode: resolve sub → employee slug via the injected resolver.
+      // Absent resolver (pre-G1 wiring / no DB) ⇒ no actor (honest-empty, never a
+      // raw-UUID tenant lookup).
+      if (!actorSlugResolver) return null;
+      return actorSlugResolver(authCtx.sub, authCtx.preferredUsername);
+    }
+    // Dev mode: x-dev-user header value IS the slug.
+    let h = req.headers["x-dev-user"];
+    if (Array.isArray(h)) h = h[0];
+    return typeof h === "string" && h ? h : null;
+  }
+
   // GET /api/processes — return full process instances list.
   //
   // T-0301 (mock-leak fix): in DB mode, serve ONLY real tenant-scoped instance
@@ -294,19 +321,14 @@ export function registerProcessesRoutes(
   // T-0259 compat: when DATABASE_URL is set but the pack file is absent, that path
   // is no longer reached for the list endpoint (DB mode goes directly to projections).
   // The `demo: true` sentinel is retained only for the no-DB + pack-absent corner.
-  router.register("GET", "/api/processes", async (req, res) => {
+  //
+  // T-0564: wrapped in withAuth so getAuthContext(req) is populated in keycloak mode
+  // (in dev mode withAuth is a pass-through, so the x-dev-user branch is unchanged).
+  router.register("GET", "/api/processes", withAuth(async (req, res) => {
     // DB mode: serve ONLY real tenant-scoped projections (T-0301).
     if (hasDb() && startDeps) {
-      // Resolve actor from JWT (keycloak mode) or x-dev-user header (dev mode).
-      const authCtx = getAuthContext(req);
-      let actorSlug: string | null = null;
-      if (authCtx !== undefined) {
-        actorSlug = authCtx.sub;
-      } else {
-        let h = req.headers["x-dev-user"];
-        if (Array.isArray(h)) h = h[0];
-        if (typeof h === "string" && h) actorSlug = h;
-      }
+      // T-0564: resolve sub→slug (keycloak) or x-dev-user (dev) BEFORE the tenant lookup.
+      const actorSlug = await resolveActorSlugForRead(req);
 
       let instances: ProcessInstance[] = [];
       if (actorSlug) {
@@ -340,16 +362,56 @@ export function registerProcessesRoutes(
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ instances: base }));
-  });
+  }));
 
-  // GET /api/processes/:id — return specific instance or 404
-  router.register("GET", "/api/processes/:id", async (_req, res, params) => {
-    const instance = findProcessInstance(params.id as string);
+  // GET /api/processes/:id — return specific instance or 404.
+  //
+  // T-0564: give the detail route a REAL projection branch. Previously it only ever
+  // consulted the pack/seed fixture (findProcessInstance), so a live started instance
+  // (whose id is a Flowable instance id, not a seed INS-xxxx) always 404'd — the
+  // T-0556 detail screen fetches /api/processes/:id by that instance id.
+  //
+  // DB mode: resolve actor → tenant → tenant-scoped projections (same source as the
+  // list), then find the one whose `inst` equals the requested id and map it via the
+  // EXACT SAME projectionToInstance mapper the list uses (wire contract preserved —
+  // `id` = p.inst). 404 when not found. No-DB mode: the pack/seed fixture fallback is
+  // unchanged (FF-11 / no-DB display-plane path).
+  //
+  // Wrapped in withAuth for the same reason as the list route (populates AuthContext
+  // in keycloak mode; pass-through in dev mode).
+  router.register("GET", "/api/processes/:id", withAuth(async (req, res, params) => {
+    const instanceId = params.id as string;
+
+    // DB mode: serve the real tenant-scoped projection for this instance id.
+    if (hasDb() && startDeps) {
+      const actorSlug = await resolveActorSlugForRead(req);
+      if (actorSlug) {
+        try {
+          const tenantId = await startDeps.resolveActorTenant(actorSlug);
+          const projections = await listInstanceProjections(startDeps.pool, tenantId);
+          const match = projections.find((p) => p.inst === instanceId);
+          if (match) {
+            res.statusCode = 200;
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify(projectionToInstance(match)));
+            return;
+          }
+        } catch {
+          // Read-projection: degrade gracefully — fall through to 404 (never 500).
+        }
+      }
+      // DB mode + no matching real instance ⇒ 404 (the seed fixture is NOT served to
+      // real authenticated tenants; T-0301 mock-leak invariant).
+      throw new HttpError(404, "NOT_FOUND", "instance not found");
+    }
+
+    // No-DB fallback: pack/seed fixture lookup (FF-11 display-plane path).
+    const instance = findProcessInstance(instanceId);
     if (!instance) {
       throw new HttpError(404, "NOT_FOUND", "instance not found");
     }
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(instance));
-  });
+  }));
 }
