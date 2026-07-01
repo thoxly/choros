@@ -315,3 +315,136 @@ describe('applications API — create/list/get (T-0262)', () => {
     expect(listBody.applications.some((a) => a['slug'] === bSlug)).toBe(false);
   }));
 });
+
+// ---------------------------------------------------------------------------
+// T-0567 · DELETE /api/applications/:id (frozen contract 204/404/409)
+// ---------------------------------------------------------------------------
+
+describe('applications API — DELETE (T-0567)', () => {
+  it('204 deletes the application + its own registries and records', requireDb(async () => {
+    const slug = `del-app-${uuid().slice(0, 8)}`;
+    const created = await makeRequest(
+      baseUrl, 'POST', '/api/applications',
+      { slug, display_name: 'To Delete' }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(created.statusCode).toBe(201);
+    const id = (JSON.parse(created.body) as { id: string }).id;
+
+    // Seed a registry_def + record under the app (the "наборы полей" + "записи").
+    const regId = uuid();
+    const recId = uuid();
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await c.query(
+        `INSERT INTO choros.registry_def
+           (tenant_id, id, application_id, slug, display_name, record_schema, created_at, updated_at)
+         VALUES ($1, $2, $3, 'items', 'Items', '{}'::jsonb, 0, 0)`,
+        [TENANT_A, regId, id],
+      );
+      await c.query(
+        `INSERT INTO choros.record
+           (tenant_id, id, registry_id, data, created_at, updated_at, created_by)
+         VALUES ($1, $2, $3, '{}'::jsonb, 0, 0, 'seed')`,
+        [TENANT_A, recId, regId],
+      );
+      await c.query('COMMIT');
+    });
+
+    // DELETE → 204, empty body.
+    const del = await makeRequest(baseUrl, 'DELETE', `/api/applications/${id}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(del.statusCode).toBe(204);
+    expect(del.body).toBe('');
+
+    // GET now → 404 (app + children gone).
+    const got = await makeRequest(baseUrl, 'GET', `/api/applications/${id}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(got.statusCode).toBe(404);
+
+    // The registry_def + record are gone too (no orphans).
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      const reg = await c.query(`SELECT 1 FROM choros.registry_def WHERE id = $1`, [regId]);
+      const rec = await c.query(`SELECT 1 FROM choros.record WHERE id = $1`, [recId]);
+      await c.query('COMMIT');
+      expect(reg.rowCount).toBe(0);
+      expect(rec.rowCount).toBe(0);
+    });
+  }));
+
+  it('404 when the application does not exist in the caller tenant', requireDb(async () => {
+    const missing = uuid();
+    const del = await makeRequest(baseUrl, 'DELETE', `/api/applications/${missing}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(del.statusCode).toBe(404);
+  }));
+
+  it('TENANT ISOLATION: actor A cannot DELETE tenant B\'s application → 404', requireDb(async () => {
+    let bId = '';
+    await withClient(migratorUrl(), async (c) => {
+      bId = await seedApplicationDirect(c, TENANT_B, `del-iso-b-${uuid().slice(0, 8)}`);
+    });
+    cleanupIds.push({ tenantId: TENANT_B, id: bId });
+
+    const del = await makeRequest(baseUrl, 'DELETE', `/api/applications/${bId}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(del.statusCode).toBe(404);
+
+    // Sanity: B's app still there.
+    const gotB = await makeRequest(baseUrl, 'GET', `/api/applications/${bId}`, undefined, {
+      'x-dev-user': 'actor-b',
+    });
+    expect(gotB.statusCode).toBe(200);
+  }));
+
+  it('409 when another object still references the application', requireDb(async () => {
+    const slug = `del-fk-${uuid().slice(0, 8)}`;
+    const created = await makeRequest(
+      baseUrl, 'POST', '/api/applications',
+      { slug, display_name: 'FK Guarded' }, { 'x-dev-user': 'actor-a' },
+    );
+    expect(created.statusCode).toBe(201);
+    const id = (JSON.parse(created.body) as { id: string }).id;
+    cleanupIds.push({ tenantId: TENANT_A, id });
+
+    // Seed a report_page referencing the app (FK not handled by the app's own
+    // cascade) → DELETE must surface a 409, not a 500, and the app survives.
+    const pageId = uuid();
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await c.query(
+        `INSERT INTO choros.report_page
+           (tenant_id, id, app_id, slug, title, floor, tier, page_code, created_at, updated_at)
+         VALUES ($1, $2, $3, 'rep', 'Rep', '2', 'draft', 'export default null', 0, 0)`,
+        [TENANT_A, pageId, id],
+      );
+      await c.query('COMMIT');
+    });
+
+    const del = await makeRequest(baseUrl, 'DELETE', `/api/applications/${id}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(del.statusCode).toBe(409);
+
+    // App still exists (transaction rolled back).
+    const got = await makeRequest(baseUrl, 'GET', `/api/applications/${id}`, undefined, {
+      'x-dev-user': 'actor-a',
+    });
+    expect(got.statusCode).toBe(200);
+
+    // Cleanup the report_page so afterAll can drop the app.
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${TENANT_A}'`);
+      await c.query(`DELETE FROM choros.report_page WHERE id = $1`, [pageId]);
+      await c.query('COMMIT');
+    });
+  }));
+});

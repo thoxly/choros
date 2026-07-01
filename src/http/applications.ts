@@ -293,6 +293,69 @@ async function patchApplication(
   });
 }
 
+// T-0567: delete one application within the caller's tenant.
+//
+// The application's OWN data — its registries (наборы полей) and their records —
+// is removed in the same transaction (children first, tenant-scoped by RLS +
+// explicit tenant_id), matching the honest consequence shown to the user:
+// «Приложение и все его записи и наборы полей будут удалены безвозвратно».
+//
+// If some OTHER object still references the application or its registries
+// (report_page, doc_page, template_def, cross_app_ref, …) Postgres raises a
+// foreign_key_violation (SQLSTATE 23503); we surface that as a 409 CONFLICT so
+// the caller sees an honest "still in use" error rather than a 500. The whole
+// thing is one transaction, so a 409 rolls back the child deletes too.
+//
+// Returns true if an application row was deleted, false if none matched
+// (not in tenant OR does not exist → the route maps that to 404).
+async function deleteApplication(
+  pool: pg.Pool,
+  tenantId: string,
+  id: string,
+): Promise<boolean> {
+  return withTenantTx(pool, tenantId, async (client) => {
+    // Guard: does the app exist in this tenant at all? (distinguish 404 from 204).
+    const exists = await client.query(
+      `SELECT 1 FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, id],
+    );
+    if (exists.rowCount === 0) return false;
+
+    try {
+      // records → registry_defs → application (children first; FK is child→parent).
+      await client.query(
+        `DELETE FROM choros.record
+           WHERE tenant_id = $1
+             AND registry_id IN (
+               SELECT id FROM choros.registry_def
+                 WHERE tenant_id = $1 AND application_id = $2)`,
+        [tenantId, id],
+      );
+      await client.query(
+        `DELETE FROM choros.registry_def
+           WHERE tenant_id = $1 AND application_id = $2`,
+        [tenantId, id],
+      );
+      await client.query(
+        `DELETE FROM choros.application WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id],
+      );
+    } catch (err) {
+      // 23503 = foreign_key_violation → the app (or one of its registries) is
+      // still referenced by another object → honest 409, not a 500.
+      if (typeof err === "object" && err !== null && (err as { code?: string }).code === "23503") {
+        throw new HttpError(
+          409,
+          "CONFLICT",
+          "приложение используется другими объектами (отчёты, документы, связи) — удалите их сначала",
+        );
+      }
+      throw err;
+    }
+    return true;
+  });
+}
+
 async function listApplications(pool: pg.Pool, tenantId: string): Promise<ApplicationRow[]> {
   return withTenantTx(pool, tenantId, async (client) => {
     const res = await client.query<ApplicationRow>(
@@ -531,6 +594,30 @@ export function registerApplicationRoutes(
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(serializeApplication(row)));
+    }),
+  );
+
+  // DELETE /api/applications/:id — T-0567: delete an application + its own data.
+  // Frozen contract: 204 (deleted, no body) · 404 (not in caller's tenant) ·
+  // 409 (still referenced by other objects). The app's registries + records are
+  // removed in the same transaction (see deleteApplication).
+  router.register(
+    "DELETE",
+    "/api/applications/:id",
+    withAuth(async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>) => {
+      const id = params["id"] ?? "";
+      assertUuidShape(id, "application id");
+
+      const actor = await extractActor(req, pool);
+      const tenantId = await resolveActorTenant(actor);
+      const deleted = await deleteApplication(pool, tenantId, id);
+      if (!deleted) {
+        // Not in the caller's tenant (RLS-filtered) OR does not exist → 404.
+        throw new HttpError(404, "NOT_FOUND", "application not found");
+      }
+
+      res.statusCode = 204;
+      res.end();
     }),
   );
 }
