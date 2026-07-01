@@ -41,10 +41,12 @@
  *                         schema. The form renders a <select> dropdown; the chosen
  *                         value is a string matching one of the enum entries.
  *                         Required ⇒ must be non-empty. Optional + blank ⇒ omit.
- *   - date (T-0294)     → emitted as `type:"string"` (no format — AJV strict
- *                         rejects format:date). The form renders <input type="date">
- *                         which produces ISO 8601 dates (YYYY-MM-DD). Required ⇒
- *                         must be non-empty. Optional + blank ⇒ omit.
+ *   - date (T-0294)     → emitted as `type:"string"` + `x-date:true` (T-0553; no
+ *                         format — AJV strict rejects format:date, so x-date is the
+ *                         discriminator). The form renders <input type="date"> which
+ *                         produces ISO 8601 dates (YYYY-MM-DD). Required ⇒ must be
+ *                         non-empty. Optional + blank ⇒ omit. Legacy date fields without
+ *                         x-date load as text (backward-compatible).
  *   - unknown type      → treated as string (defensive; the constructor never
  *                         emits an unsupported type, see apps-schema FIELD_TYPES).
  */
@@ -411,6 +413,23 @@ export function schemaToFormFields(recordSchema) {
         label: title || humanizeKey(key),
         required: requiredSet.has(key),
         inputKind: "email",
+      };
+    }
+
+    // T-0553: detect date fields by the presence of x-date annotation.
+    // Shape: { type: "string", "x-date": true }. Must be detected before the generic
+    // string fallthrough so a date field renders <input type="date">, not a text input.
+    // Legacy date fields (plain { type: "string" }, no x-date) fall through to text —
+    // no regression, backward-compatible.
+    const xDate = def && typeof def === "object" ? def["x-date"] : undefined;
+    if (xDate) {
+      return {
+        key,
+        type: "date",
+        title,
+        label: title || humanizeKey(key),
+        required: requiredSet.has(key),
+        inputKind: "date",
       };
     }
 

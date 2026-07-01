@@ -83,6 +83,20 @@ describe('schemaToFormFields', () => {
     expect(fields[0]).toMatchObject({ key: 'x', type: 'string', inputKind: 'text' });
   });
 
+  it('T-0553: detects a date field via x-date → type "date", inputKind "date"', () => {
+    const fields = schemaToFormFields({
+      type: 'object',
+      additionalProperties: false,
+      properties: { due: { type: 'string', 'x-date': true, title: 'Срок' } },
+    });
+    expect(fields[0]).toMatchObject({ key: 'due', type: 'date', label: 'Срок', inputKind: 'date' });
+  });
+
+  it('T-0553: legacy date (plain type:"string", no x-date) stays a text input', () => {
+    const fields = schemaToFormFields({ type: 'object', properties: { due: { type: 'string' } } });
+    expect(fields[0]).toMatchObject({ key: 'due', type: 'string', inputKind: 'text' });
+  });
+
   it('tolerates absent / malformed schemas', () => {
     expect(schemaToFormFields(null)).toEqual([]);
     expect(schemaToFormFields(undefined)).toEqual([]);

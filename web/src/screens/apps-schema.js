@@ -38,12 +38,15 @@
  *            `format`). At least one option is required; each option is a non-empty
  *            string, unique within the field.
  *   date     — an ISO 8601 date string. AJV strict REJECTS `format: "date"` (unknown
- *              format — throws on compile), so this emits as { type: "string" } in the
- *              record_schema; the UI renders <input type="date"> to constrain input.
- *              Round-trip note: parseRecordSchema cannot distinguish a plain "string"
- *              from a "date" in the persisted schema (no AJV-compliant annotation
- *              exists). A persisted date field loads back as "string" — acceptable per
- *              the constructor's read-back contract.
+ *              format — throws on compile), so this emits as { type: "string", "x-date": true }
+ *              in the record_schema; the UI renders <input type="date"> to constrain input.
+ *              T-0553: x-date is the round-trip discriminator (same x-* convention as
+ *              x-person/x-url/x-email; stripped before AJV compile). parseRecordSchema and
+ *              schemaToFormFields restore type "date" from x-date, so a date field survives
+ *              save→reload. Legacy date fields persisted before T-0553 (plain { type:"string" },
+ *              no x-date) load back as "string" — backward-compatible, no regression.
+ *              NOTE: collection date SUB-fields stay plain { type:"string" } — stripXExtensions
+ *              does not recurse into items.properties, so a nested x-date would break AJV.
  *
  * T-0444 ADDITION:
  *   relation — a pointer to a record in another набор полей (registry_def). Emitted
@@ -496,6 +499,15 @@ export function buildRecordSchema(fields) {
       // AJV strict rejects format:"email" (unknown format) — use x-email as the
       // round-trip discriminator (same x-* convention). Stored value is a plain string.
       prop = { type: "string", "x-email": true };
+    } else if (f.type === "date") {
+      // T-0553: date → type:string + x-date extension (round-trip discriminator).
+      // AJV strict rejects format:"date" (unknown format), so x-date is the discriminator
+      // (same x-* convention as x-person/x-url/x-email). Stored value is an ISO date
+      // string; parse restores type "date" so the record form renders <input type="date">.
+      // NOTE: only TOP-LEVEL date fields carry x-date — stripXExtensions does NOT recurse
+      // into collection items.properties, so a date sub-field must stay plain string
+      // (emitScalarProp) or AJV strict would throw on the nested x-date keyword.
+      prop = { type: "string", "x-date": true };
     } else {
       prop = emitScalarProp(f);
     }
@@ -541,9 +553,9 @@ export function buildRecordSchema(fields) {
  * are surfaced read-only as-is in `extra`). Tolerates absent/empty properties.
  *
  * T-0294: a property with `enum` is detected as a "select" field; its options
- * array is extracted. A "date" field (stored as type:"string" in the schema)
- * cannot be distinguished from a plain string field — it parses back as "string"
- * (see header for rationale).
+ * array is extracted. T-0553: a "date" field is detected by its x-date annotation
+ * ({ type:"string", "x-date":true }) and parses back as "date". Legacy date fields
+ * without x-date (persisted before T-0553) still parse back as "string".
  *
  * T-0448: a property with type:"array" + items.type:"object" is detected as a
  * "collection" field; its sub-fields are parsed from items.properties.
@@ -691,6 +703,16 @@ export function parseRecordSchema(recordSchema) {
     if (xEmail) {
       const title = typeof def.title === "string" ? def.title : "";
       return { key, type: "email", title, required: requiredSet.has(key) };
+    }
+
+    // T-0553: detect date fields by the presence of x-date annotation.
+    // Shape: { type: "string", "x-date": true }. Must be detected before the string
+    // fallthrough. Legacy date fields persisted before T-0553 (plain { type: "string" },
+    // no x-date) still parse back as "string" — no regression, backward-compatible.
+    const xDate = def && typeof def === "object" ? def["x-date"] : undefined;
+    if (xDate) {
+      const title = typeof def.title === "string" ? def.title : "";
+      return { key, type: "date", title, required: requiredSet.has(key) };
     }
 
     // T-0294: detect select fields by the presence of an enum array.

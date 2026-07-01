@@ -117,6 +117,26 @@ describe('apps-schema · supported types', () => {
     expect(backendAccepts(dateSchema)).toBe(true);
   });
 
+  it('T-0553: date emits { type:"string", "x-date":true } and round-trips back to "date"', () => {
+    const schema = buildRecordSchema([{ key: 'due', type: 'date', title: 'Срок', required: true }]);
+    // Persisted shape carries the x-date discriminator.
+    expect(schema.properties.due).toEqual({ type: 'string', 'x-date': true, title: 'Срок' });
+    // x-date is stripped before AJV compile → backend still accepts it.
+    expect(backendAccepts(schema)).toBe(true);
+    // Round-trip: the editor restores type "date" (not "string").
+    const parsed = parseRecordSchema(schema);
+    expect(parsed).toEqual([
+      { key: 'due', type: 'date', title: 'Срок', required: true },
+    ]);
+  });
+
+  it('T-0553: legacy date (plain type:"string", no x-date) still parses back as "string"', () => {
+    // Backward-compat: fields persisted before T-0553 have no discriminator.
+    const legacy = { type: 'object', additionalProperties: false, properties: { due: { type: 'string' } } };
+    const parsed = parseRecordSchema(legacy);
+    expect(parsed[0].type).toBe('string');
+  });
+
   it('does not offer `format` (AJV strict throws on unknown formats)', () => {
     // sanity: the editor must never emit format — prove format would be rejected
     const withFormat = { type: 'object', properties: { f: { type: 'string', format: 'email' } } };
@@ -373,11 +393,12 @@ describe('apps-schema T-0294 · select field type', () => {
 });
 
 describe('apps-schema T-0294 · date field type', () => {
-  it('buildRecordSchema: date emits { type: "string" } (no format — AJV strict rejects format:date)', () => {
+  it('buildRecordSchema: date emits { type: "string", "x-date": true } (T-0553; no format — AJV strict rejects format:date)', () => {
     const schema = buildRecordSchema([
       { key: 'close_date', type: 'date', title: 'Дата закрытия', required: true },
     ]);
-    expect(schema.properties.close_date).toEqual({ type: 'string', title: 'Дата закрытия' });
+    expect(schema.properties.close_date).toEqual({ type: 'string', 'x-date': true, title: 'Дата закрытия' });
+    // x-date is stripped before AJV compile (property-level strip) → backend accepts it.
     expect(backendAccepts(schema)).toBe(true);
   });
 
@@ -389,9 +410,17 @@ describe('apps-schema T-0294 · date field type', () => {
 
   it('buildRecordSchema: date schema accepts ISO date strings (as plain string validation)', () => {
     const schema = buildRecordSchema([{ key: 'd', type: 'date', required: true }]);
-    // T-0510: strip root x-field-order before direct compile (backendAccepts does this).
+    // T-0510/T-0553: strip root AND property-level x-* (x-field-order, x-date) before
+    // direct compile — mirrors stripXExtensions; AJV strict rejects unknown x-* keywords.
+    const rooted = stripRootX(schema);
+    const strippedProps = Object.fromEntries(
+      Object.entries(rooted.properties).map(([pk, pv]) => [
+        pk,
+        Object.fromEntries(Object.entries(pv).filter(([k]) => !k.startsWith('x-'))),
+      ]),
+    );
     const ajv = new Ajv();
-    const validate = ajv.compile(stripRootX(schema));
+    const validate = ajv.compile({ ...rooted, properties: strippedProps });
     // AJV validates it as a string (format is not enforced); any non-empty string passes.
     expect(validate({ d: '2024-01-15' })).toBe(true);
     expect(validate({ d: 'not-a-date' })).toBe(true); // string type — AJV accepts it
