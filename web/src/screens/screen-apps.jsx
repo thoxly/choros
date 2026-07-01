@@ -354,6 +354,26 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
   );
 }
 
+/**
+ * T-0565: гаситель всплытия клика для модалок, открытых из строки таблицы.
+ *
+ * <Modal> рендерится ИНЛАЙН (components.jsx — без createPortal), поэтому его
+ * .chs-overlay оказывается DOM-потомком кликабельной строки
+ * `<tr onClick={() => navigate('/app-records/:id')}>`. Клик внутри модалки
+ * (напр. «Сохранить» в «Изменить раздел» или «Опубликовать» в диалоге публикации)
+ * всплывал по React-дереву до onClick строки — действие срабатывало, но страница
+ * ПАРАЗИТНО уходила на записи приложения.
+ *
+ * Локальный fix того же класса, что T-0552: гасим всплытие на обёртке overlay'ев,
+ * не трогая общий <Modal> (его портирование задело бы позиционирование/focus-trap
+ * во всех остальных экранах). onClose-по-фону остаётся: overlay сам решает close по
+ * e.target === e.currentTarget, а stopPropagation тут — про доставку до строки, не
+ * про сам обработчик overlay. Экспортируется для tree-walk теста (конвенция проекта).
+ */
+export function RowModalStopBubble({ children }) {
+  return <span onClick={(e) => e.stopPropagation()}>{children}</span>;
+}
+
 // Per-row actions: keep BOTH "Настроить поля" and "Записи" reachable without
 // horizontal scroll (audit #2) via a "…" Popover menu anchored to the row.
 // T-0540: добавлено действие «Изменить раздел» → PATCH /api/applications/:id { section }.
@@ -363,20 +383,22 @@ function AppActions({ app, navigate, onAppUpdated, onPublished, pushToast }) {
   const [publishOpen, setPublishOpen] = useState(false);
   return (
     <>
-      <SetSectionModal
-        open={sectionModalOpen}
-        app={app}
-        onClose={() => setSectionModalOpen(false)}
-        onUpdated={(updated) => { setSectionModalOpen(false); if (onAppUpdated) onAppUpdated(updated); }}
-      />
-      {/* T-0563: «Опубликовать решение» — publish-preview → confirm → per-item results. */}
-      <PublishSolutionDialog
-        open={publishOpen}
-        app={app}
-        pushToast={pushToast}
-        onClose={() => setPublishOpen(false)}
-        onDone={(summary) => { if (onPublished) onPublished(app, summary); }}
-      />
+      <RowModalStopBubble>
+        <SetSectionModal
+          open={sectionModalOpen}
+          app={app}
+          onClose={() => setSectionModalOpen(false)}
+          onUpdated={(updated) => { setSectionModalOpen(false); if (onAppUpdated) onAppUpdated(updated); }}
+        />
+        {/* T-0563: «Опубликовать решение» — publish-preview → confirm → per-item results. */}
+        <PublishSolutionDialog
+          open={publishOpen}
+          app={app}
+          pushToast={pushToast}
+          onClose={() => setPublishOpen(false)}
+          onDone={(summary) => { if (onPublished) onPublished(app, summary); }}
+        />
+      </RowModalStopBubble>
       <Popover
         open={open}
         onClose={() => setOpen(false)}
