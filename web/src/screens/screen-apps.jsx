@@ -25,11 +25,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Button, MonoId, Mono, StatusChip, Modal, Field, Select, Popover,
+  Button, MonoId, Mono, StatusChip, Modal, Field, Select, Popover, Badge,
   EmptyState, ErrorState, LoadingState, KitIcon,
 } from '../components/components.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
+import { useToastContext } from '../app-shell/toast-context.jsx';
 import { validateAppForm, mapCreateError } from './apps-validate.js';
+import { PublishSolutionDialog } from './apps-publish-dialog.jsx';
+import { fetchPublishPreview, hasUnpublishedChanges } from './apps-publish-api.js';
 
 // tier → StatusChip status (chip is purely visual; tier values are 'draft'|'published').
 const TIER_CHIP = { draft: "waiting", published: "done" };
@@ -354,9 +357,10 @@ function SetSectionModal({ open, app, onClose, onUpdated }) {
 // Per-row actions: keep BOTH "Настроить поля" and "Записи" reachable without
 // horizontal scroll (audit #2) via a "…" Popover menu anchored to the row.
 // T-0540: добавлено действие «Изменить раздел» → PATCH /api/applications/:id { section }.
-function AppActions({ app, navigate, onAppUpdated }) {
+function AppActions({ app, navigate, onAppUpdated, onPublished, pushToast }) {
   const [open, setOpen] = useState(false);
   const [sectionModalOpen, setSectionModalOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
   return (
     <>
       <SetSectionModal
@@ -364,6 +368,14 @@ function AppActions({ app, navigate, onAppUpdated }) {
         app={app}
         onClose={() => setSectionModalOpen(false)}
         onUpdated={(updated) => { setSectionModalOpen(false); if (onAppUpdated) onAppUpdated(updated); }}
+      />
+      {/* T-0563: «Опубликовать решение» — publish-preview → confirm → per-item results. */}
+      <PublishSolutionDialog
+        open={publishOpen}
+        app={app}
+        pushToast={pushToast}
+        onClose={() => setPublishOpen(false)}
+        onDone={(summary) => { if (onPublished) onPublished(app, summary); }}
       />
       <Popover
         open={open}
@@ -406,6 +418,14 @@ function AppActions({ app, navigate, onAppUpdated }) {
           >
             Изменить раздел
           </Button>
+          {/* T-0563: публикация связанного решения (само приложение + справочники + процессы + формы) */}
+          <Button
+            variant="ghost" size="sm" role="menuitem"
+            style={{ justifyContent: 'flex-start', width: '100%' }}
+            onClick={(e) => { e.stopPropagation(); setOpen(false); setPublishOpen(true); }}
+          >
+            Опубликовать решение
+          </Button>
         </div>
       </Popover>
     </>
@@ -414,10 +434,13 @@ function AppActions({ app, navigate, onAppUpdated }) {
 
 function AppsScreen() {
   const navigate = useNavigate();
+  const { push: pushToast } = useToastContext();
   const [apps, setApps] = useState(null);     // null = loading, [] = empty, [...] = list
   const [error, setError] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [highlightId, setHighlightId] = useState(null); // id of just-created app
+  // T-0563: id приложений с неопубликованными изменениями (published + preview.to_publish>0).
+  const [unpublishedIds, setUnpublishedIds] = useState(() => new Set());
 
   const load = useCallback(async () => {
     setError(null);
@@ -433,6 +456,27 @@ function AppsScreen() {
 
   useEffect(() => { load(); }, [load]);
 
+  // T-0563: бейдж «есть неопубликованные изменения». Для каждого УЖЕ опубликованного
+  // приложения тянем preview один раз — если в связке есть will_publish, помечаем строку.
+  // Простая v1-эвристика (ADR §2 п.5): tolerant к ошибкам (тихо пропускаем).
+  useEffect(() => {
+    if (!Array.isArray(apps)) return;
+    const published = apps.filter((a) => a && a.tier === 'published' && a.id);
+    if (published.length === 0) { setUnpublishedIds(new Set()); return; }
+    let cancelled = false;
+    (async () => {
+      const next = new Set();
+      await Promise.all(published.map(async (a) => {
+        try {
+          const p = await fetchPublishPreview(a.id);
+          if (hasUnpublishedChanges(a, p)) next.add(a.id);
+        } catch { /* preview недоступен — бейдж просто не показываем */ }
+      }));
+      if (!cancelled) setUnpublishedIds(next);
+    })();
+    return () => { cancelled = true; };
+  }, [apps]);
+
   const handleCreated = useCallback((created) => {
     setCreateOpen(false);
     if (created && created.id) setHighlightId(created.id);
@@ -444,6 +488,12 @@ function AppsScreen() {
     if (!updated || !updated.id) return;
     setApps((prev) => prev ? prev.map((a) => a.id === updated.id ? { ...a, ...updated } : a) : prev);
   }, []);
+
+  // T-0563: после публикации решения — перезагружаем список (tier мог смениться
+  // draft→published; при полном успехе бейдж «неопубликованные» снимется).
+  const handlePublished = useCallback((_app, summary) => {
+    if (summary && summary.allOk) load();
+  }, [load]);
 
   const list = apps || [];
 
@@ -531,7 +581,15 @@ function AppsScreen() {
                       )}
                     </td>
                     <td><MonoId>{app.slug}</MonoId></td>
-                    <td><StatusChip status={TIER_CHIP[app.tier] || "waiting"} label={app.tier} /></td>
+                    <td>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)', flexWrap: 'wrap' }}>
+                        <StatusChip status={TIER_CHIP[app.tier] || "waiting"} label={app.tier} />
+                        {/* T-0563: published-приложение с draft-частями в связке */}
+                        {unpublishedIds.has(app.id) && (
+                          <Badge tone="warning">есть неопубликованные изменения</Badge>
+                        )}
+                      </span>
+                    </td>
                     <td>
                       <Mono style={{ fontSize: "var(--chs-text-xs)", color: "var(--chs-color-text-muted)" }}>
                         {fmtTs(app.created_at)}
@@ -540,7 +598,13 @@ function AppsScreen() {
                     <td style={{ textAlign: 'right' }}>
                       {/* T-0266/T-0267 actions: field-constructor + records, behind a "…" menu */}
                       {/* T-0540: добавлено «Изменить раздел» */}
-                      <AppActions app={app} navigate={navigate} onAppUpdated={handleAppUpdated} />
+                      <AppActions
+                        app={app}
+                        navigate={navigate}
+                        onAppUpdated={handleAppUpdated}
+                        onPublished={handlePublished}
+                        pushToast={pushToast}
+                      />
                     </td>
                   </tr>
                 ))}
