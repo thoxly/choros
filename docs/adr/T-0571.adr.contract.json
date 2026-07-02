@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0571",
+  "status": "ready",
+  "decision": "BUG-014: базовый (process.started) шаг инбокса завершает движковый user-task по ИДЕНТИЧНОСТИ инстанса (активный user-task этого инстанса из движка), а не по ТЭЛ-литералу taskDefKey=\"task-approve\" (process-projection.ts:865). Литерал снимается с несущего пути матчинга (остаётся как UI-дефолт; деТЭЛизация ролей/наборов = T-0575). Завершение базового шага становится СИНХРОННЫМ к HTTP-ответу с честным типизированным статусом: 200 только когда движковый шаг реально завершён или легитимный idempotent-повтор; при сбое/недоступности движка или ненайденной активной задаче — 502 с типизированным code (ENGINE_DRIVE_FAILED / ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK) — конец тихого 200 (AC-7). Движок не сконфигурирован — явное engine:\"not_configured\" (200, audit-only сохранён), наблюдаемо иначе, чем сбой (NF-3). Fan-out следующей задачи остаётся async + самоисцеляется reconcile-on-read (не регрессирует T-0522). Модель событий и схема БД не меняются (additive-only). Реализация — отдельный BUILD-таск.",
+  "rejected_alternatives": [
+    {"option": "B1. Переименовать/параметризовать литерал task-approve по procKey", "why_not": "остаётся матчинг-по-строке; следующий процесс с иным именем узла снова упадёт — не устраняет класс дефекта, лишь сдвигает границу."},
+    {"option": "B2. Читать taskDefinitionKey базового узла из BPMN при старте в process.started payload", "why_not": "дублирует парсинг BPMN в проекцию — второй источник правды о ключе, тот же дрейф двух машин, что Option B в ADR-T0432 отвергла; движок уже знает активную задачу инстанса."},
+    {"option": "B3. Оставить fire-and-forget, чинить только матчинг", "why_not": "ложный 200 при недоступности/сбое движка остаётся — AC-7 не закрыт; главное зло не несовпадение ключа, а невидимость сбоя."},
+    {"option": "B4. Полностью синхронный весь reconcile (ждать появления next_task в ответе)", "why_not": "связывает latency approve с появлением следующей задачи; ADR-T0432 §4 уже приняла eventual-consistency следующего шага. Синхронизируем только завершение (несущее), не fan-out."},
+    {"option": "B5. Durable outbox-очередь для post-approve reconcile", "why_not": "это O6 (вне скоупа спеки §6); не требуется для детерминизма — завершение синхронно, fan-out самоисцеляется reconcile-on-read."},
+    {"option": "B6. Откатывать task.approved при engine-fail (атомарно решение+движок)", "why_not": "теряет решение человека при транзиентном сбое; повтор approve не найдёт waiting-task (в проекции done) → тупик. Idempotent-повтор поверх сохранённого task.approved + честный 502 надёжнее."}
+  ],
+  "contracts": [
+    "InstanceInboxTask.taskDefKey расширяется до string|null (либо additive-флаг resolveByInstance?:boolean при сохранении taskDefKey?): базовая process.started-строка несёт сигнал resolve-by-instance вместо литерала task-approve; process.next_task-строки продолжают нести истинный task_def_key из payload. ADDITIVE — ни один существующий консюмер (.taskDefKey дедуп в inbox.ts, reconcileInstanceEngineDrive, reconcileInboxEngineDriveOnRead, reconcileInstanceTimers) не меняет поведение для НЕ-базовых задач.",
+    "reconcileInstanceEngineDrive (post-approve, completeEngineTask:true): для базового шага матчинг активной задачи движка = 'активный user-task этого instanceId' (getActiveUserTasks без фильтра по литералу), НЕ find(t=>t.taskDefinitionKey===literal). engineTaskId и истинный taskDefinitionKey берутся из найденной задачи. >1 активной user-task у базового шага → ok:false code=AMBIGUOUS_ACTIVE_TASK stage=poll (не угадывать первую). 0 задач → различать через isInstanceEnded: завершён=idempotent-легитимно (ok:true completed:false), иначе=структурный сбой (ENGINE_TASK_NOT_FOUND).",
+    "Ответ approve (движок сконфигурирован): 200 {engine:'completed'} — задача найдена+завершена; 200 {engine:'already'} — инстанс уже завершён этим шагом (idempotent, NOT_FOUND/isInstanceEnded); 502 {code:'ENGINE_DRIVE_FAILED',stage,engineCode} — движок недоступен/HTTP-ошибка; 502 {code:'ENGINE_TASK_NOT_FOUND',stage:'poll'} — активная задача не найдена и инстанс не завершён; 502 {code:'AMBIGUOUS_ACTIVE_TASK',stage:'poll'} — >1 активной задачи.",
+    "Ответ approve (движок НЕ сконфигурирован, writeDepsFlowable отсутствует): 200 {engine:'not_configured'} — audit-only режим сохранён, но ЯВНЫМ полем; отличимо от сбоя по значению engine и HTTP-коду (200 vs 502).",
+    "applyStepResult (task.approved) в своей tx ДО завершения движка и НЕ откатывается при 502: решение человека сохранено, ответ 502 честно сообщает 'записано, но шаг в движке не завершён'; повтор approve дожимает завершение идемпотентно.",
+    "Завершение базового шага СИНХРОННО к HTTP-ответу (снят void fire-and-forget с пути completeUserTask); async остаётся только для fan-out next_task после завершения (eventual-consistency, страхуется reconcile-on-read). reconcile-on-read (completeEngineTask:false) остаётся чистым зеркалом — никогда не завершает задачу.",
+    "Модель событий (process.started, task.approved, process.next_task, instance.ended) и схема БД НЕ меняются — миграции нет (additive-only, ADR-T0432 §4.1 п.1)."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "На несущем пути завершения запрещён матчинг активной задачи движка по литералу task-approve: reconcileInstanceEngineDrive не сравнивает taskDefinitionKey===\"task-approve\", listInstanceInboxTasks не проставляет taskDefKey:\"task-approve\" на базовой строке.", "ci_check": "bash ci/checks/engine-drive-no-literal-defkey.sh (grep: тело reconcileInstanceEngineDrive без /taskDefinitionKey\\s*===\\s*[\"'`]task-approve/ и базовая process.started-строка listInstanceInboxTasks без taskDefKey:\"task-approve\"; наличие=exit 1) + --self-test"},
+    {"id": "FF-2", "rule": "Ответ approve при сконфигурированном движке и неуспехе завершения/матчинга — не тихий 200: не-2xx с типизированным code, отличимый от success.", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"engine-fail-visible\" (AC-7; красный на текущем коде — сейчас всегда 200, зелёный после)"},
+    {"id": "FF-3", "rule": "Живой интеграционный тест (Flowable+Postgres): generic-BPMN с первым user-task taskDefinitionKey != \"task-approve\" -> approve через HTTP -> completeUserTask вызван для верного engineTaskId, задача исчезла из runtime/tasks.", "ci_check": "vitest run --dir ci/checks/db ci/checks/db/engine-drive-generic.db.test.ts (lane fitness:db; AC-6; красный до фикса, зелёный после)"},
+    {"id": "FF-4", "rule": "Frozen ТЭЛ-джорнеи не регрессируют: линейный ТЭЛ и gateway-routing проходят как раньше (тот же токен завершается через резолв-по-инстансу).", "ci_check": "bash ci/checks/flowable/tel-linear-smoke.sh && vitest run e2e/journeys/loader.test.ts (journeys tel-linear, tel-gateway-routing; регрессия=exit 1)"},
+    {"id": "FF-5", "rule": "Идемпотентность T-0522 не регрессирует: повторный approve/reconcile уже завершённого шага без дублей событий и без исключения.", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"idempotent\" (AC-8)"},
+    {"id": "FF-6", "rule": "Diff задачи не добавляет в src/ новых кейс-специфичных строковых литералов (имена шагов/процессов/ролей демо-кейса) сверх baseline.", "ci_check": "git diff origin/main...HEAD -- 'src/**' | grep '^+' | grep -Ev '^\\+\\+\\+' | grep -E '\"(soglasovanie|role-approver|Согласование|Закупки|task-approve)\"' — пусто=pass (AC-9; считаются только добавленные строки ^+)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.1 резолв-по-инстансу; FF-3 (db); LIVE_PROOF §7 спеки"},
+    {"ac": "AC-2", "covered_by": "§2.3 fan-out async + reconcile-on-read не регрессирует; manual LIVE_PROOF"},
+    {"ac": "AC-3", "covered_by": "§2.1 isInstanceEnded->instance.ended (не трогается); manual"},
+    {"ac": "AC-4", "covered_by": "§2.1 матчинг по инстансу не завязан на строки; FF-1; manual анти-кейс"},
+    {"ac": "AC-5", "covered_by": "§2.3 единственный вход — HTTP approve; FF-3 (через HTTP-роут)"},
+    {"ac": "AC-6", "covered_by": "FF-3"},
+    {"ac": "AC-7", "covered_by": "§2.3 контракт ответа; FF-2"},
+    {"ac": "AC-8", "covered_by": "§2.4; FF-5"},
+    {"ac": "AC-9", "covered_by": "§2.2; FF-6"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0571-engine-drive-seam.md",
+  "escalation": ""
+}
