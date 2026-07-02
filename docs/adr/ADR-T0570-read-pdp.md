@@ -4,6 +4,11 @@
 - **Phase:** DESIGN (architect)
 - **Status:** ready
 - **Date:** 2026-07-02
+- **AMENDED 2026-07-02 (возврат с TEST, product-defect):** §10 — коллизия FF-13/AC-13
+  (ADR T-0082, `ci/checks/db/bundle-coherence.test.ts`) × default-read грант с
+  `resource_facet=NULL`. Решение: санкционированное сужение FF-13 (вариант (а)),
+  санкционный паттерн T-0033. Также §4.1 — ратификация фактического значения сентинела.
+  Новые FF-RP-14/FF-RP-15.
 - **Spec:** `docs/specs/T-0570-read-pdp.spec.md` + `docs/specs/T-0570.spec.contract.json` (AC-1..AC-11)
 - **Ratified founder decision (не переспрашивается):** карта примитивов §7 п.1, вариант (а) —
   default-open внутри тенанта ЧЕРЕЗ СИДИРОВАННЫЙ ГРАНТ; сужение = настройка грантов.
@@ -207,6 +212,17 @@ export const RESOURCE_ROOT_NODE_ID = "00000000-0000-0000-0000-0000000000r0"; // 
 export const READER_ROLE_SLUG = "role-reader"; // платформенная роль-держатель default-open READ-гранта
 ```
 
+**Значение сентинела РАТИФИЦИРОВАНО (amended):** строка `…0000000000r0` намеренно НЕ является
+валидным hex-UUID (`r` — не hex). Она живёт только внутри jsonb (`grant.scope->nodeId`) и в
+строковых сравнениях оракула/SQL — а `choros.application.id` — колонка типа `uuid`, значит этот
+nodeId **структурно не может** совпасть с id реального приложения, и `gen_random_uuid()` не может
+его породить. Rule-2 оракула (§2.1/§4.4) никогда не сработает на реальном узле по коллизии.
+Значение — единый литерал в ТРЁХ местах (`src/core/read-visibility.ts`,
+`migrations/115_default_read_grant_backfill.sql`, carve-out в
+`ci/checks/db/bundle-coherence.test.ts` §10) — когерентность пинит FF-RP-15
+(db-тесты по house-паттерну НЕ импортируют из `src/`, поэтому single-source обеспечивается
+grep-равенством, не импортом).
+
 ### 4.2 `ReadVisibilityResolver` (новый optional dep на `RecordRoutesDeps`)
 
 ```ts
@@ -281,6 +297,11 @@ export function makeResourceAncestryOracle(
 - `src/core/grant-resolver.ts`, `src/core/grant-lattice.ts`, `src/core/object-handle.ts`,
   `src/core/field-visibility.ts` — **НЕ редактируются** (только импортируются).
 - `src/core/register.ts` — ДОБАВЛЯЕТ seed-блок внутри существующей транзакции (additive).
+- **(amended)** `ci/checks/db/bundle-coherence.test.ts` — ХИРУРГИЧЕСКАЯ правка FF-13-предиката
+  (санкционированный carve-out §10; T-0033-паттерн правки чужого гарда с сохранением его
+  инварианта). Потребители: `npm run fitness:db` (job `db`); импортёров-модулей нет.
+  `docs/design/T-0082-bundle-coherence.adr.md` НЕ редактируется (история; живой контракт —
+  тест + §10 этого ADR).
 
 ---
 
@@ -301,6 +322,8 @@ export function makeResourceAncestryOracle(
 | **FF-RP-11** | Field-level поверх record-level: актор с READ-грантом, чей `resource_facet.fields` сужен, получает запись (не 404), но недозволенные JSONB-ключи ОТСУТСТВУЮТ (не null); через существующий `field-visibility.ts`, без второго проекционного пути. | `ci/checks/db/records_field_mask.test.ts`-стиль + `records-read-pdp.test.ts`: узкий facet ⇒ record present, ключи physically absent. (AC-6, FR-4) |
 | **FF-RP-12** | Tenant-isolation первична: запись тенанта B невидима актору тенанта A даже при гипотетически широком READ-гранте (RLS + explicit filter — первый фильтр). | `ci/checks/db/records-read-pdp.db.test.ts`: актор A с RESOURCE_ROOT-грантом, SET tenant=B-строка ⇒ 0 строк/404. (AC-10, NF-3) |
 | **FF-RP-13** | Honest-degrade: `resolveReadVisibility` absent ⇒ READ-путь byte-identical дотаск-поведению (RLS+sandbox), все существующие read-тесты зелёные. | `npm run fitness` + `records-pagination.test.ts`/`records-field-visibility*.test.ts`/`records-sandbox-gate.test.ts` (и `ci/checks/db/records_crud.test.ts`) зелёные без инъекции резолвера. (NF-2) |
+| **FF-RP-14** *(amended)* | Инвариант T-0082 FF-13 СОХРАНЯЕТ СИЛУ после carve-out: NULL-facet record-грант с ЛЮБЫМ не-сентинел scope (или не-read operation) по-прежнему ловится амендированным предикатом; exempt — ТОЛЬКО точная структурная форма default-read гранта. | `ci/checks/db/bundle-coherence.test.ts`: (i) амендированный FF-13-запрос ⇒ 0 строк на сидированных данных; (ii) force-тест: в транзакции с ROLLBACK вставить NULL-facet record-грант с НЕ-сентинел scope ⇒ тот же WHERE-предикат возвращает эту строку (инвариант жив); read+сентинел-строка предикатом НЕ возвращается. (§10) |
+| **FF-RP-15** *(amended)* | Сентинел — единый литерал: значение `RESOURCE_ROOT_NODE_ID` в `src/core/read-visibility.ts` == литерал в `migrations/115_*.sql` == литерал carve-out в `ci/checks/db/bundle-coherence.test.ts`; дрейф любого из трёх ⇒ красный. | `ci/checks/read-pdp-sentinel-coherence.sh`: извлечь значение константы из read-visibility.ts, grep-подтвердить точное вхождение в оба других файла; self-test bad/good. Wired в `npm run fitness`. (§10) |
 
 ---
 
@@ -332,8 +355,8 @@ export function makeResourceAncestryOracle(
 |---|---|
 | AC-1 (list прячет без гранта) | §2.3 LIST-фильтр + FF-RP-1 |
 | AC-2 (detail 404 без гранта) | §2.3 DETAIL + FF-RP-2 |
-| AC-3 (backfill не ломает) | §2.2 миграция 115 + FF-RP-3, FF-RP-6 |
-| AC-4 (registerTenant атомарный сид) | §2.2 register.ts + FF-RP-4 |
+| AC-3 (backfill не ломает) | §2.2 миграция 115 + FF-RP-3, FF-RP-6; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15 |
+| AC-4 (registerTenant атомарный сид) | §2.2 register.ts + FF-RP-4; сид легален для FF-13 T-0082 через §10 carve-out + FF-RP-14/15 |
 | AC-5 (сужение record-level = настройка) | §2.1 правило 3 + §4 `validateNarrowing` + FF-RP-5 |
 | AC-6 (field-level поверх record-level) | §2.4 + FF-RP-11 |
 | AC-7 (нет N+1) | §2.3 O(1)-резолюция + FF-RP-9 |
@@ -349,9 +372,10 @@ export function makeResourceAncestryOracle(
 `runtime:node` — TS/Node HTTP-слой (`src/http/records.ts`) + чистое ядро (`src/core/read-visibility.ts`)
 + DB-слой (`src/db/resource-ancestry.ts`, `getGrantsForSubject`) + Postgres-миграция
 (`migrations/115_default_read_grant_backfill.sql`) + seed в `src/core/register.ts`. Fitness: vitest
-(`src/__tests__/records-read-pdp.test.ts`) + live-PG (`ci/checks/db/records-read-pdp.db.test.ts`,
-`npm run fitness:db`) + shell-линтеры (`read-pdp-no-hardcoded-tenant.sh`, `read-pdp-anti-case.sh`,
-`read-pdp-frozen-core.sh`).
+(`src/__tests__/records-read-pdp.test.ts`) + live-PG (`ci/checks/db/records-read-pdp.db.test.ts` и
+амендированный `ci/checks/db/bundle-coherence.test.ts` §10, `npm run fitness:db`) + shell-линтеры
+(`read-pdp-no-hardcoded-tenant.sh`, `read-pdp-anti-case.sh`, `read-pdp-frozen-core.sh`,
+`read-pdp-sentinel-coherence.sh` — amended, FF-RP-15).
 
 ---
 
@@ -362,3 +386,114 @@ export function makeResourceAncestryOracle(
 её architect, §8 спеки: «не разворот объёма/поведения». Выбран resource-ancestry-оракул с
 root-сентинелом (§2.1) как соразмерный (нет нового kind, латтис frozen, O(1) для default-гранта,
 поддерживает будущее сужение). Ничего высоколевериджно-спорного не осталось.
+
+Коллизия §10 (FF-13 T-0082) — тоже НЕ эскалация: оба ADR инженерные, ратифицированное решение
+фаундера (default-open через сидированный грант) не пересматривается — сужается только
+data-инвариант CI-гарда, причём с сохранением его силы для реальных десинков.
+
+---
+
+## 10. AMENDED 2026-07-02 — коллизия FF-13/AC-13 (T-0082) × default-read грант
+
+### 10.1 Суть коллизии (воспроизводится для КАЖДОГО тенанта)
+
+ADR T-0082 §4.3 FR-3 / FF-13 / AC-13 (`ci/checks/db/bundle-coherence.test.ts:71–93`) —
+живой data-инвариант: `SELECT … FROM choros."grant" WHERE resource_type='record' AND
+resource_facet IS NULL` обязан вернуть **0 строк**; NULL-facet на record-гранте намеренно
+объявлен маркером object-schema↔grant-десинка («висячий грант»).
+
+Этот ADR (§2.2/§4.5) сидирует default-open READ-грант с `resource_type='record'` и
+`resource_facet=NULL` — т.к. в T-0021-ядре **строго-отсутствующий facet = whole-resource
+read** (все поля видимы; `grantFacetFields` → `undefined` → union всех ключей,
+grant-resolver.ts:359–372). Миграция 115 + сид `register.ts` (блок 3p) создают такой грант
+в каждом тенанте ⇒ FF-13 красный для каждого существующего И каждого нового тенанта.
+
+**Природа коллизии:** латентное противоречие двух ратифицированных контрактов. T-0082
+(2026-06-11) объявил NULL-facet вне закона НА ДАННЫХ в момент, когда легитимного
+whole-resource record-гранта не существовало ни в одном сиде (потому инвариант и был
+зелёным). T-0021-ядро при этом ВСЕГДА определяло NULL-facet как легальный whole-resource.
+T-0570 (решение фаундера: default-open) создаёт первый легитимный экземпляр — латентное
+противоречие стало живым.
+
+### 10.2 Решение: вариант (а) — санкционированное сужение FF-13
+
+NULL-facet допустим **ТОЛЬКО** для платформенного default-read гранта, идентифицируемого
+самым узким структурным предикатом; для всего прочего инвариант T-0082 сохраняет полную
+силу. Амендированный FF-13-запрос (точный контракт для кодера):
+
+```sql
+SELECT id::text, tenant_id::text
+FROM choros."grant"
+WHERE resource_type = 'record'
+  AND resource_facet IS NULL
+  AND NOT (                                        -- SANCTIONED CARVE-OUT (T-0570 ADR §10)
+        operation = 'read'
+    AND scope->>'kind'      = 'node'
+    AND scope->>'hierarchy' = 'resource'
+    AND scope->>'nodeLevel' = 'application'
+    AND scope->>'nodeId'    = '00000000-0000-0000-0000-0000000000r0'  -- RESOURCE_ROOT_NODE_ID
+  )
+-- ожидание: 0 строк (как и раньше)
+```
+
+**Почему предикат БЕЗ role-условия** (вопрос координатора «+ role=role-reader?»):
+идентичность «default-open read» несёт зарезервированный сентинел-scope, а не держатель.
+(i) Полноширинная делегация default-гранта (легальна через `validateNarrowing`: равный
+scope, absent==absent facet) породила бы тот же shape под ДРУГОЙ ролью — role-предикат
+дал бы ложный красный на легальной конфигурации. (ii) Сентинел-nodeId структурно не может
+указывать на реальный узел (§4.1) — любой грант этой формы ЕСТЬ default-read примитив
+независимо от роли; это не десинк по определению. (iii) Без JOIN — минимальная поверхность.
+
+### 10.3 Санкционный паттерн (не «молчаливая правка чужого предиката»)
+
+Прецедент — T-0033 FROZEN-FILE TENSION («coder MUST drop grant-resolver.ts from
+mutation-gateway-isolation.sh FROZEN_EXPORTS, preserving every isolation invariant»):
+новый ADR предписывает хирургическую правку старого гарда, сохраняя его инвариант,
+с двусторонней ссылкой. Здесь:
+
+1. Правка — ТОЛЬКО в `ci/checks/db/bundle-coherence.test.ts` (FF-13-блок): carve-out
+   `NOT(…)` + комментарий-санкция в коде теста, дословно ссылающийся на ОБА контракта:
+   `// SANCTIONED CARVE-OUT — T-0570 ADR §10 × T-0082 FR-3/AC-13: NULL-facet legal ONLY
+   for the platform default-open READ grant (read + RESOURCE_ROOT sentinel scope);
+   the invariant keeps full force for every other record-grant.`
+2. `docs/design/T-0082-bundle-coherence.adr.md` НЕ редактируется (история решения);
+   живой контракт инварианта = амендированный тест + этот §10.
+3. Сила инварианта ДОКАЗЫВАЕТСЯ, а не постулируется — FF-RP-14: force-тест в том же
+   файле, в транзакции с ROLLBACK вставляет NULL-facet record-грант с НЕ-сентинел scope
+   и утверждает, что амендированный WHERE-предикат его ЛОВИТ (а read+сентинел-строку —
+   НЕ ловит). Красный без carve-out-точности в обе стороны.
+4. Единство литерала сентинела — FF-RP-15 (`read-pdp-sentinel-coherence.sh`):
+   db-тесты по house-паттерну не импортируют из `src/` (проверено: ни один
+   `ci/checks/db/*.ts` не импортирует `../../src`), поэтому single-source обеспечивает
+   grep-равенство трёх вхождений (read-visibility.ts / migration 115 / carve-out).
+
+### 10.4 Отвергнутые альтернативы коллизии
+
+| Опция | Почему нет |
+|---|---|
+| **(б) whole-resource без NULL: facet-сентинел `{fields:["*"]}` + правка матчинга** | Ломает ратифицированную fail-closed доктрину ядра ДОСЛОВНО (grant-resolver.ts:353–358: «structurally-present facet, не парсящийся в валидный field-list, даёт НОЛЬ полей — never silently widen to whole-resource»). `'*'` — ровно «present facet, молча расширяющийся до whole-resource». Расползается: `grantFacetFields` + `visibleFields` (grant-resolver) + `grantConferredFields` (field-visibility) + facet-deepEqual в `validateNarrowing` (латтис) + T-0033 masking-путь — все frozen (FF-RP-8, mutation-gateway-isolation). In-band магическая строка внутри narrowing-токена = паттерн дрейфа, против которого ядро построено. Максимальная поверхность вместо минимальной. |
+| **(в1) resource_type='application' для default-гранта (обход FF-13 без правки теста)** | Технически «сработало бы» (covering-фильтр `resolveFor:589–607` не сверяет `resourceType` — только operation+scope), но это checker-evasion, не решение: ложь в данных (грант ЧИТАЕТ ЗАПИСИ); classification/clearance-путь T-0033 ключуется на `resource_type='record'` — расхождение в masking; будущее ужесточение resourceType↔ref-kind в covering молча убило бы default-open в проде (fail-open→fail-closed флип без сигнала). |
+| **(в2) не-NULL «whole-resource» значение facet, уже понимаемое ядром (`{}`)** | Такого значения НЕ существует: `grantFacetFields` для `{}` → `fields` не Array → fail-closed `[]` (ноль полей). Любой не-NULL facet сегодня = либо field-list, либо ноль. Превращается в (б). |
+| **Правка ADR T-0082 задним числом (переписать FR-3)** | Ратифицированные ADR — история решений; переписывание разрушает трассируемость. Прецедент (T-0033×mutation-gateway) амендирует ГАРД с санкцией в новом ADR, старый документ не трогает. |
+
+### 10.5 Что меняет кодер (полный список файлов амендмента)
+
+1. `ci/checks/db/bundle-coherence.test.ts` — амендировать FF-13-запрос предикатом §10.2
+   (carve-out + комментарий-санкция §10.3 п.1) + добавить force-тест FF-RP-14
+   (ROLLBACK-транзакция: не-сентинел NULL-facet ловится, сентинел-read — нет).
+2. `ci/checks/read-pdp-sentinel-coherence.sh` — НОВЫЙ мелкий гард FF-RP-15 (grep-равенство
+   литерала в 3 файлах; self-test bad/good по house-паттерну; wired в `package.json` fitness).
+3. Больше НИЧЕГО: `migrations/115_*.sql`, `src/core/register.ts`,
+   `src/core/read-visibility.ts`, `src/db/resource-ancestry.ts`, `src/http/records.ts`,
+   frozen-ядро (grant-resolver/lattice/object-handle/field-visibility) — НЕ трогаются;
+   уже зелёные RP-тесты не задеваются (в READ-пути изменений нет).
+
+### 10.6 Критерии координатора — сверка
+
+- **Минимальная поверхность:** 1 амендированный тест-файл + 1 новый ~30-строчный shell-гард. ✅
+- **Инвариант T-0082 сохраняет силу для реальных десинков:** carve-out — точная структурная
+  форма default-read гранта; всё прочее ловится; сила доказана force-тестом FF-RP-14. ✅
+- **Правка чужого предиката — только по санкционному паттерну:** T-0033-прецедент,
+  двусторонняя ссылка в коде теста + §10, старый ADR не переписан. ✅
+- **Совместимость с уже зелёными RP-тестами:** READ-путь/сид/миграция не меняются;
+  сентинел-значение ратифицировано как есть (§4.1). ✅
