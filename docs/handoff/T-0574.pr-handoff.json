@@ -58,5 +58,23 @@
     "FE-5: production wiring (src/server.ts) runs GET /api/agents, PUT /api/agents/:id/llm-connection, and resolveActorTenant all against the SAME BYPASSRLS pool (DATABASE_URL/choros_migrator via getOrgPool()), not the NOBYPASSRLS choros_app pool — resolveActorTenant is a documented cross-tenant lookup that must run before any tenant GUC exists, so it cannot work under FORCE RLS with no GUC set. Confirmed empirically while wiring ci/checks/db/assistant-llm-binding.test.ts (pointing it at choros_app 403'd ACTOR_TENANT_UNRESOLVED); the DB test now mirrors production wiring exactly.",
     "FE-6: this worktree was shared, without an isolated cwd, by several other spawned follow-up sessions running concurrently while this task's own fitness verification was in progress — their commits/file edits appeared and disappeared in `git status` mid-run. Handled by repeatedly reverting non-T-0574 ci/checks/*.sh and package.json edits out of the working tree before each verification pass, and by re-running the affected suites (fitness:db, unit tests) after the branch's HEAD advanced (migration 116 landing) to confirm no interaction effects.",
     "FE-7: one ci/checks/db/doc-regen.db.test.ts test run hit a 5000ms vitest timeout during a full fitness:db pass while multiple concurrent sessions were competing for CPU/DB in the same environment; re-run in isolation (no contention) passed cleanly in 11.3s across all 17 of its tests — confirmed as environmental flakiness, not a regression (the file has zero diff in this task)."
-  ]
+  ],
+  "live_proof": {
+    "status": "green_partial",
+    "date": "2026-07-02T19:20+03:00",
+    "stand": "http://100.121.76.86:3000 (dev, commit e727ad4)",
+    "actor": "владелец pgv@axonteam.ru, браузер (Chrome MCP)",
+    "steps": [
+      "/llm-connections: инструкция 'Откуда взять ключ' человекочитаема (console.anthropic.com → API Keys → Create Key)",
+      "Создан профиль 'Anthropic (проверка стенда)' (пресет заполнил endpoint/model)",
+      "Вставить API-ключ: write-only поле, 'обратно не читается'; невалидный ключ привязан → чип 'ключ привязан' + маскированный app://",
+      "Проверить подключение: Loading-спиннер → честная русская ошибка '✗ Не удалось разрешить адрес эндпойнта (DNS)', без сырого JSON, без эха ключа"
+    ],
+    "observation": "Путь владельца до вставки настоящего ключа прожит глазами целиком.",
+    "founder_todo": [
+      "Вставить НАСТОЯЩИЙ ключ Anthropic (машина ключи не переносит — правило)",
+      "DNS хоста: контейнер не резолвит api.anthropic.com — давний founder_request:choros-host-docker-dns; без него даже валидный ключ не достучится"
+    ],
+    "blocked_step": "«Назначить ассистенту» задизейблен на ООО Аксон: у тенантов, созданных ДО tenant-zero, нет employee assistant-agent вовсе (backfill-115 достраивал только карточки существующим ассистентам; у новых тенантов — TestOrg/Нейрон — всё на месте). Достройка ассистента старым тенантам = скоуп T-0573 (та же волна). Путь назначения покрыт live-DB тестами assistant-llm-binding 4/4."
+  }
 }
