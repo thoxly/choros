@@ -1,0 +1,87 @@
+{
+  "task_id": "T-0596",
+  "verdict": "pass",
+  "tested_commit": "7de1405 (branch task/T-0596-lock-harden, base dev@0370cf5e3d1c2f8ee8d5daa3635576034e57663e)",
+  "deterministic": true,
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "PLANT MATRIX 1/4 — src/**/*.ts, ОДИНАРНЫЕ кавычки: временный untracked src/http/__t0596_test_plant_single.ts (`export const T0596_TEST_SINGLE = 'gw-approval-threshold';`), боевой прогон anti-case-lock.sh. Результат: FAIL, ''gw-approval-threshold' count INCREASED (2 > baseline 1)' + 'aggregate count INCREASED (25 > baseline 24)', SCRIPT_EXIT=1. Плант удалён, git status чист после.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-1b",
+      "test": "PLANT MATRIX 2/4 — src/**/*.ts, ДВОЙНЫЕ кавычки: тот же литерал в двойных кавычках. Идентичный результат: FAIL, count INCREASED, SCRIPT_EXIT=1. Подтверждает, что double-quote-детекция (T-0576 наследие) не регрессирована R-4-расширением.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "PLANT MATRIX 3/4 — web/src/**/*.jsx, ОДИНАРНЫЕ кавычки: временный untracked web/src/screens/__t0596_test_plant_single.jsx с тем же литералом в одинарных кавычках. FAIL, count INCREASED (2 > baseline 1), aggregate INCREASED, SCRIPT_EXIT=1 (подтверждён явно, не через grep-pipeline artifact).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2b",
+      "test": "PLANT MATRIX 4/4 — web/src/**/*.jsx, ДВОЙНЫЕ кавычки: тот же литерал в двойных кавычках в web/src/. FAIL, count INCREASED, SCRIPT_EXIT=1. Полная 2×2 матрица (плоскость × стиль кавычек) — все 4 клетки красные, как того требует R-4 harden. Все планты удалены после каждого теста, git status чист.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "Baseline = ФАКТ, перепроверено ТРИЖДЫ независимо: (1) production-прогон anti-case-lock.sh на неизменном дереве — exit 0, все 8 литералов + aggregate == baseline (3/2/1/8/2/2/5/1, aggregate 24); (2) идемпотентность — 2 прогона подряд, `diff` двух логов — байт-идентичны, оба rc=0; (3) полностью НЕЗАВИСИМЫЙ пересчёт судьёй голым `grep -rn \"[\\\"'`]${lit}[\\\"'`]\" ...` НАПРЯМУЮ на дереве (без вызова скрипта вовсе) для всех 8 литералов по отдельности (src+web) — совпадает 8/8 + арифметика агрегата (3+2+1+8+2+2+5+1=24).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "rights-ui-anti-case.sh плант-доказательство (повторено дважды — в REVIEW и в TEST независимо): временный untracked web/src/__t0596_test_rights_plant.jsx (`export const PLANTED = \"e-orlov\";`). Прогон: FAIL [FF-T0572-ANTICASE], 'anti-case literal e-orlov found in an ADDED line under web/src/', SCRIPT_EXIT=1. Плант удалён, git status чист.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "rights-ui-anti-case.sh на ЧИСТОЙ ветке task/T-0596-lock-harden (без плантов) — PASS exit 0 ('no D-064 anti-case literals added under web/src/, base=0370cf5...'). Diff-scoped семантика подтверждена: pre-existing одинарно-кавычные R-4-вхождения (screen-inbox.jsx/gateway-condition-panel.jsx/screen-dmn-editor.jsx) НЕ триггерят FAIL, т.к. не в диффе этой ветки.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "rights-ui-anti-case.sh --self-test — PASS exit 0 ('good diff clean, bad diff flagged (1 violation(s))'). Synthetic temp-repo фикстуры не сломаны фиксом резолва (не зависят от реального PROJECT_ROOT).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "anti-case-lock.sh --self-test ассерты #7/#7b (rc>=2 fatal) — оба PASS живьём в дереве. ПЛЮС независимая re-implementation судьи ВНЕ скрипта (изолированный bash-сеанс с той же функцией count_literal, chmod-000-фикстура на отдельном probe-файле /private/tmp/.../rc2test/unreadable.ts) — rc=2 подтверждён, явное 'FAIL [anti-case-lock]: count_literal grep error (rc=2) ... Permission denied' сообщение подтверждено НЕ из вывода тестируемого скрипта, а из собственной копии логики (контроль против самоподтверждающегося бага).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "rc=0/1 остаются данными: self-test ассерты #4 (zero-occurrence single literal, count=0 без смерти скрипта) и #5 (eroded-to-zero Phase 2 сценарий, явная 'OK (eroded)' строка) — оба PASS без изменения поведения. Отдельно судья независимо подтвердил rc=1 (no-match) на чистом дереве вне worktree возвращает rc=0/count=0 из функции (не пропагирует как fatal) — используя ту же изолированную re-implementation, что и AC-7.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "Обе новые строки frozen-sanctions.jsonl (task:T-0596, файлы rights-ui-anti-case.sh и anti-case-lock.sh) — валидный compact JSON. Проверено программно: python3 json.loads на ВСЕХ 44 non-comment/non-blank data-строках файла — 0 invalid (первичная проверка ошибочно включила 2 header-комментарий-строки как 'invalid JSON', исправлено фильтром на '#'-префикс; итоговый прогон — все реальные data-строки валидны).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "frozen-checks-immutable.sh живой прогон на ветке task/T-0596-lock-harden — PASS exit 0, обе строки 'SANCTION [FF-FCI12]: ... modification ALLOWED' + 'AUDIT [FF-FCI12]: frozen-sanction GRANTED' напечатаны для rights-ui-anti-case.sh (owner=T-0572) и anti-case-lock.sh (owner=T-0576). Механизм is_sanctioned()/sanction_class() прочитан в первоисточнике (chained grep -F на оба токена \"task\"/\"file\" на одной строке) — не 'слепое доверие' выводу скрипта.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "Полный `npm run fitness` — ДВА прогона. Прогон №1 (с конкурентной нагрузкой — vitest run выполнялся параллельно в foreground) дал ЛОЖНЫЙ FAIL на card-action-broad-scope.sh (T-0227's чек, файл src/core/card-action.ts НЕ тронут этой веткой вовсе — git diff dev...HEAD пуст для этого файла). Расследовано: (а) тот же чек на том же коммите (0370cf5) в соседнем чистом worktree /Users/shoxy/Code/choros прошёл PASS; (б) 5 последовательных повторных прогонов card-action-broad-scope.sh В ЭТОМ worktree сразу после — все 5/5 PASS; (в) ручная репродукция grep-логики чека (grep_noncomment 'target_kind_mismatch' | grep -q 'process_instance'... на самом деле проверка иная, чем судья первоначально предположил — но независимо от точной причины, сам чек детерминирован и НЕ зависит от диффа этой ветки). Вывод: изолированный, невоспроизводимый флейк (вероятно ресурсный конфликт из-за параллельного vitest run + фоновый fitness на одной машине), НЕ регрессия T-0596 — файл/чек вне мандата и вне диффа задачи. Прогон №2 (ЧИСТЫЙ повтор, БЕЗ конкурентной нагрузки, единственный процесс) — EXIT=0 полностью, card-action-broad-scope.sh PASS, все 2935 строк лога проверены построчно на реальные (не self-test) FAIL — 0 найдено. Итоговый вердикт AC-11: PASS на чистом прогоне; флейк задокументирован как friction/durable lesson, не блокирующая находка этой волны.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12",
+      "test": "anti-case-lock.sh --self-test — 9 assertion PASS lines + 1 финальная summary PASS line ('all anti-case-lock detectors functional across literal families'), exit 0. Воспроизведено судьёй трижды (один раз изолированно, один раз внутри полного fitness прогона #1, один раз внутри чистого прогона #2) — идентичный результат каждый раз.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": "n/a — этот diff чисто CI-инфраструктурный (ci/checks + data + docs), не трогает web/src UI кроме временных плант-файлов судьи (удалены после каждого теста, подтверждён git status clean).",
+  "notes": {
+    "vitest_scope": "vitest run — 254 файла PASS, 4877 тестов PASS, 2 skipped (интеграционный flowable-client, требует живого стека — не в мандате этой задачи), 0 failures. Дифф T-0596 не трогает src/**/*.ts (кроме ci/checks/*.sh — bash, не TS) — vitest прогон был БЫСТРОЙ регрессионной проверкой, не целевым тестом этой волны.",
+    "flake_investigation_card_action_broad_scope": "ЕДИНСТВЕННАЯ невоспроизводимая аномалия за весь TEST-проход: первый полный npm run fitness прогон (в фоне, ПАРАЛЛЕЛЬНО с vitest run в foreground) дал FAIL на ci/checks/card-action-broad-scope.sh (T-0227's чек над src/core/card-action.ts) — файл НЕ в диффе этой ветки (git diff dev...HEAD -- src/core/card-action.ts пуст). Расследование заняло отдельный шаг: (1) тот же коммит 0370cf5 в соседнем чистом worktree /Users/shoxy/Code/choros прошёл этот чек PASS; (2) 5 последовательных повторов в T-0596 worktree сразу после — все PASS; (3) второй ПОЛНЫЙ fitness-прогон БЕЗ конкурентной нагрузки — PASS на этом чеке и exit=0 целиком. Гипотеза причины: ресурсная гонка (grep/IO конфликт) от одновременного vitest run (254 файла, ~67с) + фоновый bash-цепочка ~280 чеков на одной dev-машине (macOS, единственное ядро внимания консоли). НЕ связано с диффом T-0596 (файл чужой, чек чужой, не изменялся). DURABLE lesson для будущих волн: не запускать vitest run и npm run fitness ОДНОВРЕМЕННО на одной машине при TEST-фазе — сначала один, затем другой, чтобы исключить ложные FAIL от ресурсного конфликта.",
+    "plant_matrix_full": "4/4 плоскость×кавычка плантов (src/single, src/double, web/src/single, web/src/double) на литерале gw-approval-threshold — все 4 корректно покрасили aggregate + per-литерал INCREASED, SCRIPT_EXIT=1 подтверждён явно (не через grep-artifact) для каждого. rights-ui-anti-case.sh плант (e-orlov в web/src/) — FAIL exit 1. Боевой anti-case-lock.sh прогон ×2 подряд на чистом дереве — байт-идентичен, exit 0 оба раза (идемпотентность).",
+    "self_test_totals": "anti-case-lock.sh --self-test: 9/9 assertion-PASS lines (5 pre-existing R-1/R-3 + 2 новых R-4 quote-agnostic + 2 новых R-5 rc>=2-fatal) + 1 summary PASS = 10 PASS lines total, 0 FAIL, exit 0. rights-ui-anti-case.sh --self-test: 1/1 (good/bad synthetic diff), exit 0.",
+    "environment": "Оба fitness-прогона и все ручные плант-тесты — локальные, детерминированные (grep/git-based CI-скрипты + vitest unit-набор), db-lane/живой стек не требовался (дифф не трогает src/**/*.ts, миграции, или что-либо требующее Postgres/Flowable/KC). node_modules уже был установлен в worktree (138 top-level записей) — не пришлось повторять npm ci, в отличие от BUILD-фазы handoff-friction-заметки."
+  },
+  "failures": []
+}
