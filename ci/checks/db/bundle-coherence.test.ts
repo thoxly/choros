@@ -102,12 +102,13 @@ const HANGING_RECORD_GRANTS_SQL = `
   FROM choros."grant"
   WHERE resource_type = 'record'
     AND resource_facet IS NULL
-    AND NOT (                                        -- SANCTIONED CARVE-OUT (T-0570 ADR §10)
+    AND NOT COALESCE(                                -- SANCTIONED CARVE-OUT (T-0570 ADR §10)
           operation = 'read'
       AND scope->>'kind'      = 'node'
       AND scope->>'hierarchy' = 'resource'
       AND scope->>'nodeLevel' = 'application'
-      AND scope->>'nodeId'    = '00000000-0000-0000-0000-0000000000r0'  -- RESOURCE_ROOT_NODE_ID
+      AND scope->>'nodeId'    = '00000000-0000-0000-0000-0000000000r0',  -- RESOURCE_ROOT_NODE_ID
+          false
     )`;
 
 describe.skipIf(skipAll)(
@@ -154,9 +155,10 @@ describe.skipIf(skipAll)(
         try {
           const tenantId = uuid();
           const roleId = uuid();
-          const badScopeId = uuid(); // (a) read + NON-sentinel scope, NULL facet
-          const badOpId = uuid();    // (b) NON-read op + sentinel scope, NULL facet
-          const exemptId = uuid();   // (c) read + sentinel scope, NULL facet
+          const badScopeId = uuid();        // (a) read + NON-sentinel scope, NULL facet
+          const badOpId = uuid();           // (b) NON-read op + sentinel scope, NULL facet
+          const incompleteScopeId = uuid(); // (d) read + INCOMPLETE scope (no nodeId), NULL facet
+          const exemptId = uuid();          // (c) read + sentinel scope, NULL facet
 
           // Temp tenant + role (grant.role_id → role(tenant_id, id) FK,
           // migration 021). Rolled back below — never visible outside this tx.
@@ -193,6 +195,18 @@ describe.skipIf(skipAll)(
             [tenantId, badOpId, roleId],
           );
 
+          // (d) read + INCOMPLETE scope (missing nodeId key, e.g. only kind),
+          // NULL facet — the jsonb extraction scope->>'nodeId' will return NULL,
+          // making the full AND-condition NULL; must be caught by COALESCE fallback.
+          await c.query(
+            `INSERT INTO choros."grant"
+               (tenant_id, id, role_id, resource_type, resource_facet, operation, scope, granted_by, created_at)
+             VALUES ($1, $2, $3, 'record', NULL, 'read',
+                     '{"kind":"node"}'::jsonb,
+                     'ffrp14-force-test', 0)`,
+            [tenantId, incompleteScopeId, roleId],
+          );
+
           // (c) the exact default-read shape (read + sentinel application
           // node, NULL facet) — the ONE sanctioned exemption; must NOT appear.
           await c.query(
@@ -217,6 +231,10 @@ describe.skipIf(skipAll)(
             ids,
             'FF-RP-14: NULL-facet record-grant with a non-read operation must be caught by the amended FF-13 predicate (carve-out is wider than sanctioned)',
           ).toContain(badOpId);
+          expect(
+            ids,
+            'FF-RP-14: NULL-facet record-grant with an INCOMPLETE scope (missing nodeId) must be caught by COALESCE fallback (NULL-propagation fix)',
+          ).toContain(incompleteScopeId);
           expect(
             ids,
             'FF-RP-14: the exact default-read shape (read + RESOURCE_ROOT sentinel) must be exempt (carve-out is narrower than sanctioned — FF-13 would go red on every seeded tenant)',
