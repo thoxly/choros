@@ -1505,3 +1505,349 @@ describe("T-0522 reconcileInboxEngineDriveOnRead — self-healing net (mock engi
     expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0571 [W1/шов] BUG-014 — ADR-T0571-engine-drive-seam.md.
+//
+// Handler-level HTTP contract tests (AC-6/AC-7/AC-8 unit-equivalents; the live
+// Flowable+Postgres integration test is ci/checks/db/engine-drive-generic.db.test.ts,
+// FF-3/AC-6). These tests exercise the FULL approve handler synchronously (no more
+// fire-and-forget IIFE + drainMicrotasks — T-0571 made completion SYNCHRONOUS to the
+// HTTP response) against a mock FlowableClient, proving:
+//   - AC-1/AC-3/AC-4 (unit-level): a GENERIC process (base user-task defKey != the old
+//     ТЭЛ literal defKey) is resolved and completed by INSTANCE IDENTITY, not by
+//     string match — the engine-drive no longer silently fails to find it.
+//   - AC-7 ("engine-fail-visible"): engine failure/ambiguity is a VISIBLE 502 with a
+//     typed code, never a silent 200.
+//   - AC-8 ("idempotent"): a legitimate already-ended repeat is 200 {engine:"already"},
+//     not an error and not indistinguishable from a fresh completion.
+//   - NF-3: engine not configured (writeDepsFlowable absent) is a DELIBERATE 200
+//     {engine:"not_configured"}, distinct from both "completed" and a 502 failure.
+// ---------------------------------------------------------------------------
+
+describe("T-0571 approve handler — synchronous engine-drive HTTP contract", () => {
+  let server: http.Server;
+  let base: string;
+
+  afterEach(async () => {
+    _resetClaimStateForTests();
+    if (server) await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  async function startServer(deps: InboxWriteDeps): Promise<void> {
+    const h = buildHandlerServer(deps);
+    server = h.server;
+    await new Promise<void>((r) =>
+      server.listen(0, "127.0.0.1", () => { base = h.baseUrl(); r(); }),
+    );
+  }
+
+  it("AC-1/AC-4 GENERIC process: base task (unknown defKey to the projection) is resolved by instance identity and completed — 200 {engine:'completed'}", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    // A GENERIC process — the BPMN author named the first user-task "zakupki-approve",
+    // nothing resembling the ТЭЛ literal defKey this ADR removes (task-approve, no
+    // quotes here on purpose — see FF-1/FF-6). The base process.started row (T-0571)
+    // carries taskDefKey=null regardless of process identity.
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      // The engine's ONLY active task for this instance carries a GENERIC defKey —
+      // never the old ТЭЛ literal defKey (task-approve, unquoted — FF-1/FF-6). The
+      // old code would never find this (BUG-014); T-0571 resolves it by instance
+      // identity (exactly one active task).
+      getActiveUserTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        tasks: [{ id: "eng-generic-1", taskDefinitionKey: "zakupki-approve", name: "Согласовать закупку", candidateGroups: ["role-generic-approver"] }],
+      }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    // Synchronous — no drainMicrotasks needed; the response IS the engine outcome.
+    expect(r.status).toBe(200);
+    const body = r.json as Record<string, unknown>;
+    expect(body["status"]).toBe("done");
+    expect(body["engine"]).toBe("completed");
+
+    // The GENERIC defKey was completed — never the old ТЭЛ literal defKey.
+    expect(mockClient.completeUserTask).toHaveBeenCalledWith("eng-generic-1");
+    expect(mockClient.getActiveUserTasks).toHaveBeenCalledWith(H_INST);
+
+    const endedEvents = db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE);
+    expect(endedEvents).toHaveLength(1);
+  });
+
+  it("AC-7 engine-fail-visible: structural mismatch (no active task found, instance NOT ended) is a VISIBLE 502 ENGINE_TASK_NOT_FOUND, never a silent 200", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // BUG-014's exact structural failure mode: the engine reports NO active tasks at
+    // all for this instance (e.g. mis-wired process, or the poll window elapsed before
+    // the token routed) AND the instance is NOT ended. Old code: silent {ok:true,
+    // completed:false} → 200. T-0571: this is now a VISIBLE 502.
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+      // T-0571: pollTimeoutMs/pollIntervalMs are not exposed through InboxWriteDeps —
+      // the poll loop exits fast here anyway (0 tasks → immediate break, no waiting).
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    expect(r.status).toBe(502);
+    const body = r.json as Record<string, unknown>;
+    expect(body["code"]).toBe("ENGINE_TASK_NOT_FOUND");
+    expect(body["stage"]).toBeDefined();
+
+    // The human's decision is STILL recorded (task.approved committed before the
+    // engine-drive call, ADR §2.3) — not rolled back on engine failure.
+    const approvedEvents = db.events.filter((e) => e.type === TASK_APPROVED_TYPE);
+    expect(approvedEvents).toHaveLength(1);
+    // But the engine was never actually completed.
+    expect(mockClient.completeUserTask).not.toHaveBeenCalled();
+  });
+
+  it("AC-7 engine-fail-visible: >1 active user-task for a base step is a VISIBLE 502 AMBIGUOUS_ACTIVE_TASK (never guesses)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // Structural anomaly per ADR §2.1: a base step must see exactly ONE active task.
+    // Two active tasks is a genuine anomaly — honest refusal beats guessing the first.
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        tasks: [
+          { id: "eng-a", taskDefinitionKey: "zakupki-step-a", name: "A", candidateGroups: ["role-generic-approver"] },
+          { id: "eng-b", taskDefinitionKey: "zakupki-step-b", name: "B", candidateGroups: ["role-generic-approver"] },
+        ],
+      }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    expect(r.status).toBe(502);
+    const body = r.json as Record<string, unknown>;
+    expect(body["code"]).toBe("AMBIGUOUS_ACTIVE_TASK");
+    // Never guessed — neither engine task was completed.
+    expect(mockClient.completeUserTask).not.toHaveBeenCalled();
+  });
+
+  it("AC-7 engine-fail-visible: engine unreachable (transport error) is a VISIBLE 502 ENGINE_DRIVE_FAILED", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValue({ ok: false, code: "ENGINE_UNAVAILABLE" }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: false, code: "ENGINE_UNAVAILABLE" }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    expect(r.status).toBe(502);
+    const body = r.json as Record<string, unknown>;
+    expect(body["code"]).toBe("ENGINE_DRIVE_FAILED");
+    expect(body["engineCode"]).toBe("ENGINE_UNAVAILABLE");
+  });
+
+  it("AC-8 idempotent: a legitimate already-ended repeat is 200 {engine:'already'} — not an error, not indistinguishable from a fresh completion", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // Idempotent repeat: no active task left (already completed by a prior drive) AND
+    // the instance IS ended — a legitimate no-op, not a failure (NF-2).
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValue({ ok: true, tasks: [] }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    expect(r.status).toBe(200);
+    const body = r.json as Record<string, unknown>;
+    expect(body["engine"]).toBe("already");
+    expect(mockClient.completeUserTask).not.toHaveBeenCalled();
+
+    // instance.ended IS folded into the projection (engine already confirms ended).
+    const endedEvents = db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE);
+    expect(endedEvents).toHaveLength(1);
+  });
+
+  it("NF-3 not_configured: engine client absent is a DELIBERATE 200 {engine:'not_configured'} — distinct from both completed and failed", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // No flowableClient at all — honest-degrade, audit-only mode (NF-3).
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+
+    expect(r.status).toBe(200);
+    const body = r.json as Record<string, unknown>;
+    expect(body["engine"]).toBe("not_configured");
+    expect(body["status"]).toBe("done");
+  });
+
+  it("AC-1 generic completion excludes admin-REST: the ONLY engine call path is through reconcileInstanceEngineDrive via the HTTP action route (AC-5 unit-equivalent)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "vacationApproval", // a SECOND, differently-named generic process (AC-4)
+      actor: "e-orlov",
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        tasks: [{ id: "eng-vac-1", taskDefinitionKey: "vacation-manager-approve", name: "Согласовать отпуск", candidateGroups: ["role-generic-approver"] }],
+      }),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: true }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    await startServer(deps);
+
+    const r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+    expect(r.status).toBe(200);
+    expect(mockClient.completeUserTask).toHaveBeenCalledWith("eng-vac-1");
+    // Every engine touch went through the injected FlowableClient port (the ONLY
+    // engine transport reachable from this handler) — no separate admin-REST client
+    // is constructed or called anywhere in this path.
+    expect(mockClient.getActiveUserTasks).toHaveBeenCalled();
+  });
+});
