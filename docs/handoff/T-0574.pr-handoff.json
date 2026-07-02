@@ -8,7 +8,11 @@
     "lint": true,
     "types": true,
     "tests": true,
-    "fitness": true
+    "fitness": true,
+    "fitness_verified_at_head": "638901e review R-1 fix pass",
+    "fitness_last_line": "SELF-TEST PASS: http-route-auth-coverage predicates detect planted violations (EXITCODE:0, full 277-step && chain, no unresolved FAIL)",
+    "fitness_db": true,
+    "fitness_db_result": "96 test files passed (96); 1064 tests passed (1064); Duration 82.58s"
   },
   "files_changed": [
     "src/core/register.ts",
@@ -20,6 +24,8 @@
     "ci/checks/db/assistant-llm-binding.test.ts",
     "ci/checks/db/migration-115-backfill.test.ts",
     "ci/checks/db/llm-key-no-leak.test.ts",
+    "ci/checks/dual-control-isolation.sh",
+    "ci/checks/data/frozen-sanctions.jsonl",
     "docs/handoff/T-0574.pr-handoff.json"
   ],
   "deviations_from_adr": [
@@ -40,8 +46,9 @@
   ],
   "notes_for_reviewer": [
     "AC-6 and AC-12 are LIVE_PROOF/manual per the spec's own Definition of Done (D-064) — not exercised by this coder pass; they require a deployed dev stand + a real Anthropic key + design-steward UX_REVIEW.",
-    "Two commits already exist on this branch ahead of the coder's own work, landed by separately-dispatched follow-up sessions sharing this worktree (no isolated cwd was specified when they were spawned): 9efede7 (migrations/116, fixes a real pre-existing composite-FK ON DELETE SET NULL defect discovered while authoring this task's live-Postgres tests) and 0794731 (fitness-gate baseline/pattern fixes: FF-FL-11 keycloak-compose baseline bump, FF-BUD-10 spend-accounting thaw). Neither touches this task's own files; both are additive, tested, and unrelated to T-0574's spec — flagged here for visibility, not authored as part of this task's scope.",
-    "During the same window, several OTHER spawned follow-up sessions modified ci/checks/*.sh / package.json / ci/checks/data/* directly in this shared worktree (substitution-isolation.sh FF-SUB5 range, grant-propose-isolation.sh sk- regex, seed/single-source.sh allow-list, tier-isolation.sh comment-stripping, flowable/static-checks.sh baseline, budget-dormancy.sh). Per the coder rule 'чужие ci/checks/*.sh не трогай', those were reverted out of this coder's own working tree before finalizing — this task's diff contains ONLY the files listed above. If any of those fixes are still desired, they are separately flagged/spawned tasks (not part of this PR)."
+    "Three rider commits already exist on this branch ahead of/alongside the coder's own work, landed by separately-dispatched follow-up sessions sharing this worktree (no isolated cwd was specified when they were spawned): (1) 9efede7 (migrations/116_composite_fk_set_null_columns.sql, fixes a real pre-existing composite-FK ON DELETE SET NULL defect discovered while authoring this task's live-Postgres tests); (2) 0794731 (fitness-gate baseline/pattern fixes: FF-FL-11 keycloak-compose baseline bump, FF-BUD-10 spend-accounting thaw); (3) 83115b7 (fix(fitness): false-positive fixes for 4 gates exposed by the FF-FL-11 baseline unmask — grant-propose-isolation.sh FF-39-2 sk- regex word-boundary, secret-handle-isolation.sh FF-25-8b test-fixture exclusion, tier-isolation.sh FF-10 comment-exclusion, seed/single-source.sh FAKE_*_WITH_SEED allowlist entry — verified content-honest, detection surface not narrowed). Commit (3) was omitted from this note in the prior handoff revision; review 638901e (R-1 role_gap_evidence) flagged the omission — corrected here. None of the three touch this task's own product files; all are additive/tested and unrelated to T-0574's spec — flagged for visibility, not authored as part of this task's scope.",
+    "R-1 fix (this revision): review 638901e found ci/checks/dual-control-isolation.sh (FF-DC7) red on HEAD because migrations 115 and 116 lacked per-migration relief blocks. A relief pair (T0574-DC-MIG115-GUARD / T0574-DC-MIG116-GUARD) was already added by rider commit 9c66e51 before the review commit landed; this revision only adds a rider-provenance comment to the 116 relief block (chip task_66d8af7a, sanctioned by review 638901e) per the review's explicit instruction — no predicate/logic change. `bash ci/checks/dual-control-isolation.sh` and `bash ci/checks/frozen-checks-immutable.sh` both PASS on current HEAD; sanction entries for 115/116 are present in ci/checks/data/frozen-sanctions.jsonl.",
+    "During the same window, several OTHER spawned follow-up sessions modified ci/checks/*.sh / package.json / ci/checks/data/* directly in this shared worktree (substitution-isolation.sh FF-SUB5 range, flowable/static-checks.sh baseline, budget-dormancy.sh, and others beyond the 4 gates fixed in 83115b7). Per the coder rule 'чужие ci/checks/*.sh не трогай', those were reverted out of this coder's own working tree before finalizing — this task's diff contains ONLY the files listed above (files_changed) plus the three rider commits named above. If any of those other fixes are still desired, they are separately flagged/spawned tasks (not part of this PR)."
   ],
   "friction_events": [
     "FE-1: register.ts's original 3f-bis INSERT (per ADR §2.1's literal sample SQL) bound the SAME query parameter both as a bare uuid value and ::text-cast in one statement — Postgres rejected it with 'inconsistent types deduced for parameter $1'. Fixed by computing kc_client_id in JS as its own parameter.",

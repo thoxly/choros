@@ -569,7 +569,11 @@ fi                                                                             #
 # CONSTRAINT-ONLY fix: composite ON DELETE SET NULL nulled NOT-NULL tenant_id       # T0574-DC-MIG116-GUARD
 # (FKs from 094/107/113) → re-declared with column-scoped SET NULL. ALTER TABLE     # T0574-DC-MIG116-GUARD
 # DROP/ADD CONSTRAINT only: no new table, no column add/drop, no RLS — the          # T0574-DC-MIG116-GUARD
-# FF-DC7 invariant (derived decision, no new TABLE/RLS) holds.                      # T0574-DC-MIG116-GUARD
+# FF-DC7 invariant (derived decision, no new TABLE/RLS) holds. Migration 116 itself # T0574-DC-MIG116-GUARD
+# is a rider (chip task_66d8af7a, commit 9efede7) that landed on this branch, not   # T0574-DC-MIG116-GUARD
+# authored by the T-0574 coder — sanctioned as honest/additive by review 638901e    # T0574-DC-MIG116-GUARD
+# (R-1); this relief block only grants the FF-DC7 exemption, it does not relax the  # T0574-DC-MIG116-GUARD
+# content-verification below.                                                       # T0574-DC-MIG116-GUARD
 _dc_mig116_stem="migrations/116_composite_fk_set_null_columns.sql"                 # T0574-DC-MIG116-GUARD
 if [[ "${_dc_mig116_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig116_stem}"; then # T0574-DC-MIG116-GUARD
   _dc_mig116_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig116_stem}" 2>/dev/null || true)"  # T0574-DC-MIG116-GUARD
