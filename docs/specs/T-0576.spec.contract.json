@@ -1,0 +1,43 @@
+{
+  "task_id": "T-0576",
+  "status": "ready",
+  "summary": "D-064 п.2 (закон границы): единый CI-гейт anti-case-lock.sh поверх карты примитивов §5 полного денилиста (role-approver, soglasovanie, tel-approval, telLinear, e-larina/e-orlov, TEL_GATEWAY_VAR/ID) — зонтик, вызывающий существующие точечные чеки T-0570 (read-pdp-anti-case.sh, git-diff-scoped src/), T-0572 (rights-ui-anti-case.sh, web/src/) и T-0575 (detel-literal-baseline.sh, 3 литерала) как есть + добирающий repo-wide code-only скан непокрытого (telLinear, персоны, TEL_GATEWAY_*). Data-baseline-файл (не код) фиксирует текущий разведанный count (§2: агрегат 18 code-only вхождений на HEAD afa856b) с семантикой «выедается, не растёт» (<=, не строгое уменьшение — в отличие от T-0575 AC-10). Wired аддитивно в хвост npm run fitness. Бонус-поручение оркестратора (вердикт ревью T-0575, frozen-sanctions.jsonl запись T-0575/http-route-auth-coverage.sh явно называет T-0576 исполнителем): сужает FF-0328-3 FROZEN_FILES в http-route-auth-coverage.sh (чужой чек, владелец T-0328) до ровно secret-handle.ts, убирая process-start.ts из byte-diff арма — ADR T-0328 §4.2 называет process-start.ts contract-frozen (enforced start-route-isolation.sh), не byte-frozen. Правка санкционирована докозаписью T-0575 + собственной новой founder-класс записью этой задачи в frozen-sanctions.jsonl.",
+  "functional": [
+    "FR-1. Новый ci/checks/anti-case-lock.sh — зонтик: вызывает read-pdp-anti-case.sh/rights-ui-anti-case.sh/detel-literal-baseline.sh как сабпроцессы (не дублирует, не меняет их владение) + собственный repo-wide code-only скан полного денилиста поверх src/**/*.ts и web/src/**/*.{jsx,tsx}.",
+    "FR-2. Baseline — отдельный data-файл ci/checks/data/anti-case-baseline.json, фиксирующий текущий count каждого литерала денилиста + агрегат (значения из разведки §2 spec).",
+    "FR-3. FAIL если count любого литерала СТРОГО БОЛЬШЕ записанного baseline ИЛИ агрегат строго больше baseline-агрегата (<=, семантика «выедается, не растёт»).",
+    "FR-4. Гейт ловит планту КАЖДОГО класса денилиста независимо — self-test на представительный набор литералов.",
+    "FR-5. anti-case-lock.sh не имеет side-effects вне src/, web/src/, ci/checks/data/ и себя самого.",
+    "FR-6. Правка http-route-auth-coverage.sh §5 FF-0328-3: FROZEN_FILES сужается до РОВНО src/http/secret-handle.ts; process-start.ts выходит из byte-diff арма (контракт остаётся enforced start-route-isolation.sh FF-7-1..3 per ADR §4.2). --self-test скрипта остаётся живым.",
+    "FR-7. Собственная append-запись в ci/checks/data/frozen-sanctions.jsonl (task=T-0576, file=ci/checks/http-route-auth-coverage.sh, owner=T-0328, sanctioned_by=founder), завершающая санкцию, начатую записью T-0575."
+  ],
+  "non_functional": [
+    "NF-1 (идемпотентность). Повторный прогон anti-case-lock.sh на неизменном дереве даёт идентичный результат.",
+    "NF-2 (не ломает существующее). read-pdp-anti-case.sh/rights-ui-anti-case.sh/detel-literal-baseline.sh проходят свои --self-test и производственные прогоны без модификации их файлов этой задачей (frozen-checks-immutable.sh FF-FCI1 защищает их как чужие для T-0576).",
+    "NF-3 (required CI). anti-case-lock.sh (+ --self-test) прошиты аддитивно в хвост npm run fitness в package.json; отдельного workflow-флага не требуется (npm run fitness уже required через npm run ci).",
+    "NF-4 (анти-кейс дисциплина внутри задачи). Дифф этой задачи не добавляет новых кейс-специфичных литералов сверх легитимных денилист/baseline мета-строк (аналог FORBIDDEN_SANITY_LIST паттерна существующих чеков).",
+    "NF-5 (no-weakening мета). Baseline — отдельный data-файл, любое расширение видимо построчно в git diff (тот же принцип прозрачности, что frozen-sanctions.jsonl)."
+  ],
+  "out_of_scope": [
+    "O1. Уменьшение текущего baseline (выедание остатка) — обязанность будущих деТЭЛизирующих задач, не этой.",
+    "O2. Параметризация порога 5000000 в migrations/080_tel_dmn_seed.sql — seed-данные миграции, не src/.",
+    "O3. Полная деТЭЛизация оставшихся 18 вхождений денилиста — BUILD-задачи будущих волн.",
+    "O4. Изменение логики/владения существующих точечных гейтов (read-pdp-anti-case.sh, rights-ui-anti-case.sh, detel-literal-baseline.sh) — остаются в собственности T-0570/T-0572/T-0575.",
+    "O5. Правки http-route-auth-coverage.sh за пределами FF-0328-3 FROZEN_FILES (FF-0328-1/2 не трогаются).",
+    "O6. Новый founder_decide-сеанс для FF-0328-3 — используется уже существующая санкция T-0575 + собственная завершающая запись."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "anti-case-lock.sh ловит планту КАЖДОГО класса денилиста (role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov, approvalRequired-значение, gw-approval-threshold-значение) — подтверждено --self-test с планированными синтетическими нарушениями и ненулевым exit на каждое.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "Baseline точен на текущем dev: production-прогон anti-case-lock.sh на неизменном дереве возвращает exit 0 (каждый литерал и агрегат <= записанного baseline, значения из разведки §2 spec — role-approver:2,soglasovanie:2,tel-approval:1,telLinear:7,e-larina:2,e-orlov:2,approvalRequired:1,gw-approval-threshold:1,агрегат:18).", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Повторный прогон anti-case-lock.sh на том же дереве без изменений идемпотентен: два последовательных вызова дают идентичный exit code и идентичные напечатанные числа.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "read-pdp-anti-case.sh --self-test, rights-ui-anti-case.sh --self-test, detel-literal-baseline.sh --self-test продолжают проходить без модификации их файлов этой задачей.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "http-route-auth-coverage.sh FF-0328-3 после правки: FROZEN_FILES содержит РОВНО src/http/secret-handle.ts (не process-start.ts); полный прогон скрипта (FF-0328-1/2/3) зелёный.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "http-route-auth-coverage.sh --self-test остаётся зелёным после правки FF-0328-3.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "Новая запись в ci/checks/data/frozen-sanctions.jsonl (task:\"T-0576\", file:\"ci/checks/http-route-auth-coverage.sh\") присутствует, валидный compact JSON без интериорных пробелов в \"key\":\"value\", по образцу существующих строк.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "frozen-checks-immutable.sh (FF-FCI1..13) на этой ветке зелёный: модификация http-route-auth-coverage.sh распознаётся как санкционированная (FF-FCI12), собственные новые файлы задачи проходят как own/new.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "anti-case-lock.sh прошит в хвост npm run fitness в package.json аддитивно (существующие звенья не переставлены/не удалены); ci/checks/package-json-no-dup-keys.sh остаётся зелёным.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "Полный npm run fitness прогон (вся цепь, включая новое звено) зелёный на итоговом дереве задачи.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0576-anticase-ci.spec.md"
+}
