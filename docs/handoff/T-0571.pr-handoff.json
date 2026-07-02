@@ -1,0 +1,32 @@
+{
+  "task_id": "T-0571",
+  "status": "pr_open",
+  "branch": "task/T-0571-engine-drive-seam",
+  "pr_url": "local:task/T-0571-engine-drive-seam",
+  "summary": "BUG-014: approve в инбоксе теперь реально завершает Flowable user-task для ЛЮБОГО (не только ТЭЛ) процесса. Базовый (process.started) шаг больше не матчится по литералу taskDefKey=\"task-approve\" — резолвится по идентичности инстанса (единственная активная задача движка для этого instanceId). Завершение синхронно к HTTP-ответу: 200 {engine:\"completed\"|\"already\"} только при реальном завершении/легитимном idempotent-повторе; 502 {code:ENGINE_DRIVE_FAILED|ENGINE_TASK_NOT_FOUND|AMBIGUOUS_ACTIVE_TASK} на сбое/структурной аномалии; 200 {engine:\"not_configured\"} когда движок не сконфигурирован (NF-3). Live-диагностика на реальном Flowable 7.1.0 вскрыла ВТОРУЮ, независимую причину: completeUserTask слал PUT вместо POST на runtime/tasks/{id} — Flowable отвечал 200 с телом задачи, но НЕ завершал её (сброс токена не происходил); это транспортный баг, скрытый от всех предыдущих unit-тестов (моки fetch не проверяют HTTP-семантику), пойман только живым db-lane прогоном (FF-3/AC-6) против настоящего движка — без этого фикса AC-6 не мог бы стать зелёным ни при каком состоянии process-projection.ts/inbox.ts.",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/inbox.ts",
+    "src/core/flowable-client.ts",
+    "src/__tests__/inbox-engine-drive.test.ts",
+    "ci/checks/db/engine-drive-generic.db.test.ts",
+    "ci/checks/engine-drive-no-literal-defkey.sh",
+    "package.json",
+    "docs/handoff/T-0571.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "ADDITIVE FIX BEYOND runtime_target (не предусмотрено ADR явно, но необходимо для AC-6): src/core/flowable-client.ts::completeUserTask слал HTTP PUT на runtime/tasks/{taskId} с телом {action:\"complete\"} — Flowable 7.1.0 REST трактует это как endpoint ОБНОВЛЕНИЯ СВОЙСТВ (не действия): отвечает 200 с телом задачи БЕЗ ОШИБКИ, но задача остаётся активной (проверено эмпирически на живом движке — GET того же taskId после PUT-complete всё ещё 200, задача видна в runtime/tasks; после исправления на POST — тот же GET даёт 404). Это НЕЗАВИСИМАЯ от defKey-литерала причина того же наблюдаемого симптома (200-ok, токен не двигается) — обе причины должны были совпасть для воспроизведения живого BUG-014 на «Закупках». Исправление: метод PUT → POST в completeUserTask (единственная строка). Не входит в ADR's runtime_target (process-projection.ts/inbox.ts), но: (а) без него FF-3/AC-6 не может стать зелёным ни при каком состоянии кода в скоупе ADR — новый db-lane тест на живом Flowable детерминированно доказал это (подтверждено git-stash экспериментом: тест зелёный ТОЛЬКО когда оба фикса применены вместе; красный при отсутствии любого из двух); (б) правка additive, однострочная, в пределах уже названного в ADR модуля-соседа (flowable-client.ts упомянут в спеке §8 как файл разведки); (в) не меняет ни один существующий mock-based unit-тест (все зелёные без изменений) — обнаружить это мог только LIVE_PROOF, что и есть суть D-064. Задокументировано здесь как отклонение, не как STOP-эскалация, т.к. это не противоречие ADR, а необходимое дополнение, вскрытое диагностикой FF-3.",
+    "reconcileInstanceTimers (T-0458, не в runtime_target ADR) потребовал точечного regression-guard: с удалением литерала taskDefKey=\"task-approve\" с базовой строки (taskDefKey теперь null) дедуп в reconcileInstanceTimers по строковому Set потерял способность узнавать «это тот же ещё не сработавший базовый таск» (раньше — по совпадению литерала). Добавлен НЕ строковый хардкод, а структурный признак: пока базовый ряд не резолвлен (taskDefKey=null) и его role совпадает с candidateGroups активной движковой задачи — это тот же базовый таск, не новая эскалация (эскалация по T-0458/timer-escalation-mapper.ts архитектурно ВСЕГДА адресуется на ДРУГУЮ роль — manager/owner/явная роль, не роль базового шага). Это устранило регрессию в src/__tests__/timer-firing-loop.test.ts (6/11 тестов падали без этого гарда) без нового кейс-специфичного литерала (роль сравнивается по значению, взятому из проекции, не хардкожена)."
+  ],
+  "friction_events": [
+    "Live-only находка (не описана в ADR, обнаружена только LIVE_PROOF-прогоном на реальном Flowable 7.1.0 + Postgres в отдельном docker-compose проекте): completeUserTask использовал HTTP PUT вместо POST — Flowable молча НЕ завершает задачу, отвечая 200 с эхо-телом. Это второй, независимый от defKey-литерала корень того же наблюдаемого BUG-014-симптома; воспроизведено вручную (curl + node fetch) до и после фикса, задокументировано инлайн в flowable-client.ts.",
+    "Дедуп в reconcileInstanceTimers/reconcileInstanceEngineDrive (T-0458/T-0522) implicitно опирался на совпадение литерала taskDefKey=\"task-approve\" для различения «это тот же базовый ещё не подтверждённый шаг» от «это новая задача». Снятие литерала (T-0571 §2.1) обнажило эту implicit-зависимость — потребовало точечного структурного (не строкового-литерального) гарда, не предусмотренного ADR явно, но не противоречащего ему."
+  ]
+}
