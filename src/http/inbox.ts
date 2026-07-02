@@ -58,6 +58,7 @@ import {
   makeEngineMessageSubscriptionSource,
   ENGINE_TASK_NOT_FOUND,
   AMBIGUOUS_ACTIVE_TASK,
+  ENGINE_DRIVE_TIMEOUT,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -192,6 +193,27 @@ type SeedItem = InboxItem & { tenant: string };
 // ---------------------------------------------------------------------------
 
 const OTHER_TENANT_ID = "b0000000-0000-0000-0000-0000000000ff";
+
+/** Built-in fallback when ENGINE_DRIVE_DEADLINE_MS is not set (T-0591 F-2). */
+const DEFAULT_ENGINE_DRIVE_DEADLINE_MS = 10_000;
+
+/**
+ * T-0591 (F-2, ADR-T0591-drive-deadline §2.4): overall wall-clock budget (ms)
+ * for the ENTIRE post-approve engine-drive path (reconcileInstanceEngineDrive's
+ * poll loop + completeUserTask + both isInstanceEnded checks + fan-out). Read
+ * LAZILY per-call (mirrors claim-reaper.ts's sweepStaleClaims: `opts.thresholdMs
+ * ?? (process.env[...] ? parseInt(...) : DEFAULT)`), not cached at module load —
+ * so tests can flip the env var per-case, and so a running process picks up an
+ * operator override without a restart. Absent/invalid env ⇒ built-in default
+ * 10_000 — honest-degrade, symmetric with reconcileInstanceEngineDrive's own
+ * pollTimeoutMs/pollIntervalMs defaults.
+ */
+function resolveEngineDriveDeadlineMs(): number {
+  const raw = process.env["ENGINE_DRIVE_DEADLINE_MS"];
+  if (raw === undefined || raw === "") return DEFAULT_ENGINE_DRIVE_DEADLINE_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ENGINE_DRIVE_DEADLINE_MS;
+}
 
 const INBOX_SEED: SeedItem[] = [
   { id: "t1", tenant: DEV_TENANT_ID, status: "running", name: "Проверить реквизиты счёта №4471", step: "Согласование счёта · узел Проверка", inst: "INS-7731", role: "fin-appr", execType: "agent", execName: "Счёт-агент", sla: { min: 120, left: 88 }, due: "07.06 16:40" },
@@ -1675,6 +1697,10 @@ export function registerInboxRoutes(
             approvedTaskDefKey,
             completeEngineTask: true, // post-approve: complete the human's task.
             actor,
+            // T-0591 (F-2): bound the WHOLE drive path, not just poll-between-
+            // iterations — a single degraded engine call can no longer stretch
+            // this HTTP response past ENGINE_DRIVE_DEADLINE_MS.
+            driveDeadlineMs: resolveEngineDriveDeadlineMs(),
           },
         );
 
@@ -1694,13 +1720,19 @@ export function registerInboxRoutes(
           );
           // T-0571 (ADR §2.3 response contract, amended after REVIEW F-1 —
           // orchestrator-sanctioned): the `code` field distinguishes WHICH of the
-          // three 502 shapes this is. The two STRUCTURAL codes
-          // (ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK) are surfaced verbatim as
-          // `error.code` — they ARE the diagnosis, not a wrapped transport error.
-          // Any OTHER engine result.code (transport/HTTP failure — e.g.
-          // ENGINE_UNAVAILABLE, a non-NOT_FOUND completeUserTask error) is wrapped as
-          // the generic ENGINE_DRIVE_FAILED, with the underlying engine code nested in
-          // `engineCode` (diagnostic, not the dispatch key).
+          // 502 shapes this is. The STRUCTURAL codes (ENGINE_TASK_NOT_FOUND /
+          // AMBIGUOUS_ACTIVE_TASK) are surfaced verbatim as `error.code` — they ARE
+          // the diagnosis, not a wrapped transport error. T-0591 (F-2) adds
+          // ENGINE_DRIVE_TIMEOUT as a THIRD structural code: it is not an
+          // engine-reported failure either — it is the product choosing to stop
+          // waiting once the shared drive-deadline elapsed (ADR-T0591 §2.2: the
+          // underlying engine call may still have succeeded moments later; the
+          // frontend message for this code says so explicitly, ENGINE_DRIVE_ERROR_
+          // MESSAGE in screen-inbox.jsx). Any OTHER engine result.code
+          // (transport/HTTP failure — e.g. ENGINE_UNAVAILABLE, a non-NOT_FOUND
+          // completeUserTask error) is wrapped as the generic ENGINE_DRIVE_FAILED,
+          // with the underlying engine code nested in `engineCode` (diagnostic, not
+          // the dispatch key).
           //
           // Body shape: {error:{code, stage, engineCode, instanceId}} — the
           // codebase-wide error envelope (see router.ts sendErrorEnvelope, and its
@@ -1710,7 +1742,9 @@ export function registerInboxRoutes(
           // (web/src/screens/screen-inbox.jsx reads body?.error?.code in both
           // handleComplete and approveTask) — fixed here, ADR §2.3 amended to match.
           const isStructural =
-            result.code === ENGINE_TASK_NOT_FOUND || result.code === AMBIGUOUS_ACTIVE_TASK;
+            result.code === ENGINE_TASK_NOT_FOUND ||
+            result.code === AMBIGUOUS_ACTIVE_TASK ||
+            result.code === ENGINE_DRIVE_TIMEOUT;
           res.statusCode = 502;
           res.setHeader("Content-Type", "application/json");
           res.end(

@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0591",
+  "status": "pr_open",
+  "branch": "task/T-0591-drive-deadline",
+  "pr_url": "local:task/T-0591-drive-deadline",
+  "summary": "F-2 (T-0571 review, nit resolved-by-followup): reconcileInstanceEngineDrive получил ОБЩИЙ wall-clock deadline-бюджет (driveDeadlineMs, дефолт 10_000мс, опциональный env ENGINE_DRIVE_DEADLINE_MS, читается лениво per-call в inbox.ts) на весь post-approve engine-drive путь — poll-цикл getActiveUserTasks, completeUserTask, две проверки isInstanceEnded, fan-out getActiveUserTasks. Каждая из пяти точек вызова EngineDriveReconcilePort обёрнута локальным callWithBudget (Promise.race поверх уже-promise-based порта — withRetry/FlowableClient интерфейс НЕ тронуты, нулевой blast radius на deploy/start/fetchAndLock/failTask/pingEngine). При исчерпании бюджета — честный {ok:false, code:ENGINE_DRIVE_TIMEOUT, stage}; approve-хендлер отвечает 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, engineCode, instanceId}} (третий структурный код рядом с ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK, та же codebase-wide envelope T-0571). Poll-цикл получил 4-е условие выхода (Date.now()>=deadlineAt) наряду с pollTimeoutMs — эффективный лимит=min(pollTimeoutMs, оставшийся бюджет). Семантика неопределённости (спека §2.2/ADR §2.2): таймаут НЕ означает гарантированный неуспех — completeUserTask мог пройти в движке несмотря на то что продукт перестал ждать; reconcile-on-read (T-0522) самоисцеляет проекцию на следующем чтении. Фронт (screen-inbox.jsx ENGINE_DRIVE_ERROR_MESSAGE) получил нежаргонную запись для ENGINE_DRIVE_TIMEOUT, явно называющую эту неопределённость и советующую обновить страницу.",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "tests_note": "npx vitest run (backend, полный non-db прогон): 254 файла / 4882 теста green (+2 skipped, pre-existing) — 0 регрессий. Точечно src/__tests__/inbox-engine-drive.test.ts: 46/46 green (41 pre-existing T-0571/T-0522 без изменения ожиданий + 5 новых T-0591 тестов: AC-1 drive-deadline wall-clock bound, AC-2 502 envelope через реальный HTTP-роут, AC-3 no-regress typовой путь, AC-4 retry-within-budget, idempotent repeat). web (npx vitest run в web/): 56 файлов / 1541 тестов green, без изменения ожиданий. web/npx vite build успешен (516 modules transformed).",
+    "fitness": true,
+    "fitness_note": "npm run fitness (полная цепочка ci/checks/*, включая embedded npm run build) — exit 0. Включает engine-drive-no-literal-defkey.sh (FF-1 T-0571, PASS — контракт T-0571 не регрессирует), anti-case-lock.sh (D-064 §5 полный денилист, PASS Phase 1+2 — 0 новых кейс-строк), ux-g5-jargon-denylist.sh (informational, 0 новых находок в screen-inbox.jsx). Fitness-DB (fitness:db, живой Flowable+Postgres) НЕ прогонялся — задача не трогает SQL/схему/db-lane тесты (additive TS-only изменение, ADR §out-of-scope O2/O5); T-0571's ci/checks/db/engine-drive-generic.db.test.ts не затронут этим диффом.",
+    "anti_case_note": "Первый прогон read-pdp-anti-case.sh (часть anti-case-lock.sh) поймал 4 новые вхождения литералов 'role-approver'/'e-orlov' в МОИХ новых unit-тестах (скопированы из соседних существующих тест-кейсов по инерции стиля) — исправлено: candidateGroups заменён на [] (роль нерелевантна для timeout-тестов), актёр-стартер заменён на уже существующую переменную H_APPROVER вместо нового литерала. После фикса: read-pdp-anti-case.sh и anti-case-lock.sh оба PASS (0 новых D-064 строк, base=0370cf5)."
+  },
+  "files_changed": [
+    "docs/specs/T-0591-drive-deadline.spec.md",
+    "docs/specs/T-0591.spec.contract.json",
+    "docs/adr/ADR-T0591-drive-deadline.md",
+    "docs/adr/T-0591.adr.contract.json",
+    "src/http/process-projection.ts",
+    "src/http/inbox.ts",
+    "src/__tests__/inbox-engine-drive.test.ts",
+    "web/src/screens/screen-inbox.jsx",
+    "docs/handoff/T-0591.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "ADR §2.4 предполагала module-level константу ENGINE_DRIVE_DEADLINE_MS, читаемую один раз при импорте (по образцу первоначального черновика). При написании кода выбран ленивый per-call читатель (resolveEngineDriveDeadlineMs()) вместо кэшированной module-level константы — мирроит РЕАЛЬНУЮ существующую конвенцию кодовой базы (src/db/claim-reaper.ts sweepStaleClaims: `opts.thresholdMs ?? (process.env[...] ? parseInt(...) : DEFAULT)`), которую ADR не процитировала явно. Это строго более тестируемо (env можно переключать per-test без module-reimport хаков) и не меняет наблюдаемый контракт (тот же дефолт 10_000, то же honest-degrade при отсутствии/невалидном env) — задокументировано как уточнение механизма, не отклонение от контракта."
+  ],
+  "friction_events": [
+    "read-pdp-anti-case.sh (T-0570's FF-RP-7, часть общего anti-case-lock.sh D-064 гейта) сканирует ВЕСЬ git diff под src/ включая тестовые файлы (не только продуктовый код) — мои новые unit-тесты по инерции скопировали candidateGroups:['role-approver'] и actor:'e-orlov' из соседних существующих тест-кейсов в том же файле, что дало 4 ложных 'новых' вхождения кейс-специфичных литералов D-064. Урок для будущих задач: анти-кейс гейт считает добавленные СТРОКИ, а не намерение — при копировании существующего тест-паттерна нужно заменять кейс-специфичные литералы на уже объявленные переменные (H_APPROVER) или нейтральные значения ([]), даже если продуктовый код чист."
+  ]
+}

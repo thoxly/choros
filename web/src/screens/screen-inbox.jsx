@@ -330,10 +330,19 @@ const STATUS_LABEL = {
 // error codes surfaced by POST /api/inbox/:id/action (502 {error:{code,...}}) get a
 // short, non-technical Russian message instead of the raw code — see ADR §2.3.
 // Wording per UX_REVIEW / design-steward (D-062).
+//
+// T-0591 (F-2, ADR-T0591-drive-deadline §2.6): ENGINE_DRIVE_TIMEOUT means the
+// product stopped WAITING for the engine within its shared deadline — it does
+// NOT mean the action failed. completeUserTask may have already landed at the
+// engine moments after the response was sent; reconcile-on-read (T-0522) will
+// pick up the real state on the very next GET /api/inbox. The wording below
+// deliberately says "могло примениться" (uncertain), not "не выполнено"
+// (guaranteed failure), and points at refreshing rather than retrying blindly.
 const ENGINE_DRIVE_ERROR_MESSAGE = {
   ENGINE_DRIVE_FAILED: "Не удалось выполнить действие в процессе — попробуйте ещё раз",
   ENGINE_TASK_NOT_FOUND: "Эта задача уже недоступна — обновите страницу",
   AMBIGUOUS_ACTIVE_TASK: "У шага несколько активных задач — обратитесь к администратору",
+  ENGINE_DRIVE_TIMEOUT: "Движок отвечает дольше обычного — действие могло примениться, обновите страницу, чтобы увидеть актуальное состояние",
 };
 
 function TaskDetailPanel({ taskId, onClose, onActionDone }) {

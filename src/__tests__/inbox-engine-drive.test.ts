@@ -33,8 +33,9 @@ import {
   INSTANCE_ENDED_TYPE,
   NEXT_TASK_TYPE,
   TASK_APPROVED_TYPE,
+  ENGINE_DRIVE_TIMEOUT,
 } from "../http/process-projection.js";
-import type { EngineDriveReconcilePort } from "../http/process-projection.js";
+import type { EngineDriveReconcilePort, ActiveEngineTask } from "../http/process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 
 // ---------------------------------------------------------------------------
@@ -1425,6 +1426,192 @@ describe("T-0522 reconcileInstanceEngineDrive — direct unit (mock engine)", ()
     });
     expect(res.ok).toBe(true); // NOT_FOUND tolerated → proceed to reconcile
     expect(db.events.filter((e) => e.type === INSTANCE_ENDED_TYPE)).toHaveLength(1);
+  });
+});
+
+describe("T-0591 drive-deadline — overall wall-clock budget on the post-approve drive path (F-2)", () => {
+  it("AC-1 drive-deadline: a hung engine call exhausts the shared budget → ok:false ENGINE_DRIVE_TIMEOUT within the configured wall-clock bound (not the per-call withRetry ~40s worst case)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // Simulate a DEGRADED (not hard-down) engine: getActiveUserTasks never
+    // resolves within any reasonable test window (mirrors a withRetry call that
+    // is still spinning through retries/backoff). callWithBudget must stop
+    // AWAITING it once the shared budget elapses — it does not need the
+    // underlying promise to ever settle for THIS test to observe the timeout.
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(
+        () => new Promise<{ ok: true; tasks: ActiveEngineTask[] } | { ok: false; code: string }>(() => { /* never resolves */ }),
+      ),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+
+    const budgetMs = 50;
+    const start = Date.now();
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR,
+      pollTimeoutMs: 5_000, pollIntervalMs: 5, driveDeadlineMs: budgetMs,
+    });
+    const elapsedMs = Date.now() - start;
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.code).toBe(ENGINE_DRIVE_TIMEOUT);
+      expect(res.stage).toBe("poll");
+    }
+    // Wall-clock bound: must return well within the ~40s+ per-call withRetry
+    // worst case F-2 flagged — generous slack (10x budget) keeps this robust on
+    // a loaded CI box while still proving the budget (not pollTimeoutMs=5000ms,
+    // not withRetry's ~40s) is what bounded this call.
+    expect(elapsedMs).toBeLessThan(budgetMs * 10);
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+
+  it("AC-2 502 envelope: approve handler surfaces ENGINE_DRIVE_TIMEOUT as a 502 {error:{code,stage,instanceId}} — same shape as other T-0571 structural codes", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+
+    const setupClient = await pool.connect();
+    await setupClient.query(`SET LOCAL choros.tenant_id = '${H_TENANT}'`);
+    // T-0591 (D-064 anti-case discipline): the starter actor identity is
+    // orthogonal to this test (timeout behavior, not who kicked off the
+    // instance) — reuse the already-declared H_APPROVER rather than
+    // introducing a new persona literal into the diff.
+    const baseTaskId = await appendProcessStarted(setupClient as unknown as PgClientLike, {
+      instanceId: H_INST,
+      procKey: "zakupki",
+      actor: H_APPROVER,
+      nowMs: 1000,
+      tenantId: H_TENANT,
+    });
+    setupClient.release();
+
+    // A DEGRADED (not hard-down) engine — getActiveUserTasks never settles, mirroring
+    // a withRetry call still spinning through retries/backoff (F-2's exact scenario).
+    const mockClient: FlowableClient = {
+      startInstance: vi.fn(),
+      submitUserTask: vi.fn(),
+      completeUserTask: vi.fn().mockResolvedValue({ ok: true }),
+      getActiveUserTasks: vi.fn(
+        () => new Promise<{ ok: true; tasks: ActiveEngineTask[] } | { ok: false; code: string }>(() => { /* never resolves */ }),
+      ),
+      isInstanceEnded: vi.fn().mockResolvedValue({ ok: true, ended: false }),
+    } as unknown as FlowableClient;
+
+    const deps: InboxWriteDeps = {
+      pool,
+      resolveActorTenant: async () => H_TENANT,
+      flowableClient: mockClient,
+    };
+    const h = buildHandlerServer(deps);
+    const server = h.server;
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const base = h.baseUrl();
+
+    // T-0591: ENGINE_DRIVE_DEADLINE_MS is read LAZILY per-call (inbox.ts
+    // resolveEngineDriveDeadlineMs, mirrors claim-reaper.ts's per-call env read)
+    // — not cached at module load — so this env override takes effect for this
+    // one request without needing a fresh module import.
+    const prevEnv = process.env["ENGINE_DRIVE_DEADLINE_MS"];
+    process.env["ENGINE_DRIVE_DEADLINE_MS"] = "50";
+    let r: { status: number; json: unknown };
+    try {
+      r = await httpPost(`${base}/api/inbox/${baseTaskId}/action`, H_APPROVER, { action: "approve" });
+    } finally {
+      if (prevEnv === undefined) delete process.env["ENGINE_DRIVE_DEADLINE_MS"];
+      else process.env["ENGINE_DRIVE_DEADLINE_MS"] = prevEnv;
+      await new Promise<void>((res) => server.close(() => res()));
+    }
+
+    expect(r.status).toBe(502);
+    const body = r.json as Record<string, unknown>;
+    const error = body["error"] as Record<string, unknown>;
+    expect(error).toBeDefined();
+    expect(error["code"]).toBe("ENGINE_DRIVE_TIMEOUT");
+    expect(error["stage"]).toBe("poll");
+    expect(error["instanceId"]).toBe(H_INST);
+  });
+
+  it("AC-3 no-regress: a healthy engine (fast responses, well within budget) still yields 200 {engine:'completed'} — deadline adds no latency/behavior change on the typical path", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: [] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR,
+      pollTimeoutMs: 100, pollIntervalMs: 5, driveDeadlineMs: 10_000,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) { expect(res.ended).toBe(true); expect(res.completed).toBe(true); }
+    // Default driveDeadlineMs (no explicit override) behaves identically.
+    const res2 = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR, pollTimeoutMs: 100, pollIntervalMs: 5,
+    });
+    expect(res2.ok).toBe(true);
+  });
+
+  it("AC-4 retry-within-budget: a single transient failure followed by success still completes when the retry fits inside the remaining budget (deadline does not zero out retry)", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    // Mimics what withRetry's OWN internal retry already tolerates for a single
+    // engine-port call — this test proves callWithBudget does not short-circuit
+    // that: the engine port itself may be a thin wrapper whose promise resolves
+    // only after an internal retry succeeds; as long as it resolves BEFORE the
+    // shared deadline, reconcile still completes successfully.
+    let calls = 0;
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => {
+        calls++;
+        // First call simulates the port's OWN retry taking a little time before
+        // succeeding (well within the generous budget below) — not a rejection,
+        // since EngineDriveReconcilePort methods never throw (honest ok:false/ok:true).
+        if (calls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return { ok: true as const, tasks: [{ id: "eng-base", taskDefinitionKey: "task-approve", name: "Согласовать", candidateGroups: [] }] };
+      }),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: true })),
+    };
+
+    const res = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, {
+      instanceId: D_INST, procKey: PROC_KEY, approvedTaskDefKey: "task-approve",
+      completeEngineTask: true, actor: ACTOR,
+      pollTimeoutMs: 5_000, pollIntervalMs: 5, driveDeadlineMs: 5_000,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) { expect(res.completed).toBe(true); expect(res.ended).toBe(true); }
+  });
+
+  it("idempotent: repeated reconcile after a resolved (non-timeout) pass does not regress T-0522 dedup", async () => {
+    const db = new FakeAuditDb();
+    const pool = makeFakePool(db);
+    await seedStarted(pool, D_TENANT, D_INST);
+
+    const engine: EngineDriveReconcilePort = {
+      getActiveUserTasks: vi.fn(async () => ({ ok: true as const, tasks: [{ id: "eng-extra", taskDefinitionKey: "task-extra-approve", name: "Доп. согласование", candidateGroups: [] }] })),
+      completeUserTask: vi.fn(async () => ({ ok: true as const })),
+      isInstanceEnded: vi.fn(async () => ({ ok: true as const, ended: false })),
+    };
+    const a = { instanceId: D_INST, procKey: PROC_KEY, completeEngineTask: false, actor: ACTOR, driveDeadlineMs: 5_000 } as const;
+    const r1 = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+    const r2 = await reconcileInstanceEngineDrive(pool, D_TENANT, engine, a);
+    if (r1.ok) expect(r1.emitted).toBe(1);
+    if (r2.ok) expect(r2.emitted).toBe(0);
+    expect(db.events.filter((e) => e.type === NEXT_TASK_TYPE)).toHaveLength(1);
   });
 });
 

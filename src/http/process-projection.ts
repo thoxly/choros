@@ -1253,6 +1253,67 @@ export const ENGINE_TASK_NOT_FOUND = "ENGINE_TASK_NOT_FOUND";
 export const AMBIGUOUS_ACTIVE_TASK = "AMBIGUOUS_ACTIVE_TASK";
 
 /**
+ * T-0591 (F-2, ADR-T0591-drive-deadline §2.2/§4): the OVERALL post-approve
+ * drive-path deadline was exhausted before the reconcile finished — NOT a
+ * transport/HTTP failure reported BY the engine, but the product choosing to
+ * stop waiting. Distinct from ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK
+ * (those are engine-observed structural facts); this one means "we don't
+ * know what the engine did" — the underlying engine call may have completed
+ * moments later. See ADR §2.2: reconcile-on-read (T-0522) self-heals the
+ * projection on the NEXT read regardless of which outcome actually occurred.
+ */
+export const ENGINE_DRIVE_TIMEOUT = "ENGINE_DRIVE_TIMEOUT";
+
+/** Sentinel returned by callWithBudget's race when the shared deadline wins. */
+const BUDGET_EXHAUSTED = Symbol("BUDGET_EXHAUSTED");
+
+/**
+ * T-0591 (F-2): race a single engine-port call against the REMAINING slice of a
+ * shared wall-clock deadline. Local to this module — deliberately NOT imported
+ * from flowable-client.ts's internal makeTimeoutPromise/TIMEOUT_SENTINEL (those
+ * are unexported implementation details of withRetry) and deliberately NOT a
+ * change to FlowableClient/withRetry themselves (ADR §2.1/§3 B1: threading
+ * AbortSignal through the whole client interface would widen blast radius to
+ * deploy/start/fetchAndLock/failTask/etc., which this deadline has nothing to
+ * do with). Mirrors the SAME Promise.race+timer-sentinel pattern already used by
+ * flowable-client.ts's withRetry/pingEngine — same technique, applied one layer
+ * up, over the port's already-promise-returning methods.
+ *
+ * - remaining <= 0: does NOT invoke `fn` at all (no point starting a call that
+ *   cannot possibly finish in budget) — returns exhausted immediately.
+ * - otherwise: races `fn()` against a timer for `remaining` ms. If the timer
+ *   wins, the (still in-flight, withRetry-wrapped) call to the engine is simply
+ *   no longer awaited here — it is NOT actively aborted (no AbortController
+ *   plumbed to fetch, see ADR §2.1) and may still complete against the engine
+ *   moments later with no observer on this side. This IS the source of the
+ *   "timeout ≠ guaranteed non-success" semantics the spec requires (§2.2 NF-1):
+ *   the caller cannot know whether the underlying operation eventually
+ *   succeeded — reconcile-on-read (T-0522) is what closes that gap on the next
+ *   read, not this function.
+ */
+async function callWithBudget<T>(
+  fn: () => Promise<T>,
+  deadlineAt: number,
+): Promise<T | typeof BUDGET_EXHAUSTED> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) return BUDGET_EXHAUSTED;
+
+  return new Promise<T | typeof BUDGET_EXHAUSTED>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(BUDGET_EXHAUSTED), remaining);
+    fn().then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
  * Durable, idempotent engine-drive reconcile for ONE instance.
  *
  * Flow (mirrors the original T-0443/T-0456 IIFE, but as a reusable error-explicit fn):
@@ -1307,11 +1368,28 @@ export async function reconcileInstanceEngineDrive(
     /** Poll budget for finding the engine task to complete (post-approve only). */
     readonly pollTimeoutMs?: number;
     readonly pollIntervalMs?: number;
+    /**
+     * T-0591 (F-2, ADR-T0591-drive-deadline §2.4): OVERALL wall-clock budget (ms)
+     * for the ENTIRE post-approve drive path (poll loop + completeUserTask + both
+     * isInstanceEnded checks + fan-out getActiveUserTasks) — an INDEPENDENT ceiling
+     * from pollTimeoutMs. pollTimeoutMs bounds "how long to wait between poll
+     * iterations for a healthy-but-not-yet-routed engine"; driveDeadlineMs bounds
+     * "how long the WHOLE synchronous approve HTTP response may take even if a
+     * SINGLE engine-port call itself hangs/degrades" (the F-2 finding: a single
+     * withRetry-wrapped call can stretch to ~40s+ on a slow engine, which
+     * pollTimeoutMs alone does not interrupt because it is only checked BETWEEN
+     * iterations, never around an in-flight call). Default 10_000.
+     */
+    readonly driveDeadlineMs?: number;
   },
 ): Promise<EngineDriveResult> {
   const nowMs = args.nowMs ?? Date.now();
   const pollTimeoutMs = args.pollTimeoutMs ?? 10_000;
   const pollIntervalMs = args.pollIntervalMs ?? 500;
+  const driveDeadlineMs = args.driveDeadlineMs ?? 10_000;
+  // T-0591: computed ONCE, at the top — shared by every engine-port call below via
+  // callWithBudget. This is a WALL-CLOCK instant (epoch-ms), not a duration.
+  const deadlineAt = Date.now() + driveDeadlineMs;
 
   let completed = false;
   let alreadyEnded = false;
@@ -1341,7 +1419,16 @@ export async function reconcileInstanceEngineDrive(
     // already-routed token. We must not complete until the target task is actually
     // present (so we never complete the wrong/stale token).
     for (;;) {
-      const tasksResult = await engine.getActiveUserTasks(args.instanceId);
+      // T-0591 (FF-1): race this poll-tick's engine call against the SHARED
+      // deadline, not just the per-call withRetry timeout. remaining<=0 short-
+      // circuits without even starting the call (see callWithBudget doc-comment).
+      const tasksResult = await callWithBudget(
+        () => engine.getActiveUserTasks(args.instanceId),
+        deadlineAt,
+      );
+      if (tasksResult === BUDGET_EXHAUSTED) {
+        return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "poll" };
+      }
       if (!tasksResult.ok) {
         return { ok: false, code: tasksResult.code, stage: "poll" };
       }
@@ -1377,11 +1464,30 @@ export async function reconcileInstanceEngineDrive(
       // No matching/active task and no tasks at all → instance may have ended; stop polling.
       if (tasksResult.tasks.length === 0) break;
       if (Date.now() - pollStart >= pollTimeoutMs) break;
+      // T-0591 (ADR §2.3): the shared deadline is a SECOND, independent ceiling on
+      // top of pollTimeoutMs — effective loop bound is min(pollTimeoutMs, remaining
+      // budget). Breaking here (rather than looping once more) falls through to the
+      // same "engineTaskId still null" path below; the very next engine call
+      // (completeUserTask is skipped since engineTaskId is null, so it lands on the
+      // isInstanceEnded pre-ended-check) will itself immediately hit
+      // BUDGET_EXHAUSTED via callWithBudget (remaining<=0) — no separate branch
+      // needed, the timeout cascades through the existing control flow.
+      if (Date.now() >= deadlineAt) break;
       await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
     if (engineTaskId) {
-      const completeResult = await engine.completeUserTask(engineTaskId);
+      // T-0591 (FF-1): budget-race the completion call too — this is THE call
+      // whose outcome the timeout semantics are most about (§2.2 NF-1 of the
+      // spec): if the budget wins here, the completeUserTask request may still
+      // land at the engine moments later — we simply stop waiting for it.
+      const completeResult = await callWithBudget(
+        () => engine.completeUserTask(engineTaskId as string),
+        deadlineAt,
+      );
+      if (completeResult === BUDGET_EXHAUSTED) {
+        return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "complete" };
+      }
       // NOT_FOUND ⇒ already completed (idempotent re-run / concurrent drive). Proceed.
       if (!completeResult.ok && completeResult.code !== "NOT_FOUND") {
         return { ok: false, code: completeResult.code, stage: "complete" };
@@ -1401,7 +1507,17 @@ export async function reconcileInstanceEngineDrive(
 
     if (!completed) {
       // Completion did not happen this pass — find out WHY before proceeding.
-      const preEndedResult = await engine.isInstanceEnded(args.instanceId);
+      // T-0591: if the shared budget is already exhausted (e.g. the poll loop
+      // above broke on the deadline, not on pollTimeoutMs/empty-list), this call
+      // short-circuits to BUDGET_EXHAUSTED without a network round-trip — the
+      // timeout cascades through the existing control flow (ADR §2.3).
+      const preEndedResult = await callWithBudget(
+        () => engine.isInstanceEnded(args.instanceId),
+        deadlineAt,
+      );
+      if (preEndedResult === BUDGET_EXHAUSTED) {
+        return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "poll" };
+      }
       if (!preEndedResult.ok) {
         return { ok: false, code: preEndedResult.code, stage: "ended" };
       }
@@ -1418,7 +1534,16 @@ export async function reconcileInstanceEngineDrive(
   }
 
   // 2. Reconcile: ended → instance.ended; else surface live engine tasks.
-  const endedResult = await engine.isInstanceEnded(args.instanceId);
+  // T-0591 (FF-1): still budget-raced — reached even on the reconcile-on-read
+  // (mirror) path where completeEngineTask is false/absent (step 1 above is
+  // skipped entirely); deadlineAt still bounds this call the same way.
+  const endedResult = await callWithBudget(
+    () => engine.isInstanceEnded(args.instanceId),
+    deadlineAt,
+  );
+  if (endedResult === BUDGET_EXHAUSTED) {
+    return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "ended" };
+  }
   if (!endedResult.ok) {
     return { ok: false, code: endedResult.code, stage: "ended" };
   }
@@ -1448,7 +1573,19 @@ export async function reconcileInstanceEngineDrive(
   }
 
   // 3. Engine has more tokens → surface EVERY live user-task not yet projected.
-  const nextTasksResult = await engine.getActiveUserTasks(args.instanceId);
+  // T-0591 (FF-1): budget-raced like the other four call sites. Note this fan-out
+  // is the ASYNC/eventually-consistent half of the contract (ADR-T0571 §2.3) —
+  // a timeout here still surfaces as ok:false to the caller (inbox.ts logs it,
+  // does not fail the already-decided 200/502 above it in a way that changes
+  // completion semantics), and reconcile-on-read retries it on the next GET
+  // /api/inbox regardless.
+  const nextTasksResult = await callWithBudget(
+    () => engine.getActiveUserTasks(args.instanceId),
+    deadlineAt,
+  );
+  if (nextTasksResult === BUDGET_EXHAUSTED) {
+    return { ok: false, code: ENGINE_DRIVE_TIMEOUT, stage: "next-tasks" };
+  }
   if (!nextTasksResult.ok) {
     return { ok: false, code: nextTasksResult.code, stage: "next-tasks" };
   }
