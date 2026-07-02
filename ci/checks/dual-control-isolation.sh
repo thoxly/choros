@@ -190,6 +190,7 @@ _dc_mig107_failed=0                                                             
 _dc_mig109_failed=0                                                                # T0397-DC-MIG109-GUARD track when 109 triggers the FF-DC7 fail
 _dc_mig115_failed=0                                                                # T0574-DC-MIG115-GUARD track when 115 triggers the FF-DC7 fail
 _dc_mig116_failed=0                                                                # T0574-DC-MIG116-GUARD track when 116 triggers the FF-DC7 fail
+_dc_mig117_failed=0                                                                # T0570-DC-MIG117-GUARD track when 117 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -246,6 +247,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/116_composite_fk_set_null_columns.sql" ]]; then # T0574-DC-MIG116-GUARD
       _dc_mig116_failed=1                                                     # T0574-DC-MIG116-GUARD
     fi                                                                        # T0574-DC-MIG116-GUARD
+    # Track specifically when 117 triggers this FAIL (and nothing else).     # T0570-DC-MIG117-GUARD
+    if [[ "${m}" == "migrations/117_default_read_grant_backfill.sql" ]]; then # T0570-DC-MIG117-GUARD
+      _dc_mig117_failed=1                                                     # T0570-DC-MIG117-GUARD
+    fi                                                                        # T0570-DC-MIG117-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -593,6 +598,32 @@ if [[ "${_dc_mig116_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0574-composite-fk-fix]: migration 116 is CONSTRAINT-ONLY (DROP/ADD CONSTRAINT with column-scoped SET NULL; no CREATE TABLE, no ADD/DROP COLUMN, no RLS/POLICY) — relief granted" # T0574-DC-MIG116-GUARD
   fi                                                                           # T0574-DC-MIG116-GUARD
 fi                                                                             # T0574-DC-MIG116-GUARD
+# T-0570: additive relief for migration 117_default_read_grant_backfill.sql.  # T0570-DC-MIG117-GUARD
+# 117 is a PURE SEED — INSERT ... SELECT ... FROM choros.tenant rows into the # T0570-DC-MIG117-GUARD
+# EXISTING role/role_assignment/grant tables (migrations 019/020/008). Zero   # T0570-DC-MIG117-GUARD
+# DDL: no CREATE/ALTER/DROP TABLE, no RLS/POLICY change. The seeded rows use   # T0570-DC-MIG117-GUARD
+# plain confirmed_by='migration-117' (ordinary confirmation, same shape as    # T0570-DC-MIG117-GUARD
+# every other pre-existing role_assignment/grant seed) — 117 does NOT touch   # T0570-DC-MIG117-GUARD
+# confirmed2_by at all (dual-control's own column, owned by 031). Same class  # T0570-DC-MIG117-GUARD
+# as the T-0475 migration-104 capability-grant seed relief (auto_additive).   # T0570-DC-MIG117-GUARD
+_dc_mig117_stem="migrations/117_default_read_grant_backfill.sql"                 # T0570-DC-MIG117-GUARD
+if [[ "${_dc_mig117_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig117_stem}"; then # T0570-DC-MIG117-GUARD
+  _dc_mig117_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig117_stem}" 2>/dev/null || true)"  # T0570-DC-MIG117-GUARD
+  _dc_mig117_bad=0                                                             # T0570-DC-MIG117-GUARD
+  # 117 must add NO table/RLS/policy (pure seed) ...                          # T0570-DC-MIG117-GUARD
+  if echo "${_dc_mig117_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0570-DC-MIG117-GUARD
+    _dc_mig117_bad=1                                                           # T0570-DC-MIG117-GUARD introduces DDL/RLS
+  fi                                                                           # T0570-DC-MIG117-GUARD
+  # ... and must NOT touch the confirmed2_by invariant.                       # T0570-DC-MIG117-GUARD
+  if echo "${_dc_mig117_content}" | grep -iqE "confirmed2_by"; then           # T0570-DC-MIG117-GUARD
+    _dc_mig117_bad=1                                                           # T0570-DC-MIG117-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0570-DC-MIG117-GUARD
+  if [[ "${_dc_mig117_bad}" -eq 0 ]]; then                                    # T0570-DC-MIG117-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0570-DC-MIG117-GUARD cancel false-red
+    _dc_mig117_failed=0                                                        # T0570-DC-MIG117-GUARD
+    echo "PASS [FF-DC7-T0570-read-pdp-grant-backfill]: migration 117_default_read_grant_backfill.sql is a pure INSERT…SELECT seed (role-reader + role_assignment + read/record grant rows, confirmed_by='migration-117') — NO CREATE TABLE/RLS/POLICY, does NOT touch confirmed2_by/dual-control authority machinery — relief granted" # T0570-DC-MIG117-GUARD
+  fi                                                                           # T0570-DC-MIG117-GUARD
+fi                                                                             # T0570-DC-MIG117-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
