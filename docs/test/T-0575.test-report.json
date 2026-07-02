@@ -1,0 +1,147 @@
+{
+  "task_id": "T-0575",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 5939,
+    "passed": 5939,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/detel-base-task-role.db.test.ts (FF-2, live Flowable+Postgres, project t-0575-test, ports 55434/8083) — re-run GREEN (2/2); MUTATION CHECK: forced firstActiveTask=undefined at process-start.ts's appendProcessStarted call site (simulating the pre-fix bare-call shape) → both tests RED, task_role fell back to literal 'role-approver' instead of the real candidateGroups[0] — proves the test genuinely catches the BUG-015 regression, not a tautology. Working tree restored clean after mutation (git diff --quiet). Manual/LIVE_PROOF UI walkthrough NOT separately performed (no dev-stand access in TEST phase) — automated live-engine equivalent is the decisive evidence per spec's own D-064 LIVE_PROOF discipline (structural test IS the live proof here, matching review.json's own framing)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "same detel-base-task-role.db.test.ts run — payload.task_name/task_step asserted == real BPMN user-task name, not the ТЭЛ literals «Согласование»/«Согласовать заявку»",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "ci/checks/db/detel-rollup-to-variables.db.test.ts (FF-3, live lane) re-run GREEN (2/2) + INDEPENDENT tester-authored adversarial probe (separate BPMN/process-key/field-names/roles in Russian, threshold-crossing value 600000 == this morning's exact LIVE_PROOF T-0571 observed figure) via the REAL production route POST /api/records → registerRecordRoutes → on_create → flowable.startInstance: instance routed to the approval-track branch, not the fast-track/default branch — direct inversion of this morning's failure, confirmed live against Flowable, not a mock",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "detel-base-task-role.db.test.ts — process.started audit_event payload asserted against real candidateGroups[0]/name for TWO distinct generic processes (D-064 anti-case: not tied to one specific string)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "detel-rollup-to-variables.db.test.ts + independent tester probe, both re-run live GREEN; MUTATION CHECK: forced `if (false && derivedSpecs.length > 0)` in records.ts (simulating computeAllDerivedFields never being invoked before start, the exact BUG-016 root cause) → BOTH the coder's own high-value test AND the independently-authored tester probe went RED with the EXACT documented symptom (instance took the default branch despite a >500000 rollup sum) — confirms the tests are genuinely adversarial, not false-green. Working tree restored clean after mutation",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "src/__tests__/step-applier.test.ts SA-10 re-run GREEN; MUTATION CHECK: hardcoded `resolvedSlug = SOGLASOVANIE_SLUG` in step-applier.ts (simulating the pre-fix literal-slug resolution) → SA-10 (arbitrary-slug 'zakupki-rezultat' case) went RED with StepTargetUnresolvedError, exactly the BUG-017 regression shape — confirms genuine adversariality. Working tree restored clean",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "src/__tests__/inbox-step-target-unresolved.test.ts (2/2 green) — full HTTP approve round-trip via registerInboxRoutes: unresolved target → 422 {error:{code:'STEP_TARGET_UNRESOLVED'}} + structured console.warn with tenantId/processKey/applicationId/expectedSlug (not a silent 500); companion case (configured arbitrary slug) → 200, proving the fail-honest path is not over-triggered",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "bash ci/checks/flowable/tel-linear-smoke.sh re-run LIVE against the isolated stack (deploy tel-linear.bpmn20.xml HTTP 201 + startInstance HTTP 201) — GREEN, independently re-verified (the review could not run this live in its sandbox; this IS the decisive live confirmation the TEST phase owns); npx vitest run e2e/journeys/loader.test.ts 62/62 green (tel-linear/tel-gateway-routing journeys unmodified)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "npx vitest run src/__tests__/inbox-form-values.test.ts src/__tests__/inbox-form-submit-validation.test.ts src/__tests__/inbox-form-submit.adversarial.test.ts — 21/21 green, purchase/approval → purchases/soglasovanie resolution behaviorally unchanged (config-primitive defaults equal to the ТЭЛ seed values)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "bash ci/checks/detel-literal-baseline.sh (+ --self-test) — independently re-run: role-approver 3→2, soglasovanie 3→2, tel-approval 1→1, aggregate 7→5; strictly decreased, no individual literal regressed; self-test PASS (comment/test-file exclusion verified)",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-11",
+      "test": "bash ci/checks/detel-base-task-from-engine.sh (+ --self-test) — statically confirms dispatch-outcome.ts's fallback reads resolveDefaultApproverRole() (process-projection.ts), not a second hardcoded literal; grep of src/runtime/agent-dispatch/dispatch-outcome.ts confirms single import, no re-hardcoded string. verifiable_as:manual per spec — code-level confirmation performed, no dev-stand UI walkthrough available in TEST phase",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "tsc --noEmit",
+      "result": "pass"
+    },
+    {
+      "check": "eslint src",
+      "result": "pass",
+      "note": "0 errors, 36 pre-existing no-console warnings — matches handoff/review baseline exactly, none introduced by this diff"
+    },
+    {
+      "check": "npx vitest run (full non-db suite)",
+      "result": "pass",
+      "note": "252 files / 4863 tests passed, 2 files / 10 tests skipped (pre-existing, unrelated live-dep gates) — matches handoff/review numbers exactly; this count ALREADY INCLUDES e2e/journeys/loader.test.ts (62 tests, not under vitest.config.js exclude) — not double-counted in the deterministic total below"
+    },
+    {
+      "check": "npx vitest run e2e/journeys/loader.test.ts",
+      "result": "pass",
+      "note": "62/62 green — already included within the full non-db vitest run's 4863 total (run standalone here as an extra explicit check, not double-counted)"
+    },
+    {
+      "check": "web/ vitest run",
+      "result": "n/a",
+      "note": "TOOLING-GAP, not a product defect: web/node_modules is not installed in this worktree (web/ is not in the T-0575 files_changed list; no dependency on this diff). Attempting `npx vitest run` fails at module resolution (Cannot find package '@vitejs/plugin-react') before any test executes. Out of scope for this task's mandate (web/ untouched by the diff) — flagged for visibility, not counted as a failure"
+    },
+    {
+      "check": "npm run fitness:db (live isolated stack: docker compose -p t-0575-test, Postgres 16 port 55434, Flowable 7.1.0 port 8083, migrations 001-119 applied clean, torn down after with -v)",
+      "result": "pass",
+      "note": "100 files / 1076 tests passed — matches handoff/review claim exactly, THIS TIME independently and freshly executed (the review explicitly could not bring up its own live lane due to sandbox network egress; this is the decisive live confirmation the mandate required)"
+    },
+    {
+      "check": "ci/checks/db/detel-base-task-role.db.test.ts + ci/checks/db/detel-rollup-to-variables.db.test.ts — isolated re-run + mutation-tested",
+      "result": "pass",
+      "note": "4/4 green on unmodified code; BOTH files independently confirmed adversarial via temporary code mutations simulating the exact pre-fix defect shape (see AC-1/AC-5 notes) — working tree restored byte-clean after each mutation (git diff --quiet verified)"
+    },
+    {
+      "check": "bash ci/checks/flowable/tel-linear-smoke.sh (live)",
+      "result": "pass",
+      "note": "deploy HTTP 201 + startInstance HTTP 201 against the live isolated Flowable — ТЭЛ compatibility is decisive and independently confirmed live, not relied-upon from the coder's report"
+    },
+    {
+      "check": "bash ci/checks/detel-base-task-from-engine.sh (+ --self-test)",
+      "result": "pass"
+    },
+    {
+      "check": "bash ci/checks/detel-literal-baseline.sh (+ --self-test)",
+      "result": "pass",
+      "note": "independently recomputed: 7→5 aggregate, matches ADR/handoff exactly"
+    },
+    {
+      "check": "bash ci/checks/dual-control-isolation.sh",
+      "result": "pass",
+      "note": "FF-DC7 interim FAIL for migration 119 immediately superseded by the T0575-target-registry-slug relief line (additive, content-verified ADD COLUMN only) — final verdict PASS all FF-DC1..DC8/DC11"
+    },
+    {
+      "check": "bash ci/checks/frozen-checks-immutable.sh",
+      "result": "pass",
+      "note": "auto-additive sanction for the dual-control-isolation.sh edit verified (A-1..A-4 + Враг-attestation VALID)"
+    },
+    {
+      "check": "bash ci/checks/substitution-isolation.sh",
+      "result": "pass",
+      "note": "the transient migration-119-uncommitted FF-SUB5 concern the review flagged does not reproduce post-commit — clean pass, no relief needed, matches coder's own claim"
+    },
+    {
+      "check": "bash ci/checks/start-route-isolation.sh (+ --self-test)",
+      "result": "pass",
+      "note": "FF-7-1..3 all green — confirms process-start.ts's REST contract (the actual T-0328 invariant per its own ADR §4.2) is intact despite the sanctioned byte-diff"
+    },
+    {
+      "check": "npm run fitness (full non-db chain, ~280 checks)",
+      "result": "pass",
+      "note": "sanctioned_known_red confirmed: the ONLY unresolved red in the entire chain is ci/checks/http-route-auth-coverage.sh FF-0328-3 (byte-freeze diff on src/http/process-start.ts) — durable documentary sanction independently verified present in ci/checks/data/frozen-sanctions.jsonl (task=T-0575, decision=review:T-0575@0060c59-ff-0328-3-additive-sanction, scope pinned to the exact blob pair). All other apparent 'FAIL' lines observed in the full run output are internal self-test negative-fixture probes (document-render-isolation, check-template-deps, doc-coherence, docpage-writeful-tools) that print FAIL as their EXPECTED detector-firing result, immediately followed by a passing self-test assertion — verified by reading surrounding log context for each occurrence, not a real defect"
+    },
+    {
+      "check": "src/__tests__/step-applier.test.ts, inbox-step-target-unresolved.test.ts, inbox-form-values.test.ts, inbox-form-submit-validation.test.ts, inbox-form-submit.adversarial.test.ts",
+      "result": "pass",
+      "note": "36/36 green (13+2+10+6+5); SA-10/SA-9 mutation-tested (see AC-6 note)"
+    }
+  ],
+  "failures": []
+}
