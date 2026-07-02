@@ -238,7 +238,7 @@ export default function SpendScreen() {
         {overview && byConnection.length === 0 && (
           <EmptyState
             title="Нет данных о расходах"
-            message="Расходы появятся после LLM-вызовов с настроенными ценами."
+            description="Расходы появятся после LLM-вызовов с настроенными ценами."
           />
         )}
         {overview && byConnection.length > 0 && (
@@ -289,7 +289,7 @@ export default function SpendScreen() {
         {Array.isArray(recent) && recent.length === 0 && (
           <EmptyState
             title="Нет записей о расходах"
-            message="Записи появятся после LLM-вызовов с настроенными ценами."
+            description="Записи появятся после LLM-вызовов с настроенными ценами."
           />
         )}
         {Array.isArray(recent) && recent.length > 0 && (

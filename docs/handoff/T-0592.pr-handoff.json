@@ -1,0 +1,17 @@
+{
+  "task_id": "T-0592",
+  "status": "pr_open",
+  "branch": "task/T-0592-spend-emptystate",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true
+  },
+  "files_changed": [
+    "web/src/screens/screen-spend.jsx",
+    "web/src/screens/screen-spend.test.jsx"
+  ],
+  "summary": "Fix: T-0592 — EmptyState компоненты получали несуществующий проп message= вместо description= в двух местах (строки 241, 292). Заменены на правильный description= для подсказок по следующему шагу. Добавлен тест screen-spend.test.jsx (source-presence checks)."
+}
