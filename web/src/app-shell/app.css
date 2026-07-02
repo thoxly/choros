@@ -623,6 +623,8 @@
 .chs-ov-scope__tags { display: flex; flex-wrap: wrap; gap: var(--chs-space-4); }
 .chs-ov-scope__tag { display: inline-flex; align-items: center; gap: var(--chs-space-2); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); }
 .chs-ov-inbox-hint { display: flex; align-items: center; gap: var(--chs-space-5); margin-top: var(--chs-space-7); padding-top: var(--chs-space-6); border-top: 1px solid var(--chs-color-border-faint); }
+/* Человекочитаемый охват гранта (UX_REVIEW F-2): чипы тегов / перечисление набора */
+.chs-ov-scopesum { display: inline-flex; flex-wrap: wrap; gap: var(--chs-space-3); align-items: center; }
 
 /* ============================================================================
    FORMS SCREEN (.chs-forms-screen)

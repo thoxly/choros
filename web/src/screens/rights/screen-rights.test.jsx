@@ -118,3 +118,76 @@ describe('ra-overview-forms — scope uses the existing ScopeElement contract (A
     expect(formsSrc).toContain("kind: 'tags'");
   });
 });
+
+// ---------------------------------------------------------------------------
+// UX_REVIEW iteration (docs/ux-review/T-0572.ux-review.json, changes_requested)
+// ---------------------------------------------------------------------------
+
+describe('UX F-1 — empty tenant differentiates can_manage; admin gets a CTA (blocking)', () => {
+  it('admin empty branch renders EmptyState WITH a primary action to /rights/editor', () => {
+    expect(screenSrc).toContain('Пока нет ролей');
+    expect(screenSrc).toContain('Создайте первую роль доступа');
+    expect(screenSrc).toContain('Открыть «Каталог ролей»');
+    expect(screenSrc).toContain("navigate('/rights/editor')");
+    // The CTA lives inside the EmptyState action slot (kit anatomy), not a
+    // stray button.
+    expect(screenSrc).toMatch(/action=\{\s*<Button[\s\S]{0,200}\/rights\/editor/);
+  });
+  it('empty branch differentiates by can_manage (not scope alone): self user keeps text-only EmptyState', () => {
+    expect(screenSrc).toMatch(/canManage\s*\?[\s\S]{0,400}Пока нет ролей[\s\S]{0,600}У вас пока нет ни одной назначенной роли/);
+  });
+});
+
+describe('UX F-2 — scope is human-readable, never raw JSON (blocking)', () => {
+  it('does NOT render grant scope via JSON.stringify', () => {
+    expect(screenSrc).not.toContain('JSON.stringify(g.scope)');
+  });
+  it('renders scope through the ScopeSummary component', () => {
+    expect(screenSrc).toContain('function ScopeSummary');
+    expect(screenSrc).toMatch(/<ScopeSummary scope=\{g\.scope\}/);
+  });
+  it('maps every ScopeElement kind to a human phrase (node/tags/set/interval/sentinel)', () => {
+    expect(screenSrc).toContain('Весь тенант');
+    expect(screenSrc).toContain('Узел оргструктуры');
+    expect(screenSrc).toMatch(/Узел: \$\{node\.label\}/);
+    expect(screenSrc).toContain('Диапазон');
+    expect(screenSrc).toContain('Особый охват');
+  });
+  it('resolves the default-open sentinel node to «Весь тенант» (not a raw id)', () => {
+    expect(screenSrc).toContain('RESOURCE_ROOT_SENTINEL');
+  });
+});
+
+describe('UX F-3 — revoke requires a kit confirmation step (nit)', () => {
+  it('both revoke buttons open a ConfirmDialog instead of firing on click', () => {
+    expect(formsSrc).toContain('ConfirmDialog');
+    const dialogs = formsSrc.match(/<ConfirmDialog/g) || [];
+    expect(dialogs.length).toBe(2);
+    expect(formsSrc).toContain('Отозвать роль?');
+    expect(formsSrc).toContain('Отозвать право?');
+  });
+  it('does not call the native window.confirm', () => {
+    expect(formsSrc).not.toContain('window.confirm(');
+  });
+});
+
+describe('UX F-4 — form sources have honest empty/loading states (nit)', () => {
+  it('shows LoadingState while dictionaries/employees are loading', () => {
+    expect(formsSrc).toContain('sourcesLoading');
+    expect(formsSrc).toContain('Загрузка справочников…');
+  });
+  it('explains WHY a select is empty (employees / resources / operations / org tree / tags)', () => {
+    expect(formsSrc).toContain('Список сотрудников пуст');
+    expect(formsSrc).toContain('Справочник ресурсов недоступен');
+    expect(formsSrc).toContain('Справочник операций недоступен');
+    expect(formsSrc).toContain('Дерево оргструктуры недоступно');
+    expect(formsSrc).toContain('Теги охвата не настроены');
+  });
+});
+
+describe('UX F-5 — one-click path to the confirmation inbox for pending observers (nit)', () => {
+  it('the inbox hint renders for canManage OR when the role has pending rows', () => {
+    expect(screenSrc).toMatch(/canManage\s*\|\|\s*rolePendingCount\s*>\s*0/);
+    expect(screenSrc).toContain('rolePendingCount');
+  });
+});

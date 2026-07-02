@@ -23,6 +23,7 @@ import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, E
 import { authHeaders } from '../../app-shell/dev-auth.js';
 import { getActiveTenantId } from '../../app-shell/active-tenant.js';
 import { useNavigate } from 'react-router-dom';
+import { ScopeToken } from './ra-data.jsx';
 import {
   AssignRoleForm, GrantRightForm, RevokeAssignmentButton, RevokeGrantButton, PendingBadge,
 } from './ra-overview-forms.jsx';
@@ -80,11 +81,67 @@ async function fetchEmployees() {
 }
 
 // ---------------------------------------------------------------------------
+// ScopeSummary — человекочитаемый охват гранта (UX_REVIEW F-2, principles §3:
+// пользователь видит продукт, не разработку — сырой JSON недопустим).
+//   node → «Узел: <label из dictionaries.orgTree>» (fallback «Узел оргструктуры»)
+//   node-сентинел default-open гранта (READ-PDP) → «Весь тенант»
+//   tags → чипы тегов (label из dictionaries.scopeTags, fallback — сам тег)
+//   set → перечисление членов; пустой set / отсутствие охвата → «Весь тенант»
+// self-взгляд (dictionaries не загружены) деградирует в человеческую форму
+// kind без резолва label — но никогда не в raw JSON.
+// ---------------------------------------------------------------------------
+
+// Платформенный сентинел-узел default-open READ-гранта (display-копия литерала
+// RESOURCE_ROOT_NODE_ID из src/core/read-visibility.ts; дрейф безопасен —
+// несовпадение деградирует в «Узел оргструктуры», не в ложь).
+const RESOURCE_ROOT_SENTINEL = '00000000-0000-0000-0000-0000000000r0';
+
+function ScopeSummary({ scope, dictionaries }) {
+  if (!scope || typeof scope !== 'object') {
+    return <span>Весь тенант</span>;
+  }
+  if (scope.kind === 'node') {
+    if (scope.nodeId === RESOURCE_ROOT_SENTINEL) {
+      return <span>Весь тенант</span>;
+    }
+    const node = (dictionaries?.orgTree || []).find((n) => n.id === scope.nodeId);
+    return <span>{node ? `Узел: ${node.label}` : 'Узел оргструктуры'}</span>;
+  }
+  if (scope.kind === 'tags') {
+    const tags = scope.tags || [];
+    if (tags.length === 0) {
+      return <span>Весь тенант</span>;
+    }
+    const labelById = Object.fromEntries((dictionaries?.scopeTags || []).map((t) => [t.id, t.label]));
+    return (
+      <span className="chs-ov-scopesum">
+        {tags.map((t) => <ScopeToken key={t} kind="tag">{labelById[t] || t}</ScopeToken>)}
+      </span>
+    );
+  }
+  if (scope.kind === 'interval') {
+    return <span>{`Диапазон: ${scope.axis} ${scope.lo}–${scope.hi}`}</span>;
+  }
+  if (scope.kind === 'set') {
+    const members = scope.members || [];
+    if (members.length === 0) {
+      return <span>Весь тенант</span>;
+    }
+    return (
+      <span className="chs-ov-scopesum">
+        {members.map((m, i) => <ScopeSummary key={i} scope={m} dictionaries={dictionaries} />)}
+      </span>
+    );
+  }
+  return <span>Особый охват</span>;
+}
+
+// ---------------------------------------------------------------------------
 // "Кто что может" — секция роль-детали (FR-6). Показывает ДЕЙСТВУЮЩИЕ
 // assignments/grants (никогда pending — FR-5/AC-8) + отдельный pending-блок.
 // ---------------------------------------------------------------------------
 
-function WhoCanDoWhat({ role, canManage, onChanged }) {
+function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
   return (
     <section className="chs-section2">
       <div className="chs-section2__head">
@@ -99,7 +156,13 @@ function WhoCanDoWhat({ role, canManage, onChanged }) {
           role.assignments.map((a) => (
             <div className="chs-ov-holder" key={a.id}>
               <ExecutorBadge type={a.employee_kind} name={a.employee_display || a.employee_slug || a.employee_id} />
-              {canManage && <RevokeAssignmentButton id={a.id} onDone={onChanged} />}
+              {canManage && (
+                <RevokeAssignmentButton
+                  id={a.id}
+                  subjectLabel={a.employee_display || a.employee_slug || ''}
+                  onDone={onChanged}
+                />
+              )}
             </div>
           ))
         )}
@@ -116,8 +179,14 @@ function WhoCanDoWhat({ role, canManage, onChanged }) {
             <div className={`chs-grant ${canManage ? 'chs-grant--actions' : ''}`} key={g.id}>
               <div className="chs-grant__res"><span className="chs-grant__resname">{g.resource_type}</span></div>
               <div className="chs-grant__ops"><OpChip op={g.operation} /></div>
-              <div className="chs-grant__scope">{JSON.stringify(g.scope)}</div>
-              {canManage && <RevokeGrantButton id={g.id} onDone={onChanged} />}
+              <div className="chs-grant__scope"><ScopeSummary scope={g.scope} dictionaries={dictionaries} /></div>
+              {canManage && (
+                <RevokeGrantButton
+                  id={g.id}
+                  subjectLabel={`${g.resource_type} · ${g.operation}`}
+                  onDone={onChanged}
+                />
+              )}
             </div>
           ))
         )}
@@ -154,6 +223,9 @@ function RightsScreen({ initialRole }) {
   const [sel, setSel] = useState(initialRole || null);
   const [dictionaries, setDictionaries] = useState(null);
   const [employees, setEmployees] = useState([]);
+  // UX_REVIEW F-4: пока справочники грузятся, формы показывают LoadingState —
+  // «ещё грузится» отличимо от «справочник пуст/недоступен».
+  const [sourcesLoading, setSourcesLoading] = useState(false);
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -171,8 +243,11 @@ function RightsScreen({ initialRole }) {
 
   useEffect(() => {
     if (state?.can_manage) {
-      fetchDictionaries().then(setDictionaries);
-      fetchEmployees().then(setEmployees);
+      setSourcesLoading(true);
+      Promise.all([
+        fetchDictionaries().then(setDictionaries),
+        fetchEmployees().then(setEmployees),
+      ]).finally(() => setSourcesLoading(false));
     }
   }, [state?.can_manage]);
 
@@ -203,24 +278,40 @@ function RightsScreen({ initialRole }) {
     );
   }
 
+  const canManage = Boolean(state.can_manage);
+
   if (roles.length === 0) {
+    // UX_REVIEW F-1: пустой тенант различает can_manage. Админ получает
+    // Primary action (first-use anatomy) — путь к созданию первой роли на
+    // /rights/editor; обычный пользователь — честное разъяснение без CTA.
     return (
       <div className="chs-rights">
-        <EmptyState
-          title="Нет ролей"
-          description={
-            state.scope === 'self'
-              ? 'У вас пока нет ни одной назначенной роли.'
-              : 'В этом тенанте ещё не определено ни одной роли доступа.'
-          }
-        />
+        {canManage ? (
+          <EmptyState
+            title="Пока нет ролей"
+            description="Создайте первую роль доступа, чтобы назначать её сотрудникам."
+            action={
+              <Button variant="primary" size="sm" onClick={() => navigate('/rights/editor')}>
+                Открыть «Каталог ролей»
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            title="Нет ролей"
+            description="У вас пока нет ни одной назначенной роли."
+          />
+        )}
       </div>
     );
   }
 
   const role = roles.find(r => r.id === sel) || roles[0];
   const tools = [...new Set(role.grants.map((g) => g.resource_type))];
-  const canManage = Boolean(state.can_manage);
+  // UX_REVIEW F-5: pending виден и в self-взгляде (свои «ждёт подтверждения»)
+  // — одноклик-путь к инбоксу /rights/criticality не должен зависеть от
+  // canManage, когда есть pending.
+  const rolePendingCount = role.pending.assignments.length + role.pending.grants.length;
 
   return (
     <div className="chs-rights">
@@ -257,7 +348,7 @@ function RightsScreen({ initialRole }) {
           </div>
 
           {/* «Кто что может» — FR-6 */}
-          <WhoCanDoWhat role={role} canManage={canManage} onChanged={load} />
+          <WhoCanDoWhat role={role} canManage={canManage} dictionaries={dictionaries} onChanged={load} />
 
           {/* Производное от грантов */}
           <section className="chs-section2">
@@ -289,6 +380,7 @@ function RightsScreen({ initialRole }) {
                 roles={roles}
                 employees={employees}
                 dictionaries={dictionaries}
+                sourcesLoading={sourcesLoading}
                 onDone={load}
               />
             </section>
@@ -302,12 +394,16 @@ function RightsScreen({ initialRole }) {
               <GrantRightForm
                 roles={roles}
                 dictionaries={dictionaries}
+                sourcesLoading={sourcesLoading}
                 onDone={load}
               />
             </section>
           )}
 
-          {canManage && (
+          {/* UX_REVIEW F-5: подсказка-путь к инбоксу подтверждений видна и
+              не-admin наблюдателю СВОЕГО pending (rolePendingCount > 0) —
+              не только под canManage. */}
+          {(canManage || rolePendingCount > 0) && (
             <div className="chs-ov-inbox-hint">
               <span className="chs-section2__aux">Критичные изменения требуют второго подтверждения.</span>
               <Button variant="ghost" size="sm" onClick={() => navigate('/rights/criticality')}>

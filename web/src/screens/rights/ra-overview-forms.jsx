@@ -21,7 +21,7 @@
    ============================================================================ */
 
 import React, { useState } from 'react';
-import { Button, Field, Select, StatusChip } from '../../components/components.jsx';
+import { Button, Select, StatusChip, ConfirmDialog, LoadingState } from '../../components/components.jsx';
 import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
 
@@ -124,10 +124,16 @@ function ScopePicker({ dictionaries, value, onChange }) {
           onChange={(e) => setNode(e.target.value)}
           placeholder="Выберите узел…"
           options={orgTree.map((n) => ({ value: n.id, label: n.label }))}
+          hint={orgTree.length === 0
+            ? 'Дерево оргструктуры недоступно — выберите охват тегами или обновите страницу.'
+            : undefined}
         />
       )}
       {mode === 'tags' && (
         <div className="chs-ov-scope__tags">
+          {scopeTags.length === 0 && (
+            <span className="chs-hint">Теги охвата не настроены — справочник пуст или недоступен.</span>
+          )}
           {scopeTags.map((t) => {
             const checked = (value?.tags ?? []).includes(t.id);
             return (
@@ -154,7 +160,7 @@ function ScopePicker({ dictionaries, value, onChange }) {
 // AssignRoleForm (FR-2) — назначить роль сотруднику.
 // ---------------------------------------------------------------------------
 
-function AssignRoleForm({ roles, employees, dictionaries, onDone }) {
+function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false, onDone }) {
   const [employeeId, setEmployeeId] = useState('');
   const [roleId, setRoleId] = useState('');
   const [scope, setScope] = useState(null);
@@ -187,6 +193,11 @@ function AssignRoleForm({ roles, employees, dictionaries, onDone }) {
     }
   };
 
+  // UX_REVIEW F-4: «ещё грузится» отличимо от «справочник пуст».
+  if (sourcesLoading) {
+    return <LoadingState compact label="Загрузка справочников…" />;
+  }
+
   return (
     <form className="chs-ov-form" onSubmit={handleSubmit}>
       <Select
@@ -195,6 +206,9 @@ function AssignRoleForm({ roles, employees, dictionaries, onDone }) {
         onChange={(e) => setEmployeeId(e.target.value)}
         placeholder="Выберите сотрудника…"
         options={(employees ?? []).map((e) => ({ value: e.id, label: e.slug }))}
+        hint={(employees ?? []).length === 0
+          ? 'Список сотрудников пуст — заведите сотрудников в разделе «Оргструктура» или обновите страницу.'
+          : undefined}
       />
       <Select
         label="Роль"
@@ -215,7 +229,7 @@ function AssignRoleForm({ roles, employees, dictionaries, onDone }) {
 // GrantRightForm (FR-3) — дать роли право.
 // ---------------------------------------------------------------------------
 
-function GrantRightForm({ roles, dictionaries, onDone }) {
+function GrantRightForm({ roles, dictionaries, sourcesLoading = false, onDone }) {
   const [roleId, setRoleId] = useState('');
   const [resourceType, setResourceType] = useState('');
   const [operation, setOperation] = useState('');
@@ -252,6 +266,11 @@ function GrantRightForm({ roles, dictionaries, onDone }) {
     }
   };
 
+  // UX_REVIEW F-4: «ещё грузится» отличимо от «справочник пуст».
+  if (sourcesLoading) {
+    return <LoadingState compact label="Загрузка справочников…" />;
+  }
+
   return (
     <form className="chs-ov-form" onSubmit={handleSubmit}>
       <Select
@@ -267,6 +286,9 @@ function GrantRightForm({ roles, dictionaries, onDone }) {
         onChange={(e) => setResourceType(e.target.value)}
         placeholder="Выберите ресурс…"
         options={resources.map((r) => ({ value: r.uri, label: r.name }))}
+        hint={resources.length === 0
+          ? 'Справочник ресурсов недоступен — обновите страницу.'
+          : undefined}
       />
       <Select
         label="Операция"
@@ -274,6 +296,9 @@ function GrantRightForm({ roles, dictionaries, onDone }) {
         onChange={(e) => setOperation(e.target.value)}
         placeholder="Выберите операцию…"
         options={operations.map((op) => ({ value: op, label: op }))}
+        hint={operations.length === 0
+          ? 'Справочник операций недоступен — обновите страницу.'
+          : undefined}
       />
       <ScopePicker dictionaries={dictionaries} value={scope} onChange={setScope} />
       <Button type="submit" variant="primary" size="sm" disabled={!canSubmit} loading={busy}>
@@ -285,16 +310,21 @@ function GrantRightForm({ roles, dictionaries, onDone }) {
 
 // ---------------------------------------------------------------------------
 // RevokeAssignmentButton / RevokeGrantButton — FR-2/FR-3 revoke path.
+// UX_REVIEW F-3 (principles §4: опасное действие = осознанное подтверждение):
+// отзыв деструктивен — клик открывает kit ConfirmDialog (образец
+// screen-org.jsx pendingDelete), НЕ window.confirm и НЕ одноклик-revoke.
 // ---------------------------------------------------------------------------
 
-function RevokeAssignmentButton({ id, onDone }) {
+function RevokeAssignmentButton({ id, subjectLabel = '', onDone }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { push: pushToast } = useToastContext();
-  const handleClick = async () => {
+  const handleConfirm = async () => {
     setBusy(true);
     try {
       await revokeAssignment(id);
       pushToast({ tone: 'success', message: 'Назначение отозвано.' });
+      setConfirmOpen(false);
       onDone && onDone();
     } catch (err) {
       pushToast({ tone: 'error', message: err.message ?? 'Не удалось отозвать назначение.' });
@@ -303,18 +333,35 @@ function RevokeAssignmentButton({ id, onDone }) {
     }
   };
   return (
-    <Button variant="ghost" size="sm" loading={busy} onClick={handleClick}>Отозвать</Button>
+    <>
+      <Button variant="ghost" size="sm" onClick={() => setConfirmOpen(true)}>Отозвать</Button>
+      <ConfirmDialog
+        open={confirmOpen}
+        tone="danger"
+        title="Отозвать роль?"
+        message={subjectLabel
+          ? `Отозвать роль у: ${subjectLabel}? Доступ по этой роли пропадёт сразу.`
+          : 'Отозвать это назначение? Доступ по этой роли пропадёт сразу.'}
+        confirmLabel="Отозвать"
+        cancelLabel="Отмена"
+        loading={busy}
+        onConfirm={handleConfirm}
+        onClose={() => { if (!busy) setConfirmOpen(false); }}
+      />
+    </>
   );
 }
 
-function RevokeGrantButton({ id, onDone }) {
+function RevokeGrantButton({ id, subjectLabel = '', onDone }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { push: pushToast } = useToastContext();
-  const handleClick = async () => {
+  const handleConfirm = async () => {
     setBusy(true);
     try {
       await revokeGrant(id);
       pushToast({ tone: 'success', message: 'Право отозвано.' });
+      setConfirmOpen(false);
       onDone && onDone();
     } catch (err) {
       pushToast({ tone: 'error', message: err.message ?? 'Не удалось отозвать право.' });
@@ -323,7 +370,22 @@ function RevokeGrantButton({ id, onDone }) {
     }
   };
   return (
-    <Button variant="ghost" size="sm" loading={busy} onClick={handleClick}>Отозвать</Button>
+    <>
+      <Button variant="ghost" size="sm" onClick={() => setConfirmOpen(true)}>Отозвать</Button>
+      <ConfirmDialog
+        open={confirmOpen}
+        tone="danger"
+        title="Отозвать право?"
+        message={subjectLabel
+          ? `Отозвать право «${subjectLabel}» у роли? Оно перестанет действовать сразу.`
+          : 'Отозвать это право у роли? Оно перестанет действовать сразу.'}
+        confirmLabel="Отозвать"
+        cancelLabel="Отмена"
+        loading={busy}
+        onConfirm={handleConfirm}
+        onClose={() => { if (!busy) setConfirmOpen(false); }}
+      />
+    </>
   );
 }
 
