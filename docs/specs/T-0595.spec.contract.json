@@ -1,0 +1,75 @@
+{
+  "task_id": "T-0595",
+  "status": "ready",
+  "summary": "UX_REVIEW T-0573 findings F-1/F-2: honest-503 ассистента называет /llm-connections голым текстом в прозе — не кликабелен, и билдер-не-админ видит путь, которого нет в его навигации (admin-зона скрыта). Решение: respondLlmUnavailable (src/http/assistant.ts:1160) резолвит admin-статус actor'а через существующий loadAdminContext(pool, tenantId, actorSlug, nowMs) (src/db/org.ts:674) с тем же предикатом, что гейтует саму admin-зону (isGenesisOwner || adminGrants.length>0, src/http/org.ts:379) — админу envelope несёт error.deepLinks:[{path:'/llm-connections',label}], не-админу deepLinks отсутствует и текст честно просит обратиться к администратору вместо голого пути. screen-assistant.jsx 503-ветка рендерит кнопку тем же паттерном, что уже существующие deep-links bundle-review (:568-584, navigate(dl.path)) — новый UI-примитив не вводится. Envelope-изменение аддитивно (error.deepLinks — новое опциональное поле, старый {error:{code,message}} шейп не ломается).",
+  "functional": [
+    "F1. Admin actor (isGenesisOwner || adminGrants.length>0) получает в honest-503 error.deepLinks с path=/llm-connections и label.",
+    "F2. Не-admin actor НЕ получает deepLinks с /llm-connections — сервер не создаёт мёртвую кнопку.",
+    "F3. Текст для не-админа не содержит /llm-connections, честно направляет к администратору тенанта. Текст для админа (F-2) убирает голый (/llm-connections) из прозы, оставляя название страницы «Подключения LLM».",
+    "F4. screen-assistant.jsx 503-ветка кладёт deepLinks из d.error.deepLinks в рендеримое сообщение, используя существующий MessageBubble deep-link рендер (:568-584).",
+    "F5. Non-ok (4xx/5xx кроме 503) ветка не меняется — deepLinks туда не добавляются."
+  ],
+  "non_functional": [
+    "N1. Envelope-расширение аддитивно — старые потребители (assistantErrorText читает d.error.message) не ломаются.",
+    "N2. Решение по admin-статусу принимает СЕРВЕР (единственный источник правды), не клиент — честность (G7) не зависит от клиентского state.",
+    "N3. Обе новые формулировки текста проходят assistant-llm-message-jargon.sh (без dev-жаргона денилиста).",
+    "N4. Гейт assistant-llm-message-jargon.sh (ЧУЖОЙ, создан T-0573) обновляется АДДИТИВНО с комментарием-санкцией 'T-0595 по UX_REVIEW T-0573 F-2', т.к. проза меняется по санкционированной находке самого стюарда.",
+    "N5. classifyLlmUnavailability и механика обоих failure-сайтов не переписываются — только admin-ветвление внутри respondLlmUnavailable и обогащение envelope."
+  ],
+  "out_of_scope": [
+    "O1. Клиентская проверка nav-capabilities для скрытия кнопки — решение целиком серверное, клиент рендерит ровно то, что получил.",
+    "O2. Non-ok-ветка (4xx/5xx кроме 503) — deepLinks туда не добавляются.",
+    "O3. UI/экран /llm-connections сам по себе — не трогается (T-0574, уже смержено).",
+    "O4. Правка classifyLlmUnavailability, адаптеров LLM-портов, миграций — вне скоупа.",
+    "O5. Redesign системного промпта ассистента/аналитика.",
+    "O6. Полный machine-readable capability-объект в error envelope — избыточно, нужен только deep-link дескриптор."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "Actor с admin-доступом (isGenesisOwner || adminGrants.length>0), получивший honest-503 от POST /api/assistant/threads/:id/messages, видит error.deepLinks — непустой массив с объектом path='/llm-connections' и непустым label.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Actor БЕЗ admin-доступа, получивший тот же honest-503, НЕ видит error.deepLinks с путём /llm-connections (поле отсутствует либо пустой массив).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "Текст error.message для НЕ-админа не содержит /llm-connections и явно направляет к администратору тенанта вместо самостоятельного перехода.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "Текст error.message для админа не содержит голого (/llm-connections) в скобках прозы (F-2), сохраняет упоминание страницы «Подключения LLM» по названию, остаётся человекочитаемым/actionable.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-5",
+      "text": "screen-assistant.jsx 503-ветка кладёт deepLinks из d.error.deepLinks в сообщение; MessageBubble рендерит кнопку navigate(dl.path) тем же паттерном, что bundle-review deep-links (:568-584).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Envelope-изменение аддитивно: существующие 8 тестов screen-assistant.error-envelope.test.js проходят без регресса.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "assistant-llm-message-jargon.sh зелёный после правки (обновлён аддитивно с санкц-комментарием T-0595 по UX_REVIEW T-0573 F-2); --self-test тоже зелёный.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-8",
+      "text": "npm run fitness, npm run ci (root), vitest run (web), tsc --noEmit, eslint src — все зелёные после изменений.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-9",
+      "text": "ux-g5-jargon-denylist.sh (INFORMATIONAL) не показывает новых находок на видимом продуктовом тексте (только pre-existing шум *.test.jsx, как T-0573).",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "spec_artifact_path": "docs/specs/T-0595-assistant-deeplink.spec.md"
+}

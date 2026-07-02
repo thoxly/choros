@@ -1,6 +1,7 @@
 /**
  * ci/checks/db/assistant-llm-unavailable.test.ts — T-0573
- * (ADR-T0573 §2.2, FF-5/FF-6/FF-UX-7)
+ * (ADR-T0573 §2.2, FF-5/FF-6/FF-UX-7), extended by T-0595
+ * (ADR-T0595, UX_REVIEW T-0573 F-1/F-2, FF-1/FF-2)
  *
  * Run in the `db` CI job / locally:
  *   DATABASE_URL=postgres://choros_migrator:...@localhost:55432/choros npm run fitness:db
@@ -8,21 +9,31 @@
  * Proves, against LIVE Postgres and REAL HTTP routes (registerAssistantRoutes,
  * a real registerTenant() tenant/owner — not a mock):
  *
- *   FF-5 (AC-5). When ctx.llm.chat() throws a NON-LlmDormantError adapter
- *     failure (modeled here as LlmUnavailableError — exactly the class
- *     src/adapters/openai-llm-port.ts now wraps its own throw points in),
- *     POST /api/assistant/threads/:id/messages does NOT answer with a raw
- *     HTTP 500 {"error":{"code":"INTERNAL"}} — it answers 503 with
- *     error.code==="LLM_UNAVAILABLE" and a message containing "/llm-connections".
- *   FF-6 (AC-6). The SAME route, for a tenant whose llmPortFactory returns the
- *     genuinely dormant port (no config at all — LlmDormantError path),
- *     answers with a message containing "/llm-connections" too — the SAME
- *     class of honest answer, not just "not configured" with no pointer to
- *     where to fix it.
- *   Anti-mask check (ADR §2.2 "do not mask real bugs"): when ctx.llm.chat()
- *     throws a PLAIN Error (not LlmDormantError, not LlmUnavailableError),
- *     the route still falls through to the ordinary 500 INTERNAL path — the
- *     classifier does NOT swallow genuine bugs.
+ *   FF-5 (AC-5, T-0573). When ctx.llm.chat() throws a NON-LlmDormantError
+ *     adapter failure (modeled here as LlmUnavailableError — exactly the
+ *     class src/adapters/openai-llm-port.ts now wraps its own throw points
+ *     in), POST /api/assistant/threads/:id/messages does NOT answer with a
+ *     raw HTTP 500 {"error":{"code":"INTERNAL"}} — it answers 503 with
+ *     error.code==="LLM_UNAVAILABLE".
+ *   FF-6 (AC-6, T-0573). The SAME route, for a tenant whose llmPortFactory
+ *     returns the genuinely dormant port (no config at all —
+ *     LlmDormantError path), answers with the SAME class of honest answer.
+ *   Anti-mask check (ADR-T0573 §2.2 "do not mask real bugs"): when
+ *     ctx.llm.chat() throws a PLAIN Error (not LlmDormantError, not
+ *     LlmUnavailableError), the route still falls through to the ordinary
+ *     500 INTERNAL path — the classifier does NOT swallow genuine bugs.
+ *
+ *   FF-1 (AC-1, T-0595). The tenant OWNER (always isGenesisOwner=true, hence
+ *     admin) gets a structured error.deepLinks:[{path:"/llm-connections",
+ *     label}] in the SAME honest-503 body — UX_REVIEW T-0573 F-2's
+ *     click-through. (Supersedes the old `.toContain('/llm-connections')`
+ *     text assertion — the admin PROSE no longer carries the bare path,
+ *     F-2 — the contract moved from substring-in-text to a structural
+ *     deep-link descriptor, asserted here instead.)
+ *   FF-2 (AC-2, T-0595). A plain tenant member (no role_assignment at all —
+ *     NOT admin, cannot reach /llm-connections via their own nav either,
+ *     UX_REVIEW T-0573 F-1) gets the SAME honest 503 but WITHOUT
+ *     error.deepLinks — no dead door to a screen they cannot reach.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -165,10 +176,34 @@ describe.skipIf(!LIVE)('T-0573 — assistant LLM-unavailable honest 503 (live Po
     return (JSON.parse(res.body) as { id: string }).id;
   }
 
+  // T-0595 (AC-2, FF-2): a plain tenant member — NO role_assignment at all
+  // (not tenant-owner, not role-configurator) — same pattern as
+  // assistant-llm-binding.test.ts FF-7 (non-privileged-member fixture).
+  // isGenesisOwner=false AND adminGrants=[] for this actor: NOT admin.
+  async function createPlainMember(tenantId: string, label: string): Promise<string> {
+    const plainSlug = `t0595-plain-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withClient(migratorUrl(), async (c) => {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
+      await c.query(
+        `INSERT INTO choros.employee (tenant_id, id, slug, kind, display_name, position_id, created_at, updated_at)
+         VALUES ($1, gen_random_uuid(), $2, 'human', 'T-0595 plain member', NULL, 0, 0)`,
+        [tenantId, plainSlug],
+      );
+      await c.query('COMMIT');
+    });
+    return plainSlug;
+  }
+
   // -------------------------------------------------------------------------
-  // FF-6 (AC-6): dormant path (LlmDormantError, via the real dormantLlmPort).
+  // FF-6 (AC-6, T-0573): dormant path (LlmDormantError, via the real
+  // dormantLlmPort). T-0595/AC-1: the owner is ALWAYS isGenesisOwner=true
+  // (tenant-owner role_assignment from registerTenant) — i.e. always admin —
+  // so this scenario now asserts the structural error.deepLinks descriptor
+  // (F-2 removed the bare path from the admin PROSE; the click-through
+  // carries "where"/"how" instead — see ADR-T0595 §1.5).
   // -------------------------------------------------------------------------
-  it('FF-6: dormant LLM (no config at all) answers 503 LLM_UNAVAILABLE with a message containing /llm-connections', async () => {
+  it('FF-6/FF-1: dormant LLM (no config at all), owner (admin) — 503 LLM_UNAVAILABLE with error.deepLinks to /llm-connections', async () => {
     const a = await registerOne('Dormant');
     try {
       currentFactoryResult = dormantLlmPort;
@@ -179,19 +214,27 @@ describe.skipIf(!LIVE)('T-0573 — assistant LLM-unavailable honest 503 (live Po
         { text: 'привет, расскажи, сколько заявок обработано' },
       );
       expect(res.statusCode).toBe(503);
-      const body = JSON.parse(res.body) as { error: { code: string; message: string } };
+      const body = JSON.parse(res.body) as {
+        error: { code: string; message: string; deepLinks?: Array<{ path: string; label: string }> };
+      };
       expect(body.error.code).toBe('LLM_UNAVAILABLE');
-      expect(body.error.message).toContain('/llm-connections');
+      // T-0595/F-2: admin prose no longer carries the bare path.
+      expect(body.error.message).not.toContain('/llm-connections');
+      // T-0595/AC-1: structural deep-link descriptor present instead.
+      expect(body.error.deepLinks).toEqual([
+        { path: '/llm-connections', label: expect.any(String) },
+      ]);
     } finally {
       await cleanup(a.tenantId);
     }
   });
 
   // -------------------------------------------------------------------------
-  // FF-5 (AC-5): adapter-failure path (LlmUnavailableError — config EXISTS,
-  // the call failed). Must NOT be a raw 500 INTERNAL.
+  // FF-5 (AC-5, T-0573): adapter-failure path (LlmUnavailableError — config
+  // EXISTS, the call failed). Must NOT be a raw 500 INTERNAL. Same T-0595/AC-1
+  // structural-deep-link contract as the dormant path (owner is always admin).
   // -------------------------------------------------------------------------
-  it('FF-5: a configured-but-failing LLM adapter (LlmUnavailableError) answers 503 LLM_UNAVAILABLE, NOT 500 INTERNAL', async () => {
+  it('FF-5/FF-1: a configured-but-failing LLM adapter, owner (admin) — 503 LLM_UNAVAILABLE with error.deepLinks, NOT 500 INTERNAL', async () => {
     const a = await registerOne('AdapterFail');
     try {
       currentFactoryResult = makeThrowingPort(
@@ -205,10 +248,48 @@ describe.skipIf(!LIVE)('T-0573 — assistant LLM-unavailable honest 503 (live Po
       );
       expect(res.statusCode).not.toBe(500);
       expect(res.statusCode).toBe(503);
-      const body = JSON.parse(res.body) as { error: { code: string; message: string } };
+      const body = JSON.parse(res.body) as {
+        error: { code: string; message: string; deepLinks?: Array<{ path: string; label: string }> };
+      };
       expect(body.error.code).not.toBe('INTERNAL');
       expect(body.error.code).toBe('LLM_UNAVAILABLE');
-      expect(body.error.message).toContain('/llm-connections');
+      expect(body.error.message).not.toContain('/llm-connections');
+      expect(body.error.deepLinks).toEqual([
+        { path: '/llm-connections', label: expect.any(String) },
+      ]);
+    } finally {
+      await cleanup(a.tenantId);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // FF-2 (AC-2, T-0595): a plain tenant member (no admin capability at all)
+  // gets the SAME honest 503 class, but WITHOUT error.deepLinks — the server
+  // does not offer a path the caller cannot reach via their own nav
+  // (UX_REVIEW T-0573 F-1 — admin zone is hidden from a non-admin builder).
+  // -------------------------------------------------------------------------
+  it('FF-2: dormant LLM, plain non-admin member — 503 LLM_UNAVAILABLE WITHOUT error.deepLinks (no dead door)', async () => {
+    const a = await registerOne('NonAdmin');
+    try {
+      currentFactoryResult = dormantLlmPort;
+      const plainSlug = await createPlainMember(a.tenantId, 'dormant');
+      const threadId = await createThread(baseUrl, plainSlug);
+
+      const res = await request(
+        baseUrl, 'POST', `/api/assistant/threads/${threadId}/messages`, { 'x-dev-user': plainSlug },
+        { text: 'привет, расскажи, сколько заявок обработано' },
+      );
+      expect(res.statusCode).toBe(503);
+      const body = JSON.parse(res.body) as {
+        error: { code: string; message: string; deepLinks?: unknown };
+      };
+      expect(body.error.code).toBe('LLM_UNAVAILABLE');
+      // T-0595/AC-3: no path at all — nothing to navigate to.
+      expect(body.error.message).not.toContain('/llm-connections');
+      // T-0595/AC-3: honestly redirects to the tenant admin instead.
+      expect(body.error.message.toLowerCase()).toMatch(/администратор/);
+      // T-0595/AC-2: no deep-link descriptor — field absent, not an empty array.
+      expect(body.error.deepLinks).toBeUndefined();
     } finally {
       await cleanup(a.tenantId);
     }

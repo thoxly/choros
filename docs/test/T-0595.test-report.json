@@ -1,0 +1,110 @@
+{
+  "task_id": "T-0595",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 6427,
+    "passed": 6427,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/assistant-llm-unavailable.test.ts :: 'FF-6/FF-1: dormant LLM (no config at all), owner (admin) — 503 LLM_UNAVAILABLE with error.deepLinks to /llm-connections' + 'FF-5/FF-1: a configured-but-failing LLM adapter, owner (admin) — 503 LLM_UNAVAILABLE with error.deepLinks, NOT 500 INTERNAL' — both on live Postgres 16, real HTTP routes, real registerTenant()'d owner (always isGenesisOwner=true). Both assert body.error.deepLinks toEqual([{path:'/llm-connections', label: expect.any(String)}]) — structural, not substring. Independently re-run by this tester (npx vitest run --dir ci/checks/db --no-file-parallelism -t T-0573, live PG on port 55432) — 4/4 green, matching handoff.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/assistant-llm-unavailable.test.ts :: 'FF-2: dormant LLM, plain non-admin member — 503 LLM_UNAVAILABLE WITHOUT error.deepLinks (no dead door)' — createPlainMember helper inserts a genuine employee row with ZERO role_assignment rows (not tenant-owner, not role-configurator); asserts body.error.deepLinks toBeUndefined() (field absent, not empty array — matches spec's explicit semantic distinction). Independently re-run — pass. ADVERSARIAL EXTENSION (this tester, not in the coder's suite): registered a live tenant, then via a COMMITTED raw-SQL UPDATE (UPDATE choros.role_assignment SET valid_until=1 WHERE employee_id=<owner>) revoked the tenant OWNER's own role_assignment rows entirely — making the SAME actor (previously isGenesisOwner=true) genuinely non-admin — and hit the live server with the SAME x-dev-user header. Raw HTTP response body string does NOT contain the substring 'deepLinks' anywhere (not just the parsed-JSON field being undefined) and does NOT contain '/llm-connections'. Restored the role_assignment afterward (compensating UPDATE valid_until=NULL) and confirmed deepLinks reappears for the same actor on the same running server — proving the manipulation, not some other confound, drove the change. Full cleanup of the throwaway tenant confirmed via psql (0 orphan rows).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "bash ci/checks/ux/assistant-llm-message-jargon.sh (PASS: NON_ADMIN message contains no '/llm-connections', mentions 'администратор', denylist clean) + --self-test (PASS, rc=14 on bad fixture, rc=0 on good) + src/__tests__/assistant-llm-message.unit.test.ts :: 'AC-3: does NOT contain /llm-connections' + 'AC-3: honestly directs the caller to their tenant admin' (unit-level, no DB) + web/src/screens/__tests__/screen-assistant.error-envelope.test.js :: 'AC-3: non-admin body WITHOUT deepLinks — assistantErrorText extracts the honest ask-your-admin message'. All independently re-run by this tester — pass.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "bash ci/checks/ux/assistant-llm-message-jargon.sh (PASS: ADMIN message does not contain the bare '/llm-connections' path AND names 'Подключения LLM' by title AND denylist clean) + src/__tests__/assistant-llm-message.unit.test.ts :: 'AC-4/F-2: does NOT contain the bare /llm-connections path' + 'still names the target page by title, human-readably'. Independently re-run — pass. Manually inspected the literal constant value in src/core/assistant-messages.ts — confirmed no '(/llm-connections)' substring remains in the admin prose.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "web/src/screens/__tests__/screen-assistant.error-envelope.test.js :: 'AC-5: 503 branch threads d.error.deepLinks into the rendered assistantMsg' + 'AC-5: MessageBubble deep-link render block is reused (no new component) — same navigate(dl.path) pattern'. Independently re-run — 12/12 pass (8 original T-0573 + 4 new T-0595). Manually verified by direct source read (not just regex-in-test): MessageBubble's deepLinks/.map/Button/navigate(dl.path) block is structurally identical to the pre-existing bundle-review block, only the heading (deepLinksTitle) is new and conditional on msg.intent — confirmed msg.intent is 'configurator' for every bundle-review path (3 call sites, grep-verified) and undefined for the live honest-503 client message object (screen-assistant.jsx:178-185 builds a literal without an intent field) — so the title switch cannot misfire on the bundle-review case.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "web/src/screens/__tests__/screen-assistant.error-envelope.test.js — all 8 pre-existing T-0573 tests re-run unmodified in content and pass alongside the 4 new ones (12/12 total). assistantErrorText (web/src/screens/assistant-error-text.js) verified by direct source read to only touch d.error.message/d.message — physically cannot be affected by an unrecognized deepLinks field. New test 'AC-6: admin body WITH deepLinks — assistantErrorText still extracts the message unchanged (unknown field ignored)' confirms this behaviorally too.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "bash ci/checks/ux/assistant-llm-message-jargon.sh (PASS) + bash ci/checks/ux/assistant-llm-message-jargon.sh --self-test (PASS: rc=0 good fixture, rc=14 bad fixture correctly flagged with all 3 planted violation classes — dev-jargon, dead path in ADMIN fixture, dead path + no-admin-redirect in NON_ADMIN fixture). Independently re-run by this tester outside the full fitness chain to confirm the detector itself is sound, not merely coincidentally green.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-8",
+      "test": "npm run fitness (full ~250-step chain) — exit 0, re-run by this tester; every FAIL line in the log traced to a gate's own --self-test negative fixture (expected). npm run ci (root) — exit 0, re-run. npx vitest run (web) — 56 files/1545 tests, re-run. npx tsc --noEmit — 0 errors, re-run. npx eslint src — 0 errors/36 pre-existing no-console warnings outside the T-0595 delta, re-run.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "bash ci/checks/ux/ux-g5-jargon-denylist.sh (INFORMATIONAL, exit 0) — re-run by this tester: exactly 24 pre-existing findings, all in *.test.jsx files (screen-agents.test.jsx, screen-app-records.test.jsx, screen-apps.test.jsx, screen-audit.test.jsx, screen-llm-connections.test.jsx, screen-ops-overview.test.jsx, screen-process-analytics.test.jsx, screen-process-editor.test.jsx, screen-record-detail.test.jsx, screen-reports.test.jsx) — same count/files as the T-0573 baseline, 0 new findings on T-0595's visible product text (the two new message constants and the deep-link button label).",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npx tsc --noEmit (root)",
+      "result": "pass",
+      "note": "0 errors."
+    },
+    {
+      "check": "npx eslint src",
+      "result": "pass",
+      "note": "0 errors, 36 pre-existing no-console warnings, none in the T-0595 delta files."
+    },
+    {
+      "check": "npx vitest run (root, full suite)",
+      "result": "pass",
+      "note": "254 files passed | 2 skipped (256); 4882 tests passed | 10 skipped (4892); 0 failed. Matches pr-handoff exactly."
+    },
+    {
+      "check": "npx vitest run (web, full suite)",
+      "result": "pass",
+      "note": "56 files passed (56); 1545 tests passed (1545); 0 failed. Matches pr-handoff exactly."
+    },
+    {
+      "check": "npm run ci (root)",
+      "result": "pass",
+      "note": "Ran to completion, exit 0 (background-run, tail confirmed 254 files/4882 tests passed, same as standalone vitest run)."
+    },
+    {
+      "check": "npm run fitness:db (live Postgres 16, docker-compose postgres:16, port 55432, torn down after)",
+      "result": "pass",
+      "note": "103 files passed (103); 1092 tests passed (1092); 0 failed, 0 flake (single clean run, unlike the coder's first-attempt doc-summary timeout flake under container load — this tester's run was clean throughout)."
+    },
+    {
+      "check": "npm run fitness (full ~250-step gate chain, live Postgres)",
+      "result": "pass",
+      "note": "Exit 0. Every 'FAIL' line in the log individually traced to a gate's own --self-test proving detection of a deliberately-planted broken fixture (read-pdp-frozen-core, rights-overview-source-switch, rights-ui-no-new-write, rights-ui-anti-case, rights-editor-badge-verdict, rights-ui-frozen-write self-tests) — no unexplained/real FAIL found. Anti-case-lock (D-064 §5) tail explicitly checked per task instruction: Phase 1 (delegate point-gates) PASS, Phase 2 (full denylist repo-wide) PASS — all literal families (role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov, approvalRequired, gw-approval-threshold) at-or-below their recorded baseline, aggregate 19<=19 (steady, not grown)."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None. All 9 AC map to at least one automated, independently re-run test (fitness or unit/integration) — no manual-only AC in this task's contract.",
+    "adversarial_probe_performed_per_task_instruction": "Per the review brief's explicit instruction ('SQL-ом в ROLLBACK сделай вызывающего НЕ-админом и убедись живым HTTP, что deepLinks нет в сыром теле'): registered a live tenant via the real registerTenant() path (owner starts isGenesisOwner=true, i.e. admin by construction — confirmed via a baseline probe showing deepLinks present). Then, via a SEPARATE raw pg.Client connection, ran a committed UPDATE choros.role_assignment SET valid_until=1 WHERE tenant_id=<t> AND employee_id=<owner's employee row> — revoking ALL of that actor's role_assignment rows (both the tenant-owner assignment that drives isGenesisOwner and any other assignment that could grant adminGrants). This is the same actorSlug the live HTTP server's own connection pool resolves against — a genuine DB-state change, not a mock or stub. Sent a live POST /api/assistant/threads/:id/messages with x-dev-user=<owner slug> to the SAME running server (registerAssistantRoutes + Router, real localhost HTTP) and inspected the RAW response body STRING (not just the parsed object) — confirmed via .not.toContain('deepLinks') and .not.toContain('/llm-connections') on the raw text, plus explicit parsed.error.deepLinks toBeUndefined(). This rules out any possibility of the field being present-but-falsy-in-a-way-JSON.parse-hides, or the client merely choosing not to render it — the server-emitted bytes themselves carry no deepLinks key while the actor is non-admin. Restored the role_assignment (compensating UPDATE valid_until=NULL — net effect of a rollback without an actual open-transaction ROLLBACK, since a genuinely uncommitted transaction on a separate connection would be invisible to the server's own pool under READ COMMITTED and would make the probe vacuous) and confirmed deepLinks reappears for the identical actor on the identical server afterward. Full teardown of the throwaway tenant (grant/role_assignment/agent_card/employee/role/tenant rows) confirmed via a direct psql count query (0 orphan rows matching the test's display_name pattern).",
+    "anti_false_pass_checks_performed": [
+      "Did not trust the handoff's claimed test counts at face value — independently re-ran every claimed suite (root vitest, web vitest, tsc, eslint, fitness, fitness:db, npm run ci, the two UX gates) from a clean docker-compose postgres:16 bring-up and confirmed identical pass counts.",
+      "Scanned the full npm run fitness log line-by-line for every 'FAIL' occurrence and traced each to a --self-test negative-fixture assertion, not a real red — confirmed the overall process exit code was 0 (not just 'last line looked fine').",
+      "Verified the jargon gate's own detection logic by re-running --self-test standalone (not just as part of the full fitness chain) — confirmed it independently fires (rc=14) on a deliberately broken fixture containing all three violation classes (dev-jargon token, dead /llm-connections path in the ADMIN fixture, dead path + missing admin-redirect in the NON_ADMIN fixture).",
+      "Went beyond the coder's own AC-2 non-admin test (which only asserts against a fresh employee with no role_assignment ever created) by adversarially REVOKING an existing admin's rights via direct SQL and re-probing the SAME actor identity live over HTTP — a stronger proof that the server re-evaluates admin status per-request rather than caching/assuming it, since this is the identical actorSlug that was admin moments earlier in the same test run.",
+      "Grepped the entire web/ and src/ trees for the removed constant name (ASSISTANT_LLM_UNAVAILABLE_MESSAGE, singular, no suffix) to confirm no stray importer was left broken by the ADMIN/NON_ADMIN split — found only one harmless comment reference, no live import.",
+      "Manually inspected sendErrorEnvelope's call sites are unchanged (grep for its signature) and that respondLlmUnavailable's non-admin branch is the ONLY branch that still routes through it unmodified — confirming N1 (envelope aliasing) holds structurally, not just by the tests passing."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (nit, review): ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN honestly redirects to 'администратор вашей организации' but gives no mechanism to identify/contact that person — acceptable per ADR §3's explicit rejection of a full capability object (O6) as out of scope; not a defect in this task.",
+      "F-2 (info, review): the deep-link render title-switch (msg.intent-based) never actually exercises its 'unknown'-intent branch in practice, because deepLinks itself is never persisted to the message row (fetchMessages doesn't return it) — same pre-existing ephemeral-only behavior as bundle-review deep-links, not a new regression, just not explicitly called out in the ADR."
+    ]
+  }
+}

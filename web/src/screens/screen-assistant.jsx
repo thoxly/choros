@@ -165,8 +165,15 @@ function useMessagesStub(threadId, onFirstMessage) {
 
       if (r.status === 503) {
         // LLM недоступен — честный 503. T-0573 (review R-1): текст сервера
-        // теперь в каноническом envelope d.error.message (LLM_UNAVAILABLE, с
-        // /llm-connections); плоское d.message — legacy-совместимость.
+        // теперь в каноническом envelope d.error.message; плоское d.message —
+        // legacy-совместимость. T-0595 (UX_REVIEW T-0573 F-1/F-2): сервер
+        // (respondLlmUnavailable) резолвит admin-статус вызывающего и — ТОЛЬКО
+        // для admin — кладёт error.deepLinks:[{path:'/llm-connections',label}]
+        // в envelope; не-админ его не получает вовсе (честный текст без
+        // мёртвой кнопки на admin-only экран, который ему всё равно не видно
+        // в навигации). Рендерится тем же MessageBubble deep-links блоком, что
+        // и bundle-review (:568-584) — deepLinks:null для не-админа/legacy-тел
+        // без структурного deep-link ничего не меняет в рендере.
         const d = await r.json().catch(() => ({}));
         const assistantMsg = {
           id: `msg-dormant-${Date.now()}`,
@@ -174,6 +181,7 @@ function useMessagesStub(threadId, onFirstMessage) {
           text: assistantErrorText(d, 'LLM не настроен — настройте BYO-ключ для активации ассистента.'),
           ts: new Date().toISOString(),
           streaming_done: true,
+          deepLinks: (d && d.error && Array.isArray(d.error.deepLinks)) ? d.error.deepLinks : null,
         };
         setMessages((prev) => [...prev, assistantMsg]);
         return;
@@ -420,9 +428,17 @@ function MessageBubble({ msg, activeThreadId }) {
   const [bundlePromoteConfirmOpen, setBundlePromoteConfirmOpen] = React.useState(false);
 
   // T-0465: deep-links + bundle-promote are present only on a bot reply that
-  // generated a solution bundle this turn.
+  // generated a solution bundle this turn. T-0595: the SAME deepLinks field
+  // is now also populated by the honest-503 "LLM unavailable" path (admin
+  // callers only) — rendered by the identical block below, no new component.
   const deepLinks = Array.isArray(msg.deepLinks) ? msg.deepLinks : [];
   const bundlePromote = msg.bundlePromote || null;
+  // T-0595: bundle-review deep-links always carry msg.intent==='configurator'
+  // (assistant.ts :1998); the honest-503 message never sets intent — use that
+  // to pick a contextually correct heading for the SAME rendered block.
+  const deepLinksTitle = msg.intent
+    ? 'Проверьте черновик в разделах:'
+    : 'Действие:';
 
   const handleBundlePromote = async () => {
     if (!bundlePromote || promoting || promoted) return;
@@ -564,10 +580,14 @@ function MessageBubble({ msg, activeThreadId }) {
 
       {/* T-0465 (D8-G4): REVIEW-IN-SECTIONS. Deep-links into the actual sections
           (Приложения / Модельер) — the user reviews the generated DRAFT visually
-          THERE, not via a constructor rendered in chat. */}
+          THERE, not via a constructor rendered in chat.
+          T-0595 (UX_REVIEW T-0573 F-1/F-2): the SAME block also renders the
+          admin-only honest-503 deep-link ("Открыть подключения LLM") — the
+          heading text switches contextually (deepLinksTitle, above) so it
+          reads correctly for both cases without a second component. */}
       {deepLinks.length > 0 && (
         <div className="chs-asst__msg-deeplinks">
-          <div className="chs-asst__msg-deeplinks-title">Проверьте черновик в разделах:</div>
+          <div className="chs-asst__msg-deeplinks-title">{deepLinksTitle}</div>
           {deepLinks.map((dl, i) => (
             <Button
               key={`${dl.path}-${i}`}
