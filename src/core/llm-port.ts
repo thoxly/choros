@@ -210,7 +210,9 @@ export class LlmDormantError extends Error {
  * Thrown by a production LlmPort adapter when a CONFIGURED provider call
  * fails (bad key/handle, non-JSON response, HTTP error, timeout, network).
  * The original failure is preserved as `cause` for logs — NEVER surfaced to
- * the end user (see ASSISTANT_LLM_UNAVAILABLE_MESSAGE, assistant-messages.ts).
+ * the end user (see ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN/_NON_ADMIN,
+ * assistant-messages.ts — T-0595 split the single constant by caller admin
+ * status).
  */
 export class LlmUnavailableError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {

@@ -77,8 +77,14 @@ import { classifyLlmUnavailability, type LlmPort } from "../core/llm-port.js";
 // T-0573 (ADR-T0573 §2.2 B3): shared honest-503 text for BOTH the dormant path
 // (no LLM config at all) and the adapter-failure path (config exists, call
 // failed) — one canonical human message, one canonical envelope.
-import { ASSISTANT_LLM_UNAVAILABLE_MESSAGE } from "../core/assistant-messages.js";
-import { resolveActorSlugFromAuth } from "../db/org.js";
+// T-0595 (UX_REVIEW T-0573 F-1/F-2): the single constant is now two — admin
+// gets a deep-link button + path-free prose, non-admin gets an honest
+// "ask your admin" text (no dead door to an admin-only screen they can't reach).
+import {
+  ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN,
+  ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN,
+} from "../core/assistant-messages.js";
+import { loadAdminContext, resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
 // T-0477 [E-AGENTS L5]: spend-tracking port wrapper (non-fatal ledger write on chat()).
@@ -1156,6 +1162,15 @@ interface MessagePayload {
 // the T-0571 F-1 lesson: the OLD dormant-only path emitted a non-canonical
 // {error:"LLM_NOT_CONFIGURED", message} (string, not {code,message} object) —
 // this responder always uses the canonical sendErrorEnvelope shape.
+//
+// T-0595 (ADR-T0595 §1.1/§1.2, UX_REVIEW T-0573 F-1/F-2): additionally
+// resolves the CALLER's admin status via the existing `loadAdminContext`
+// resolver — reusing the SAME predicate that gates the admin nav-zone itself
+// (src/http/org.ts:379, `isGenesisOwner || adminGrants.length > 0`) — because
+// `/llm-connections` lives in that zone. Admin callers get a clickable
+// deep-link descriptor (`error.deepLinks`) + path-free prose (F-2); non-admin
+// callers get neither (no dead door to a screen their own nav hides) and a
+// text that honestly points them at their tenant admin instead.
 // ---------------------------------------------------------------------------
 async function respondLlmUnavailable(
   pool: pg.Pool,
@@ -1165,6 +1180,12 @@ async function respondLlmUnavailable(
   agentSlug: string,
   res: ServerResponse,
 ): Promise<void> {
+  const admin = await loadAdminContext(pool, tenantId, actorSlug, Date.now());
+  const isAdmin = admin.isGenesisOwner || admin.adminGrants.length > 0;
+  const text = isAdmin
+    ? ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN
+    : ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN;
+
   // Persist an assistant message so the thread stays consistent for the user.
   const dormantMsgId = randomUUID();
   const dormantTs = Date.now();
@@ -1172,7 +1193,7 @@ async function respondLlmUnavailable(
     const payload: MessagePayload = {
       thread_id: threadId,
       role: "assistant",
-      text: ASSISTANT_LLM_UNAVAILABLE_MESSAGE,
+      text,
       context_ref: null,
       intent: "unknown",
       streaming_done: true,
@@ -1191,7 +1212,27 @@ async function respondLlmUnavailable(
     });
   });
 
-  sendErrorEnvelope(res, 503, "LLM_UNAVAILABLE", ASSISTANT_LLM_UNAVAILABLE_MESSAGE);
+  if (isAdmin) {
+    // T-0595 (ADR-T0595 §1.2): admin envelope carries a structured deep-link
+    // so the web chat can render a clickable button (same pattern as the
+    // bundle-review deep-links, :2080-2085) — NOT routed through
+    // sendErrorEnvelope, which stays a fixed {error:{code,message}} shape for
+    // its ~10 other call sites (additive-at-the-call-site, not
+    // additive-to-the-shared-signature).
+    const body = JSON.stringify({
+      error: {
+        code: "LLM_UNAVAILABLE",
+        message: text,
+        deepLinks: [{ path: "/llm-connections", label: "Открыть подключения LLM" }],
+      },
+    });
+    res.statusCode = 503;
+    res.setHeader("Content-Type", "application/json");
+    res.end(body);
+    return;
+  }
+
+  sendErrorEnvelope(res, 503, "LLM_UNAVAILABLE", text);
 }
 
 interface ThreadRow {
