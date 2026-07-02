@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0592",
+  "verdict": "approved",
+  "review_rounds": "Round 1 (single pass, independent judge — D-007, не строил этот код): git log dev..HEAD (2 коммита: 84f8f76 fix + 4da4966 handoff), git diff dev...HEAD прочитан построчно целиком (3 файла, +101/-2). Определение EmptyState прочитано в первоисточнике (web/src/components/components.jsx:461) — не принято на веру из handoff-текста.",
+  "ci_seen": {
+    "green": true,
+    "known_red": []
+  },
+  "findings": [
+    {
+      "id": "REV-1",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/components/components.jsx:461 (EmptyState signature) vs web/src/screens/screen-spend.jsx:241,292",
+      "issue": "Проверена реальная сигнатура EmptyState: `function EmptyState({ icon, title, description, action, compact = false })`. Проп называется именно `description`, не `message` — заявленный фикс не является no-op: до фикса `message=` тихо игнорировался JSX (React просто не рендерил невалидный проп неизвестного имени в кастомном компоненте), после фикса текст реально попадает в `<div className=\"chs-state__desc\">{description}</div>` и рендерится под заголовком. Это не находка-дефект, а подтверждение корректности фикса — заносится как REV-1 для полноты доказательной цепочки.",
+      "suggestion": "n/a — подтверждено, не требует действия."
+    },
+    {
+      "id": "REV-2",
+      "severity": "nit",
+      "axis": 1,
+      "location": "web/src/components/components.css:406 (.chs-state__desc)",
+      "issue": "Проверена семантика рендера description: CSS `.chs-state__desc { font-size: var(--chs-text-sm); max-width: 42ch; line-height: var(--chs-leading-normal); }` — многострочный блок (НЕ line-clamp/truncate/white-space:nowrap), просто узкий max-width. Оба текста в диффе («Расходы появятся после LLM-вызовов с настроенными ценами.» / «Записи появятся после LLM-вызовов с настроенными ценами.») — короткие однострочные предложения (~55-60 символов), укладываются в 42ch с переносом на 1-2 строки без потери смысла. Смысл не ломается при рендере как description.",
+      "suggestion": "n/a — подтверждено, не требует действия."
+    },
+    {
+      "id": "REV-3",
+      "severity": "nit",
+      "axis": 3,
+      "location": "web/src/screens/__tests__/screen-llm-connections.states.test.jsx:78-80",
+      "issue": "В проекте уже существовал ПРЕЦЕДЕНТ ровно этого класса регрессии (несуществующий проп message= на EmptyState) с тем же паттерном detection (`not.toMatch(/\\bmessage=/)` на срезе исходника вокруг <EmptyState.../>) для screen-llm-connections.jsx. Тест T-0592 (screen-spend.test.jsx) следует уже устоявшейся конвенции source-presence проверки, а не изобретает новый подход — согласованность с прецедентом.",
+      "suggestion": "n/a — информационная находка, подтверждает консистентность подхода."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "diff-scope", "covered": true, "note": "git diff dev...HEAD: РОВНО 2 замены message=→description= в web/src/screens/screen-spend.jsx (строки ~241, ~292) + новый тестовый файл screen-spend.test.jsx (source-presence, без mount React, vitest node environment) + docs/handoff/T-0592.pr-handoff.json. Никаких посторонних изменений не найдено."},
+    {"ac": "prop-exists", "covered": true, "note": "EmptyState реально принимает проп `description` (components.jsx:461) — фикс не no-op, текст физически рендерится в DOM (chs-state__desc)."},
+    {"ac": "no-stray-message", "covered": true, "note": "grep по всему web/src (кроме самого нового test-файла, где message= встречается только в комментариях/regex-паттернах) не находит других мест с message= на EmptyState — экран spend приведён к общей конвенции проекта."},
+    {"ac": "text-semantics", "covered": true, "note": "Оба текста-подсказки короткие однострочные предложения, укладываются в описанный CSS-контейнер (max-width 42ch, многострочный без обрезки) без потери смысла."},
+    {"ac": "handoff-format", "covered": true, "note": "docs/handoff/T-0592.pr-handoff.json присутствует, валидный JSON, содержит task_id/status/branch/ci_local/files_changed/summary — соответствует формату, используемому в этом же worktree другими задачами."}
+  ],
+  "coverage_summary": "Дифф T-0592 состоит ровно из заявленного: 2 замены несуществующего пропа message= на реальный проп description= (EmptyState components.jsx:461) в web/src/screens/screen-spend.jsx + source-presence тест (8 тестов, все green) + handoff JSON. Никаких посторонних изменений. Сигнатура EmptyState независимо прочитана в первоисточнике — description существует, фикс не no-op. Семантика текста после замены проверена по факту CSS-рендера (.chs-state__desc, 42ch, многострочно) — короткие тексты не превращаются в бессмыслицу. Тесты spend (8/8), llm-connections states+a11y+base (41/41) и UX-гейт G4 (state-primitives, informational и --required оба exit 0) — все зелёные, регрессий не найдено. Полный vitest-прогон web/: 1108/1108 passed; 2 test-файла (records-form.test.js, apps-schema.test.js) падают на отсутствующем npm-пакете ajv — подтверждено как pre-existing инфраструктурный гэп на dev, не тронутый и не вызванный этим диффом (те файлы не входят в git diff dev...HEAD).",
+  "role_gap_evidence": [
+    "Не поверил заявлению 'проп description существует' на слово — открыл components.jsx:461 и прочитал реальную сигнатуру function EmptyState({ icon, title, description, action, compact }).",
+    "Проверил физический рендер description через CSS (chs-state__desc, max-width 42ch, line-height normal) вместо предположения, что 'какой-то проп — какой-то текст' достаточно для приёмки: убедился, что смысл текста не ломается контейнером.",
+    "Прогнал полный vitest набор (не только точечные файлы) и обнаружил 2 неродственных failing-файла — расследовал причину (отсутствующий ajv в node_modules, pre-existing на dev, файлы вне диффа) вместо того чтобы просто зафиксировать 'тесты падают' или проигнорировать их."
+  ]
+}
