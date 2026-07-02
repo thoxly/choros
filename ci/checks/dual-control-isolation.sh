@@ -188,6 +188,8 @@ _dc_mig104_failed=0                                                             
 _dc_mig106_failed=0                                                                # T0476-DC-MIG106-GUARD track when 106 triggers the FF-DC7 fail
 _dc_mig107_failed=0                                                                # T0477-DC-MIG107-GUARD track when 107 triggers the FF-DC7 fail
 _dc_mig109_failed=0                                                                # T0397-DC-MIG109-GUARD track when 109 triggers the FF-DC7 fail
+_dc_mig115_failed=0                                                                # T0574-DC-MIG115-GUARD track when 115 triggers the FF-DC7 fail
+_dc_mig116_failed=0                                                                # T0574-DC-MIG116-GUARD track when 116 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -236,6 +238,14 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/109_dual_control_pdp_backfill.sql" ]]; then   # T0397-DC-MIG109-GUARD
       _dc_mig109_failed=1                                                     # T0397-DC-MIG109-GUARD
     fi                                                                        # T0397-DC-MIG109-GUARD
+    # Track specifically when 115 triggers this FAIL (and nothing else).     # T0574-DC-MIG115-GUARD
+    if [[ "${m}" == "migrations/115_assistant_agent_card_backfill.sql" ]]; then # T0574-DC-MIG115-GUARD
+      _dc_mig115_failed=1                                                     # T0574-DC-MIG115-GUARD
+    fi                                                                        # T0574-DC-MIG115-GUARD
+    # Track specifically when 116 triggers this FAIL (and nothing else).     # T0574-DC-MIG116-GUARD
+    if [[ "${m}" == "migrations/116_composite_fk_set_null_columns.sql" ]]; then # T0574-DC-MIG116-GUARD
+      _dc_mig116_failed=1                                                     # T0574-DC-MIG116-GUARD
+    fi                                                                        # T0574-DC-MIG116-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -536,6 +546,49 @@ if [[ "${_dc_mig109_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0397-pdp-dual-control-backfill]: migration 109_dual_control_pdp_backfill.sql is a PURE DML BACKFILL (UPDATE … SET confirmed2_by = confirmed_by for pre-existing active critical rows; no CREATE/ALTER/DROP TABLE, no ADD/DROP COLUMN, no RLS/POLICY) — the confirmed2_by COLUMN STRUCTURE is untouched (still owned by 031); enforcement is the grants-dao.ts read-path change — relief granted" # T0397-DC-MIG109-GUARD
   fi                                                                           # T0397-DC-MIG109-GUARD
 fi                                                                             # T0397-DC-MIG109-GUARD
+# T-0574: additive relief for 115_assistant_agent_card_backfill.sql — PURE DML     # T0574-DC-MIG115-GUARD
+# backfill (INSERT agent_card rows for pre-existing assistant-agent employees).    # T0574-DC-MIG115-GUARD
+# Same scoped-relief class as 073/109; sanctioned in data/frozen-sanctions.jsonl.  # T0574-DC-MIG115-GUARD
+_dc_mig115_stem="migrations/115_assistant_agent_card_backfill.sql"                 # T0574-DC-MIG115-GUARD
+if [[ "${_dc_mig115_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig115_stem}"; then # T0574-DC-MIG115-GUARD
+  _dc_mig115_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig115_stem}" 2>/dev/null || true)"  # T0574-DC-MIG115-GUARD
+  _dc_mig115_bad=0                                                             # T0574-DC-MIG115-GUARD
+  if echo "${_dc_mig115_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0574-DC-MIG115-GUARD
+    _dc_mig115_bad=1                                                           # T0574-DC-MIG115-GUARD introduces DDL/RLS
+  fi                                                                           # T0574-DC-MIG115-GUARD
+  if echo "${_dc_mig115_content}" | grep -iqE "ALTER[[:space:]]+TABLE|ADD[[:space:]]+COLUMN|DROP[[:space:]]+COLUMN|DROP[[:space:]]+TABLE"; then # T0574-DC-MIG115-GUARD
+    _dc_mig115_bad=1                                                           # T0574-DC-MIG115-GUARD touches column/table structure
+  fi                                                                           # T0574-DC-MIG115-GUARD
+  if [[ "${_dc_mig115_bad}" -eq 0 ]]; then                                    # T0574-DC-MIG115-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0574-DC-MIG115-GUARD cancel false-red
+    _dc_mig115_failed=0                                                        # T0574-DC-MIG115-GUARD
+    echo "PASS [FF-DC7-T0574-assistant-backfill]: migration 115 is a PURE DML BACKFILL (INSERT agent_card for assistant-agent employees; no CREATE/ALTER/DROP TABLE, no ADD/DROP COLUMN, no RLS/POLICY) — dual-control confirmed2_by structure untouched — relief granted" # T0574-DC-MIG115-GUARD
+  fi                                                                           # T0574-DC-MIG115-GUARD
+fi                                                                             # T0574-DC-MIG115-GUARD
+# T-0574: additive relief for 116_composite_fk_set_null_columns.sql —              # T0574-DC-MIG116-GUARD
+# CONSTRAINT-ONLY fix: composite ON DELETE SET NULL nulled NOT-NULL tenant_id       # T0574-DC-MIG116-GUARD
+# (FKs from 094/107/113) → re-declared with column-scoped SET NULL. ALTER TABLE     # T0574-DC-MIG116-GUARD
+# DROP/ADD CONSTRAINT only: no new table, no column add/drop, no RLS — the          # T0574-DC-MIG116-GUARD
+# FF-DC7 invariant (derived decision, no new TABLE/RLS) holds.                      # T0574-DC-MIG116-GUARD
+_dc_mig116_stem="migrations/116_composite_fk_set_null_columns.sql"                 # T0574-DC-MIG116-GUARD
+if [[ "${_dc_mig116_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig116_stem}"; then # T0574-DC-MIG116-GUARD
+  _dc_mig116_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig116_stem}" 2>/dev/null || true)"  # T0574-DC-MIG116-GUARD
+  _dc_mig116_bad=0                                                             # T0574-DC-MIG116-GUARD
+  if echo "${_dc_mig116_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0574-DC-MIG116-GUARD
+    _dc_mig116_bad=1                                                           # T0574-DC-MIG116-GUARD introduces DDL/RLS
+  fi                                                                           # T0574-DC-MIG116-GUARD
+  if echo "${_dc_mig116_content}" | grep -iqE "ADD[[:space:]]+COLUMN|DROP[[:space:]]+COLUMN|DROP[[:space:]]+TABLE"; then # T0574-DC-MIG116-GUARD
+    _dc_mig116_bad=1                                                           # T0574-DC-MIG116-GUARD touches column/table structure
+  fi                                                                           # T0574-DC-MIG116-GUARD
+  if ! echo "${_dc_mig116_content}" | grep -iqE "(DROP|ADD)[[:space:]]+CONSTRAINT"; then # T0574-DC-MIG116-GUARD
+    _dc_mig116_bad=1                                                           # T0574-DC-MIG116-GUARD must actually be a constraint fix
+  fi                                                                           # T0574-DC-MIG116-GUARD
+  if [[ "${_dc_mig116_bad}" -eq 0 ]]; then                                    # T0574-DC-MIG116-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0574-DC-MIG116-GUARD cancel false-red
+    _dc_mig116_failed=0                                                        # T0574-DC-MIG116-GUARD
+    echo "PASS [FF-DC7-T0574-composite-fk-fix]: migration 116 is CONSTRAINT-ONLY (DROP/ADD CONSTRAINT with column-scoped SET NULL; no CREATE TABLE, no ADD/DROP COLUMN, no RLS/POLICY) — relief granted" # T0574-DC-MIG116-GUARD
+  fi                                                                           # T0574-DC-MIG116-GUARD
+fi                                                                             # T0574-DC-MIG116-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
