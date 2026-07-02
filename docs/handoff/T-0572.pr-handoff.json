@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0572",
+  "status": "pr_open",
+  "branch": "task/T-0572-rights-ui-writes",
+  "pr_url": "local:task/T-0572-rights-ui-writes",
+  "summary": "Экран «Доступ» перестаёт лгать и получает ручки выдачи/отзыва — БЕЗ нового write-пути (write-путь + dual-control уже построены и заморожены, NF-1). (1) Новый READ-эндпоинт GET /api/rights/tenant-state в НОВОМ файле src/http/rights-overview.ts (rights.ts не трогается — несёт zero-pg инвариант FF-DISPLAY-4): читает choros.role LEFT JOIN role_assignment LEFT JOIN \"grant\" + employee для тенанта ВЫЗЫВАЮЩЕГО, tenant ИЗ AUTH (resolveActorTenant), НЕ из query. Одна транзакция, три запроса (roles / assignments+employee всех ролей разом / grants всех ролей разом) — N+1-free. Две проекции по авторитету (loadAdminContext, тот же сигнал что GET /api/me/nav-capabilities): admin/owner ⇒ scope='tenant', can_manage=true, все роли тенанта; обычный юзер ⇒ scope='self', can_manage=false, сервер фильтрует по employee_id вызывающего (резолвится из auth, никогда из параметра — AC-10, параметра нет вовсе). Fail-closed: ошибка резолюции авторитета ⇒ self, не admin. Действующий предикат зеркалит семантику записи grants.ts: confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) [+ in-window]; semi-confirmed (confirmed_by set, confirmed2_by NULL, proposed_by set) ⇒ отдельный roles[].pending, НИКОГДА не смешивается с действующими (FR-5/AC-8). (2) screen-rights.jsx переключён на живой источник (fetch('/api/rights/tenant-state'), не /api/rights — AC-3), удалены demo-ROLE_GROUPS/demo-id, добавлена секция «Кто что может» (действующие assignments+grants роли, human/agent бейджем, ссылка на существующий инбокс /rights/criticality для second-confirm) + отдельная pending-секция с waiting-маркером (PendingBadge). Формы выдачи/отзыва роли и гранта (ra-overview-forms.jsx, новый файл) рендерятся ТОЛЬКО при can_manage:true — компонент структурно отсутствует в DOM при false, не disabled (FR-7/AC-9). Формы бьют СТРОГО в существующие POST /api/role-assignments(/:id/revoke) и POST /api/grants(/:id/revoke) — ни одного нового write-эндпоинта (AC-4/5/6). Scope формируется как ScopeElement JSON (node/tags день-1) для существующего parseScopeElement — не вводит параллельный клиентский формат (AC-14). Semi-confirmed ответ ({state:'semi-confirmed', second_approver_required:true}) рендерится честно как «ждёт второго подтверждения», НЕ как активное право; approve/reject НЕ дублируется — только ссылка на /rights/criticality (NF-1). Empty/Loading/Error на «Обзоре ролей» через существующие kit ErrorState/LoadingState/EmptyState (переиспользованы как есть). (3) Бейдж /rights/editor (shell.jsx REFERENCE_TABS) ОСТАЁТСЯ 'demo' (вердикт ADR §2.7, FR-8/AC-12) — ra-role-editor.jsx пишет грант в реальный API целиком, НО его грант-черновик засеян INITIAL_GRANTS (не проекция БД) — тултип заменён с общего «данные иллюстративные (mock)» на конкретный: «Черновик грантов засеян примером; существующие гранты роли из БД пока не подгружаются в редактор». (4) Пять новых fitness-чеков (все с --self-test, wired в package.json fitness-цепь): rights-overview-source-switch.sh (AC-3), rights-ui-no-new-write.sh (AC-4/5/6, git-diff-scoped grep на новый router.register POST по grants/role-assignments), rights-ui-anti-case.sh (AC-11/NF-4, расширяет read-pdp-anti-case.sh на web/src/ — тот исходный скрипт scoped только src/), rights-editor-badge-verdict.sh (AC-12, проверяет status:\"demo\" + конкретный тултип-маркер «гранты роли»/«черновик»), rights-ui-frozen-write.sh (NF-1/NF-2/FR-5, byte-unchanged: grants.ts/rights-change-requests.ts/rights.ts/dual-control.ts/role-criticality.ts/grant-resolver.ts/grant-lattice.ts).",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "fitness": true,
+    "fitness_last_line": "PASS: rights-ui-frozen-write — write-core files byte-unchanged vs base (full 289-step && chain, npm run fitness exit 0)",
+    "fitness_db": true,
+    "fitness_db_result": "99 test files passed (99); 1079 tests passed (1079); Duration ~136s — includes new ci/checks/db/rights-overview.db.test.ts (7/7)",
+    "vitest_root": "252 test files passed | 2 skipped (254); 4866 tests passed | 10 skipped (4876)",
+    "web_vitest": "54 test files passed (54); 1505 tests passed (1505) — includes new web/src/screens/rights/screen-rights.test.jsx (16/16)",
+    "web_build": "npx vite build — 515 modules transformed, 0 errors"
+  },
+  "files_changed": [
+    "src/http/rights-overview.ts",
+    "src/server.ts",
+    "web/src/screens/rights/screen-rights.jsx",
+    "web/src/screens/rights/ra-overview-forms.jsx",
+    "web/src/app-shell/shell.jsx",
+    "web/src/app-shell/app.css",
+    "src/__tests__/rights-overview.test.ts",
+    "web/src/screens/rights/screen-rights.test.jsx",
+    "ci/checks/db/rights-overview.db.test.ts",
+    "ci/checks/rights-overview-source-switch.sh",
+    "ci/checks/rights-ui-no-new-write.sh",
+    "ci/checks/rights-ui-anti-case.sh",
+    "ci/checks/rights-editor-badge-verdict.sh",
+    "ci/checks/rights-ui-frozen-write.sh",
+    "package.json",
+    "docs/handoff/T-0572.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "granted_by (провенанс-поле формы, не авторитет — сервер всегда берёт confirmed_by из аутентифицированного actor, R-AUTH) не может быть заполнен реальным слагом вызывающего, потому что ответ GET /api/rights/tenant-state (по контракту ADR §6.1) не несёт слаг/id вызывающего — это НЕ пробел ADR (поле там не заявлено), просто явное инженерное решение дня-1: UI ставит фиксированную честную метку 'ui:rights-overview' вместо того чтобы либо (а) расширять контракт ответа новым полем вне периметра спеки, либо (б) хардкодить dev-silo актора (что было бы анти-паттерном — единственный такой хардкод в ra-role-editor.jsx явно закомментирован как 'dev silo actor', не переиспользуется). Не влияет ни на один AC — granted_by нигде не используется для авторизации.",
+    "«Кто что может» переключатель проекции «по роли ↔ по сотруднику» (ADR §2.4, помечено «опционально день-1») НЕ реализован отдельным UI-переключателем в этой итерации — секция показывает «по роли» (роль-деталь, действующие assignments+grants), что ADR прямо называет достаточным для AC. Переключение «по сотруднику» технически достижимо агрегацией той же tenant-state проекции на клиенте (не требует нового эндпоинта), но не добавлено, чтобы не раздувать объём сверх заявленного минимума спеки; фиксирую как явный день-2 остаток, не молчаливый пробел."
+  ],
+  "tests_added": [
+    "src/http/rights-overview.ts — новый READ-эндпоинт (см. summary); экспортирует registerRightsOverviewRoutes, TenantStateResponse/OverviewRole/OverviewAssignment/OverviewGrant/OverviewPending типы 1:1 с ADR §6.1.",
+    "src/__tests__/rights-overview.test.ts (no-DB, stub pg.Pool, 6 тестов) — RO-1 (AC-2, пустой тенант ⇒ {roles:[]} без demo-поля), RO-2 (genesis-owner ⇒ scope:tenant/can_manage:true), RO-3 (AC-9, обычный актор ⇒ scope:self/can_manage:false + фильтрация ролей по владению), RO-4 (AC-8, semi-confirmed grant в pending, не в active, admin-вид), RO-5 (401 без auth).",
+    "ci/checks/db/rights-overview.db.test.ts (LIVE Postgres, 7 тестов) — FF-T0572-1 (AC-1, admin-проекция == прямой SELECT id FROM role), FF-T0572-2 (AC-2, honest empty), FF-T0572-8 (AC-8, admin+self проекции: pending НИКОГДА не в active), FF-T0572-9/10 (AC-9/10, self-проекция только своих ролей/назначений, нет параметра employee_id для подмены).",
+    "web/src/screens/rights/screen-rights.test.jsx (source-presence, 16 тестов, конвенция screen-agents.test.jsx) — AC-3 (источник tenant-state, не /api/rights), AC-13 (kit Error/Loading/EmptyState + честный self/tenant empty-текст), AC-7/8 (pending структурно отделён от active-контейнеров), AC-9 (формы гейтятся structurally, не disabled), AC-4/5/6 (ra-overview-forms.jsx бьёт РОВНО в один существующий write-путь на операцию, никакого /api/rights/overview/*), AC-7 (semi-confirmed не отправляет bypass-флаг dual-control), AC-14 (ScopeElement node/tags, не параллельный формат).",
+    "Пять fitness-чеков (все self-test-covered, см. summary) — FF-T0572-3/4/5/6/ANTICASE/BADGE/FROZEN."
+  ],
+  "notes_for_reviewer": [
+    "LIVE-стенд ООО Аксон (AC-16, manual) НЕ прогнан в этой сессии — коридор coder не имеет прав на deploy/founder-доступ к прод-стенду. Вместо этого весь функциональный путь §6/§7 спеки/ADR прожит вручную через HTTP против ЖИВОГО dev-Postgres (docker localhost:55432, реальные dev-silo данные, migrations применены): e-owner (genesis owner) → GET tenant-state вернул РЕАЛЬНЫЕ 9 ролей тенанта с реальными assignments/grants (role-configurator: 4 гранта из migration 088, role-reader: 1 грант из migration 117 backfill — не фикстура); e-mironov (обычный сотрудник) → scope:self, can_manage:false, видит РОВНО 1 роль (budget-approver), которую держит. Живой POST /api/grants на некритичный ресурс → {state:'confirmed'}, немедленно виден в tenant-state.grants. Живой POST /api/grants с operation:'approve' (guarded-transition ось) → {state:'semi-confirmed', second_approver_required:true} — виден ТОЛЬКО в tenant-state.pending.grants, отсутствует в .grants. Второй подтверждающий (e-larina, отдельный человек) → POST /api/grants {phase:'confirm2', change_ref} через СУЩЕСТВУЮЩИЙ механизм (не новый) → {state:'confirmed'} → мгновенно появился в .grants, исчез из .pending. Все три тестовых гранта отозваны (revoke) после проверки — стенд оставлен чистым. Это доказывает КАЖДЫЙ шаг LIVE_PROOF §6/§7 (кроме буквально «глазами владельца ООО Аксон в браузере», которое требует founder-сессию/деплой) на РЕАЛЬНЫХ данных дев-тенанта, не на синтетике. Founder/оператор, промоутящий эту ветку, должен повторить те же шаги глазами в браузере на деплоенном стенде для формального закрытия AC-16 (manual) — механизм и данные уже доказаны машиной.",
+    "GET /api/rights/change-requests (rights-change-requests.ts, T-0390, ЗАМОРОЖЕН этой задачей) вернул 500 INTERNAL при ручной проверке на дев-Postgres в этой сессии — НЕ вызвано этой задачей (файл byte-unchanged, подтверждено FF-T0572-FROZEN; second-confirm через POST /api/grants {phase:'confirm2'} к тому же change_ref сработал штатно, 200). Похоже на пред-существующий дефект листинга инбокса, не пайплайна подтверждения. Не в периметре T-0572 (не мой файл, не в FR/AC этой спеки) — фиксирую как наблюдение для отдельной задачи, не блокирует эту.",
+    "«Кто что может» день-1 показывает секцию 'по роли' (см. deviations_from_adr) — переключатель 'по сотруднику' не реализован, технически достижим на существующих данных без нового эндпоинта."
+  ],
+  "friction_events": [
+    "npm ci (root + web/) выполнен с нуля в этом worktree (node_modules отсутствовал) — оба прошли чисто, --maxsockets=3 не понадобился (без флейка).",
+    "fitness:db:setup-template потребовался перед первым запуском live-DB тестов (шаблонная БД отсутствовала в этом docker-инстансе) — применил 103 миграции чисто, затем npm run fitness:db (полный, 99 файлов/1079 тестов) и точечный npx vitest --dir ci/checks/db -t T-0572 (7/7) оба зелёные.",
+    "Postgres на localhost:55432 — общий dev-инстанс (принадлежит соседнему воркери t-0573-postgres-1 по docker ps), НЕ создавал отдельный контейнер — использовал существующий (миграции применены, известная dev-silo топология). Ручная HTTP-проверка (см. notes_for_reviewer) создала и УДАЛИЛА 3 тестовых grant-строки в dev-silo тенанте (a0000000-…001, роль budget-approver) — состояние восстановлено revoke-вызовами до конца сессии, подтверждено повторным GET (0 активных тестовых грантов).",
+    "ra-overview-forms.jsx изначально принимал prop actorSlug для granted_by, но TenantStateResponse (по контракту ADR) не несёт слаг вызывающего — убрал prop, заменил на фиксированную честную провенанс-метку 'ui:rights-overview' (см. deviations_from_adr) вместо расширения контракта эндпоинта вне периметра спеки."
+  ],
+  "live_proof": {
+    "status": "green_partial",
+    "date": "2026-07-02T19:35+03:00",
+    "stand": "localhost:55432 (dev-silo Postgres, migrations @ dev merge-base) — НЕ деплоенный стенд ООО Аксон; coder-сессия без founder/deploy-доступа",
+    "actor": "e-owner (genesis owner, dev-silo), e-mironov (обычный сотрудник), e-larina (второй подтверждающий) — прямой HTTP (curl), не браузер",
+    "steps": [
+      "GET /api/rights/tenant-state (e-owner) → scope:tenant, can_manage:true, 9 РЕАЛЬНЫХ ролей тенанта с реальными assignments (включая agent-исполнителей) и грантами (role-configurator 4/role-reader 1 — из живых миграций, не фикстур)",
+      "GET /api/rights/tenant-state (e-mironov) → scope:self, can_manage:false, РОВНО 1 роль (budget-approver), которую держит — не видит остальные 8",
+      "POST /api/grants (некритичный ресурс) → {state:'confirmed'} → мгновенно виден в tenant-state.grants",
+      "POST /api/grants (operation:'approve', критичная ось) → {state:'semi-confirmed', second_approver_required:true} → виден ТОЛЬКО в tenant-state.pending.grants, отсутствует в .grants",
+      "POST /api/grants {phase:'confirm2', change_ref} от e-larina (другой человек) → {state:'confirmed'} → появился в .grants, исчез из .pending",
+      "Отзыв всех 3 тестовых грантов (POST .../revoke) → tenant-state.grants вернулся к исходному состоянию"
+    ],
+    "observation": "Полный dual-control-цикл (confirmed / semi-confirmed / второй подтверждающий / отзыв) прожит на живых данных через HTTP; честное разделение admin/self проекций подтверждено на двух разных реальных сотрудниках дев-тенанта.",
+    "founder_todo": [
+      "Повторить те же 7 шагов глазами в браузере на деплоенном стенде ООО Аксон (владелец pgv@axonteam.ru) для формального закрытия AC-16 (manual) — весь механизм и данные уже доказаны машиной выше; это финальный визуальный чек, не поиск нового дефекта."
+    ]
+  }
+}
