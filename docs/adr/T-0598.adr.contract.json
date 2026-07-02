@@ -1,0 +1,31 @@
+{
+  "task_id": "T-0598",
+  "status": "ready",
+  "decision": "Two independent client-only changes on the owner's day-1 path. (1) screen-overview.jsx gains a 'Первые шаги' section above the existing tile grid: a non-blocking checklist-style stepper (uxpatterns MCP patterns/advanced/wizard onboarding use-case, checklist variant — no back/next/review, no forced sequencing, each step is an independent navigable link) with three mandatory steps + one optional step, each fed by a LIVE signal from an EXISTING read endpoint (zero new API surface, per task scope): step 1 'Создайте приложение' reuses the screen's own already-fetched GET /api/applications count (applications.length>0) — not a second fetch, just a second read of the same `apps` state; step 2 'Подключите LLM-ключ' adds a new best-effort fetch to GET /api/agents and imports the existing pure function resolveAssistantBinding(agents) from screen-llm-connections.jsx:176-184 (finds agent_type==='assistant', done when assistantConnectionId != null) — GET /api/agents is gated only by withAuth (no llm_connection:configure capability), so this signal is honestly visible to any authenticated tenant member, not just admins, unlike GET /api/llm-connections which 403s non-admins; step 3 'Спросите ассистента' adds a best-effort fetch to GET /api/assistant/threads, done when threads.some(t => t.message_count > 0); step 4 (optional) 'Настройте права' adds a best-effort fetch to GET /api/rights/tenant-state, rendered ONLY when can_manage===true resolved successfully (mirrors the T-0572 ADR principle: can_manage:false ⇒ structurally absent, not a disabled/unchecked item) and is therefore excluded from the hide-criterion. Each of the three mandatory fetches degrades honestly on any failure (network/HTTP/parse) mirroring the screen's existing fetchCount() pattern: the step stays visible without a checkmark, its CTA link stays clickable, and the whole strip does NOT hide on error (hide requires all three mandatory signals to be CONFIRMED true, not merely non-false) — a stale/unavailable signal is treated as 'not yet done', which is the safe default. The whole strip auto-hides (returns null) once all three mandatory checks are confirmed true — no localStorage/dismiss button, purely derived from live data, so it correctly reappears if a tenant's state regresses (e.g. the only application gets deleted). (2) screen-inbox.jsx's EmptyState on the zero-task path gains a context-aware action: on tab==='all' with no active exec filter and a genuinely empty tenant (counts.all===0), the EmptyState now includes an action button 'Открыть процессы' → navigate('/processes') (route confirmed pre-existing in shell.jsx:1161, not invented); on every other tab/filter combination (mine/pool/esc, or 'all' with an active exec filter) the EmptyState instead shows a distinguishing 'no tasks in this view' message WITHOUT the action, to avoid falsely implying '/processes' would fix a filter-scoped empty view.",
+  "rejected_alternatives": [
+    {
+      "option": "Строить полноценный Wizard-компонент с шагами back/next/review (буквальная реализация паттерна advanced/wizard).",
+      "why_not": "Рамки задачи явно требуют non-blocking stepper, не модал/не туториал-оверлей — жёсткая последовательность gate противоречила бы требованию, что каждый шаг доступен независимо через прямую навигацию (владелец может зайти в /apps напрямую, минуя полосу). Взят только применимый элемент паттерна — визуальный чек done/not-done на независимых шагах."
+    },
+    {
+      "option": "Строить новый агрегирующий эндпоинт GET /api/onboarding-status, отдающий все 3-4 чека одним вызовом.",
+      "why_not": "Рамки задачи прямо запрещают строить новые API для полосы («шаги с ЖИВЫМИ состояниями из УЖЕ существующих API»); все нужные сигналы уже дёшево читаются четырьмя существующими READ-эндпоинтами без нового бэкенд-кода."
+    },
+    {
+      "option": "Читать статус LLM-ключа через GET /api/llm-connections (secret_bound), как буквально предлагает рамка задачи первым вариантом.",
+      "why_not": "GET /api/llm-connections требует капабилити llm_connection:configure (owner/grant) и возвращает 403 рядовому сотруднику — шаг стал бы недоступен/ошибочным для не-админа. GET /api/agents защищён только withAuth и уже несёт готовую чистую функцию resolveAssistantBinding, дающую тот же по сути сигнал (привязан ли LLM-коннекшн к ассистенту тенанта) без капабилити-гейта — честнее деградирует для любого пользователя."
+    },
+    {
+      "option": "Персистировать dismiss-состояние полосы в localStorage (владелец один раз закрывает — полоса больше не появляется).",
+      "why_not": "Создаёт риск «закрыл случайно и забыл, где искать путь к настройке» — и рассинхронизируется с реальным состоянием тенанта (если сигналы регрессируют, например приложение удалено, localStorage-скрытая полоса не покажет актуальную незавершённость). Авто-скрытие по факту готовности данных проще и всегда честно отражает текущее состояние."
+    },
+    {
+      "option": "Показывать одинаковую CTA-кнопку «Открыть процессы» на любой пустой вкладке инбокса (mine/pool/esc), не только на «Все».",
+      "why_not": "Противоречит honest-degradation принципу проекта (§6) — на вкладке «Мне» пустота может означать «задачи есть у других, просто не у меня», и CTA «Открыть процессы» подразумевала бы, что там взяться неоткуда, что ложно. Различение по вкладке/фильтру и реальному счётчику tenant-wide zero — единственный честный вариант."
+    },
+    {
+      "option": "Добавить кнопку «Сбросить фильтр» на EmptyState инбокса при активном exec-фильтре.",
+      "why_not": "Вне рамок задачи T-0598 (петля №1+№7 касается онбординг-полосы и honest CTA для tenant-wide zero, не UX фильтров инбокса в целом) — отдельная находка, не поднятая отчётом для этого T."
+    }
+  ]
+}

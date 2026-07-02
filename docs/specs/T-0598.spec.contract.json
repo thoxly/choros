@@ -1,0 +1,71 @@
+{
+  "task_id": "T-0598",
+  "status": "ready",
+  "summary": "Полоса «Первые шаги» на Обзоре (non-blocking checklist-stepper: создать приложение / подключить LLM-ключ / спросить ассистента / опционально настроить права) кормится ЖИВЫМИ сигналами из уже существующих READ-эндпоинтов (/api/applications, /api/agents, /api/assistant/threads, /api/rights/tenant-state) — без единого нового API; авто-скрывается, когда обязательные три шага выполнены. Пустой инбокс на вкладке «Все» получает честный action-CTA «Открыть процессы» вместо тупика.",
+  "functional": [
+    "FR-1 (находка №1): screen-overview.jsx рендерит секцию «Первые шаги» над сеткой плиток — три обязательных шага (приложение/ключ/ассистент) + опциональный (права), каждый — иконка-состояние + текст + Button-CTA в соответствующий раздел (/apps, /llm-connections, /assistant, /rights).",
+    "FR-1 сигналы: шаг-1 = GET /api/applications (applications.length>0, переиспользует существующий apps-счётчик); шаг-2 = GET /api/agents + импортированный resolveAssistantBinding из screen-llm-connections.jsx (assistantConnectionId != null); шаг-3 = GET /api/assistant/threads (хотя бы один тред message_count>0); шаг-4 (опц.) = GET /api/rights/tenant-state (can_manage===true, иначе шаг структурно отсутствует).",
+    "FR-1 деградация: любой сбой фетча (сеть/HTTP/парсинг) на шагах 1-3 оставляет шаг без чека (не error state), CTA-ссылка остаётся кликабельной; полоса не скрывается ошибочно (критерий скрытия требует подтверждённое true на всех трёх).",
+    "FR-1 скрытие: полоса целиком не рендерится, когда шаги 1-3 все true — авто-производное состояние от данных, без localStorage/dismiss-кнопки.",
+    "FR-2 (находка №7): screen-inbox.jsx EmptyState на вкладке 'Все' без активного exec-фильтра при реальном counts.all===0 получает action-кнопку 'Открыть процессы' → navigate('/processes'); прочие вкладки/фильтры получают уточняющий текст без вводящего в заблуждение action."
+  ],
+  "non_functional": [
+    "NF-1: ни один фикс не вводит новый серверный эндпоинт или меняет существующий контракт — все сигналы читаются с READ-эндпоинтов, доступных already (applications/agents/assistant threads/rights tenant-state).",
+    "NF-2: паттерн non-blocking stepper (uxpatterns MCP patterns/advanced/wizard, onboarding-вариант) + first-use empty-state (patterns/user-feedback/empty-states) — сверено через get_pattern, не модал/не оверлей/не блокирующий wizard с back-next.",
+    "NF-3: только kit-примитивы (Button, KitIcon, LoadingState) и --chs-* токены — ux-g6 (no-new-hardcode) и ux-g4 (state-primitives, никаких hand-rolled loading/empty branches) остаются чисты на новых строках.",
+    "NF-4: ux-g5 (jargon denylist) — новый видимый текст на чистом продуктовом русском, без dev-жаргона.",
+    "NF-5: Loading не мигает — каждый чек шага показывает compact LoadingState до ответа, не false-по-умолчанию с последующим скачком к true.",
+    "NF-6: совместимость — существующие тесты screen-overview (пока нет файла — создаётся новый) и screen-inbox.test.jsx (T-0597, alert→toast describe-блоки) продолжают проходить без изменения их утверждений."
+  ],
+  "out_of_scope": [
+    "OOS-1: находки №2-6, №8-10 отчёта ux-loop-report-2026-07-02.md — вне периметра (T-0597 или продуктовое решение фаундера).",
+    "OOS-2: новый серверный эндпоинт или изменение существующего HTTP-контракта.",
+    "OOS-3: localStorage/cookie dismiss-персистентность полосы — авто-скрытие только по факту готовности данных.",
+    "OOS-4: кнопка 'сбросить фильтр' на EmptyState инбокса — вне рамок задачи.",
+    "OOS-5: изменение контракта EmptyState/Button/LoadingState в components.jsx."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "screen-overview.jsx рендерит полосу «Первые шаги» с тремя обязательными шагами + опциональным четвёртым, каждый — ссылка в соответствующий раздел.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Шаг «Создайте приложение» done при applications.length>0 (переиспользует существующий apps-счётчик, не второй фетч).", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Шаг «Подключите LLM-ключ» использует GET /api/agents + импортированный resolveAssistantBinding из screen-llm-connections.jsx — done при assistantConnectionId != null.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Шаг «Спросите ассистента» использует GET /api/assistant/threads — done при наличии треда с message_count>0.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Опциональный шаг «Настройте права» рендерится только при успешном can_manage:true; при ошибке/403/false структурно отсутствует (не в списке).", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Любой сбой сигнала на шагах 1-3 не рушит экран — шаг остаётся видим без чека, ссылка кликабельна, полоса не скрывается ошибочно.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Полоса целиком не рендерится, когда шаги 1-3 все подтверждённо true.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "Во время загрузки сигнала шаг показывает compact LoadingState, не мигает между состояниями.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "screen-inbox.jsx EmptyState на вкладке «Все» без активного exec-фильтра при counts.all===0 получает action, вызывающий navigate('/processes').", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "EmptyState на вкладках mine/pool/esc или при активном фильтре не получает вводящий в заблуждение action — текст различает контекст.", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "Путь /processes подтверждён существующим Route в shell.jsx — не изобретён новый маршрут.", "verifiable_as": "test"},
+    {"id": "AC-12", "text": "Ни один фикс не вводит новый хардкод-цвет вне --chs-* токенов.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "Ни один фикс не вводит dev-жаргон в видимый текст.", "verifiable_as": "fitness"},
+    {"id": "AC-14", "text": "Полный web vitest прогон зелёный, включая новый screen-overview.test.jsx и расширенный screen-inbox.test.jsx.", "verifiable_as": "ci"},
+    {"id": "AC-15", "text": "Существующие тесты screen-inbox.test.jsx (T-0597, alert→toast) проходят без изменения их утверждений.", "verifiable_as": "test"}
+  ],
+  "blocking_questions": [],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1..AC-8: screen-overview.test.jsx (новый) — source-presence проверки шагов, сигналов, деградации, скрытия, loading-состояния.", "ci_check": "npx vitest run web/src/screens/screen-overview.test.jsx"},
+    {"id": "FF-2", "rule": "AC-9..AC-11: screen-inbox.test.jsx (расширение) — action на EmptyState вкладки Все при нуле, отсутствие action на прочих вкладках, navigate('/processes').", "ci_check": "npx vitest run web/src/screens/screen-inbox.test.jsx"},
+    {"id": "FF-3", "rule": "AC-12: no new hardcoded color in diff.", "ci_check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required"},
+    {"id": "FF-4", "rule": "AC-13: no dev-jargon in new visible product text.", "ci_check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh --required"},
+    {"id": "FF-5", "rule": "AC-14/AC-15: full web CI green.", "ci_check": "cd web && npx vitest run"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-1"},
+    {"ac": "AC-4", "covered_by": "FF-1"},
+    {"ac": "AC-5", "covered_by": "FF-1"},
+    {"ac": "AC-6", "covered_by": "FF-1"},
+    {"ac": "AC-7", "covered_by": "FF-1"},
+    {"ac": "AC-8", "covered_by": "FF-1"},
+    {"ac": "AC-9", "covered_by": "FF-2"},
+    {"ac": "AC-10", "covered_by": "FF-2"},
+    {"ac": "AC-11", "covered_by": "FF-2"},
+    {"ac": "AC-12", "covered_by": "FF-3"},
+    {"ac": "AC-13", "covered_by": "FF-4"},
+    {"ac": "AC-14", "covered_by": "FF-5"},
+    {"ac": "AC-15", "covered_by": "FF-5"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0598-first-steps.spec.md",
+  "adr_artifact_path": "docs/adr/ADR-T0598.md"
+}
