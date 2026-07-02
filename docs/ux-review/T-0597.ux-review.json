@@ -1,0 +1,92 @@
+{
+  "task_id": "T-0597",
+  "verdict": "approved",
+  "_scope": "5 S-размерных UX quick-wins из ux-loop-report-2026-07-02.md (находки №3/№5/№6/№8/№9), все чисто клиентские (web/src/**), без новых эндпоинтов. FR-1 alert()→pushToast в инбоксе (screen-inbox.jsx); FR-2 reveal-toggle на поле API-ключа (screen-llm-connections.jsx ConnectionKeyBinder); FR-3 actionable-hint 'оргструктура пуста'→navigate('/org') (ra-overview-forms.jsx AssignRoleForm); FR-4 дефолт формы LLM-профиля = Anthropic (screen-llm-connections.jsx); FR-5 честный статус 'ключ не привязан' — warning-чип + primary-кнопка + честный баннер (screen-llm-connections.jsx). Судил как владелец облика (design-steward, D-062) глазами пользователя, не строившего систему. Все 5 фиксов — прямые применения СУЩЕСТВУЮЩИХ принципов (§3 голос / §4 toast+опасное действие / §6 явный следующий шаг) существующими kit-примитивами и --chs-* токенами; новых правил облика не ввожу.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh --required → 0 newly-added hardcode/overlay findings (сильнее заявленного informational — проходит и в required-режиме). Все новые стили — только var(--chs-*): warning/warning-soft (FR-5 чип), accent (FR-3 ссылка), space-* (глазик/паддинг).",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh → 28 findings всего, ВСЕ в .test.jsx (T-id-in-describe). grep по 5 продуктовым .jsx/.js (screen-inbox, screen-llm-connections, ra-overview-forms, components, icon-registry) → 0 находок. +3 к baseline (25→28) — исключительно новые describe('T-0597 — …') в screen-llm-connections.test.jsx, конвенция всего suite. Продуктовый текст чист.",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → PASS (light default + dark reachable в обоих token-source, tokens.css/form-theme.css не тронуты). Токены FR-3/FR-5 (accent, warning, warning-soft) определены в ОБЕИХ темах (по 2 def каждый) — AA-контраст статически, чип/ссылка тема-безопасны.",
+      "ci/checks/rights-ui-no-new-write.sh / rights-ui-anti-case.sh / rights-ui-frozen-write.sh → PASS (правка ra-overview-forms.jsx не вводит write-эндпоинт, не добавляет D-064 anti-case литерал, write-core байт-неизменен).",
+      "npx vitest run web/src/screens/screen-inbox.test.jsx (8), screen-llm-connections.test.jsx (42), __tests__/screen-llm-connections.a11y.test.jsx (7), rights/screen-rights.test.jsx (32) → 89/89 passed. Полный web vitest 1142/1142 (2 pre-existing ajv-suite вне периметра)."
+    ],
+    "green_note": "Все UX-гейты зелёные. ux-g6 в required-режиме чист (0). ux-g5 продуктовый текст чист (0), test-файл шум (T-id-in-describe) — легитимен, не понижает и не поднимает baseline. a11y на reveal-toggle (aria-label синхронный + aria-pressed + <button type=button>) — под тестом. Одобрено с первого раунда — ни одного blocking; 3 нит/инфо-находки (см. findings) не требуют правки в T-0597."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "Real-click в живом стенде НЕ пройден — web-тест-тир vitest 'node' без DOM (проектная конвенция source-presence, mount невозможен в этом репо). Судил по коду + токенам + тестам ЧЕСТНО. Статически строго: все НОВЫЕ цветовые токены определены в ОБЕИХ темах — --chs-color-warning (tokens.css light :193 / dark :251), --chs-color-warning-soft (:194/:252), --chs-color-accent (:168/:226) — по 2 определения каждый, AA-помечены в комментариях. FR-5 warning-чип (chipStyle(false)) визуально отличим от нейтрального в обеих темах (амбер vs серый). FR-3 accent-ссылка (underline) — акцентный цвет в обеих. FR-2 глазик — --chs-color-text-muted (тема-инвариант по назначению). Space/radius-токены тема-инвариантны (корректно). Real-click в обеих темах доедет LIVE_PROOF-ом (D-064, manual).",
+  "pattern_sources": [
+    {
+      "element": "FR-1: pushToast({tone:'error'}) на ошибках claim/approve в инбоксе (замена alert())",
+      "pattern": "Toast для исхода действия (неблокирующий, но заметный): error-тон = duration:0 (не гаснет сам) + role=alert + aria-live=assertive — эквивалент 'не пропустишь' у alert(), но без native-modal паузы потока. Тот же провайдер, что уже потребляют rights/assistant экраны — не новый механизм.",
+      "mcp_ref": "principles.md §4 (Toast для исхода) + системный аудит-тема №3 (outcomes silently swallowed/alert()-blocked). toast-context.jsx :55 push({tone,message}); error→defaultDuration 0.",
+      "applied": true
+    },
+    {
+      "element": "FR-2: reveal-toggle (глазик eye/eye-off) на поле API-ключа",
+      "pattern": "forms/password — visibility toggle прямо предписан: пользователь проверяет вставленное перед отправкой на самом чувствительном шаге, не вслепую. <button type=button> с aria-label (синхронный состоянию) + aria-pressed (boolean) — доступно с клавиатуры. Write-only инвариант сохранён (reveal только клиентского pre-send значения).",
+      "mcp_ref": "uxpatterns forms/password (reveal-toggle) + ux-loop-report №3. Инлайн-реализация (ADR §2) вместо расширения kit Field — обоснована площадью риска (~15 потребителей Field).",
+      "applied": true
+    },
+    {
+      "element": "FR-3: actionable-hint при пустом employees → кликабельная «Открыть оргструктуру» (navigate('/org'))",
+      "pattern": "Empty States (secondary recovery path) + §6 явный следующий шаг: голый честный текст 'список пуст' превращён в CTA-выход из тупика. Кнопка рендерится ТОЛЬКО при employees.length===0 (тернар hint), при наличии сотрудников — undefined (нет кнопки). <button type=button>, не <div onClick> — keyboard-reachable.",
+      "mcp_ref": "uxpatterns user-feedback/empty-states (secondary recovery path) + principles.md §6. Путь /org сверен: shell.jsx:1160 Route + screen-overview.jsx:193 тот же navigate('/org').",
+      "applied": true
+    },
+    {
+      "element": "FR-4: дефолт формы 'Новый профиль' = Anthropic-пресет (синхрон текст-инструкция ↔ дефолт)",
+      "pattern": "Устранение рассинхрона ориентировки на первом контакте: инструкция вела по Anthropic (console.anthropic.com), форма стояла на DeepSeek. Дефолт синхронизирован с инструкцией; единый источник цифр — PROVIDER_PRESETS. DeepSeek остаётся первым/выбираемым — смена дефолта, не удаление опции. anthropic-пресет внутренне согласован (anthropic-url + claude-модель + anthropic-цены).",
+      "mcp_ref": "ux-loop-report №8 (рассинхрон инструкция↔дефолт). Фаундер вставляет Anthropic-ключ по T-0574 — дефолт=Anthropic согласован с продуктовым направлением.",
+      "applied": true
+    },
+    {
+      "element": "FR-5: честный статус готовности профиля — warning-чип + honest-баннер + primary-кнопка при !secretBound",
+      "pattern": "ai-error-states / честность готовности: успех-сигнал НЕ должен опережать готовность. (a) баннер без ключа дописывает 'Теперь вставьте API-ключ, чтобы он заработал.'; (b) chipStyle(false) → warning-тон (незавершённость ≠ нейтральный факт); (c) 'Вставить API-ключ' primary только пока ключа нет = явный следующий шаг. Три согласованных, но независимых изменения.",
+      "mcp_ref": "uxpatterns ai-intelligence/ai-error-states (предупреждать о неготовности) + principles.md §4 (визуальный вес по важности). Токены --chs-color-warning* — обе темы, не хардкод.",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "steward",
+      "location": "web/src/screens/rights/ra-overview-forms.jsx :219 — <button className=\"chs-link-button\"> (FR-3)",
+      "issue": "Класс 'chs-link-button' не определён ни в одном web/src *.css (grep пуст). Все визуальные свойства заданы инлайн-style (color: var(--chs-color-accent), textDecoration: underline, cursor, сброс border/padding/bg) — кнопка выглядит и работает корректно, className hook-инертен. Не тупик, не сломан облик.",
+      "suggestion": "Не блокирует. На будущее: либо убрать неиспользуемый className, либо ввести реальный kit-класс 'chs-link-button' в CSS и перенести инлайн-стили — тогда link-button станет переиспользуемым kit-примитивом при втором потребителе. Инлайн-токены (--chs-color-accent) честны и тема-безопасны в обеих темах.",
+      "resolution": "NON-BLOCKING — оставлено на усмотрение (S-фикс, инлайн-реализация приемлема); кандидат в kit-примитив при появлении второго потребителя link-hint."
+    },
+    {
+      "id": "F-2",
+      "severity": "info",
+      "root": "steward",
+      "location": "web/src/screens/screen-llm-connections.jsx :456-482 — глазик position:absolute/bottom внутри wrapper вокруг Field (FR-2)",
+      "issue": "Глазик спозиционирован absolute к wrapper-div, оборачивающему весь Field (с <label> сверху), с bottom:var(--chs-space-3). Сегодня визуально корректно (bottom совпадает с низом input, Field без hint-строки, paddingRight зарезервирован через …rest на input). Но якорь формально к контейнеру-с-лейблом; при будущем добавлении hint под этот input глазик уедет под hint.",
+      "suggestion": "Не блокирует, сегодня корректно. Информационная трассировка на будущее: если Field получит hint-строку — пересмотреть якорь глазика (привязать к input). Инлайн-reveal вместо расширения kit Field — сознательное ADR §2-решение, обоснованное площадью риска; согласен с границей.",
+      "resolution": "NON-BLOCKING — визуально верно в текущем состоянии; трассировано на случай будущего hint у этого поля."
+    },
+    {
+      "id": "F-3",
+      "severity": "info",
+      "root": "phase",
+      "location": "docs/adr/ — нет T-0597.adr.contract.json (только ADR-T0597.md); + расхождение AC-нумерации spec.md ↔ spec.contract.json",
+      "issue": "Машиночитаемый ADR-контракт (T-0597.adr.contract.json) отсутствует — судья задания пометил как возможный брак фазы. ADR-T0597.md полон и честен (все 5 решений + отклонённые альтернативы + write-only инвариант) — судил по нему по явной директиве. Отдельно: AC-нумерация в spec.md (14 AC, primary-кнопка=AC-11, g6=AC-12, g5=AC-13) не совпадает с spec.contract.json (14 AC, g6=AC-11, g5=AC-12); handoff/тесты ссылаются на spec.md-нумерацию. Смысловое покрытие полное в обеих, ни один AC не потерян — расхождение только в номерах.",
+      "suggestion": "Не блокирует вердикт (ADR .md достаточен). Follow-up гигиены фазы: (1) добавить T-0597.adr.contract.json; (2) выровнять AC-нумерацию spec.md↔contract.json (canonical=contract.json).",
+      "resolution": "NON-BLOCKING — отмечено как дефект гигиены фазы (spec/design), не облика; вердикт по ADR .md."
+    }
+  ],
+  "principles_updated": [],
+  "_principles_note": "Новых правил облика не ввожу — все 5 находок ux-loop-report закрыты в рамках СУЩЕСТВУЮЩИХ §3 (голос: честный статус вместо преждевременного успеха), §4 (Toast для исхода; визуальный вес primary по важности), §6 (явный следующий шаг/CTA вместо тупика) существующими kit-примитивами (toast-провайдер, KitIcon, Button variant, Select hint как ReactNode) и существующими --chs-* токенами (warning/warning-soft/accent, все в обеих темах). Reveal-toggle и link-button — кандидаты в общие kit-примитивы ПРИ втором потребителе (сейчас инлайн-локальны — норма для S-фикса, зафиксировано в ADR §2).",
+  "acceptance_coverage": [
+    {"ac": "FR-1/№6: alert()→pushToast в claim/approve, тот же провайдер/тон, текст byte-for-byte (§4 Toast)", "covered": true},
+    {"ac": "FR-2/№3: reveal-toggle password↔text, aria-label/aria-pressed синхронны, <button type=button>, write-only инвариант сохранён (forms/password)", "covered": true},
+    {"ac": "FR-3/№5: actionable-hint → navigate('/org') при пустом employees; кнопки нет когда сотрудники есть; путь реален (empty-states secondary recovery + §6)", "covered": true},
+    {"ac": "FR-4/№8: дефолт=Anthropic (внутренне согласованный пресет), DeepSeek первый/выбираем, синхрон с инструкцией", "covered": true},
+    {"ac": "FR-5/№9: warning-чип (не нейтральный) + honest-баннер без ключа + primary-кнопка при !secretBound (ai-error-states + §4)", "covered": true},
+    {"ac": "N7/OBLIK: только --chs-* токены (g6 --required=0), новые токены warning*/accent в ОБЕИХ темах AA (статически), kit KitIcon/Button/Select/Field/toast — аддитивно", "covered": true},
+    {"ac": "g5 продуктовый текст чист (0 находок в 5 .jsx); дев-жаргон/T-id только в test-файлах (легитимно)", "covered": true},
+    {"ac": "a11y: reveal-toggle keyboard-reachable (button type=button + aria-*), /org-ссылка button не div — под тестом", "covered": true},
+    {"ac": "LIVE_PROOF real-click обе темы на живом стенде (владелец, глазик/чип/toast/ссылка визуально) — НЕ пройден здесь (vitest node без DOM), доедет LIVE_PROOF-ом (manual, D-064)", "covered": false}
+  ]
+}
