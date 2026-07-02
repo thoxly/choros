@@ -111,8 +111,10 @@ export const ZONES = [
       { id: "forms",     label: "Конструктор форм", icon: "forms",     zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 3, screen: true, status: "live" },
       // Модельер: BPMN-редактор. Маршрут /processes/new/edit (path-override). T-0323.
       { id: "modeler",   label: "Модельер",    icon: "process",   zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 4, path: "/processes/new/edit", screen: true, status: "live" },
-      // Ассистент: AI-консоль авторинга и аналитики. E17.
-      { id: "assistant", label: "Ассистент",   icon: "assistant", zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 5, screen: true, status: "demo" },
+      // Ассистент: AI-консоль авторинга и аналитики. E17. T-0573: снят демо-бейдж —
+      // ТОЛЬКО как следствие доказанного backfill (migration 118, AC-1) +
+      // живого прохода владельца тенанта через чат (AC-4), не косметика впереди факта.
+      { id: "assistant", label: "Ассистент",   icon: "assistant", zone: "constructor", audience: "builder", capability: "authoring_draft", frequency: "weekly", order: 5, screen: true, status: "live" },
     ],
   },
 

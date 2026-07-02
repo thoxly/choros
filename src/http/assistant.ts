@@ -60,10 +60,10 @@
  *   core modules — this file is NEVER touched by them.
  */
 
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { HttpError, type Router, readJsonBody } from "./router.js";
+import { HttpError, type Router, readJsonBody, sendErrorEnvelope } from "./router.js";
 import { DEV_USER_HEADER, getAuthContext, withAuth } from "./auth.js";
 import { makeDbGrantSource } from "../db/grants-dao.js";
 import { makeIntersectionGrantSource } from "../core/agent-on-behalf.js";
@@ -73,7 +73,11 @@ import {
   classifyIntent,
   type HandlerContext,
 } from "../core/assistant-intent.js";
-import { LlmDormantError, type LlmPort } from "../core/llm-port.js";
+import { classifyLlmUnavailability, type LlmPort } from "../core/llm-port.js";
+// T-0573 (ADR-T0573 §2.2 B3): shared honest-503 text for BOTH the dormant path
+// (no LLM config at all) and the adapter-failure path (config exists, call
+// failed) — one canonical human message, one canonical envelope.
+import { ASSISTANT_LLM_UNAVAILABLE_MESSAGE } from "../core/assistant-messages.js";
 import { resolveActorSlugFromAuth } from "../db/org.js";
 import type { AncestryOracle } from "../core/grant-lattice.js";
 import type { ResolveSubject } from "../core/object-handle.js";
@@ -1142,6 +1146,54 @@ interface MessagePayload {
   streaming_done?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// T-0573 (ADR-T0573 §2.2 B2/B3): shared honest "LLM unavailable" responder.
+//
+// Called from BOTH failure sites — (a) llmPortFactory() throwing before any
+// port is even built, and (b) ctx.llm.chat()/complete() throwing mid-dispatch
+// — so a tenant owner sees the EXACT SAME persisted assistant message and the
+// EXACT SAME canonical HTTP envelope regardless of which site failed. Fixes
+// the T-0571 F-1 lesson: the OLD dormant-only path emitted a non-canonical
+// {error:"LLM_NOT_CONFIGURED", message} (string, not {code,message} object) —
+// this responder always uses the canonical sendErrorEnvelope shape.
+// ---------------------------------------------------------------------------
+async function respondLlmUnavailable(
+  pool: pg.Pool,
+  tenantId: string,
+  threadId: string,
+  actorSlug: string,
+  agentSlug: string,
+  res: ServerResponse,
+): Promise<void> {
+  // Persist an assistant message so the thread stays consistent for the user.
+  const dormantMsgId = randomUUID();
+  const dormantTs = Date.now();
+  await withTenantTx(pool, tenantId, async (client) => {
+    const payload: MessagePayload = {
+      thread_id: threadId,
+      role: "assistant",
+      text: ASSISTANT_LLM_UNAVAILABLE_MESSAGE,
+      context_ref: null,
+      intent: "unknown",
+      streaming_done: true,
+    };
+    await auditWriter.appendAuditEvent(client, {
+      id: dormantMsgId,
+      type: "assistant.message",
+      actor: agentSlug,
+      subject: actorSlug,
+      scope: null,
+      via: null,
+      proposed_by: null,
+      confirmed_by: null,
+      payload,
+      occurred_at: dormantTs,
+    });
+  });
+
+  sendErrorEnvelope(res, 503, "LLM_UNAVAILABLE", ASSISTANT_LLM_UNAVAILABLE_MESSAGE);
+}
+
 interface ThreadRow {
   id: string;
   title: string;
@@ -1735,7 +1787,20 @@ export function registerAssistantRoutes(
       // -----------------------------------------------------------------------
       // T-0382: factory is now async (per-tenant agent_card config lookup).
       // T-0477 [E-AGENTS L5]: wrap with spend-tracking (non-fatal ledger write).
-      let llm = await llmPortFactory(tenantId);
+      // T-0573 (ADR-T0573 §2.2 B2): the factory build itself can throw a
+      // classifiable LLM-unavailability error (e.g. config-resolution failure)
+      // — caught HERE too, not just around the dispatch call below, so BOTH
+      // failure sites answer with the SAME honest 503 (never a raw INTERNAL).
+      let llm: LlmPort;
+      try {
+        llm = await llmPortFactory(tenantId);
+      } catch (err) {
+        if (classifyLlmUnavailability(err) === "unavailable") {
+          await respondLlmUnavailable(pool, tenantId, threadId, actorSlug, agentSlug, res);
+          return;
+        }
+        throw err;
+      }
       if (spendTrackingFactory) {
         try {
           const spendCtx = await spendTrackingFactory(tenantId);
@@ -1835,7 +1900,8 @@ export function registerAssistantRoutes(
 
       // -----------------------------------------------------------------------
       // 5. Dispatch to intent handler.
-      //    LlmDormantError → 503 (no crash, honest-degrade).
+      //    T-0573: classifyLlmUnavailability(err) === "unavailable" → 503
+      //    (no crash, honest-degrade; covers BOTH dormant AND adapter-failure).
       //    T-0363 (d): for CONFIGURATOR intent, call runConfigurator to get the
       //    full ConfiguratorResult so approvedOps can be persisted as DRAFT.
       //    For other intents, use the regular intentDispatch path.
@@ -1953,42 +2019,13 @@ export function registerAssistantRoutes(
           handlerResult = await intentDispatch(userText, handlerCtx);
         }
       } catch (err) {
-        if (err instanceof LlmDormantError) {
-          // Persist a "dormant" assistant message so the thread is consistent.
-          const dormantMsgId = randomUUID();
-          const dormantTs = Date.now();
-          await withTenantTx(pool, tenantId, async (client) => {
-            const payload: MessagePayload = {
-              thread_id: threadId,
-              role: "assistant",
-              text: "LLM не настроен — настройте BYO-ключ для активации ассистента.",
-              context_ref: null,
-              intent: "unknown",
-              streaming_done: true,
-            };
-            await auditWriter.appendAuditEvent(client, {
-              id: dormantMsgId,
-              type: "assistant.message",
-              actor: agentSlug,
-              subject: actorSlug,
-              scope: null,
-              via: null,
-              proposed_by: null,
-              confirmed_by: null,
-              payload,
-              occurred_at: dormantTs,
-            });
-          });
-
-          res.statusCode = 503;
-          res.setHeader("Content-Type", "application/json");
-          res.end(
-            JSON.stringify({
-              error: "LLM_NOT_CONFIGURED",
-              message:
-                "LLM не настроен — настройте BYO-ключ для активации ассистента.",
-            }),
-          );
+        // T-0573 (ADR-T0573 §2.2 B2, F5/AC-5): classify by TYPE — dormant (no
+        // config) AND adapter-failure (config exists, call failed) both answer
+        // with the SAME honest 503. Any OTHER error (a real bug) is NOT
+        // masked — it falls through to `throw err` → router's INTERNAL 500,
+        // exactly as before this task.
+        if (classifyLlmUnavailability(err) === "unavailable") {
+          await respondLlmUnavailable(pool, tenantId, threadId, actorSlug, agentSlug, res);
           return;
         }
         throw err;

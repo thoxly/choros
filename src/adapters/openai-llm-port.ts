@@ -26,6 +26,10 @@ import type {
   ChatLlmResult,
   ChatToolCall,
 } from "../core/llm-port.js";
+// T-0573 (ADR-T0573 §2.2 B1): wrap adapter-level failures (bad handle,
+// non-JSON response, HTTP error, timeout, network) so the HTTP layer can
+// classify them as "LLM unavailable" (honest 503) by TYPE, not by message text.
+import { LlmUnavailableError } from "../core/llm-port.js";
 import { SecretResolverPort, validateSecretHandleShape, redactHandle } from "../core/secret-handle-validator.js";
 // T-0497: SSRF guard — validates endpoint against private/loopback/metadata IP ranges
 // (both literal IP and DNS-resolved) before shipping the bearer key.
@@ -105,7 +109,9 @@ export class OpenAILlmPort implements LlmPort {
     // RL-3: validate the handle shape — not a raw key.
     const verdict = validateSecretHandleShape(config.secretHandle);
     if (!verdict.ok) {
-      throw new Error(
+      // T-0573: classified as LLM-unavailable (bad/invalid key configuration),
+      // not a generic Error — cause preserved for logs, never surfaced to the user.
+      throw new LlmUnavailableError(
         `OpenAILlmPort: invalid secret handle (${verdict.reason}); ` +
         `use an opaque vault/env reference, not a raw key. ` +
         `Handle (redacted): ${redactHandle(config.secretHandle)}`,
@@ -151,8 +157,11 @@ export class OpenAILlmPort implements LlmPort {
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(content) as Record<string, unknown>;
-    } catch {
-      throw new Error(`OpenAILlmPort: invalid JSON response from model`);
+    } catch (err) {
+      // T-0573: provider returned a malformed response — classified as
+      // LLM-unavailable (the provider is not usably reachable), not a bug in
+      // our code.
+      throw new LlmUnavailableError(`OpenAILlmPort: invalid JSON response from model`, { cause: err });
     }
 
     // Extract confidence: use a top-level confidence field if present, else default 0.8.
@@ -271,21 +280,25 @@ export class OpenAILlmPort implements LlmPort {
           try {
             const parsed = JSON.parse(text) as ChatCompletionResponse;
             if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`OpenAI API error ${res.statusCode}: ${text}`));
+              // T-0573: provider rejected the call (bad key, quota, etc.) —
+              // classified as LLM-unavailable, not a generic Error.
+              reject(new LlmUnavailableError(`OpenAI API error ${res.statusCode}: ${text}`));
             } else {
               resolve(parsed);
             }
-          } catch {
-            reject(new Error(`OpenAI API non-JSON response: ${text.slice(0, 200)}`));
+          } catch (err) {
+            // T-0573: non-JSON response from the provider — unavailable, not our bug.
+            reject(new LlmUnavailableError(`OpenAI API non-JSON response: ${text.slice(0, 200)}`, { cause: err }));
           }
         });
       });
 
       request.on("timeout", () => {
         request.destroy();
-        reject(new Error("timeout: OpenAI request exceeded " + this.config.timeoutMs + "ms"));
+        // T-0573: request timeout — classified as LLM-unavailable.
+        reject(new LlmUnavailableError("timeout: OpenAI request exceeded " + this.config.timeoutMs + "ms"));
       });
-      request.on("error", (err) => reject(err));
+      request.on("error", (err) => reject(new LlmUnavailableError(`OpenAI API network error: ${String(err)}`, { cause: err })));
 
       request.write(payload);
       request.end();
