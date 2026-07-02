@@ -1,0 +1,85 @@
+{
+  "task_id": "T-0573",
+  "status": "ready",
+  "summary": "Разблокировка ассистента для существующих (не свежерегистрированных) тенантов: register.ts (T-0373/T-0475/T-0574) сидит 9 строк tenant-zero (role-configurator, employee assistant-agent, agent_card, 2 role_assignment, 4 grant) ТОЛЬКО новым тенантам; владелец существующего тенанта (например ООО Аксон) получает отказ AUTHORING_ACCESS_DENIED_MESSAGE в ассистенте-конфигураторе, так как ни одной из этих строк не существует. Отдельно, assistant.ts:1738 вызывает llmPortFactory вне try/catch(LlmDormantError) и любая ошибка адаптера, не являющаяся LlmDormantError, прокидывается в общий catch router.ts (строки 296-304), который безусловно отдаёт сырой HTTP 500 {\"error\":{\"code\":\"INTERNAL\"}} вместо честного 503 \"подключите LLM\", обещанного docs/specs/ai-assistant-byo.spec.md §3.1. Задача: set-driven backfill-миграция (эталон формата — migrations/115_assistant_agent_card_backfill.sql), человечная ошибка LLM-недоступности со ссылкой на /llm-connections (построен T-0574) для обоих путей отказа LLM, и снятие бейджа status:\"demo\" с пункта assistant в nav-config.js ТОЛЬКО как следствие доказанного факта разблокировки.",
+  "functional": [
+    "F1. Backfill-миграция для КАЖДОГО тенанта без полного набора 9 строк tenant-zero (role-configurator / employee assistant-agent / agent_card / 2× role_assignment / 4× grant) досоздаёт недостающие — set-driven (без литерала UUID тенанта), идемпотентно, не трогая тенанты с уже полным инвариантом.",
+    "F2. Владелец тенанта (employee с role_assignment на роль tenant-owner) — цель нового role_assignment на role-configurator, созданного backfill (та же связка, что register.ts шаг 3g для нового тенанта).",
+    "F3. После backfill владелец тенанта, открывший Ассистента-конфигуратора, видит рабочий чат (не AUTHORING_ACCESS_DENIED_MESSAGE) независимо от того, подключён ли LLM-ключ.",
+    "F4. Кнопка «Назначить ассистенту» на /llm-connections (построена T-0574) становится живой для тенанта, прошедшего backfill (эндпойнт назначения профиля не возвращает AGENT_NOT_FOUND).",
+    "F5. Путь «LLM-конфиг существует в БД, но провайдер/ключ нерабочий» (ошибка внутри ctx.llm.chat(), не LlmDormantError) отдаёт тот же класс честного человекочитаемого ответа, что и путь «LLM вовсе не настроен» — не сырой INTERNAL/500.",
+    "F6. Текст человечной ошибки «нет LLM-ключа» (оба пути) содержит указание подключить/проверить ключ, ссылку на /llm-connections, без дев-жаргона (endpoint/handle/secretHandle/стек-трейс).",
+    "F7. Текст отказа «нет прав» (AUTHORING_ACCESS_DENIED_MESSAGE, содержание не меняется) в честном случае «у пользователя действительно нет гранта после backfill» продолжает называть, кто может выдать право — не регресс."
+  ],
+  "non_functional": [
+    "N1. Backfill не создаёт ни одной строки для тенанта с уже полным инвариантом (в т.ч. свежезарегистрированные и уже прошедшие migration 115) — ON CONFLICT DO NOTHING + WHERE … IS NULL.",
+    "N2. Backfill не содержит ни одного литерала UUID тенанта — грепом проверяемо (ci/checks/demo/no-hardcoded-tenant.sh, ci/checks/seed/no-hardcoded-fixture-ids.sh обязаны проходить).",
+    "N3. Backfill — аддитивный INSERT ONLY, не меняет/не удаляет существующие строки других тенантов.",
+    "N4 (анти-кейс D-064). Изменения задачи не вносят новых кейс-специфичных строковых констант (конкретные названия тенантов/владельцев из живой приёмки) в src/.",
+    "N5. Изменение обработки ошибок не расширяет/не сужает круг лиц, которым разрешено видеть текст ошибки — тот же гейт доступа; меняется только содержание сообщения.",
+    "N6. Снятие бейджа «демо» выполняется ТОЛЬКО как следствие доказанных F3/F4 — не как самостоятельная косметика без факта разблокировки (D-064 анти-кейс-дисциплина)."
+  ],
+  "out_of_scope": [
+    "O1. Реальный рабочий LLM-ключ вставить в интерфейс — некому (директива фаундера); путь «ассистент ответил по-настоящему» — founder-todo (AC-8), не блокирует закрытие задачи.",
+    "O2. UI/экран /llm-connections сам по себе (создание профиля/вставка ключа/тест/назначение) — T-0574, уже смержено; эта задача только потребляет адресуемость ассистента.",
+    "O3. Обобщение backfill на любые БУДУЩИЕ поля/сущности tenant-zero сверх текущего набора из 9 строк — не ретроактивный контракт этой спеки.",
+    "O4. Полная замена x-dev-user/worker-token модели (access-and-tenant-zero.spec.md §3.2, F1) — T-0328, не в объёме.",
+    "O5. Приглашение по ссылке / email-инвайты (access-and-tenant-zero.spec.md §3.4, F3) — отдельная задача.",
+    "O6. Редизайн текста системного промта ассистента/аналитика — не трогается; меняются только тексты ошибок LLM-недоступности.",
+    "O7. Любая реорганизация экрана /llm-connections кроме уже существующей (T-0574) кнопки «назначить профиль ассистенту»."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "SQL-запрос по choros.tenant, для каждого тенанта проверяющий существование role-configurator, employee assistant-agent, agent_card для него, confirmed role_assignment владелец→role-configurator, confirmed role_assignment assistant-agent→role-configurator, >=2 confirmed authoring_draft grant (create+update) и >=2 confirmed capability grant (llm_connection:configure + system_agent:operate) на role-configurator — выполненный после применения backfill-миграции, возвращает 0 строк (см. полный текст запроса в T-0573-assistant-unlock.spec.md §8 AC-1).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Тот же SQL-запрос AC-1, выполненный повторно после второго прогона backfill-миграции, по-прежнему возвращает 0 строк, и количество строк в choros.role/employee/agent_card/role_assignment/grant не увеличилось по сравнению с состоянием сразу после первого прогона (идемпотентность).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "Grep-проверка: файл(ы) backfill-миграции не содержат ни одного литерала-UUID тенанта вне динамически вычисляемых выражений — ci/checks/demo/no-hardcoded-tenant.sh и ci/checks/seed/no-hardcoded-fixture-ids.sh проходят на новом файле.",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "На живом dev-стенде: владелец тенанта ООО Аксон (или эквивалентного тенанта без предварительного seed) после backfill открывает Ассистента-конфигуратора, отправляет содержательное сообщение и получает ответ, отличный от AUTHORING_ACCESS_DENIED_MESSAGE.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-5",
+      "text": "Интеграционный тест (живая Postgres): когда ctx.llm.chat() внутри обработки сообщения ассистента бросает ошибку, не являющуюся LlmDormantError (смоделировано), HTTP-ответ POST /api/assistant/threads/:id/messages НЕ является HTTP 500 {\"error\":{\"code\":\"INTERNAL\"}} — отражает честное состояние «LLM недоступен» тем же классом ответа (HTTP 503, message с человекочитаемым текстом и путём /llm-connections).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-6",
+      "text": "Интеграционный тест: POST /api/assistant/threads/:id/messages для тенанта без любого LLM-конфига (dormant path) возвращает тело ответа, text/message которого содержит подстроку /llm-connections.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-7",
+      "text": "Текстовый грep/юнит-тест: пользовательское поле message человекочитаемого текста ошибки «нет LLM» (dormant-путь и путь произвольной ошибки адаптера из AC-5) не содержит строк-маркеров дев-жаргона (LLM_NOT_CONFIGURED как единственный текст без пояснения, OpenAILlmPort, endpoint, secretHandle, stack) — код ошибки в JSON не предмет этого критерия.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-8",
+      "text": "Founder-todo, явно зафиксирован, НЕ входит в DoD этой задачи: путь «владелец тенанта получает от ассистента содержательный ответ реального LLM-провайдера» требует вставки настоящего рабочего API-ключа на /llm-connections фаундером — не проверяется в автоматической приёмке.",
+      "verifiable_as": "manual"
+    },
+    {
+      "id": "AC-9",
+      "text": "web/src/app-shell/nav-config.js пункт {id:\"assistant\"} меняет status:\"demo\" → status:\"live\" ТОЛЬКО после того, как AC-1 и AC-4 зафиксированы зелёными; автоматизированный тест на nav-config.js подтверждает status===\"live\" для пункта assistant, гейтован CI вместе с AC-1..AC-7 (не независимая косметика).",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-10",
+      "text": "Существующий текст AUTHORING_ACCESS_DENIED_MESSAGE (не изменяется по содержанию) по-прежнему возвращается для не-владельца/не-админа тенанта без гранта authoring_draft даже после backfill — регрессия проверяется существующим тестовым покрытием assistant-configurator.test.ts.",
+      "verifiable_as": "test"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0573-assistant-unlock.spec.md"
+}

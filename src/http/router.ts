@@ -186,6 +186,13 @@ function sendErrorEnvelope(
   res.end(body);
 }
 
+// T-0573: additive re-export so call-sites outside the router (e.g.
+// assistant.ts's LLM-unavailable 503) can emit the SAME canonical
+// {error:{code,message}} envelope instead of hand-rolling their own shape
+// (ADR-T0573 §2.2 B3). Zero lines of the original declaration touched
+// (FF-HIRE-4: router.ts is additive-only).
+export { sendErrorEnvelope };
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------

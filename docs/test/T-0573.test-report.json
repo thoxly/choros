@@ -1,0 +1,93 @@
+{
+  "task_id": "T-0573",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 7462,
+    "passed": 7462,
+    "failed": 0
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1",
+      "test": "ci/checks/db/migration-118-tenant-zero-backfill.test.ts :: 'the seeded pre-T-0373 tenant genuinely lacks the full invariant before any backfill runs' (violations=1 pre-migration) + 'FF-1 (AC-1): re-running migration 118 backfills the FULL 9-row invariant for the pre-T-0373 tenant' (violations=0 post-migration; role=1/employee=1/agent_card=1/role_assignment=2/grant=4; F2 owner-targeting asserted by id) + 'FF-2: a freshly registerTenant()-registered tenant ALSO satisfies the AC-1 invariant' (anti-drift: register.ts seed-site independently satisfies the same predicate, 0 violations) — all on live Postgres 16. ADVERSARIAL EXTENSION performed by this tester (not in the coder's test file): seeded a mixed-state DB with 3 tenants simultaneously (T_FULL — already-complete invariant; T_PARTIAL — role-configurator+owner-assignment present but employee/agent_card/grants missing; T_OWNERLESS — tenant with NO tenant-owner role_assignment at all, the R-2 anti-case) and ran migration 118's SQL body directly. Result: T_FULL untouched (row counts identical pre/post, N3 non-regression), T_PARTIAL fully closed (0 violations after), T_OWNERLESS remains flagged (exactly 1 tenant returned by the AC-1 predicate) — matching the documented known-behaviour in review R-2 finding exactly (role-configurator+agent-assignment+4 grants ARE created for the ownerless tenant since A5/A6/A7 do not depend on an owner, but A4 owner-assignment is correctly skipped — no fabricated owner, no crash).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-2",
+      "test": "ci/checks/db/migration-118-tenant-zero-backfill.test.ts :: 'FF-3 (AC-2): running migration 118 a SECOND and THIRD time is a no-op (idempotent, no dup rows)' (0 new rows across role/employee/agent_card/role_assignment/grant on 2nd+3rd run, live PG). ADVERSARIAL EXTENSION: re-ran the migration's SQL body a SECOND time against this tester's own 3-tenant mixed-state fixture (T_FULL/T_PARTIAL/T_OWNERLESS, see AC-1) after the first run had already closed T_PARTIAL and partially addressed T_OWNERLESS — all 7 INSERT blocks reported '0' rows affected on the second pass; row counts for all three tenants (role/employee/agent_card/role_assignment/grant) were byte-identical before and after the second run; no duplicate role_assignment/grant rows appeared (each block's WHERE NOT EXISTS / COUNT<N / IS NULL guard held under a harder mixed-population fixture than the coder's single-tenant test exercises).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-3",
+      "test": "bash ci/checks/migrations/no-hardcoded-tenant-uuid.sh (PASS: migration 118 iterates FROM choros.tenant, no literal tenant UUID) + bash ci/checks/migrations/no-hardcoded-tenant-uuid.sh --self-test (PASS: planted good/bad fixtures correctly discriminated) + bash ci/checks/demo/no-hardcoded-tenant.sh (PASS, pre-existing scope, unaffected) + bash ci/checks/seed/no-hardcoded-fixture-ids.sh (exit 0; emits pre-existing WARNs on unrelated test files e.g. 'e-kravtsova' slug in audit-grant-encoder.test.ts/grants-dao.test.ts, none touching migrations/118 or this task's diff) + ci/checks/db/migration-118-tenant-zero-backfill.test.ts :: 'AC-3 static: migration 118 has no literal tenant UUID and is driven by FROM choros.tenant' (regex-verified on the actual file content, comments stripped).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-4",
+      "test": "manual/LIVE_PROOF (verifiable_as:manual per spec — deployed dev-stand step, D-064 DoD, out of TEST-phase automated scope). Not exercised by this tester; ADR/review/pr-handoff record a prior LIVE_PROOF pass on a simulated ООО-Аксон-shaped tenant (owner-akson-sim, backfill applied, role_assignment confirmed_by='backfill' observed live) reported in pr-handoff friction_events. Recorded per the same convention as T-0570/T-0574 test-reports (manual AC recorded result:pass / out-of-phase-scope, not fabricated as an automated test).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-5",
+      "test": "ci/checks/db/assistant-llm-unavailable.test.ts :: 'FF-5: a configured-but-failing LLM adapter (LlmUnavailableError) answers 503 LLM_UNAVAILABLE, NOT 500 INTERNAL' — live Postgres, real HTTP routes (registerAssistantRoutes), real registerTenant()'d tenant; llmPortFactory injected to throw LlmUnavailableError (modeling an adapter failure e.g. 'OpenAI API error 401: invalid api key'); asserts statusCode===503 (explicitly !== 500), body.error.code==='LLM_UNAVAILABLE' (explicitly !=='INTERNAL'), message contains '/llm-connections'. Companion anti-mask test in the same file (see notes) proves the classifier does not swallow unrelated bugs.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-6",
+      "test": "ci/checks/db/assistant-llm-unavailable.test.ts :: 'FF-6: dormant LLM (no config at all) answers 503 LLM_UNAVAILABLE with a message containing /llm-connections' (live Postgres, real dormantLlmPort path, real registerTenant()'d tenant, real HTTP route) — asserts body.error.message contains '/llm-connections'. Cross-checked at the unit level by src/__tests__/assistant-llm-message.unit.test.ts :: 'AC-6: contains the /llm-connections path' and by bash ci/checks/ux/assistant-llm-message-jargon.sh (message extraction + substring check, PASS).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-7",
+      "test": "bash ci/checks/ux/assistant-llm-message-jargon.sh (PASS: no LLM_NOT_CONFIGURED/OpenAILlmPort/endpoint/secretHandle/stack in ASSISTANT_LLM_UNAVAILABLE_MESSAGE) + --self-test (PASS: planted good/bad fixtures correctly discriminated) + src/__tests__/assistant-llm-message.unit.test.ts :: 'AC-7: contains none of the dev-jargon denylist tokens' (unit-level denylist assertion on the exported constant, used verbatim by BOTH the dormant and adapter-failure paths per src/http/assistant.ts's respondLlmUnavailable, so one message source covers both AC-5's and AC-6's user-facing text).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9",
+      "test": "web/src/app-shell/nav-config.test.js :: 'T-0573: assistant item has status \"live\" (demo badge lifted post-backfill)' (asserts constructor-zone assistant item.status==='live'). Order/gating verified by inspection: this test lives in the SAME file as the rest of the nav-config IA suite (27/27 green together, no independent/isolated CI job), and nav-config.js:117's status:'live' literal is code-committed alongside migration 118 in the same PR — the AC-9 gate cannot go green without AC-1's backfill migration existing in the same diff (D-064 anti-decoration ordering honoured structurally, not just by convention).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-10",
+      "test": "src/__tests__/assistant-configurator.test.ts (pre-existing, T-0361/T-0363/T-0462 coverage, NOT modified by this task, re-run fresh as part of the full root vitest suite) :: 'AC-T361-2: grant ceiling enforced when no authoring_draft grant' ('returns недостаточно прав message without tool dispatch' + 'returns denied message with non-authoring grant (wrong resourceType)') — AUTHORING_ACCESS_DENIED_MESSAGE content is byte-unchanged by this task (grep-verified: src/core/assistant-configurator.ts lines 534-541/598-602 untouched in the diff) and this existing suite continues to exercise the non-owner/non-grant denial path unmodified, satisfying the spec's explicit 'no new test needed, existing coverage suffices' instruction.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npx vitest run --exclude 'ci/checks/db/**' (full root unit suite)",
+      "result": "pass",
+      "note": "252 files passed / 2 skipped (254); 4868 tests passed / 10 skipped (4878); 0 failed. Includes assistant-llm-message.unit.test.ts (8/8) and the full pre-existing assistant-* / llm-port* suites unmodified."
+    },
+    {
+      "check": "npx vitest run (web/, full suite)",
+      "result": "pass",
+      "note": "55 files passed (55); 1514 tests passed (1514); 0 failed. Includes nav-config.test.js (27/27, AC-9) and screen-assistant.error-envelope.test.js (8/8, R-1 review fix — reads canonical d.error.message with legacy d.message fallback)."
+    },
+    {
+      "check": "npm run fitness:db (live Postgres 16, isolated docker-compose project t-0573-test, POSTGRES_PORT=55432, torn down after)",
+      "result": "pass",
+      "note": "104 migration files (001..118) applied cleanly to a fresh instance; fitness:db:setup-template rebuilt the test template (hash aea10edf, matches pr-handoff's claimed hash exactly); 100 files passed (100), 1080 tests passed (1080), 0 failed. Includes migration-118-tenant-zero-backfill.test.ts (5/5) and assistant-llm-unavailable.test.ts (3/3, incl. the anti-mask test)."
+    },
+    {
+      "check": "npm run fitness (full ~280-step gate chain, root, on the same live Postgres)",
+      "result": "pass",
+      "note": "Process ran to completion through the entire && chain (log ends on the final step, ci/checks/ux/assistant-llm-message-jargon.sh --self-test — no premature truncation, which a mid-chain non-self-test failure would have caused since `&&` short-circuits). Scanned every 'FAIL' line in the full log: all trace to a gate's own --self-test proving it catches a deliberately-planted broken fixture (document-render-isolation, check-template-deps, doc-coherence, docpage-writeful-tools, read-pdp-anti-case, read-pdp-frozen-core self-tests), OR to the FF-DC7 dual-control-isolation.sh internal detector correctly flagging migration 118 BEFORE the T0573-DC-MIG118-GUARD relief block content-verifies it and grants relief (both PASS lines for the same check appear in sequence; the check's own final summary line reads 'PASS: dual-control-isolation — all checks green'). frozen-checks-immutable.sh confirms the relief was granted through the existing auto_additive sanction channel with a valid vrag_attestation, not a silent bypass. No real (non-self-test, non-relieved) FAIL found."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None requiring a new automated test — all AC-1..AC-3/AC-5..AC-7/AC-9/AC-10 trace to an existing, executed test written by the coder in this task's own commits, or (AC-10) to pre-existing non-regressed coverage per the spec's explicit instruction. AC-4/AC-8 are correctly manual/founder-todo (verifiable_as:manual) and are not fabricated as automated tests, per task brief instruction that they are n/a for the TEST phase.",
+    "adversarial_probe_performed_per_task_instruction": "Ran the specific mixed-state adversarial probe requested by the task brief: seeded THREE tenants concurrently in one database — T_FULL (pre-existing complete 9-row invariant, simulating an already-registered or already-migration-115-backfilled tenant), T_PARTIAL (role-configurator role + confirmed tenant-owner assignment present, but NO assistant-agent employee/agent_card/role_assignment-to-configurator/grants — a harder partial state than the coder's single all-or-nothing pre-T-0373 fixture), and T_OWNERLESS (a tenant row with ZERO organizational structure — no role, no employee, no role_assignment at all — the deepest R-2 anti-case: no confirmed tenant-owner assignment to resolve an owner from). Ran migration 118's SQL body TWICE against this fixture. Findings, all matching the review's documented R-2 known-behaviour exactly: (1) T_FULL — 0 new rows on either run (N3 non-regression holds under a harder concurrent-tenant scenario than any existing test exercises); (2) T_PARTIAL — fully closed to 0 AC-1 violations after run 1, stable (0 new inserts) on run 2; (3) T_OWNERLESS — role-configurator, assistant-agent employee, agent_card, the assistant-agent-to-role-configurator role_assignment, and all 4 grants ARE created (blocks A1/A2/A3/A5/A6/A7 do not depend on an owner existing), but the owner-to-role-configurator assignment (A4) is correctly NOT created (LATERAL join over zero confirmed tenant-owner assignments yields zero rows — no crash, no fabricated owner) — the AC-1 predicate continues to flag this ONE tenant (and only this one) as a violator after both runs, with a STABLE violation count across the second run (not oscillating, not accumulating duplicates). This is EXACTLY the known-behaviour documented in docs/review/T-0573.review.json finding R-2 (info, non-blocking, deferred to T-0594) and is recorded here as an independently-reproduced confirmation, not a new defect — no action needed on this task per the review's explicit disposition.",
+    "anti_false_pass_checks_performed": [
+      "Before accepting 'npm run fitness' green, scanned its full log line-by-line for every 'FAIL' occurrence; each one was individually traced to either (a) a gate's own --self-test intentionally proving detection of a planted-broken fixture, or (b) the FF-DC7 dual-control-isolation.sh detector correctly firing on migration 118 BEFORE its content-verified relief block (T0573-DC-MIG118-GUARD) grants sanctioned relief — confirmed the check's own final summary line is 'PASS', not silently ignoring a real red.",
+      "Independently re-ran (not merely trusted) both new FF-4/FF-UX-7 shell gates AND their --self-test invocations directly, outside the full fitness chain, to confirm the detectors themselves are sound (would fire on a bad fixture) and not just passing by coincidence on the one real file.",
+      "Reproduced the coder's own live-acceptance scenario at a HARDER difficulty: the coder's migration-118-tenant-zero-backfill.test.ts and the pr-handoff's manual live-acceptance narrative each seed exactly ONE pre-T-0373 tenant per run. This tester's adversarial probe seeded THREE tenants of three DIFFERENT completeness states SIMULTANEOUSLY in the same migration run/database, to probe for cross-tenant interference (e.g. a WHERE clause accidentally scoped too broadly, or a LATERAL join leaking a wrong tenant's owner across tenant boundaries) — none found; each tenant's outcome was scoped correctly to itself.",
+      "Verified the R-2 finding is not merely asserted by the review but independently reproducible: ran the exact anti-case (tenant with zero role_assignment rows at all, not just zero CONFIRMED tenant-owner ones) against the actual migration SQL file (not a re-derived predicate) and confirmed row-for-row the same asymmetric outcome (agent gets wired, owner-slot stays empty, tenant stays flagged) that the review reports.",
+      "Confirmed AC-2's idempotency claim under the harder 3-tenant mixed fixture, not just the coder's single-tenant fixture — a second migration run produced literally '0' rows inserted in all 7 blocks (INSERT 0 0 x7), for a database state considerably messier than what FF-3 alone proves."
+    ],
+    "residual_findings_nonblocking": [
+      "R-2 (already known, review-recorded, deferred to T-0594): a tenant with zero tenant-owner role_assignment ends up with a fully-granted role-configurator (4 confirmed grants + an agent assignment) that no human can inherit, because A5/A6/A7 do not gate on owner existence while A4 correctly does. Not a privilege escalation (the agent identity does not authenticate as an HTTP actor — chat runs under the owner's identity per ADR §1) and not silently hidden (AC-1's own predicate continues to flag such a tenant). Independently reproduced by this tester's adversarial probe (see adversarial_probe_performed_per_task_instruction); no code change requested for T-0573, consistent with the review's disposition."
+    ]
+  }
+}

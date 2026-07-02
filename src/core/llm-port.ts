@@ -197,6 +197,47 @@ export class LlmDormantError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// LlmUnavailableError — T-0573 (ADR-T0573 §2.2 B1): thrown by a production
+// adapter (e.g. OpenAILlmPort) when the CONFIGURED provider/key/endpoint is
+// unreachable or rejects the call (invalid secret handle, non-JSON response,
+// HTTP >=400, timeout, network error). This is DIFFERENT from LlmDormantError
+// (no config at all) — here a config EXISTS but calling it failed. Both are
+// classified as "unavailable" by classifyLlmUnavailability below, so the HTTP
+// layer can answer both with the SAME honest 503, never a raw INTERNAL.
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by a production LlmPort adapter when a CONFIGURED provider call
+ * fails (bad key/handle, non-JSON response, HTTP error, timeout, network).
+ * The original failure is preserved as `cause` for logs — NEVER surfaced to
+ * the end user (see ASSISTANT_LLM_UNAVAILABLE_MESSAGE, assistant-messages.ts).
+ */
+export class LlmUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "LlmUnavailableError";
+  }
+}
+
+/**
+ * T-0573 (ADR-T0573 §2.2 B1): classify an error caught around ctx.llm.chat()/
+ * complete() as "unavailable" (honest 503, no LLM reachable) or `null` (NOT an
+ * LLM-availability problem — a real bug, must fall through to INTERNAL, never
+ * masked as "no key").
+ *
+ * Classification is BY TYPE, never by message string (N4/AC-7: no dev-jargon
+ * text-sniffing, robust to adapter wording changes):
+ *   - err instanceof LlmDormantError    → "unavailable" (no config at all).
+ *   - err instanceof LlmUnavailableError → "unavailable" (config exists, call failed).
+ *   - anything else                     → null (do not hide real bugs).
+ */
+export function classifyLlmUnavailability(err: unknown): "unavailable" | null {
+  if (err instanceof LlmDormantError) return "unavailable";
+  if (err instanceof LlmUnavailableError) return "unavailable";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // dormantLlmPort — the fail-closed default (FR-7 / AC-4, three-lock §6).
 // ---------------------------------------------------------------------------
 

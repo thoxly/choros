@@ -1,0 +1,166 @@
+{
+  "task_id": "T-0573",
+  "status": "ready",
+  "decision": "Три соразмерные дельты без новых таблиц/колонок/эндпоинтов; ассистент не переписывается. (A) Backfill-миграция 117_assistant_tenant_zero_backfill.sql (следующий свободный № — 116 максимум на ветке, не 118 как в parenthetical спеки): ОДНА set-driven идемпотентная аддитивная миграция (эталон формата — 115), 7 блоков INSERT…SELECT…LEFT JOIN…WHERE <partner> IS NULL + ON CONFLICT DO NOTHING, воспроизводящих ПОЛНЫЙ tenant-zero-инвариант (role-configurator + employee assistant-agent + agent_card + 2 role_assignment + 4 grant) для КАЖДОГО тенанта, у которого чего-то не хватает; владелец резолвится set-driven из role_assignment→role(slug='tenant-owner') (F2), НИ ОДНОГО литерала UUID тенанта. Анти-дрейф двух seed-сайтов (register.ts TS-транзакция vs SQL-миграция) закрыт НЕ shared-кодом (несоразмерный SQL↔TS рефактор), а fitness-сверкой FF-2: живой тест регистрирует свежий тенант И прогоняет инвариант AC-1 — оба сайта удовлетворяют один предикат. (B) Честная ошибка LLM-недоступности: новый классификатор classifyLlmUnavailability(err) в ядре (llm-port.ts) сводит dormant (LlmDormantError) И ошибки адаптера (обёрнутые в новый LlmUnavailableError: невалидный handle/JSON/HTTP≥400/timeout/сеть в openai-llm-port.ts) к ОДНОМУ честному ответу — HTTP 503, КАНОНИЧЕСКИЙ envelope {error:{code:'LLM_UNAVAILABLE',message:<HUMAN c /llm-connections, без дев-жаргона>}} (урок T-0571 F-1: старый dormant-путь отдавал не-канонический {error:'LLM_NOT_CONFIGURED'} — исправляется); НЕ-LLM ошибки классификатор возвращает null → честно падают в INTERNAL (не маскируем баги под 'нет ключа'); построение порта (assistant.ts:1738) вносится в тот же перехват. (C) Статический флип бейджа nav-config.js:115 status:'demo'→'live' для пункта assistant, гейтованный порядком (FF-UX-9 бежит вместе с db-гейтами AC-1, не как независимая косметика — D-064 анти-декорация). KC-identity: реальный Keycloak-клиент ассистента НЕ нужен — чат идёт под identity владельца, assistant-agent используется только как субъект grant-пересечения, kc_client_id='assistant-agent-'||tenant_id остаётся непрозрачным уникальным адресом (паттерн 115), не auth-идентичностью.",
+  "rejected_alternatives": [
+    {
+      "option": "Backfill = миграция + shared TS/SQL-функция, общая с register.ts",
+      "why_not": "Требует SQL↔TS-рефактор seed-транзакции (register.ts вставляет per-row параметризованными query, не SQL-функцией); несоразмерно (§3 задания). Анти-дрейф дешевле закрыть fitness-сверкой FF-2 (register+инвариант-запрос в одном тесте), чем разделяемым кодом."
+    },
+    {
+      "option": "Дописать недостающие 8 строк в существующую миграцию 115 на месте",
+      "why_not": "115 уже применена и трекнута в schema_migrations — правка тела применённой миграции = невоспроизводимое состояние на средах, где 115 прошла. Новая 117 — единственно корректно."
+    },
+    {
+      "option": "Хардкод известного dev-tenant UUID в backfill",
+      "why_not": "Нарушает N2/AC-3, молча пропустит прочие тенанты. Set-driven SELECT из tenant/role_assignment — единственно верно."
+    },
+    {
+      "option": "Backfill только грантов (первая гипотеза до LIVE_PROOF T-0574)",
+      "why_not": "У старых тенантов НЕТ и employee, и role, и agent_card — не только грантов. Гранты на несуществующую роль/агента ничего не разблокируют. Нужен ПОЛНЫЙ инвариант 9 строк."
+    },
+    {
+      "option": "Классифицировать 'нет ключа' по строке сообщения ошибки",
+      "why_not": "Хрупко, тянет дев-жаргон в проверки (против духа AC-7), ломается при смене формулировки адаптера. Классификация по ТИПУ (подкласс LlmUnavailableError) — устойчива."
+    },
+    {
+      "option": "Маскировать ЛЮБУЮ ошибку try-блока под 'нет ключа' (503 на всё)",
+      "why_not": "Прячет реальные баги под ложным 'подключите ключ' — анти-паттерн наблюдаемости. Классификатор возвращает null для не-LLM ошибок → они честно падают в INTERNAL."
+    },
+    {
+      "option": "Динамический бейдж (снимать per-tenant по наличию рабочего ключа)",
+      "why_not": "Ложная точность: ассистент — доставленная 'live' функция даже без ключа (честно отвечает 'подключите'). Per-tenant demo/live усложняет статический nav-config и путает G7 бейдж≡контент. Статический флип честнее и проще."
+    },
+    {
+      "option": "Снять бейдж отдельным косметическим изменением раньше backfill",
+      "why_not": "Нарушение D-064 'эпик=кейс-доказательство'/N6: 'live' без факта разблокировки = декорация впереди факта. FF-UX-9 гейтует порядок."
+    },
+    {
+      "option": "Реальный Keycloak service account для assistant-agent под чат",
+      "why_not": "Чат идёт под identity владельца; ассистент как auth-клиент не нужен. Лишняя KC-поверхность ради несуществующей потребности."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "role (существующая; новая СТРОКА role-configurator для тенантов без неё)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid — ведёт (T-0013)"},
+        {"name": "id", "type": "uuid = gen_random_uuid()"},
+        {"name": "slug", "type": "text = 'role-configurator'"},
+        {"name": "display_name", "type": "text = 'Конфигуратор системы'"}
+      ]
+    },
+    {
+      "entity": "employee (существующая; новая СТРОКА assistant-agent)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid"},
+        {"name": "id", "type": "uuid = gen_random_uuid()"},
+        {"name": "slug", "type": "text = 'assistant-agent'"},
+        {"name": "kind", "type": "text = 'agent'"},
+        {"name": "position_id", "type": "NULL"}
+      ]
+    },
+    {
+      "entity": "agent_card (существующая; новая СТРОКА — шейп миграции 115, новых колонок НЕТ)",
+      "fields": [
+        {"name": "tenant_id", "type": "uuid"},
+        {"name": "employee_id", "type": "uuid — assistant-agent employee (адрес привязки)"},
+        {"name": "agent_type", "type": "text = 'assistant'"},
+        {"name": "kc_client_id", "type": "text = 'assistant-agent-' || tenant_id — детерминирован, UNIQUE (092), НЕ Keycloak-сервис, НЕ хардкод"},
+        {"name": "llm_endpoint/llm_model/llm_secret_handle/llm_connection_id/autonomy_threshold", "type": "NULL — dormant; seed-plane инвариант FF-25-5 не тронут"}
+      ]
+    },
+    {
+      "entity": "role_assignment (существующая; 2 новые СТРОКИ)",
+      "fields": [
+        {"name": "A4: владелец → role-configurator", "type": "employee_id = владелец (из role_assignment→role slug='tenant-owner', set-driven, F2); org_scope=⊥; granted_by=confirmed_by=владелец; source='backfill'; CONFIRMED"},
+        {"name": "A5: assistant-agent → role-configurator", "type": "org_scope=⊥; granted_by=confirmed_by=владелец; source='backfill'; CONFIRMED"}
+      ]
+    },
+    {
+      "entity": "grant (существующая; 4 новые СТРОКИ на role-configurator, scope=⊥, confirmed_by NOT NULL)",
+      "fields": [
+        {"name": "authoring_draft/create", "type": "3i"},
+        {"name": "authoring_draft/update", "type": "3j"},
+        {"name": "llm_connection:configure/configure", "type": "3j-bis (T-0475)"},
+        {"name": "system_agent:operate/operate", "type": "3j-bis (T-0475)"}
+      ]
+    },
+    {
+      "entity": "AssistantErrorResponse (наблюдаемое, не хранимое — единое для dormant+adapter путей)",
+      "fields": [
+        {"name": "statusCode", "type": "503"},
+        {"name": "body", "type": "{error:{code:'LLM_UNAVAILABLE', message:<HUMAN, содержит '/llm-connections', без дев-жаргона>}} — канонический sendErrorEnvelope-шейп"}
+      ]
+    }
+  ],
+  "contracts": [
+    "migrations/117_assistant_tenant_zero_backfill.sql — 7 блоков A1-A7 (role-configurator, employee assistant-agent, agent_card, 2 role_assignment, 4 grant), заголовок-комментарий по образцу 115/116, set-driven, идемпотентно, аддитивно, без литерала UUID тенанта.",
+    "src/core/llm-port.ts — export class LlmUnavailableError extends Error + export function classifyLlmUnavailability(err): 'unavailable'|null (dormant ∪ unavailable → 'unavailable'; иначе null). Ядро, без IO (FF-LP-9 остаётся зелёным). LlmDormantError НЕ удаляется.",
+    "src/core/(assistant-configurator.ts или новый assistant-messages.ts) — export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE: содержит '/llm-connections', без дев-жаргона (LLM_NOT_CONFIGURED/OpenAILlmPort/endpoint/secretHandle/stack).",
+    "src/adapters/openai-llm-port.ts — точки throw new Error (:108,:155) и _post reject (:274/279/286/288) оборачиваются в LlmUnavailableError (cause для логов; пользователю НЕ текст исключения).",
+    "src/http/assistant.ts — catch (:1955) переходит на classifyLlmUnavailability; построение порта (:1738) вносится в перехват; ответ = канонический {error:{code,message}} 503; старый не-канонический envelope (:1987) удаляется.",
+    "web/src/app-shell/nav-config.js:115 — status:'demo'→'live' для пункта assistant."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "AC-1: после миграции 117 инвариант-запрос §8 AC-1 спеки возвращает 0 строк для всех тенантов (живой Postgres).",
+      "ci_check": "vitest run ci/checks/db/migration-117-tenant-zero-backfill.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-2",
+      "rule": "AC-1/анти-дрейф seed-сайтов: свежерегистрированный через registerTenant тенант И backfill-тенант ОБА проходят инвариант-запрос (0 строк) — register.ts и миграция удовлетворяют один предикат.",
+      "ci_check": "vitest run ci/checks/db/migration-117-tenant-zero-backfill.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-3",
+      "rule": "AC-2: повторный прогон тела 117 — no-op (0 новых строк в role/employee/agent_card/role_assignment/grant), инвариант всё ещё 0 строк (идемпотентность).",
+      "ci_check": "vitest run ci/checks/db/migration-117-tenant-zero-backfill.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-4",
+      "rule": "AC-3: migrations/117_*.sql не содержит литерала UUID тенанта (regex [0-9a-f]{8}-...-[0-9a-f]{12}); совместимость — старые no-hardcoded-tenant.sh/no-hardcoded-fixture-ids.sh зелёные (поправка §1: они НЕ сканируют migrations/, поэтому AC-3 закрывает НОВАЯ проверка).",
+      "ci_check": "bash ci/checks/migrations/no-hardcoded-tenant-uuid.sh && bash ci/checks/demo/no-hardcoded-tenant.sh && bash ci/checks/seed/no-hardcoded-fixture-ids.sh"
+    },
+    {
+      "id": "FF-5",
+      "rule": "AC-5: ctx.llm.chat() бросает не-LlmDormantError (смоделировано) → POST /api/assistant/threads/:id/messages НЕ 500 INTERNAL, а 503 с error.code='LLM_UNAVAILABLE' и message c /llm-connections (живой Postgres, реальные маршруты).",
+      "ci_check": "vitest run ci/checks/db/assistant-llm-unavailable.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-6",
+      "rule": "AC-6: тот же маршрут для тенанта без ЛЮБОГО LLM-конфига (dormant) → пользовательский текст ответа содержит подстроку /llm-connections.",
+      "ci_check": "vitest run ci/checks/db/assistant-llm-unavailable.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-UX-7",
+      "rule": "AC-7: поле message обоих путей LLM-ошибки не содержит дев-жаргона (LLM_NOT_CONFIGURED как единственный текст / OpenAILlmPort / endpoint / secretHandle / stack) — код ошибки в JSON не предмет.",
+      "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh && vitest run src/__tests__/assistant-llm-message.unit.test.ts"
+    },
+    {
+      "id": "FF-8",
+      "rule": "AC-10: AUTHORING_ACCESS_DENIED_MESSAGE неизменен по содержанию и возвращается не-владельцу/не-админу без гранта authoring_draft даже после backfill (регресс — существующее покрытие).",
+      "ci_check": "vitest run src/__tests__/assistant-configurator.test.ts"
+    },
+    {
+      "id": "FF-UX-9",
+      "rule": "AC-9 (бейдж≡контент G7, гейт порядка D-064): nav-config пункт assistant имеет status==='live'; тест бежит вместе с db-гейтами AC-1, не как независимая косметика.",
+      "ci_check": "vitest run web/src/app-shell/nav-config.test.js"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1, FF-2"},
+    {"ac": "AC-2", "covered_by": "FF-3"},
+    {"ac": "AC-3", "covered_by": "FF-4"},
+    {"ac": "AC-4", "covered_by": "manual — LIVE_PROOF §7 спеки (DoD, вне авто-гейта)"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"},
+    {"ac": "AC-7", "covered_by": "FF-UX-7"},
+    {"ac": "AC-8", "covered_by": "founder-todo — реальный ключ фаундером, вне DoD"},
+    {"ac": "AC-9", "covered_by": "FF-UX-9 (гейтован порядком за FF-1/AC-4)"},
+    {"ac": "AC-10", "covered_by": "FF-8"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0573-assistant-unlock.md",
+  "escalation": ""
+}

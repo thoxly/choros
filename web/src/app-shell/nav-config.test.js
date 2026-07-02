@@ -166,6 +166,18 @@ describe('nav-config T-0538: 4-zone IA', () => {
     expect(ids).toContain('assistant');
   });
 
+  // T-0573 (ADR-T0573 §2.3, AC-9/FF-UX-9): the "demo" badge on assistant is
+  // lifted ONLY as a consequence of the proven backfill (migration 118, AC-1)
+  // + the live owner-chat proof (AC-4) — this test asserts the OUTCOME
+  // (status==='live'), gated to run alongside the db fitness gates per the
+  // ADR's anti-decoration ordering (D-064).
+  it('T-0573: assistant item has status "live" (demo badge lifted post-backfill)', () => {
+    const cz = ZONES.find((z) => z.id === 'constructor');
+    const assistantItem = cz.items.find((i) => i.id === 'assistant');
+    expect(assistantItem).toBeDefined();
+    expect(assistantItem.status).toBe('live');
+  });
+
   it('OBSERVABILITY zone contains ops-overview, reports, process-analytics, audit, spend, notifications', () => {
     const oz = ZONES.find((z) => z.id === 'observability');
     const ids = oz.items.map((i) => i.id);
