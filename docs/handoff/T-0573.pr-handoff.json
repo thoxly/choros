@@ -50,5 +50,21 @@
     "Следующий прогон fitness упал на frozen-checks-immutable.sh (T-0146 meta-gate, FF-FCI1) — dual-control-isolation.sh принадлежит T-0044, моя ветка задекларирована как T-0573 по имени. Разрешено через уже существующий и многократно применённый (T-0244/…/T-0570, 12 прецедентов) канал auto_additive (ci/checks/auto-sanction-additive.sh, T-0232): добавлена ОДНА санкционная строка в ci/checks/data/frozen-sanctions.jsonl (append-only data-файл), верифицированная машиной (A-1..A-4 аддитивность моего relief-блока над dual-control-isolation.sh + валидная vrag_attestation) — см. deviations_from_adr. После этой строки npm run fitness (полная цепочка) стал зелёным целиком, exit 0.",
     "npx tsc --noEmit → 0 ошибок. npx eslint src → 0 ошибок, 34 preexisting no-console warnings (ни один не в файлах этой задачи — проверено построчно, все warnings в src/adapters/spend-tracking-llm-port.ts, src/bridge-runner.ts, src/core/externalTaskBridge.ts, src/db/dmn-rule-table-store.ts, src/db/step-applier.ts, src/http/{inbox,process-defs,process-start,records}.ts, src/server/{agent-dispatch-loop,timer-firing-loop}.ts, src/http/assistant.ts — существующие console.error/console.log точки НЕ добавленные этой задачей, кроме отсутствия новых). npx vitest run --exclude 'ci/checks/db/**' (web исключён из корневого раннера) → 252 файла / 4868 тестов зелёных, 10 skipped (0 failed) — включая новый src/__tests__/assistant-llm-message.unit.test.ts (8/8) и все существующие assistant-*/llm-port*-тесты без единой правки логики поведения. web: npx vitest run → 54 файла / 1506 тестов зелёных (включая nav-config.test.js с новым AC-9 тестом, 27/27).",
     "REVIEW ITERATION verification (R-1 fix): мутационная проверка честности нового теста — временный возврат старой строки `text: d.message ?? '…'` в screen-assistant.jsx валит screen-assistant.error-envelope.test.js (1 failed: 'must NOT regress to the pre-fix flat read') — тест ловит именно R-1-регресс, не декорация. После восстановления фикса: точечный npx vitest run screen-assistant.error-envelope.test.js → 8/8; полный web npx vitest run → 55 файлов / 1514 тестов зелёных (было 54/1506 + 1 новый файл / 8 новых тестов); npx tsc --noEmit → 0 ошибок; bash ci/checks/ux/ux-g5-jargon-denylist.sh → 0 находок в screen-assistant.jsx (24 pre-existing в других файлах, informational); ux-g6/ux-g2 → PASS. Бэкенд-лейн этой итерацией не тронут (изменения только web/) — предыдущие прогоны fitness/fitness:db/root-vitest остаются в силе."
-  ]
+  ],
+  "live_proof": {
+    "status": "green_partial",
+    "date": "2026-07-02T20:20+03:00",
+    "stand": "http://100.121.76.86:3000 (dev, commit 5002111)",
+    "state_proof": [
+      "schema_migrations: 118_assistant_tenant_zero_backfill применена деплоем",
+      "ООО Аксон (c7a70702): employee assistant-agent СОЗДАН, agent_card есть (agent_type=assistant), 2 authoring_draft-гранта — tenant-zero-инвариант закрыт у старого тенанта (до 118 ассистента не существовало вовсе — доказано в live-proof T-0574)"
+    ],
+    "blocked_ui_step": "Стенд разлогинился после авто-деплоя (рестарт контейнера убил сессии app+KC). Машина пароли не вводит (граница фаундера) → браузерный шаг ждёт входа.",
+    "founder_steps_after_login": [
+      "Открыть «Ассистент» (бейдж live): вместо «У вас нет прав настраивать систему» — рабочий чат; сообщение → человечное «Подключите LLM-ключ…» со ссылкой /llm-connections (не сырой INTERNAL)",
+      "/llm-connections: «Назначить ассистенту» теперь ЖИВОЙ (agent_card есть) → назначить профиль → чип",
+      "После вставки настоящего ключа (+починки host-DNS): ассистент отвечает по-настоящему (AC-4/AC-8)"
+    ],
+    "machine_proof": "7462/7462 тестов, вкл. live-PG backfill-инвариант (полный/частичный/ownerless тенанты, идемпотентность двойного прогона)"
+  }
 }
