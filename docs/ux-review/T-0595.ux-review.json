@@ -1,0 +1,81 @@
+{
+  "task_id": "T-0595",
+  "verdict": "approved",
+  "_scope": "Реализация находок F-1/F-2 из UX_REVIEW T-0573 (мои же находки — сужу их реализацию). Дельта (git diff dev...HEAD -- web/ src/core/assistant-messages.ts): (1) assistant-messages.ts — одна константа → две (ADMIN: проза без голого пути, F-2 закрыт; NON_ADMIN: «обратитесь к администратору», без пути и без кнопки); (2) src/http/assistant.ts respondLlmUnavailable — сервер резолвит admin-статус через СУЩЕСТВУЮЩИЙ loadAdminContext (тот же предикат isGenesisOwner||adminGrants, что гейтит admin-зону nav) и ТОЛЬКО админу кладёт error.deepLinks:[{path:'/llm-connections',label:'Открыть подключения LLM'}]; (3) screen-assistant.jsx — 503-ветка прокидывает d.error.deepLinks в msg, рендер — СУЩЕСТВУЮЩИЙ MessageBubble deep-links блок (паттерн bundle-review :587-603), новый компонент НЕ введён, заголовок блока контекстный (deepLinksTitle); (4) ci/checks/ux/assistant-llm-message-jargon.sh перестроен под мою же рекомендацию F-2 (санкционированно).",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/assistant-llm-message-jargon.sh (перестроен T-0595) → PASS: обе константы ADMIN/NON_ADMIN чисты, no dev-jargon, no dead doors; --self-test → PASS (good fixture rc=0, bad fixture rc=14, фикстуры для ОБЕИХ констант)",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh (informational) → exit 0: те же 24 pre-existing findings исключительно в *.test.jsx (T-id в describe + telLinear-фикстура) — ни одного НОВОГО на дельте T-0595",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → PASS: оба token-source light-default + dark-reachable",
+      "npx vitest run web/src/screens/__tests__/screen-assistant.error-envelope.test.js → 12/12 passed (в т.ч. новые AC-3/AC-5/AC-6: admin-envelope с deepLinks, non-admin без, реюз navigate(dl.path)-блока доказан грепом)"
+    ],
+    "green_note": "Правка ЧУЖОГО гейта (assistant-llm-message-jargon.sh) — САНКЦИОНИРОВАННОЕ УСИЛЕНИЕ, не ослабление: гейт перестроен под мою собственную рекомендацию F-2 из T-0573 и теперь проверяет БОЛЬШЕ — (a) ADMIN-проза БЕЗ голого /llm-connections, но С именем страницы; (b) NON_ADMIN БЕЗ пути вовсе + обязательное «администратор» (не предлагать дверь, которую не открыть); (c) denylist AC-7 не тронут для обеих. Self-test с good/bad фикстурами сохранён. Гейт-дисциплина соблюдена."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-визуально: T-0595 не вводит НИ ОДНОГО нового визуального примитива/стиля. Deep-link блок (.chs-asst__msg-deeplinks app.css:1159, -title :1170) и Button variant=ghost/size=sm — pre-existing, полностью на var(--chs-*)-токенах (обе темы наследуются, G2 PASS). Единственные новые видимые артефакты — текстовые строки (константы + заголовок «Действие:») в существующих themed-каналах. Real-click в двух темах для реюза готового блока без новых стилей не требуется.",
+  "implementation_of_my_findings": {
+    "T-0573_F-1": "ЗАКРЫТ и лучше, чем я просил: я предлагал deepLink-кнопку тем же паттерном :576 — сделано ровно так (тот же map/navigate(dl.path)/Button ghost-sm, нового компонента нет). ПЛЮС решён admin/builder-шов, который я отметил как усугубление: сервер решает ветку через ТОТ ЖЕ предикат, что гейтит admin-зону навигации (loadAdminContext, isGenesisOwner||adminGrants.length>0) — capability-not-text, кнопка не показывается тому, кому дверь всё равно закрыта. Не-админ получает честный текст «обратитесь к администратору» — не тупик: следующий шаг назван, мёртвых дверей нет.",
+    "T-0573_F-2": "ЗАКРЫТ: голый «(/llm-connections)» убран из прозы, страница названа по-человечески, «где/как» несёт кнопка. Оговорка — см. F-2 ниже: премисса «кнопка несёт где/как» держится только на живом ответе, персистентный тред кнопку теряет."
+  },
+  "pattern_sources": [
+    {
+      "element": "deep-link кнопка «Открыть подключения LLM» в honest-503 (admin)",
+      "pattern": "existing MessageBubble deep-links block (T-0465 bundle-review) — deepLinks.map → Button variant=ghost size=sm onClick=navigate(dl.path), aria-label (screen-assistant.jsx:587-603); стили .chs-asst__msg-deeplinks (app.css:1159) на токенах",
+      "applied": true
+    },
+    {
+      "element": "серверная admin-ветка envelope",
+      "pattern": "existing loadAdminContext resolver — ТОТ ЖЕ предикат, что гейтит admin-зону nav (isGenesisOwner || adminGrants.length > 0); бейдж/кнопка ≡ реальной способности (G7-дисциплина на уровне envelope)",
+      "applied": true
+    },
+    {
+      "element": "заголовок блока для 503-кейса",
+      "pattern": "контекстный ternary deepLinksTitle (intent ? bundle-заголовок : «Действие:») — реюз одного блока без второго компонента",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/core/assistant-messages.ts:37 («Подключения LLM») + src/http/assistant.ts:1226 (label «Открыть подключения LLM») vs web/src/app-shell/nav-config.js:162 (label «LLM-соединения»), web/src/screens/screen-llm-connections.jsx:678 (h1 «LLM-соединения»), shell.jsx:108 (crumb «LLM-соединения»)",
+      "issue": "Рассинхрон имени страницы: проза и кнопка называют её «Подключения LLM», а сама страница ВЕЗДЕ называется «LLM-соединения» (nav, h1, breadcrumb). После F-2 имя страницы стало НЕСУЩИМ текстовым якорем (голого пути в прозе больше нет) — и оно не совпадает с реальностью. В живом ответе замаскировано кнопкой (клик везёт по path, приезжаешь верно, читаешь другой заголовок — лёгкий диссонанс); на перезагруженном треде (см. F-2) несовпадающее имя — ВСЁ, что остаётся админу. Не blocking: слова-когнаты (LLM + подключения/соединения), человек свяжет; кнопка живая.",
+      "suggestion": "Синхронизировать в одну сторону: дешёво и в скоупе — константа+label → «LLM-соединения» («…на странице «LLM-соединения»» / «Открыть LLM-соединения»). Лучше долгосрочно (отдельной задачей): переименовать страницу/nav в «Подключения LLM» — это более живой русский, чем калька «LLM-соединения», и текст T-0595 тогда уже прав. В любом случае обе поверхности должны говорить одними словами."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/http/assistant.ts:1193-1200 (persisted MessagePayload — только text, без deepLinks) vs :1219-1228 (deepLinks только в HTTP-envelope); контраст с bundle-соседом :2036-2044",
+      "issue": "Шов персистентности: кнопка живёт ТОЛЬКО в живом 503-ответе. Персистентное сообщение треда несёт path-free ADMIN-прозу без deepLinks → при перезагрузке треда админ видит текст без кнопки И без пути (F-2 путь из прозы убрал). Сосед-паттерн bundle-review сознательно ДОПИСЫВАЕТ в персистентный text plaintext-fallback «• label — path» именно для неструктурных потребителей (:2039-2042) — honest-503 этого не сделал, т.е. на перезагрузке новое сообщение слабее и своего живого варианта, и соседа. А это ровно то сообщение, к которому возвращаются (получил ключ у провайдера → вернулся в тред). Не blocking: не тупик — админ видит admin-зону в собственной навигации, имя страницы в прозе есть (см. F-1); мёртвого аффорданса нет (ничего некликабельного не рендерится).",
+      "suggestion": "Персистировать deepLinks в MessagePayload (аддитивно) и пропустить через GET-проекцию — MessageBubble уже читает msg.deepLinks, рендер получится сам; тогда кнопка переживает перезагрузку и премисса F-2 («кнопка несёт где/как») держится на обеих поверхностях. Перед этим закрыть F-3 (иначе перезагруженный 503 получит чужой заголовок). Альтернатива-минимум: зеркалить bundle-приём — plaintext-fallback только в ПЕРСИСТЕНТНОМ тексте."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-assistant.jsx:437-441 (deepLinksTitle = msg.intent ? … : 'Действие:') + :598 (dl.kind==='process' ? Icon process : Icon apps)",
+      "issue": "Реюзнутый блок предполагает bundle-форму ссылок в двух местах: (а) заголовок ключуется на ПРАВДИВОСТИ intent, а не на природе ссылок — живой 503-msg intent не ставит (→ «Действие:», верно), но ПЕРСИСТЕНТНЫЙ 503-payload несёт intent:'unknown' (truthy, :1197) → если deepLinks станут персистентными (моё же предложение в F-2), перезагруженный 503 озаглавится «Проверьте черновик в разделах:» — ложь; (б) icon-fallback рисует «apps»-иконку на кнопке «Открыть подключения LLM», тогда как nav для этой же цели использует иконку «assistant» (nav-config.js:162) — кнопка и пункт назначения визуально не рифмуются. Сейчас латентно/микроскопично — nit.",
+      "suggestion": "Ключевать и заголовок, и иконку на САМОЙ ссылке, не на сообщении: дескриптору honest-503 дать явный kind (напр. kind:'admin' или icon:'assistant') → deepLinksTitle по наличию bundle-kind'ов ('app'/'process'), иконка из dl. Тогда блок остаётся один, а форма ссылки самоописательна."
+    },
+    {
+      "id": "F-4",
+      "severity": "nit",
+      "root": "B",
+      "location": "src/core/assistant-messages.ts:39-41 (ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN)",
+      "issue": "«Обратитесь к администратору …, чтобы подключить ключ, затем повторите.» — «затем повторите» после асинхронной человеческой передачи читается механически: между «обратился» и «повторите» могут пройти дни, и повторит человек и так. У ADMIN-варианта «затем повторите» уместно (немедленный цикл действия), у NON_ADMIN — шов. Формулировки в целом хорошие: обе человекочитаемы, без жаргона (LLM — устоявшийся словарь продукта: nav-подгруппа «Интеграции и LLM»), с ясным следующим шагом.",
+      "suggestion": "NON_ADMIN: «Ассистент пока не может ответить — не подключён рабочий LLM-ключ. Обратитесь к администратору вашей организации — когда ключ подключат, ассистент начнёт отвечать.» (убирает командное «повторите» там, где действие не в руках читателя; честно называет, что произойдёт). ADMIN-вариант оставить как есть (с поправкой имени страницы из F-1)."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "F-1 (T-0573) закрыт: кликабельный deep-link тем же MessageBubble-блоком (паттерн bundle-review), без нового компонента; navigate(dl.path) доказан тестом", "covered": true},
+    {"ac": "F-2 (T-0573) закрыт: голый /llm-connections убран из ADMIN-прозы, страница названа словами; проверяется перестроенным гейтом", "covered": true},
+    {"ac": "admin-ветку решает СЕРВЕР через тот же предикат, что гейтит admin-зону nav (loadAdminContext) — кнопка ≡ реальной способности, не-админ не получает мёртвой двери", "covered": true},
+    {"ac": "не-админ путь честен и не тупик: следующий шаг назван («администратор»), без пути в недосягаемую зону, без кнопки", "covered": true},
+    {"ac": "гейт assistant-llm-message-jargon.sh перестроен санкционированно и УСИЛЕН (контракты обеих констант + self-test), не ослаблен", "covered": true},
+    {"ac": "G5/G2 зелёные на дельте; 12/12 web-тестов (error-envelope suite) passed", "covered": true}
+  ]
+}
