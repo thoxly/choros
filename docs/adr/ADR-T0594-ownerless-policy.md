@@ -129,6 +129,7 @@ DELETE FROM choros.role_assignment ra
    AND agent.tenant_id = ra.tenant_id
    AND agent.slug = 'assistant-agent' AND agent.kind = 'agent'
    AND ra.source = 'backfill'
+   AND ra.confirmed_by = 'backfill'  -- R-1 (см. примечание после блока)
    AND NOT EXISTS (
      SELECT 1 FROM choros.role_assignment owner_ra
        JOIN choros.role owner_role
@@ -154,6 +155,18 @@ DELETE FROM choros."grant" g
         AND owner_ra.confirmed_by IS NOT NULL
    );
 ```
+
+**R-1 (вердикт судьи T-0594, применён до промоушна — миграция 120 ещё нигде не была
+применена, тело безопасно правилось).** B1 требует `confirmed_by = 'backfill'` В ДОПОЛНЕНИЕ к
+`source = 'backfill'`, не source в одиночку. `role_assignment.source` — клиент-контролируемая
+свободная строка (POST /api/role-assignments читает её из тела запроса без CHECK/enum —
+подтверждено существующим тестом `ci/checks/db/role-assignment.test.ts` «arbitrary non-empty
+source string accepted»); судья живьём сконструировал ложное срабатывание: легитимное
+админ-назначение с настоящим server-derived `confirmed_by`, у которого создатель просто передал
+`source='backfill'` в теле, было неотличимо от строки миграции 118 для source-only предиката и
+удалялось. `confirmed_by` всегда выводится сервером из аутентифицированного актора (R-AUTH,
+`src/http/grants.ts`) и через живой путь записи не может быть литералом `'backfill'` —
+единственный доверенный дискриминатор, и B1 теперь симметричен B2 по его использованию.
 
 Идемпотентность: второй прогон находит 0 строк (первый DELETE уже убрал их — `NOT EXISTS`
 предикат сам по себе не осциллирует, т.к. не зависит от СВОЕГО ЖЕ предыдущего эффекта, кроме

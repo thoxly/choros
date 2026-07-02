@@ -57,12 +57,30 @@
 --
 -- MARKER-PRECISE (N4): both DELETE blocks are scoped to rows carrying
 -- EXACTLY the marker migration 118 itself writes -- role_assignment.source
--- = 'backfill' (B1) and grant.confirmed_by = 'backfill' (B2). A grant or
--- role_assignment on role-configurator granted through some OTHER path
--- (e.g. a human administrator manually assigning role-configurator to
--- someone after this migration runs, or before it, through a different
--- source/confirmed_by marker) is NEVER touched by this migration --
--- deleting only what 118 itself is responsible for having armed.
+-- = 'backfill' AND role_assignment.confirmed_by = 'backfill' (B1), and
+-- grant.confirmed_by = 'backfill' (B2). A grant or role_assignment on
+-- role-configurator granted through some OTHER path (e.g. a human
+-- administrator manually assigning role-configurator to someone after this
+-- migration runs, or before it, through a different source/confirmed_by
+-- marker) is NEVER touched by this migration -- deleting only what 118
+-- itself is responsible for having armed.
+--
+-- R-1 (judge review of T-0594, docs/review/T-0594.review.json — applied
+-- pre-promotion, while 120 was still UNAPPLIED anywhere so its body was
+-- safe to edit): B1 requires confirmed_by = 'backfill' IN ADDITION to
+-- source = 'backfill', not source alone. role_assignment.source is a
+-- CLIENT-CONTROLLED free-text column (POST /api/role-assignments reads it
+-- straight from the request body with only a typeof-string check, no
+-- CHECK/enum — see ci/checks/db/role-assignment.test.ts 'arbitrary
+-- non-empty source string accepted'), so a legitimate admin-created
+-- assignment whose creator merely passed source='backfill' in the body
+-- would be indistinguishable from a migration-118 row to a source-only
+-- predicate (the judge constructed and verified this false positive live).
+-- confirmed_by, by contrast, is ALWAYS server-derived from the
+-- authenticated actor (R-AUTH, src/http/grants.ts) and can never be the
+-- literal 'backfill' via the live write path — it is the trustworthy
+-- discriminator, and B1 now matches B2's use of it (defense-in-depth
+-- symmetry).
 --
 -- SET-DRIVEN, NO HARDCODED TENANT (N2): both blocks are driven by
 -- `FROM choros.role_assignment ra ... JOIN choros.role cfg_role` / the
@@ -100,6 +118,7 @@ WHERE ra.tenant_id = cfg_role.tenant_id
   AND agent.slug = 'assistant-agent'
   AND agent.kind = 'agent'
   AND ra.source = 'backfill'
+  AND ra.confirmed_by = 'backfill'
   AND NOT EXISTS (
     SELECT 1
       FROM choros.role_assignment owner_ra

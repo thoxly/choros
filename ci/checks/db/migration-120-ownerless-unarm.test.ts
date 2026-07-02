@@ -41,6 +41,17 @@
  *     UUID and is driven by joins against choros.role_assignment/role (same
  *     regex-class as ci/checks/migrations/no-hardcoded-tenant-uuid.sh uses
  *     for migration 118).
+ *   R-1 (judge review, docs/review/T-0594.review.json — marker precision).
+ *     A fourth tenant T_RACE reproduces the judge's live-constructed false
+ *     positive: an ownerless tenant whose assistant-agent->role-configurator
+ *     role_assignment carries source='backfill' (a CLIENT-controlled
+ *     free-text column — POST /api/role-assignments accepts any string, no
+ *     CHECK/enum) but a REAL server-derived confirmed_by (an authenticated
+ *     actor's employee id — never the literal 'backfill' through the live
+ *     write path). With the R-1 fix (B1 requires confirmed_by='backfill' IN
+ *     ADDITION to source='backfill'), this assignment MUST SURVIVE
+ *     migration 120, while T_RACE's 4 grants (grant.confirmed_by='backfill',
+ *     B2's trustworthy server-side marker) are still deleted.
  *   FF-4 (AC-4, regression). The EXISTING migration-118 test file
  *     (migration-118-tenant-zero-backfill.test.ts) is NOT modified by this
  *     task and is asserted green in the same CI run (see package.json
@@ -207,8 +218,19 @@ async function seedOwner(c: pg.Client, tenantId: string, ownerEmployeeId: string
  * requiring an owner (this simulates "migration 118 already ran on this
  * tenant" — used for both T_OWNERLESS, which never gets A4, and as the base
  * for T_FULL, which additionally gets an owner + A4).
+ *
+ * `assignment` overrides the role_assignment's marker columns — defaults
+ * reproduce migration 118's exact shape (source='backfill',
+ * confirmed_by='backfill'); T_RACE (R-1) overrides confirmed_by with a real
+ * actor id to simulate an admin-created row whose creator merely passed
+ * source='backfill' in a POST body.
  */
-async function armTenantZero(c: pg.Client, tenantId: string, agentEmployeeId: string): Promise<void> {
+async function armTenantZero(
+  c: pg.Client,
+  tenantId: string,
+  agentEmployeeId: string,
+  assignment: { source: string; confirmedBy: string } = { source: 'backfill', confirmedBy: 'backfill' },
+): Promise<void> {
   await c.query('BEGIN');
   await c.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
   await c.query(
@@ -238,8 +260,8 @@ async function armTenantZero(c: pg.Client, tenantId: string, agentEmployeeId: st
   await c.query(
     `INSERT INTO choros.role_assignment
        (tenant_id, id, employee_id, role_id, org_scope, granted_by, confirmed_by, source, created_at, updated_at)
-     VALUES ($1, gen_random_uuid(), $2::uuid, $3, '{"kind":"set","members":[]}'::jsonb, 'backfill', 'backfill', 'backfill', 0, 0)`,
-    [tenantId, agentEmployeeId, cfgRoleId],
+     VALUES ($1, gen_random_uuid(), $2::uuid, $3, '{"kind":"set","members":[]}'::jsonb, $4::text, $4::text, $5::text, 0, 0)`,
+    [tenantId, agentEmployeeId, cfgRoleId, assignment.confirmedBy, assignment.source],
   );
   await c.query(
     `INSERT INTO choros."grant"
@@ -270,6 +292,13 @@ describe.skipIf(!LIVE)('T-0594 — migration 120 ownerless-tenant unarm (live Po
 
   const T_OWNERLESS = uuid();
   const T_OWNERLESS_AGENT = uuid();
+
+  // R-1 (judge review): ownerless tenant whose agent->cfg assignment has a
+  // REAL confirmed_by (an authenticated actor's employee id, server-derived)
+  // but CLIENT-settable source='backfill' — must SURVIVE migration 120.
+  const T_RACE = uuid();
+  const T_RACE_AGENT = uuid();
+  const T_RACE_REAL_ACTOR = uuid(); // the "real admin" employee id used as confirmed_by
 
   beforeAll(async () => {
     if (!LIVE) return;
@@ -310,13 +339,28 @@ describe.skipIf(!LIVE)('T-0594 — migration 120 ownerless-tenant unarm (live Po
       // R-2 anti-case.
       await insertTenant(c, T_OWNERLESS, `t-ownerless-${T_OWNERLESS.slice(0, 8)}`);
       await armTenantZero(c, T_OWNERLESS, T_OWNERLESS_AGENT);
+
+      // T_RACE (R-1): ownerless like T_OWNERLESS, but the agent->cfg
+      // role_assignment carries a REAL confirmed_by (server-derived actor
+      // id, per R-AUTH never the literal 'backfill' via the live write
+      // path) while source='backfill' (client-controlled free text, POST
+      // /api/role-assignments accepts any string). The judge constructed
+      // exactly this row live and showed the pre-fix source-only B1
+      // predicate deleted it; post-fix it must survive. The 4 grants keep
+      // confirmed_by='backfill' (B2's marker is trustworthy) and must
+      // still be deleted.
+      await insertTenant(c, T_RACE, `t-race-${T_RACE.slice(0, 8)}`);
+      await armTenantZero(c, T_RACE, T_RACE_AGENT, {
+        source: 'backfill',
+        confirmedBy: T_RACE_REAL_ACTOR,
+      });
     });
   });
 
   afterAll(async () => {
     if (!LIVE) return;
     await withClient(migratorUrl(), async (c) => {
-      for (const t of [T_FULL, T_PARTIAL, T_OWNERLESS]) {
+      for (const t of [T_FULL, T_PARTIAL, T_OWNERLESS, T_RACE]) {
         await c.query('BEGIN');
         await c.query(`SET LOCAL choros.tenant_id = '${t}'`);
         await c.query(`DELETE FROM choros."grant" WHERE tenant_id = $1`, [t]);
@@ -365,6 +409,16 @@ describe.skipIf(!LIVE)('T-0594 — migration 120 ownerless-tenant unarm (live Po
       expect(ownerlessCounts.agentCards).toBe(1);
       expect(ownerlessCounts.roleAssignments).toBe(1); // agent->cfg only, no owner->cfg
       expect(ownerlessCounts.grants).toBe(4);
+
+      // T_RACE (R-1): armed like T_OWNERLESS — its assignment is confirmed
+      // (real confirmed_by, counted by countRows) and its 4 grants are
+      // backfill-marked.
+      const raceCounts = await countRows(c, T_RACE);
+      expect(raceCounts.roles).toBe(1);
+      expect(raceCounts.employees).toBe(1);
+      expect(raceCounts.agentCards).toBe(1);
+      expect(raceCounts.roleAssignments).toBe(1); // agent->cfg with REAL confirmed_by
+      expect(raceCounts.grants).toBe(4);
     } finally {
       c.release();
     }
@@ -404,12 +458,50 @@ describe.skipIf(!LIVE)('T-0594 — migration 120 ownerless-tenant unarm (live Po
     }
   });
 
+  it("R-1 (judge review): an assignment with a REAL confirmed_by but client-settable source='backfill' SURVIVES migration 120; its backfill-marked grants are still deleted", async () => {
+    const c = await pool.connect();
+    try {
+      // Migration 120 already ran in the FF-1 test above (same DB, sequential).
+      const afterRace = await countRows(c, T_RACE);
+      expect(afterRace.roles).toBe(1); // untouched
+      expect(afterRace.employees).toBe(1); // untouched
+      expect(afterRace.agentCards).toBe(1); // untouched
+      // THE R-1 ASSERTION: the assignment survives — source='backfill' alone
+      // must NOT mark a row for deletion; only confirmed_by='backfill' (the
+      // server-derived marker migration 118 actually writes) may.
+      expect(
+        afterRace.roleAssignments,
+        "an admin-created assignment (real confirmed_by, source='backfill' from a client body) must NOT be deleted by migration 120",
+      ).toBe(1);
+      // The surviving row is EXACTLY the real-confirmed_by one.
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL choros.tenant_id = '${T_RACE}'`);
+      const { rows } = await c.query<{ confirmed_by: string }>(
+        `SELECT ra.confirmed_by
+           FROM choros.role_assignment ra
+           JOIN choros.role r ON r.tenant_id = ra.tenant_id AND r.id = ra.role_id
+          WHERE ra.tenant_id = $1 AND r.slug = 'role-configurator'`,
+        [T_RACE],
+      );
+      await c.query('COMMIT');
+      expect(rows.length).toBe(1);
+      expect(rows[0]!.confirmed_by).toBe(T_RACE_REAL_ACTOR);
+      // B2 is unaffected by R-1: the 4 grants carry confirmed_by='backfill'
+      // (which the live write path can never set) and are correctly deleted
+      // for this ownerless tenant.
+      expect(afterRace.grants).toBe(0);
+    } finally {
+      c.release();
+    }
+  });
+
   it('FF-2 (AC-2): running migration 120 a SECOND time is a no-op (idempotent, no further deletes, no oscillation)', async () => {
     const c = await pool.connect();
     try {
       const beforeOwnerless = await countRows(c, T_OWNERLESS);
       const beforeFull = await countRows(c, T_FULL);
       const beforePartial = await countRows(c, T_PARTIAL);
+      const beforeRace = await countRows(c, T_RACE);
 
       await c.query(migrationSql); // second run in this test's lifetime (fixture already unarmed by the previous test)
       await c.query(migrationSql); // third run
@@ -417,6 +509,9 @@ describe.skipIf(!LIVE)('T-0594 — migration 120 ownerless-tenant unarm (live Po
       expect(await countRows(c, T_OWNERLESS)).toEqual(beforeOwnerless);
       expect(await countRows(c, T_FULL)).toEqual(beforeFull);
       expect(await countRows(c, T_PARTIAL)).toEqual(beforePartial);
+      // R-1 row keeps surviving repeated runs (no oscillation into deletion).
+      expect(await countRows(c, T_RACE)).toEqual(beforeRace);
+      expect(beforeRace.roleAssignments).toBe(1);
 
       expect(await countInvariantViolations(c, T_OWNERLESS)).toBe(1);
       expect(await countInvariantViolations(c, T_FULL)).toBe(0);
