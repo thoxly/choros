@@ -94,12 +94,13 @@ import {
   MAX_PAGE_SIZE,
   type RecordsPage,
 } from "../core/data-access-port.js";
-import type { Grant } from "../core/grant-lattice.js";
+import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
 import { extractDerivedFields } from "../core/rollup-contract.js";
 import { computeAllDerivedFields } from "../db/derived-fields-dao.js";
 import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 import { sandboxReadPredicate } from "../core/sandbox-gate.js";
 import { resolveActorPrivilege, type ActorPrivilege } from "../db/sandbox-gate-dao.js";
+import { isRecordReadable, type RowAncestry } from "../core/read-visibility.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,6 +211,38 @@ export type ActorPrivilegeResolver = (
   nowMs: number,
 ) => Promise<ActorPrivilege>;
 
+/**
+ * T-0570 (D3, READ-PDP): resolve the caller's READ-visibility context for the
+ * records LIST/DETAIL endpoints — the actor's covering READ grants (via the
+ * SAME `getGrantsForSubject`/`makeDbGrantSource` DAO the rest of the PDP uses —
+ * single-resolver, FR-7) plus a per-request composite `AncestryOracle`
+ * (org-hierarchy delegate + resource-hierarchy root-sentinel/inline-chain,
+ * `src/db/resource-ancestry.ts`).
+ *
+ * Resolved ONCE per HTTP request (NOT per row, NF-1/AC-7): the LIST/DETAIL
+ * handlers call this a single time, then filter the already-loaded page/row
+ * in-memory via `isRecordReadable` (src/core/read-visibility.ts) — O(1) grant/
+ * ancestry resolution calls per request, O(N) pure containment checks over the
+ * page already in memory.
+ *
+ * HONEST-DEGRADE (ADR §2.3, mirrors resolveWriteFacet?/resolveFieldVisibility?/
+ * resolveSandboxPrivilege?): OPTIONAL on RecordRoutesDeps. When absent, the
+ * READ-PDP gate is NOT applied — the LIST/DETAIL handlers behave EXACTLY as
+ * pre-T-0570 (tenant-RLS + sandbox-gate only). The gate activates the moment
+ * composition root injects this resolver — which it does in the SAME commit
+ * that applies migrations/117 (the default-open backfill), so the gate never
+ * activates before every existing tenant has a covering grant (NF-2).
+ *
+ * @param actorSlug  the caller identity (dev-user slug / OIDC sub)
+ * @param tenantId   the caller's resolved tenant
+ * @param nowMs      current epoch ms (grant validity-window instant)
+ */
+export type ReadVisibilityResolver = (
+  actorSlug: string,
+  tenantId: string,
+  nowMs: number,
+) => Promise<{ grants: Grant[]; ancestry: AncestryOracle }>;
+
 export interface RecordRoutesDeps {
   pool: pg.Pool;
   resolveActorTenant: ActorTenantResolver;
@@ -249,6 +282,21 @@ export interface RecordRoutesDeps {
    * replacement for the tenant scope (T-0013 isolation is sacred).
    */
   resolveSandboxPrivilege?: ActorPrivilegeResolver;
+  /**
+   * T-0570 (D3, READ-PDP): OPTIONAL read-visibility resolver. When supplied, the
+   * LIST/GET handlers additionally filter the already-loaded page/row through
+   * the SAME grant-resolver PDP that already gates actions (card-action.ts →
+   * resolveFor) — a record without ANY covering READ grant (default-open or a
+   * narrower one) is EXCLUDED from the list response / turns the detail 404
+   * (indistinguishable from cross-tenant/not-found, FR-5/AC-1/AC-2).
+   *
+   * When absent (honest-degrade, NF-2): the READ-PDP filter is skipped entirely
+   * — LIST/DETAIL behave byte-identically to pre-T-0570 (tenant-RLS + sandbox-
+   * gate only). Production wiring injects this resolver in the SAME commit that
+   * applies the migrations/117 default-open backfill, so the gate never turns on
+   * before every tenant has a covering grant.
+   */
+  resolveReadVisibility?: ReadVisibilityResolver;
   /**
    * T-0351 E16 (on_create trigger): OPTIONAL FlowableClient for process-start
    * co-located with record creation. When supplied, POST /api/records checks for
@@ -1279,7 +1327,7 @@ export function registerRecordRoutes(
   deps?: RecordRoutesDeps,
 ): void {
   if (!deps) return;
-  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, resolveSandboxPrivilege, flowable, emitSignal } = deps;
+  const { pool, resolveActorTenant, resolveWriteFacet, resolveFieldVisibility, resolveSandboxPrivilege, resolveReadVisibility, flowable, emitSignal } = deps;
 
   // T-0558 (sandbox gate): resolve whether the caller may see DRAFT (sandbox) records.
   // Honest-degrade: when no resolveSandboxPrivilege is injected, fall back to the REAL
@@ -1423,12 +1471,32 @@ export function registerRecordRoutes(
     const actorIsPrivileged = await sandboxPrivilegedFor(actor, tenantId, nowMs);
     const page = await listRecordsPaginated(pool, tenantId, applicationId, registryDefId, limit, cursor, actorIsPrivileged);
 
+    // T-0570 (D3, READ-PDP): filter the already-loaded page to rows the actor
+    // holds a covering READ grant for. Grants + ancestry are resolved ONCE per
+    // request (NOT per row, NF-1/AC-7); containment is a pure in-memory check
+    // (isRecordReadable) over the page already in hand — no per-row DB call.
+    // Honest-degrade (NF-2): no resolveReadVisibility dep → filter is skipped
+    // entirely, byte-identical to pre-T-0570 behaviour.
+    const visibleItems = resolveReadVisibility !== undefined
+      ? await (async () => {
+          const { grants: readGrants, ancestry } = await resolveReadVisibility(actor, tenantId, nowMs);
+          return page.items.filter((row) => {
+            const rowAncestry: RowAncestry = {
+              recordId: row.id,
+              registryId: row.registry_id,
+              applicationId: row.application_id,
+            };
+            return isRecordReadable(rowAncestry, readGrants, ancestry, nowMs);
+          });
+        })()
+      : page.items;
+
     // Apply field-visibility redaction to each row's data before serialization.
     // unionVisible = all keys in the row's data object (pre-T-0081 union floor:
     // the caller has already passed the covering-grant check via the DB query;
     // whole-resource semantics mean all stored keys are in unionVisible unless the
     // most-restrictive role-policy hides them). Redacted keys are physically absent.
-    const serialized = page.items.map((row) => {
+    const serialized = visibleItems.map((row) => {
       const base = serializeRecord(row);
       if (fvPolicy.roleScopedFields.size === 0) {
         // Fast path: empty policy → no-op (NF-1, avoids object churn per row).
@@ -1481,6 +1549,24 @@ export function registerRecordRoutes(
         // Not in the caller's tenant (RLS-filtered), draft-hidden (sandbox gate),
         // OR does not exist → 404.
         throw new HttpError(404, "NOT_FOUND", "record not found");
+      }
+
+      // T-0570 (D3, READ-PDP): a record without ANY covering READ grant (default-
+      // open or narrower) gets the SAME honest 404 as not-found/cross-tenant/draft-
+      // hidden (FR-5/AC-2) — indistinguishable by code or response shape, so the
+      // caller cannot infer the record's existence from the denial reason. Honest-
+      // degrade (NF-2): no resolveReadVisibility dep → this check is skipped
+      // entirely, byte-identical to pre-T-0570 behaviour.
+      if (resolveReadVisibility !== undefined) {
+        const { grants: readGrants, ancestry } = await resolveReadVisibility(actor, tenantId, nowMs);
+        const rowAncestry: RowAncestry = {
+          recordId: row.id,
+          registryId: row.registry_id,
+          applicationId: row.application_id,
+        };
+        if (!isRecordReadable(rowAncestry, readGrants, ancestry, nowMs)) {
+          throw new HttpError(404, "NOT_FOUND", "record not found");
+        }
       }
 
       // T-0421: resolve field-visibility context and apply redaction to the

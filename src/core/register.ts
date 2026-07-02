@@ -27,6 +27,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { KeycloakUserPort } from "../keycloak/admin-port.js";
+import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG } from "./read-visibility.js";
 
 // ---------------------------------------------------------------------------
 // Request / Response shapes (ADR §4 wire contract)
@@ -245,6 +246,13 @@ export async function registerTenant(
     roleUpdate: randomUUID(),
     roleDelete: randomUUID(),
   };
+  // T-0570 (D3, READ-PDP): IDs for the default-open READ grant seed —
+  // role-reader + its two role_assignments (owner, assistant-agent) + the
+  // single tenant-wide READ grant scoped at the RESOURCE_ROOT sentinel.
+  const readerRoleId = randomUUID();
+  const ownerRaReaderId = randomUUID();
+  const agentRaReaderId = randomUUID();
+  const readGrantId = randomUUID();
   const ts = deps.nowMs();
 
   let tenantSlug: string | undefined;
@@ -586,6 +594,111 @@ export async function registerTenant(
           ],
         );
       }
+
+      // -----------------------------------------------------------------------
+      // T-0570 (D3, READ-PDP): Tenant-zero seeding of the default-open READ
+      // grant — every new tenant gets:
+      //   3m. role-reader: the platform role that holds the tenant-wide READ
+      //       grant (ADR §2.2). NOT a case-specific persona/role (NF-4).
+      //   3n. role_assignment: owner (employeeId) → role-reader (CONFIRMED).
+      //   3o. role_assignment: assistant-agent → role-reader (CONFIRMED) — same
+      //       human==agent single-path discipline as role-configurator (FR-6).
+      //   3p. grant: read/record, scope = RESOURCE_ROOT sentinel (CONFIRMED).
+      //
+      // Founder decision (ratified 2026-07-02, spec §"Founder decision"):
+      // default-open inside a tenant THROUGH a seeded grant — sujenie (narrowing
+      // visibility) is a grant-configuration act, never a platform code change.
+      //
+      // Scope = {kind:"node", hierarchy:"resource", nodeLevel:"application",
+      // nodeId: RESOURCE_ROOT_NODE_ID} — the sentinel the composite resource-
+      // ancestry oracle (src/db/resource-ancestry.ts) special-cases as "covers
+      // every resource node in this tenant's tree" in O(1) (ADR §2.1 rule 2). It
+      // is the SAME sentinel for every tenant; RLS + this transaction's own
+      // tenant_id column are what keep it from crossing tenants (NF-3) — the
+      // nodeId itself carries no tenant identity.
+      //
+      // resource_facet = NULL (whole-resource) ⇒ every field is in the union-
+      // floor (field-level narrowing, if ever configured, layers on TOP via a
+      // narrower grant's resourceFacet — FR-3/FR-4, this seed does not narrow
+      // fields itself). delegable = true so a narrower READ grant can be
+      // delegated FROM this one via the existing validateNarrowing gate (FR-3
+      // sujenie-as-config, no platform code path).
+      //
+      // Idempotency: ON CONFLICT DO NOTHING (PK = (tenant_id, id)); fresh IDs on
+      // a new tenant never conflict.
+      // -----------------------------------------------------------------------
+
+      // 3m. Insert role-reader (holds the tenant-wide default-open READ grant)
+      await client.query(
+        `INSERT INTO choros.role
+           (tenant_id, id, slug, display_name, created_at, updated_at)
+         VALUES ($1, $2, $3, 'Читатель (по умолчанию)', $4, $4)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, readerRoleId, READER_ROLE_SLUG, ts],
+      );
+
+      // 3n. role_assignment: owner → role-reader (CONFIRMED, self-bootstrap)
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          ownerRaReaderId,
+          employeeId,
+          readerRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3o. role_assignment: assistant-agent → role-reader (CONFIRMED) — human
+      // and agent share the identical READ-PDP path (FR-6): no separate,
+      // wider/narrower agent-only read grant.
+      await client.query(
+        `INSERT INTO choros.role_assignment
+           (tenant_id, id, employee_id, role_id, org_scope,
+            granted_by, confirmed_by, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6, 'registration', $7, $7)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          agentRaReaderId,
+          agentEmployeeId,
+          readerRoleId,
+          JSON.stringify({ kind: "set", members: [] }),
+          employeeId,
+          ts,
+        ],
+      );
+
+      // 3p. grant: read/record, scope = RESOURCE_ROOT sentinel (CONFIRMED,
+      // delegable — so a narrower grant can be delegated from it, FR-3).
+      await client.query(
+        `INSERT INTO choros."grant"
+           (tenant_id, id, role_id, resource_type, resource_facet, operation, scope,
+            "constraint", delegable, granted_by, proposed_by, confirmed_by,
+            valid_from, valid_until, created_at)
+         VALUES ($1, $2, $3, 'record', NULL, 'read', $4::jsonb,
+                 NULL, true, 'registration', NULL, 'registration',
+                 NULL, NULL, $5)
+         ON CONFLICT DO NOTHING`,
+        [
+          tenantId,
+          readGrantId,
+          readerRoleId,
+          JSON.stringify({
+            kind: "node",
+            hierarchy: "resource",
+            nodeLevel: "application",
+            nodeId: RESOURCE_ROOT_NODE_ID,
+          }),
+          ts,
+        ],
+      );
 
       await client.query("COMMIT");
       tenantSlug = candidateSlug;
