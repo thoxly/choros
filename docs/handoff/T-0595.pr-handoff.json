@@ -1,0 +1,47 @@
+{
+  "task_id": "T-0595",
+  "status": "pr_open",
+  "branch": "task/T-0595-assistant-deeplink",
+  "pr_url": "local:task/T-0595-assistant-deeplink",
+  "summary": "UX_REVIEW T-0573 F-1/F-2: honest-503 ассистента называла /llm-connections голым текстом в прозе (не кликабелен) и билдер-не-админ видел путь, которого нет в его навигации (admin-зона скрыта). respondLlmUnavailable (src/http/assistant.ts) резолвит admin-статус вызывающего через существующий loadAdminContext, переиспользуя канонический admin-zone предикат (isGenesisOwner||adminGrants.length>0, src/http/org.ts:379). Admin получает error.deepLinks:[{path:'/llm-connections',label}] в 503-envelope (аддитивно, sendErrorEnvelope не изменена) и path-free прозу (F-2); не-админ получает честный текст без пути и без мёртвой кнопки, направляющий к администратору тенанта. screen-assistant.jsx рендерит кнопку существующим MessageBubble deep-link блоком (паттерн bundle-review T-0465/D8-G4) — новый UI-компонент не введён. ЧУЖОЙ гейт ci/checks/ux/assistant-llm-message-jargon.sh (создан T-0573) обновлён АДДИТИВНО с явной санкцией в комментарии 'T-0595 по UX_REVIEW T-0573 F-2' — стюард-автор гейта сам рекомендовал это изменение в своей находке.",
+  "mechanism": {
+    "server": "respondLlmUnavailable (src/http/assistant.ts:1166) резолвит loadAdminContext(pool, tenantId, actorSlug, Date.now()) — тот же резолвер и предикат, что гейтует видимость admin nav-зоны (src/http/org.ts:379). isAdmin=true → инлайн-JSON envelope {error:{code,message:ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN,deepLinks:[{path:'/llm-connections',label:'Открыть подключения LLM'}]}}, статус 503; isAdmin=false → sendErrorEnvelope(res,503,'LLM_UNAVAILABLE',ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN) без правки сигнатуры общей утилиты (используется ~10 другими call sites).",
+    "non_admin_decision": "Решение принимает ИСКЛЮЧИТЕЛЬНО сервер (единственный источник правды об admin-статусе вызывающего) — не клиент. Не-админ (плоский сотрудник без role_assignment на tenant-owner/role-configurator, т.е. isGenesisOwner=false и adminGrants=[]) получает error.deepLinks ОТСУТСТВУЮЩИМ (не пустой массив — семантика 'не положено', а не 'нечего показать') и текст ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN, который НЕ содержит /llm-connections вовсе и честно направляет 'обратитесь к администратору вашей организации'. Это устраняет мёртвую дверь (admin-only экран, скрытый в навигации билдера) без disabled-кнопки-декорации.",
+    "client": "web/src/screens/screen-assistant.jsx 503-ветка кладёт assistantMsg.deepLinks из d.error.deepLinks (null для non-admin/legacy тел). MessageBubble уже универсально читает msg.deepLinks (Array.isArray guard) — рендерится ТЕМ ЖЕ блоком, что и bundle-review deep-links (:588-603, navigate(dl.path)), без нового компонента. Заголовок блока переключается по msg.intent (bundle несёт intent='configurator', honest-503 — нет) на 'Действие:' вместо 'Проверьте черновик в разделах:'.",
+    "jargon_gate": "ci/checks/ux/assistant-llm-message-jargon.sh (T-0573, ЧУЖОЙ) обновлён АДДИТИВНО: явный комментарий-санкция 'T-0595 по UX_REVIEW T-0573 F-2' в начале файла; проверяет ОБЕ новые константы по их собственному контракту (ADMIN — денилист чист + НЕ содержит /llm-connections (F-2) + называет страницу по титулу; NON_ADMIN — денилист чист + НЕ содержит /llm-connections + упоминает администратора); --self-test расширен фикстурами для обеих констант."
+  },
+  "ci_local": {
+    "build": true,
+    "build_result": "npx tsc --noEmit — 0 ошибок",
+    "lint": true,
+    "lint_result": "npx eslint src — 0 errors, 36 warnings (все pre-existing no-console, не относятся к дельте T-0595)",
+    "types": true,
+    "types_result": "покрыто tsc --noEmit (тот же прогон, что build)",
+    "tests": true,
+    "tests_result": "root vitest run: 254 файла passed | 2 skipped (256), 4882 теста passed | 10 skipped (4892), exit 0. web vitest run: 56 файлов passed (56), 1545 тестов passed (1545), exit 0 — включая новые/расширенные screen-assistant.error-envelope.test.js (12/12, 8 старых + 4 новых) и assistant-llm-message.unit.test.ts (13/13, ранее 3, расширен под ADMIN/NON_ADMIN). Живой Postgres (docker-compose postgres:16, DATABASE_URL localhost:55432): npm run fitness:db — 1092/1092 tests passed (2 прогона подряд, оба exit 0; в первом прогоне doc-regen.db.test.ts (несвязанный doc-pipeline модуль) упал таймаутом под ресурсной нагрузкой контейнера (3.8GiB лимит) — второй чистый прогон подтвердил 17/17 green, флейк не регрессия T-0595). ci/checks/db/assistant-llm-unavailable.test.ts (4/4, включая новые AC-1/AC-2 admin/non-admin сценарии) и migration-118-tenant-zero-backfill.test.ts (5/5, T-0573, не тронут) зелёные в обоих прогонах.",
+    "fitness": true,
+    "fitness_result": "npm run fitness (полная цепочка ~250 чеков) — exit 0 после коммита BUILD-фазы (до коммита FF-T147-2 ожидаемо FAIL — db-isolation-no-test-change.sh сравнивает untracked diff vs HEAD, зелёный как только тестовый файл закоммичен). npm run ci (tsc+eslint+fitness+vitest) — exit 0. Точечно: bash ci/checks/ux/assistant-llm-message-jargon.sh → PASS (обе константы чисты); --self-test → PASS (good/bad фикстуры под новый контракт); bash ci/checks/ux/ux-g5-jargon-denylist.sh → PASS, ровно 24 pre-existing находки (T-0573 baseline), 0 новых на видимом тексте T-0595."
+  },
+  "files_changed": [
+    "docs/specs/T-0595-assistant-deeplink.spec.md",
+    "docs/specs/T-0595.spec.contract.json",
+    "docs/adr/ADR-T0595-assistant-deeplink.md",
+    "docs/adr/T-0595.adr.contract.json",
+    "src/core/assistant-messages.ts",
+    "src/core/llm-port.ts",
+    "src/http/assistant.ts",
+    "web/src/screens/screen-assistant.jsx",
+    "web/src/screens/__tests__/screen-assistant.error-envelope.test.js",
+    "src/__tests__/assistant-llm-message.unit.test.ts",
+    "ci/checks/db/assistant-llm-unavailable.test.ts",
+    "ci/checks/ux/assistant-llm-message-jargon.sh",
+    "docs/handoff/T-0595.pr-handoff.json"
+  ],
+  "deviations_from_adr": [
+    "Нет отклонений от ADR-T0595. Единственное уточнение: MessageBubble deepLinks-заголовок переключается по признаку msg.intent (bundle-review всегда несёт intent='configurator', honest-503 — не несёт intent вовсе) — этот механизм переключения был предусмотрен в ADR §1.3/§4 п.3 буквально ('заголовок блока переключается по признаку msg.intent') и реализован как описано."
+  ],
+  "friction_events": [
+    "Worktree был provisioned без node_modules (root и web) — npm ci --maxsockets=3 в обоих перед первым tsc/vitest прогоном. Живой Postgres для db-fitness (AC-1/AC-2 требуют реальный HTTP+DB) отсутствовал в среде — поднят через `docker-compose up -d postgres` (образ postgres:16 из существующего docker-compose.yml, порт 55432) + `npm run migrate` + `npm run fitness:db:setup-template`; контейнер остановлен (docker-compose stop postgres) по завершении верификации.",
+    "Жаргон-гейт ci/checks/ux/assistant-llm-message-jargon.sh изначально переписан с паттерном `set +e; fn; errors=$((errors+$?)); set -e` внутри вложенных bash-функций — под `set -euo pipefail` это ломало скрипт (errexit срабатывал на возврате ненулевого статуса вложенного вызова несмотря на локальный `set +e` в caller). DURABLE: в bash-скриптах с `set -e` для накопления счётчика ошибок из нескольких проверок использовать паттерн 'echo COUNT to stdout, capture via $(...)' вместо 'return N + арифметика на $? без явного if/while guard' — command substitution не триггерит errexit, а голая арифметика после вызова функции — триггерит."
+  ]
+}
