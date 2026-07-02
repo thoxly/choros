@@ -1223,7 +1223,9 @@ async function respondLlmUnavailable(
       error: {
         code: "LLM_UNAVAILABLE",
         message: text,
-        deepLinks: [{ path: "/llm-connections", label: "Открыть подключения LLM" }],
+        // UX_REVIEW T-0595 F-1: label matches the page's FACTUAL nav/h1 title
+        // «LLM-соединения» (nav-config.js:162), not a paraphrase.
+        deepLinks: [{ path: "/llm-connections", label: "Открыть LLM-соединения" }],
       },
     });
     res.statusCode = 503;

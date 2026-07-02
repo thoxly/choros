@@ -109,13 +109,17 @@ describe('T-0573 R-1 — screen-assistant.jsx consumption points route through a
  * render block that already exists for bundle-review (T-0465/D8-G4).
  */
 describe('T-0595 — admin envelope carries error.deepLinks; assistantErrorText ignores unknown fields (AC-6, additive)', () => {
+  // Fixture texts mirror the CURRENT constants (assistant-messages.ts) incl.
+  // UX_REVIEW T-0595 F-1 (page named by its factual nav/h1 title
+  // «LLM-соединения») and F-4 (non-admin tail says what happens next, not
+  // «затем повторите» the caller cannot themselves satisfy).
   const ADMIN_503_BODY_WITH_DEEPLINKS = {
     error: {
       code: 'LLM_UNAVAILABLE',
       message:
         'Ассистент пока не может ответить — не подключён рабочий LLM-ключ. ' +
-        'Подключите или проверьте ключ на странице «Подключения LLM», затем повторите.',
-      deepLinks: [{ path: '/llm-connections', label: 'Открыть подключения LLM' }],
+        'Подключите или проверьте ключ на странице «LLM-соединения», затем повторите.',
+      deepLinks: [{ path: '/llm-connections', label: 'Открыть LLM-соединения' }],
     },
   };
 
@@ -124,7 +128,8 @@ describe('T-0595 — admin envelope carries error.deepLinks; assistantErrorText 
       code: 'LLM_UNAVAILABLE',
       message:
         'Ассистент пока не может ответить — не подключён рабочий LLM-ключ. ' +
-        'Обратитесь к администратору вашей организации, чтобы подключить ключ, затем повторите.',
+        'Обратитесь к администратору вашей организации, чтобы подключить ключ — ' +
+        'когда ключ подключат, ассистент начнёт отвечать.',
       // deepLinks intentionally absent — non-admin caller, no dead door.
     },
   };
@@ -132,7 +137,7 @@ describe('T-0595 — admin envelope carries error.deepLinks; assistantErrorText 
   it('AC-6: admin body WITH deepLinks — assistantErrorText still extracts the message unchanged (unknown field ignored)', () => {
     const text = assistantErrorText(ADMIN_503_BODY_WITH_DEEPLINKS, 'FALLBACK');
     expect(text).not.toBe('FALLBACK');
-    expect(text).toContain('Подключения LLM');
+    expect(text).toContain('LLM-соединения');
     // F-2: admin prose no longer carries the bare path.
     expect(text).not.toContain('/llm-connections');
   });

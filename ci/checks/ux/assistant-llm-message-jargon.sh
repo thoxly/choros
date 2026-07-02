@@ -32,7 +32,9 @@
 #     (a) does NOT contain the bare /llm-connections path (F-2 — replaced by
 #         a clickable deep-link button, checked structurally elsewhere, not
 #         by a substring in the prose);
-#     (b) DOES name the target page by title ("Подключения LLM"), so the
+#     (b) DOES name the target page by its FACTUAL nav/h1 title
+#         ("LLM-соединения" — nav-config.js:162; UX_REVIEW T-0595 F-1: the
+#         name must match the real screen, not a paraphrase), so the
 #         sentence still reads as human prose, not a bare pointer;
 #     (c) NO dev-jargon denylist tokens (AC-7 unchanged).
 #
@@ -101,8 +103,9 @@ count_admin_message_violations() {
     echo "FAIL [T-0595/F-2]: ADMIN message still contains the bare '/llm-connections' path — replace with a deep-link, not prose" >&2
     errors=$((errors + 1))
   fi
-  if ! echo "${msg}" | grep -qF 'Подключения LLM'; then
-    echo "FAIL [T-0595/F-2]: ADMIN message does not name the target page by title ('Подключения LLM')" >&2
+  # UX_REVIEW T-0595 F-1: the page must be named by its FACTUAL nav/h1 title.
+  if ! echo "${msg}" | grep -qF 'LLM-соединения'; then
+    echo "FAIL [T-0595/F-1]: ADMIN message does not name the target page by its factual title ('LLM-соединения')" >&2
     errors=$((errors + 1))
   fi
 
@@ -165,11 +168,12 @@ self_test() {
   cat >"${tmp}/good.ts" <<'EOF'
 export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN =
   "Ассистент пока не может ответить — не подключён рабочий LLM-ключ. " +
-  "Подключите или проверьте ключ на странице «Подключения LLM», затем повторите.";
+  "Подключите или проверьте ключ на странице «LLM-соединения», затем повторите.";
 
 export const ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN =
   "Ассистент пока не может ответить — не подключён рабочий LLM-ключ. " +
-  "Обратитесь к администратору вашей организации, чтобы подключить ключ, затем повторите.";
+  "Обратитесь к администратору вашей организации, чтобы подключить ключ — " +
+  "когда ключ подключат, ассистент начнёт отвечать.";
 EOF
 
   cat >"${tmp}/bad.ts" <<'EOF'

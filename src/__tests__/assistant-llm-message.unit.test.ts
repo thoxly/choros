@@ -25,8 +25,8 @@ describe('T-0595 — ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN (AC-4/AC-7, UX_REVI
     expect(ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN).not.toContain('/llm-connections');
   });
 
-  it('still names the target page by title, human-readably', () => {
-    expect(ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN).toContain('Подключения LLM');
+  it('names the target page by its FACTUAL nav/h1 title «LLM-соединения» (UX_REVIEW T-0595 F-1)', () => {
+    expect(ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN).toContain('LLM-соединения');
   });
 
   it('AC-6 (carried over): states plainly that a key must be connected/checked', () => {
