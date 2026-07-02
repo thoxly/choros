@@ -1,0 +1,34 @@
+{
+  "task_id": "T-0574",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": false
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 1,
+      "location": "ci/checks/dual-control-isolation.sh:173-244 (FF-DC7) — вызвано migrations/115_assistant_agent_card_backfill.sql (этот коммит, d53a576) и migrations/116_composite_fk_set_null_columns.sql (rider, 9efede7)",
+      "issue": "`npm run fitness` красный на HEAD этой ветки: FF-DC7 в dual-control-isolation.sh падает с 'unexpected migration touched by T-0044' на ОБЕИХ новых миграциях 115 и 116 (только 031_*confirmed2_by*.sql разрешён без relief-блока). Проверено полным прогоном всех 277 `bash ci/checks/*`-шагов цепочки `fitness` индивидуально: единственный failing шаг во всей цепочке — dual-control-isolation.sh; все остальные 276, включая fitness:db (96 файлов/1064 теста) и все FF-1/FF-2/FF-3/FF-4/FF-5/FF-6/FF-7/FF-8/FF-UX-1..5, зелёные. pr-handoff.json заявляет `ci_local.fitness: true` — это неверно на текущем HEAD ветки (277-шаговая `&&`-цепь `npm run fitness` обрывается на этом шаге, весь хвост после него не выполняется в реальном `npm run fitness`). Прецедент в этом же файле (T0476-DC-MIG106-GUARD, T0477-DC-MIG107-GUARD, T0397-DC-MIG109-GUARD и др.) показывает устоявшийся паттерн: каждая новая миграция, не являющаяся 031, обязана получить свой явный relief-блок (per-migration flag + verified-additive-basis + PASS-строка) в этом же файле — миграции 115/116 такого блока не получили ни от кодера T-0574, ни от rider-коммита 9efede7.",
+      "suggestion": "Добавить в ci/checks/dual-control-isolation.sh два relief-блока по образцу T0476-DC-MIG106-GUARD/T0477-DC-MIG107-GUARD: (1) для migrations/115_assistant_agent_card_backfill.sql — verified-additive-basis: чистый INSERT...SELECT в agent_card (существующая таблица), не создаёт/не меняет grant/confirmation/authority таблицы, не трогает confirmed2_by; (2) для migrations/116_composite_fk_set_null_columns.sql — verified-additive-basis: DROP+ADD CONSTRAINT column-specific ON DELETE SET NULL на существующих FK (094/107/113), не создаёт таблицы, не трогает dual-control authority domain. Прогнать `npm run fitness` целиком после правки и подтвердить зелёный `dual-control-isolation.sh`."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": false},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": true},
+    {"ac": "AC-12", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "Riders в общем worktree без изоляции cwd (9efede7, 0794731, и необъявленный в задании 83115b7 'fix(fitness): false-positive фиксы 4 гейтов') — все три коммита с author=demiurge-founder/demiurge-coder попали на ветку T-0574 без явного скоупа задачи; pr-handoff.json явно называет только первые два, но 83115b7 (правки grant-propose-isolation.sh/secret-handle-isolation.sh/seed/single-source.sh/tier-isolation.sh) не упомянут вовсе, хотя он тоже трогает frozen-чеки и тоже поедет в dev вместе с веткой. Само по себе содержимое 83115b7 честное (проверено построчно — все 4 фикса устраняют реальные false-positive без ослабления детекции), но практика 'чип-сессии фаундера работают в чужом worktree без изоляции и не попадают в pr-handoff' — системный риск для ревью (кандидат в ledgers/role-gaps.md: ревьюер должен трактовать `git diff dev...HEAD -- ci/checks/` буквально, не полагаясь на список 'riders' из промпта оркестратора, т.к. этот список может быть неполным)."
+  ]
+}
