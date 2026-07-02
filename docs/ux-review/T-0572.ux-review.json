@@ -1,0 +1,103 @@
+{
+  "task_id": "T-0572",
+  "verdict": "changes_requested",
+  "_scope": "Экран /rights ПЕРЕПИСАН на живой источник. screen-rights.jsx: источник = GET /api/rights/tenant-state (demo-pack /api/rights убит), «Обзор ролей» = настоящие роли/назначения/гранты, секция «Кто что может» (действующие holders+grants), pending-блок (semi-confirmed) структурно отдельным контейнером, формы выдачи монтируются ТОЛЬКО при can_manage (структурный гейт, не disabled), инбокс-подсказка → /rights/criticality. Новый ra-overview-forms.jsx: AssignRoleForm/GrantRightForm/RevokeAssignmentButton/RevokeGrantButton/ScopePicker/PendingBadge — write строго в существующие POST /api/role-assignments(/:id/revoke) и /api/grants(/:id/revoke), semi-confirmed → info-тост «ждёт второго подтверждения». shell.jsx: /rights/editor остаётся demo с КОНКРЕТНЫМ тултипом; /rights (overview) = live без бейджа. app.css: 12 новых .chs-ov-* правил, все на --chs-* токенах. Это ЭКРАН ПРАВ — судится по максимальной строгости.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g2-theme-pairing.sh → exit 0: оба token-source (tokens.css + form-theme.css) light-default в :root + [data-theme=dark] reachable",
+      "ci/checks/ux/ux-g6-no-new-hardcode.sh --required → 0 findings на диффе T-0572: все 12 новых .chs-ov-* правил на var(--chs-*), ни одного hardcode-цвета/оверлея; scope-строка рендерится текстом без инлайн-стиля",
+      "ci/checks/ux/ux-g4-state-primitives.sh --required → 0 findings: Empty/Loading/Error взяты из кита (EmptyState/LoadingState/ErrorState), ни одной рукотворной state-ветки; ScopePicker/формы не катают собственный loading",
+      "ci/checks/ux/ux-g5-jargon-denylist.sh → продуктовые файлы T-0572 (screen-rights.jsx, ra-overview-forms.jsx) ЧИСТЫ (0 findings на них). 24 repo-wide findings — исключительно pre-existing шум в *.test.jsx (T-id в describe + telLinear-фикстура), не введён T-0572. ВАЖНО: G5-denylist НЕ ловит raw-JSON в UI — см. F-2 (scope как JSON.stringify), это нарушение principles §3 голоса, не покрытое денилистом.",
+      "ci/checks/rights-editor-badge-verdict.sh → PASS: /rights/editor честно demo с конкретной причиной (FF-T0572-BADGE)",
+      "npx vitest run web/src/screens/rights/screen-rights.test.jsx → 16/16 passed (source-switch, empty-honesty, pending-separation, canManage-структурный-гейт, single-write-route, semi-confirmed-honest, ScopeElement-контракт)"
+    ],
+    "green_note": "Все UX-гейты (G2/G4/G5/G6) зелёные — включая G6/G4 с --required (строгий флип). Красных правил на диффе нет. Вердикт changes_requested — не из-за красного гейта, а из-за UX-находок уровня ЭКРАНА ПРАВ, где гейт = пол, не потолок (F-1 dead-end пустого тенанта для админа; F-2 raw-JSON scope в лицо пользователю; F-3 деструктивный отзыв без подтверждения)."
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "Real-click в живом стенде НЕ пройден — web-тест-тир vitest 'node' без DOM (Field/Select зовут useId, mount вне render невозможен в этом репо; см. заголовок screen-rights.test.jsx «no React mount»). Судил по коду + токенам + тестам ЧЕСТНО. Статический анализ тем строгий: ВСЕ новые CSS-токены доказанно определены в ОБЕИХ темах — --chs-color-surface-2 (light :root L147 / dark L217), --chs-color-border-strong (L155/L225), --chs-color-border-faint (L156/L226), --chs-color-border/surface/text-muted (по 2 def каждый); radius-2/3, text-sm/xs, space-2..7 — theme-invariant (1 def, корректно). Pending-маркер PendingBadge = StatusChip status='waiting' → .chs-chip--waiting на --chs-color-warning/warning-soft (kit, components.css:77-78) — амбер-чип, визуально ОТЛИЧЕН от нейтральных holders и OpChip действующих грантов в обеих темах (контраст статусов достаточен: pending=тёплый warning в пунктирном surface-2-контейнере vs active=нейтральный solid). Real-click в обеих темах доедет LIVE_PROOF-ом (AC-16 manual, D-064).",
+  "pattern_sources": [
+    {
+      "element": "EmptyState (нет ролей) / LoadingState (загрузка) / ErrorState (сбой + Повторить) на «Обзоре ролей»",
+      "pattern": "Empty States (first-use variant): state message + supporting detail + PRIMARY ACTION + secondary recovery path; announce via role=status. Loading/Error — kit-примитивы, role=status/alert.",
+      "mcp_ref": "uxpatterns get_pattern user-feedback/empty-states → Anatomy (State message + Supporting detail + Primary action + Secondary recovery path), Variations#first-use ('Use when the state is expected on day one'). Первичное действие обязательно — см. F-1.",
+      "applied": false
+    },
+    {
+      "element": "AssignRoleForm/GrantRightForm — формы выдачи (Select роль/сотрудник/ресурс/операция + ScopePicker)",
+      "pattern": "kit Field/Select с явной label↔control привязкой (htmlFor/id, aria-invalid); disabled submit пока canSubmit=false (правило аффорданса §4 — enabled обязан что-то делать); busy-состояние на Button (aria-busy).",
+      "mcp_ref": "principles.md §4 (аффорданс: disabled пока форма неполна) + §6 (состояния явные). uxpatterns get_pattern forms/* не тянул — kit Select/Field уже инкапсулирует a11y-контракт (доказан ранее).",
+      "applied": true
+    },
+    {
+      "element": "PendingBadge (semi-confirmed) в отдельном .chs-ov-pending контейнере",
+      "pattern": "статус-дифференциация: semi-confirmed НЕ смешан с действующими правами, тёплый waiting-чип + пунктирная граница как визуальный разделитель «черновик/ожидание» vs «действует».",
+      "mcp_ref": "principles.md §6 (состояния явные) + локальный образец ra-criticality.jsx (semi-confirmed рендеринг). Дифференциация статусов честна.",
+      "applied": true
+    },
+    {
+      "element": "Отзыв роли/гранта (RevokeAssignmentButton/RevokeGrantButton) — деструктивное действие",
+      "pattern": "Destructive action confirmation: опасное/необратимое действие требует осознанного подтверждения (Modal/Dialog), не одиночный клик.",
+      "mcp_ref": "principles.md §4 ('Modal/Dialog — опасное действие (удаление)') — отзыв права НЕ имеет подтверждения, см. F-3.",
+      "applied": false
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx:206-219 (EmptyState «Нет ролей», ветка roles.length === 0)",
+      "issue": "Пустой тенант для АДМИНА — dead-end. Ложь «Нет ролей» действительно умерла (источник живой, EmptyState честно различает self vs tenant по state.scope) — это хорошо. НО: (1) EmptyState рендерится БЕЗ action-слота, хотя kit его поддерживает (components.jsx:461 `action`), и uxpatterns first-use-anatomy требует Primary action; (2) ветка НЕ различает can_manage — админ с нулём ролей видит «В этом тенанте ещё не определено ни одной роли доступа» и НЕ имеет ни одной кнопки, чтобы это исправить. Формы выдачи (Назначить/Дать право) в этой ветке недостижимы — они за `if roles.length===0 return` ВЫШЕ по коду, и вдобавок работают только по существующим ролям. Итог: на экране ПРАВ администратор упирается в тупик без выхода. Это ровно тот класс провала, который экран должен был убить. На self-взгляде (обычный юзер без ролей) CTA не нужен — там текст-разъяснение достаточен; проблема строго в admin-ветке (can_manage===true && roles===0).",
+      "suggestion": "В admin-ветке пустого тенанта дать EmptyState action → кнопку к созданию роли: `<EmptyState title=\"Пока нет ролей\" description=\"Создайте первую роль доступа, чтобы назначать её сотрудникам.\" action={<Button variant=\"primary\" size=\"sm\" onClick={() => navigate('/rights/editor')}>Открыть «Каталог ролей»</Button>} />` (создание роли живёт на /rights/editor — честный перевод «здесь ролей нет → вот где их завести»). Различай ветку по state.can_manage, не только по scope: self-юзер без ролей → текст без CTA (как сейчас), админ без ролей → CTA. Без этого экран прав снова становится витриной-тупиком для нового тенанта."
+    },
+    {
+      "id": "F-2",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx:119 (WhoCanDoWhat, колонка «Охват»: {JSON.stringify(g.scope)})",
+      "issue": "Охват гранта показывается пользователю как СЫРОЙ JSON: `{\"kind\":\"node\",\"hierarchy\":\"org\",\"nodeId\":\"…\",\"nodeLevel\":\"department\"}`. Это прямое нарушение principles §3 (голос без дев-жаргона: «Пользователь видит продукт, не нашу разработку») и §5 (машинное — моноширинным, но это НЕ машинный ID, это доменное понятие «где действует право»). G5-denylist это не ловит (JSON.stringify не в списке), поэтому гейт зелёный — но на ЭКРАНЕ ПРАВ, где охват права критичен для понимания «кто что реально может», сырой JSON нечитаем: бизнес-владелец не отличит «весь отдел закупок» от «набор из трёх тегов». Раздел называется «Кто что может» — а «что может» частично закодировано техническим литералом. В self-взгляде обычный юзер тоже видит этот JSON про СВОИ права — вдвойне непонятно.",
+      "suggestion": "Человекочитаемый рендер scope вместо JSON.stringify: node → «Узел: <label из dictionaries.orgTree>», tags → чипы с label тегов, set → перечисление, отсутствие → «Весь тенант» / «Без ограничения». Мини-компонент `<ScopeSummary scope={g.scope} dictionaries={dictionaries} />` (dictionaries уже грузится при can_manage; для self-взгляда — деградация в человеческую форму kind без label, но НЕ raw JSON). Минимум-минимум для разблокировки: маппинг kind→русское слово («узел оргструктуры» / «теги» / «набор» / «весь тенант»), даже без резолва id. Сырой JSON в лицо пользователю на экране прав — недопустимо."
+    },
+    {
+      "id": "F-3",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/ra-overview-forms.jsx:290-328 (RevokeAssignmentButton / RevokeGrantButton — onClick сразу вызывает revoke)",
+      "issue": "Отзыв роли у сотрудника и отзыв гранта у роли выполняются ОДНИМ кликом по «Отозвать» без подтверждения. principles §4 прямо относит опасное действие (удаление) к Modal/Dialog с осознанным подтверждением. Отзыв права — деструктивен и на экране прав особенно чувствителен (случайный клик снимает доступ у живого сотрудника; восстановление = заново пройти форму+возможный dual-control). Тост-исход честен, кнопка ghost и не кричит — но необратимость действия просит confirm-шаг. Держу nit (не blocking): исход человекочитаем, busy-состояние есть, действие обратимо повторной выдачей; на экране прав это скорее полировка безопасности, чем ложь. Но на LIVE_PROOF стоит проверить, не отзовётся ли право промахом.",
+      "suggestion": "Подтверждение перед revoke: либо kit-Modal «Отозвать роль у <сотрудник>? Доступ пропадёт сразу.» → «Отозвать»/«Отмена», либо двухшаговый ghost-кнопка (клик → «Точно?»/подтвердить, авто-сброс через N сек). Modal предпочтителен на экране прав (§4: опасное действие = осознанное подтверждение). Если dual-control уже требует второго подтверждающего на revoke критичного права — тогда UI-confirm избыточен для критичных, но для НЕкритичных прав (revoke проходит сразу) confirm-шаг всё равно нужен."
+    },
+    {
+      "id": "F-4",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/ra-overview-forms.jsx — AssignRoleForm/GrantRightForm/ScopePicker (Select без опций при пустых employees/dictionaries)",
+      "issue": "AC-13 требует Empty/Loading/Error и НА ФОРМАХ выдачи. Форма Empty/Loading-состояния не рендерит: при пустых employees (fetchEmployees вернул []) или недошедших dictionaries (fetchDictionaries → null, resources/operations/orgTree/scopeTags пусты) Select показывает placeholder + ноль опций — форма молча неюзабельна без объяснения. Не dead-end и не ложь (submit заблокирован canSubmit, ничего не сломается), но «почему список сотрудников пуст / почему нельзя выбрать ресурс» пользователь не узнаёт. dictionaries/employees грузятся best-effort и молча деградируют в []. На экране прав это шероховатость, не блокер.",
+      "suggestion": "Когда справочник пуст: краткая подпись под Select («Сотрудники ещё не заведены — добавьте в разделе X» / «Справочник ресурсов недоступен, обновите страницу»), или disabled-Select с hint. Минимум — не оставлять пустой Select без причины. Опционально: пока dictionaries===null показывать LoadingState-хинт в блоке форм (сейчас null неотличим от «пусто»)."
+    },
+    {
+      "id": "F-5",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/rights/screen-rights.jsx:126-142 (pending-блок «Ждут второго подтверждения») + строка 311-316 (инбокс-подсказка)",
+      "issue": "Аффорданс от pending-строки к инбоксу подтверждений неполон для НЕ-admin. Инбокс-кнопка «Открыть инбокс «Критичность»» → /rights/criticality есть, но она внутри `{canManage && ...}` (строка 310). Pending-блок же рендерится ВСЕГДА (строка 126, без canManage-гейта) — значит self-юзер/наблюдатель, увидевший «Ждёт подтверждения» на своей будущей роли, не имеет одноклик-пути к /rights/criticality (кнопки нет, сама pending-строка не кликабельна). Задача (п.4) просит «дойти до инбокса одним кликом». Для admin — путь есть (кнопка). Для не-admin с видимым pending — тупик наблюдения. Держу nit: возможно, не-admin вообще не должен видеть чужой pending (тогда это ок), но если видит СВОЙ pending — ссылка нужна.",
+      "suggestion": "Либо (а) сделать саму pending-строку/PendingBadge ссылкой на /rights/criticality (одноклик из любого взгляда), либо (б) вынести инбокс-подсказку из-под canManage, когда pending непуст (показывать её если pending.length>0 независимо от can_manage). Уточнить со спекой, видит ли обычный юзер свой pending — если нет, находка снимается."
+    }
+  ],
+  "principles_updated": [],
+  "_principles_note": "Новых правил облика не ввожу — все три блокера/находки покрыты существующими §3 (голос: raw-JSON scope), §4 (деструктивное подтверждение; аффорданс) и §6 (Empty с CTA). Правила уже есть — нарушены, а не отсутствуют. Обобщать в новое правило нечего: класс «сырой JSON доменного значения в UI» уже ловится §3 «пользователь видит продукт, не разработку». Если после фикса F-2 понадобится общий примитив ScopeSummary — это код/кит, не принцип.",
+  "acceptance_coverage": [
+    {"ac": "AC-3 источник сменён на /api/rights/tenant-state, старый /api/rights не фетчится (структурно + тест)", "covered": true},
+    {"ac": "AC-1/AC-2 живые роли, пустой тенант → честный EmptyState без demo:true (ложь «Нет ролей» умерла)", "covered": true},
+    {"ac": "AC-2/AC-13 Empty пустого тенанта: ЧЕСТЕН, но для админа БЕЗ CTA — dead-end (F-1 blocking): first-use anatomy требует Primary action", "covered": false},
+    {"ac": "AC-4/AC-5/AC-6 write строго в существующие POST role-assignments/grants(/:id/revoke), ровно один вызов на операцию, нет нового write-route (тест)", "covered": true},
+    {"ac": "AC-7/AC-8 semi-confirmed → отдельный контейнер .chs-ov-pending + PendingBadge (waiting-чип), НЕ смешан с действующими (тест + визуально)", "covered": true},
+    {"ac": "AC-9 формы выдачи под структурным canManage-гейтом (отсутствуют в DOM при can_manage=false, не disabled) — тест + код", "covered": true},
+    {"ac": "AC-13 Empty/Loading/Error на «Обзоре ролей» — kit-примитивы (covered); НА ФОРМАХ выдачи Empty/Loading пустого справочника не показан (F-4 nit)", "covered": false},
+    {"ac": "AC-12/FR-8 бейдж /rights/editor честно demo с КОНКРЕТНЫМ тултипом (черновик засеян примером, гранты роли из БД не подгружаются); /rights overview = live БЕЗ бейджа (G7 обе стороны — стейл-бейдж снят). Badge-verdict CI PASS.", "covered": true},
+    {"ac": "AC-14 scope как ScopeElement JSON (node/tags) в существующий parseScopeElement — без параллельного формата (тест). ОТДЕЛЬНО: чтение scope в UI как raw JSON.stringify нечитаемо (F-2 blocking) — контракт записи ок, презентация чтения нарушает §3", "covered": false},
+    {"ac": "N7/OBLIK только --chs-* токены (G6 --required=0), kit Select/Field/Button/StatusChip/EmptyState, обе темы по токенам AA (статически), pending-чип отличим от active", "covered": true},
+    {"ac": "AC-16 real-click LIVE_PROOF на живом стенде (владелец ООО, dual-control сквозняком) — НЕ пройден здесь (vitest node без DOM), доедет LIVE_PROOF-ом (manual, D-064)", "covered": false},
+    {"ac": "UX-грань §4: отзыв роли/гранта деструктивен без confirm-шага (F-3 nit); аффорданс к инбоксу подтверждений неполон для не-admin с видимым pending (F-5 nit)", "covered": false}
+  ]
+}
