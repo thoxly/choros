@@ -114,6 +114,16 @@ export interface InstanceTargetRef {
    * explicit launch affordance (process-start.ts).
    */
   readonly primaryRecordId?: string;
+  /**
+   * T-0575 [W1/деТЭЛ] BUG-017: the configured target registry slug for this
+   * (process_key, applicationId) binding's step-RESULT entity — sourced from
+   * choros.process_app_binding.target_registry_slug (migration 119). `undefined`
+   * when the binding row has NULL here (no explicit override) — the step-applier
+   * resolves the default via resolveDefaultStepResultSlug() in that case, NOT a
+   * second hardcoded literal. Present (non-empty string) only when the binding
+   * row explicitly names a registry slug for the step result.
+   */
+  readonly targetRegistrySlug?: string;
 }
 
 /** Reason categories for unresolved outcomes (used by T-0335 to decide branching). */
@@ -144,6 +154,8 @@ interface AuditStartedRow {
 
 interface AppBindingRow {
   application_id: string;
+  /** T-0575 BUG-017: NULL when the binding has no explicit target-registry override. */
+  target_registry_slug: string | null;
 }
 
 interface RegistryDefRow {
@@ -296,7 +308,7 @@ async function resolveInstanceTargetReads(
     // T-0335 can pass an explicit applicationId hint to select a specific binding when
     // ambiguity matters — for now the resolver returns the primary one.
     const bindingRes = await client.query<AppBindingRow>(
-      `SELECT application_id
+      `SELECT application_id, target_registry_slug
          FROM choros.process_app_binding
         WHERE tenant_id = $1
           AND process_key = $2
@@ -312,6 +324,13 @@ async function resolveInstanceTargetReads(
         detail: `No process_app_binding found for process_key ${JSON.stringify(processKey)} in tenant ${tenantId}`,
       };
     }
+
+    // T-0575 BUG-017: carry the per-binding target-registry override through (if set).
+    const targetRegistrySlugRaw = bindingRes.rows[0]?.target_registry_slug ?? null;
+    const targetRegistrySlug =
+      typeof targetRegistrySlugRaw === "string" && targetRegistrySlugRaw.trim() !== ""
+        ? targetRegistrySlugRaw
+        : undefined;
 
     const applicationId = bindingRes.rows[0]?.application_id ?? "";
     if (!applicationId || !isUuid(applicationId)) {
@@ -369,6 +388,8 @@ async function resolveInstanceTargetReads(
       tenantId,
       // T-0356 (E16): carry through if present (from on_create trigger path).
       ...(primaryRecordId !== undefined ? { primaryRecordId } : {}),
+      // T-0575 BUG-017: carry through if the binding has an explicit override.
+      ...(targetRegistrySlug !== undefined ? { targetRegistrySlug } : {}),
     };
   }
 }

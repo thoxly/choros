@@ -39,7 +39,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import pg from "pg";
 import { HttpError, readJsonBody, type RouteHandler } from "./router.js";
 import { DEV_USER_HEADER } from "./auth.js";
-import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient, type ActiveUserTask } from "../core/flowable-client.js";
 import { appendProcessStarted } from "./process-projection.js";
 import type { PgClientLike } from "../db/audit-writer.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
@@ -382,6 +382,31 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
           : undefined,
       );
       if (result.ok) {
+        // T-0575 [W1/деТЭЛ] BUG-015: resolve the REAL waiting user-task's
+        // candidateGroups[0]/name from the live engine BEFORE the projection
+        // write, so the base process.started task carries this process's OWN
+        // role/label instead of the process-agnostic ТЭЛ constant. Best-effort:
+        // an engine read failure degrades to the named config-primitive fallback
+        // (resolveDefaultApproverRole/Step/TaskName) — never blocks the start.
+        // The full task list is kept (not just the first) so the task-submit
+        // auto-complete lookup below preserves its original `.find()` semantics
+        // (single getActiveUserTasks round-trip, reused for both purposes).
+        let activeTasks: readonly ActiveUserTask[] = [];
+        try {
+          const tasksResult = await flowable.getActiveUserTasks(result.instanceId);
+          if (tasksResult.ok) {
+            activeTasks = tasksResult.tasks;
+          } else {
+            console.warn(
+              `[process-start T-0443] getActiveUserTasks failed for instance ` +
+                `${result.instanceId}: ${tasksResult.code} (non-fatal)`,
+            );
+          }
+        } catch {
+          // Best-effort: engine read failure → fall back to config-primitive defaults.
+        }
+        const firstActiveTask = activeTasks[0];
+
         try {
           await appendProcessStarted(client as unknown as PgClientLike, {
             instanceId: result.instanceId,
@@ -391,6 +416,15 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
             // T-0339 (E15-S3): supply tenantId so instance.started + task.created
             // transition-journal events are emitted (F2 Phase 1).
             tenantId,
+            // T-0575 BUG-015: real candidateGroups[0]/name when the engine yielded
+            // an active user-task with non-empty values; appendProcessStarted's own
+            // ?? fallback applies when these are undefined/empty.
+            ...(firstActiveTask !== undefined && firstActiveTask.candidateGroups.length > 0
+              ? { approverRole: firstActiveTask.candidateGroups[0] }
+              : {}),
+            ...(firstActiveTask !== undefined && firstActiveTask.name !== ""
+              ? { step: firstActiveTask.name, taskName: firstActiveTask.name }
+              : {}),
           });
         } catch {
           // Projection is additive; never fail the start on a projection write error.
@@ -401,25 +435,17 @@ export function makeStartInstanceHandler(deps: StartInstanceDeps): RouteHandler 
         // Best-effort only: NEVER roll back the already-started instance on failure.
         // The 201 response shape is FROZEN (ADR §2.2) — this is purely engine-internal.
         try {
-          const tasksResult = await flowable.getActiveUserTasks(result.instanceId);
-          if (tasksResult.ok) {
-            const submitTask = tasksResult.tasks.find(
-              (t) => t.taskDefinitionKey === "task-submit",
-            );
-            if (submitTask) {
-              const completeResult = await flowable.completeUserTask(submitTask.id);
-              if (!completeResult.ok) {
-                console.warn(
-                  `[process-start T-0443] task-submit auto-complete failed for instance ` +
-                    `${result.instanceId}: ${completeResult.code} (non-fatal, instance still started)`,
-                );
-              }
+          const submitTask = activeTasks.find(
+            (t) => t.taskDefinitionKey === "task-submit",
+          );
+          if (submitTask) {
+            const completeResult = await flowable.completeUserTask(submitTask.id);
+            if (!completeResult.ok) {
+              console.warn(
+                `[process-start T-0443] task-submit auto-complete failed for instance ` +
+                  `${result.instanceId}: ${completeResult.code} (non-fatal, instance still started)`,
+              );
             }
-          } else {
-            console.warn(
-              `[process-start T-0443] getActiveUserTasks failed for instance ` +
-                `${result.instanceId}: ${tasksResult.code} (non-fatal)`,
-            );
           }
         } catch (submitErr) {
           console.warn(

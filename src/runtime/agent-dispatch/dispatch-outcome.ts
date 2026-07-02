@@ -41,6 +41,11 @@ import {
   applyStepResult,
   type OutboxEnqueuePort,
 } from "../../db/step-applier.js";
+// T-0575 [W1/деТЭЛ] BUG-015-agent (AC-11): the defer-to-human fallback role reads
+// the SAME config-primitive as the base process.started projection
+// (process-projection.ts resolveDefaultApproverRole) rather than re-hardcoding
+// "role-approver" as an independent second literal.
+import { resolveDefaultApproverRole } from "../../http/process-projection.js";
 import type { PrecheckOutcome } from "../../core/agent-precheck-motor.js";
 import type { AgentStepContext } from "./agent-step-context.js";
 
@@ -271,7 +276,10 @@ export async function applyAgentOutcome(
     // --- Plan the defer task + mint the task id BEFORE the audit append so the
     //     self-referential inbox_task_id == audit_event.id (T-0221 FF-3). ---
     const plan = planDeferTask(outcome, {
-      role: ctx.roleId !== "" ? ctx.roleId : "role-approver",
+      // T-0575 BUG-015-agent: fallback reads the single config-primitive source
+      // (env CHOROS_DEFAULT_APPROVER_ROLE, defaulting to "role-approver") instead
+      // of a second independently-hardcoded literal (AC-11).
+      role: ctx.roleId !== "" ? ctx.roleId : resolveDefaultApproverRole(),
       agentEmployeeId: ctx.agentEmployeeId,
     });
     const taskId = randomUUID();

@@ -85,7 +85,7 @@ import { makePgAuditWriter, type PgClientLike } from "../db/audit-writer.js";
 import { checkWriteMask } from "../runtime/customer-onboarding/field-mask-guard.js";
 import { getOnCreateBinding } from "../db/binding-trigger-dao.js";
 import { appendProcessStarted } from "./process-projection.js";
-import { flowableErrorToHttp, type FlowableClient } from "../core/flowable-client.js";
+import { flowableErrorToHttp, type FlowableClient, type ActiveUserTask } from "../core/flowable-client.js";
 import { preComputeGatewayVariable } from "../core/dmn-gateway.js";
 import {
   parsePaginationParams,
@@ -812,9 +812,61 @@ async function createRecord(args: {
     if (flowable !== undefined) {
       const binding = await getOnCreateBinding(client, tenantId, reg.application_id);
       if (binding !== null) {
-        // Project SCALAR variables from record data via field_mapping.
-        // RECORD_IN_PAYLOAD: only primitives pass through; objects/arrays are dropped.
-        let variables = projectEngineVariables(data, binding.field_mapping);
+        // T-0575 [W1/деТЭЛ] BUG-016: compute derived (rollup / matrix-lookup)
+        // fields of THIS registry BEFORE projecting engine variables, and overlay
+        // them onto the raw `data` object so field_mapping entries that reference
+        // a computed/rollup field key actually resolve to a value at start time.
+        //
+        // WHY: projectEngineVariables (below) reads ONLY record.data — and by PD-20
+        // doctrine (derived-fields-dao.ts), derived values are NEVER stored in
+        // record.data (they are computed on READ). Before this fix, an on_create
+        // start's field_mapping referencing a rollup field always got `undefined`
+        // (LIVE_PROOF T-0571: a 600000 rollup-sum silently vanished, sending the
+        // instance down the gateway's DEFAULT branch instead of the condition
+        // branch). This does NOT change storage (record.data is unaffected) — it
+        // is a TRANSIENT overlay computed only for this engine-variable projection.
+        //
+        // SAVEPOINT isolation (mirrors dmn_precompute below): a derived-field
+        // compute failure must NOT poison the outer tx or block the record+start
+        // that already succeeded — degrade honestly (no derived values injected;
+        // any gateway condition referencing them sees them as absent, same as
+        // pre-fix behavior) rather than aborting the whole create=start.
+        let projectionSource: Record<string, unknown> =
+          data !== null && typeof data === "object" && !Array.isArray(data)
+            ? (data as Record<string, unknown>)
+            : {};
+        const derivedSpecs = extractDerivedFields(reg.record_schema);
+        if (derivedSpecs.length > 0) {
+          await client.query('SAVEPOINT derived_precompute');
+          try {
+            const derived = await computeAllDerivedFields(
+              client,
+              tenantId,
+              id,
+              projectionSource,
+              derivedSpecs,
+            );
+            // Derived values OVERLAY the raw scalar data (rollup key now has a
+            // computed value instead of being absent). null-semantics ARE HONEST:
+            // "no child records" → null (never coerced to 0) — a gateway condition
+            // like ${amount>500000} on null evaluates false, deterministically, not
+            // a silent throw (ADR-T0575 §2.4).
+            projectionSource = { ...projectionSource, ...derived };
+            await client.query('RELEASE SAVEPOINT derived_precompute');
+          } catch (derivedErr) {
+            await client.query('ROLLBACK TO SAVEPOINT derived_precompute');
+            console.warn(
+              `[on_create derived-precompute] non-fatal derived-field compute error for ` +
+                `registry ${reg.id} record ${id}:`,
+              derivedErr,
+            );
+          }
+        }
+
+        // Project SCALAR variables from record data (+ overlaid derived values)
+        // via field_mapping. RECORD_IN_PAYLOAD: only primitives pass through;
+        // objects/arrays are dropped.
+        let variables = projectEngineVariables(projectionSource, binding.field_mapping);
 
         // T-0439: pre-compute DMN gateway routing variable at launch.
         // Evaluates the published rule table (if any) for this process and injects
@@ -921,6 +973,26 @@ async function createRecord(args: {
           );
         }
 
+        // T-0575 [W1/деТЭЛ] BUG-015: resolve the REAL waiting user-task's
+        // candidateGroups[0]/name from the live engine BEFORE the projection
+        // write, so the base process.started task carries THIS process's OWN
+        // role/label instead of the process-agnostic ТЭЛ constant. Read AFTER the
+        // skip-submit auto-complete above so this reflects the task the instance
+        // is ACTUALLY waiting at post-submit (task-submit itself was just
+        // auto-completed and is gone by this point for the common case).
+        // Best-effort: an engine read failure degrades to the named
+        // config-primitive fallback (resolveDefaultApproverRole/Step/TaskName in
+        // appendProcessStarted) — never blocks the already-committed start.
+        let firstActiveTask: ActiveUserTask | undefined;
+        try {
+          const tasksResult = await flowable.getActiveUserTasks(startResult.instanceId);
+          if (tasksResult.ok && tasksResult.tasks.length > 0) {
+            firstActiveTask = tasksResult.tasks[0];
+          }
+        } catch {
+          // Best-effort: engine read failure → fall back to config-primitive defaults.
+        }
+
         // Projection write: best-effort, isolated by a SAVEPOINT so a projection
         // failure cannot poison the outer tx and cause the committed record+instance
         // to be lost. Mirrors process-start.ts appendProcessStarted pattern.
@@ -936,6 +1008,15 @@ async function createRecord(args: {
             // expose it as primaryRecordId and the step-applier can write it as the
             // real cross_app_ref pointer (closes the T-0344 create-path gap).
             recordId: id,
+            // T-0575 BUG-015: real candidateGroups[0]/name when the engine yielded
+            // an active user-task with non-empty values; appendProcessStarted's own
+            // ?? fallback applies when these are undefined/empty.
+            ...(firstActiveTask !== undefined && firstActiveTask.candidateGroups.length > 0
+              ? { approverRole: firstActiveTask.candidateGroups[0] }
+              : {}),
+            ...(firstActiveTask !== undefined && firstActiveTask.name !== ""
+              ? { step: firstActiveTask.name, taskName: firstActiveTask.name }
+              : {}),
           });
           await client.query('RELEASE SAVEPOINT proc_proj');
         } catch {

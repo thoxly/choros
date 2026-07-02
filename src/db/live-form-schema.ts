@@ -36,9 +36,11 @@
  */
 
 import type pg from "pg";
-
-/** Well-known slug of the approvals («Согласование») registry (migration seed). */
-const SOGLASOVANIE_SLUG = "soglasovanie" as const;
+// T-0575 [W1/деТЭЛ] BUG-017 (§2.5 dedup): this module carried its OWN second
+// copy of the "soglasovanie" literal — schlopped into the single config-primitive
+// source (resolveDefaultStepResultSlug) shared with step-applier.ts's
+// applyStepResult, so the value lives in exactly one place.
+import { resolveDefaultStepResultSlug } from "./step-applier.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -71,10 +73,10 @@ export async function resolveLiveSchemaFieldKeys(
     return null;
   }
 
-  // Step 1: processKey → application_id (process_app_binding).
+  // Step 1: processKey → application_id + target_registry_slug (process_app_binding).
   // NOT wrapped in try/catch — a DB error here must propagate (fail-closed).
-  const appRes = await client.query<{ application_id: string }>(
-    `SELECT application_id
+  const appRes = await client.query<{ application_id: string; target_registry_slug: string | null }>(
+    `SELECT application_id, target_registry_slug
        FROM choros.process_app_binding
       WHERE tenant_id = $1
         AND process_key = $2
@@ -88,7 +90,15 @@ export async function resolveLiveSchemaFieldKeys(
     return null;
   }
 
-  // Step 2: application_id → registry_def (soglasovanie) → record_schema.
+  // T-0575 BUG-017: resolve the SAME per-binding slug applyStepResult uses
+  // (explicit target_registry_slug override, else the config-primitive default)
+  // — not the hardcoded ТЭЛ constant unconditionally.
+  const schemaSlug =
+    appRow.target_registry_slug && appRow.target_registry_slug.trim() !== ""
+      ? appRow.target_registry_slug
+      : resolveDefaultStepResultSlug();
+
+  // Step 2: application_id → registry_def (resolved slug) → record_schema.
   const schemaRes = await client.query<{ record_schema: unknown }>(
     `SELECT record_schema
        FROM choros.registry_def
@@ -96,7 +106,7 @@ export async function resolveLiveSchemaFieldKeys(
         AND application_id = $2
         AND slug = $3
       LIMIT 1`,
-    [tenantId, appRow.application_id, SOGLASOVANIE_SLUG],
+    [tenantId, appRow.application_id, schemaSlug],
   );
   const schemaRow = schemaRes.rows[0];
   if (!schemaRow) {
