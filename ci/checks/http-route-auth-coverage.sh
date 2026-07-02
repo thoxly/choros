@@ -21,9 +21,14 @@
 #              (non-comment code) is either inside a `getAuthContext(...) === undefined`
 #              dev-fallback branch, or in the actor-inject façade, or in an allowlisted
 #              file. A bare x-dev-user read in an otherwise-covered file → FAIL.
-#  FF-0328-3 — frozen byte-unchanged: secret-handle.ts + process-start.ts are
-#              byte-identical to the merge-base with the integration branch (the G1
-#              fix is purely at the registration/wrapper site).
+#  FF-0328-3 — frozen byte-unchanged: secret-handle.ts is byte-identical to the
+#              merge-base with the integration branch (the G1 fix is purely at the
+#              registration/wrapper site). process-start.ts is NOT in this byte-diff
+#              arm (T-0576, sanctioned — see below): ADR §4.2 names it CONTRACT-frozen
+#              (the REST shape, enforced by start-route-isolation.sh's structural
+#              checks), not byte-frozen like secret-handle.ts (§4.1) — post-freeze
+#              edits to its body (threading real role/step/name values, etc.) are
+#              legitimate as long as the REST contract and FF-7-1..3 stay intact.
 #
 # Comment lines are stripped before every grep (lesson T-0143) so prose explaining a
 # ban / an allowlist entry does not trip the check. grep rc=1 (no match) is clean;
@@ -235,14 +240,25 @@ if [[ ${ERRORS} -eq ${before} ]]; then
 fi
 
 # ---- FF-0328-3: frozen files byte-unchanged vs merge-base --------------------
-# The G1 fix is purely at the registration/wrapper site; the two frozen surfaces are
+# The G1 fix is purely at the registration/wrapper site; secret-handle.ts is
 # byte-identical to the merge-base with the integration branch. (Mirrors FF-25-6.)
+#
+# T-0576 (sanctioned — ci/checks/data/frozen-sanctions.jsonl, task=T-0576, this
+# file; grounds recorded in the T-0575 sanction entry + ADR-T0576-anticase-ci.md)
+# narrows this list to secret-handle.ts ONLY. ADR T-0328 §4.2 names
+# process-start.ts's freeze CONTRACT-frozen (the REST request/response shape
+# across the B<->C<->E seam), enforced by start-route-isolation.sh's structural
+# FF-7-1..3 checks — NOT byte-frozen the way secret-handle.ts (§4.1) genuinely
+# is. Byte-diffing process-start.ts here was a stricter-than-designed proxy for
+# a contract that already has its own dedicated structural gate; legitimate
+# post-freeze edits to its body (e.g. T-0575 threading real role/step/name
+# values through appendProcessStarted) do not violate the ADR's actual freeze
+# and should not need a per-task sanction to pass this arm.
 echo ""
 echo "Check FF-0328-3: frozen surfaces byte-unchanged vs merge-base"
 before=${ERRORS}
 FROZEN_FILES=(
   "src/http/secret-handle.ts"
-  "src/http/process-start.ts"
 )
 MERGE_BASE="$(git -C "${ROOT}" merge-base HEAD dev 2>/dev/null || echo "")"
 if [[ -z "${MERGE_BASE}" ]]; then
