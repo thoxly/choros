@@ -1,0 +1,48 @@
+{
+  "task_id": "T-0570",
+  "verdict": "fail",
+  "deterministic": {
+    "total": 5913,
+    "passed": 5912,
+    "failed": 1
+  },
+  "coverage_by_ac": [
+    {"ac": "AC-1", "test": "src/__tests__/records-read-pdp.test.ts :: RP-2 (empty grant set -> list=[]), RP-3 (root-sentinel grant -> all rows); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-1/FF-RP-2 (zero covering grant -> empty list)", "result": "pass"},
+    {"ac": "AC-2", "test": "src/__tests__/records-read-pdp.test.ts :: RP-4 (DETAIL no grant -> 404, same shape as not-found), RP-5 (DETAIL with grant -> 200); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-1/FF-RP-2", "result": "pass"},
+    {"ac": "AC-3", "test": "ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-3 (backfill preserves pre-gate visibility, real migration-115-shaped seed on live PG)", "result": "pass"},
+    {"ac": "AC-4", "test": "src/__tests__/register.test.ts :: 'FF-4: new tenant has 0 app/record rows + exactly 1 tenant, 4 roles, 2 employees, 5 confirmed role_assignments (T-0570 updated)' -- asserts role-reader + exactly 1 grant (read/record/RESOURCE_ROOT/delegable/confirmed) seeded atomically in the T-0373 registerTenant transaction, live DB", "result": "pass"},
+    {"ac": "AC-5", "test": "src/__tests__/records-read-pdp.test.ts :: RP-6 (narrow record-scoped grant excludes other record), RP-7 (two actors, narrow vs default-open); ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-5 (real grants-dao path, live PG)", "result": "pass"},
+    {"ac": "AC-6", "test": "src/__tests__/records-read-pdp.test.ts :: RP-11 (resolveReadVisibility + resolveFieldVisibility composed: record admitted, disallowed JSONB key physically absent on LIST and DETAIL)", "result": "pass"},
+    {"ac": "AC-7", "test": "src/__tests__/records-read-pdp.test.ts :: RP-8 (resolveReadVisibility spy called exactly once for N=3 rows; ADR claims O(1) per-request, in-memory containment for larger N)", "result": "pass"},
+    {"ac": "AC-8", "test": "src/__tests__/records-read-pdp.test.ts :: RP-9 (human actor slug vs agent actor slug over same grant set -> byte-identical sorted id set)", "result": "pass"},
+    {"ac": "AC-9", "test": "ci/checks/read-pdp-anti-case.sh (git-diff-scoped grep against D-064 literals under src/, run against actual branch diff) + --self-test (good/bad/sneaky-R1-PoC/sanity-list fixtures)", "result": "pass"},
+    {"ac": "AC-10", "test": "ci/checks/db/records-read-pdp.db.test.ts :: FF-RP-12 (tenant A actor with wide RESOURCE_ROOT grant cannot see tenant B's record via LIST or DETAIL, live PG, real RLS)", "result": "pass"},
+    {"ac": "AC-11", "test": "manual/LIVE_PROOF -- out of TEST phase scope per task instructions (docs/review/T-0570.review.json explicitly marks AC-11 covered:false / manual, pending live-stand run)", "result": "pass"}
+  ],
+  "secondary_ux": [],
+  "failures": [
+    {
+      "test": "ci/checks/db/bundle-coherence.test.ts > FF-13 / AC-13 · every grant with resource_type='record' has resource_facet IS NOT NULL",
+      "is_product_defect": true,
+      "root_class": "product-defect"
+    }
+  ],
+  "notes": {
+    "coverage_gaps_found": "none — all AC-1..AC-10 map to an existing, executed test (no test authored by tester; AC-11 is manual/n/a per task scope).",
+    "runs_performed": [
+      "npx vitest run (full unit suite): 251 files passed, 2 skipped (253); 4853 tests passed, 10 skipped (4863); 0 failed. Matches PR-handoff's claimed count exactly.",
+      "npm run fitness:db on isolated docker postgres (docker compose -p t-0570-test, POSTGRES_PORT=55433, migrations/run.mjs applied all 101 files cleanly including 115_default_read_grant_backfill.sql, npm run fitness:db:setup-template then npm run fitness:db): 92 files passed + 1 FAILED (93); 1053 tests passed + 1 FAILED (1054). Docker container + volume torn down after the run (docker compose -p t-0570-test down -v).",
+      "bash ci/checks/read-pdp-anti-case.sh --self-test -> PASS (good/bad/sneaky-PoC/sanity-list fixtures all correct); bash ci/checks/read-pdp-anti-case.sh (real branch diff) -> PASS.",
+      "bash ci/checks/read-pdp-no-hardcoded-tenant.sh --self-test -> PASS; bash ci/checks/read-pdp-no-hardcoded-tenant.sh (real) -> PASS.",
+      "bash ci/checks/read-pdp-frozen-core.sh --self-test -> PASS; bash ci/checks/read-pdp-frozen-core.sh (real) -> PASS (grant-lattice.ts/object-handle.ts/grant-resolver.ts/field-visibility.ts byte-unchanged vs base e2417705)."
+    ],
+    "failure_classification_detail": "ci/checks/db/bundle-coherence.test.ts (T-0082, FF-13/AC-13) asserts NO choros.\"grant\" row with resource_type='record' may have resource_facet IS NULL — the T-0082 ADR (docs/design/T-0082-bundle-coherence.adr.md:176) explicitly documents this as an INTENTIONALLY STRONGER-than-schema invariant: 'grant on a specific record without specifying which registry/record it references = a hanging grant = the object-schema<->grant desync from §7'. T-0570's ADR (docs/adr/ADR-T0570-read-pdp.md:98/153/265) explicitly designs the default-open READ grant with resource_facet=NULL meaning 'whole-resource ⇒ all fields visible' -- this is a direct, intentional-on-both-sides collision between two ADRs, not an accidental regression or a coder oversight in wiring. Anti-false-FAIL verification performed: (1) queried the live seeded DB directly -- exactly ONE grant with resource_type='record' AND resource_facet IS NULL exists in the dev-silo tenant (a0000000-0000-0000-0000-000000000001), and its granted_by column is literally 'migration-115' (T-0570's own backfill migration), confirming the hanging grant is newly introduced by this task, not pre-existing debt; (2) confirmed migrations/115 is not applied on the branch's own merge-base (e2417705, only migrations up to 114 exist there) -- so on a pristine pre-T-0570 checkout this exact hanging-grant row cannot exist, meaning bundle-coherence.test.ts was green before this branch; (3) src/core/register.ts (T-0570's registerTenant additions, lines ~590-656) seeds the IDENTICAL resource_facet=NULL/resource_type='record' grant shape for EVERY newly-registered tenant going forward, so this is not a one-off backfill artifact confined to the dev-silo tenant -- FF-13 will be permanently red in the `db` CI job for every tenant after this task merges. This is a genuine product defect: the PR-handoff's friction_events entry lumping 'bundle-coherence' into '5 pre-existing unrelated reds... not touched by this task' is INCORRECT for this file -- the failure IS caused by files this task added (migrations/115_default_read_grant_backfill.sql + src/core/register.ts), verified live, not asserted from memory. Not a tooling-gap (the harness/docker/template setup worked correctly and the other 92 db-suite files passed clean) and not a wrong test (FF-13's intent — one row must unambiguously say which record/registry a narrow grant targets — is a deliberate, documented platform invariant that T-0570's own object_model directly contradicts for the default-open case). Verdict: fail, return to coder to either (a) get an explicit ADR-level reconciliation/exception for FF-13 covering the RESOURCE_ROOT sentinel case (mirroring how T-0570 already got a sanctioned exception for dual-control-isolation.sh via auto-sanction-additive.sh), or (b) encode the default-open grant's 'whole-resource' semantics without a NULL facet (e.g. an explicit sentinel facet value) so FF-13's invariant holds without carve-outs.",
+    "anti_false_fail_checks_performed": [
+      "Verified failure exists on a FRESH, isolated docker postgres (port 55433, project t-0570-test) freshly created for this test run, not reused/stale state from a prior run.",
+      "Verified via direct SQL query against the live seeded DB that the offending grant row's granted_by='migration-115', tying it unambiguously to this task's own migration rather than pre-existing seed data.",
+      "Verified merge-base e2417705 has no migration 115 (migrations dir tops out at 114), so this exact failure could not have existed before this branch.",
+      "Verified the failure is reproducible via BOTH paths this task adds (backfill migration 115 AND registerTenant in register.ts) -- not an isolated one-off in a single seed path.",
+      "Ruled out harness/tooling-gap: all other 92 files in ci/checks/db passed cleanly on the same isolated postgres/template setup in the same run, including the task's own new records-read-pdp.db.test.ts (4/4 pass) and register.test.ts live-DB block (pass) -- the setup itself is sound."
+    ]
+  }
+}
