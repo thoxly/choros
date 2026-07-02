@@ -51,6 +51,7 @@ import { registerDmnRuleTableRoutes } from "./http/dmn-rule-table.js";
 import { registerVendorActivationRoutes } from "./http/vendor-activation.js";
 import { registerRightsIntentRoutes } from "./http/rights-intents.js";
 import { registerRightsChangeRequestRoutes } from "./http/rights-change-requests.js";
+import { registerRightsOverviewRoutes } from "./http/rights-overview.js";
 import { registerSodRoutes } from "./http/rights-sod.js";
 import { registerSodAdminRoutes } from "./http/rights-sod-admin.js";
 import { registerProcessDefsRoutes } from "./http/process-defs.js";
@@ -666,6 +667,12 @@ function buildRouter(
     // PUT/DELETE /api/rights/sod-rules/:id are distinct paths from the literal
     // GET /api/rights/sod-rules registered by registerSodRoutes above.
     registerSodAdminRoutes(router, grantsPool);
+    // Register the honest tenant-state overview (T-0572 FR-1/FR-6): reads REAL
+    // choros.role/role_assignment/"grant" rows for the caller's tenant — not the
+    // demo-pack/RIGHTS_SEED fixture rights.ts serves. MUST also precede
+    // registerRightsRoutes: the literal path /api/rights/tenant-state would
+    // otherwise be swallowed by the GET /api/rights/:roleId catch-all.
+    registerRightsOverviewRoutes(router, grantsPool);
   }
 
   // Register rights endpoints (includes GET /api/rights/:roleId catch-all).

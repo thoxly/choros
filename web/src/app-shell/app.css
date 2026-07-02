@@ -608,6 +608,25 @@
 .chs-derived--hidden .chs-derived__a { color: var(--chs-color-text-faint); }
 
 /* ============================================================================
+   T-0572 — «Кто что может» + формы выдачи/отзыва (Обзор ролей, живой источник)
+   ============================================================================ */
+.chs-ov-holders { display: flex; flex-wrap: wrap; gap: var(--chs-space-5); margin-top: var(--chs-space-6); margin-bottom: var(--chs-space-6); }
+.chs-ov-holder { display: flex; align-items: center; gap: var(--chs-space-3); padding: var(--chs-space-3) var(--chs-space-4); border: 1px solid var(--chs-color-border); border-radius: var(--chs-radius-2); background: var(--chs-color-surface); }
+/* Grants table gains an optional 4th (action) column when canManage — a
+   modifier class widens the shared 3-column grid (base rule above). */
+.chs-grants__colhead--actions,
+.chs-grant--actions { grid-template-columns: 1.3fr 152px 1fr 96px; }
+.chs-ov-pending { margin-top: var(--chs-space-6); padding: var(--chs-space-5) var(--chs-space-6); border: 1px dashed var(--chs-color-border-strong); border-radius: var(--chs-radius-3); background: var(--chs-color-surface-2); display: flex; flex-direction: column; gap: var(--chs-space-3); }
+.chs-ov-pending__row { display: flex; align-items: center; gap: var(--chs-space-4); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); }
+.chs-ov-form { display: flex; flex-direction: column; gap: var(--chs-space-5); max-width: 420px; margin-top: var(--chs-space-5); }
+.chs-ov-scope { display: flex; flex-direction: column; gap: var(--chs-space-4); }
+.chs-ov-scope__tags { display: flex; flex-wrap: wrap; gap: var(--chs-space-4); }
+.chs-ov-scope__tag { display: inline-flex; align-items: center; gap: var(--chs-space-2); font-size: var(--chs-text-sm); color: var(--chs-color-text-muted); }
+.chs-ov-inbox-hint { display: flex; align-items: center; gap: var(--chs-space-5); margin-top: var(--chs-space-7); padding-top: var(--chs-space-6); border-top: 1px solid var(--chs-color-border-faint); }
+/* Человекочитаемый охват гранта (UX_REVIEW F-2): чипы тегов / перечисление набора */
+.chs-ov-scopesum { display: inline-flex; flex-wrap: wrap; gap: var(--chs-space-3); align-items: center; }
+
+/* ============================================================================
    FORMS SCREEN (.chs-forms-screen)
    Обёртка для sandbox-iframe с формой: бар выбора формы + канвас.
    ============================================================================ */

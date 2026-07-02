@@ -1,33 +1,47 @@
 /* ============================================================================
-   CHOROS — screen-rights.jsx
-   ЭКРАН П1R: «Права и доступ». Read-first.
+   CHOROS — screen-rights.jsx  (T-0572: живой источник + «кто что может» + формы)
+   ЭКРАН П1R: «Доступ». Обзор ролей тенанта + выдача/отзыв роли и гранта.
    Модель: право = ГРАНТ {роль · ресурс · операция · охват(scope)}.
+
+   FR-1 (AC-1/AC-2/AC-3): источник — GET /api/rights/tenant-state (честное
+   tenant-состояние из choros.role/role_assignment/"grant"), НЕ /api/rights
+   (demo-pack/RIGHTS_SEED). Пустой тенант — честный EmptyState, не demo.
+
+   FR-6 (AC-8): «Кто что может» — секция роль-детали. Админ-взгляд видит
+   действующие assignments/grants роли; self-взгляд (can_manage:false) видит
+   только свои роли, read-only, без форм записи.
+
+   FR-2/FR-3/FR-7 (AC-4/5/6/9): формы выдачи/отзыва роли+гранта монтируются
+   ТОЛЬКО когда can_manage===true — отсутствуют в DOM иначе (не disabled).
+
+   FR-5 (AC-7/AC-8): pending (semi-confirmed) — ОТДЕЛЬНАЯ секция роли,
+   никогда не смешивается с действующими assignments/grants.
    ============================================================================ */
 
-import React, { useState, useEffect } from 'react';
-import { ExecutorBadge, ExecGlyph, MonoId, Mono, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
-import { Icon } from '../../app-shell/icon.jsx';
-import { devHeaders } from '../../app-shell/dev-auth.js';
+import React, { useState, useEffect, useCallback } from 'react';
+import { ExecutorBadge, Button, OpChip, DerivedChip, LoadingState, ErrorState, EmptyState } from '../../components/components.jsx';
+import { authHeaders } from '../../app-shell/dev-auth.js';
+import { getActiveTenantId } from '../../app-shell/active-tenant.js';
+import { useNavigate } from 'react-router-dom';
+import { ScopeToken } from './ra-data.jsx';
+import {
+  AssignRoleForm, GrantRightForm, RevokeAssignmentButton, RevokeGrantButton, PendingBadge,
+} from './ra-overview-forms.jsx';
 
-const ROLE_GROUPS = [
-  { dept: "Финансы", ids: ["role-fin-control", "role-fin-approve-250", "role-fin-approve-50", "role-fin-recon", "role-fin-escrcv"] },
-  { dept: "Клиентский сервис", ids: ["role-cs-l1", "role-cs-l2"] },
-  { dept: "Платформа", ids: ["role-plat-ledger"] },
-];
-
-const grantCount = (r) => r.grants.reduce((n, g) => n + g.ops.length, 0);
-const toolName = (uri) => uri.replace(/^mcp:\/\//, "");
+const grantCount = (r) => r.grants.length;
 
 function RoleRailItem({ role, active, onSelect }) {
   return (
     <button className="chs-rolerow" aria-current={active ? "true" : undefined} onClick={() => onSelect(role.id)}>
       <span className="chs-rolerow__main">
-        <span className="chs-rolerow__name">{role.name}</span>
-        <span className="chs-rolerow__scope">{role.scope}</span>
+        <span className="chs-rolerow__name">{role.name || role.slug}</span>
+        <span className="chs-rolerow__scope">{role.slug}</span>
       </span>
       <span className="chs-rolerow__holders">
-        {role.holders.slice(0, 3).map((h, i) => (
-          <span key={i} className={`chs-rolerow__h chs-rolerow__h--${h.type}`} title={h.name}><ExecGlyph type={h.type} size={8} /></span>
+        {role.assignments.slice(0, 3).map((a) => (
+          <span key={a.id} className={`chs-rolerow__h chs-rolerow__h--${a.employee_kind}`} title={a.employee_display || a.employee_slug}>
+            <ExecutorBadge type={a.employee_kind} name="" bare showLabel={false} />
+          </span>
         ))}
       </span>
       <span className="chs-rolerow__count">{grantCount(role)}</span>
@@ -35,34 +49,210 @@ function RoleRailItem({ role, active, onSelect }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Data fetching — GET /api/rights/tenant-state (FR-1). Tenant is resolved from
+// the caller's identity server-side — this fetch takes no tenant/employee
+// parameter (AC-10: nothing here to spoof).
+// ---------------------------------------------------------------------------
+
+async function fetchTenantState() {
+  const res = await fetch('/api/rights/tenant-state', { headers: authHeaders() });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function fetchDictionaries() {
+  const res = await fetch('/api/rights/dictionaries', { headers: authHeaders() });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+async function fetchEmployees() {
+  try {
+    const res = await fetch(`/api/org/tenant-state?tenant_id=${getActiveTenantId()}`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.employees ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ScopeSummary — человекочитаемый охват гранта (UX_REVIEW F-2, principles §3:
+// пользователь видит продукт, не разработку — сырой JSON недопустим).
+//   node → «Узел: <label из dictionaries.orgTree>» (fallback «Узел оргструктуры»)
+//   node-сентинел default-open гранта (READ-PDP) → «Весь тенант»
+//   tags → чипы тегов (label из dictionaries.scopeTags, fallback — сам тег)
+//   set → перечисление членов; пустой set / отсутствие охвата → «Весь тенант»
+// self-взгляд (dictionaries не загружены) деградирует в человеческую форму
+// kind без резолва label — но никогда не в raw JSON.
+// ---------------------------------------------------------------------------
+
+// Платформенный сентинел-узел default-open READ-гранта (display-копия литерала
+// RESOURCE_ROOT_NODE_ID из src/core/read-visibility.ts; дрейф безопасен —
+// несовпадение деградирует в «Узел оргструктуры», не в ложь).
+const RESOURCE_ROOT_SENTINEL = '00000000-0000-0000-0000-0000000000r0';
+
+function ScopeSummary({ scope, dictionaries }) {
+  if (!scope || typeof scope !== 'object') {
+    return <span>Весь тенант</span>;
+  }
+  if (scope.kind === 'node') {
+    if (scope.nodeId === RESOURCE_ROOT_SENTINEL) {
+      return <span>Весь тенант</span>;
+    }
+    const node = (dictionaries?.orgTree || []).find((n) => n.id === scope.nodeId);
+    return <span>{node ? `Узел: ${node.label}` : 'Узел оргструктуры'}</span>;
+  }
+  if (scope.kind === 'tags') {
+    const tags = scope.tags || [];
+    if (tags.length === 0) {
+      return <span>Весь тенант</span>;
+    }
+    const labelById = Object.fromEntries((dictionaries?.scopeTags || []).map((t) => [t.id, t.label]));
+    return (
+      <span className="chs-ov-scopesum">
+        {tags.map((t) => <ScopeToken key={t} kind="tag">{labelById[t] || t}</ScopeToken>)}
+      </span>
+    );
+  }
+  if (scope.kind === 'interval') {
+    return <span>{`Диапазон: ${scope.axis} ${scope.lo}–${scope.hi}`}</span>;
+  }
+  if (scope.kind === 'set') {
+    const members = scope.members || [];
+    if (members.length === 0) {
+      return <span>Весь тенант</span>;
+    }
+    return (
+      <span className="chs-ov-scopesum">
+        {members.map((m, i) => <ScopeSummary key={i} scope={m} dictionaries={dictionaries} />)}
+      </span>
+    );
+  }
+  return <span>Особый охват</span>;
+}
+
+// ---------------------------------------------------------------------------
+// "Кто что может" — секция роль-детали (FR-6). Показывает ДЕЙСТВУЮЩИЕ
+// assignments/grants (никогда pending — FR-5/AC-8) + отдельный pending-блок.
+// ---------------------------------------------------------------------------
+
+function WhoCanDoWhat({ role, canManage, dictionaries, onChanged }) {
+  return (
+    <section className="chs-section2">
+      <div className="chs-section2__head">
+        <h3 className="chs-section2__title">Кто что может</h3>
+        <span className="chs-section2__aux">держатели роли · выданные права</span>
+      </div>
+
+      <div className="chs-ov-holders">
+        {role.assignments.length === 0 ? (
+          <span className="chs-derivedcol__empty">Роль пока никому не назначена</span>
+        ) : (
+          role.assignments.map((a) => (
+            <div className="chs-ov-holder" key={a.id}>
+              <ExecutorBadge type={a.employee_kind} name={a.employee_display || a.employee_slug || a.employee_id} />
+              {canManage && (
+                <RevokeAssignmentButton
+                  id={a.id}
+                  subjectLabel={a.employee_display || a.employee_slug || ''}
+                  onDone={onChanged}
+                />
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="chs-grants">
+        <div className={`chs-grants__colhead ${canManage ? 'chs-grants__colhead--actions' : ''}`}>
+          <span>Ресурс</span><span>Операция</span><span>Охват</span>{canManage && <span>Действие</span>}
+        </div>
+        {role.grants.length === 0 ? (
+          <span className="chs-derivedcol__empty">Роль пока не держит ни одного гранта</span>
+        ) : (
+          role.grants.map((g) => (
+            <div className={`chs-grant ${canManage ? 'chs-grant--actions' : ''}`} key={g.id}>
+              <div className="chs-grant__res"><span className="chs-grant__resname">{g.resource_type}</span></div>
+              <div className="chs-grant__ops"><OpChip op={g.operation} /></div>
+              <div className="chs-grant__scope"><ScopeSummary scope={g.scope} dictionaries={dictionaries} /></div>
+              {canManage && (
+                <RevokeGrantButton
+                  id={g.id}
+                  subjectLabel={`${g.resource_type} · ${g.operation}`}
+                  onDone={onChanged}
+                />
+              )}
+            </div>
+          ))
+        )}
+      </div>
+
+      {(role.pending.assignments.length > 0 || role.pending.grants.length > 0) && (
+        <div className="chs-ov-pending">
+          <div className="chs-section2__aux">Ждут второго подтверждения</div>
+          {role.pending.assignments.map((a) => (
+            <div className="chs-ov-pending__row" key={a.id}>
+              <PendingBadge />
+              <span>{a.employee_display || 'Назначение'}</span>
+            </div>
+          ))}
+          {role.pending.grants.map((g) => (
+            <div className="chs-ov-pending__row" key={g.id}>
+              <PendingBadge />
+              <span>{g.description}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main screen
+// ---------------------------------------------------------------------------
+
 function RightsScreen({ initialRole }) {
-  const [roles, setRoles] = useState(null);
+  const [state, setState] = useState(null); // TenantStateResponse | null
   const [error, setError] = useState(null);
   const [sel, setSel] = useState(initialRole || null);
+  const [dictionaries, setDictionaries] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  // UX_REVIEW F-4: пока справочники грузятся, формы показывают LoadingState —
+  // «ещё грузится» отличимо от «справочник пуст/недоступен».
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+  const navigate = useNavigate();
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/rights', {
-        headers: devHeaders(),
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      setRoles(data.roles);
+      const data = await fetchTenantState();
+      setState(data);
       setError(null);
     } catch (e) {
       setError(e.message || 'Failed to load roles');
-      setRoles(null);
+      setState(null);
     }
-  };
-
-  // Load roles on mount
-  useEffect(() => {
-    load();
   }, []);
 
-  // Update selected role when roles load or change
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (state?.can_manage) {
+      setSourcesLoading(true);
+      Promise.all([
+        fetchDictionaries().then(setDictionaries),
+        fetchEmployees().then(setEmployees),
+      ]).finally(() => setSourcesLoading(false));
+    }
+  }, [state?.can_manage]);
+
+  const roles = state?.roles ?? null;
+
   useEffect(() => {
     if (roles) {
       if (!sel || !roles.find(r => r.id === sel)) {
@@ -80,7 +270,7 @@ function RightsScreen({ initialRole }) {
     );
   }
 
-  if (roles === null) {
+  if (state === null) {
     return (
       <div className="chs-rights">
         <LoadingState label="Загрузка ролей…" />
@@ -88,97 +278,77 @@ function RightsScreen({ initialRole }) {
     );
   }
 
+  const canManage = Boolean(state.can_manage);
+
   if (roles.length === 0) {
+    // UX_REVIEW F-1: пустой тенант различает can_manage. Админ получает
+    // Primary action (first-use anatomy) — путь к созданию первой роли на
+    // /rights/editor; обычный пользователь — честное разъяснение без CTA.
     return (
       <div className="chs-rights">
-        <EmptyState title="Нет ролей" description="В этом тенанте ещё не определено ни одной роли доступа." />
+        {canManage ? (
+          <EmptyState
+            title="Пока нет ролей"
+            description="Создайте первую роль доступа, чтобы назначать её сотрудникам."
+            action={
+              <Button variant="primary" size="sm" onClick={() => navigate('/rights/editor')}>
+                Открыть «Каталог ролей»
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            title="Нет ролей"
+            description="У вас пока нет ни одной назначенной роли."
+          />
+        )}
       </div>
     );
   }
 
   const role = roles.find(r => r.id === sel) || roles[0];
-  const tools = [...new Set(role.grants.map((g) => g.uri))];
+  const tools = [...new Set(role.grants.map((g) => g.resource_type))];
+  // UX_REVIEW F-5: pending виден и в self-взгляде (свои «ждёт подтверждения»)
+  // — одноклик-путь к инбоксу /rights/criticality не должен зависеть от
+  // canManage, когда есть pending.
+  const rolePendingCount = role.pending.assignments.length + role.pending.grants.length;
 
   return (
     <div className="chs-rights">
       {/* Левый рейл — роли */}
       <div className="chs-rights__rail">
         <div className="chs-rights__railhead">
-          <span>Роли</span>
+          <span>{state.scope === 'self' ? 'Мои роли' : 'Роли'}</span>
           <span className="chs-rights__railcount">{roles.length}</span>
         </div>
-        <div className="chs-rights__search"><Icon name="search" /><span>Поиск роли</span></div>
         <div className="chs-rights__roles">
-          {ROLE_GROUPS.map((grp) => (
-            <div className="chs-rights__rgroup" key={grp.dept}>
-              <div className="chs-rights__rgrouplabel">{grp.dept}</div>
-              {grp.ids.map((id) => {
-                const roleItem = roles.find(r => r.id === id);
-                return roleItem ? (
-                  <RoleRailItem key={id} role={roleItem} active={sel === id} onSelect={setSel} />
-                ) : null;
-              })}
-            </div>
+          {roles.map((r) => (
+            <RoleRailItem key={r.id} role={r} active={sel === r.id} onSelect={setSel} />
           ))}
         </div>
       </div>
 
-      {/* Правая часть — матрица грантов роли */}
+      {/* Правая часть — детали роли */}
       <div className="chs-rights__main">
         <div className="chs-roledetail">
           {/* Заголовок роли */}
           <div className="chs-roledetail__head">
             <div className="chs-roledetail__titlewrap">
-              <h2 className="chs-roledetail__title">{role.name}</h2>
+              <h2 className="chs-roledetail__title">{role.name || role.slug}</h2>
               <div className="chs-roledetail__sub">
-                <span className="chs-scopepill"><span className="chs-scopepill__glyph" />{role.scope}</span>
-                <span className="chs-crumbs__sep">/</span>
-                <Mono style={{ color: "var(--chs-color-text-faint)" }}>{role.id}</Mono>
+                <span className="chs-scopepill"><span className="chs-scopepill__glyph" />{role.slug}</span>
               </div>
             </div>
             <div className="chs-roledetail__actions">
-              <span className="chs-readmode"><span className="chs-readmode__dot" />только чтение</span>
-              {/* "Запросить изменение": no POST /api/rights/change-requests endpoint exists yet.
-                   Degrade honestly — disabled with tooltip. Follow-up: T-0387-FU-change-request. */}
-              <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — эндпойнт ещё не реализован (следующий слой)">Запросить изменение</Button>
+              <span className="chs-readmode"><span className="chs-readmode__dot" />{canManage ? 'управление' : 'только чтение'}</span>
+              {!canManage && (
+                <Button variant="secondary" size="sm" disabled title="Запрос изменения роли — доступно только владельцу/админу">Запросить изменение</Button>
+              )}
             </div>
           </div>
 
-          {/* Носители роли */}
-          <div className="chs-roledetail__holders">
-            <span className="chs-roledetail__hk">Назначена</span>
-            <div className="chs-roledetail__hlist">
-              {role.holders.map((h, i) => <ExecutorBadge key={i} type={h.type} name={h.name} />)}
-            </div>
-            <span className="chs-roledetail__hmeta">
-              <Mono>{grantCount(role)}</Mono> грантов · <Mono>{role.grants.length}</Mono> ресурсов · <Mono>{tools.length}</Mono> инструментов
-            </span>
-          </div>
-
-          {/* Матрица грантов — атом {ресурс · операция · охват} */}
-          <section className="chs-section2">
-            <div className="chs-section2__head">
-              <h3 className="chs-section2__title">Гранты роли</h3>
-              <span className="chs-section2__aux">атом: {"{"} роль · ресурс · операция · охват {"}"}</span>
-            </div>
-            <div className="chs-grants">
-              <div className="chs-grants__colhead">
-                <span>Ресурс</span><span>Операции</span><span>Охват (scope)</span>
-              </div>
-              {role.grants.map((g) => (
-                <div className="chs-grant" key={g.uri}>
-                  <div className="chs-grant__res">
-                    <span className="chs-grant__resname">{g.res}</span>
-                    <span className="chs-grant__uri">{g.uri}</span>
-                  </div>
-                  <div className="chs-grant__ops">
-                    {g.ops.map((op) => <OpChip key={op} op={op} />)}
-                  </div>
-                  <div className="chs-grant__scope">{g.scope}</div>
-                </div>
-              ))}
-            </div>
-          </section>
+          {/* «Кто что может» — FR-6 */}
+          <WhoCanDoWhat role={role} canManage={canManage} dictionaries={dictionaries} onChanged={load} />
 
           {/* Производное от грантов */}
           <section className="chs-section2">
@@ -188,27 +358,59 @@ function RightsScreen({ initialRole }) {
             </div>
             <div className="chs-derivedwrap">
               <div className="chs-derivedcol">
-                <div className="chs-derivedcol__label">Инструменты (MCP)</div>
+                <div className="chs-derivedcol__label">Ресурсы</div>
                 <div className="chs-derivedcol__items">
-                  {tools.map((uri) => <DerivedChip key={uri} kind="tool">{toolName(uri)}</DerivedChip>)}
+                  {tools.length === 0
+                    ? <span className="chs-derivedcol__empty">Гранты роли отсутствуют</span>
+                    : tools.map((uri) => <DerivedChip key={uri} kind="tool">{uri}</DerivedChip>)}
                 </div>
-                <div className="chs-derivedcol__note">↳ из грантов с операцией read / write / invoke</div>
-              </div>
-              <div className="chs-derivedcol">
-                <div className="chs-derivedcol__label">Видимые поля форм</div>
-                <div className="chs-derivedcol__items">
-                  {role.fields.length === 0
-                    ? <span className="chs-derivedcol__empty">Поля форм не применяются — детерминированный сервис</span>
-                    : role.fields.map((f) => (
-                        <DerivedChip key={f.name} kind="field" state={f.a}>
-                          {f.name}<span className="chs-derived__a">{f.a === "hidden" ? "скрыто" : f.a}</span>
-                        </DerivedChip>
-                      ))}
-                </div>
-                <div className="chs-derivedcol__note">↳ поле без гранта скрывается из формы</div>
+                <div className="chs-derivedcol__note">↳ из действующих грантов роли</div>
               </div>
             </div>
           </section>
+
+          {/* Формы выдачи — FR-2/FR-3/FR-7: монтируются ТОЛЬКО при canManage.
+              При canManage===false компонент отсутствует в DOM (не disabled). */}
+          {canManage && (
+            <section className="chs-section2">
+              <div className="chs-section2__head">
+                <h3 className="chs-section2__title">Назначить роль сотруднику</h3>
+              </div>
+              <AssignRoleForm
+                roles={roles}
+                employees={employees}
+                dictionaries={dictionaries}
+                sourcesLoading={sourcesLoading}
+                onDone={load}
+              />
+            </section>
+          )}
+
+          {canManage && (
+            <section className="chs-section2">
+              <div className="chs-section2__head">
+                <h3 className="chs-section2__title">Дать роли право</h3>
+              </div>
+              <GrantRightForm
+                roles={roles}
+                dictionaries={dictionaries}
+                sourcesLoading={sourcesLoading}
+                onDone={load}
+              />
+            </section>
+          )}
+
+          {/* UX_REVIEW F-5: подсказка-путь к инбоксу подтверждений видна и
+              не-admin наблюдателю СВОЕГО pending (rolePendingCount > 0) —
+              не только под canManage. */}
+          {(canManage || rolePendingCount > 0) && (
+            <div className="chs-ov-inbox-hint">
+              <span className="chs-section2__aux">Критичные изменения требуют второго подтверждения.</span>
+              <Button variant="ghost" size="sm" onClick={() => navigate('/rights/criticality')}>
+                Открыть инбокс «Критичность»
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </div>

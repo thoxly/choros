@@ -66,10 +66,16 @@ const ACCESS_TABS = [
   { id: "trail",    label: "Журнал",      path: "/rights/trail", status: "live" },
 ];
 // REFERENCE — справочные конструкты (пункт nav 'reference' / «Справочники»).
+// T-0572 (FR-8/AC-12): «editor» бейдж остаётся "demo" — ra-role-editor.jsx уже
+// пишет гранты в реальный API (POST /api/grants/propose/confirm2), НО его
+// черновик засеян примером (INITIAL_GRANTS) и не подгружает существующие
+// гранты роли из БД — тултип называет ЭТО конкретно, не общую формулировку
+// (G7 бейдж≡контент). См. ADR-T0572-rights-ui.md §2.7.
 const REFERENCE_TABS = [
   { id: "criticality", label: "Критичность",          path: "/rights/criticality", status: "live" },
   { id: "sod",         label: "SoD",                  path: "/rights/sod",         status: "live" },
-  { id: "editor",      label: "Каталог ролей",         path: "/rights/editor",      status: "demo" },
+  { id: "editor",      label: "Каталог ролей",         path: "/rights/editor",      status: "demo",
+    demoTooltip: "Черновик грантов засеян примером; существующие гранты роли из БД пока не подгружаются в редактор." },
   { id: "intents",     label: "Повседневные операции", path: "/rights/intents",     status: "live" },
 ];
 
@@ -420,7 +426,7 @@ function RightsSubTabs({ genre }) {
             {t.label}
           </button>
           {t.status === "demo" && (
-            <Tooltip label="Демо — данные иллюстративные (mock)" placement="bottom">
+            <Tooltip label={t.demoTooltip || "Демо — данные иллюстративные (mock)"} placement="bottom">
               <span className="chs-subtab__demo">демо</span>
             </Tooltip>
           )}
