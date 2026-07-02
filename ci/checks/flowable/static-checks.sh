@@ -216,14 +216,16 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== FF-FL-11: Existing postgres/keycloak blocks unmodified ==="
-# Compare against baseline commit f693923 (T-0061 BUILD fix — KC healthcheck changed from
-# curl to bash /dev/tcp with hardcoded container-internal port 9000; Flowable healthcheck
-# changed from --password= to URL-embedded basic-auth; both are authorized fixes for
-# pre-existing T-0054/T-0058 bugs, ported in-scope per orchestrator mandate).
+# Compare against baseline commit 6c79822 (T-0431 incident fix — keycloak init: true so
+# PID 1 reaps zombie healthcheck children; without it ~13k zombies exhaust cgroup pids in
+# ~22h → JVM pthread_create EAGAIN → login down). Prior baseline was f693923 (T-0061 BUILD
+# fix — KC healthcheck curl→bash /dev/tcp on container-internal port 9000; Flowable
+# healthcheck --password=→URL-embedded basic-auth). Each baseline bump must reference the
+# task that authorized the pg/kc block change.
 # Strategy: extract service blocks by AWK (no pyyaml needed) and diff.
 # A service block starts at "  <name>:" (2-space indent) and ends before the next
 # 2-space-indent service key or end of file.
-BASELINE_SHA="f693923"
+BASELINE_SHA="6c79822"
 
 extract_service_block() {
   local file_content="$1"
