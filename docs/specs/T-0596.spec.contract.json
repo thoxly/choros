@@ -1,0 +1,42 @@
+{
+  "task_id": "T-0596",
+  "status": "ready",
+  "summary": "W2/замок-харден: три devops follow-up находки судьи T-0576 закрыты одной волной. R-4 (major, свой файл anti-case-lock.sh): count_literal() матчер был двойно-кавычным, слеп к одинарным кавычкам web/src-конвенции — квот-агностик паттерн ([\"']literal[\"']) + пересчёт baseline ФАКТОМ (не текстовой оценкой из ревью) на этой ветке. ECO-1 (свой находкой test-фазы, файл ЧУЖОЙ — rights-ui-anti-case.sh, владелец T-0572): PROJECT_ROOT резолвился в ci/ вместо repo root -> pathspec web/src/ никогда не существовал относительно этого root -> git diff/ls-files возвращали пусто -> гейт вечно-зелёный; однострочный фикс резолва (${SCRIPT_DIR}/.. -> ${SCRIPT_DIR}/../.., та же идиома что read-pdp-anti-case.sh:26 и anti-case-lock.sh:70), санкционирован как аддитивная запись в frozen-sanctions.jsonl (фикс ВОССТАНАВЛИВАЕТ функциональность, не ослабляет). R-5 (minor, свой файл): rc>=2 у grep-стадий в count_literal()/read_baseline() был замаскирован || true наравне с легитимным rc=1 (no-match) -- явная развилка: rc=0/1 остаются данными, rc>=2 фатален с сообщением.",
+  "functional": [
+    "FR-1. count_literal() в ci/checks/anti-case-lock.sh: первая grep-стадия переходит с жёсткого двойно-кавычного паттерна на quote-agnostic ([\"']${literal}[\"'] — одинарные, двойные, обратные кавычки), единообразно для всех 8 денилист-литералов.",
+    "FR-2. ci/checks/data/anti-case-baseline.json пересчитывается ФАКТОМ прогоном пересчитанного скрипта на HEAD этой ветки (не переносится текстовой оценкой из ревью-документа) для каждого литерала + агрегата.",
+    "FR-3. ci/checks/rights-ui-anti-case.sh:25 (PROJECT_ROOT): однострочная правка резолва ${SCRIPT_DIR}/.. -> ${SCRIPT_DIR}/../.. — единственная строка файла, которая меняется.",
+    "FR-4. Правка FR-3 санкционируется append-записью в ci/checks/data/frozen-sanctions.jsonl (task:T-0596, file:ci/checks/rights-ui-anti-case.sh, owner:T-0572), основание: фикс восстанавливает документированную функциональность (ECO-1 судьи T-0576 — гейт был структурно нефункционален), не ослабляет предикат.",
+    "FR-5. count_literal()/read_baseline() в anti-case-lock.sh: rc=0/1 внешней grep-стадии остаются данными (0 матчей — легитимный eroded-исход); rc>=2 становится фатальным — явное сообщение об ошибке + ненулевой exit скрипта."
+  ],
+  "non_functional": [
+    "NF-1 (обратная совместимость self-test). Все 5 существующих self-test ассертов anti-case-lock.sh (R-1/R-3 регрессии) остаются зелёными после FR-1/FR-5.",
+    "NF-2 (не ломает чужое, не в мандате этой волны). read-pdp-anti-case.sh, detel-literal-baseline.sh не модифицируются и проходят свои --self-test и производственные прогоны.",
+    "NF-3 (диффовая честность правки чужого чека). Правка rights-ui-anti-case.sh — ровно одна строка (PROJECT_ROOT присвоение); FORBIDDEN_LITERALS/scan_diff/self_test/resolve_base_ref не меняются.",
+    "NF-4 (required CI, порядок звеньев). Оба изменённых скрипта остаются в существующих местах npm run fitness; package.json порядок звеньев не переставляется.",
+    "NF-5 (self-tests живы). anti-case-lock.sh --self-test и rights-ui-anti-case.sh --self-test оба проходят после правок."
+  ],
+  "out_of_scope": [
+    "O1. Выедание 5 pre-existing одинарно-кавычных вхождений (role-approver/approvalRequired в web/src) — BUILD-задача будущей деТЭЛ-волны.",
+    "O2. Любые другие находки ревью/теста T-0576 кроме R-4/R-5/ECO-1 — не переоткрываются.",
+    "O3. Изменение diff-scope семантики rights-ui-anti-case.sh (переход на repo-wide baseline) — только резолв корня, семантика сохраняется.",
+    "O4. Добавление новых литералов в денилист — вне мандата этой волны.",
+    "O5. Избыточная rc-обработка вторичных grep-стадий read_baseline(), структурно недостижимых для rc>=2 при валидном baseline-файле — не переусложняется без основания из BUILD-анализа."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Плант денилист-литерала в одинарных кавычках в src/**/*.ts красит anti-case-lock.sh (per-литерал + aggregate INCREASED), rc=1 — доказано --self-test.", "verifiable_as": "fitness"},
+    {"id": "AC-2", "text": "То же для одинарно-кавычного планта в web/src/**/*.jsx — обе плоскости чувствительны к обеим кавычкам.", "verifiable_as": "fitness"},
+    {"id": "AC-3", "text": "Baseline — ФАКТ, полученный прогоном пересчитанного скрипта на HEAD этой ветки; production-прогон на неизменном дереве после обновления baseline возвращает exit 0.", "verifiable_as": "fitness"},
+    {"id": "AC-4", "text": "rights-ui-anti-case.sh после фикса корня, боевым прогоном на НОВОМ untracked-плант-файле в web/src/ с денилист-литералом — красит гейт (rc!=0), доказывая исправность резолва.", "verifiable_as": "fitness"},
+    {"id": "AC-5", "text": "rights-ui-anti-case.sh на чистой ветке task/T-0596-lock-harden (без плантов) — зелёный: pre-existing одинарно-кавычные вхождения R-4 не в диффе этой ветки, diff-scoped гейт их не триггерит.", "verifiable_as": "fitness"},
+    {"id": "AC-6", "text": "rights-ui-anti-case.sh --self-test остаётся зелёным после фикса корня.", "verifiable_as": "fitness"},
+    {"id": "AC-7", "text": "rc>=2 у внешней grep-стадии count_literal()/read_baseline() (несуществующий SRC_ROOT/WEB_ROOT/BASELINE_FILE) — фатален: явное сообщение об ошибке + ненулевой exit.", "verifiable_as": "fitness"},
+    {"id": "AC-8", "text": "rc=0/1 той же стадии продолжают трактоваться как данные — существующие R-1-регрессии self-test (zero-occurrence, eroded-to-zero) зелёные без изменения поведения.", "verifiable_as": "fitness"},
+    {"id": "AC-9", "text": "Новая append-запись в ci/checks/data/frozen-sanctions.jsonl (task:T-0596, file:ci/checks/rights-ui-anti-case.sh) — валидный compact JSON по образцу существующих строк.", "verifiable_as": "fitness"},
+    {"id": "AC-10", "text": "frozen-checks-immutable.sh зелёный: модификация rights-ui-anti-case.sh распознана как санкционированная; собственные файлы этой волны проходят как own.", "verifiable_as": "fitness"},
+    {"id": "AC-11", "text": "Полный npm run fitness прогон на итоговом дереве этой волны зелёный.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "anti-case-lock.sh --self-test (все существующие + новые ассерты) полностью зелёный.", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0596-lock-harden.spec.md"
+}

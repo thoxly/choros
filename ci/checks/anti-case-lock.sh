@@ -29,20 +29,36 @@
 # unbounded (explaining the ban, or documenting WHY a value defaults to this,
 # is not itself a hardcode).
 #
+# QUOTE-AGNOSTIC MATCH (review R-4 harden, T-0596): the literal match is NOT
+# anchored to double quotes only — it fires on the literal wrapped in double,
+# single, OR backtick quotes ("x"/'x'/`x`). The original T-0576 matcher was
+# double-quote-only (a valid methodology for src/, whose convention is double
+# quotes — verified empirically), but web/src/'s convention is SINGLE quotes,
+# and the double-quote-only matcher was blind to 5 real code-only occurrences
+# there (role-approver in screen-inbox.jsx:835, approvalRequired x4 in
+# gateway-condition-panel.jsx / screen-dmn-editor.jsx — all single-quoted).
+# The baseline (ci/checks/data/anti-case-baseline.json) is recorded against
+# THIS quote-agnostic matcher, not the narrower one T-0576 shipped with.
+#
 # SCOPE (review R-3, defense-in-depth): EVERY denylist literal is scanned over
 # BOTH planes — src/**/*.ts AND web/src/**/*.{jsx,tsx} — not only the ones with
-# a current web occurrence. Today only telLinear has a web/src hit (the
-# FormBuilder placeholder); the other seven count 0 on the web plane, so the
-# recorded baseline is unchanged by the widened scope — but a FUTURE web-side
-# hardcode of any literal is now caught by this repo-wide gate too, not only
-# by the diff-scoped rights-ui-anti-case.sh.
+# a current web occurrence. Post-R-4-harden, web/src/ has REAL code-only hits
+# beyond the telLinear FormBuilder placeholder (role-approver, approvalRequired
+# — see QUOTE-AGNOSTIC MATCH note above); the recorded baseline reflects the
+# FACTUAL current count on both planes (see data file) — a FUTURE web-side
+# hardcode of any literal is caught by this repo-wide gate too, not only by
+# the diff-scoped rights-ui-anti-case.sh.
 #
-# BASELINE (recorded on this task's own HEAD, afa856b + this task's additions —
-# see ci/checks/data/anti-case-baseline.json; full derivation in ADR §2/§6):
-#   role-approver:2  soglasovanie:2  tel-approval:1  telLinear:8 (7 src + 1
-#   web/src placeholder-text, NOT a hardcode value — see ADR §6 note)
-#   e-larina:2  e-orlov:2  approvalRequired:1  gw-approval-threshold:1
-#   aggregate:19
+# BASELINE (T-0596 [W2/замок-харден] recount — recorded against the
+# QUOTE-AGNOSTIC matcher above, factually re-measured on this branch's own
+# HEAD, not carried over textually from the T-0576 review estimate — see
+# ci/checks/data/anti-case-baseline.json for the exact current numbers; full
+# derivation in ADR-T0596-lock-harden.md §4/§5):
+#   role-approver, soglasovanie, tel-approval, telLinear, e-larina, e-orlov,
+#   approvalRequired, gw-approval-threshold, aggregate — see the data file,
+#   which is the single source of truth (this comment intentionally does not
+#   duplicate the numbers to avoid a second copy drifting out of sync with
+#   the data file, review R-2 lesson from T-0576).
 #
 # SEMANTICS: FAIL if any INDIVIDUAL literal's count is STRICTLY GREATER than
 # its recorded baseline, OR the aggregate is strictly greater than the
@@ -52,18 +68,25 @@
 # from detel-literal-baseline.sh's own AC-10 "strictly less" requirement,
 # which was a one-time reduction proof for T-0575's specific diff.
 #
-# ZERO-SAFETY (review R-1, blocker fix): every grep stage is wrapped in a
-# rc-tolerant subshell `(grep ... || true)` so a zero-match outcome (grep
-# rc=1) can NEVER trip this script's own `set -euo pipefail` into a silent
-# mid-scan death. Zero matches is the gate's SUCCESS end-state, not an error;
-# the --self-test covers this path explicitly (a literal with zero occurrences
-# must produce count=0, a live script, and an "OK (eroded)" PASS line).
+# ZERO-SAFETY (review R-1, blocker fix) + RC>=2 HARDEN (review R-5, T-0596):
+# the outer (root-scanning) grep stage of count_literal()/read_baseline() now
+# captures rc explicitly: rc=0/1 (match/no-match) are legitimate DATA — a
+# zero count is the gate's SUCCESS end-state, not an error, and can NEVER
+# trip this script's own `set -euo pipefail` into a silent mid-scan death.
+# rc>=2 (a REAL grep error: missing/unreadable root, bad regex) is now
+# FATAL — an explicit error message + exit, instead of the old blanket
+# `|| true` which silently fail-opened a broken root into "0 OK (eroded)".
+# Downstream filter stages (grep -v/-vE over already-captured text) keep the
+# `|| true` idiom — rc>=2 is not a realistic failure mode for this script's
+# own fixed patterns applied to text already in hand.
 #
 # --self-test: plants a synthetic violation for a representative literal from
 # each detection family (a bare grep-value literal AND a comment-immune
-# literal) and asserts the detector fires; asserts a comment-only / test-file
-# occurrence does NOT false-positive; and asserts the eroded-to-zero scenario
-# passes with an explicit "0 OK (eroded)" line (review R-1 regression).
+# literal, in BOTH double and single quotes — R-4 harden) and asserts the
+# detector fires; asserts a comment-only / test-file occurrence does NOT
+# false-positive; asserts the eroded-to-zero scenario passes with an explicit
+# "0 OK (eroded)" line (review R-1 regression); and asserts rc>=2 on a broken
+# root is FATAL while rc=0/1 remain data (review R-5 regression).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,18 +114,31 @@ LITERALS=(
 
 # ---------------------------------------------------------------------------
 # count_literal <root_dir> <literal> <exts...> — code-only occurrence count of
-# a double-quoted string literal across the given file extensions, excluding
-# __tests__/ dirs, .test.* files, and comment lines.
+# a quote-agnostic string literal (double, single, OR backtick — review R-4
+# harden) across the given file extensions, excluding __tests__/ dirs,
+# .test.* files, and comment lines.
 #
-# ZERO-SAFE (review R-1): each pipeline stage is a subshell `(grep ... || true)`
-# so grep's rc=1-on-no-match never propagates through pipefail/set -e — a zero
-# count is a legitimate (best) outcome, returned as the string "0".
+# ZERO-SAFE (review R-1): the outer grep stage's rc is captured explicitly
+# (not `|| true`-glossed) so a zero-match outcome (rc=1) is distinguished from
+# a real grep error (rc>=2: missing/unreadable root, bad regex — review R-5
+# harden). rc=0/1 are legitimate data (a zero count is the gate's best
+# outcome); rc>=2 is now FATAL — a silent fail-open into "0 OK (eroded)" would
+# mask a broken root, which R-5 flagged as the material risk of the old
+# blanket `|| true`. Downstream filter stages operate on already-captured
+# text (grep -v/-vE over a fixed string) where rc>=2 is not a realistic
+# failure mode for this script's own fixed patterns, so they keep the R-1
+# `|| true` zero-safety idiom unchanged.
 # ---------------------------------------------------------------------------
 count_literal() {
   local root="$1" literal="$2"; shift 2
-  local include_args=() ext filtered
+  local include_args=() ext filtered raw rc
   for ext in "$@"; do include_args+=(--include="*.${ext}"); done
-  filtered="$( (grep -rn "\"${literal}\"" "${root}" "${include_args[@]}" 2>/dev/null || true) \
+  raw="$(grep -rn "[\"'\`]${literal}[\"'\`]" "${root}" "${include_args[@]}" 2>&1)"; rc=$?
+  if [[ ${rc} -ge 2 ]]; then
+    echo "FAIL [anti-case-lock]: count_literal grep error (rc=${rc}) scanning '${root}' for '${literal}': ${raw}" >&2
+    exit 2
+  fi
+  filtered="$( (printf '%s\n' "${raw}" || true) \
     | (grep -v '__tests__' || true) \
     | (grep -vE '\.test\.(ts|tsx|jsx|js)' || true) \
     | (grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' || true) )"
@@ -123,11 +159,18 @@ count_web() { count_literal "${WEB_ROOT}" "$1" jsx tsx; }
 # "key": integer pairs — a simple line-anchored grep is exact and zero-dep,
 # same idiom as this repo's other baseline/allowlist readers). ZERO-SAFE
 # (review R-1): a missing key yields the empty string, never a set -e death —
-# the caller treats empty as a FAIL with an explicit message.
+# the caller treats empty as a FAIL with an explicit message. rc>=2 on the
+# outer grep stage (missing/unreadable BASELINE_FILE — review R-5 harden) is
+# FATAL, distinct from rc=1 (key legitimately absent, still handled as an
+# empty-string FAIL by the caller, not this function).
 read_baseline() {
-  local key="$1" val
-  val="$( (grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*[0-9]+" "${BASELINE_FILE}" 2>/dev/null || true) \
-    | (grep -oE '[0-9]+$' || true) | head -1 )"
+  local key="$1" val raw rc
+  raw="$(grep -oE "\"${key}\"[[:space:]]*:[[:space:]]*[0-9]+" "${BASELINE_FILE}" 2>&1)"; rc=$?
+  if [[ ${rc} -ge 2 ]]; then
+    echo "FAIL [anti-case-lock]: read_baseline grep error (rc=${rc}) reading '${BASELINE_FILE}' for key '${key}': ${raw}" >&2
+    exit 2
+  fi
+  val="$( (printf '%s\n' "${raw}" || true) | (grep -oE '[0-9]+$' || true) | head -1 )"
   printf '%s' "${val}"
 }
 
@@ -270,6 +313,73 @@ JSON
     exit 1
   fi
   echo "PASS self-test: eroded-to-zero fixture scans clean with explicit 'OK (eroded)' lines (R-1)"
+
+  # (6) QUOTE-AGNOSTIC detection (review R-4 harden regression, T-0596): a
+  #     literal wrapped in SINGLE quotes (the web/src/ convention) must be
+  #     detected exactly like a double-quoted one — proves the matcher is no
+  #     longer blind to the quote style that hid 5 real occurrences in
+  #     screen-inbox.jsx / gateway-condition-panel.jsx / screen-dmn-editor.jsx.
+  cat > "${TMPDIR_ST}/src/http/single-quote.ts" <<'TSFIX'
+export const SINGLE_QUOTED_ROLE = 'role-approver'; // single-quoted code line.
+TSFIX
+  single_src_count="$(count_literal "${TMPDIR_ST}/src" "role-approver" ts)"
+  if [[ "${single_src_count}" != "1" ]]; then
+    echo "FAIL self-test: expected count=1 for single-quoted 'role-approver' in src, got ${single_src_count} (R-4 regression)"
+    exit 1
+  fi
+  echo "PASS self-test: single-quoted literal detected in src (R-4 quote-agnostic)"
+
+  cat > "${TMPDIR_ST}/web/src/screens/single-quote.jsx" <<'JSXFIX'
+export const DEFAULT_ROUTING = 'approvalRequired'; // single-quoted code line.
+JSXFIX
+  single_web_count="$(count_literal "${TMPDIR_ST}/web/src" "approvalRequired" jsx tsx)"
+  if [[ "${single_web_count}" != "1" ]]; then
+    echo "FAIL self-test: expected count=1 for single-quoted 'approvalRequired' in web/src, got ${single_web_count} (R-4 regression)"
+    exit 1
+  fi
+  echo "PASS self-test: single-quoted literal detected in web/src (R-4 quote-agnostic, both planes)"
+
+  # (7) RC>=2 FATAL (review R-5 harden regression, T-0596): a genuine grep
+  #     error must be a FATAL error (explicit message + exit), not a silent
+  #     fail-open into "0 OK (eroded)". Note: a NONEXISTENT root directory is
+  #     NOT a portable rc>=2 trigger here — with `--include` present, BSD
+  #     grep (macOS /usr/bin/grep, this repo's dev-machine default) returns
+  #     rc=1 (treated leniently as "no matching files"), while GNU grep
+  #     returns rc=2 for the same input; using it as the fixture would make
+  #     this assertion flaky across platforms. An UNREADABLE file (chmod 000)
+  #     is portable: both BSD and GNU grep emit "Permission denied" at rc=2.
+  #     Run count_literal in a subshell command-substitution so its `exit 2`
+  #     terminates only the subshell, not the self-test harness itself.
+  RC2_ROOT="${TMPDIR_ST}/rc2-root"
+  mkdir -p "${RC2_ROOT}"
+  printf 'x' > "${RC2_ROOT}/unreadable.ts"
+  chmod 000 "${RC2_ROOT}/unreadable.ts"
+  rc2_out=""
+  rc2_rc=0
+  rc2_out="$(count_literal "${RC2_ROOT}" "role-approver" ts 2>&1)" || rc2_rc=$?
+  chmod 644 "${RC2_ROOT}/unreadable.ts"
+  if [[ ${rc2_rc} -lt 2 ]]; then
+    echo "FAIL self-test: expected rc>=2 (fatal) for an unreadable file, got rc=${rc2_rc}; output:"
+    echo "${rc2_out}"
+    exit 1
+  fi
+  if ! echo "${rc2_out}" | grep -qF "FAIL [anti-case-lock]: count_literal grep error"; then
+    echo "FAIL self-test: expected explicit grep-error message for unreadable file, got:"
+    echo "${rc2_out}"
+    exit 1
+  fi
+  echo "PASS self-test: rc>=2 on a real grep error is FATAL with an explicit message (R-5)"
+
+  # (7b) rc>=2 on read_baseline (missing BASELINE_FILE) is likewise FATAL.
+  rc2b_out=""
+  rc2b_rc=0
+  rc2b_out="$(BASELINE_FILE="${TMPDIR_ST}/definitely-nonexistent-baseline.json"; read_baseline "role-approver" 2>&1)" || rc2b_rc=$?
+  if [[ ${rc2b_rc} -lt 2 ]]; then
+    echo "FAIL self-test: expected rc>=2 (fatal) for a missing baseline file, got rc=${rc2b_rc}; output:"
+    echo "${rc2b_out}"
+    exit 1
+  fi
+  echo "PASS self-test: rc>=2 on a missing baseline file is FATAL (R-5)"
 
   echo "PASS self-test: all anti-case-lock detectors functional across literal families"
   exit 0

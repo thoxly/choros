@@ -22,7 +22,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# ECO-1 fix (T-0596, sanctioned — see ci/checks/data/frozen-sanctions.jsonl
+# task:T-0596): was `${SCRIPT_DIR}/..` = <repo>/ci (one level short of repo
+# root), so `git -C "${PROJECT_ROOT}" diff ... -- web/src/` resolved the
+# pathspec against a nonexistent ci/web/src/ and the scan was always empty —
+# the gate was structurally always-green regardless of diff content. Two
+# levels up (matching read-pdp-anti-case.sh:26 and anti-case-lock.sh:70)
+# resolves to the real repo root.
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 FORBIDDEN_LITERALS=(
   "role-approver"
