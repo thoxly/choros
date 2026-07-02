@@ -1692,24 +1692,35 @@ export function registerInboxRoutes(
               `code=${result.code} (instance ${engineDriveInstanceId}) — ` +
               `approve recorded, engine step NOT completed; reconcile-on-read will retry`,
           );
-          // T-0571 (ADR §2.3 response contract): the top-level `code` distinguishes
-          // WHICH of the three 502 shapes this is. The two STRUCTURAL codes
+          // T-0571 (ADR §2.3 response contract, amended after REVIEW F-1 —
+          // orchestrator-sanctioned): the `code` field distinguishes WHICH of the
+          // three 502 shapes this is. The two STRUCTURAL codes
           // (ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK) are surfaced verbatim as
-          // the top-level code — they ARE the diagnosis, not a wrapped transport error.
+          // `error.code` — they ARE the diagnosis, not a wrapped transport error.
           // Any OTHER engine result.code (transport/HTTP failure — e.g.
           // ENGINE_UNAVAILABLE, a non-NOT_FOUND completeUserTask error) is wrapped as
           // the generic ENGINE_DRIVE_FAILED, with the underlying engine code nested in
           // `engineCode` (diagnostic, not the dispatch key).
+          //
+          // Body shape: {error:{code, stage, engineCode, instanceId}} — the
+          // codebase-wide error envelope (see router.ts sendErrorEnvelope, and its
+          // inline mirrors in files.ts/grant-propose.ts/message-ingest.ts/
+          // process-defs.ts). The original draft used a flat top-level object; REVIEW
+          // F-1 found this diverged from the convention AND from the real consumer
+          // (web/src/screens/screen-inbox.jsx reads body?.error?.code in both
+          // handleComplete and approveTask) — fixed here, ADR §2.3 amended to match.
           const isStructural =
             result.code === ENGINE_TASK_NOT_FOUND || result.code === AMBIGUOUS_ACTIVE_TASK;
           res.statusCode = 502;
           res.setHeader("Content-Type", "application/json");
           res.end(
             JSON.stringify({
-              code: isStructural ? result.code : "ENGINE_DRIVE_FAILED",
-              stage: result.stage,
-              engineCode: result.code,
-              instanceId: engineDriveInstanceId,
+              error: {
+                code: isStructural ? result.code : "ENGINE_DRIVE_FAILED",
+                stage: result.stage,
+                engineCode: result.code,
+                instanceId: engineDriveInstanceId,
+              },
             }),
           );
           return;

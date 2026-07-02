@@ -57,13 +57,17 @@
 
 **Контракт ответа approve (движок сконфигурирован — `writeDepsFlowable` присутствует):**
 
+> **Amended after REVIEW F-1 (orchestrator-sanctioned, 2026-07-02):** первая версия этой таблицы фиксировала ПЛОСКОЕ тело ошибки (`{code, stage, engineCode, instanceId}` без обёртки). Ревью (docs/review/T-0571.review.json, finding F-1) вскрыло, что это расходится (а) с конвенцией ВСЕЙ кодовой базы — ЕДИНСТВЕННАЯ форма ручных error-ответов везде — `{error:{code,...}}` (см. `router.ts:177-187` `sendErrorEnvelope`, и её инлайн-зеркала в `files.ts:236/348`, `grant-propose.ts:375`, `message-ingest.ts:137`, `process-defs.ts:575/585/595`); (б) с реальным потребителем `web/src/screens/screen-inbox.jsx`, который читает `body?.error?.code` в обоих вызывающих местах (`handleComplete`, `approveTask`) и НЕ был тронут в первой версии диффа. Это несоответствие ADR↔кодбаза, а не намеренное расширение контракта — таблица ниже исправлена на обёрнутую форму; реализация (`src/http/inbox.ts`) и unit-тесты приведены в соответствие в том же BUILD-заходе.
+
 | Ситуация | HTTP | тело |
 |---|---|---|
 | Базовая задача найдена в движке и завершена | 200 | `{ instanceId, status:"done", action:"approve", outcome, engine:"completed" }` |
 | Idempotent-повтор: инстанс уже завершён этим шагом (задача уже не активна, `isInstanceEnded` или NOT_FOUND на complete) | 200 | `{ …, engine:"already" }` (NF-2: легитимное завершённое состояние) |
-| Движок недоступен / HTTP-ошибка (`getActiveUserTasks`/`completeUserTask`/`isInstanceEnded` → `ok:false`) | **502** | `{ code:"ENGINE_DRIVE_FAILED", stage, engineCode }` |
-| Активная задача инстанса не найдена, при этом инстанс НЕ завершён (структурный сбой BUG-014) | **502** | `{ code:"ENGINE_TASK_NOT_FOUND", stage:"poll" }` |
-| >1 активной user-task у базового шага (§2.1) | **502** | `{ code:"AMBIGUOUS_ACTIVE_TASK", stage:"poll" }` |
+| Движок недоступен / HTTP-ошибка (`getActiveUserTasks`/`completeUserTask`/`isInstanceEnded` → `ok:false`) | **502** | `{ error:{ code:"ENGINE_DRIVE_FAILED", stage, engineCode, instanceId } }` |
+| Активная задача инстанса не найдена, при этом инстанс НЕ завершён (структурный сбой BUG-014) | **502** | `{ error:{ code:"ENGINE_TASK_NOT_FOUND", stage:"poll", engineCode, instanceId } }` |
+| >1 активной user-task у базового шага (§2.1) | **502** | `{ error:{ code:"AMBIGUOUS_ACTIVE_TASK", stage:"poll", engineCode, instanceId } }` |
+
+Тело ошибки использует ЕДИНУЮ codebase-wide envelope `{error:{code, ...}}` — не отдельный ad-hoc формат для engine-drive. `stage`/`engineCode`/`instanceId` — вложенные диагностические поля внутри `error`, `code` — верхний (внутри `error`) дискриминатор для UI/клиента.
 
 **Контракт при движке НЕ сконфигурированном (`writeDepsFlowable` отсутствует, NF-3):** approve отвечает 200 с `{ …, engine:"not_configured" }` — существующий audit-only режим СОХРАНЯЕТСЯ, но становится ЯВНЫМ полем ответа (наблюдаемо ≠ тихий 200 сбоя). Различение «не настроен» vs «настроен-но-упал» = разные значения поля `engine` + разный HTTP-код (200 vs 502). На живом стенде движок настроен → путь §2.1 обязан работать (AC-1..AC-5).
 

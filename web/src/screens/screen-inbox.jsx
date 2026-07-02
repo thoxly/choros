@@ -326,6 +326,15 @@ const STATUS_LABEL = {
   paused: "Пауза",
 };
 
+// T-0571 (amended after REVIEW F-1, orchestrator-sanctioned): typed engine-drive
+// error codes surfaced by POST /api/inbox/:id/action (502 {error:{code,...}}) get a
+// short, non-technical Russian message instead of the raw code — see ADR §2.3.
+const ENGINE_DRIVE_ERROR_MESSAGE = {
+  ENGINE_DRIVE_FAILED: "Движок процессов не подтвердил действие — попробуйте ещё раз",
+  ENGINE_TASK_NOT_FOUND: "Задача в движке не найдена — обновите страницу",
+  AMBIGUOUS_ACTIVE_TASK: "У шага несколько активных задач — обратитесь к администратору",
+};
+
 function TaskDetailPanel({ taskId, onClose, onActionDone }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null); // { item, projection }
@@ -378,7 +387,9 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         const code = body?.error?.code ?? `HTTP ${res.status}`;
-        throw new Error(code === 'NOT_ELIGIBLE' ? 'Нет права на выполнение этого шага' : `Ошибка: ${code}`);
+        // T-0571 (amended after REVIEW F-1): typed engine-drive 502 codes get a
+        // human-readable message, same as the pre-existing NOT_ELIGIBLE case below.
+        throw new Error(ENGINE_DRIVE_ERROR_MESSAGE[code] ?? (code === 'NOT_ELIGIBLE' ? 'Нет права на выполнение этого шага' : `Ошибка: ${code}`));
       }
       setOutcome(body);
       // Notify parent to refresh the inbox list.
@@ -664,7 +675,9 @@ function InboxScreen() {
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         const code = body?.error?.code ?? `HTTP ${res.status}`;
-        throw new Error(`Ошибка: ${code}`);
+        // T-0571 (amended after REVIEW F-1): typed engine-drive 502 codes get a
+        // human-readable message instead of the raw code.
+        throw new Error(ENGINE_DRIVE_ERROR_MESSAGE[code] ?? `Ошибка: ${code}`);
       }
       // Task approved → instance done; re-fetch to drop the task from the list.
       await load();

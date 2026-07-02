@@ -1639,8 +1639,13 @@ describe("T-0571 approve handler — synchronous engine-drive HTTP contract", ()
 
     expect(r.status).toBe(502);
     const body = r.json as Record<string, unknown>;
-    expect(body["code"]).toBe("ENGINE_TASK_NOT_FOUND");
-    expect(body["stage"]).toBeDefined();
+    // T-0571 (amended after REVIEW F-1, orchestrator-sanctioned): error body uses the
+    // codebase-wide {error:{code,...}} envelope (router.ts sendErrorEnvelope
+    // convention), not a flat top-level object — see ADR §2.3.
+    const error = body["error"] as Record<string, unknown>;
+    expect(error).toBeDefined();
+    expect(error["code"]).toBe("ENGINE_TASK_NOT_FOUND");
+    expect(error["stage"]).toBeDefined();
 
     // The human's decision is STILL recorded (task.approved committed before the
     // engine-drive call, ADR §2.3) — not rolled back on engine failure.
@@ -1692,7 +1697,10 @@ describe("T-0571 approve handler — synchronous engine-drive HTTP contract", ()
 
     expect(r.status).toBe(502);
     const body = r.json as Record<string, unknown>;
-    expect(body["code"]).toBe("AMBIGUOUS_ACTIVE_TASK");
+    // T-0571 (amended after REVIEW F-1, orchestrator-sanctioned): {error:{code,...}}.
+    const error = body["error"] as Record<string, unknown>;
+    expect(error).toBeDefined();
+    expect(error["code"]).toBe("AMBIGUOUS_ACTIVE_TASK");
     // Never guessed — neither engine task was completed.
     expect(mockClient.completeUserTask).not.toHaveBeenCalled();
   });
@@ -1731,8 +1739,11 @@ describe("T-0571 approve handler — synchronous engine-drive HTTP contract", ()
 
     expect(r.status).toBe(502);
     const body = r.json as Record<string, unknown>;
-    expect(body["code"]).toBe("ENGINE_DRIVE_FAILED");
-    expect(body["engineCode"]).toBe("ENGINE_UNAVAILABLE");
+    // T-0571 (amended after REVIEW F-1, orchestrator-sanctioned): {error:{code,...}}.
+    const error = body["error"] as Record<string, unknown>;
+    expect(error).toBeDefined();
+    expect(error["code"]).toBe("ENGINE_DRIVE_FAILED");
+    expect(error["engineCode"]).toBe("ENGINE_UNAVAILABLE");
   });
 
   it("AC-8 idempotent: a legitimate already-ended repeat is 200 {engine:'already'} — not an error, not indistinguishable from a fresh completion", async () => {
