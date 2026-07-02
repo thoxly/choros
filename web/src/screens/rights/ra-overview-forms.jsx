@@ -21,6 +21,7 @@
    ============================================================================ */
 
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, Select, StatusChip, ConfirmDialog, LoadingState } from '../../components/components.jsx';
 import { useToastContext } from '../../app-shell/toast-context.jsx';
 import { authHeaders } from '../../app-shell/dev-auth.js';
@@ -166,6 +167,10 @@ function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false
   const [scope, setScope] = useState(null);
   const [busy, setBusy] = useState(false);
   const { push: pushToast } = useToastContext();
+  // T-0597 (находка №5): «Список сотрудников пуст» получает кликабельный выход
+  // в «Оргструктуру» вместо тупика — путь /org уже используется тем же способом
+  // на screen-overview.jsx (плитка «Оргструктура») и зарегистрирован в shell.jsx.
+  const navigate = useNavigate();
 
   const canSubmit = employeeId && roleId && scope;
 
@@ -207,7 +212,24 @@ function AssignRoleForm({ roles, employees, dictionaries, sourcesLoading = false
         placeholder="Выберите сотрудника…"
         options={(employees ?? []).map((e) => ({ value: e.id, label: e.slug }))}
         hint={(employees ?? []).length === 0
-          ? 'Список сотрудников пуст — заведите сотрудников в разделе «Оргструктура» или обновите страницу.'
+          ? (
+            <>
+              Список сотрудников пуст — заведите сотрудников в разделе «Оргструктура»
+              или обновите страницу.{' '}
+              <button
+                type="button"
+                className="chs-link-button"
+                onClick={() => navigate('/org')}
+                style={{
+                  background: 'none', border: 'none', padding: 0, margin: 0,
+                  font: 'inherit', color: 'var(--chs-color-accent)',
+                  textDecoration: 'underline', cursor: 'pointer',
+                }}
+              >
+                Открыть оргструктуру
+              </button>
+            </>
+          )
           : undefined}
       />
       <Select

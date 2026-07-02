@@ -1,0 +1,77 @@
+{
+  "task_id": "T-0597",
+  "status": "pr_open",
+  "branch": "task/T-0597-ux-quick-wins",
+  "base": "dev@d94efe3",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": "n/a — web/ has no tsconfig.json (plain JSX, not TS-compiled); repo-root tsc not applicable to this diff (no src/**.ts touched)",
+    "tests": true,
+    "fitness": "partial — ux-g2/g5/g6 gates run directly (see below); full root npm run fitness not re-run in this pass (server/src untouched by this diff, out of scope for a web-only UX fix)"
+  },
+  "test_summary": {
+    "web_vitest_full": "1142/1142 passed (2 pre-existing failing suites: apps-schema.test.js, records-form.test.js — missing 'ajv' npm package, confirmed pre-existing infra gap NOT touched by this diff, same as documented in docs/review/T-0592.review.json)",
+    "new_test_files": ["web/src/screens/screen-inbox.test.jsx (8 tests)"],
+    "extended_test_files": [
+      "web/src/screens/screen-llm-connections.test.jsx (+42 tests: reveal-toggle AC-3, Anthropic-default AC-6/7, honest-key-status AC-8/9/10)",
+      "web/src/screens/rights/screen-rights.test.jsx (+5 tests: actionable org-link hint AC-4/5)",
+      "web/src/screens/__tests__/screen-llm-connections.a11y.test.jsx (2 assertions updated — pre-existing test asserted literal type=\"password\"; updated to assert the new password↔text reveal-toggle contract, not a regression, field still defaults masked)"
+    ],
+    "ux_gates": {
+      "ux-g6-no-new-hardcode --required": "PASS — 0 new hardcode/overlay findings",
+      "ux-g2-theme-pairing": "PASS — light-default/dark-reachable intact (tokens.css untouched)",
+      "ux-g5-jargon-denylist --required": "FAIL but PRE-EXISTING — baseline dev already fails this gate in --required mode (25 findings, all T-id-in-describe-string inside .test.jsx files, a glob-scoping gap that matches test files alongside screens). This diff adds 3 more findings of the identical pre-existing class (describe('T-0597 — ...') labels in the new/extended test files — consistent with every other task's test file in the suite, e.g. T-0574/T-0499/T-0568/T-0592). The gate as WIRED in package.json fitness chain runs WITHOUT --required (informational, exit 0) — actual CI is green. No dev-jargon was introduced in visible PRODUCT text (the 5 screen .jsx files themselves have zero new findings)."
+    },
+    "rights_isolation_gates": {
+      "rights-ui-no-new-write.sh": "PASS — no new grant/role-assignment write endpoint",
+      "rights-ui-anti-case.sh": "PASS — no D-064 anti-case literal added",
+      "rights-ui-frozen-write.sh": "PASS — write-core files byte-unchanged"
+    }
+  },
+  "files_changed": [
+    "docs/specs/T-0597-ux-quick-wins.spec.md",
+    "docs/specs/T-0597.spec.contract.json",
+    "docs/adr/ADR-T0597.md",
+    "docs/ux-loop-report-2026-07-02.md",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/screens/screen-inbox.test.jsx",
+    "web/src/screens/screen-llm-connections.jsx",
+    "web/src/screens/screen-llm-connections.test.jsx",
+    "web/src/screens/rights/ra-overview-forms.jsx",
+    "web/src/screens/rights/screen-rights.test.jsx",
+    "web/src/components/components.jsx",
+    "web/src/design/icon-registry.js",
+    "web/src/screens/__tests__/screen-llm-connections.a11y.test.jsx"
+  ],
+  "fixes_summary": [
+    {
+      "id": "FR-1",
+      "finding": "№6 — alert() блокирующий модал на claim/approve ошибках в инбоксе",
+      "diff": "screen-inbox.jsx: 2 alert(e.message) → pushToast({tone:'error', message:e.message}) через существующий useToastContext(). ENGINE_DRIVE_ERROR_MESSAGE-маппинг и ALREADY_CLAIMED-текст не изменены — только канал доставки."
+    },
+    {
+      "id": "FR-2",
+      "finding": "№3 — нет reveal-toggle на поле API-ключа",
+      "diff": "screen-llm-connections.jsx ConnectionKeyBinder: showKey state, type={showKey?'text':'password'}, кнопка-глазик (aria-label/aria-pressed синхронны). Новые kit-иконки eye/eye-off (components.jsx KitIcon + icon-registry.js, аддитивно). Ключ сбрасывается вместе с showKey при отмене/успехе — write-only инвариант не ослаблен."
+    },
+    {
+      "id": "FR-3",
+      "finding": "№5 — «оргструктура пуста» без выхода",
+      "diff": "ra-overview-forms.jsx AssignRoleForm: useNavigate() + hint дополнен кнопкой «Открыть оргструктуру» → navigate('/org'). Путь сверен с существующим Route в shell.jsx (тот же путь уже использует screen-overview.jsx)."
+    },
+    {
+      "id": "FR-4",
+      "finding": "№8 — дефолт формы DeepSeek расходится с инструкцией про Anthropic",
+      "diff": "screen-llm-connections.jsx: initial useState формы «Новый профиль» переключён на ANTHROPIC_PRESET = PROVIDER_PRESETS.find(p=>p.value==='anthropic') — единственный источник цифр. DeepSeek остаётся первым элементом массива, полностью выбираем."
+    },
+    {
+      "id": "FR-5",
+      "finding": "№9 — успех-баннер и нейтральный чип маскируют незавершённость (профиль без ключа)",
+      "diff": "screen-llm-connections.jsx: (a) createOkNoKey state дописывает 'Теперь вставьте API-ключ, чтобы он заработал.' в успех-баннер, если secretHandle был пуст на момент создания; (b) chipStyle(false) → --chs-color-warning/-soft вместо нейтральных токенов; (c) кнопка «Вставить API-ключ» variant='primary' только при !secretBound."
+    }
+  ],
+  "deviations_from_spec": [],
+  "escalation": "Нет.",
+  "summary": "5 S-размерных UX quick-wins из ux-loop-report-2026-07-02.md (находки №3/№5/№6/№8/№9), все чисто клиентские (web/src/**), без новых эндпоинтов. SPEC+DESIGN и BUILD — отдельными коммитами (06ddc8e, b16c026) на ветке task/T-0597-ux-quick-wins поверх dev@d94efe3. Полный web vitest 1142/1142 green; ux-g6/g2 чисты; rights-изоляционные гейты (no-new-write/anti-case/frozen-write) зелёные на правке ra-overview-forms.jsx. ux-g5 остаётся в исходном (pre-existing, informational) состоянии — не понижен и не поднят этим диффом."
+}

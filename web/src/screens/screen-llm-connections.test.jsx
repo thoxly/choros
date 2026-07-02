@@ -237,3 +237,120 @@ describe('T-0574 — инструкция «где взять ключ Anthropic
     expect(block).not.toMatch(/HTTP\s*\d{3}/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0597 (находка №3) — reveal-toggle on the API-key field (AC-3)
+// ---------------------------------------------------------------------------
+
+describe('T-0597 — reveal-toggle на поле API-ключа (AC-3)', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const filePath = path.default.resolve(
+    new URL(import.meta.url).pathname,
+    '../screen-llm-connections.jsx',
+  );
+  const src = fs.default.readFileSync(filePath, 'utf-8');
+
+  it('ConnectionKeyBinder holds a showKey state', () => {
+    expect(src).toMatch(/const \[showKey, setShowKey\] = useState\(false\)/);
+  });
+  it('the key Field type toggles password↔text based on showKey', () => {
+    expect(src).toContain("type={showKey ? 'text' : 'password'}");
+  });
+  it('the toggle button has aria-label synced with state (Показать/Скрыть ключ)', () => {
+    expect(src).toContain("aria-label={showKey ? 'Скрыть ключ' : 'Показать ключ'}");
+  });
+  it('the toggle button carries aria-pressed synced with showKey', () => {
+    expect(src).toContain('aria-pressed={showKey}');
+  });
+  it('the toggle is a real <button type="button"> (keyboard reachable, not a submit trigger)', () => {
+    const idx = src.indexOf('setShowKey((s) => !s)');
+    expect(idx).toBeGreaterThan(-1);
+    const before = src.slice(Math.max(0, idx - 200), idx);
+    expect(before).toMatch(/type="button"/);
+  });
+  it('uses the new eye/eye-off KitIcon names', () => {
+    expect(src).toContain("KitIcon name={showKey ? 'eye-off' : 'eye'}");
+  });
+  it('imports KitIcon from the kit', () => {
+    expect(src).toMatch(/import \{[^}]*KitIcon[^}]*\} from '\.\.\/components\/components\.jsx'/);
+  });
+  it('key state resets on cancel and after a successful bind (write-only hygiene preserved)', () => {
+    // Cancel button resets showKey alongside apiKey.
+    expect(src).toMatch(/setApiKey\(''\); setShowKey\(false\); setOpen\(false\)/);
+    // Successful submit clears apiKey AND showKey immediately (before the 200/error branches).
+    expect(src).toMatch(/setApiKey\(''\);\s*\n\s*setShowKey\(false\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0597 (находка №8) — форма «Новый профиль» по умолчанию = Anthropic (AC-6/AC-7)
+// ---------------------------------------------------------------------------
+
+describe('T-0597 — дефолт формы = Anthropic, синхрон с инструкцией (AC-6/AC-7)', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const filePath = path.default.resolve(
+    new URL(import.meta.url).pathname,
+    '../screen-llm-connections.jsx',
+  );
+  const src = fs.default.readFileSync(filePath, 'utf-8');
+
+  it('derives the initial state from PROVIDER_PRESETS anthropic entry (single source of numbers)', () => {
+    expect(src).toContain("PROVIDER_PRESETS.find((p) => p.value === 'anthropic')");
+  });
+  it('provider/endpoint/model/prices/currency initial state reference ANTHROPIC_PRESET', () => {
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.value\)/);
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.endpoint\)/);
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.model\)/);
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.priceIn\)/);
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.priceOut\)/);
+    expect(src).toMatch(/useState\(ANTHROPIC_PRESET\.currency\)/);
+  });
+  it('DeepSeek remains the first PROVIDER_PRESETS entry and fully selectable', () => {
+    const presetsBlock = src.slice(src.indexOf('const PROVIDER_PRESETS'), src.indexOf('const PROVIDER_PRESETS') + 800);
+    const deepseekIdx = presetsBlock.indexOf("value: 'deepseek'");
+    const anthropicIdx = presetsBlock.indexOf("value: 'anthropic'");
+    expect(deepseekIdx).toBeGreaterThan(-1);
+    expect(anthropicIdx).toBeGreaterThan(deepseekIdx);
+  });
+  it('onProviderChange logic is untouched (still auto-fills from the preset array)', () => {
+    expect(src).toContain('const onProviderChange = (e) => {');
+    expect(src).toContain('PROVIDER_PRESETS.find((p) => p.value === val)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-0597 (находка №9) — честный статус «ключ не привязан» (AC-8/AC-9/AC-10)
+// ---------------------------------------------------------------------------
+
+describe('T-0597 — честный статус готовности профиля (AC-8/AC-9/AC-10)', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+  const filePath = path.default.resolve(
+    new URL(import.meta.url).pathname,
+    '../screen-llm-connections.jsx',
+  );
+  const src = fs.default.readFileSync(filePath, 'utf-8');
+
+  it('createOkNoKey state captures whether the just-created profile had no key', () => {
+    expect(src).toContain('const [createOkNoKey, setCreateOkNoKey] = useState(false)');
+    expect(src).toContain('setCreateOkNoKey(!secretHandle.trim())');
+  });
+  it('success banner appends the honest next-step line only when createOkNoKey', () => {
+    expect(src).toContain('Теперь вставьте API-ключ, чтобы он заработал.');
+    expect(src).toMatch(/\{createOkNoKey && ' Теперь вставьте API-ключ, чтобы он заработал\.'\}/);
+  });
+  it('chipStyle uses warning tokens (not neutral) when the key is unbound', () => {
+    const idx = src.indexOf('const chipStyle');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 500);
+    expect(block).toContain('--chs-color-warning-soft');
+    expect(block).toContain('--chs-color-warning');
+    expect(block).not.toContain('--chs-color-surface-raised');
+    expect(block).not.toContain('--chs-color-text-muted');
+  });
+  it('the «Вставить API-ключ» button is primary only while unbound', () => {
+    expect(src).toContain("variant={secretBound ? 'ghost' : 'primary'}");
+  });
+});

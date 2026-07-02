@@ -1,0 +1,70 @@
+{
+  "task_id": "T-0597",
+  "status": "ready",
+  "summary": "5 S-фиксов из ux-loop-report-2026-07-02.md (находки №3/№5/№6/№8/№9): alert()→pushToast в инбоксе (claim/approve), reveal-toggle на поле API-ключа, actionable-hint «оргструктура пуста» → navigate('/org'), дефолт формы LLM-профиля = Anthropic, честный статус «ключ не привязан» (баннер/чип/primary-кнопка). Все пять — чисто клиентские, без новых эндпоинтов, без изменения серверной семантики.",
+  "functional": [
+    "FR-1 (находка №6): screen-inbox.jsx claimTask/approveTask catch-блоки заменяют alert(e.message) на pushToast({tone:'error', message:e.message}) через существующий useToastContext(); человекочитаемый текст (включая ENGINE_DRIVE_ERROR_MESSAGE-маппинг и ALREADY_CLAIMED-ветку) не меняется.",
+    "FR-2 (находка №3): ConnectionKeyBinder (screen-llm-connections.jsx) получает reveal-toggle кнопку рядом с полем API-ключа — локальный showKey state, type password↔text, KitIcon eye/eye-off (новые записи в icon-registry), aria-label 'Показать ключ'/'Скрыть ключ', aria-pressed синхронно с состоянием.",
+    "FR-3 (находка №5): AssignRoleForm (ra-overview-forms.jsx) при пустом списке сотрудников рендерит hint как JSX с кликабельной кнопкой/ссылкой 'Открыть оргструктуру' → navigate('/org') (useNavigate внутри компонента, путь подтверждён существующим Route в shell.jsx и уже используется screen-overview.jsx).",
+    "FR-4 (находка №8): начальные значения формы 'Новый профиль' (provider/endpoint/model/priceIn/priceOut/currency) переключаются на PROVIDER_PRESETS.find(p=>p.value==='anthropic') вместо ручного deepseek-литерала; DeepSeek остаётся первым элементом массива и полностью выбираем.",
+    "FR-5 (находка №9): три согласованных изменения на честность готовности — (a) успех-баннер без секрет-хэндла дописывает 'Теперь вставьте API-ключ, чтобы он заработал.'; (b) chipStyle(false) переключается с нейтральных токенов на --chs-color-warning/--chs-color-warning-soft; (c) кнопка 'Вставить API-ключ' получает variant={secretBound?'ghost':'primary'}."
+  ],
+  "non_functional": [
+    "NF-1: ни один фикс не меняет серверный контракт/эндпоинты — диффы строго в web/src/screens/** (+ components.jsx/icon-registry.js аддитивно для eye/eye-off).",
+    "NF-2: write-only семантика API-ключа не ослабляется — reveal-toggle показывает только то, что пользователь уже напечатал в этом сеансе формы, сервер по-прежнему не возвращает сырой ключ.",
+    "NF-3: ux-g5 (jargon denylist) и ux-g6 (no-new-hardcode) остаются чисты на новых строках (--chs-* токены только, никакого дев-жаргона в видимом тексте).",
+    "NF-4: ux-g2 (theme-pairing) не затрагивается — tokens.css/form-theme.css не трогаются, --chs-color-warning* уже существуют в обеих темах.",
+    "NF-5: source-presence тестовая конвенция проекта (grep-on-source-text, vitest node environment — см. screen-llm-connections.test.jsx, screen-rights.test.jsx) — новые тесты следуют тому же паттерну, не вводят DOM-mount там, где его не было."
+  ],
+  "out_of_scope": [
+    "OOS-1: находки №1/№2/№4/№7/№10 отчёта (M-размер или продуктовое решение к фаундеру) — не в периметре T-0597.",
+    "OOS-2: переименование LLM-навигационных ярлыков (находка №2) — отдельное продуктовое решение.",
+    "OOS-3: изменение общего Field/Select компонента в components.jsx — только аддитивные записи eye/eye-off в KitIcon+ICON_REGISTRY.",
+    "OOS-4: серверные изменения (/api/inbox, /api/llm-connections, /api/role-assignments, /api/agents) — все пять фиксов чисто клиентские."
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "screen-inbox.jsx НЕ содержит alert( в теле claimTask/approveTask catch-блоков; оба используют pushToast({tone:'error', ...}).", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Человекочитаемый текст ошибки (ENGINE_DRIVE_ERROR_MESSAGE-маппинг, ALREADY_CLAIMED-ветка) сохранён без изменений — только канал доставки.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "ConnectionKeyBinder рендерит toggle-кнопку с aria-label 'Показать ключ'/'Скрыть ключ', клик переключает type password↔text.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "AssignRoleForm при пустом списке сотрудников рендерит кликабельный элемент, вызывающий navigate('/org') при клике.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Путь '/org' подтверждён существующим Route в shell.jsx — не изобретён новый маршрут.", "verifiable_as": "test"},
+    {"id": "AC-6", "text": "Начальные значения формы 'Новый профиль' соответствуют anthropic-пресету (provider='anthropic', endpoint/model/priceIn/priceOut/currency из PROVIDER_PRESETS).", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "DeepSeek остаётся первым элементом PROVIDER_PRESETS и полностью выбираем через onProviderChange без изменений его логики.", "verifiable_as": "test"},
+    {"id": "AC-8", "text": "Успех-баннер без секрет-хэндла содержит дописанную строку про вставку ключа; баннер с секрет-хэндлом — не содержит.", "verifiable_as": "test"},
+    {"id": "AC-9", "text": "chipStyle(false) использует --chs-color-warning/--chs-color-warning-soft вместо --chs-color-surface-raised/--chs-color-text-muted.", "verifiable_as": "test"},
+    {"id": "AC-10", "text": "Кнопка 'Вставить API-ключ' — variant='primary' при !secretBound, variant='ghost' при secretBound (включая 'Заменить API-ключ').", "verifiable_as": "test"},
+    {"id": "AC-11", "text": "ux-g6-no-new-hardcode.sh: 0 новых находок (--required режим тоже проходит) на диффе T-0597.", "verifiable_as": "fitness"},
+    {"id": "AC-12", "text": "ux-g5-jargon-denylist.sh: 0 новых находок на диффе T-0597.", "verifiable_as": "fitness"},
+    {"id": "AC-13", "text": "Полный web vitest прогон зелёный (без новых красных, включая расширенные/новые тестовые файлы).", "verifiable_as": "ci"},
+    {"id": "AC-14", "text": "tsc (если применимо к web-конфигурации) не показывает новых ошибок в затронутых файлах.", "verifiable_as": "ci"}
+  ],
+  "blocking_questions": [],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "AC-1/AC-2: screen-inbox.test.jsx — source-presence проверки отсутствия alert(, наличия pushToast/useToastContext, сохранности ENGINE_DRIVE_ERROR_MESSAGE-ветки.", "ci_check": "npx vitest run web/src/screens/screen-inbox.test.jsx"},
+    {"id": "FF-2", "rule": "AC-3: screen-llm-connections.test.jsx (расширение) — присутствие toggle-кнопки, aria-label обеих фаз, eye/eye-off в ICON_REGISTRY.", "ci_check": "npx vitest run web/src/screens/screen-llm-connections.test.jsx"},
+    {"id": "FF-3", "rule": "AC-4/AC-5: ra-overview-forms.test.jsx (новый) — hint при пустом employees содержит navigate('/org') вызов; путь сверен с shell.jsx Route.", "ci_check": "npx vitest run web/src/screens/rights/ra-overview-forms.test.jsx"},
+    {"id": "FF-4", "rule": "AC-6/AC-7: screen-llm-connections.test.jsx (расширение) — initial state provider==='anthropic', DeepSeek присутствует и первый в PROVIDER_PRESETS.", "ci_check": "npx vitest run web/src/screens/screen-llm-connections.test.jsx"},
+    {"id": "FF-5", "rule": "AC-8/AC-9/AC-10: screen-llm-connections.test.jsx (расширение) — банер-текст, warning-токены в chipStyle, variant-переключение кнопки.", "ci_check": "npx vitest run web/src/screens/screen-llm-connections.test.jsx"},
+    {"id": "FF-6", "rule": "AC-11: no new hardcoded color / hand-rolled overlay in diff.", "ci_check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required"},
+    {"id": "FF-7", "rule": "AC-12: no dev-jargon in new visible product text.", "ci_check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh --required"},
+    {"id": "FF-8", "rule": "AC-13/AC-14: full web CI green.", "ci_check": "cd web && npx vitest run && npx tsc --noEmit || true"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-1"},
+    {"ac": "AC-3", "covered_by": "FF-2"},
+    {"ac": "AC-4", "covered_by": "FF-3"},
+    {"ac": "AC-5", "covered_by": "FF-3"},
+    {"ac": "AC-6", "covered_by": "FF-4"},
+    {"ac": "AC-7", "covered_by": "FF-4"},
+    {"ac": "AC-8", "covered_by": "FF-5"},
+    {"ac": "AC-9", "covered_by": "FF-5"},
+    {"ac": "AC-10", "covered_by": "FF-5"},
+    {"ac": "AC-11", "covered_by": "FF-6"},
+    {"ac": "AC-12", "covered_by": "FF-7"},
+    {"ac": "AC-13", "covered_by": "FF-8"},
+    {"ac": "AC-14", "covered_by": "FF-8"}
+  ],
+  "spec_artifact_path": "docs/specs/T-0597-ux-quick-wins.spec.md",
+  "adr_artifact_path": "docs/adr/ADR-T0597.md"
+}

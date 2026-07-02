@@ -18,7 +18,7 @@
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Button, LoadingState, ErrorState, EmptyState, Field, Select, ConfirmDialog } from '../components/components.jsx';
+import { Button, LoadingState, ErrorState, EmptyState, Field, Select, ConfirmDialog, KitIcon } from '../components/components.jsx';
 import { ConsequenceSummary, useDestructiveConfirm } from '../util/confirm-helpers.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders } from '../app-shell/dev-auth.js';
@@ -104,13 +104,16 @@ const monoStyle = {
   background: 'var(--chs-color-surface-raised)', padding: '2px 6px',
   borderRadius: 'var(--chs-radius-2)', color: 'var(--chs-color-text)',
 };
+// T-0597 (находка №9): «ключ не привязан» — предупреждающий тон (warning),
+// не нейтрально-серый. Успех остаётся success; отсутствие ключа — это
+// незавершённое состояние, не «просто факт», поэтому warning уместнее neutral.
 const chipStyle = (ok) => ({
   display: 'inline-flex', alignItems: 'center', gap: 'var(--chs-space-2)',
   fontSize: 'var(--chs-text-xs)', fontWeight: 'var(--chs-weight-medium)',
   padding: '2px 8px', borderRadius: 'var(--chs-radius-pill, 999px)',
-  background: ok ? 'var(--chs-color-success-soft)' : 'var(--chs-color-surface-raised)',
-  color: ok ? 'var(--chs-color-success)' : 'var(--chs-color-text-muted)',
-  border: `1px solid ${ok ? 'var(--chs-color-success)' : 'var(--chs-color-border)'}`,
+  background: ok ? 'var(--chs-color-success-soft)' : 'var(--chs-color-warning-soft)',
+  color: ok ? 'var(--chs-color-success)' : 'var(--chs-color-warning)',
+  border: `1px solid ${ok ? 'var(--chs-color-success)' : 'var(--chs-color-warning)'}`,
 });
 
 /* ===========================================================================
@@ -350,6 +353,10 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);    // { kind: 'ok'|'err', text }
   const [open, setOpen] = useState(false);
+  // T-0597 (находка №3): reveal-toggle — чисто клиентское состояние, показывает
+  // только то, что пользователь уже напечатал в этом сеансе формы. Не влияет
+  // на write-only семантику ключа (сервер по-прежнему не возвращает сырой ключ).
+  const [showKey, setShowKey] = useState(false);
   // T-0526: confirm dialog для отвязки ключа (CONFIRM-DANGER)
   const dc = useDestructiveConfirm();
 
@@ -370,6 +377,7 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
       });
       // Clear the raw key from state IMMEDIATELY (write-only — never keep it around).
       setApiKey('');
+      setShowKey(false);
       if (res.status === 200) {
         setMsg({ kind: 'ok', text: 'Ключ зашифрован и привязан (app://). Сырой ключ не хранится.' });
         setOpen(false);
@@ -427,7 +435,9 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
     <div style={{ marginTop: 'var(--chs-space-4)', width: '100%' }}>
       {!open && (
         <div style={{ display: 'flex', gap: 'var(--chs-space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
-          <Button variant="ghost" size="sm" type="button" onClick={() => { setOpen(true); setMsg(null); }}>
+          {/* T-0597 (находка №9): primary только пока ключ ещё НЕ привязан —
+              явный следующий шаг, а не одна из равноценных вторичных кнопок. */}
+          <Button variant={secretBound ? 'ghost' : 'primary'} size="sm" type="button" onClick={() => { setOpen(true); setMsg(null); }}>
             {secretBound ? 'Заменить API-ключ' : 'Вставить API-ключ'}
           </Button>
           {secretBound && (
@@ -439,15 +449,36 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
       )}
       {open && (
         <form onSubmit={submitKey} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--chs-space-3)' }}>
-          <Field
-            label="API-ключ (вставить)"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-..."
-            type="password"
-            autoComplete="off"
-            mono
-          />
+          {/* T-0597 (находка №3): reveal-toggle — глазик рядом с полем переключает
+              type password↔text, чтобы пользователь мог проверить вставленное
+              перед отправкой (не вслепую). Клиентское состояние only; write-only
+              семантика ключа на сервере не меняется (см. submitKey выше). */}
+          <div style={{ position: 'relative' }}>
+            <Field
+              label="API-ключ (вставить)"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-..."
+              type={showKey ? 'text' : 'password'}
+              autoComplete="off"
+              mono
+              style={{ paddingRight: 'var(--chs-space-8)' }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowKey((s) => !s)}
+              aria-label={showKey ? 'Скрыть ключ' : 'Показать ключ'}
+              aria-pressed={showKey}
+              style={{
+                position: 'absolute', right: 'var(--chs-space-3)', bottom: 'var(--chs-space-3)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: 'transparent', border: 'none', padding: 0, cursor: 'pointer',
+                color: 'var(--chs-color-text-muted)',
+              }}
+            >
+              <KitIcon name={showKey ? 'eye-off' : 'eye'} />
+            </button>
+          </div>
           <div style={noteStyle}>
             Ключ шифруется на сервере и хранится зашифрованным. Обратно он не читается —
             видно только статус «ключ привязан».
@@ -456,7 +487,7 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
             <Button variant="primary" size="sm" type="submit" loading={busy} disabled={busy}>
               Зашифровать и привязать
             </Button>
-            <Button variant="ghost" size="sm" type="button" onClick={() => { setApiKey(''); setOpen(false); setMsg(null); }}>
+            <Button variant="ghost" size="sm" type="button" onClick={() => { setApiKey(''); setShowKey(false); setOpen(false); setMsg(null); }}>
               Отмена
             </Button>
           </div>
@@ -496,20 +527,31 @@ export default function LlmConnectionsScreen() {
   // null while unloaded/unresolvable — AssistantBinder degrades to disabled.
   const [assistantBinding, setAssistantBinding] = useState(null);
 
+  // T-0597 (находка №8): дефолт формы = Anthropic — синхронно с инструкцией
+  // «Откуда взять ключ» выше (console.anthropic.com), которая ведёт строго по
+  // Anthropic. Единственный источник значений — существующий PROVIDER_PRESETS
+  // (не дублируем цифры вручную). DeepSeek остаётся первым элементом массива
+  // и полностью выбираем через Select — это смена дефолта, не удаление опции.
+  const ANTHROPIC_PRESET = PROVIDER_PRESETS.find((p) => p.value === 'anthropic');
+
   // Create form state
   const [name, setName] = useState('');
-  const [provider, setProvider] = useState('deepseek');
-  const [endpoint, setEndpoint] = useState('https://api.deepseek.com/v1');
-  const [model, setModel] = useState('deepseek-chat');
+  const [provider, setProvider] = useState(ANTHROPIC_PRESET.value);
+  const [endpoint, setEndpoint] = useState(ANTHROPIC_PRESET.endpoint);
+  const [model, setModel] = useState(ANTHROPIC_PRESET.model);
   const [secretHandle, setSecretHandle] = useState('');
-  // T-0477 [E-AGENTS L5]: pre-fill with DeepSeek price presets (initial provider).
-  const [priceIn, setPriceIn] = useState('0.14');
-  const [priceOut, setPriceOut] = useState('0.28');
-  const [currency, setCurrency] = useState('USD');
+  // T-0597: pre-fill with Anthropic price presets (initial provider, was DeepSeek).
+  const [priceIn, setPriceIn] = useState(ANTHROPIC_PRESET.priceIn);
+  const [priceOut, setPriceOut] = useState(ANTHROPIC_PRESET.priceOut);
+  const [currency, setCurrency] = useState(ANTHROPIC_PRESET.currency);
   const [isDefault, setIsDefault] = useState(false);
   const [fieldErrors, setFieldErrors] = useState({});
   const [submitErr, setSubmitErr] = useState(null);
   const [createOk, setCreateOk] = useState(false);
+  // T-0597 (находка №9): true когда только что созданный профиль НЕ получил
+  // секрет-хэндл — успех-баннер дописывает честный следующий шаг вместо
+  // подразумевания «готово».
+  const [createOkNoKey, setCreateOkNoKey] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // -------------------------------------------------------------------------
@@ -627,6 +669,7 @@ export default function LlmConnectionsScreen() {
     e.preventDefault();
     setSubmitErr(null);
     setCreateOk(false);
+    setCreateOkNoKey(false);
     if (!validate()) return;
     setSaving(true);
     try {
@@ -649,6 +692,10 @@ export default function LlmConnectionsScreen() {
       });
       if (res.status === 201) {
         setCreateOk(true);
+        // T-0597 (находка №9): remember whether THIS created profile had no key,
+        // captured BEFORE the field reset below — the success banner uses it to
+        // add an honest next-step line instead of implying the profile is ready.
+        setCreateOkNoKey(!secretHandle.trim());
         // Reset only the per-profile fields; keep provider/currency for the next one.
         setName('');
         setSecretHandle('');
@@ -797,7 +844,12 @@ export default function LlmConnectionsScreen() {
           </div>
 
           {submitErr && <div style={bannerErrStyle}>{submitErr}</div>}
-          {createOk && <div style={bannerOkStyle}>Профиль создан.</div>}
+          {createOk && (
+            <div style={bannerOkStyle}>
+              Профиль создан.
+              {createOkNoKey && ' Теперь вставьте API-ключ, чтобы он заработал.'}
+            </div>
+          )}
         </div>
       </form>
 
