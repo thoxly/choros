@@ -278,7 +278,9 @@ fi
 # (b) UPDATE choros.agent_card ... llm_secret_handle must appear ONLY in
 #     src/http/secret-handle.ts (INSERT in agent-provision.ts is allowed;
 #     a SET/UPDATE there or elsewhere is a violation — ADR §13.4 C-5(b)).
-UPDATE_HITS=$(grep -rnE 'UPDATE[[:space:]]+choros\.agent_card' "${ROOT}/src/" --include="*.ts" 2>/dev/null | grep "llm_secret_handle" || true)
+#     Test files are excluded (T-0471 integration tests seed handles directly
+#     as fixtures) — the custody seam is a PRODUCTION invariant.
+UPDATE_HITS=$(grep -rnE 'UPDATE[[:space:]]+choros\.agent_card' "${ROOT}/src/" --include="*.ts" 2>/dev/null | grep "llm_secret_handle" | grep -v '__tests__' | grep -v '\.test\.' || true)
 if [[ -n "${UPDATE_HITS}" ]]; then
   BAD_UPDATE=0
   while IFS= read -r hit_line; do

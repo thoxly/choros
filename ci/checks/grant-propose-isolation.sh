@@ -74,8 +74,12 @@ if [[ ${ERRORS} -eq ${before} ]]; then
 fi
 
 # ---- FF-39-2: no LLM key literals or SDK imports in src/ (excl. tests) ------
+# NB: sk- requires a NON-word char before it (portable \b) — otherwise the
+# filename agent-task-external-mapper.ts (T-0460) false-positives via
+# "ta(sk-external)-mapper" in comments/imports. Real key literals always sit
+# after a quote/space/start-of-line, so detection is not weakened.
 before=${ERRORS}
-if grep -rE 'OPENAI_API_KEY|ANTHROPIC_API_KEY|sk-[A-Za-z0-9]{8,}' "${PROJECT_ROOT}/src/" \
+if grep -rE "OPENAI_API_KEY|ANTHROPIC_API_KEY|(^|[^A-Za-z0-9_])sk-[A-Za-z0-9]{8,}" "${PROJECT_ROOT}/src/" \
      --include='*.ts' 2>/dev/null \
    | grep -v '__tests__' | grep -v '\.test\.' | grep -q .; then
   echo "FAIL (FF-39-2): found LLM key literal(s) in src/ (non-test)"
