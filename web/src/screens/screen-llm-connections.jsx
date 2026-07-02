@@ -151,6 +151,113 @@ export function mapTestResponse(status, data) {
   return { ok: false, error: data.error || 'Подключение не работает.' };
 }
 
+/* ===========================================================================
+   T-0574 — «Назначить ассистенту»: замыкает BYO-цепочку до места.
+
+   LIVE contract (существующие маршруты, НИКАКИХ новых эндпоинтов):
+     GET /api/agents                         — резолвит id ассистента тенанта
+                                                 (agent_type==='assistant').
+     PUT /api/agents/:id/llm-connection       — привязывает профиль к нему
+                                                 (тот же контракт, что уже
+                                                 использует /agents-экран).
+   =========================================================================== */
+
+/**
+ * Pure: из списка GET /api/agents достаёт адрес и текущую привязку ассистента
+ * тенанта. Возвращает { assistantEmployeeId, assistantConnectionId } | null
+ * (null пока список не загружен / ассистент почему-то отсутствует — до
+ * бэкфилла T-0574 на старых тенантах или сетевой ошибки).
+ * Экспортирована для unit-теста (project convention: логика — в чистых
+ * функциях, тестируемых без mount).
+ */
+export function resolveAssistantBinding(agents) {
+  if (!Array.isArray(agents)) return null;
+  const assistant = agents.find((a) => a && a.agent_type === 'assistant');
+  if (!assistant) return null;
+  return {
+    assistantEmployeeId: assistant.id,
+    assistantConnectionId: assistant.llm_connection_id ?? null,
+  };
+}
+
+/**
+ * «Назначить ассистенту» — резолвит id ассистента через GET /api/agents (передан
+ * родителем, загружен один раз для всего экрана — незачем бить эндпоинт на
+ * каждую карточку), затем PUT /api/agents/:id/llm-connection. Честные исходы:
+ * 200 → чип «использует профиль» + рефетч; 403 → «недостаточно прав»; сеть → ошибка.
+ * Кнопка скрыта, если этот профиль УЖЕ назначен (нет мёртвого enabled-аффорданса).
+ */
+function AssistantBinder({ connectionId, assistantBinding, onAssigned }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null); // { kind:'ok'|'err', text }
+
+  const assign = useCallback(async () => {
+    if (!assistantBinding || !assistantBinding.assistantEmployeeId) {
+      setMsg({ kind: 'err', text: 'Ассистент тенанта пока недоступен — обновите страницу.' });
+      return;
+    }
+    setMsg(null);
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/agents/${assistantBinding.assistantEmployeeId}/llm-connection`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ llm_connection_id: connectionId }),
+      });
+      if (res.status === 200) {
+        setMsg({ kind: 'ok', text: 'Профиль назначен ассистенту.' });
+        if (onAssigned) onAssigned();
+        return;
+      }
+      if (res.status === 403) {
+        setMsg({ kind: 'err', text: 'Недостаточно прав (требуется владелец/админ).' });
+        return;
+      }
+      if (res.status === 404) {
+        // Anti-regression sentinel (ADR §2.3): after 3f-bis/migration 115 this
+        // must not happen — surfaced honestly if it ever does.
+        setMsg({ kind: 'err', text: 'Ассистент тенанта не найден. Обратитесь к оператору.' });
+        return;
+      }
+      setMsg({ kind: 'err', text: `Не удалось назначить профиль (HTTP ${res.status}).` });
+    } catch {
+      setMsg({ kind: 'err', text: 'Сетевая ошибка — профиль не назначен.' });
+    } finally {
+      setBusy(false);
+    }
+  }, [assistantBinding, connectionId, onAssigned]);
+
+  const isAssigned = !!assistantBinding && assistantBinding.assistantConnectionId === connectionId;
+
+  const msgStyle = (kind) => ({
+    marginTop: 'var(--chs-space-2)', fontSize: 'var(--chs-text-xs)',
+    color: kind === 'ok' ? 'var(--chs-color-success)' : 'var(--chs-color-danger)',
+  });
+
+  return (
+    <div style={{ marginTop: 'var(--chs-space-3)', width: '100%' }}>
+      {isAssigned ? (
+        <span style={chipStyle(true)}>
+          <Icon name="assistant" />
+          ассистент использует этот профиль
+        </span>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          type="button"
+          onClick={assign}
+          loading={busy}
+          disabled={busy || !assistantBinding}
+        >
+          Назначить ассистенту
+        </Button>
+      )}
+      {msg && <div style={msgStyle(msg.kind)}>{msg.text}</div>}
+    </div>
+  );
+}
+
 function ConnectionTester({ connectionId, secretBound }) {
   const [busy, setBusy] = useState(false);
   // result: null | { ok:true, model, latencyMs, tokens } | { ok:false, error }
@@ -384,6 +491,10 @@ function ConnectionKeyBinder({ connectionId, connectionName, secretBound, onChan
 export default function LlmConnectionsScreen() {
   const [connections, setConnections] = useState(null); // null = loading, false = error
   const [loadErr, setLoadErr] = useState(null);
+  // T-0574: assistant binding (GET /api/agents) — loaded once for the whole
+  // screen (one request feeds every card's «Назначить ассистенту» affordance).
+  // null while unloaded/unresolvable — AssistantBinder degrades to disabled.
+  const [assistantBinding, setAssistantBinding] = useState(null);
 
   // Create form state
   const [name, setName] = useState('');
@@ -433,6 +544,25 @@ export default function LlmConnectionsScreen() {
   }, []);
 
   useEffect(() => { loadConnections(); }, [loadConnections]);
+
+  // -------------------------------------------------------------------------
+  // T-0574: load the assistant binding (best-effort — a failure here degrades
+  // the «Назначить ассистенту» affordance to disabled, it does NOT block the
+  // rest of the screen: creating/testing/binding a key is independent of it).
+  // -------------------------------------------------------------------------
+  const loadAssistantBinding = useCallback(async () => {
+    try {
+      const res = await fetch('/api/agents', { headers: authHeaders() });
+      if (!res.ok) return; // honest degrade — button stays disabled
+      const data = await res.json();
+      setAssistantBinding(resolveAssistantBinding(data.agents));
+    } catch {
+      // Network error — degrade silently (the connections list already shows
+      // its own ErrorState for the primary load failure).
+    }
+  }, []);
+
+  useEffect(() => { loadAssistantBinding(); }, [loadAssistantBinding]);
 
   // -------------------------------------------------------------------------
   // Provider preset change → auto-fill endpoint + model
@@ -547,6 +677,21 @@ export default function LlmConnectionsScreen() {
       <h1 style={{ fontSize: 'var(--chs-text-lg)', fontWeight: 'var(--chs-weight-bold)', color: 'var(--chs-color-text)', margin: '0 0 var(--chs-space-6) 0' }}>
         LLM-соединения
       </h1>
+
+      {/* T-0574 (F6/AC-11): статическая инструкция, без дев-жаргона — где
+          взять ключ Anthropic и что с ним делать на этой странице. */}
+      <div style={{ ...sectionStyle, background: 'var(--chs-color-surface-raised)' }}>
+        <h2 style={headingStyle}>Откуда взять ключ и что с ним сделать</h2>
+        <p style={{ ...descStyle, margin: 0 }}>
+          Зайдите на <span style={monoStyle}>console.anthropic.com</span>, откройте
+          раздел «API Keys» и нажмите «Create Key» — сервис покажет ключ один раз,
+          скопируйте его. Ниже создайте профиль с провайдером «Anthropic», нажмите
+          «Вставить API-ключ» и вставьте скопированное значение в открывшееся поле.
+          После сохранения нажмите «Проверить подключение» — если всё в порядке,
+          назначьте профиль ассистенту одной кнопкой на его карточке, и ассистент
+          компании начнёт отвечать на ваших сообщениях этим ключом.
+        </p>
+      </div>
 
       {/* ── Create form ──────────────────────────────────────────────── */}
       <form style={sectionStyle} onSubmit={onCreate}>
@@ -676,7 +821,7 @@ export default function LlmConnectionsScreen() {
         {Array.isArray(connections) && connections.length === 0 && (
           <EmptyState
             title="Пока нет профилей"
-            message="Создайте первое LLM-соединение выше."
+            description="Создайте первое LLM-соединение выше."
           />
         )}
 
@@ -724,6 +869,13 @@ export default function LlmConnectionsScreen() {
                 <ConnectionTester
                   connectionId={c.id}
                   secretBound={!!c.secret_bound}
+                />
+                {/* T-0574 (F4/AC-4): «Назначить ассистенту» — closes the BYO-LLM
+                    chain in-place, no navigation to the agents screen. */}
+                <AssistantBinder
+                  connectionId={c.id}
+                  assistantBinding={assistantBinding}
+                  onAssigned={() => { loadAssistantBinding(); loadConnections(); }}
                 />
               </div>
             ))}
