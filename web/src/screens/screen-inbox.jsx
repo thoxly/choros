@@ -329,9 +329,10 @@ const STATUS_LABEL = {
 // T-0571 (amended after REVIEW F-1, orchestrator-sanctioned): typed engine-drive
 // error codes surfaced by POST /api/inbox/:id/action (502 {error:{code,...}}) get a
 // short, non-technical Russian message instead of the raw code — see ADR §2.3.
+// Wording per UX_REVIEW / design-steward (D-062).
 const ENGINE_DRIVE_ERROR_MESSAGE = {
-  ENGINE_DRIVE_FAILED: "Движок процессов не подтвердил действие — попробуйте ещё раз",
-  ENGINE_TASK_NOT_FOUND: "Задача в движке не найдена — обновите страницу",
+  ENGINE_DRIVE_FAILED: "Не удалось выполнить действие в процессе — попробуйте ещё раз",
+  ENGINE_TASK_NOT_FOUND: "Эта задача уже недоступна — обновите страницу",
   AMBIGUOUS_ACTIVE_TASK: "У шага несколько активных задач — обратитесь к администратору",
 };
 
