@@ -193,6 +193,7 @@ _dc_mig116_failed=0                                                             
 _dc_mig117_failed=0                                                                # T0570-DC-MIG117-GUARD track when 117 triggers the FF-DC7 fail
 _dc_mig118_failed=0                                                                # T0573-DC-MIG118-GUARD track when 118 triggers the FF-DC7 fail
 _dc_mig119_failed=0                                                                # T0575-DC-MIG119-GUARD track when 119 triggers the FF-DC7 fail
+_dc_mig120_failed=0                                                                # T0594-DC-MIG120-GUARD track when 120 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -261,6 +262,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/119_process_app_binding_target_registry_slug.sql" ]]; then # T0575-DC-MIG119-GUARD
       _dc_mig119_failed=1                                                     # T0575-DC-MIG119-GUARD
     fi                                                                        # T0575-DC-MIG119-GUARD
+    # Track specifically when 120 triggers this FAIL (and nothing else).     # T0594-DC-MIG120-GUARD
+    if [[ "${m}" == "migrations/120_ownerless_tenant_zero_unarm.sql" ]]; then # T0594-DC-MIG120-GUARD
+      _dc_mig120_failed=1                                                     # T0594-DC-MIG120-GUARD
+    fi                                                                        # T0594-DC-MIG120-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -687,6 +692,39 @@ if [[ "${_dc_mig119_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0575-target-registry-slug]: migration 119_process_app_binding_target_registry_slug.sql adds ONE nullable column to process_app_binding + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0575-DC-MIG119-GUARD
   fi                                                                           # T0575-DC-MIG119-GUARD
 fi                                                                             # T0575-DC-MIG119-GUARD
+# T-0594: additive relief for migration 120_ownerless_tenant_zero_unarm.sql.   # T0594-DC-MIG120-GUARD
+# 120 is a PURE DML DELETE (T-0573 review finding R-2): it removes the        # T0594-DC-MIG120-GUARD
+# dangling role-configurator armament (assistant-agent role_assignment +     # T0594-DC-MIG120-GUARD
+# 4 grants, both migration-118-backfill-marked source/confirmed_by=          # T0594-DC-MIG120-GUARD
+# 'backfill') for tenants that have NO confirmed role_assignment on role     # T0594-DC-MIG120-GUARD
+# slug='tenant-owner'. Zero DDL: no CREATE/ALTER/DROP TABLE, no ADD/DROP     # T0594-DC-MIG120-GUARD
+# COLUMN, no RLS/POLICY — only two DELETE ... USING statements against the   # T0594-DC-MIG120-GUARD
+# EXISTING role_assignment/grant tables (008/020/032). 120 does NOT touch    # T0594-DC-MIG120-GUARD
+# confirmed2_by at all (dual-control's own column, owned by 031). Same class # T0594-DC-MIG120-GUARD
+# as the T-0397 migration-109 pure-DML-over-protected-tables relief (there   # T0594-DC-MIG120-GUARD
+# UPDATE, here DELETE — same fail-closed DDL/confirmed2_by guard shape).     # T0594-DC-MIG120-GUARD
+_dc_mig120_stem="migrations/120_ownerless_tenant_zero_unarm.sql"                 # T0594-DC-MIG120-GUARD
+if [[ "${_dc_mig120_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig120_stem}"; then # T0594-DC-MIG120-GUARD
+  _dc_mig120_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig120_stem}" 2>/dev/null || true)"  # T0594-DC-MIG120-GUARD
+  _dc_mig120_bad=0                                                             # T0594-DC-MIG120-GUARD
+  # 120 must add NO table/RLS/policy (pure DELETE only) ...                   # T0594-DC-MIG120-GUARD
+  if echo "${_dc_mig120_content}" | grep -iqE "CREATE[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0594-DC-MIG120-GUARD
+    _dc_mig120_bad=1                                                           # T0594-DC-MIG120-GUARD introduces DDL/RLS
+  fi                                                                           # T0594-DC-MIG120-GUARD
+  # ... must add/alter NO column/table (pure DELETE only) ...                 # T0594-DC-MIG120-GUARD
+  if echo "${_dc_mig120_content}" | grep -iqE "ALTER[[:space:]]+TABLE|ADD[[:space:]]+COLUMN|DROP[[:space:]]+COLUMN|DROP[[:space:]]+TABLE"; then # T0594-DC-MIG120-GUARD
+    _dc_mig120_bad=1                                                           # T0594-DC-MIG120-GUARD touches column/table structure
+  fi                                                                           # T0594-DC-MIG120-GUARD
+  # ... and must NOT touch the confirmed2_by invariant.                      # T0594-DC-MIG120-GUARD
+  if echo "${_dc_mig120_content}" | grep -iqE "confirmed2_by"; then           # T0594-DC-MIG120-GUARD
+    _dc_mig120_bad=1                                                           # T0594-DC-MIG120-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0594-DC-MIG120-GUARD
+  if [[ "${_dc_mig120_bad}" -eq 0 ]]; then                                    # T0594-DC-MIG120-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0594-DC-MIG120-GUARD cancel false-red
+    _dc_mig120_failed=0                                                        # T0594-DC-MIG120-GUARD
+    echo "PASS [FF-DC7-T0594-ownerless-tenant-zero-unarm]: migration 120_ownerless_tenant_zero_unarm.sql is a pure DELETE (removes backfill-marked role_assignment/grant rows on role-configurator for tenants without a confirmed tenant-owner) — NO CREATE/ALTER/DROP TABLE, NO ADD/DROP COLUMN, NO RLS/POLICY, does NOT touch confirmed2_by/dual-control authority machinery — relief granted" # T0594-DC-MIG120-GUARD
+  fi                                                                           # T0594-DC-MIG120-GUARD
+fi                                                                             # T0594-DC-MIG120-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then
