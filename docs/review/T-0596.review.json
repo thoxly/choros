@@ -1,0 +1,78 @@
+{
+  "task_id": "T-0596",
+  "verdict": "approved",
+  "review_rounds": "Round 1 (single pass, independent judge — D-007, did not build this code): полное чтение ADR-T0596-lock-harden.md, T-0596-lock-harden.spec.md, оба contract.json, pr-handoff.json; git diff dev...HEAD прочитан построчно (все 9 файлов). Каждый из 3 фиксов верифицирован ЖИВЬЁМ в worktree /Users/shoxy/Code/choros-wt/T-0596 (база dev@0370cf5), не на веру из handoff-текста.",
+  "ci_seen": "bash ci/checks/anti-case-lock.sh (clean, exit 0); bash ci/checks/anti-case-lock.sh --self-test (9/9 assertion PASS lines, exit 0); bash ci/checks/rights-ui-anti-case.sh (clean на чистой ветке, exit 0); bash ci/checks/rights-ui-anti-case.sh --self-test (exit 0); bash ci/checks/frozen-checks-immutable.sh (exit 0, обе SANCTION/AUDIT [FF-FCI12] строки напечатаны); npm run fitness — второй (изолированный) прогон EXIT=0 целиком, см. test-report.json.",
+  "findings": [
+    {
+      "id": "REV-1",
+      "severity": "info",
+      "status": "verified, not a defect",
+      "axis": "quote-agnostic matcher — word-boundary / over-match safety (checklist item 1)",
+      "location": "ci/checks/anti-case-lock.sh count_literal(), pattern [\"'`]${literal}[\"'`]",
+      "issue": "Проверено эмпирически (независимый пробный файл вне worktree, 7 строк-кейсов): двойные, одинарные, backtick-кавычки все матчатся единообразно; substring внутри более длинного идентификатора (`role-approver-extra`, `prefix-role-approver`, `xrole-approverx`) корректно НЕ матчится, потому что паттерн требует кавычковый символ НЕПОСРЕДСТВЕННО по обе стороны литерала — квот-символы не входят в [A-Za-z0-9_-], так что character-class сам по себе действует как word-boundary без отдельного \\\\b. Голый идентификатор без кавычек (`role-approver;` без обёртки) корректно НЕ матчится этим паттерном (это ожидаемо — гейт называется quote-agnostic, не quote-optional; идентификатор без кавычек — не строковый литерал, вне мандата R-4).",
+      "resolution": "Не находка, а подтверждение корректности. Отдельно отмечено: count_literal считает СТРОКИ (grep -n без -o), не occurrences — если два вхождения литерала на одной строке, считается 1 — это ПРЕДСУЩЕСТВУЮЩАЯ методология T-0576 (не тронута/не регрессирована этой волной), не входит в мандат R-4/R-5."
+    },
+    {
+      "id": "REV-2",
+      "severity": "info",
+      "status": "verified, not a defect (out of this task's scope)",
+      "axis": "смежное наблюдение — rights-ui-anti-case.sh's СОБСТВЕННЫЙ матчер (не тронут этой волной кроме строки 25)",
+      "location": "ci/checks/rights-ui-anti-case.sh scan_diff(), pattern ^${lit}|[^A-Za-z0-9_-]${lit}",
+      "issue": "T-0572's родной матчер (не FR-3/FR-4 предмет — та правка ровно строка 25 PROJECT_ROOT) допускает false-positive НАД границей ПОСЛЕ литерала: `role-approver-extended` матчится (символ ПЕРЕД литералом проверяется классом [^A-Za-z0-9_-], но символ ПОСЛЕ — нет). Это pre-existing характеристика чужого файла, спека NF-3 explicitно требует диффовую честность (ровно одна строка меняется) — не предмет этой волны, не регрессия T-0596.",
+      "resolution": "Задокументировано как наблюдение для будущего follow-up (не блокирует эту волну); flagged as spawn_task candidate, см. финальный отчёт."
+    },
+    {
+      "id": "REV-3",
+      "severity": "none",
+      "status": "verified clean",
+      "axis": "baseline recount — checklist item 2",
+      "location": "ci/checks/data/anti-case-baseline.json",
+      "issue": "Независимый пересчёт судьёй (grep напрямую на реальном дереве, БЕЗ вызова anti-case-lock.sh) точно воспроизвёл заявленные числа: role-approver=3 (src=2+web=1), soglasovanie=2, tel-approval=1, telLinear=8 (src=7+web=1), e-larina=2, e-orlov=2, approvalRequired=5 (src=1+web=4), gw-approval-threshold=1, aggregate=3+2+1+8+2+2+5+1=24. Baseline — ФАКТ, не транскрипция ревью-оценки. 'erodes-or-steady' семантика (`-gt` триггерит FAIL, `-eq`/`-lt` проходят) прочитана в коде (run_denylist_scan строки 197/213) и подтверждена живым self-test (9/9 PASS, включая eroded-to-zero фикстуру #5).",
+      "resolution": "n/a — подтверждено фактом."
+    },
+    {
+      "id": "REV-4",
+      "severity": "none",
+      "status": "verified clean",
+      "axis": "rights-ui-anti-case.sh фикс — checklist item 3 (однострочность, санкция jsonl, восстановление строгости)",
+      "location": "ci/checks/rights-ui-anti-case.sh:25 + ci/checks/data/frozen-sanctions.jsonl",
+      "issue": "git diff подтверждает РОВНО одну изменённую строку кода (PROJECT_ROOT присвоение) плюс explanatory-комментарий (не логика) — FORBIDDEN_LITERALS/scan_diff/self_test/resolve_base_ref байт-идентичны BASE_REF. Санкц-запись (строка 59 frozen-sanctions.jsonl) — валидный compact JSON (проверено python3 json.loads), содержит task/file/owner/decision/sanctioned_by/note. Судья повторил плант-доказательство САМ (независимо от handoff): (1) чистая ветка без плантов -> PASS exit 0; (2) untracked-плант `e-orlov` в web/src/__t0596_review_plant.jsx -> FAIL exit 1, плант удалён после, git status чист; (3) вручную сравнены OLD-резолв (${SCRIPT_DIR}/.. = <repo>/ci, ls показывает ci/web/src НЕ существует) vs NEW-резолв (${SCRIPT_DIR}/../.. = <repo>, web/src существует) — воспроизводит структурную причину ECO-1 буквально. Это ВОССТАНОВЛЕНИЕ строгости (гейт идёт от structurally-vacuous к functioning), не ослабление — на любом входе, где старый (сломанный) гейт был PASS по причине бага, новый гейт либо тоже PASS (диффа нет), либо теперь корректно FAIL (диффа с денилистом нет в этой ветке, но untracked-плант доказывает механизм работает).",
+      "resolution": "n/a — подтверждено живьём."
+    },
+    {
+      "id": "REV-5",
+      "severity": "none",
+      "status": "verified clean",
+      "axis": "вторая санкция на anti-case-lock.sh — checklist item 4 (легитимность цепочки прецедента, frozen-checks-immutable распознавание)",
+      "location": "ci/checks/data/frozen-sanctions.jsonl (строка 60) + ci/checks/frozen-checks-immutable.sh",
+      "issue": "Прочитан frozen-checks-immutable.sh целиком: is_sanctioned()/sanction_class() требуют ОБА токена `\"task\":\"T-0596\"` и `\"file\":\"...\"` на ОДНОЙ строке (chained grep -F) — структурно не может протечь между файлами/задачами. Прочитан auto-sanction-additive.sh A-1 (строки 9-11): 'каждая непустая строка BASE_REF-версии присутствует в HEAD байт-идентично' — обе правки этой волны (count_literal grep-паттерн, PROJECT_ROOT-присвоение) МЕНЯЮТ значение существующих строк, значит auto_additive канал СТРУКТУРНО недоступен по конструкции, founder-класс — единственный путь. Прецедент T-0576 (санкция http-route-auth-coverage.sh, FF-0328-3) действительно того же класса (founder, не auto_additive, по той же причине — модификация существующего предиката). Живой прогон frozen-checks-immutable.sh на этой ветке: PASS, обе SANCTION[FF-FCI12]+AUDIT[FF-FCI12] строки напечатаны для обоих файлов (rights-ui-anti-case.sh owner=T-0572, anti-case-lock.sh owner=T-0576) — механизм распознаёт structurally, не 'зелёный по случайности'.",
+      "resolution": "n/a — цепочка легитимна, воспроизведена и распознана живым прогоном меты-гейта."
+    },
+    {
+      "id": "REV-6",
+      "severity": "none",
+      "status": "verified clean",
+      "axis": "R-5 rc>=2 фатален + R-1 zero-safety жива — checklist item 5",
+      "location": "ci/checks/anti-case-lock.sh count_literal()/read_baseline()",
+      "issue": "Судья независимо реализовал portable chmod-000-фикстуру ВНЕ worktree (изолированная re-implementation функции count_literal в отдельном bash-сеансе) — подтверждено rc=2 + явное FAIL-сообщение на unreadable-файле, БЕЗ использования кода из скрипта напрямую (чтобы исключить самоподтверждающийся баг). Отдельно подтверждён R-1 zero-scenario: rc=1 (no match, легитимный 'eroded'-исход) на чистом дереве без литерала gw-approval-threshold корректно возвращает rc=0/count=0 из функции — не пропагирует как фатальную ошибку. Self-test живой прогон (9/9 PASS) включает обе новые ассерты #7/#7b (rc>=2 fatal на count_literal И read_baseline) плюс существующие #4/#5 (zero-count / eroded-to-zero) без регрессии.",
+      "resolution": "n/a — R-5 и R-1 сосуществуют корректно, подтверждено и кодом script'а, и независимой re-implementation судьи."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true, "note": "Плант одинарно-кавычного role-approver в src/ (self-test assertion 6) — count=1, FAIL-класс регрессии проверен."},
+    {"ac": "AC-2", "covered": true, "note": "Плант одинарно-кавычного approvalRequired в web/src/ (self-test assertion 7) — count=1, обе плоскости чувствительны."},
+    {"ac": "AC-3", "covered": true, "note": "Baseline пересчитан судьёй независимо от скрипта (голым grep) — совпадает 8/8 + aggregate; production-прогон на неизменном дереве exit 0, дважды подряд байт-идентичен."},
+    {"ac": "AC-4", "covered": true, "note": "Untracked-плант e-orlov судьёй лично в web/src/ — FAIL exit 1, плант удалён, git status чист после."},
+    {"ac": "AC-5", "covered": true, "note": "Production-прогон на чистой ветке task/T-0596-lock-harden без плантов — PASS exit 0."},
+    {"ac": "AC-6", "covered": true, "note": "rights-ui-anti-case.sh --self-test — PASS (synthetic temp-repo фикстуры, good/bad diff), не сломан фиксом резолва."},
+    {"ac": "AC-7", "covered": true, "note": "rc>=2 (unreadable-file, portable chmod 000) — FATAL с явным сообщением, воспроизведено судьёй независимой re-implementation ВНЕ скрипта."},
+    {"ac": "AC-8", "covered": true, "note": "rc=0/1 остаются данными — существующие self-test ассерты #4 (zero-occurrence) и #5 (eroded-to-zero Phase 2) зелёные без изменения поведения."},
+    {"ac": "AC-9", "covered": true, "note": "Обе новые строки frozen-sanctions.jsonl (task:T-0596, файлы rights-ui-anti-case.sh и anti-case-lock.sh) — валидный compact JSON, подтверждено python3 json.loads на всех 44 data-строках файла (0 invalid)."},
+    {"ac": "AC-10", "covered": true, "note": "frozen-checks-immutable.sh живой прогон — PASS, обе SANCTION/AUDIT [FF-FCI12] строки напечатаны, механизм распознаёт structurally (is_sanctioned/sanction_class логика прочитана и проверена, не просто вывод скрипта принят на веру)."},
+    {"ac": "AC-11", "covered": true, "note": "Полный npm run fitness прогнан судьёй ДВАЖДЫ на этой ветке. Первый прогон (параллельно с vitest run) дал транзитный ложный FAIL на card-action-broad-scope.sh (T-0227's чужой чек, файл вне диффа этой ветки) — расследован и подтверждён как невоспроизводимый ресурсный флейк (5/5 повторов сразу после — PASS; тот же коммит в соседнем чистом worktree — PASS). Второй прогон (изолированный, без конкурентной нагрузки) — EXIT=0 целиком, card-action-broad-scope.sh PASS, 0 реальных FAIL по всему логу (2935 строк). Полная детализация — docs/test/T-0596.test-report.json notes.flake_investigation_card_action_broad_scope."},
+    {"ac": "AC-12", "covered": true, "note": "anti-case-lock.sh --self-test — 9/9 assertion PASS lines + финальная summary PASS, exit 0, воспроизведено судьёй дважды (идемпотентность self-test тоже подразумевается стабильным выводом)."}
+  ],
+  "coverage_summary": "Round 1 (единственный, судья D-007 — не строил код): каждый из трёх заявленных фиксов (R-4 quote-agnostic + пересчёт baseline, ECO-1 PROJECT_ROOT резолв, R-5 rc>=2 fatal) верифицирован ЖИВЬЁМ, независимо от текста handoff/ADR — baseline пересчитан голым grep вне скрипта (совпадает 8/8+aggregate), плант-доказательства повторены лично (untracked e-orlov плант в rights-ui-anti-case.sh, chmod-000 rc>=2 фикстура re-implemented изолированно вне скрипта), санкц-цепочка прочитана в первоисточнике (auto-sanction-additive.sh A-1, frozen-checks-immutable.sh is_sanctioned/sanction_class) и подтверждена живым прогоном меты-гейта (обе SANCTION/AUDIT строки печатаются). Диффовая честность правки чужого файла подтверждена git diff (ровно 1 строка кода + комментарий, byte-identical остальное). Два info-уровня наблюдения (REV-1: word-boundary safety — подтверждена, не находка; REV-2: pre-existing over-match характеристика T-0572's СОБСТВЕННОГО матчера, вне мандата этой волны) не блокируют — ни одно не является дефектом ЭТОЙ волны. Никаких блокирующих находок. Полный npm run fitness запущен в фоне судьёй; TEST-фаза покрывает итоговый exit-код.",
+  "role_gap_evidence": "Независимый пересчёт baseline (голым grep, без вызова скрипта) + независимая re-implementation count_literal() ВНЕ репозитория для chmod-000 rc>=2 фикстуры — оба нацелены на исключение 'скрипт подтверждает сам себя' класса риска (судья не строил этот код, D-007). Плант-доказательства (untracked web/src/ файл на rights-ui-anti-case.sh) повторены лично, не транскрибированы из handoff. Прочитаны первоисточники governance-цепочки (auto-sanction-additive.sh A-1 текст, frozen-checks-immutable.sh is_sanctioned логика) вместо доверия ADR §7 governance-обоснованию на слово."
+}
