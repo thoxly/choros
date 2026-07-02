@@ -811,8 +811,21 @@ export function makeFlowableClient(
   // -------------------------------------------------------------------------
   // FR-7: completeUserTask — T-0368 (E16) on_create skip-submit seam
   //
-  // PUT {baseUrl}/runtime/tasks/{taskId}  body: {"action":"complete"}
-  // Flowable 7 returns 200 with the task JSON on a successful complete.
+  // T-0571 (BUG-014 live diagnosis, ADR-T0571-engine-drive-seam.md): Flowable 7's
+  // REST API executes task ACTIONS (complete/claim/delegate/…) via POST
+  // {baseUrl}/runtime/tasks/{taskId} — NOT PUT. PUT on this resource is the
+  // property-UPDATE endpoint (assignee/name/etc.): it silently ACCEPTS an
+  // unrecognized `action` field, ECHOES the unchanged task body back with HTTP
+  // 200, and does NOT complete the task. This was verified empirically against a
+  // live Flowable 7.1.0 instance while diagnosing why BUG-014 persisted after the
+  // defKey resolve-by-instance fix (ci/checks/db/engine-drive-generic.db.test.ts,
+  // FF-3/AC-6): every prior unit test mocked `fetch` and could not have caught a
+  // wrong-verb bug, since a mock has no HTTP-semantics of its own to violate. This
+  // was the SECOND, independent root cause behind the live acceptance-run symptom
+  // (200-ok, engine token never advances) — the defKey-literal bug (§2.1) and this
+  // verb bug are both necessary conditions for BUG-014's fix to hold end-to-end.
+  // POST returns 200 with an EMPTY body on success (not the task JSON — a
+  // subsequent GET for the same taskId then correctly 404s, confirming completion).
   // No variables are passed (task-submit has no output variables — the
   // field_mapping already injected amount at startInstance time).
   // -------------------------------------------------------------------------
@@ -821,7 +834,7 @@ export function makeFlowableClient(
       const resp = await globalThis.fetch(
         `${resolved.baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`,
         {
-          method: "PUT",
+          method: "POST",
           headers: {
             Authorization: auth,
             "Content-Type": "application/json",
@@ -829,7 +842,7 @@ export function makeFlowableClient(
           body: JSON.stringify({ action: "complete" }),
         },
       );
-      // Flowable 7 returns 200 with the completed task body on success.
+      // Flowable 7 returns 200 (empty body) on a successful complete.
       if (resp.status === 200 || resp.status === 204) {
         return { ok: true as const };
       }
