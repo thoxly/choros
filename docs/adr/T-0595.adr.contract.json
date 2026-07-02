@@ -1,0 +1,116 @@
+{
+  "task_id": "T-0595",
+  "status": "ready",
+  "decision": "Сервер решает, кому положена кнопка. respondLlmUnavailable (src/http/assistant.ts:1160) резолвит admin-статус actor'а через существующий loadAdminContext(pool, tenantId, actorSlug, Date.now()) и переиспользует канонический admin-zone предикат isGenesisOwner||adminGrants.length>0 (src/http/org.ts:379 — тот же, что гейтует видимость самой admin-зоны). Текст расщепляется на две константы в src/core/assistant-messages.ts: ASSISTANT_LLM_UNAVAILABLE_MESSAGE_ADMIN (без голого /llm-connections в прозе — F-2, incl. error.deepLinks:[{path:'/llm-connections',label:'Открыть подключения LLM'}] в envelope, собранном инлайн-JSON — sendErrorEnvelope не меняет сигнатуру) и ASSISTANT_LLM_UNAVAILABLE_MESSAGE_NON_ADMIN (без пути вовсе, честно направляет к администратору тенанта, deepLinks поле ОТСУТСТВУЕТ, не пустой массив). web/src/screens/screen-assistant.jsx 503-ветка (:166) добавляет чтение d.error.deepLinks в assistantMsg; MessageBubble (:424/:568-584) уже универсально рендерит msg.deepLinks существующим паттерном (bundle-review) — рендер-блок не меняется структурно, только заголовок переключается по признаку msg.intent. ci/checks/ux/assistant-llm-message-jargon.sh (ЧУЖОЙ гейт T-0573) обновляется АДДИТИВНО с явной санкцией в комментарии 'T-0595 по UX_REVIEW T-0573 F-2': проверяет обе новые константы по их контракту (admin — денилист чист, без /llm-connections; non-admin — денилист чист, без /llm-connections, упоминает администратора), self-test расширен. ci/checks/db/assistant-llm-unavailable.test.ts (T-0573, owner всегда isGenesisOwner) — ассерт toContain('/llm-connections') заменяется на структурную проверку error.deepLinks (санкционированная правка по F-2, тест проверяет поведение envelope, не букву формулировки).",
+  "rejected_alternatives": [
+    {
+      "option": "Клиент решает admin-статус (читает navCaps, прячет кнопку)",
+      "why_not": "Дублирует источник правды, расходится при stale client state. Честность (G7) гарантируется сервером — единственным арбитром admin-статуса."
+    },
+    {
+      "option": "Расширить sendErrorEnvelope пятым необязательным параметром deepLinks",
+      "why_not": "Меняет сигнатуру утилиты с ~10 вызовами ради одного call site. Прямая инлайн-сборка тела в respondLlmUnavailable (как уже делает bundle-success-путь) соразмернее."
+    },
+    {
+      "option": "Единая константа + флаг showLink, кнопка рендерится всегда но disabled для не-админа",
+      "why_not": "Disabled-кнопка на недостижимый путь — тот же анти-паттерн 'честно назвали, нечестно предложили' в другой форме. Нужен честный текст без мёртвой кнопки."
+    },
+    {
+      "option": "Пустой массив deepLinks:[] для не-админа вместо отсутствия поля",
+      "why_not": "Семантически 'посчитано, но нечего показать' (как bundle с 0 предметов) — вводит в заблуждение. Здесь 'не положено показывать', не 'нечего показывать'. Отсутствие поля честнее."
+    },
+    {
+      "option": "Смягчить/удалить assistant-llm-message-jargon.sh вместо обновления",
+      "why_not": "Прямое нарушение задания — гейт ЧУЖОЙ (T-0573). Правка только аддитивная, с санкцией в комментарии и расширенным self-test под новый контракт."
+    },
+    {
+      "option": "Не трогать assistant-llm-unavailable.test.ts, оставить сломанным или добавить skip",
+      "why_not": "Тест стал бы КРАСНЫМ (admin-текст больше не содержит /llm-connections). Тест проверяет ПОВЕДЕНИЕ envelope (T-0573 FF-5/FF-6), не букву строки — правка под новый структурный контракт единственно честна."
+    },
+    {
+      "option": "Новое значение enum DeepLink.kind (например 'settings') для honest-503-кнопки",
+      "why_not": "Единственное потребление kind — выбор иконки app/process. Дефолт на apps-иконку визуально приемлем, не вводит в заблуждение. Новый enum — лишняя поверхность ради косметики иконки."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "AssistantErrorResponse (наблюдаемое, не хранимое; расширение аддитивно)",
+      "fields": [
+        {"name": "statusCode", "type": "503"},
+        {"name": "error.code", "type": "string = 'LLM_UNAVAILABLE'"},
+        {"name": "error.message", "type": "string — один из двух текстов по admin-статусу"},
+        {"name": "error.deepLinks", "type": "DeepLink[] | undefined — присутствует ⟺ actor admin; НЕ пустой массив для non-admin, поле отсутствует вовсе"}
+      ]
+    },
+    {
+      "entity": "DeepLink (переиспользуется существующий тип assistant.ts:907, упрощённая форма для honest-503)",
+      "fields": [
+        {"name": "label", "type": "string, напр. 'Открыть подключения LLM'"},
+        {"name": "path", "type": "string = '/llm-connections'"}
+      ]
+    }
+  ],
+  "contracts": [
+    "docs/adr/ADR-T0595-assistant-deeplink.md §4 — контракты для coder/tester (7 пунктов: assistant-messages.ts константы, assistant.ts respondLlmUnavailable, screen-assistant.jsx рендер, assistant-llm-unavailable.test.ts правка ассертов, assistant-llm-message-jargon.sh обновление, error-envelope.test.js расширение, новый/расширенный db-fitness тест AC-1/AC-2)"
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "AC-1: admin actor получает error.deepLinks с path==='/llm-connections' и непустым label в honest-503 (dormant И adapter-failure пути)",
+      "ci_check": "vitest run ci/checks/db/assistant-llm-unavailable.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-2",
+      "rule": "AC-2: НЕ-admin actor НЕ получает error.deepLinks (поле отсутствует) в honest-503",
+      "ci_check": "vitest run ci/checks/db/assistant-llm-unavailable.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-3",
+      "rule": "AC-3: non-admin-текст не содержит /llm-connections, содержит указание на администратора",
+      "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh"
+    },
+    {
+      "id": "FF-4",
+      "rule": "AC-4: admin-текст не содержит голого (/llm-connections), упоминает 'Подключения LLM' по названию, денилист чист",
+      "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh"
+    },
+    {
+      "id": "FF-5",
+      "rule": "AC-5: screen-assistant.jsx 503-ветка кладёт deepLinks из d.error.deepLinks; рендер тем же паттерном, что bundle-review",
+      "ci_check": "vitest run web/src/screens/__tests__/screen-assistant.error-envelope.test.js"
+    },
+    {
+      "id": "FF-6",
+      "rule": "AC-6: существующие 8 тестов error-envelope продолжают проходить (аддитивность envelope)",
+      "ci_check": "vitest run web/src/screens/__tests__/screen-assistant.error-envelope.test.js"
+    },
+    {
+      "id": "FF-7",
+      "rule": "AC-7: assistant-llm-message-jargon.sh и его --self-test зелёные после обновления под новый контракт (обе константы)",
+      "ci_check": "bash ci/checks/ux/assistant-llm-message-jargon.sh && bash ci/checks/ux/assistant-llm-message-jargon.sh --self-test"
+    },
+    {
+      "id": "FF-8",
+      "rule": "AC-8: полный локальный CI (root+web) зелёный",
+      "ci_check": "npm run ci && (cd web && npx vitest run)"
+    },
+    {
+      "id": "FF-9",
+      "rule": "AC-9: ux-g5-jargon-denylist.sh не показывает новых находок на видимом тексте T-0595",
+      "ci_check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"},
+    {"ac": "AC-7", "covered_by": "FF-7"},
+    {"ac": "AC-8", "covered_by": "FF-8"},
+    {"ac": "AC-9", "covered_by": "FF-9"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0595-assistant-deeplink.md",
+  "escalation": "Нет. Весь механизм переиспользует существующие резолверы/паттерны; ЧУЖОЙ гейт assistant-llm-message-jargon.sh обновляется под санкцией собственной находки его автора (F-2 UX_REVIEW T-0573), с explicit комментарием-санкцией и расширенным self-test."
+}
