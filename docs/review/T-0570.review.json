@@ -1,0 +1,52 @@
+{
+  "task_id": "T-0570",
+  "verdict": "changes_requested",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "R-1",
+      "severity": "blocking",
+      "axis": 5,
+      "location": "ci/checks/read-pdp-anti-case.sh:78-84",
+      "issue": "Новый CI-чек этой же задачи (FF-RP-7, D-064 анти-кейс гейт) содержит тривиально обходимую дыру: строка `code_lines=\"$(echo \\\"${added_lines}\\\" | grep -vE '^\\+[[:space:]]*(//|\\*)' | grep -vE 'FORBIDDEN' || true)\"` вырезает из скана ЛЮБУЮ добавленную строку, где встречается подстрока `FORBIDDEN` — не только строку с самим тестовым sanity-массивом (RP-10 self-check в records-read-pdp.test.ts), а вообще ЛЮБУЮ строку. Практически проверено (изолированный git-репо PoC): добавление исполняемой строки `export const SNEAKY_ROLE_SLUG = \"role-approver\"; // FORBIDDEN: not a real hardcode, trust me` под src/ проходит чек с exit 0 (`PASS: read-pdp-anti-case — no D-064 anti-case literals added`), т.е. реальный хардкод кейс-строки в исполняемом коде может быть протащен мимо анти-кейс гейта одним словом-комментарием. Это ослабляет ИМЕННО ту защиту (D-064 анти-кейс), которую спека явно требует (NF-4/AC-9), и делает будущие задачи менее защищёнными этим же чеком.",
+      "suggestion": "Сузить exclusion: вместо grep по всей строке на 'FORBIDDEN' — либо (а) требовать, чтобы исключаемая строка сама была частью строкового литерала-массива в тестовом файле (например матчить конкретный паттерн `FORBIDDEN_SANITY_LIST` или ограничить исключение только файлами `*.test.ts`), либо (б) вырезать только собственно закомментированную часть строки (после `//`), а не всю строку целиком, чтобы код перед комментарием продолжал сканироваться."
+    },
+    {
+      "id": "R-2",
+      "severity": "nit",
+      "axis": 4,
+      "location": "src/__tests__/records-read-pdp.test.ts (весь файл) + src/__tests__/records-field-visibility.test.ts / records-field-visibility-detail.test.ts",
+      "issue": "AC-6/FF-RP-11 (field-level сужение поверх record-level READ-PDP: актор с READ-грантом на запись, чей resource_facet сужен по полям, получает запись, но недозволенные ключи physically absent) не покрыт ни одним тестом, где ОДНОВРЕМЕННО инжектированы и `resolveReadVisibility`, и `resolveFieldVisibility` с сужающим facet. records-read-pdp.test.ts тестирует record-level гейт БЕЗ field-facet сужения; records-field-visibility*.test.ts тестируют field-facet сужение БЕЗ resolveReadVisibility (honest-degrade режим). Сам код в records.ts (LIST: `visibleItems.map` после record-level фильтра; DETAIL аналогично) структурно корректен — оба слоя независимы и композируемы правильно (проверено чтением кода), но контракт AC-6/FF-RP-11 буквально описывает СОВМЕСТНУЮ работу обоих резолверов, а такого теста нет.",
+      "suggestion": "Добавить один тест (LIST или DETAIL), где resolveReadVisibility возвращает covering READ-грант на запись, а resolveFieldVisibility возвращает policy, сужающую поля — проверить, что запись присутствует в ответе, но недозволенные ключи physically absent (не null)."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": false},
+    {"ac": "AC-7", "covered": true},
+    {"ac": "AC-8", "covered": true},
+    {"ac": "AC-9", "covered": true},
+    {"ac": "AC-10", "covered": true},
+    {"ac": "AC-11", "covered": false}
+  ],
+  "role_gap_evidence": [
+    "Pre-check ci/checks/*.sh diff: ТОЛЬКО ci/checks/dual-control-isolation.sh (владелец T-0044) тронут среди чужих frozen-чеков. Заявленное auto_additive-отклонение (T0570-DC-MIG115-GUARD) проверено МАШИНОЙ независимо: `bash ci/checks/auto-sanction-additive.sh --verify T-0570 ci/checks/dual-control-isolation.sh dev '<строка>'` → exit 0, A-1..A-4 PASS + Враг-аттестация валидна (corpus_ref=efa4b97 подтверждён как предок HEAD с совпадающим blob). `bash ci/checks/frozen-checks-immutable.sh` → exit 0, SANCTION/AUDIT явные строки. Дифф — чисто аддитивный (новые _dc_mig115_* переменные + relief-блок после существующего _dc_mig109_* блока по идентичному паттерну T-0475 migration-104), ни одна существующая строка не удалена/изменена. Вердикт: НЕ ослабление предиката, легитимный аддитивный санкционный вход — заявление кодера подтверждено.",
+    "ci/checks/data/frozen-sanctions.jsonl и ci/checks/role-criticality-migration-excludes.txt — оба append-only data-файлы (JSONL/txt, не .sh), вне скоупа frozen-checks-immutable.sh; дифф добавляет ровно одну строку в каждый, формат идентичен 10+ прежним записям (T-0476/T-0477/etc для sanctions.jsonl; T-0354/T-0362/T-0397/etc для excludes.txt). Подтверждено git diff.",
+    "npx tsc --noEmit: чисто, 0 ошибок.",
+    "npx eslint src: 0 ошибок, 34 preexisting no-console warnings в НЕ связанных с T-0570 файлах (bridge-runner.ts, externalTaskBridge.ts, assistant.ts, inbox.ts, и т.д. — ни один не в files_changed этой задачи).",
+    "vitest run (все 10 задетых unit-файлов + records-read-pdp.test.ts): 132 passed | 3 skipped, 0 failed.",
+    "3 новых CI-чека (read-pdp-no-hardcoded-tenant.sh, read-pdp-anti-case.sh, read-pdp-frozen-core.sh) — и --self-test, и реальный прогон против фактического диффа: все PASS.",
+    "fitness:db лейн: поднят изолированный docker postgres (порт 55499, снесён после прогона), применены все 101 миграции ЧИСТО включая 115 среди прочих. ci/checks/db/records-read-pdp.db.test.ts (4 теста, FF-RP-1/2/3/5/12) — PASS. ci/checks/db/records_crud.test.ts + records_field_mask.test.ts + records-sandbox-gate.test.ts (27 тестов, honest-degrade contract) — PASS без единой правки. src/__tests__/register.test.ts на реальной БД (40 тестов, включая ранее live-DB-skipped FF-4 c обновлёнными счётчиками 4 роли/5 role_assignment) — PASS.",
+    "Выборочно перепроверен 1 из 6 заявленных предсуществующих несвязанных красных (ci/checks/flowable/static-checks.sh FF-FL-11b, docker-compose.yml/keycloak baseline drift): подтверждено red на этой ветке, подтверждено пустым `git diff dev...HEAD -- docker-compose.yml ci/checks/flowable/static-checks.sh` — файлы вообще не тронуты T-0570, значит red предшествует задаче. Остальные 5 не перепроверены поштучно (не в скоупе задачи по заявлению кодера, их файлы также не в files_changed).",
+    "production-wiring (server.ts) реально подключает resolveReadVisibility (не honest-degrade заглушка) — проверено чтением: buildRouter передаёт resolveReadVisibility как async-резолвер, вызывающий getGrantsForSubject + loadTenantOrgAncestry + makeResourceAncestryOracle. НЕТ скрытой дыры 'PDP молча выключен в проде'.",
+    "N+1: подтверждено чтением (records.ts LIST/DETAIL вызывают resolveReadVisibility РОВНО один раз до цикла/фильтрации) + RP-8 unit-тестом (spy-счётчик == 1 при многострочной странице). server.ts wiring передаёт ПУСТОЙ rowIndex в makeResourceAncestryOracle — из-за этого rule 3 (registry/application-scoped узкое сужение) в проде НЕ работает; но AC-5 сценарий использует RECORD-scoped узкий грант, который покрывается через rule 1 (self-match), не через rowIndex — проверено по коду recordResourceScope (nodeLevel:'record') и подтверждено, что AC-5 тест (RP-6/RP-7) использует именно nodeLevel:'record' грант. Это явно задокументированная, не скрытая граница объёма (комментарий в server.ts прямо называет это 'an explicit, documented future increment'), не расхождение с ADR/AC.",
+    "Migrations 115: идемпотентность подтверждена по коду (role — ON CONFLICT (tenant_id, slug), constraint реально существует в migration 019; role_assignment/grant — WHERE NOT EXISTS guards) и живым прогоном (применена чисто на пустой БД в цепочке всех 101 миграций). Нет хардкода tenant-UUID — итерирует FROM choros.tenant t, подтверждено и грепом, и чтением.",
+    "AC-11 (LIVE_PROOF на живом стенде) не воспроизведён этим ревью — это заявлено в спеке как 'manual', вне периметра автоматизированного code review; требует отдельного живого прогона на dev-стенде с реальным UI/API (не выполнялось, инфраструктура/токены для живого стенда не запрашивались в рамках этой сессии)."
+  ]
+}
