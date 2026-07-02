@@ -1,0 +1,95 @@
+{
+  "task_id": "T-0594",
+  "status": "ready",
+  "decision": "Skip-политика (вариант а из задания): ownerless-тенант остаётся полностью нетронутым и флагуемым по role/employee/agent_card (безвредный субстрат — F3), но недостижимый для человека вооружённый контур (role_assignment assistant-agent→role-configurator + 4 grant на role-configurator, оба backfill-маркированные migration 118 блоками A5/A6/A7) УДАЛЯЕТСЯ новой миграцией migrations/120_ownerless_tenant_zero_unarm.sql. Механизм: set-driven, DELETE-only, без литерала UUID тенанта — два блока (role_assignment, grant), каждый с предикатом source/confirmed_by='backfill' И NOT EXISTS(confirmed role_assignment человека на role slug='tenant-owner'). Файл 118 НЕ редактируется (директива — уже применена на стенде/CI-шаблонах, идемпотентный повтор не случится). Живой путь (registerTenant) гарантирует владельца первым шагом транзакции — ownerless-тенант недостижим в проде, только данные-сироты тестов/приёмок; поэтому 'ждать владельца' (вариант б) ждёт событие, которое штатно не наступает — оставлять контур вооружённым 'на всякий случай' до тех пор — риск без функциональной пользы. Появление владельца ПОЗЖЕ (ручная операторская правка аномалии) не запускает авто-довооружение (миграции одноразовые) — оператор, чинящий такую сироту вручную, сознательно довооружает контур тем же INSERT-паттерном, что 118 A5/A6/A7, используя нетронутые role/employee/agent_card (явный out-of-scope, SPEC O2). Dual-control relief для 120 (DELETE над role_assignment/grant, защищённый домен T-0044) — тот же per-migration guard-блок паттерн (T0594-DC-MIG120-GUARD), что 109/117/118/119, через auto_additive канал.",
+  "rejected_alternatives": [
+    {
+      "option": "(б) текущее поведение (вооружаем контур, ждём владельца) + задокументировать как осознанное",
+      "why_not": "Оставляет 4 confirmed-гранта + назначение агента висящими на роли, которую ни один человек не может унаследовать, НЕОПРЕДЕЛЁННО долго — чистый риск без функциональной пользы сегодня (агент не auth-субъект), но потенциальная дыра при будущих изменениях модели идентичности агента. Документация одна не убирает висячие гранты — гигиена не решена, только описана."
+    },
+    {
+      "option": "(в) вооружаем + маркер аномалии",
+      "why_not": "Требует новую колонку/поле для маркера — непропорциональная DDL-поверхность для info-уровня находки (R-2 не блокировал T-0573). Маркер сам по себе не решает гигиену — гранты всё ещё висят, только теперь описаны как аномалия; AC-1-предикат миграции 118 БЕЗ ИЗМЕНЕНИЙ уже честно флагует такой тенант — маркер не добавляет наблюдаемости, которой не хватает."
+    },
+    {
+      "option": "Править migrations/118_*.sql на месте (добавить WHERE-условие на владельца в A5/A6/A7)",
+      "why_not": "118 уже применена на стенде и в CI-шаблонах — правка тела применённой миграции невоспроизводима на средах, где 118 уже прошла (тот же аргумент, что ADR-T0573 приводил против правки 115 на месте)."
+    },
+    {
+      "option": "Удалить role/employee/agent_card ownerless-тенанта вместе с role_assignment/grant",
+      "why_not": "Роль без назначений и агент без роли ничего не открывают сами по себе — не вооружённый контур. Удаление лишает будущего оператора, чинящего аномалию вручную, готового субстрата — пришлось бы пересоздавать с нуля вместо точечного довооружения role_assignment+grant."
+    },
+    {
+      "option": "Skip ВЕСЬ тенант целиком в новой миграции (включая уже вставленные 118-строки, независимо от владельца)",
+      "why_not": "118 УЖЕ применена безусловно для всех тенантов (включая ownerless) — 'не трогать вовсе' относится к будущему прогону 118, которого не будет (одноразовая миграция). Единственный реализуемый механизм для УЖЕ существующих последствий — точечная отмена A5/A6/A7-результата, не 'всего тенанта' (A1/A2/A3 безвредны, их отмена не улучшает гигиену прав, только теряет субстрат — тот же аргумент, что против удаления role/employee/agent_card)."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "role_assignment (существующая; УДАЛЯЕТСЯ backfill-маркированная строка assistant-agent→role-configurator для ownerless-тенантов)",
+      "fields": [
+        {"name": "предикат удаления", "type": "role.slug='role-configurator' AND employee.slug='assistant-agent' AND employee.kind='agent' AND source='backfill' AND NOT EXISTS(confirmed role_assignment на role.slug='tenant-owner' для этого тенанта)"}
+      ]
+    },
+    {
+      "entity": "grant (существующая; УДАЛЯЮТСЯ 4 backfill-маркированные строки на role-configurator для ownerless-тенантов)",
+      "fields": [
+        {"name": "предикат удаления", "type": "role.slug='role-configurator' AND confirmed_by='backfill' AND NOT EXISTS(confirmed role_assignment на role.slug='tenant-owner' для этого тенанта)"}
+      ]
+    },
+    {
+      "entity": "role / employee / agent_card (существующие; НЕ ЗАТРАГИВАЮТСЯ — F3)",
+      "fields": [
+        {"name": "инвариант", "type": "ни один DELETE FROM choros.role/employee/agent_card не присутствует в migration 120 — структурная гарантия F3, не логическая"}
+      ]
+    }
+  ],
+  "contracts": [
+    "migrations/120_ownerless_tenant_zero_unarm.sql — два set-driven идемпотентных DELETE-блока (role_assignment, grant), заголовок-комментарий по образцу 118/119, без литерала UUID тенанта, не трогает role/employee/agent_card.",
+    "ci/checks/db/migration-120-ownerless-unarm.test.ts — новый файл, смешанная фикстура T_FULL/T_PARTIAL/T_OWNERLESS (именование по adversarial-щупу T-0573), переиспользует AC-1-инвариант-предикат migration-118-tenant-zero-backfill.test.ts буквально (без изменения оригинального файла).",
+    "ci/checks/dual-control-isolation.sh — аддитивный relief-блок T0594-DC-MIG120-GUARD (per-migration flag + post-loop DDL/confirmed2_by-guard), точный паттерн T0573-DC-MIG118-GUARD/T0575-DC-MIG119-GUARD.",
+    "ci/checks/data/frozen-sanctions.jsonl — новая append-only строка (task=T-0594, file=ci/checks/dual-control-isolation.sh, owner=T-0044, sanctioned_by=auto_additive), формат идентичен записям T-0570/T-0573/T-0575."
+  ],
+  "fitness_functions": [
+    {
+      "id": "FF-1",
+      "rule": "AC-1: на смешанной фикстуре T_FULL/T_PARTIAL/T_OWNERLESS прогон тела 120 удаляет ровно backfill-строки (role_assignment + 4 grant) T_OWNERLESS; role/employee/agent_card T_OWNERLESS нетронуты; AC-1-инвариант-предикат (форма 118) по-прежнему возвращает 1 нарушение для T_OWNERLESS; T_FULL/T_PARTIAL — 0 удалённых строк (row-counts идентичны до/после).",
+      "ci_check": "vitest run ci/checks/db/migration-120-ownerless-unarm.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-2",
+      "rule": "AC-2: повторный (второй) прогон тела 120 на той же фикстуре — 0 новых DELETE, состояние стабильно.",
+      "ci_check": "vitest run ci/checks/db/migration-120-ownerless-unarm.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-3",
+      "rule": "AC-3: migrations/120_*.sql не содержит литерала UUID тенанта.",
+      "ci_check": "grep-assertion внутри migration-120-ownerless-unarm.test.ts (тот же regex-класс, что no-hardcoded-tenant-uuid.sh для 118)"
+    },
+    {
+      "id": "FF-4",
+      "rule": "AC-4: существующий migration-118-tenant-zero-backfill.test.ts (FF-1/FF-2/FF-3 T-0573) зелёный без изменений логики существующих тестов.",
+      "ci_check": "vitest run ci/checks/db/migration-118-tenant-zero-backfill.test.ts --no-file-parallelism"
+    },
+    {
+      "id": "FF-5",
+      "rule": "AC-5: dual-control-isolation.sh зелёный после добавления миграции 120 и её relief-блока.",
+      "ci_check": "bash ci/checks/dual-control-isolation.sh"
+    },
+    {
+      "id": "FF-6",
+      "rule": "AC-6: полный fitness:db зелёный, полный корневой vitest зелёный, полная цепочка fitness зелёная.",
+      "ci_check": "npm run fitness:db && npx vitest run && npm run fitness"
+    }
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "FF-1"},
+    {"ac": "AC-2", "covered_by": "FF-2"},
+    {"ac": "AC-3", "covered_by": "FF-3"},
+    {"ac": "AC-4", "covered_by": "FF-4"},
+    {"ac": "AC-5", "covered_by": "FF-5"},
+    {"ac": "AC-6", "covered_by": "FF-6"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0594-ownerless-policy.md",
+  "escalation": ""
+}

@@ -1,0 +1,59 @@
+{
+  "task_id": "T-0594",
+  "status": "ready",
+  "summary": "Политика для тенантов без владельца (finding R-2 ревью T-0573 + adversarial-щуп тестера T-0573): migrations/118_assistant_tenant_zero_backfill.sql на тенанте БЕЗ role_assignment на tenant-owner корректно не создаёт фиктивного владельца (A4 no-op), НО блоки A5 (assistant-agent→role-configurator) и A6/A7 (4 гранта) всё равно вооружают role-configurator — гранты и назначение агента без человека-получателя. Не эскалация привилегий (агент не аутентифицируется как человек), собственный AC-1-предикат миграции 118 честно продолжает флагать такой тенант. Решение: skip-политика — новая миграция 120 УДАЛЯЕТ ровно эти backfill-маркированные строки (role_assignment assistant-agent→role-configurator + 4 grant) для тенантов, у которых нет НИ ОДНОГО confirmed role_assignment на tenant-owner на момент прогона 120; role/employee/agent_card НЕ удаляются (безвредный, но не вооружённый субстрат). Живой путь регистрации (registerTenant) гарантирует владельца первым шагом транзакции — ownerless-тенант недостижим в проде, только данные-сироты из тестов/приёмок.",
+  "functional": [
+    "F1. Новая миграция 120_*.sql для каждого тенанта БЕЗ confirmed role_assignment на role(slug='tenant-owner') удаляет: role_assignment assistant-agent→role-configurator с source='backfill' и все 4 grant на role-configurator с confirmed_by='backfill' (authoring_draft×2 + capability×2) — ровно строки, созданные блоками A5/A6/A7 миграции 118 для этого тенанта.",
+    "F2. Тенанты с владельцем (confirmed role_assignment на tenant-owner) — полный или частичный инвариант — не теряют ни одной строки от миграции 120 (нулевой эффект).",
+    "F3. role (role-configurator), employee (assistant-agent) и agent_card тенанта без владельца НЕ удаляются миграцией 120 — остаются как безвредный, но не вооружённый субстрат.",
+    "F4. Собственный AC-1-предикат миграции 118 (та же SQL-форма, что migration-118-tenant-zero-backfill.test.ts) продолжает флагать тенант без владельца ПОСЛЕ 120 — было 1 нарушение до 120, остаётся 1 нарушение после (теперь по правильной причине: недостающие строки для человека, а не вооружённый-но-недостижимый контур)."
+  ],
+  "non_functional": [
+    "N1. Миграция 120 не удаляет ни одной строки тенанта, у которого confirmed role_assignment на tenant-owner СУЩЕСТВУЕТ (полный или частичный инвариант) — байт-в-байт идентичные счётчики до/после.",
+    "N2. Ни одного литерала UUID тенанта в теле 120 — set-driven FROM choros.tenant / role_assignment, тот же дисциплинарный стандарт, что 118.",
+    "N3. Повторный (второй, третий) прогон тела 120 — no-op: 0 новых DELETE, состояние стабильно (идемпотентность).",
+    "N4. DELETE ограничен строго строками с source/confirmed_by='backfill' (маркер миграции 118) — не трогает гранты/назначения, выданные человеком другим путём.",
+    "N5. Ни одной новой таблицы/колонки — чистый DELETE над существующими role_assignment и \"grant\".",
+    "N6. Файл migrations/118_assistant_tenant_zero_backfill.sql НЕ редактируется (уже применён на стенде и в CI-шаблонах, идемпотентный повтор не случится)."
+  ],
+  "out_of_scope": [
+    "O1. Правка файла migrations/118_*.sql — запрещена директивой.",
+    "O2. Автоматическое обнаружение/уведомление о появлении владельца у ранее ownerless тенанта и авто-довооружение контура — ручная операторская забота, не в объёме.",
+    "O3. Изменение register.ts / живого пути регистрации — не тронут, там ownerless недостижим по конструкции.",
+    "O4. Удаление role-configurator/assistant-agent employee/agent_card у ownerless-тенанта — явно не в объёме (F3)."
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "text": "На смешанной фикстуре из трёх тенантов — T_FULL (полный 9-строчный инвариант), T_PARTIAL (role-configurator+confirmed tenant-owner assignment есть, employee/agent_card/role_assignment-на-role-configurator/grants отсутствуют — владелец ЕСТЬ), T_OWNERLESS (роль/employee/agent_card/role_assignment/grant на role-configurator ЕСТЬ, но ни одного confirmed role_assignment человека на tenant-owner НЕТ — точная постановка R-2/adversarial-щупа) — после прогона тела миграции 120: у T_OWNERLESS role_assignment assistant-agent→role-configurator и все 4 grant на role-configurator с source/confirmed_by='backfill' удалены (0 строк); role/employee/agent_card T_OWNERLESS остаются нетронутыми (>0 строк); AC-1-инвариант-предикат (форма 118) по-прежнему возвращает 1 нарушение для T_OWNERLESS. У T_FULL и T_PARTIAL — 0 удалённых строк (row-counts до/после идентичны).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-2",
+      "text": "Повторный (второй) прогон тела миграции 120 на той же фикстуре после первого прогона — 0 новых DELETE, состояние стабильно (идемпотентность).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-3",
+      "text": "Файл migrations/120_*.sql не содержит литерала UUID тенанта (тот же regex-класс, что no-hardcoded-tenant-uuid.sh проверяет для 118).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-4",
+      "text": "Существующий ci/checks/db/migration-118-tenant-zero-backfill.test.ts (FF-1/FF-2/FF-3) остаётся зелёным без изменений логики существующих тестов — 120 не меняет поведение 118 для тенантов с владельцем.",
+      "verifiable_as": "test"
+    },
+    {
+      "id": "AC-5",
+      "text": "bash ci/checks/dual-control-isolation.sh зелёный после добавления миграции 120 (DELETE над role_assignment/grant — тот же защищённый домен, что 118 задел; relief по прецеденту 109/117/118/119, если чек красит без него).",
+      "verifiable_as": "fitness"
+    },
+    {
+      "id": "AC-6",
+      "text": "npm run fitness:db (весь ci/checks/db) зелёный; npx vitest run (корневой раннер) зелёный; npm run fitness (полная цепочка) зелёный.",
+      "verifiable_as": "fitness"
+    }
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0594-ownerless-policy.spec.md"
+}
