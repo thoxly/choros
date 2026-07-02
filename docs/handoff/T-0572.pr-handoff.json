@@ -61,20 +61,15 @@
   ],
   "live_proof": {
     "status": "green_partial",
-    "date": "2026-07-02T19:35+03:00",
-    "stand": "localhost:55432 (dev-silo Postgres, migrations @ dev merge-base) — НЕ деплоенный стенд ООО Аксон; coder-сессия без founder/deploy-доступа",
-    "actor": "e-owner (genesis owner, dev-silo), e-mironov (обычный сотрудник), e-larina (второй подтверждающий) — прямой HTTP (curl), не браузер",
-    "steps": [
-      "GET /api/rights/tenant-state (e-owner) → scope:tenant, can_manage:true, 9 РЕАЛЬНЫХ ролей тенанта с реальными assignments (включая agent-исполнителей) и грантами (role-configurator 4/role-reader 1 — из живых миграций, не фикстур)",
-      "GET /api/rights/tenant-state (e-mironov) → scope:self, can_manage:false, РОВНО 1 роль (budget-approver), которую держит — не видит остальные 8",
-      "POST /api/grants (некритичный ресурс) → {state:'confirmed'} → мгновенно виден в tenant-state.grants",
-      "POST /api/grants (operation:'approve', критичная ось) → {state:'semi-confirmed', second_approver_required:true} → виден ТОЛЬКО в tenant-state.pending.grants, отсутствует в .grants",
-      "POST /api/grants {phase:'confirm2', change_ref} от e-larina (другой человек) → {state:'confirmed'} → появился в .grants, исчез из .pending",
-      "Отзыв всех 3 тестовых грантов (POST .../revoke) → tenant-state.grants вернулся к исходному состоянию"
-    ],
-    "observation": "Полный dual-control-цикл (confirmed / semi-confirmed / второй подтверждающий / отзыв) прожит на живых данных через HTTP; честное разделение admin/self проекций подтверждено на двух разных реальных сотрудниках дев-тенанта.",
-    "founder_todo": [
-      "Повторить те же 7 шагов глазами в браузере на деплоенном стенде ООО Аксон (владелец pgv@axonteam.ru) для формального закрытия AC-16 (manual) — весь механизм и данные уже доказаны машиной выше; это финальный визуальный чек, не поиск нового дефекта."
+    "date": "2026-07-02T20:30+03:00",
+    "stand": "http://100.121.76.86:3000 (dev, авто-деплой после 53f342e)",
+    "machine_proof": "TEST-фаза: три адверсариальных щупа на живом HTTP+PG (5 векторов кросс-тенант смуглинга отбиты; semi-confirmed невидим в active и доведён до confirmed через phase:confirm2 вторым админом; self-проекция не течёт); 7477+ детерминированных тестов зелёные",
+    "blocked_ui_step": "Браузерный проход ждёт входа фаундера (сессии app+KC убиты авто-деплоем; машина пароли не вводит).",
+    "founder_steps_after_login": [
+      "Доступ: «Обзор ролей» показывает ЖИВЫЕ роли тенанта (ложь «Нет ролей» умерла)",
+      "Выдать ассистенту грант/роль из UI (например через форму выдачи) — разомкнёт круг ассистента руками",
+      "«Кто что может»: выданные права глазами; полу-подтверждённое — отдельным блоком «ждёт подтверждения»",
+      "Охват гранта читается по-человечески (не JSON): «Весь тенант» / «Узел: …» / чипы тегов"
     ]
   }
 }
