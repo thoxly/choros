@@ -24,14 +24,21 @@
  *         set) → byte-identical visible set (FF-RP-10/AC-8 — one PDP, no fork)
  *   RP-10 Anti-case sanity: RESOURCE_ROOT_NODE_ID / READER_ROLE_SLUG are
  *         platform constants, not case-specific strings (NF-4 smoke check)
+ *   RP-11 Composition: resolveReadVisibility (record-level gate) AND
+ *         resolveFieldVisibility (field-level narrowing) injected TOGETHER —
+ *         a record within the actor's READ grant is present, but a
+ *         role-scoped field the actor's grant does not confer is physically
+ *         absent from that SAME record (AC-6/FF-RP-11 — the two resolvers
+ *         compose, neither shadows the other)
  */
 
 import { describe, it, expect, vi } from "vitest";
 import * as http from "node:http";
 import { Router } from "../http/router.js";
 import { registerRecordRoutes } from "../http/records.js";
-import type { RecordRoutesDeps, ReadVisibilityResolver } from "../http/records.js";
+import type { RecordRoutesDeps, ReadVisibilityResolver, FieldVisibilityResolver } from "../http/records.js";
 import type { Grant, AncestryOracle } from "../core/grant-lattice.js";
+import type { FieldVisibilityPolicy } from "../core/field-visibility.js";
 import { RESOURCE_ROOT_NODE_ID, READER_ROLE_SLUG } from "../core/read-visibility.js";
 import { makeResourceAncestryOracle } from "../db/resource-ancestry.js";
 
@@ -472,5 +479,106 @@ describe("T-0570 RP-10: platform constants are not case-specific (NF-4 smoke che
       expect(READER_ROLE_SLUG.includes(bad)).toBe(false);
     }
     expect(READER_ROLE_SLUG).toBe("role-reader");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RP-11: Composition — resolveReadVisibility (record-level) AND
+// resolveFieldVisibility (field-level) injected SIMULTANEOUSLY (AC-6/FF-RP-11,
+// review R-2). records-read-pdp.test.ts (this file) otherwise only injects
+// resolveReadVisibility alone; records-field-visibility(-detail).test.ts only
+// inject resolveFieldVisibility alone (honest-degrade record-gate). Neither
+// file proves the two resolvers compose when BOTH are wired at once — this is
+// the missing case: a record-level covering grant admits the record into the
+// result set, and a field-level facet independently narrows which keys of
+// THAT SAME record are visible.
+// ---------------------------------------------------------------------------
+
+function makeRowWithSalary(recordId: string, salary: number) {
+  return {
+    id: recordId,
+    registry_id: REG_DEF_ID,
+    application_id: APP_ID,
+    record_schema_version: 1,
+    data: { name: `item-${recordId.slice(-1)}`, salary },
+    created_at: String(1700000000000),
+    updated_at: String(1700000000000),
+  };
+}
+
+const FV_POLICY_SALARY_SCOPED: FieldVisibilityPolicy = {
+  roleScopedFields: new Set(["salary"]),
+};
+
+function narrowFieldFacetGrant(): Grant {
+  // A field-facet grant that confers "name" but NOT "salary" — distinct from
+  // the record-level recordScopedGrant() above (which governs whether the
+  // RECORD is in the result set at all, not which of its FIELDS are visible).
+  return {
+    tenantId: TENANT_ID,
+    id: "g-field-facet",
+    roleId: "role-field-narrow-570",
+    resourceType: "record",
+    operation: "read",
+    scope: {
+      kind: "node",
+      hierarchy: "resource",
+      nodeLevel: "registry",
+      nodeId: REG_DEF_ID,
+    },
+    resourceFacet: { fields: ["name"] },
+    delegable: false,
+    grantedBy: "owner",
+    createdAt: Date.now() - 5_000,
+  } as unknown as Grant;
+}
+
+describe("T-0570 RP-11: resolveReadVisibility + resolveFieldVisibility injected together (AC-6/FF-RP-11)", () => {
+  it("record-level grant admits the record; field-level facet independently hides a role-scoped field on it", async () => {
+    const rows = [makeRowWithSalary(RECORD_1, 100_001), makeRowWithSalary(RECORD_2, 100_002)];
+
+    // Record-level gate: actor holds a covering grant for RECORD_1 only —
+    // RECORD_2 must be excluded from the list entirely (same as RP-6).
+    const resolveReadVisibility: ReadVisibilityResolver = async () => ({
+      grants: [recordScopedGrant(RECORD_1)],
+      ancestry: rootAncestry(),
+    });
+    // Field-level narrowing: the actor's grant confers "name" but NOT
+    // "salary" — on whatever record(s) survive the record-level gate,
+    // "salary" must be physically absent.
+    const resolveFieldVisibility: FieldVisibilityResolver = async () => ({
+      coveringGrants: [narrowFieldFacetGrant()],
+      policy: FV_POLICY_SALARY_SCOPED,
+    });
+
+    const { start, stop } = makeServer(rows, { resolveReadVisibility, resolveFieldVisibility });
+    const base = await start();
+    try {
+      // LIST: only RECORD_1 present (record-level gate), and on it "salary"
+      // is absent while "name" remains (field-level gate) — both layers fired
+      // on the SAME response, neither shadowing the other.
+      const { statusCode, records } = await getRecords(base);
+      expect(statusCode).toBe(200);
+      expect(records).toHaveLength(1);
+      const listData = records[0]!["data"] as Record<string, unknown>;
+      expect(records[0]!["id"]).toBe(RECORD_1);
+      expect("name" in listData).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(listData, "salary")).toBe(false);
+
+      // DETAIL: RECORD_1 (covered) returns 200 with "salary" absent too.
+      const { statusCode: detailStatus, body: detailBody } = await getRecordDetail(base, RECORD_1);
+      expect(detailStatus).toBe(200);
+      const detailData = detailBody["data"] as Record<string, unknown>;
+      expect("name" in detailData).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(detailData, "salary")).toBe(false);
+
+      // DETAIL: RECORD_2 is NOT covered by the record-level grant → 404,
+      // regardless of the field-visibility facet (record-level gate wins the
+      // existence question; field-visibility only narrows an admitted record).
+      const { statusCode: deniedStatus } = await getRecordDetail(base, RECORD_2);
+      expect(deniedStatus).toBe(404);
+    } finally {
+      await stop();
+    }
   });
 });

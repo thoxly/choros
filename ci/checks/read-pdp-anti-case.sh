@@ -70,17 +70,34 @@ scan_diff() {
 ${untracked_content}"
     done <<< "${untracked_files}"
   fi
+  # Strip trailing comments BEFORE any exclusion logic runs (review R-1 fix):
+  # a line like `export const X = "role-approver"; // FORBIDDEN: trust me`
+  # must NOT be able to launder executable code past the scan just by
+  # appending a comment containing an exclusion keyword. We cut each added
+  # line at the first `//` or `/*` (keeping the `+` prefix and any CODE that
+  # precedes the comment marker), so the exclusion checks below only ever see
+  # the code portion of the line — never attacker-controlled comment text.
+  local sans_trailing_comments
+  sans_trailing_comments="$(echo "${added_lines}" | sed -E 's#^(\+.*[^:/])//.*$#\1#; s#^(\+.*[^:/])/\*.*$#\1#')"
   # Drop comment-only lines (T-0143 lesson, mirrors card-action-broad-scope.sh
   # grep_noncomment): a line whose non-`+`, non-whitespace content starts with
   # `//` or `*` (JSDoc continuation) is PROSE EXPLAINING the ban (this very
   # module's own doc comments legitimately name the banned literals as
-  # examples of what NOT to write) — not an actual case-specific hardcode. Also
-  # drop lines containing an explicit `FORBIDDEN`/`anti-case`-style sanity
-  # array (this task's own RP-10 unit test lists every banned literal ONCE, on
-  # a single line, to assert NONE of them appear in the platform constants —
-  # that is the test asserting the ban, not violating it).
+  # examples of what NOT to write) — not an actual case-specific hardcode.
+  #
+  # Also drop the ONE specific legitimate line this task's own RP-10 unit test
+  # uses: a `const FORBIDDEN_SANITY_LIST = [...]` declaration (single line,
+  # lists every banned literal ONCE to assert NONE of them appear in the
+  # platform constants — that is the test asserting the ban, not violating
+  # it). This match is intentionally narrow — the EXACT identifier name, not
+  # a bare substring match on the word "FORBIDDEN" — precisely so a comment
+  # or unrelated identifier containing that word cannot be used to exclude an
+  # otherwise-real hardcoded literal from the scan (review R-1: the previous
+  # `grep -vE 'FORBIDDEN'` excluded ANY line containing that substring
+  # anywhere, including in a trailing comment on an executable line — a
+  # one-word bypass of the whole gate).
   local code_lines
-  code_lines="$(echo "${added_lines}" | grep -vE '^\+[[:space:]]*(//|\*)' | grep -vE 'FORBIDDEN' || true)"
+  code_lines="$(echo "${sans_trailing_comments}" | grep -vE '^\+[[:space:]]*(//|\*)' | grep -vE '\bFORBIDDEN_SANITY_LIST\b[[:space:]]*=' || true)"
   for lit in "${FORBIDDEN_LITERALS[@]}"; do
     # LEFT word-boundary only: "e-configurator" must NOT match as a substring
     # of the pre-existing, legitimate "role-configurator" slug (T-0373) — the
@@ -152,6 +169,46 @@ EOF
   scan_diff "${tmp}/repo" "base-branch"
   local bad_errors=${errors}
 
+  # SNEAKY branch (review R-1 regression PoC): a planted anti-case literal on
+  # an executable line, followed by a trailing `// FORBIDDEN...` comment
+  # designed to abuse the exclusion meant for the RP-10 sanity-list line. The
+  # previous exclusion (`grep -vE 'FORBIDDEN'` over the WHOLE line) dropped
+  # this line from the scan entirely — a one-word comment bypassed the gate.
+  # This is the exact PoC from the T-0570 review verdict; the detector MUST
+  # still fire on it.
+  (
+    cd "${tmp}/repo"
+    git checkout -q -b sneaky-branch base-branch
+    cat > src/sneaky.ts <<'EOF'
+export const SNEAKY_ROLE_SLUG = "role-approver"; // FORBIDDEN: trust me
+EOF
+    git add -A
+    git commit -q -m "sneaky addition"
+  )
+  scan_diff "${tmp}/repo" "base-branch"
+  local sneaky_errors=${errors}
+
+  # SANITY-LIST branch: the legitimate RP-10 pattern this exclusion exists
+  # FOR — a `const FORBIDDEN_SANITY_LIST = [...]` line in a test file that
+  # lists every banned literal ONCE to assert they're absent from platform
+  # constants. Must stay clean (no false positive), proving the narrowed
+  # exclusion still does its intended job.
+  (
+    cd "${tmp}/repo"
+    git checkout -q -b sanity-list-branch base-branch
+    mkdir -p src/__tests__
+    cat > src/__tests__/sanity.test.ts <<'EOF'
+const FORBIDDEN_SANITY_LIST = ["role-approver", "soglasovanie", "tel-", "Согласование", "e-larina", "e-orlov", "e-configurator"];
+for (const bad of FORBIDDEN_SANITY_LIST) {
+  expect(true).toBe(true);
+}
+EOF
+    git add -A
+    git commit -q -m "sanity list addition"
+  )
+  scan_diff "${tmp}/repo" "base-branch"
+  local sanity_list_errors=${errors}
+
   if [[ ${good_errors} -ne 0 ]]; then
     echo "SELF-TEST FAIL: detector wrongly flagged the GOOD diff (${good_errors} violation(s))"
     return 1
@@ -160,7 +217,15 @@ EOF
     echo "SELF-TEST FAIL: detector did NOT fire on the BAD (anti-case) diff"
     return 1
   fi
-  echo "SELF-TEST PASS: good diff clean, bad diff flagged (${bad_errors} violation(s))"
+  if [[ ${sneaky_errors} -eq 0 ]]; then
+    echo "SELF-TEST FAIL: detector did NOT fire on the SNEAKY diff (review R-1 regression — trailing '// FORBIDDEN' comment must not launder a real hardcode past the scan)"
+    return 1
+  fi
+  if [[ ${sanity_list_errors} -ne 0 ]]; then
+    echo "SELF-TEST FAIL: detector wrongly flagged the legitimate FORBIDDEN_SANITY_LIST diff (${sanity_list_errors} violation(s))"
+    return 1
+  fi
+  echo "SELF-TEST PASS: good diff clean, bad diff flagged (${bad_errors} violation(s)), sneaky R-1 PoC flagged (${sneaky_errors} violation(s)), sanity-list diff clean"
   return 0
 }
 
