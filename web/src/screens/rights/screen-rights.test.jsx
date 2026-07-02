@@ -191,3 +191,29 @@ describe('UX F-5 — one-click path to the confirmation inbox for pending observ
     expect(screenSrc).toContain('rolePendingCount');
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-0597 (находка №5) — «Список сотрудников пуст» получает actionable-выход в
+// «Оргструктуру» вместо тупика (AC-4/AC-5 of T-0597 spec).
+// ---------------------------------------------------------------------------
+describe('T-0597 — actionable hint on empty employees list (AC-4/AC-5)', () => {
+  it('imports useNavigate from react-router-dom', () => {
+    expect(formsSrc).toContain("import { useNavigate } from 'react-router-dom'");
+  });
+  it('AssignRoleForm calls useNavigate()', () => {
+    expect(formsSrc).toMatch(/const navigate = useNavigate\(\)/);
+  });
+  it('the empty-employees hint still carries the original honest reason text', () => {
+    expect(formsSrc).toContain('Список сотрудников пуст');
+  });
+  it('the hint offers a clickable «Открыть оргструктуру» control wired to navigate(\'/org\')', () => {
+    expect(formsSrc).toContain('Открыть оргструктуру');
+    expect(formsSrc).toMatch(/onClick=\{\(\)\s*=>\s*navigate\('\/org'\)\}/);
+  });
+  it('uses a real <button type="button">, not a bare non-interactive element (keyboard reachable)', () => {
+    const idx = formsSrc.indexOf('Открыть оргструктуру');
+    const before = formsSrc.slice(Math.max(0, idx - 400), idx);
+    expect(before).toMatch(/type="button"/);
+    expect(before).not.toMatch(/<div\b[^>]*onClick/);
+  });
+});

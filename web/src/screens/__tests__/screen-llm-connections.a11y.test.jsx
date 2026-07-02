@@ -1,10 +1,12 @@
 /**
  * web/src/screens/__tests__/screen-llm-connections.a11y.test.jsx  (T-0574, FF-UX-5)
  *
- * AC-12 — the API-key input carries label/aria-*, autoComplete=off, type=password
- * (N5, not a regression); the «Назначить ассистенту» action has no dead
- * enabled-no-op affordance (it is hidden/replaced by a chip once the profile is
- * already the assistant's active connection).
+ * AC-12 — the API-key input carries label/aria-*, autoComplete=off, and
+ * defaults to masked entry (type toggles password↔text via the T-0597
+ * reveal-toggle, находка №3 — starts masked, showKey initial state is false);
+ * the «Назначить ассистенту» action has no dead enabled-no-op affordance (it
+ * is hidden/replaced by a chip once the profile is already the assistant's
+ * active connection).
  *
  * Approach (project convention — vitest "node" environment, no jsdom/DOM mount,
  * no react-dom/react-test-renderer in this repo): source-text presence checks
@@ -39,11 +41,15 @@ describe('T-0574 (FF-UX-5/AC-12) — API-key field: label/type/autoComplete (N5,
     expect(src).toMatch(/label="API-ключ \(вставить\)"/);
   });
 
-  it('the same Field block sets type="password" and autoComplete="off"', () => {
+  it('the same Field block defaults to masked entry (T-0597 reveal-toggle: type starts password, toggles to text) and autoComplete="off"', () => {
     const fieldBlockMatch = src.match(/<Field\s+label="API-ключ \(вставить\)"[\s\S]{0,400}?\/>/);
     expect(fieldBlockMatch).not.toBeNull();
-    expect(fieldBlockMatch[0]).toContain('type="password"');
+    expect(fieldBlockMatch[0]).toContain("type={showKey ? 'text' : 'password'}");
     expect(fieldBlockMatch[0]).toContain('autoComplete="off"');
+  });
+
+  it('showKey defaults to false (field starts masked, not revealed)', () => {
+    expect(src).toMatch(/const \[showKey, setShowKey\] = useState\(false\)/);
   });
 
   it('the Field kit component itself always binds <label htmlFor> to the input id (components.jsx contract)', () => {

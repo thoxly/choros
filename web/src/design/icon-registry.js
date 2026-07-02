@@ -33,6 +33,9 @@ export const ICON_REGISTRY = {
   "search":          { label: "Поиск",           since: "T-0531", usedIn: [] },
   "chevron-up":      { label: "Свернуть",        since: "T-0531", usedIn: [] },
   "lock":            { label: "Заблокировано",   since: "T-0531", usedIn: [] },
+  // ── T-0597 additions (reveal-toggle на поле API-ключа, находка №3) ────────
+  "eye":             { label: "Показать",        since: "T-0597", usedIn: ["screen-llm-connections"] },
+  "eye-off":         { label: "Скрыть",           since: "T-0597", usedIn: ["screen-llm-connections"] },
 };
 
 /** Set of all known icon names — used by KitIcon dev-warn fallback. */

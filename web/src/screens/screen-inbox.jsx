@@ -12,6 +12,10 @@ import {
 } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { authHeaders, devHeaders } from '../app-shell/dev-auth.js';
+// T-0597 (находка №6): блокирующий alert-модал на claim/approve ошибках заменён на pushToast —
+// тот же провайдер, что уже используют rights/assistant экраны (консистентный
+// error-тон, duration:0/role=alert — не гаснет сам, но не блокирует поток).
+import { useToastContext } from '../app-shell/toast-context.jsx';
 // T-0399 [D7-K]: the inbox form field control is now the ONE unified renderer
 // (web/src/forms/field-renderer.jsx), keyed off the binding-contract catalog —
 // replacing the inline type→control map that silently dropped enum options.
@@ -592,6 +596,8 @@ function InboxScreen() {
   const [approving, setApproving] = useState(() => ({}));
   // T-0272: task detail panel (selectedTaskId → open; null → closed)
   const [selectedTaskId, setSelectedTaskId] = useState(null);
+  // T-0597 (находка №6): toast provider — заменяет блокирующий alert-модал на claim/approve ошибках.
+  const { push: pushToast } = useToastContext();
 
   // T-0401: pagination state for load-more. `page` tracks the last fetched page;
   // `totalPages` caps the load-more button. Reset to page 1 on filter/tab change.
@@ -667,9 +673,9 @@ function InboxScreen() {
       setTaken((s) => ({ ...s, [taskId]: true }));
       await load();
     } catch (e) {
-      // Surface error as alert — task remains in pool for retry
-      // eslint-disable-next-line no-alert
-      alert(e.message);
+      // T-0597 (находка №6): surface as a toast, not a blocking native modal —
+      // task remains in pool for retry. Same human-readable message as before.
+      pushToast({ tone: 'error', message: e.message });
     } finally {
       setClaiming((s) => ({ ...s, [taskId]: false }));
     }
@@ -695,8 +701,9 @@ function InboxScreen() {
       // Task approved → instance done; re-fetch to drop the task from the list.
       await load();
     } catch (e) {
-      // eslint-disable-next-line no-alert
-      alert(e.message);
+      // T-0597 (находка №6): surface as a toast, not a blocking native modal —
+      // same human-readable ENGINE_DRIVE_ERROR_MESSAGE-mapped text as before.
+      pushToast({ tone: 'error', message: e.message });
     } finally {
       setApproving((s) => ({ ...s, [taskId]: false }));
     }
