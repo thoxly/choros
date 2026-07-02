@@ -15,6 +15,31 @@
    Любой сбой одного фетча оставляет плитку БЕЗ числа (прочерк), не ломая экран
    (principles.md §6 — состояния явные, но дом всегда рендерится).
 
+   T-0598 (находка №1 отчёта ux-loop-report-2026-07-02.md): секция «Первые
+   шаги» над сеткой плиток — non-blocking checklist-stepper (uxpatterns MCP
+   patterns/advanced/wizard, onboarding-вариант) для нового владельца. Три
+   обязательных шага + один опциональный, все кормятся ЖИВЫМИ сигналами из
+   уже существующих READ-эндпоинтов (ноль новых API):
+     • шаг 1 «Создайте приложение» — переиспользует уже загруженный `apps`
+       (тот же счётчик, что у плитки «Конструктор»), done при apps > 0.
+     • шаг 2 «Подключите LLM-ключ»  — GET /api/agents + импортированная чистая
+       функция resolveAssistantBinding (screen-llm-connections.jsx) находит
+       агента-ассистента тенанта; done когда у него есть привязанный
+       llm_connection_id. Выбран /api/agents, а не /api/llm-connections,
+       потому что последний требует капабилити llm_connection:configure
+       (403 для рядового сотрудника) — /api/agents гейтится только withAuth,
+       честно виден любому авторизованному пользователю тенанта.
+     • шаг 3 «Спросите ассистента» — GET /api/assistant/threads, done когда
+       хотя бы один тред имеет message_count > 0.
+     • шаг 4 (опционально) «Настройте права» — GET /api/rights/tenant-state,
+       рендерится ТОЛЬКО при can_manage:true (иначе структурно отсутствует —
+       тот же принцип, что ADR T-0572 применяет к формам выдачи/отзыва); не
+       участвует в критерии скрытия полосы.
+   Деградация: любой сбой (сеть/HTTP/парсинг) на шагах 1-3 оставляет шаг БЕЗ
+   чека (не error state, не красный экран) — CTA-ссылка остаётся рабочей.
+   Полоса целиком скрывается только когда шаги 1-3 ВСЕ подтверждённо true —
+   производное от данных состояние, без localStorage/dismiss.
+
    Авторизация — через devHeaders() (X-Dev-User), как у остальных экранов.
    OBLIK: потребляем KIT (Button, KitIcon, LoadingState) + только --chs-color-*
    токены; ноль хардкода цвета (UX-гейт G6). Плотный B2B, обе темы WCAG AA.
@@ -25,6 +50,10 @@ import { useNavigate } from 'react-router-dom';
 import { Button, KitIcon, LoadingState } from '../components/components.jsx';
 import { Icon } from '../app-shell/icon.jsx';
 import { devHeaders } from '../app-shell/dev-auth.js';
+// T-0598: переиспользуем существующую чистую функцию резолюции привязки
+// ассистента (импорт, не копия логики — единственный источник истины про то,
+// как выглядит «ассистент подключён к LLM-профилю»).
+import { resolveAssistantBinding } from './screen-llm-connections.jsx';
 
 // ---- token-only inline style helpers (no hardcoded color — G6) ---------------
 const gridStyle = {
@@ -141,6 +170,202 @@ async function fetchCount(url, pick) {
   }
 }
 
+/* ============================================================================
+   T-0598 — «Первые шаги» (находка №1): non-blocking checklist-stepper.
+   ============================================================================ */
+
+// ---- token-only inline styles (G6: --chs-* only) --------------------------
+const stepsSectionStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--chs-space-3)',
+  background: 'var(--chs-color-surface)',
+  border: '1px solid var(--chs-color-border)',
+  borderRadius: 'var(--chs-radius-3)',
+  padding: 'var(--chs-space-5) var(--chs-space-6)',
+  marginBottom: 'var(--chs-space-6)',
+};
+const stepsHeadStyle = {
+  fontSize: 'var(--chs-text-xs)',
+  fontWeight: 'var(--chs-weight-semibold)',
+  letterSpacing: 'var(--chs-tracking-wide)',
+  textTransform: 'uppercase',
+  color: 'var(--chs-color-text-faint)',
+};
+const stepRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 'var(--chs-space-4)',
+};
+const stepMarkerDoneStyle = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  width: '20px', height: '20px', flex: '0 0 auto',
+  borderRadius: 'var(--chs-radius-full, 999px)',
+  background: 'var(--chs-color-success-soft)', color: 'var(--chs-color-success)',
+};
+const stepMarkerTodoStyle = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  width: '20px', height: '20px', flex: '0 0 auto',
+  borderRadius: 'var(--chs-radius-full, 999px)',
+  border: '1px solid var(--chs-color-border)',
+};
+const stepTextStyle = {
+  flex: '1 1 auto',
+  fontSize: 'var(--chs-text-sm)',
+  color: 'var(--chs-color-text)',
+};
+const stepTextDoneStyle = {
+  ...stepTextStyle,
+  color: 'var(--chs-color-text-muted)',
+};
+
+/**
+ * StepRow — одна строка чек-листа: маркер состояния (галка/пусто/загрузка) +
+ * текст шага + CTA-ссылка в соответствующий раздел. Всегда кликабельна,
+ * независимо от того, загрузился ли чек (навигация не зависит от статуса).
+ */
+function StepRow({ label, done, loading, ctaLabel, onGo }) {
+  return (
+    <div style={stepRowStyle}>
+      {loading ? (
+        <LoadingState compact label="" />
+      ) : done ? (
+        <span style={stepMarkerDoneStyle} aria-hidden="true"><KitIcon name="check" /></span>
+      ) : (
+        <span style={stepMarkerTodoStyle} aria-hidden="true" />
+      )}
+      <span style={done ? stepTextDoneStyle : stepTextStyle}>{label}</span>
+      <Button variant="ghost" size="sm" onClick={onGo}>{ctaLabel}</Button>
+    </div>
+  );
+}
+
+/**
+ * useFirstStepsSignals — best-effort загрузка трёх дополнительных сигналов
+ * (LLM-ключ / ассистент / права), КАЖДЫЙ по образцу fetchCount: любой сбой
+ * (сеть/HTTP/парсинг) деградирует до null, никогда не бросает. Шаг
+ * «приложение» НЕ дублируется здесь — он приходит пропом из уже загруженного
+ * состояния экрана (apps).
+ *
+ * Возвращает:
+ *   llmConnected  — null (грузим/недоступно) | boolean
+ *   assistantUsed — null (грузим/недоступно) | boolean
+ *   canManage     — null (грузим/недоступно/false) | true — шаг 4 рендерится
+ *                    только при true (AC-5: структурное отсутствие, не «без чека»)
+ *   loadingExtra  — true, пока хотя бы один из трёх ещё грузится
+ */
+function useFirstStepsSignals() {
+  const [llmConnected, setLlmConnected] = useState(null);
+  const [assistantUsed, setAssistantUsed] = useState(null);
+  const [canManage, setCanManage] = useState(null);
+  const [loadingExtra, setLoadingExtra] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoadingExtra(true);
+    const [agentsRes, threadsRes, rightsRes] = await Promise.all([
+      (async () => {
+        try {
+          const res = await fetch('/api/agents', { headers: devHeaders() });
+          if (!res.ok) return null;
+          const data = await res.json();
+          const binding = resolveAssistantBinding(data.agents);
+          if (!binding) return null;
+          return binding.assistantConnectionId != null;
+        } catch {
+          return null;
+        }
+      })(),
+      (async () => {
+        try {
+          const res = await fetch('/api/assistant/threads', { headers: devHeaders() });
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (!Array.isArray(data.threads)) return null;
+          return data.threads.some((t) => t && typeof t.message_count === 'number' && t.message_count > 0);
+        } catch {
+          return null;
+        }
+      })(),
+      (async () => {
+        try {
+          const res = await fetch('/api/rights/tenant-state', { headers: devHeaders() });
+          if (!res.ok) return null;
+          const data = await res.json();
+          return data && data.can_manage === true ? true : null;
+        } catch {
+          return null;
+        }
+      })(),
+    ]);
+    setLlmConnected(agentsRes);
+    setAssistantUsed(threadsRes);
+    setCanManage(rightsRes);
+    setLoadingExtra(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return { llmConnected, assistantUsed, canManage, loadingExtra };
+}
+
+/**
+ * FirstStepsStrip — секция «Первые шаги»: три обязательных шага + опциональный.
+ * Скрывается целиком (return null), когда шаги 1-3 ВСЕ подтверждённо true.
+ * Пока сигналы грузятся или деградировали (null), полоса остаётся видимой —
+ * скрытие требует явного true, не просто «не false» (AC-6/AC-7).
+ */
+function FirstStepsStrip({ apps, appsLoading, navigate }) {
+  const { llmConnected, assistantUsed, canManage, loadingExtra } = useFirstStepsSignals();
+
+  const step1Done = typeof apps === 'number' && apps > 0;
+  const step2Done = llmConnected === true;
+  const step3Done = assistantUsed === true;
+
+  // Скрытие: только когда все три обязательных сигнала подтверждённо true
+  // (не когда appsLoading/loadingExtra ещё в процессе — тогда step*Done ещё
+  // false, полоса остаётся видимой, что и требуется).
+  const allMandatoryDone = step1Done && step2Done && step3Done;
+  if (allMandatoryDone) return null;
+
+  return (
+    <section style={stepsSectionStyle} aria-label="Первые шаги">
+      <div style={stepsHeadStyle}>Первые шаги</div>
+      <StepRow
+        label="Создайте приложение"
+        done={step1Done}
+        loading={appsLoading}
+        ctaLabel="Создать приложение"
+        onGo={() => navigate('/apps')}
+      />
+      <StepRow
+        label="Подключите LLM-ключ"
+        done={step2Done}
+        loading={loadingExtra}
+        ctaLabel="Подключить ключ"
+        onGo={() => navigate('/llm-connections')}
+      />
+      <StepRow
+        label="Спросите ассистента"
+        done={step3Done}
+        loading={loadingExtra}
+        ctaLabel="Спросить ассистента"
+        onGo={() => navigate('/assistant')}
+      />
+      {/* Шаг 4 — опционален, рендерится ТОЛЬКО при can_manage:true (AC-5);
+          при false/403/сети структурно отсутствует, не «шаг без чека». */}
+      {canManage === true && (
+        <StepRow
+          label="Настройте права"
+          done={false}
+          loading={false}
+          ctaLabel="Настроить права"
+          onGo={() => navigate('/rights')}
+        />
+      )}
+    </section>
+  );
+}
+
 function OverviewScreen() {
   const navigate = useNavigate();
   // null = ещё грузим; число = живое значение; undefined-маркер не нужен —
@@ -228,6 +453,8 @@ function OverviewScreen() {
       </div>
 
       <div className="chs-inbox__scroll" style={{ padding: 'var(--chs-space-6)' }}>
+        {/* T-0598 (находка №1): «Первые шаги» — скрывается сама, когда пройдена. */}
+        <FirstStepsStrip apps={apps} appsLoading={loading} navigate={navigate} />
         <div style={gridStyle}>
           {tiles.map((t) => (
             <Tile

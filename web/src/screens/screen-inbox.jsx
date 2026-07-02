@@ -3,9 +3,17 @@
    ЭКРАН 2: плотная таблица инбокса задач.
    Колонки: задача · процесс (MonoId) · тип исполнителя · SLA · дедлайн ·
    действие «взять из пула».
+
+   T-0598 (находка №7): пустой инбокс на вкладке «Все» (без активного фильтра
+   исполнителя, реальный tenant-wide ноль — counts.all===0) получает честный
+   action-CTA «Открыть процессы» → /processes, вместо тупика. Остальные
+   вкладки/фильтры (mine/pool/esc, либо «Все» с активным exec-фильтром)
+   получают уточняющий текст БЕЗ action — иначе CTA обманула бы («задач
+   вообще нет» vs «нет по этому фильтру»).
    ============================================================================ */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Button, MonoId, Mono, ExecutorBadge, StatusChip,
   Drawer, EmptyState, LoadingState, ErrorState, KitIcon,
@@ -583,6 +591,8 @@ function TaskDetailPanel({ taskId, onClose, onActionDone }) {
 }
 
 function InboxScreen() {
+  // T-0598 (находка №7): honest CTA на пустом инбоксе вкладки «Все».
+  const navigate = useNavigate();
   const [tab, setTab] = useState("all");
   const [exec, setExec] = useState(null); // executor-type filter: agent|human|service|null
   const [sortSla, setSortSla] = useState(false); // sort by SLA headroom ascending
@@ -787,11 +797,30 @@ function InboxScreen() {
         ) : items === null ? (
           <LoadingState label="Загрузка задач…" />
         ) : items.length === 0 ? (
-          <EmptyState
-            icon={<Icon name="inbox" />}
-            title="Задач нет"
-            description="Новые задачи появятся здесь, как только процессы их создадут."
-          />
+          // T-0598 (находка №7): различаем «вообще пусто у тенанта» (вкладка
+          // «Все» без активного фильтра исполнителя, реальный tenant-wide
+          // ноль по counts.all) от «пусто по этой вкладке/фильтру» — только
+          // первое honest-CTA «Открыть процессы»; второе получает
+          // уточняющий текст без action, чтобы не обещать несуществующий
+          // выход из фильтра.
+          tab === "all" && !exec && counts.all === 0 ? (
+            <EmptyState
+              icon={<Icon name="inbox" />}
+              title="Задач нет"
+              description="Задачи появляются, когда запускаются процессы."
+              action={
+                <Button variant="secondary" size="sm" onClick={() => navigate('/processes')}>
+                  Открыть процессы
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon={<Icon name="inbox" />}
+              title="Нет задач в этой вкладке"
+              description="Попробуйте другую вкладку или снимите фильтр по исполнителю."
+            />
+          )
         ) : (
           <table className="chs-itable">
             <colgroup>
