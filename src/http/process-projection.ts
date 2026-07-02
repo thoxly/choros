@@ -217,9 +217,61 @@ export interface InstanceInboxTask {
 }
 
 // ---------------------------------------------------------------------------
+// T-0575 [W1/деТЭЛ] BUG-015: config-primitive fallback defaults.
+//
+// PRINCIPLE (ADR-T0575 §2.1): the base (process.started) task's role/step/name
+// are resolved from the LIVE engine's active user-task (candidateGroups[0]/name)
+// at start time — see appendProcessStarted's callers (process-start.ts,
+// records.ts), which now read flowable.getActiveUserTasks(instanceId) BEFORE
+// calling appendProcessStarted and pass the resolved values through. The
+// constants below survive ONLY as the NAMED, configurable fallback used when the
+// engine is unreachable, the instance has no active user-task yet, or
+// candidateGroups/name come back empty — never as the unconditional value.
+//
+// CONFIGURABLE (not a second hardcoded literal): resolveDefaultApproverRole()
+// reads CHOROS_DEFAULT_APPROVER_ROLE (env), defaulting to "role-approver" for
+// backward compatibility with the ТЭЛ seed (tel-linear.bpmn20.xml candidateGroups
+// ="role-approver"). This is the SINGLE source of truth for the fallback role —
+// dispatch-outcome.ts (BUG-015-agent, AC-11) imports it rather than re-hardcoding
+// the string a second time.
+// ---------------------------------------------------------------------------
+
+/**
+ * T-0575 config-primitive: the fallback approver role used ONLY when the live
+ * engine's active user-task cannot be resolved (unreachable engine, no active
+ * task yet, or empty candidateGroups). Env `CHOROS_DEFAULT_APPROVER_ROLE`,
+ * defaulting to the ТЭЛ seed value "role-approver" for backward compatibility.
+ * Not read in src/core/ (no-env-in-core.sh boundary) — this module is src/http/.
+ */
+export function resolveDefaultApproverRole(): string {
+  const v = process.env["CHOROS_DEFAULT_APPROVER_ROLE"];
+  return v !== undefined && v.trim() !== "" ? v : APPROVER_ROLE;
+}
+
+/**
+ * T-0575 config-primitive: the fallback step/task-name label pair used ONLY when
+ * the live engine's active user-task name is unavailable. Env
+ * `CHOROS_DEFAULT_APPROVE_STEP` / `CHOROS_DEFAULT_APPROVE_TASK_NAME`, defaulting
+ * to the ТЭЛ seed labels for backward compatibility.
+ */
+export function resolveDefaultApproveStep(): string {
+  const v = process.env["CHOROS_DEFAULT_APPROVE_STEP"];
+  return v !== undefined && v.trim() !== "" ? v : APPROVE_STEP;
+}
+
+/** @see resolveDefaultApproveStep */
+export function resolveDefaultApproveTaskName(): string {
+  const v = process.env["CHOROS_DEFAULT_APPROVE_TASK_NAME"];
+  return v !== undefined && v.trim() !== "" ? v : APPROVE_TASK_NAME;
+}
+
+// ---------------------------------------------------------------------------
 // Defaults — the canonical linear ТЭЛ U4 approval task (BPMN task-approve,
-// candidateGroups="role-approver"). The projection seeds these so a started
-// telLinear instance surfaces its waiting approval task to the approver role.
+// candidateGroups="role-approver"). Retained as the NAMED values the config
+// primitives above default to (ТЭЛ-compatibility, ADR §3) — no longer read
+// directly as the unconditional value on the base-task projection path (that
+// now goes through resolveDefaultApproverRole/resolveDefaultApproveStep/
+// resolveDefaultApproveTaskName, which fall back to these same strings).
 // ---------------------------------------------------------------------------
 
 /** candidateGroups of the U4 approval user-task (tel-linear.bpmn20.xml). */
@@ -281,9 +333,13 @@ export async function appendProcessStarted(
   },
 ): Promise<string> {
   const taskId = randomUUID();
-  const role = args.approverRole ?? APPROVER_ROLE;
-  const step = args.step ?? APPROVE_STEP;
-  const taskName = args.taskName ?? APPROVE_TASK_NAME;
+  // T-0575 BUG-015: callers now pass the LIVE engine's candidateGroups[0]/name
+  // (read via flowable.getActiveUserTasks) when available; these config-primitive
+  // fallbacks apply ONLY when the caller omits the field (engine unreachable, no
+  // active user-task yet, or empty candidateGroups/name at the call site).
+  const role = args.approverRole ?? resolveDefaultApproverRole();
+  const step = args.step ?? resolveDefaultApproveStep();
+  const taskName = args.taskName ?? resolveDefaultApproveTaskName();
 
   // --- 1. process.started (projection seed — FROZEN shape, must not change) ---
   const input: AuditEventInput = {

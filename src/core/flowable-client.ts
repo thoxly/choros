@@ -859,6 +859,44 @@ export function makeFlowableClient(
   // approve handler can resolve the correct engine task by taskDefinitionKey
   // (e.g. "task-approve") rather than blindly taking whatever is first.
   // -------------------------------------------------------------------------
+  /**
+   * T-0575 [W1/деТЭЛ] BUG-015 fix-of-fix: the `GET /runtime/tasks` LIST/query
+   * endpoint response items do NOT carry `candidateGroups`/`involvedPeople`
+   * inline (empirically confirmed against flowable/flowable-rest:7.1.0 — the
+   * list endpoint's TaskResponse omits identity links entirely; only
+   * `GET /runtime/tasks/{taskId}/identitylinks` returns them, as
+   * `[{type:"candidate", group:"<slug>", user:null}, ...]`). The
+   * defensive `t["involvedPeople"] ?? t["candidateGroups"]` read below is kept
+   * as a forward-compatible fallback (harmless if a future Flowable version or
+   * a differently-configured REST layer DOES embed them inline), but the
+   * PRIMARY source is now a per-task identity-links fetch — best-effort, in
+   * parallel, one extra round-trip per active task. A failed identity-links
+   * fetch for one task degrades that task's candidateGroups to `[]` (the
+   * caller's ?? APPROVER_ROLE / resolveDefaultApproverRole() fallback applies)
+   * — it does NOT fail the whole getActiveUserTasks call.
+   */
+  async function fetchTaskCandidateGroups(taskId: string): Promise<string[]> {
+    if (taskId === "") return [];
+    try {
+      const url = `${resolved.baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}/identitylinks`;
+      const resp = await globalThis.fetch(url, {
+        method: "GET",
+        headers: { Authorization: auth },
+      });
+      if (resp.status !== 200) return [];
+      const links = (await resp.json()) as unknown;
+      if (!Array.isArray(links)) return [];
+      return (links as Array<Record<string, unknown>>)
+        .filter((l) => l["type"] === "candidate" && typeof l["group"] === "string" && l["group"] !== "")
+        .map((l) => String(l["group"]));
+    } catch {
+      // Best-effort: engine unreachable/slow for this ONE identity-link lookup
+      // degrades to no candidateGroups for this task (config-primitive fallback
+      // applies at the caller) — never throws.
+      return [];
+    }
+  }
+
   async function getActiveUserTasks(instanceId: string): Promise<GetActiveUserTasksResult> {
     return withRetry(async () => {
       const url = `${resolved.baseUrl}/runtime/tasks?processInstanceId=${encodeURIComponent(instanceId)}`;
@@ -872,13 +910,14 @@ export function makeFlowableClient(
         if (!Array.isArray(items)) {
           return { ok: true as const, tasks: [] };
         }
-        const tasks: ActiveUserTask[] = items.map((t) => {
-          // candidateGroups: Flowable returns an array of objects {url, groupId} or strings.
-          // Normalize to a string array of group identifiers.
+        const tasks: ActiveUserTask[] = await Promise.all(items.map(async (t) => {
+          const taskId = String(t["id"] ?? "");
+          // Forward-compatible inline fallback (see doc-comment above): normalize
+          // {url, groupId} objects or plain strings to a string array.
           const rawGroups = t["involvedPeople"] ?? t["candidateGroups"] ?? [];
-          let candidateGroups: string[] = [];
+          let inlineCandidateGroups: string[] = [];
           if (Array.isArray(rawGroups)) {
-            candidateGroups = (rawGroups as unknown[]).map((g) => {
+            inlineCandidateGroups = (rawGroups as unknown[]).map((g) => {
               if (typeof g === "string") return g;
               if (g !== null && typeof g === "object") {
                 const obj = g as Record<string, unknown>;
@@ -887,13 +926,18 @@ export function makeFlowableClient(
               return String(g);
             }).filter((s) => s.length > 0);
           }
+          // PRIMARY source: per-task identity-links fetch (empirically the only
+          // source flowable-rest 7.1.0's LIST endpoint actually supports).
+          const candidateGroups = inlineCandidateGroups.length > 0
+            ? inlineCandidateGroups
+            : await fetchTaskCandidateGroups(taskId);
           return {
-            id: String(t["id"] ?? ""),
+            id: taskId,
             taskDefinitionKey: String(t["taskDefinitionKey"] ?? ""),
             name: String(t["name"] ?? ""),
             candidateGroups,
           };
-        });
+        }));
         return { ok: true as const, tasks };
       }
       return { ok: false, code: httpStatusToCode(resp.status) };

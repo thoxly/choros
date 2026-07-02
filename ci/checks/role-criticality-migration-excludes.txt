@@ -51,3 +51,4 @@
 115_assistant_agent_card_backfill # T-0574 — BYO-LLM binding gap: backfill agent_card row for existing assistant-agent employees (INSERT backfill, no new tenant table); owned by register.ts assistant seam
 116_composite_fk_set_null_columns # T-0574 — schema defect fix: composite ON DELETE SET NULL was nulling NOT-NULL tenant_id on agent_card/spend_ledger/application FKs (094/107/113) → column-scoped SET NULL
 117_default_read_grant_backfill # T-0570 — READ-PDP default-open grant backfill: pure INSERT…SELECT FROM choros.tenant seed (role-reader + role_assignment + read/record grant, no DDL, no new tenant table); owned by src/core/read-visibility.ts + src/http/records.ts
+119_process_app_binding_target_registry_slug # T-0575 — деТЭЛизация BUG-017: ALTER TABLE process_app_binding ADD COLUMN target_registry_slug (nullable, additive) + ТЭЛ-binding data-completion UPDATE; owned by src/db/step-applier.ts + src/db/process-instance-resolver.ts

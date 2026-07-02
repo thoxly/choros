@@ -191,6 +191,7 @@ _dc_mig109_failed=0                                                             
 _dc_mig115_failed=0                                                                # T0574-DC-MIG115-GUARD track when 115 triggers the FF-DC7 fail
 _dc_mig116_failed=0                                                                # T0574-DC-MIG116-GUARD track when 116 triggers the FF-DC7 fail
 _dc_mig117_failed=0                                                                # T0570-DC-MIG117-GUARD track when 117 triggers the FF-DC7 fail
+_dc_mig119_failed=0                                                                # T0575-DC-MIG119-GUARD track when 119 triggers the FF-DC7 fail
 for m in ${NEW_MIGRATIONS}; do
   if [[ ! "${m}" =~ ^migrations/031_.*confirmed2_by.*\.sql$ ]]; then
     echo "FAIL [FF-DC7]: unexpected migration touched by T-0044: '${m}' (only 031_*confirmed2_by*.sql allowed)"
@@ -251,6 +252,10 @@ for m in ${NEW_MIGRATIONS}; do
     if [[ "${m}" == "migrations/117_default_read_grant_backfill.sql" ]]; then # T0570-DC-MIG117-GUARD
       _dc_mig117_failed=1                                                     # T0570-DC-MIG117-GUARD
     fi                                                                        # T0570-DC-MIG117-GUARD
+    # Track specifically when 119 triggers this FAIL (and nothing else).     # T0575-DC-MIG119-GUARD
+    if [[ "${m}" == "migrations/119_process_app_binding_target_registry_slug.sql" ]]; then # T0575-DC-MIG119-GUARD
+      _dc_mig119_failed=1                                                     # T0575-DC-MIG119-GUARD
+    fi                                                                        # T0575-DC-MIG119-GUARD
   fi
 done
 # T-0244: additive relief for migration 073_vendor_crm_seed.sql — pure INSERT seed
@@ -624,6 +629,28 @@ if [[ "${_dc_mig117_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mi
     echo "PASS [FF-DC7-T0570-read-pdp-grant-backfill]: migration 117_default_read_grant_backfill.sql is a pure INSERT…SELECT seed (role-reader + role_assignment + read/record grant rows, confirmed_by='migration-117') — NO CREATE TABLE/RLS/POLICY, does NOT touch confirmed2_by/dual-control authority machinery — relief granted" # T0570-DC-MIG117-GUARD
   fi                                                                           # T0570-DC-MIG117-GUARD
 fi                                                                             # T0570-DC-MIG117-GUARD
+# T-0575: additive relief for migration 119_process_app_binding_target_registry_slug.sql. # T0575-DC-MIG119-GUARD
+# 119 ALTERs the EXISTING process_app_binding table (075/082 precedent),      # T0575-DC-MIG119-GUARD
+# adding ONE nullable column (target_registry_slug) + a keyed, idempotent     # T0575-DC-MIG119-GUARD
+# UPDATE completing the ТЭЛ binding row's data. No new TABLE, no new RLS      # T0575-DC-MIG119-GUARD
+# policy, no confirmed2_by touch — UNRELATED to the dual-control authority    # T0575-DC-MIG119-GUARD
+# domain (grant/confirmation/confirmed2_by). Same class as the 082 relief.    # T0575-DC-MIG119-GUARD
+_dc_mig119_stem="migrations/119_process_app_binding_target_registry_slug.sql"     # T0575-DC-MIG119-GUARD
+if [[ "${_dc_mig119_failed}" -eq 1 ]] && echo "${CHANGED}" | grep -qxF "${_dc_mig119_stem}"; then # T0575-DC-MIG119-GUARD
+  _dc_mig119_content="$(awk '/^[[:space:]]*--/{next}1' "${PROJECT_ROOT}/${_dc_mig119_stem}" 2>/dev/null || true)"  # T0575-DC-MIG119-GUARD
+  _dc_mig119_bad=0                                                             # T0575-DC-MIG119-GUARD
+  if echo "${_dc_mig119_content}" | grep -iqE "(CREATE|DROP)[[:space:]]+TABLE|ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|CREATE[[:space:]]+POLICY"; then # T0575-DC-MIG119-GUARD
+    _dc_mig119_bad=1                                                           # T0575-DC-MIG119-GUARD introduces DDL/RLS
+  fi                                                                           # T0575-DC-MIG119-GUARD
+  if echo "${_dc_mig119_content}" | grep -iqE "confirmed2_by"; then           # T0575-DC-MIG119-GUARD
+    _dc_mig119_bad=1                                                           # T0575-DC-MIG119-GUARD touches confirmed2_by invariant
+  fi                                                                           # T0575-DC-MIG119-GUARD
+  if [[ "${_dc_mig119_bad}" -eq 0 ]]; then                                    # T0575-DC-MIG119-GUARD
+    ERRORS=$(( ERRORS - 1 ))                                                   # T0575-DC-MIG119-GUARD cancel false-red
+    _dc_mig119_failed=0                                                        # T0575-DC-MIG119-GUARD
+    echo "PASS [FF-DC7-T0575-target-registry-slug]: migration 119_process_app_binding_target_registry_slug.sql adds ONE nullable column to process_app_binding + a keyed data-completion UPDATE — does NOT touch dual-control authority domain (grant/confirmation/confirmed2_by) — relief granted" # T0575-DC-MIG119-GUARD
+  fi                                                                           # T0575-DC-MIG119-GUARD
+fi                                                                             # T0575-DC-MIG119-GUARD
 # The 031 migration must be additive ALTER TABLE ADD COLUMN only — no CREATE TABLE, no RLS.
 MIG031="${PROJECT_ROOT}/migrations/031_grant_confirmed2_by.sql"
 if [[ -f "${MIG031}" ]]; then

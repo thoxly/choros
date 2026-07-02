@@ -63,6 +63,11 @@ import {
   validateFormSubmit,
   type FormSubmitValidationResult,
 } from "../core/form-submit-validator.js";
+// T-0575 [W1/деТЭЛ] BUG-017 (AC-7): the fail-honest typed error for an
+// unresolved step-result target — HttpError is already imported from
+// src/http/router.js by src/db/org.ts (sanctioned precedent; router.ts has zero
+// internal deps, so this is not a layering violation).
+import { HttpError } from "../http/router.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,12 +75,62 @@ import {
 
 /**
  * The slug of the «Согласование» (approvals) registry seeded under an application
- * that hosts an approval process. The applier resolves the approvals registry by
- * THIS slug under the instance's applicationId — NOT by the resolver's primary
- * target.registryId (which is the «Заявки» registry). Seeded by migration
+ * that hosts an approval process. Retained as the NAMED DEFAULT VALUE that
+ * resolveDefaultStepResultSlug() falls back to — no longer the unconditional
+ * code-path (T-0575 [W1/деТЭЛ] BUG-017; ADR-T0575 §2.3). Seeded by migration
  * 076_soglasovanie_registry_seed.sql (a DATA row, NOT a new table).
  */
 export const SOGLASOVANIE_SLUG = "soglasovanie" as const;
+
+/**
+ * T-0575 config-primitive (BUG-017): the fallback step-result registry slug used
+ * ONLY when a process_app_binding row has NO explicit `target_registry_slug`
+ * (migration 119, NULL = "use the default"). Env
+ * `CHOROS_DEFAULT_STEP_RESULT_SLUG`, defaulting to "soglasovanie" for backward
+ * compatibility with the ТЭЛ seed (076/085). Not read in src/core/ (no-env-in-
+ * core.sh boundary) — this module is src/db/.
+ */
+export function resolveDefaultStepResultSlug(): string {
+  const v = process.env["CHOROS_DEFAULT_STEP_RESULT_SLUG"];
+  return v !== undefined && v.trim() !== "" ? v : SOGLASOVANIE_SLUG;
+}
+
+/**
+ * T-0575 [W1/деТЭЛ] BUG-017 (AC-7): typed, structured error for the fail-honest
+ * "step requires a target-result registry but none is configured" case. Replaces
+ * the old bare `throw new Error(...)` (a plain Error that the router mapped to
+ * a bare 500 INTERNAL with no diagnostic code — the BUG-017 symptom). The
+ * approve handler (inbox.ts) lets this propagate to the router's HttpError
+ * branch, which maps it to the codebase-wide `{error:{code,message}}` envelope
+ * at the STATUS this class carries (422 — configuration incomplete, not a
+ * transient 5xx). The tx ROLLBACK / fail-closed SEMANTICS are UNCHANGED — only
+ * the error's observability improves (structured code + logged context).
+ */
+export class StepTargetUnresolvedError extends HttpError {
+  constructor(detail: {
+    readonly tenantId: string;
+    readonly processKey: string;
+    readonly applicationId: string;
+    readonly expectedSlug: string;
+  }) {
+    super(
+      422,
+      "STEP_TARGET_UNRESOLVED",
+      `no step-result target registry is configured for process ${JSON.stringify(detail.processKey)} ` +
+        `under application ${detail.applicationId} (expected registry slug ${JSON.stringify(detail.expectedSlug)}) — ` +
+        `configure choros.process_app_binding.target_registry_slug for this (process, application) pair`,
+    );
+    this.name = "StepTargetUnresolvedError";
+    // Non-fatal, structured console log with diagnostic context (BUG-017: "not a
+    // silent 500" — the operator sees tenantId/processKey/applicationId/expectedSlug).
+    console.warn(
+      `[step-applier T-0575 STEP_TARGET_UNRESOLVED] tenantId=${detail.tenantId} ` +
+        `processKey=${detail.processKey} applicationId=${detail.applicationId} ` +
+        `expectedSlug=${detail.expectedSlug} — no «Согласование»-equivalent registry ` +
+        `resolved; failing closed (FF-G3), approve tx will ROLLBACK`,
+    );
+  }
+}
 
 /** The outbox event type emitted for an applied step. */
 export const STEP_APPLIED_EVENT = "step_applied" as const;
@@ -184,15 +239,21 @@ interface ApprovalsRegistryRow {
 }
 
 /**
- * Resolve the «Согласование» (approvals) registry for an application by its
- * well-known slug. Runs on the caller's open tenant-tx client (RLS-scoped). The
- * BYPASSRLS double-predicate (explicit WHERE tenant_id = $1) mirrors the resolver.
- * Returns null when the application has no approvals registry seeded.
+ * Resolve the step-result target registry for an application by a SLUG that the
+ * caller has ALREADY resolved (T-0575 BUG-017: from process_app_binding.
+ * target_registry_slug, falling back to resolveDefaultStepResultSlug() when the
+ * binding carries no explicit override — see applyStepResult below). This
+ * function itself does NOT default the slug; it is a pure by-slug lookup so it
+ * can resolve ANY configured registry, not only the ТЭЛ-named "soglasovanie"
+ * one (ADR §2.3, AC-6). Runs on the caller's open tenant-tx client (RLS-scoped).
+ * The BYPASSRLS double-predicate (explicit WHERE tenant_id = $1) mirrors the
+ * resolver. Returns null when the application has no registry with this slug.
  */
 async function resolveApprovalsRegistry(
   client: pg.PoolClient,
   tenantId: string,
   applicationId: string,
+  slug: string,
 ): Promise<ApprovalsRegistryRow | null> {
   const res = await client.query<ApprovalsRegistryRow>(
     `SELECT id, application_id
@@ -201,7 +262,7 @@ async function resolveApprovalsRegistry(
         AND application_id = $2
         AND slug = $3
       LIMIT 1`,
-    [tenantId, applicationId, SOGLASOVANIE_SLUG],
+    [tenantId, applicationId, slug],
   );
   const row = res.rows[0];
   if (!row || !isUuid(row.id)) return null;
@@ -388,8 +449,11 @@ async function loadFormBindingForValidation(
   // block the submit. Catch only the schema-load section to keep the fail-closed
   // posture on the binding load above.
   try {
-    const appBindingRes = await client.query<{ application_id: string }>(
-      `SELECT application_id
+    const appBindingRes = await client.query<{
+      application_id: string;
+      target_registry_slug: string | null;
+    }>(
+      `SELECT application_id, target_registry_slug
          FROM choros.process_app_binding
         WHERE tenant_id = $1
           AND process_key = $2
@@ -398,6 +462,13 @@ async function loadFormBindingForValidation(
     );
     const appRow = appBindingRes.rows[0];
     if (appRow && isUuid(appRow.application_id)) {
+      // T-0575 BUG-017: resolve the SAME per-binding slug applyStepResult uses
+      // (explicit override, else the config-primitive default) — not the
+      // hardcoded ТЭЛ constant unconditionally.
+      const schemaSlug =
+        appRow.target_registry_slug && appRow.target_registry_slug.trim() !== ""
+          ? appRow.target_registry_slug
+          : resolveDefaultStepResultSlug();
       const schemaRes = await client.query<{ record_schema: unknown }>(
         `SELECT record_schema
            FROM choros.registry_def
@@ -405,7 +476,7 @@ async function loadFormBindingForValidation(
             AND application_id = $2
             AND slug = $3
           LIMIT 1`,
-        [tenantId, appRow.application_id, SOGLASOVANIE_SLUG],
+        [tenantId, appRow.application_id, schemaSlug],
       );
       const schemaRow = schemaRes.rows[0];
       if (schemaRow) {
@@ -564,20 +635,39 @@ export async function applyStepResult(
     };
   }
 
-  // --- A-branch: append a NEW record into the «Согласование» registry.
+  // --- A-branch: append a NEW record into the step-result registry.
+  //
+  // T-0575 [W1/деТЭЛ] BUG-017: resolve the target-result registry SLUG from the
+  // instance's process_app_binding row (target.targetRegistrySlug — set when the
+  // binding has an explicit override, migration 119), falling back to the
+  // config-primitive default ONLY when the binding carries no override. This
+  // replaces the unconditional SOGLASOVANIE_SLUG literal (ADR §2.3, AC-6): a
+  // binding naming an ARBITRARY registry slug now resolves to THAT registry,
+  // not only the ТЭЛ-named "soglasovanie" one.
+  const resolvedSlug = target.targetRegistrySlug ?? resolveDefaultStepResultSlug();
   const approvals = await resolveApprovalsRegistry(
     client,
     tenantId,
     target.applicationId,
+    resolvedSlug,
   );
   if (approvals === null) {
-    // The application is bound but has no «Согласование» registry seeded. A step
-    // that resolved an application IS expected to write an approval record — fail
-    // closed so a misconfigured app does not silently swallow the step result.
-    throw new Error(
-      `applyStepResult: application ${target.applicationId} has no «Согласование» ` +
-        `(slug='${SOGLASOVANIE_SLUG}') registry — failing closed (FF-G3)`,
-    );
+    // T-0575 BUG-017 (AC-7): the application is bound but has no registry with
+    // the resolved slug seeded. A step that resolved an application IS expected
+    // to write a step-result record — fail closed (FF-G3 semantics UNCHANGED),
+    // but now with a STRUCTURED, typed error (code STEP_TARGET_UNRESOLVED, 422)
+    // instead of a bare Error mapped to an undiagnosable 500 (the BUG-017
+    // "500 without a log" symptom) — the approve handler (inbox.ts) lets this
+    // propagate to the router's HttpError branch, which builds the
+    // {error:{code,message}} envelope; a structured console.warn with
+    // tenantId/processKey/applicationId/expectedSlug context is emitted by the
+    // error constructor itself (not swallowed).
+    throw new StepTargetUnresolvedError({
+      tenantId,
+      processKey: procKey,
+      applicationId: target.applicationId,
+      expectedSlug: resolvedSlug,
+    });
   }
 
   const recordId = randomUUID();

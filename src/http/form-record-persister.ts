@@ -87,7 +87,8 @@ interface ApplicationRow {
 
 /**
  * Maps a form id ("purchase" | "approval") to the registry_def slug used to
- * look up the governing registry under the "tel-approval" application.
+ * look up the governing registry under the resolved application (see
+ * resolveTelApplicationSlug below).
  *
  * This mapping is the SINGLE canonical anchor that collapses the triple:
  *   form_binding.fields (process routing) → demoted to routing hint
@@ -96,14 +97,43 @@ interface ApplicationRow {
  *
  * Extending to new forms: add an entry here and seed the registry_def via the
  * registry-def API or a migration. No separate schema maintenance needed.
+ *
+ * T-0575 [W1/деТЭЛ] BUG-017 §2.5: "purchase" keeps its pre-existing literal
+ * ("purchases" — never a ТЭЛ-osадок in the spec's own list, only "approval"/
+ * "soglasovanie" and the application slug were named). "approval" now resolves
+ * through resolveDefaultApprovalRegistrySlug() (config-primitive, below) rather
+ * than a bare literal in this map — the ТЭЛ value "soglasovanie" survives ONLY
+ * as that function's configurable default, not as an unconditional map entry.
  */
 const FORM_TO_REGISTRY_SLUG: Readonly<Record<string, string>> = Object.freeze({
   purchase: "purchases",
-  approval: "soglasovanie",
 });
 
-/** Slug of the application that hosts the ТЭЛ forms (migration 076). */
-const TEL_APPLICATION_SLUG = "tel-approval" as const;
+/**
+ * T-0575 config-primitive (BUG-017 §2.5 dedup): the fallback "Согласование"
+ * registry slug used by the "approval" form. Configurable via env
+ * `CHOROS_DEFAULT_STEP_RESULT_SLUG` — the SAME config-primitive step-applier.ts's
+ * resolveDefaultStepResultSlug() reads, so the ТЭЛ value "soglasovanie" lives in
+ * exactly ONE configuration point across both call sites (approve step-result AND
+ * form-submit persistence), not two independently-hardcoded copies.
+ */
+function resolveApprovalFormRegistrySlug(): string {
+  const v = process.env["CHOROS_DEFAULT_STEP_RESULT_SLUG"];
+  return v !== undefined && v.trim() !== "" ? v : "soglasovanie";
+}
+
+/**
+ * T-0575 config-primitive (BUG-017 §2.5): the slug of the application that
+ * hosts the ТЭЛ forms (migration 076), now READ from env
+ * `CHOROS_TEL_APPLICATION_SLUG` with a backward-compatible default — this
+ * module's application-slug resolution is NO LONGER the sole, unconditional
+ * code path for the value; an operator can override which application a form
+ * persists under without a code change.
+ */
+function resolveTelApplicationSlug(): string {
+  const v = process.env["CHOROS_TEL_APPLICATION_SLUG"];
+  return v !== undefined && v.trim() !== "" ? v : "tel-approval";
+}
 
 // ---------------------------------------------------------------------------
 // UUID shape guard (R-2 parity with records.ts — prevents SQL injection via
@@ -177,8 +207,11 @@ export function makeFormRecordPersister(
     formId: string,
     data: Record<string, unknown>,
   ): Promise<string> => {
-    // 1. Resolve the registry slug for this form.
-    const registrySlug = FORM_TO_REGISTRY_SLUG[formId];
+    // 1. Resolve the registry slug for this form. T-0575: "approval" resolves
+    //    via the shared config-primitive (resolveApprovalFormRegistrySlug), not
+    //    a hardcoded map entry.
+    const registrySlug =
+      formId === "approval" ? resolveApprovalFormRegistrySlug() : FORM_TO_REGISTRY_SLUG[formId];
     if (!registrySlug) {
       // Unknown form — the route handler already rejects UNKNOWN_FORM via
       // getFormDef() before calling persist. This path is defensive only.
@@ -191,19 +224,20 @@ export function makeFormRecordPersister(
     // 3–5. Open a tenant-scoped tx and write the record + audit event.
     const recordId = randomUUID();
     const nowMs = Date.now();
+    const applicationSlug = resolveTelApplicationSlug();
 
     await withTenantTx(pool, tenantId, async (client) => {
-      // 3a. Resolve the application by slug ("tel-approval").
+      // 3a. Resolve the application by slug (config-primitive default, T-0575).
       const appRes = await client.query<ApplicationRow>(
         `SELECT id FROM choros.application
           WHERE tenant_id = $1 AND slug = $2
           LIMIT 1`,
-        [tenantId, TEL_APPLICATION_SLUG],
+        [tenantId, applicationSlug],
       );
       const app = appRes.rows[0];
       if (!app) {
         throw new Error(
-          `form-record-persister: application '${TEL_APPLICATION_SLUG}' not found ` +
+          `form-record-persister: application '${applicationSlug}' not found ` +
           `for tenant ${tenantId} — is migration 076 applied?`,
         );
       }
@@ -226,7 +260,7 @@ export function makeFormRecordPersister(
           404,
           "NOT_FOUND",
           `form-record-persister: registry_def slug='${registrySlug}' not found ` +
-          `under application '${TEL_APPLICATION_SLUG}' for tenant ${tenantId}`,
+          `under application '${applicationSlug}' for tenant ${tenantId}`,
         );
       }
 
@@ -333,8 +367,9 @@ export function makeFormDefResolver(
     formId: string,
     actorSlug: string,
   ): Promise<import("../core/form-schema.js").FormDef | null> => {
-    // 1. Map formId → registry slug.
-    const registrySlug = FORM_TO_REGISTRY_SLUG[formId];
+    // 1. Map formId → registry slug (T-0575: "approval" via config-primitive).
+    const registrySlug =
+      formId === "approval" ? resolveApprovalFormRegistrySlug() : FORM_TO_REGISTRY_SLUG[formId];
     if (!registrySlug) {
       // Unknown form id — caller converts to 404.
       return null;
@@ -355,12 +390,12 @@ export function makeFormDefResolver(
       await client.query(`SET LOCAL choros.tenant_id = '${tenantId}'`);
       await client.query("SET LOCAL search_path TO choros");
 
-      // Resolve application.
+      // Resolve application (config-primitive default, T-0575).
       const appRes = await client.query<ApplicationRow>(
         `SELECT id FROM choros.application
           WHERE tenant_id = $1 AND slug = $2
           LIMIT 1`,
-        [tenantId, TEL_APPLICATION_SLUG],
+        [tenantId, resolveTelApplicationSlug()],
       );
       const app = appRes.rows[0];
       if (!app) {
