@@ -1,0 +1,60 @@
+{
+  "task_id": "T-0598",
+  "status": "pr_open",
+  "branch": "task/T-0598-first-steps",
+  "base": "dev@edff87e",
+  "ci_local": {
+    "build": true,
+    "lint": "n/a — no separate lint script observed for web/; vite build (npm run build) succeeded cleanly (516 modules transformed, 0 errors, only pre-existing chunk-size-warning)",
+    "types": "n/a — web/ has no tsconfig.json (plain JSX, not TS-compiled), same as documented in T-0597's own handoff",
+    "tests": true,
+    "fitness": "ux gates run directly (see ux_gates below); full root npm run fitness not re-run in this pass (server/src untouched by this diff, out of scope for a web-only UX fix — same rationale as T-0597)"
+  },
+  "test_summary": {
+    "web_vitest_full": "1172/1172 passed (2 pre-existing failing suites: apps-schema.test.js, records-form.test.js — missing 'ajv' npm package, confirmed pre-existing infra gap NOT introduced or touched by this diff, identical to the gap documented in T-0597's own handoff)",
+    "new_test_files": ["web/src/screens/screen-overview.test.jsx (24 tests)"],
+    "extended_test_files": [
+      "web/src/screens/screen-inbox.test.jsx (+6 tests: honest action-CTA AC-9/AC-10/AC-11; all 14 tests in the file green, including the 8 pre-existing T-0597 alert→toast tests unmodified)"
+    ],
+    "ux_gates": {
+      "ux-g6-no-new-hardcode --required": "PASS — 0 new hardcode/overlay findings",
+      "ux-g4-state-primitives --required": "PASS — 0 new hand-rolled loading/empty/error branches (new code uses LoadingState/conditional kit-primitive rendering)",
+      "ux-g2-theme-pairing": "PASS — light-default/dark-reachable intact (tokens.css untouched)",
+      "ux-g5-jargon-denylist --required": "FAIL but PRE-EXISTING — baseline dev already fails this gate in --required mode (28 findings, all T-id-in-describe-string inside .test.jsx files, a glob-scoping gap that matches test files alongside screens — same class as documented in T-0597's handoff). This diff adds ZERO new findings (verified: grep count for screen-overview/screen-inbox in the gate's output is 0). The gate as WIRED in package.json fitness chain runs WITHOUT --required (informational, exit 0) — actual CI is green."
+    }
+  },
+  "files_changed": [
+    "docs/specs/T-0598-first-steps.spec.md",
+    "docs/specs/T-0598.spec.contract.json",
+    "docs/adr/ADR-T0598.md",
+    "docs/adr/T-0598.adr.contract.json",
+    "web/src/screens/screen-overview.jsx",
+    "web/src/screens/screen-overview.test.jsx",
+    "web/src/screens/screen-inbox.jsx",
+    "web/src/screens/screen-inbox.test.jsx"
+  ],
+  "mechanism": {
+    "summary": "Zero new server endpoints. All checklist signals read from existing READ endpoints.",
+    "step_1_create_application": "GET /api/applications — reuses the screen's OWN already-fetched `apps` state (the same counter the 'Конструктор' tile already shows); not a second fetch. done = apps > 0.",
+    "step_2_connect_llm_key": "GET /api/agents + the pre-existing exported pure function resolveAssistantBinding(agents) from screen-llm-connections.jsx:176-184 (imported, not duplicated). Finds agent_type==='assistant', done = assistantConnectionId != null. Chosen over GET /api/llm-connections because that endpoint requires the llm_connection:configure capability (403s a non-admin tenant member); GET /api/agents is gated only by withAuth, so the step honestly resolves for any authenticated user.",
+    "step_3_ask_assistant": "GET /api/assistant/threads — done when threads.some(t => t.message_count > 0). Same list/shape the assistant screen itself renders.",
+    "step_4_optional_configure_rights": "GET /api/rights/tenant-state — rendered ONLY when can_manage===true resolved successfully; otherwise structurally absent from the list (mirrors the T-0572 ADR principle applied to write-forms: can_manage:false ⇒ absent, not disabled/unchecked). Excluded from the hide-criterion for the same reason.",
+    "degradation": "Each of the 3 mandatory signals is wrapped exactly like the screen's existing fetchCount() helper: any network/HTTP/parse failure resolves to null, never throws — the step stays visible without a checkmark and its CTA link remains clickable. The whole strip auto-hides (returns null) ONLY when all three mandatory signals are CONFIRMED true — a null/false/loading state keeps the strip visible, which is the safe default.",
+    "inbox_empty_state": "screen-inbox.jsx's EmptyState branch now inspects (tab, exec, counts.all) already held in component state — no new fetch. tab==='all' && !exec && counts.all===0 renders an action CTA (navigate('/processes'), route pre-existing in shell.jsx); every other combination renders a distinct 'empty in this view' message without the action, to avoid implying /processes would fix a filter-scoped empty view."
+  },
+  "fixes_summary": [
+    {
+      "id": "FR-1",
+      "finding": "№1 — Обзор молчит про критический путь владельца (приложение → LLM-ключ → ассистент)",
+      "diff": "screen-overview.jsx: новая секция FirstStepsStrip (non-blocking checklist, uxpatterns advanced/wizard onboarding-вариант) над сеткой плиток. Три обязательных шага + один опциональный (права), все — живые сигналы из существующих READ-эндпоинтов, честная деградация, авто-скрытие по данным."
+    },
+    {
+      "id": "FR-2",
+      "finding": "№7 — пустой инбокс ничему не учит (нет пути «запустить процесс»)",
+      "diff": "screen-inbox.jsx: EmptyState на вкладке «Все» при tenant-wide нуле получает action-CTA «Открыть процессы» → navigate('/processes'). Прочие вкладки/фильтры получают отдельный, честный, без-action текст."
+    }
+  ],
+  "deviations_from_spec": [],
+  "escalation": "Нет.",
+  "summary": "Полоса «Первые шаги» на Обзоре (находка №1) + честный action-CTA на пустом инбоксе (находка №7) из ux-loop-report-2026-07-02.md. Оба фикса чисто клиентские (web/src/screens/**), без новых эндпоинтов — все чек-сигналы читаются из уже существующих READ-путей (/api/applications, /api/agents + переиспользованный resolveAssistantBinding, /api/assistant/threads, /api/rights/tenant-state). Паттерны сверены через uxpatterns MCP (advanced/wizard non-blocking-вариант + user-feedback/empty-states first-use CTA). SPEC+DESIGN и BUILD — отдельными коммитами (8379e3d, dce510f) на ветке task/T-0598-first-steps поверх dev@edff87e. Полный web vitest 1172/1172 green (2 pre-existing infra failures, ajv-пакет, не в диффе); ux-g2/g4/g6 чисты; ux-g5 остаётся в исходном pre-existing informational состоянии — 0 новых находок этим диффом."
+}

@@ -58,3 +58,46 @@ describe('screen-inbox — alert() replaced by pushToast (AC-1/AC-2)', () => {
     expect(src).toContain("'Нет права на выполнение этого шага'");
   });
 });
+
+/**
+ * T-0598 (находка №7) — honest CTA on the tenant-wide-empty inbox path
+ * (AC-9/AC-10/AC-11). Same source-presence convention as above.
+ */
+describe('screen-inbox — honest action-CTA on empty state (AC-9/AC-10/AC-11)', () => {
+  it('imports useNavigate from react-router-dom', () => {
+    expect(src).toContain("import { useNavigate } from 'react-router-dom'");
+  });
+  it('InboxScreen invokes useNavigate()', () => {
+    expect(src).toMatch(/const\s+navigate\s*=\s*useNavigate\(\)/);
+  });
+  it('the tenant-wide-empty branch (tab==="all" && !exec && counts.all===0) renders an action CTA to /processes', () => {
+    const idx = src.indexOf('items.length === 0');
+    expect(idx).toBeGreaterThan(-1);
+    const emptyBlock = src.slice(idx, idx + 1800);
+    expect(emptyBlock).toMatch(/tab === "all" && !exec && counts\.all === 0/);
+    expect(emptyBlock).toContain("navigate('/processes')");
+    expect(emptyBlock).toContain('Открыть процессы');
+  });
+  it('the honest tenant-wide-empty description does not claim a filter-specific reason', () => {
+    const idx = src.indexOf('items.length === 0');
+    const emptyBlock = src.slice(idx, idx + 1800);
+    expect(emptyBlock).toContain('Задачи появляются, когда запускаются процессы.');
+  });
+  it('the fallback branch (other tabs / active exec filter) does NOT render the /processes action', () => {
+    const idx = src.indexOf('items.length === 0');
+    const emptyBlock = src.slice(idx, idx + 1800);
+    // the fallback EmptyState (second branch) must not itself carry an action prop —
+    // only the tenant-wide branch does. Assert the fallback title differs and has no action=.
+    expect(emptyBlock).toContain('Нет задач в этой вкладке');
+    const fallbackIdx = emptyBlock.indexOf('Нет задач в этой вкладке');
+    const fallbackSnippet = emptyBlock.slice(Math.max(0, fallbackIdx - 200), fallbackIdx + 200);
+    expect(fallbackSnippet).not.toContain('action=');
+  });
+  it('route /processes used by the CTA is a pre-existing app route (shell.jsx), not invented here', () => {
+    const shellFs = fs.default.readFileSync(
+      path.default.resolve(new URL(import.meta.url).pathname, '../../app-shell/shell.jsx'),
+      'utf-8',
+    );
+    expect(shellFs).toContain('path="/processes"');
+  });
+});

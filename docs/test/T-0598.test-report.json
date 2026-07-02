@@ -1,0 +1,106 @@
+{
+  "task_id": "T-0598",
+  "verdict": "pass",
+  "deterministic": {
+    "total": 1172,
+    "passed": 1172,
+    "failed": 0,
+    "_note": "web vitest полный: 1172/1172 tests passed, 57/59 suites passed. 2 падающие suite (apps-schema.test.js, records-form.test.js) НЕ входят в total — pre-existing инфра-разрыв (пакет 'ajv' физически отсутствует в node_modules), НЕ тронуты диффом (git diff dev...HEAD --name-only их не содержит), падают идентично на dev-базе; тот же разрыв в docs/test/T-0597.test-report.json. Не тестовые провалы T-0598."
+  },
+  "coverage_by_ac": [
+    {
+      "ac": "AC-1..AC-8 (FirstStepsStrip: 3 обязательных + опциональный шаг, живые сигналы, деградация, авто-скрытие, no-flicker)",
+      "test": "web/src/screens/screen-overview.test.jsx (НОВЫЙ, 24 теста, source-presence — проектная конвенция, vitest node без mount) :: import resolveAssistantBinding из screen-llm-connections.jsx + not.toMatch(function resolveAssistantBinding) [AC-3 импорт, не копия] · fetch('/api/agents') + fetch('/api/assistant/threads') + fetch('/api/rights/tenant-state') + not.toMatch(/api/onboarding) [NF-1 ноль новых API] · FirstStepsStrip exists + шаги 1-4 навигируют в /apps //llm-connections //assistant //rights + canManage===true-гейт шага 4 [AC-1/AC-5] · <FirstStepsStrip apps={apps} appsLoading={loading} navigate={navigate}/> wired [не осиротён] · FirstStepsStrip НЕ содержит fetch('/api/applications') + step1Done = typeof apps==='number' && apps>0 [AC-2 переиспользование, не 2-й фетч] · message_count>0 [AC-4] · ≥3 catch{return null} + if(!res.ok)return null [AC-6 деградация] · allMandatoryDone = step1Done&&step2Done&&step3Done + if(allMandatoryDone)return null + not.toMatch(localStorage) [AC-7] · loading?<LoadingState compact [AC-8 no-flicker] · <KitIcon name=check/> + var(--chs-color-success [ux-g4/g6]. Перегнан тестером независимо — 24/24 green.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-9/AC-10/AC-11 (honest action-CTA пустого инбокса + различение фильтр-пустоты + реальный /processes)",
+      "test": "web/src/screens/screen-inbox.test.jsx (+6 расширение, describe 'honest action-CTA on empty state') :: imports useNavigate from react-router-dom + InboxScreen invokes useNavigate() [AC-9 wiring] · tenant-wide-empty ветка (tab===\"all\" && !exec && counts.all===0) → navigate('/processes') + 'Открыть процессы' [AC-9] · honest description 'Задачи появляются, когда запускаются процессы.' не claim фильтр-причину [AC-10] · fallback-ветка (прочие вкладки/активный exec) содержит 'Нет задач в этой вкладке' и НЕ содержит action= в её сниппете [AC-10 не обманный CTA] · route /processes = pre-existing в shell.jsx (path=\"/processes\") [AC-11 не изобретён]. Перегнано — все 14 тестов файла green (вкл. 8 pre-existing T-0597 alert→toast).",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-12 (ux-g6 --required = 0 новых hardcode/overlay)",
+      "test": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required → '0 newly-added hardcode/overlay finding(s)', PASS [G6]. Перегнан тестером в REQUIRED-режиме (сильнее заявленного informational) — 0 находок на всём диффе, включая маркеры done/todo (success/success-soft/border), фон секции (surface), space/radius/text/tracking-токены.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-13 (ux-g5 = 0 находок на изменённом продуктовом тексте)",
+      "test": "bash ci/checks/ux/ux-g5-jargon-denylist.sh --required → 28 findings всего (informational, exit 0), ВСЕ в .test.jsx (T-id-in-describe/telLinear). Тестер выполнил КЛЮЧЕВУЮ проверку самостоятельно: grep вывода по изменённым продуктовым файлам (screen-overview.jsx, screen-inbox.jsx) БЕЗ test-файлов → 0 находок. Дифф не поднял и не понизил g5-baseline на видимом тексте. Новые строки ('Первые шаги', 'Создайте приложение', 'Подключите LLM-ключ', 'Спросите ассистента', 'Настройте права', 'Открыть процессы', 'Задачи появляются, когда запускаются процессы.', 'Нет задач в этой вкладке') — чистый продуктовый русский.",
+      "result": "pass"
+    },
+    {
+      "ac": "AC-14/AC-15 (web vitest полный green; T-0597 тесты нетронуты)",
+      "test": "npx vitest run (web) → 1172/1172 tests, 57/59 suites (2 pre-existing ajv-suite). AC-15 независимо: git diff dev...HEAD по screen-inbox.test.jsx показывает 0 удалённых строк в T-0597-describe-блоке ('alert() replaced by pushToast') — расширение чисто аддитивно (новый describe-блок дописан), все 8 pre-existing утверждений green без модификации. tsc: дифф не трогает ни одного .ts (только web/**.jsx + docs); web/ без tsconfig.json (plain JSX); root TypeScript/tsc N/A к этому диффу и недоступен в worktree.",
+      "result": "pass"
+    }
+  ],
+  "secondary_ux": [
+    {
+      "check": "npx vitest run (web, full suite)",
+      "result": "pass",
+      "note": "57 suites passed | 2 failed (59); 1172 tests passed | 0 failed. 2 failed suites = pre-existing 'Cannot find package ajv' (apps-schema.test.js, records-form.test.js) — НЕ тронуты диффом, падают идентично на dev, ajv физически отсутствует. Совпадает с pr-handoff (1172/1172)."
+    },
+    {
+      "check": "npx vitest run web/src/screens/screen-overview.test.jsx (FR-1, НОВЫЙ)",
+      "result": "pass",
+      "note": "24/24 (новый файл: AC-1..AC-8, source-presence)."
+    },
+    {
+      "check": "npx vitest run web/src/screens/screen-inbox.test.jsx (FR-2)",
+      "result": "pass",
+      "note": "14/14 (+6 расширение FR-2: honest CTA AC-9/AC-10/AC-11; 8 pre-existing T-0597 alert→toast unmodified и green)."
+    },
+    {
+      "check": "npx vite build (web)",
+      "result": "pass",
+      "note": "✓ built, 0 errors. 516 modules transformed. Только pre-existing chunk-size-warning (index-*.js 1.36MB > 500kB) — не введён этим диффом (bpmn-js в бандле). Не блокирует."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g6-no-new-hardcode.sh --required",
+      "result": "pass",
+      "note": "0 newly-added hardcode/overlay findings (required-режим). Все новые стили — var(--chs-*) только."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g4-state-primitives.sh --required",
+      "result": "pass",
+      "note": "0 newly-added hand-rolled state branch findings (required-режим). Loading шага=kit LoadingState compact; empty инбокса=kit EmptyState.action; done-маркер=kit KitIcon. Никаких hand-rolled state-branches."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g6 (ux-g2-theme-pairing.sh)",
+      "result": "pass",
+      "note": "PASS обе темы, оба token-source (tokens.css + form-theme.css не тронуты). Новые токены (success/success-soft/border/surface) определены в обеих темах."
+    },
+    {
+      "check": "bash ci/checks/ux/ux-g5-jargon-denylist.sh --required",
+      "result": "pass",
+      "note": "informational exit 0; 28 всего, ВСЕ в .test.jsx; 0 на изменённых продуктовых файлах (screen-overview.jsx/screen-inbox.jsx) — проверено grep-фильтром. Дифф не поднял baseline на видимом тексте."
+    },
+    {
+      "check": "root vitest smoke / tsc / fitness:db",
+      "result": "skip",
+      "note": "Дифф чисто web (.jsx), server/src (src/http/**) не тронут, ни одного .ts в дельте → root smoke/fitness:db не обязательны (задание: диф чисто web-UX). tsc N/A — нет TypeScript-поверхности в дельте; web/ без tsconfig; root toolchain не установлен в worktree. Web vitest (единственная релевантная поверхность) перегнан полностью."
+    }
+  ],
+  "failures": [],
+  "notes": {
+    "coverage_gaps_found": "None по автотестам. Один manual-only разрыв, вне тестового тира по конвенции проекта: LIVE_PROOF real-click обеих тем на живом стенде (полоса «Первые шаги» появляется у нового владельца и авто-исчезает у онбордженного; маркеры done/todo визуально различимы; honest-CTA пустого инбокса навигирует в /processes; F-1 flash-then-collapse у онбордженного — заметен ли) — не покрываем в vitest 'node' без DOM; доедет LIVE_PROOF-ом (D-064, manual). Все AC с verifiable_as=test/fitness/ci покрыты автоматически и перегнаны независимо.",
+    "adversarial_probe_rank_and_file": "ADVERSARIAL (рядовой сотрудник, тенант 0 приложений И can_manage=false — что видит на Обзоре): проверено СТРУКТУРНО чтением рендер-логики FirstStepsStrip (screen-overview.jsx:331-364), не только тестом. НЕ пустая полоса из 1 шага-ссылки без чеков: три обязательных StepRow (шаги 1-3) рендерятся БЕЗУСЛОВНО пока секция видима; единственный условный рендер — шаг 4 (canManage===true &&) и whole-strip return null на allMandatoryDone. Рядовой на 0-app тенанте видит полноценный 3-строчный чек-лист с ЖИВЫМИ чеками: шаг-1 без чека (apps=0), шаги 2-3 реальный статус (виден любому authed через /api/agents + /api/assistant/threads, оба гейтятся только withAuth → без 403-шумов), шаг-4 (права) СТРУКТУРНО отсутствует (не 'без чека'). Честно и не пусто. Дополнительно проверена серверная семантика counts.all для FR-2: src/http/inbox.ts:1097-1102 counts.all=base.length (findInboxItems(actor), полный tenant-scoped базовый набор), exec/tab-фильтры применяются ТОЛЬКО к filtered ПОСЛЕ (:1109-1112) → counts.all===0 честно = 'ноль задач у актора по тенанту' независимо от exec; предикат FR-2 (tab==='all' && !exec && counts.all===0) семантически верен; counts инициализирован {all:0,...} (:601) → не бросает.",
+    "anti_false_pass_checks_performed": [
+      "Не доверял заявленным counts — перегнал полный web vitest (1172/1172) и 2 целевых suite (overview 24 + inbox 14 = 38/38) с чистого запуска; совпадение с pr-handoff подтверждено.",
+      "Проверил, что 2 падающие suite — pre-existing и вне периметра: git diff dev...HEAD --name-only НЕ содержит apps-schema.test.js/records-form.test.js; ajv не объявлен в web/package.json (grep -c ajv = 0); git log dev..HEAD по этим файлам пуст — не тронуты этой веткой.",
+      "Проверил ux-g6 И ux-g4 в REQUIRED-режиме (не только заявленный informational) — оба 0 находок; строже, чем декларировал handoff.",
+      "Выполнил КЛЮЧЕВУЮ ux-g5-проверку самостоятельно: отфильтровал вывод гейта по изменённым продуктовым файлам (screen-overview.jsx, screen-inbox.jsx) БЕЗ test-файлов → 0 находок; подтвердил, что все 28 baseline — T-id-in-describe/telLinear в .test.jsx (легитимно).",
+      "Проверил ноль новых эндпоинтов независимо (сервер): GET /api/agents (agents-list.ts:269, withAuth, agent_type+llm_connection_id в проекции), GET /api/assistant/threads (assistant.ts:9, message_count :1245, ноль-message треды сервером СКРЫТЫ :36), GET /api/rights/tenant-state (rights-overview.ts:414, can_manage :452) — все существуют, ни один не тронут диффом.",
+      "Проверил честность переиспользования: resolveAssistantBinding импортирован (screen-overview.jsx:56), контракт binding.assistantConnectionId совпадает с экспортом (screen-llm-connections.jsx:176-184); обратного импорта нет → не циклический.",
+      "Проверил write-zone: git diff dev...HEAD --name-only = только docs/ + screen-overview.{jsx,test.jsx} + screen-inbox.{jsx,test.jsx}; server/src, components.jsx, screen-llm-connections.jsx не тронуты. Working tree чист.",
+      "Проверил AC-15 (T-0597 нетронуты): git diff по screen-inbox.test.jsx — 0 удалённых строк в T-0597-alert→toast-блоке, расширение чисто аддитивно.",
+      "Проверил крэш-безопасность инбокса: counts default {all:0,...} (screen-inbox.jsx:601), предикат не бросает; EmptyState.action — существующий kit-проп (components.jsx:464-470), контракт не изменён.",
+      "Проверил гигиену фазы: docs/adr/T-0598.adr.contract.json ПРИСУТСТВУЕТ (T-0597 флагил отсутствие как дефект); все 3 контракта валидный JSON; AC-нумерация spec.md↔spec.contract.json совпадает (15 AC, без дрейфа T-0597)."
+    ],
+    "residual_findings_nonblocking": [
+      "F-1 (info, ux/review): flash-then-collapse полосы у полностью онбордженного тенанта (рендерится со спиннерами до вычисления allMandatoryDone, затем схлопывается) — осознанный tradeoff no-localStorage; у целевой аудитории (не-онбордженные) верно. Опциональный фолоу-ап по итогам LIVE_PROOF.",
+      "F-2 (nit, ux): маркер done/todo шага aria-hidden — состояние завершённости сигнал только зрячим; приемлемо для декоративного глифа non-blocking hint-полосы; кандидат в a11y-полировку.",
+      "F-3 (info, ux/review): лейбл шага «Подключите LLM-ключ» vs CTA «Подключить ключ» (компактно роняет LLM) — консистентно с конвенцией, микронеровность голоса, не блокирует."
+    ]
+  }
+}
