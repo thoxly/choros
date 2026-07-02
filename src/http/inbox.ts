@@ -56,6 +56,8 @@ import {
   reconcileInboxEngineDriveOnRead,
   surfaceMessageCatchWaits,
   makeEngineMessageSubscriptionSource,
+  ENGINE_TASK_NOT_FOUND,
+  AMBIGUOUS_ACTIVE_TASK,
 } from "./process-projection.js";
 import {
   applyStepResult,
@@ -1633,64 +1635,116 @@ export function registerInboxRoutes(
         }
       });
 
-      // T-0443 / T-0522: engine-drive post-approve (fast-path; NEVER fails the response).
-      // Honest-degrade: if writeDepsFlowable is absent, no engine call is made — unchanged
-      // linear audit-only behaviour. The response is always 200 regardless of engine state.
+      // T-0443 / T-0522 / T-0571: engine-drive post-approve.
       //
-      // T-0522 (Option A hardening, ADR-T0432 §3.1): the reconcile is now a SINGLE named,
-      // idempotent, error-EXPLICIT operation (reconcileInstanceEngineDrive) shared with the
-      // reconcile-on-read net in GET /api/inbox. It completes the engine user-task for the
-      // approved step's defKey then reconciles the live token set (isInstanceEnded → emit
-      // instance.ended, else surface every gateway-spawned next_task incl. the 6M
-      // «Доп.согласование»). Unlike the old void IIFE it RETURNS engine errors instead of
-      // swallowing them — and even if THIS fast-path loses the timing race or hits a
-      // transient engine error, the reconcile-on-read net self-heals the missing task on
-      // the next inbox read (durability without a second queue).
+      // T-0571 (ADR-T0571-engine-drive-seam §2.3, BUG-014): completion of the base
+      // engine user-task is now SYNCHRONOUS to the HTTP response — the fire-and-forget
+      // `void (async…)()` IIFE is GONE for the completion step. The response is 200
+      // ONLY when the engine step is genuinely completed (or a legitimate idempotent
+      // repeat / engine-not-configured); otherwise it is a typed 502. This ends the
+      // "always 200 regardless of engine state" contract — that silent-200 WAS BUG-014
+      // (AC-7's "main evil": a false success the user could not distinguish from a real
+      // one). Fan-out of the NEXT task (post-completion "surface every live user-task")
+      // remains eventually-consistent — self-healed by reconcile-on-read (GET
+      // /api/inbox) — completion and fan-out are deliberately decoupled (ADR §2.3).
       //
-      // The gateway routing variable (approvalRequired / TEL_GATEWAY_VAR) is injected
-      // UPSTREAM at the tel-intake external-task seam (externalTaskBridge.ts) BEFORE this
-      // point; completeUserTask takes no variables — it only advances the already-routed
-      // token. The defKey-match poll guarantees we never complete a stale/wrong token.
+      // T-0443 Fix A / T-0571: `task.taskDefKey` is the projection's signal — a REAL
+      // engine defKey for process.next_task rows (e.g. "task-extra-approve" on the 6M
+      // gateway branch), or `null` for a base process.started row (T-0571
+      // resolve-by-instance: the base step's target engine task is resolved as "the
+      // active user-task of THIS instanceId", not by matching a ТЭЛ-specific literal —
+      // see reconcileInstanceEngineDrive §2.1).
+      //
+      // Honest-degrade (NF-3): if writeDepsFlowable is absent, the engine is not
+      // configured at all — this is a DELIBERATE product configuration (demo/offline),
+      // not a failure, and stays 200 with an explicit `engine:"not_configured"` field so
+      // it is observably different from a real completion or a real failure.
+      let engineField: "completed" | "already" | "not_configured" = "not_configured";
       if (writeDepsFlowable) {
         const engineDriveInstanceId = task.inst;
         const engineDriveProcKey = task.procKey;
-        // T-0443 Fix A: use the taskDefKey threaded from the projection (InstanceInboxTask).
-        // Base process.started rows carry taskDefKey="task-approve"; process.next_task rows
-        // carry the actual defKey (e.g. "task-extra-approve" on the 6M gateway branch).
-        const approvedTaskDefKey: string = task.taskDefKey;
+        const approvedTaskDefKey: string | null = task.taskDefKey;
 
-        void (async () => {
-          const result = await reconcileInstanceEngineDrive(
-            pool,
-            tenantId,
-            writeDepsFlowable,
-            {
-              instanceId: engineDriveInstanceId,
-              procKey: engineDriveProcKey,
-              approvedTaskDefKey,
-              completeEngineTask: true, // post-approve: complete the human's task.
-              actor,
-            },
+        const result = await reconcileInstanceEngineDrive(
+          pool,
+          tenantId,
+          writeDepsFlowable,
+          {
+            instanceId: engineDriveInstanceId,
+            procKey: engineDriveProcKey,
+            approvedTaskDefKey,
+            completeEngineTask: true, // post-approve: complete the human's task.
+            actor,
+          },
+        );
+
+        if (!result.ok) {
+          // T-0571 (NF-1/AC-7): the engine step did NOT complete — this is now a
+          // VISIBLE, typed error, never a silent 200. The human's decision (task.approved
+          // + applyStepResult, above) is already committed and is NOT rolled back (ADR
+          // §2.3: "recorded, but the engine step did not complete — retry/escalate").
+          // The reconcile-on-read net (GET /api/inbox) will keep retrying the engine
+          // side on every subsequent read, so a transient failure self-heals; a
+          // structural one (ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK) surfaces here
+          // so a human/ops can act instead of trusting a false "done".
+          console.warn(
+            `[inbox T-0571 engine-drive] reconcile failed at stage=${result.stage} ` +
+              `code=${result.code} (instance ${engineDriveInstanceId}) — ` +
+              `approve recorded, engine step NOT completed; reconcile-on-read will retry`,
           );
-          if (!result.ok) {
-            // Error is EXPLICIT (not swallowed): log with the failing stage + code. The
-            // reconcile-on-read net (GET /api/inbox) will retry this instance, so a
-            // gateway-spawned task is never permanently lost — it self-heals on next read.
-            console.warn(
-              `[inbox T-0522 engine-drive] reconcile failed at stage=${result.stage} ` +
-                `code=${result.code} (instance ${engineDriveInstanceId}) — ` +
-                `reconcile-on-read will retry on next inbox read`,
-            );
-          }
-        })();
+          // T-0571 (ADR §2.3 response contract, amended after REVIEW F-1 —
+          // orchestrator-sanctioned): the `code` field distinguishes WHICH of the
+          // three 502 shapes this is. The two STRUCTURAL codes
+          // (ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK) are surfaced verbatim as
+          // `error.code` — they ARE the diagnosis, not a wrapped transport error.
+          // Any OTHER engine result.code (transport/HTTP failure — e.g.
+          // ENGINE_UNAVAILABLE, a non-NOT_FOUND completeUserTask error) is wrapped as
+          // the generic ENGINE_DRIVE_FAILED, with the underlying engine code nested in
+          // `engineCode` (diagnostic, not the dispatch key).
+          //
+          // Body shape: {error:{code, stage, engineCode, instanceId}} — the
+          // codebase-wide error envelope (see router.ts sendErrorEnvelope, and its
+          // inline mirrors in files.ts/grant-propose.ts/message-ingest.ts/
+          // process-defs.ts). The original draft used a flat top-level object; REVIEW
+          // F-1 found this diverged from the convention AND from the real consumer
+          // (web/src/screens/screen-inbox.jsx reads body?.error?.code in both
+          // handleComplete and approveTask) — fixed here, ADR §2.3 amended to match.
+          const isStructural =
+            result.code === ENGINE_TASK_NOT_FOUND || result.code === AMBIGUOUS_ACTIVE_TASK;
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              error: {
+                code: isStructural ? result.code : "ENGINE_DRIVE_FAILED",
+                stage: result.stage,
+                engineCode: result.code,
+                instanceId: engineDriveInstanceId,
+              },
+            }),
+          );
+          return;
+        }
+
+        engineField = result.alreadyEnded ? "already" : "completed";
       }
 
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       // T-0353 [E16]: include outcomeName in response so the caller can show the
       // chosen branch label in the UI (e.g. "Согласовано", "Отклонено").
+      // T-0571: `engine` field makes the engine-drive outcome observable (NF-2/NF-3) —
+      // "completed" (real engine completion this call), "already" (legitimate idempotent
+      // repeat — the step/instance was already done), or "not_configured" (engine client
+      // absent — audit-only mode, a deliberate product configuration, not a failure).
       res.end(
-        JSON.stringify({ instanceId: task.inst, status: "done", action: "approve", outcome: outcomeName }),
+        JSON.stringify({
+          instanceId: task.inst,
+          status: "done",
+          action: "approve",
+          outcome: outcomeName,
+          engine: engineField,
+        }),
       );
     }));
   }

@@ -167,13 +167,23 @@ export interface InstanceInboxTask {
   /** Epoch-ms the task became available. */
   readonly occurredAt: number;
   /**
-   * T-0443: BPMN task definition key for the engine user-task this inbox row maps to.
-   * Base process.started rows default to "task-approve"; process.next_task rows carry
-   * their own defKey (e.g. "task-extra-approve" for the 6M branch).
-   * Used by the approve handler to complete the RIGHT engine task instead of always
-   * targeting the hardcoded "task-approve" defKey.
+   * T-0443 / T-0571: BPMN task definition key for the engine user-task this inbox row
+   * maps to. `process.next_task` rows always carry their OWN real defKey read from the
+   * engine (e.g. "task-extra-approve" for the 6M branch) — untouched by T-0571.
+   *
+   * Base `process.started` rows carry `null` — a RESOLVE-BY-INSTANCE signal (T-0571,
+   * BUG-014 fix), not a literal defKey to match against. The base process.started event
+   * does not know (and must not guess) the BPMN author's chosen node name for a GENERIC
+   * process — only the live engine knows which user-task is currently active for this
+   * instance. The approve handler passes this signal through to
+   * reconcileInstanceEngineDrive, which resolves the target engine task by "the active
+   * user-task of THIS instanceId" rather than by string-matching a defKey (see
+   * reconcileInstanceEngineDrive §post-approve completion). ADDITIVE: `string | null` —
+   * every existing `.taskDefKey` consumer that only reads process.next_task rows (the
+   * dedup Set in reconcileInstanceEngineDrive, reconcileInstanceTimers) is unaffected,
+   * since those rows never carried `null`.
    */
-  readonly taskDefKey: string;
+  readonly taskDefKey: string | null;
   /**
    * T-0458 [D8-R3]: true when this waiting task was surfaced by a TIMER FIRING
    * (a boundary/intermediate deadline elapsed → Flowable routed the token to the
@@ -861,8 +871,13 @@ export async function listInstanceInboxTasks(
       inst,
       procKey: strField(payload, "proc_key", "telLinear"),
       occurredAt: row.occurred_at,
-      // T-0443: base process.started rows always map to the primary approve BPMN task.
-      taskDefKey: "task-approve",
+      // T-0571 (BUG-014 fix): base process.started rows no longer assert a literal
+      // BPMN defKey — the projection does not know (and a GENERIC process's author
+      // may have named the node anything) which engine taskDefinitionKey is currently
+      // active. `null` is the RESOLVE-BY-INSTANCE signal: the approve handler's
+      // engine-drive reconcile resolves the target task as "the active user-task of
+      // this instanceId" (see reconcileInstanceEngineDrive), not by string equality.
+      taskDefKey: null,
     });
   }
 
@@ -996,13 +1011,22 @@ export async function reconcileInstanceTimers(
 
   // defKeys already projected per instance (base + next_task rows).
   const projectedDefKeysByInst = new Map<string, Set<string>>();
+  // T-0571: the BASE row's own recorded role, per instance, when the base is still
+  // unresolved (taskDefKey=null — not yet approved, real engine defKey unknown to the
+  // projection). Used by the exclusion rule below to recognise "the base step's own
+  // still-active task" without a ТЭЛ-specific literal.
+  const unresolvedBaseRoleByInst = new Map<string, string>();
   for (const t of projectedTasks) {
     let set = projectedDefKeysByInst.get(t.inst);
     if (set === undefined) {
       set = new Set<string>();
       projectedDefKeysByInst.set(t.inst, set);
     }
-    set.add(t.taskDefKey);
+    if (t.taskDefKey !== null) {
+      set.add(t.taskDefKey);
+    } else {
+      unresolvedBaseRoleByInst.set(t.inst, t.role);
+    }
   }
   // procKey per instance (for the emitted event scope).
   const procKeyByInst = new Map<string, string>();
@@ -1020,11 +1044,28 @@ export async function reconcileInstanceTimers(
     if (!engineResult.ok || engineResult.tasks.length === 0) continue;
 
     const projectedDefKeys = projectedDefKeysByInst.get(inst) ?? new Set<string>();
+    const unresolvedBaseRole = unresolvedBaseRoleByInst.get(inst);
     const emittedThisPass = new Set<string>();
 
     for (const engineTask of engineResult.tasks) {
       const defKey = engineTask.taskDefinitionKey;
       if (projectedDefKeys.has(defKey)) continue; // already on screen.
+      // T-0571 (regression guard, generic — not a ТЭЛ literal): while the base row is
+      // still unresolved (not yet approved), the engine's active-task set legitimately
+      // contains the base step's OWN still-pending task — the projection just does not
+      // know its defKey yet (T-0571 §2.1: resolved live at approve time, not guessed).
+      // A genuinely NEW timer-fired escalation task is, by the T-0458 escalation-mapper
+      // design (timer-escalation-mapper.ts), addressed to a DIFFERENT role (the
+      // escalation target userTask carries its OWN candidateGroups — manager/owner/an
+      // explicit role — never the base step's own role). So: an active task whose
+      // candidateGroups still overlaps the base row's OWN recorded role is the base
+      // step itself (unfired) — not a new escalation — and must not be surfaced twice.
+      if (
+        unresolvedBaseRole !== undefined &&
+        engineTask.candidateGroups.includes(unresolvedBaseRole)
+      ) {
+        continue;
+      }
       if (emittedThisPass.has(defKey)) continue; // dedup within this pass.
       emittedThisPass.add(defKey);
 
@@ -1117,15 +1158,43 @@ export type EngineDriveResult =
       readonly emitted: number;
       /** True when a matching engine user-task was found+completed this pass. */
       readonly completed: boolean;
+      /**
+       * T-0571 (NF-2/AC-8): true when `completed` is false ONLY because the instance
+       * was ALREADY ended by a prior (idempotent-equivalent) drive — a legitimate
+       * repeat, not a structural failure. The caller (inbox.ts) uses this to answer
+       * 200 {engine:"already"} instead of treating a no-op completion as a silent
+       * success indistinguishable from a real completion.
+       */
+      readonly alreadyEnded?: boolean;
     }
   | {
       /** The engine could not be reached / returned an error — NOT swallowed. */
       readonly ok: false;
-      /** Typed engine error code (e.g. ENGINE_UNAVAILABLE, NOT_FOUND). */
+      /** Typed engine error code (e.g. ENGINE_UNAVAILABLE, NOT_FOUND, or the T-0571
+       *  structural codes ENGINE_TASK_NOT_FOUND / AMBIGUOUS_ACTIVE_TASK below). */
       readonly code: string;
       /** Which engine step failed (diagnostic). */
       readonly stage: "poll" | "complete" | "ended" | "next-tasks";
     };
+
+/**
+ * T-0571 (BUG-014 fix, ADR §4 FF-1): structural engine-drive error codes — the target
+ * user-task for THIS instance was not found among the live active user-tasks (not a
+ * transport/HTTP failure, a genuine mismatch between "what the approve action expected
+ * to complete" and "what the engine currently has active"). Returned instead of the
+ * old silent `{ok:true, completed:false}` (AC-7's "main evil").
+ */
+export const ENGINE_TASK_NOT_FOUND = "ENGINE_TASK_NOT_FOUND";
+/**
+ * T-0571 §2.1 contract: a BASE (process.started, resolve-by-instance) step must see
+ * EXACTLY ONE active user-task for its instance at the moment of approve (the base
+ * process.started event represents exactly one waiting human step by construction —
+ * branches/AND-splits arrive as process.next_task with an already-real defKey, never
+ * as a base row). More than one active user-task for a base-step instance is a
+ * structural anomaly: honest refusal (this code) beats guessing "the first" and
+ * completing the wrong token.
+ */
+export const AMBIGUOUS_ACTIVE_TASK = "AMBIGUOUS_ACTIVE_TASK";
 
 /**
  * Durable, idempotent engine-drive reconcile for ONE instance.
@@ -1161,9 +1230,19 @@ export async function reconcileInstanceEngineDrive(
   args: {
     readonly instanceId: string;
     readonly procKey: string;
-    /** The defKey of the just-approved step (post-approve path). When omitted, no
-     *  user-task is completed — pure state-mirror (reconcile-on-read). */
-    readonly approvedTaskDefKey?: string;
+    /**
+     * The defKey of the just-approved step (post-approve path), when it is a REAL
+     * engine defKey already known to the projection (a process.next_task row, e.g.
+     * the 6M "task-extra-approve" branch — those always carry the engine's own key).
+     * OMITTED (undefined/null) for a BASE (process.started) step — T-0571 (BUG-014):
+     * the base step is resolved by INSTANCE IDENTITY (§resolveByInstance below), not
+     * by string-matching a literal, because a GENERIC process's author may have named
+     * its first user-task anything. When omitted AND `completeEngineTask` is true, the
+     * engine-drive resolves "the active user-task of this instanceId" directly (see
+     * §2.1 contract: exactly one is expected; 0 → idempotent-already-ended or
+     * structural failure; >1 → AMBIGUOUS_ACTIVE_TASK).
+     */
+    readonly approvedTaskDefKey?: string | null;
     /** When true (post-approve), complete the matching engine user-task before
      *  reconciling. When false/absent (on-read), skip completion — only mirror. */
     readonly completeEngineTask?: boolean;
@@ -1179,30 +1258,67 @@ export async function reconcileInstanceEngineDrive(
   const pollIntervalMs = args.pollIntervalMs ?? 500;
 
   let completed = false;
+  let alreadyEnded = false;
+  // T-0571: the REAL defKey that ended up completed this pass — either the caller's
+  // own `approvedTaskDefKey` (next_task/literal path) or the defKey resolved live from
+  // the engine (base/resolve-by-instance path). Used by step 3 below to exclude the
+  // just-completed step from the "surface next tasks" fan-out (it is never its own
+  // successor). Stays undefined when nothing was completed this pass.
+  let completedDefKey: string | undefined;
+  // T-0571 §2.1: resolve-by-instance mode when the caller has no real defKey to match
+  // (the base process.started step) but still wants completion driven. The literal-key
+  // path (`approvedTaskDefKey` present) stays for process.next_task steps, whose defKey
+  // IS the engine's own key (read from a live getActiveUserTasks call earlier — never a
+  // guessed literal) — matching by string there is matching by an authoritative value,
+  // not a ТЭЛ-specific hardcode.
+  const resolveByInstance = Boolean(args.completeEngineTask) && !args.approvedTaskDefKey;
 
   // 1. Post-approve completion (skipped on the reconcile-on-read net).
-  if (args.completeEngineTask && args.approvedTaskDefKey) {
+  if (args.completeEngineTask && (args.approvedTaskDefKey || resolveByInstance)) {
     let engineTaskId: string | null = null;
+    let resolvedDefKey: string | undefined = args.approvedTaskDefKey ?? undefined;
     const pollStart = Date.now();
-    // Poll for the engine user-task matching the approved defKey (the triage external
-    // task / DMN gateway variable may still be in flight). The gateway routing variable
-    // (approvalRequired / TEL_GATEWAY_VAR) is injected UPSTREAM at the tel-intake seam
-    // (externalTaskBridge.ts) BEFORE this point — completeUserTask takes no variables,
-    // it only advances the already-routed token. We must not complete until the matching
-    // task is actually present (so we never complete the wrong/stale token).
+    // Poll for the engine user-task to complete (the triage external task / DMN gateway
+    // variable may still be in flight). The gateway routing variable (approvalRequired /
+    // TEL_GATEWAY_VAR) is injected UPSTREAM at the tel-intake seam (externalTaskBridge.ts)
+    // BEFORE this point — completeUserTask takes no variables, it only advances the
+    // already-routed token. We must not complete until the target task is actually
+    // present (so we never complete the wrong/stale token).
     for (;;) {
       const tasksResult = await engine.getActiveUserTasks(args.instanceId);
       if (!tasksResult.ok) {
         return { ok: false, code: tasksResult.code, stage: "poll" };
       }
-      const match = tasksResult.tasks.find(
-        (t) => t.taskDefinitionKey === args.approvedTaskDefKey,
-      );
-      if (match) {
-        engineTaskId = match.id;
-        break;
+
+      if (resolveByInstance) {
+        // T-0571 §2.1 contract: the base step owns EXACTLY ONE active user-task for
+        // this instance by construction. 0 active tasks this poll tick just means "not
+        // routed yet" (or already ended) — keep polling/exit below; >1 is a genuine
+        // structural anomaly, not a timing artifact, so it fails FAST (no point polling
+        // longer — the ambiguity will not resolve itself).
+        if (tasksResult.tasks.length > 1) {
+          return { ok: false, code: AMBIGUOUS_ACTIVE_TASK, stage: "poll" };
+        }
+        if (tasksResult.tasks.length === 1) {
+          const only = tasksResult.tasks[0];
+          if (only) {
+            engineTaskId = only.id;
+            resolvedDefKey = only.taskDefinitionKey;
+          }
+          break;
+        }
+        // length === 0 → fall through to the ended-check below (idempotent-already vs
+        // structural-not-found is decided AFTER isInstanceEnded, not guessed here).
+      } else {
+        const match = tasksResult.tasks.find(
+          (t) => t.taskDefinitionKey === args.approvedTaskDefKey,
+        );
+        if (match) {
+          engineTaskId = match.id;
+          break;
+        }
       }
-      // No matching task and no tasks at all → instance may have ended; stop polling.
+      // No matching/active task and no tasks at all → instance may have ended; stop polling.
       if (tasksResult.tasks.length === 0) break;
       if (Date.now() - pollStart >= pollTimeoutMs) break;
       await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
@@ -1215,6 +1331,33 @@ export async function reconcileInstanceEngineDrive(
         return { ok: false, code: completeResult.code, stage: "complete" };
       }
       completed = true;
+      completedDefKey = resolvedDefKey;
+    } else {
+      // T-0571 (AC-7, "main evil"): no target task was found to complete. Distinguish
+      // a LEGITIMATE idempotent repeat (the instance is already ended — nothing was
+      // ever going to be there to complete) from a genuine structural failure (the
+      // instance is NOT ended, yet no active user-task matched what we expected to
+      // complete — the old silent BUG-014 path). We cannot know which until we check
+      // isInstanceEnded, so defer the verdict to step 2 by recording that completion
+      // was attempted-but-empty; step 2 returns ENGINE_TASK_NOT_FOUND when not ended.
+      resolvedDefKey = undefined;
+    }
+
+    if (!completed) {
+      // Completion did not happen this pass — find out WHY before proceeding.
+      const preEndedResult = await engine.isInstanceEnded(args.instanceId);
+      if (!preEndedResult.ok) {
+        return { ok: false, code: preEndedResult.code, stage: "ended" };
+      }
+      if (preEndedResult.ended) {
+        // Legitimate idempotent repeat: nothing to complete because the instance (and
+        // therefore this step) is already done. NF-2 honest-success, not a failure.
+        alreadyEnded = true;
+      } else {
+        // Structural failure (BUG-014's root cause, now surfaced instead of silently
+        // swallowed): the instance is alive but no active user-task matched.
+        return { ok: false, code: ENGINE_TASK_NOT_FOUND, stage: "poll" };
+      }
     }
   }
 
@@ -1229,8 +1372,8 @@ export async function reconcileInstanceEngineDrive(
     // re-run (on-read net after the post-approve already ended it) does not pile up
     // duplicate ended rows. Best-effort emit (a failed write is retried next pass).
     try {
-      const alreadyEnded = await isInstanceEndedProjected(pool, tenantId, args.instanceId);
-      if (!alreadyEnded) {
+      const endedRowAlreadyProjected = await isInstanceEndedProjected(pool, tenantId, args.instanceId);
+      if (!endedRowAlreadyProjected) {
         await withTenant(pool, tenantId, async (client) => {
           await appendInstanceEnded(client as unknown as PgClientLike, {
             taskId: randomUUID(),
@@ -1245,7 +1388,7 @@ export async function reconcileInstanceEngineDrive(
     } catch {
       // best-effort — next read reconciles.
     }
-    return { ok: true, ended: true, emitted: 0, completed };
+    return { ok: true, ended: true, emitted: 0, completed, ...(alreadyEnded ? { alreadyEnded: true } : {}) };
   }
 
   // 3. Engine has more tokens → surface EVERY live user-task not yet projected.
@@ -1258,11 +1401,26 @@ export async function reconcileInstanceEngineDrive(
   if (nextTasksResult.tasks.length > 0) {
     // Dedup against (a) the just-completed defKey and (b) tasks already projected as
     // waiting for this instance (base process.started + prior process.next_task rows).
+    //
+    // T-0571 note (base row unresolved, taskDefKey=null): this fan-out step is reached
+    // in mirror mode (completeEngineTask:false) via reconcileInboxEngineDriveOnRead,
+    // which re-drives every WAITING instance. In the REAL product flow (inbox.ts) the
+    // base's task.approved is always committed BEFORE any engine-drive reconcile call
+    // runs (same tx, strictly before) — so by the time this fan-out executes for a
+    // GIVEN instance, either the base row is already hidden (approved) or this pass IS
+    // the post-approve completion pass itself (completedDefKey is set). An instance
+    // whose base row is still unresolved AND has never been approved is therefore not
+    // reachable here with a genuinely-new gateway task to hide (a gateway only spawns a
+    // new token AFTER the step it follows completes). No extra guard is needed beyond
+    // the existing alreadyProjectedDefKeys / completedDefKey exclusions above.
     let alreadyProjectedDefKeys = new Set<string>();
     try {
       const projected = await listInstanceInboxTasks(pool, tenantId);
       alreadyProjectedDefKeys = new Set(
-        projected.filter((t) => t.inst === args.instanceId).map((t) => t.taskDefKey),
+        projected
+          .filter((t) => t.inst === args.instanceId)
+          .map((t) => t.taskDefKey)
+          .filter((k): k is string => k !== null),
       );
     } catch {
       // read failed — fall through with empty set; dedup-within-pass still guards.
@@ -1271,7 +1429,10 @@ export async function reconcileInstanceEngineDrive(
     const emittedThisPass = new Set<string>();
     for (const nextTask of nextTasksResult.tasks) {
       const defKey = nextTask.taskDefinitionKey;
-      if (defKey === args.approvedTaskDefKey) continue; // step we just completed
+      // T-0571: exclude the step we just completed THIS pass — completedDefKey is
+      // either the caller's literal (next_task path) or the LIVE-resolved defKey
+      // (base/resolve-by-instance path), never a guessed literal.
+      if (defKey === completedDefKey) continue; // step we just completed
       if (alreadyProjectedDefKeys.has(defKey)) continue; // already on screen
       if (emittedThisPass.has(defKey)) continue; // dedup within this pass
       emittedThisPass.add(defKey);
@@ -1572,7 +1733,11 @@ export async function deliverMessageEnvelope(
       if (tasksResult.ok) {
         const projected = await listInstanceInboxTasks(pool, envelope.tenant);
         const projectedDefKeys = new Set(
-          projected.filter((t) => t.inst === inst).map((t) => t.taskDefKey),
+          projected
+            .filter((t) => t.inst === inst)
+            // T-0571: base rows carry taskDefKey=null (resolve-by-instance signal).
+            .map((t) => t.taskDefKey)
+            .filter((k): k is string => k !== null),
         );
         const procKey =
           projected.find((t) => t.inst === inst)?.procKey ?? "telLinear";

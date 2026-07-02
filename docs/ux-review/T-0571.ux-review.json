@@ -1,0 +1,51 @@
+{
+  "task_id": "T-0571",
+  "verdict": "approved",
+  "_scope": "Backend seam approve→Flowable (BUG-014). web/ touched точечно: карта ENGINE_DRIVE_ERROR_MESSAGE (3 кода → русские сообщения) в web/src/screens/screen-inbox.jsx, потреблена в TaskDetailPanel.handleComplete (~392) и approveTask (~680), fallback сохранён. Судится СОРАЗМЕРНО дельте — text-only, рендер не менялся.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g5-jargon-denylist.sh → exit 0, screen-inbox.jsx clean (0 findings на нём; 22 findings по всему web/ — pre-existing T-id-в-комментариях в других экранах, не на новых строках)",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → exit 0, оба token-source (tokens.css + form-theme.css) с light-default + dark-reachable"
+    ]
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-text-only — рендер-путь не менялся: новые строки приходят в существующий канал ошибок. В TaskDetailPanel — <div style={{...S.notice, ...S.noticeError}}> (~558), в approveTask — pre-existing alert() (~686, тот же паттерн, что claimTask ~659). Ни одного нового инлайн-стиля/рукотворного элемента; обе темы наследуются от S.noticeError. Real-click в двух темах не требуется для text-only дельты.",
+  "pattern_sources": [
+    {
+      "element": "TaskDetailPanel action error (engine-drive 502 message)",
+      "pattern": "existing themed error-channel: <div style={{...S.notice, ...S.noticeError}}> (screen-inbox.jsx ~557)",
+      "applied": true
+    },
+    {
+      "element": "approveTask (list-row) engine-drive 502 message",
+      "pattern": "existing alert() error surface — same as sibling claimTask (~659), pre-existing pattern, no new UI element",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-inbox.jsx:334 (ENGINE_TASK_NOT_FOUND)",
+      "issue": "«Задача в движке не найдена» протекает внутренней декомпозицией inbox-задача ↔ engine-task. Пользователь мыслит «этот шаг/эта задача», а не «задача внутри движка». Не вводит в заблуждение и есть чёткое действие («обновите страницу»), поэтому не blocking; но «в движке» — самая слабая из трёх формулировок и лишнее для человека.",
+      "suggestion": "«Эта задача уже недоступна — обновите страницу» (или «Задача не найдена — обновите страницу»). Убирает внутреннее слово «движок», сохраняет действие."
+    },
+    {
+      "id": "F-2",
+      "severity": "nit",
+      "root": "B",
+      "location": "web/src/screens/screen-inbox.jsx:333 (ENGINE_DRIVE_FAILED)",
+      "issue": "«Движок процессов не подтвердил действие» — «движок процессов» на грани дев-жаргона. В BPM-продукте это допустимая русская передача workflow-engine и не ловится G5-denylist, но слово «движок» — внутреннее; бизнес-пользователь думает про «процесс», не про «движок».",
+      "suggestion": "«Не удалось выполнить действие в процессе — попробуйте ещё раз» (убирает «движок», сохраняет actionable-хвост). Оставляю как nit на будущее: текущая формулировка понятна и не вводит в заблуждение."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "3 engine-drive кода → русские сообщения (не raw code) в обоих потребителях", "covered": true},
+    {"ac": "fallback на неизвестный код сохранён (NOT_ELIGIBLE в TaskDetailPanel, `Ошибка: ${code}` везде)", "covered": true},
+    {"ac": "сообщения попадают в существующий канал ошибок экрана (S.noticeError / alert), без новых инлайн-стилей", "covered": true},
+    {"ac": "G5 dev-jargon на новых строках — чисто (нет Flowable/raw-code/T-id/UUID)", "covered": true}
+  ]
+}
