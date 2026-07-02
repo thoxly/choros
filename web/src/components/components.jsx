@@ -653,6 +653,30 @@ function Toast({ tone = "info", title, message, onClose, action }) {
   );
 }
 
+/* --------------------------------- Notice --------------------------------- */
+/* T-0599: персистентная предупреждающая плашка (Alert/notice-паттерн) — в
+   отличие от Toast (транзиентный, auto-dismiss, свой viewport), Notice живёт
+   в потоке экрана, пока условие не снимется (нет duration/onClose). Тот же
+   tone-набор и токены, что Toast (info/warning/error/success), тот же
+   role=alert/status выбор по тону. Первый потребитель — баннер «ассистент
+   не может отвечать» (screen-assistant.jsx), но компонент общий kit-примитив,
+   не one-off inline styling. */
+function Notice({ tone = "info", title, message, action, className = "" }) {
+  return (
+    <div
+      className={`chs-notice chs-notice--${tone} ${className}`.trim()}
+      role={tone === "error" || tone === "warning" ? "alert" : "status"}
+    >
+      <span className="chs-notice__icon"><KitIcon name={TOAST_ICON[tone] || "info"} size={16} /></span>
+      <div className="chs-notice__body">
+        {title && <div className="chs-notice__title">{title}</div>}
+        {message && <div className="chs-notice__msg">{message}</div>}
+      </div>
+      {action && <div className="chs-notice__action">{action}</div>}
+    </div>
+  );
+}
+
 /* useToasts — лёгкая очередь тостов + ToastViewport (фикс-стек). push() ставит
    тост с авто-дисмиссом; компонент монтирует область сам.
    A11y (T-0529): pause-on-hover — viewportRef передаётся для очистки таймеров. */
@@ -928,7 +952,7 @@ export {
   TaskRow, AuditEvent, EXEC_META, STATUS_META,
   KitIcon, Spinner,
   Modal, Drawer, ConfirmDialog, EmptyState, LoadingState, Skeleton, ErrorState,
-  Popover, Tooltip, Toast, ToastViewport, useToasts,
+  Popover, Tooltip, Toast, ToastViewport, useToasts, Notice,
   Badge, Card,
   DataTable, DataTableHead, DataTableBody, DataTableRow, DataTableHeadCell, DataTableCell,
 };

@@ -83,6 +83,46 @@ describe("T-0473 serializeAgent — org-attached vs org-less", () => {
     expect(deriveLlmProvider(null)).toBeNull();
   });
 
+  // T-0599 (AC-3): serializeAgent's llm_bound = (row.llm_secret_handle !== null)
+  // is a PURE decision over the SQL-resolved value. The SQL layer
+  // (listAgentsTx, agents-list.ts) now feeds it COALESCE(lc.secret_handle,
+  // ac.llm_secret_handle) instead of the bare deprecated column — these 4
+  // cases enumerate every combination of (connection secret_handle, inline
+  // llm_secret_handle) and assert the value `serializeAgent` WOULD receive
+  // post-COALESCE (mirroring SQL COALESCE semantics: first non-null wins).
+  // This locks the decision function's honesty contract even though the JOIN
+  // itself is only provable against live Postgres (ci/checks/db/
+  // assistant-llm-binding.test.ts T-0599 FF-1/FF-2).
+  describe("T-0599 llm_bound honesty — 4 combinations of (connection secret, inline secret)", () => {
+    const coalesce = (connectionSecret: string | null, inlineSecret: string | null) =>
+      connectionSecret ?? inlineSecret; // mirrors SQL: COALESCE(lc.secret_handle, ac.llm_secret_handle)
+
+    it("connection bound (non-null), inline null → resolved non-null → llm_bound:true (the T-0498 current path)", () => {
+      const resolved = coalesce("vault://secret/connection-only", null);
+      const out = serializeAgent({ ...base, agent_card_id: "c1", employee_id: "e1", agent_type: "workforce", slug: "x", display_name: "X", llm_secret_handle: resolved });
+      expect(out.llm_bound).toBe(true);
+    });
+
+    it("connection null, inline bound (non-null) → resolved non-null → llm_bound:true (legacy inline path)", () => {
+      const resolved = coalesce(null, "vault://secret/inline-only");
+      const out = serializeAgent({ ...base, agent_card_id: "c2", employee_id: "e2", agent_type: "workforce", slug: "x", display_name: "X", llm_secret_handle: resolved });
+      expect(out.llm_bound).toBe(true);
+    });
+
+    it("connection bound AND inline bound → connection wins per COALESCE order → llm_bound:true either way", () => {
+      const resolved = coalesce("vault://secret/connection-wins", "vault://secret/inline-shadowed");
+      expect(resolved).toBe("vault://secret/connection-wins");
+      const out = serializeAgent({ ...base, agent_card_id: "c3", employee_id: "e3", agent_type: "workforce", slug: "x", display_name: "X", llm_secret_handle: resolved });
+      expect(out.llm_bound).toBe(true);
+    });
+
+    it("connection null, inline null → resolved null → llm_bound:false (the honest dormant case, T-0599's own bug fixture)", () => {
+      const resolved = coalesce(null, null);
+      const out = serializeAgent({ ...base, agent_card_id: "c4", employee_id: "e4", agent_type: "workforce", slug: "x", display_name: "X", llm_secret_handle: resolved });
+      expect(out.llm_bound).toBe(false);
+    });
+  });
+
   it("T-0498: surfaces the named-connection FK (llm_connection_id) for the UI dropdown", () => {
     const bound = serializeAgent({
       ...base,
