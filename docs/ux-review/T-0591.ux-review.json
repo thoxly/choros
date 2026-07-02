@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0591",
+  "verdict": "changes_requested",
+  "_scope": "Мини-ревью дельты (9 строк): T-0591 добавил код ENGINE_DRIVE_TIMEOUT в карту ENGINE_DRIVE_ERROR_MESSAGE (web/src/screens/screen-inbox.jsx ~343). Та же карта/канал, что судились в T-0571; рендер не менялся. Судится только текст+паттерн.",
+  "gate_seen": {
+    "green": true,
+    "_checks_run": [
+      "ci/checks/ux/ux-g5-jargon-denylist.sh → exit 0, screen-inbox.jsx чист (0 находок на нём; 24 глобально — pre-existing в других экранах)",
+      "ci/checks/ux/ux-g2-theme-pairing.sh → exit 0"
+    ]
+  },
+  "themes_checked": ["light", "dark"],
+  "_themes_note": "n/a-delta-text-only — новая строка идёт в тот же существующий канал ошибок (S.noticeError в TaskDetailPanel / alert в approveTask), проверенный в T-0571; новых элементов/инлайн-стилей нет.",
+  "pattern_sources": [
+    {
+      "element": "ENGINE_DRIVE_TIMEOUT message (map entry)",
+      "pattern": "existing ENGINE_DRIVE_ERROR_MESSAGE map → existing error-channel (S.noticeError / alert), судился в docs/ux-review/T-0571.ux-review.json",
+      "applied": true
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "blocking",
+      "root": "B",
+      "location": "web/src/screens/screen-inbox.jsx:343 (ENGINE_DRIVE_TIMEOUT)",
+      "issue": "«Движок отвечает дольше обычного…» реинтродуцирует внутреннее слово «движок» в карту, которая по итогам UX_REVIEW T-0571 уже вычищена от него (все три соседние строки переформулированы: «…в процессе», «Эта задача уже недоступна…»). Регресс паттерн-дисциплины внутри одного артефакта: пользователь не мыслит «движком», и карта становится внутренне непоследовательной. Семантика честной неопределённости и CTA в тексте корректны — менять надо только субъект фразы.",
+      "suggestion": "Заменить одной строкой: \"Действие выполняется дольше обычного — оно могло уже примениться, обновите страницу, чтобы увидеть актуальное состояние\". Сохраняет неопределённость исхода («могло уже примениться»), CTA «обновите страницу» и не подталкивает к слепому повтору; убирает «движок»."
+    }
+  ],
+  "principles_updated": [],
+  "acceptance_coverage": [
+    {"ac": "семантика честной неопределённости (действие МОГЛО пройти, не «не выполнено»)", "covered": true},
+    {"ac": "CTA «обновите страницу» (reconcile-on-read самоисцелит)", "covered": true},
+    {"ac": "тот же map/канал, без нового рендера", "covered": true},
+    {"ac": "вкус карты без «движка» (T-0571)", "covered": false}
+  ]
+}

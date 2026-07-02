@@ -1,0 +1,44 @@
+{
+  "task_id": "T-0591",
+  "status": "ready",
+  "decision": "Общий wall-clock deadline-бюджет (driveDeadlineMs, дефолт 10_000мс, опциональный env ENGINE_DRIVE_DEADLINE_MS в композиции inbox.ts) вычисляется ОДИН РАЗ в начале reconcileInstanceEngineDrive как deadlineAt=Date.now()+driveDeadlineMs и протекает через все пять точек вызова EngineDriveReconcilePort (poll-цикл getActiveUserTasks, completeUserTask, isInstanceEnded ×2, fan-out getActiveUserTasks). Каждая точка оборачивается локальным helper'ом callWithBudget(fn, deadlineAt): remaining<=0 → не стартует вызов вовсе; иначе Promise.race([fn(), таймаут-сентинел на remaining мс]) — тот же паттерн, что уже есть в flowable-client.ts (makeTimeoutPromise/TIMEOUT_SENTINEL), но локальный для process-projection.ts (не расширяет FlowableClient/withRetry — нулевой blast radius на прочие вызовы клиента). При проигрыше гонки бюджету — {ok:false, code:'ENGINE_DRIVE_TIMEOUT', stage} (тот же дискриминатор poll|complete|ended|next-tasks, что уже есть у прочих ok:false веток). Poll-цикл дополнительно проверяет Date.now()>=deadlineAt как четвёртое условие выхода наряду с pollTimeoutMs — эффективный лимит цикла = min(pollTimeoutMs, оставшийся бюджет). withRetry НЕ меняется — retry внутри одного под-вызова остаётся, deadline лишь ограничивает СКОЛЬКО таких вызовов успевает произойти. inbox.ts добавляет ENGINE_DRIVE_TIMEOUT в isStructural-проверку (третий код рядом с ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK) → 502 {error:{code:'ENGINE_DRIVE_TIMEOUT',stage,engineCode,instanceId}}, та же envelope. screen-inbox.jsx ENGINE_DRIVE_ERROR_MESSAGE получает нежаргонную запись, явно называющую неопределённость исхода и отсылающую к обновлению страницы (reconcile-on-read T-0522 самоисцеляет). Реализация — отдельный BUILD-таск.",
+  "rejected_alternatives": [
+    {"option": "B1. AbortController/AbortSignal через весь FlowableClient (все методы) + withRetry + fetch", "why_not": "расширяет публичный интерфейс клиента ради одного шва (approve-drive); задевает deploy/start/fetchAndLock/failTask/pingEngine, которым дедлайн approve не нужен — несоразмерно. callWithBudget поверх promise-based порта достигает того же наблюдаемого эффекта без расширения клиента."},
+    {"option": "B2. Активная отмена in-flight fetch при истечении бюджета (реальный network abort)", "why_not": "требует B1. Не даёт доп. пользы для наблюдаемого контракта (approve всё равно отвечает 502 в срок) — экономит только серверные сокеты, не latency пользователя; возможный отдельный ресурсный follow-up, не блокирует эту задачу."},
+    {"option": "B3. Уменьшить глобальные timeoutMs/maxRetries в FlowableClientConfig", "why_not": "меняет ВСЕ вызовы клиента, не только drive-путь — blast radius шире шва."},
+    {"option": "B4. Уменьшить pollTimeoutMs, чтобы 'естественно' ограничить худший случай", "why_not": "не работает: находка F-2 ровно в том, что pollTimeoutMs не прерывает уже начатый вызов внутри итерации — его уменьшение не сокращает время одного зависшего withRetry-вызова (timeoutMs×попытки не зависит от pollTimeoutMs)."},
+    {"option": "B5. Заменить весь post-approve путь на асинхронный (202 + polling статуса с фронта)", "why_not": "отвергнуто уже в ADR-T0571 §3 — синхронность завершения явно выбранное решение (устраняет ложный 200); переоткрывать эту развилку не задача F-2 (латентность худшего случая), а откат T-0571."},
+    {"option": "B6. Таймаут без Promise.race (явный флаг + периодическая проверка)", "why_not": "Promise.race — уже установленный в этой же кодовой базе паттерн (flowable-client.ts makeTimeoutPromise/TIMEOUT_SENTINEL, pingEngine) для ровно этой задачи; переизобретать иначе несоразмерно."}
+  ],
+  "contracts": [
+    "reconcileInstanceEngineDrive получает новое опциональное поле args.driveDeadlineMs?:number (дефолт 10_000). deadlineAt=Date.now()+driveDeadlineMs вычисляется в начале функции рядом с nowMs/pollTimeoutMs/pollIntervalMs.",
+    "callWithBudget(fn, deadlineAt) — локальный helper в process-projection.ts (не экспортируется из flowable-client.ts): remaining<=0 → не вызывает fn, немедленно бюджет-исчерпан; иначе Promise.race([fn(), таймаут-промис на remaining мс]).",
+    "Все пять точек вызова EngineDriveReconcilePort в reconcileInstanceEngineDrive (poll-цикл getActiveUserTasks, completeUserTask, isInstanceEnded pre-ended-check, isInstanceEnded шаг2, getActiveUserTasks шаг3 fan-out) оборачиваются callWithBudget с общим deadlineAt.",
+    "Poll-цикл: четвёртое условие выхода Date.now()>=deadlineAt наряду с существующими (задача найдена/пусто/pollTimeoutMs) — эффективный лимит=min(pollTimeoutMs, оставшийся бюджет).",
+    "При бюджет-исчерпании в любой из пяти точек — {ok:false, code:ENGINE_DRIVE_TIMEOUT (новая экспортируемая string-константа рядом с ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK), stage:<тот же дискриминатор этой точки>}.",
+    "inbox.ts isStructural-проверка расширяется: result.code===ENGINE_DRIVE_TIMEOUT добавляется третьим OR рядом с ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK → 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, engineCode:'ENGINE_DRIVE_TIMEOUT', instanceId}} — та же codebase-wide envelope, что прочие структурные 502 T-0571.",
+    "Опциональный env ENGINE_DRIVE_DEADLINE_MS читается в композиции (inbox.ts модуль-уровня константа, аналогично тому как flowable-client.ts читает свои дефолты в фабрике) — отсутствие переменной = встроенный дефолт 10_000, honest-degrade.",
+    "screen-inbox.jsx ENGINE_DRIVE_ERROR_MESSAGE получает запись ENGINE_DRIVE_TIMEOUT: нежаргонный текст, констатирующий медленный ответ движка, явно называющий неопределённость исхода (действие могло примениться) и советующий обновить страницу (не 'повторите действие вслепую').",
+    "withRetry (flowable-client.ts) и FlowableClient интерфейс НЕ меняются — retry внутри одного под-вызова сохраняется; deadline подчиняет retry общему бюджету, не заменяет его.",
+    "task.approved/applyStepResult транзакционная граница T-0571 §2.3 не меняется — таймаут не откатывает решение человека."
+  ],
+  "fitness_functions": [
+    {"id": "FF-1", "rule": "reconcileInstanceEngineDrive при исчерпанном driveDeadlineMs возвращает {ok:false, code:'ENGINE_DRIVE_TIMEOUT', stage} в пределах wall-clock времени, ограниченного заданным бюджетом (не суммой per-call withRetry таймаутов).", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"drive-deadline\" — мок-порт с искусственной задержкой больше малого тестового driveDeadlineMs; тест измеряет Date.now() до/после и assert-ит верхнюю границу (AC-1)"},
+    {"id": "FF-2", "rule": "Approve-хендлер отвечает 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, instanceId}} при таймауте reconcile — та же envelope, что прочие структурные 502.", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"ENGINE_DRIVE_TIMEOUT\" (AC-2)"},
+    {"id": "FF-3", "rule": "Успешный типовой путь (движок отвечает быстро) не регрессирует — 200 как в T-0571, без искусственной задержки теста.", "ci_check": "существующие describe(\"T-0571 approve handler...\") тесты остаются зелёными без изменения ожиданий (AC-3/AC-6)"},
+    {"id": "FF-4", "rule": "Retry внутри одного под-вызова не выпилен бюджетом — транзиентная одна ошибка + успех второй попытки в пределах оставшегося бюджета всё ещё даёт успех.", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"retry-within-budget\" (AC-4)"},
+    {"id": "FF-5", "rule": "Идемпотентность T-0522/T-0571 не регрессирует.", "ci_check": "vitest run src/__tests__/inbox-engine-drive.test.ts -t \"idempotent\" (AC-6)"},
+    {"id": "FF-6", "rule": "Diff не добавляет в src/ новых кейс-специфичных строковых литералов сверх baseline.", "ci_check": "git diff origin/main...HEAD -- 'src/**' | grep '^+' | grep -Ev '^\\+\\+\\+' | grep -E '\"(soglasovanie|role-approver|Согласование|Закупки|task-approve)\"' — пусто=pass (AC-7)"}
+  ],
+  "traceability": [
+    {"ac": "AC-1", "covered_by": "§2.1-2.3 механизм callWithBudget; FF-1"},
+    {"ac": "AC-2", "covered_by": "§2.5 inbox.ts isStructural + envelope; FF-2"},
+    {"ac": "AC-3", "covered_by": "§2.4 дефолт driveDeadlineMs; FF-3"},
+    {"ac": "AC-4", "covered_by": "§2.1 п.3 (fn() остаётся withRetry-обёрнутым вызовом); FF-4"},
+    {"ac": "AC-5", "covered_by": "§2.6 ENGINE_DRIVE_ERROR_MESSAGE формулировка; manual review"},
+    {"ac": "AC-6", "covered_by": "§2.7 идемпотентность не регрессирует; FF-3/FF-5"},
+    {"ac": "AC-7", "covered_by": "§2.4 нет новых кейс-строк; FF-6"}
+  ],
+  "adr_artifact_path": "docs/adr/ADR-T0591-drive-deadline.md",
+  "escalation": ""
+}

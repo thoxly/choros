@@ -1,0 +1,38 @@
+{
+  "task_id": "T-0591",
+  "status": "ready",
+  "summary": "F-2 (T-0571 review): общий deadline-бюджет на весь синхронный post-approve engine-drive путь (reconcileInstanceEngineDrive — poll-цикл getActiveUserTasks, completeUserTask, две проверки isInstanceEnded, fan-out getActiveUserTasks), а не независимый pollTimeoutMs между итерациями поверх withRetry per-call таймаутов (до ~40с на один под-вызов). По истечении бюджета — честный 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, instanceId}}, семантически НЕ означающий гарантированный неуспех (completeUserTask мог пройти в движке несмотря на таймаут ответа) — reconcile-on-read (T-0522) самоисцеляет проекцию при следующем чтении. Фронт получает нежаргонное сообщение о неопределённости в ENGINE_DRIVE_ERROR_MESSAGE. withRetry не выпиливается — подчиняется бюджету, не заменяется нулевым retry.",
+  "functional": [
+    "FR-1 — весь post-approve engine-drive путь (все вызовы движка внутри одного вызова reconcileInstanceEngineDrive с completeEngineTask:true) подчинён общему wall-clock дедлайну, отсчитываемому от начала reconcile; каждый следующий вызов движка проверяет оставшийся бюджет и не стартует, если его недостаточно.",
+    "FR-2 — величина общего бюджета конфигурируема (параметр функции с дефолтом ~10-12с суммарно на весь drive-путь; опциональный env-override в композиции).",
+    "FR-3 — по истечении бюджета reconcileInstanceEngineDrive возвращает {ok:false, code:'ENGINE_DRIVE_TIMEOUT', stage} (stage — тот же дискриминатор poll|complete|ended|next-tasks); approve-хендлер отвечает 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, instanceId}} — та же codebase-wide envelope, что остальные 502-ветки T-0571.",
+    "FR-4 — успешный типовой путь (движок отвечает в пределах бюджета) не меняет поведения: 200 {engine:'completed'|'already'|'not_configured'} как в T-0571.",
+    "FR-5 — withRetry не выпиливается; deadline подчиняет retry общему бюджету, не заменяет его нулевым retry."
+  ],
+  "non_functional": [
+    "NF-1 — таймаут НЕ означает гарантированный неуспех: completeUserTask мог быть отправлен и примениться в движке до истечения бюджета; код ENGINE_DRIVE_TIMEOUT и любое построенное на нём сообщение обязаны нести эту неопределённость честно (не 'действие не выполнено').",
+    "NF-2 — reconcile-on-read (T-0522, чистое зеркало) самоисцеляет проекцию при следующем GET /api/inbox без участия пользователя — существующий механизм, не меняется, используется как обоснование совета 'обновите страницу'.",
+    "NF-3 — фронт (screen-inbox.jsx ENGINE_DRIVE_ERROR_MESSAGE) получает для ENGINE_DRIVE_TIMEOUT нежаргонное сообщение: констатирует медленный ответ движка, явно называет неопределённость исхода, советует обновить страницу.",
+    "NF-4 — анти-кейс (D-064): ни одной новой кейс-специфичной строки в src/, добавленном/изменённом этой задачей.",
+    "NF-5 — deadline-механизм общий примитив, не завязан на конкретный instanceId/процесс.",
+    "NF-6 — соразмерность: переиспользует существующую Promise.race/таймаут-сентинел технику (makeTimeoutPromise/TIMEOUT_SENTINEL уже в flowable-client.ts), применённую поверх engine-порта в reconcileInstanceEngineDrive, не переработку withRetry изнутри flowable-client.ts."
+  ],
+  "out_of_scope": [
+    "Изменение глобальных FlowableClientConfig.timeoutMs/maxRetries дефолтов клиента",
+    "Durable outbox/очередь для post-approve reconcile (O6 ADR-T0571 §7)",
+    "Retry/backoff-параметры per-call (retryBaseDelayMs/retryMaxDelayMs)",
+    "UI-виджет прогресса/спиннера с обратным отсчётом — фронт-фикс ограничен текстом сообщения",
+    "Изменение поведения reconcile-on-read (T-0522) — используется как есть"
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "Unit-тест: при исчерпании общего deadline-бюджета (мок-порт с искусственной задержкой, малый бюджет для теста) reconcileInstanceEngineDrive возвращает {ok:false, code:'ENGINE_DRIVE_TIMEOUT', stage} в пределах wall-clock времени, ограниченного заданным бюджетом.", "verifiable_as": "test"},
+    {"id": "AC-2", "text": "Unit-тест: approve-хендлер при ENGINE_DRIVE_TIMEOUT от reconcile отвечает 502 {error:{code:'ENGINE_DRIVE_TIMEOUT', stage, instanceId}} — та же envelope-форма, что остальные 502-ветки T-0571.", "verifiable_as": "test"},
+    {"id": "AC-3", "text": "Unit-тест: успешный drive-путь (движок отвечает быстро, в пределах бюджета) даёт тот же результат, что и до T-0591 — 200 {engine:'completed'|'already'|'not_configured'}, без регрессии существующих T-0571/T-0522 тестов.", "verifiable_as": "test"},
+    {"id": "AC-4", "text": "Unit-тест: retry внутри одного под-вызова не выпилен — транзиентная одна ошибка (напр. один ENGINE_UNAVAILABLE, затем успех) внутри оставшегося бюджета всё ещё приводит к успеху reconcile.", "verifiable_as": "test"},
+    {"id": "AC-5", "text": "Фронтовое сообщение для ENGINE_DRIVE_TIMEOUT в ENGINE_DRIVE_ERROR_MESSAGE не содержит технического жаргона и явно передаёт неопределённость исхода (действие могло примениться).", "verifiable_as": "manual"},
+    {"id": "AC-6", "text": "Существующие тесты T-0571 (describe 'T-0571 approve handler...') и T-0522 (idempotent) остаются зелёными без изменения ожиданий.", "verifiable_as": "test"},
+    {"id": "AC-7", "text": "Diff задачи не добавляет новых кейс-специфичных строковых литералов в src/ (анти-кейс периметр FF-6 T-0571).", "verifiable_as": "fitness"}
+  ],
+  "blocking_questions": [],
+  "spec_artifact_path": "docs/specs/T-0591-drive-deadline.spec.md"
+}

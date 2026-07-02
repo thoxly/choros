@@ -1,0 +1,61 @@
+{
+  "task_id": "T-0591",
+  "verdict": "approved",
+  "ci_seen": {
+    "green": true
+  },
+  "findings": [
+    {
+      "id": "F-1",
+      "severity": "nit",
+      "status": "open",
+      "axis": 2,
+      "location": "src/http/inbox.ts:211-216 (resolveEngineDriveDeadlineMs)",
+      "issue": "resolveEngineDriveDeadlineMs (private, non-exported) correctly degrades every hostile env value to the default — verified by direct code inspection and independent scratch execution of the exact logic against {undefined, \"\", \"abc\", \"NaN\", \"0\", \"-5\", \"  \", \"Infinity\", \"-Infinity\"} → all 10_000 (only \"5000\" parses to 5000). But no shipped unit test exercises these edge cases directly — the 5 new T-0591 tests only ever set a VALID override (\"50\" in AC-2) or leave it unset. The review task's own checklist explicitly named this as a point to verify (\"ENGINE_DRIVE_DEADLINE_MS: валидация значения NaN/0/отрицательное → дефолт?\") — the behavior is right, the test evidence for it is not in the diff.",
+      "suggestion": "Non-blocking: a follow-up could add 3-4 direct unit assertions on resolveEngineDriveDeadlineMs's env-parsing (or export it for testability) so a future refactor of the parse logic doesn't silently regress the honest-degrade guarantee. Does not block this task — the function is 4 lines, correct by inspection, and low-churn."
+    }
+  ],
+  "special_points_verdict": [
+    {
+      "point": "1. callWithBudget race-leak / unhandledRejection on the loser promise",
+      "verdict": "no leak, no unhandled rejection",
+      "detail": "callWithBudget (src/http/process-projection.ts:1291-1311) is NOT Promise.race([fn(), timeoutPromise]) — it is a manual `new Promise((resolve,reject) => {...})` executor where BOTH the timer callback and fn().then(onResolve, onReject) call resolve/reject on the SAME outer promise. Per ECMA-262 (25.6.1.3.2 CreateResolvingFunctions), a resolve/reject call after the promise has already settled is a silent no-op — it does not throw and does not create a new rejection to be unhandled. Critically, `fn()` ALWAYS has a rejection handler attached via `.then(onResolve, onReject)` at the moment it is created (synchronously, in the same tick as callWithBudget starts the race) — so even if `fn()` rejects long after the timer already resolved the outer promise with BUDGET_EXHAUSTED, that rejection IS handled (by onReject, which just tries to reject an already-settled promise — a no-op) rather than being an orphaned/unhandled rejection. Verified independently: wrote a standalone Node script (late-rejecting fn(), timer wins first) with `process.on('unhandledRejection', ...)` instrumented — zero unhandled rejections fired, confirmed the callWithBudget result correctly returned BUDGET_EXHAUSTED. Also checked the synchronous-throw edge case (fn() throws before returning a promise) — caught cleanly by callWithBudget's own async-function implicit try/catch. Timer cleanup (clearTimeout) happens on BOTH branches when fn() wins the race, so no timer-handle leak either. The completeUserTask-wins-after-timeout scenario the task asked about: the outer race already settled to BUDGET_EXHAUSTED (502 already sent) — the late resolution/rejection of fn() is simply discarded via the same no-op path; no crash, no process-level warning, no leaked handle. This is the CORRECT, defensive way to wrap a non-cancellable promise in a timeout in Node/JS — it is subtly better than naive `Promise.race([fn(), timeoutPromise])`, which would have exactly the bug the task hypothesized IF `fn()`'s rejection were not otherwise handled by a caller — here it always is, by construction, inside callWithBudget itself."
+    },
+    {
+      "point": "2. Deadline honored across 5 call-sites; poll-loop 4th exit; remaining budget (not full budget) passed to each call",
+      "verdict": "correct",
+      "detail": "deadlineAt = Date.now() + driveDeadlineMs is computed ONCE at function entry (line ~1385) and threaded by reference into all 5 callWithBudget(fn, deadlineAt) call sites (poll-loop getActiveUserTasks line ~1425, completeUserTask line ~1481, pre-ended isInstanceEnded line ~1513, step-2 isInstanceEnded line ~1537, fan-out getActiveUserTasks line ~1582). Each callWithBudget call recomputes `remaining = deadlineAt - Date.now()` fresh at call time — so it is genuinely the REMAINING slice, never the full budget re-granted per call (confirmed by reading the 4-line body: remaining<=0 short-circuits without invoking fn at all). Poll loop has the required 4th exit condition `if (Date.now() >= deadlineAt) break;` alongside the pre-existing 3 (match found/empty list/pollTimeoutMs) — verified at process-projection.ts, right before the pollIntervalMs sleep. When budget is exhausted mid-poll-loop (break, not match), engineTaskId stays null and falls through to the pre-ended isInstanceEnded call, which itself immediately short-circuits to BUDGET_EXHAUSTED (remaining<=0) — a clean, single-point cascade with no duplicated 'what if budget ran out here' branch, exactly as ADR §2.3 describes. Independently verified wall-clock behavior with a purpose-built harness (hung port that never resolves/rejects, fed straight into reconcileInstanceEngineDrive bypassing HTTP): budgetMs=80 → measured elapsed=82ms, nowhere near the ~40s+ withRetry worst case."
+    },
+    {
+      "point": "3. 502 envelope consistency (T-0571) + isStructural triple + idempotent-already path",
+      "verdict": "correct",
+      "detail": "inbox.ts's isStructural now ORs in `result.code === ENGINE_DRIVE_TIMEOUT` as a third condition alongside ENGINE_TASK_NOT_FOUND/AMBIGUOUS_ACTIVE_TASK — response body stays {error:{code, stage, engineCode, instanceId}}, byte-identical shape to the other two structural branches (verified by reading inbox.ts:1738-1749 and confirmed live via the AC-2 real-HTTP test: status 502, error.code='ENGINE_DRIVE_TIMEOUT', error.stage='poll', error.instanceId=H_INST). The isStructural check only executes inside `if (!result.ok)` — it cannot fire on the ok:true/alreadyEnded path, so the idempotent-already 200 {engine:'already'} branch (T-0522 contract) is structurally unreachable from this change; confirmed by reading the surrounding code and by the shipped 'idempotent' test (reconcileInstanceEngineDrive run twice with completeEngineTask:false, second call emits 0 new rows, matching T-0522 dedup exactly)."
+    },
+    {
+      "point": "4. ENGINE_DRIVE_DEADLINE_MS value validation (NaN/0/negative → default)",
+      "verdict": "correct implementation, see F-1 for test-coverage gap",
+      "detail": "resolveEngineDriveDeadlineMs: undefined/empty-string/non-finite (NaN, Infinity, -Infinity)/<=0 all fall back to DEFAULT_ENGINE_DRIVE_DEADLINE_MS=10_000 via `Number.isFinite(parsed) && parsed > 0`. Confirmed by direct execution against 10 adversarial inputs (see F-1) — every hostile value degrades safely, only a genuinely positive finite number overrides. Honest-degrade property holds."
+    },
+    {
+      "point": "5. Backward compatibility: 41 pre-existing seam tests untouched; reconcile-on-read unaffected",
+      "verdict": "confirmed",
+      "detail": "inbox-engine-drive.test.ts: 46/46 green, of which 41 are pre-existing T-0571/T-0522 tests with UNCHANGED expectations (diff only adds a new describe block + touches an import list) and 5 are new T-0591 tests. reconcileInboxEngineDriveOnRead (T-0522 mirror path) does not pass driveDeadlineMs at its call site (process-projection.ts ~1754) — it silently inherits the same 10_000 default via reconcileInstanceEngineDrive's own `args.driveDeadlineMs ?? 10_000`, and since deadlineAt is computed fresh per-instance inside each reconcileInstanceEngineDrive call (not shared across the on-read loop's per-instance iterations), there is no cross-instance budget-starvation introduced by this change to the on-read fan-out loop."
+    }
+  ],
+  "acceptance_coverage": [
+    {"ac": "AC-1", "covered": true},
+    {"ac": "AC-2", "covered": true},
+    {"ac": "AC-3", "covered": true},
+    {"ac": "AC-4", "covered": true},
+    {"ac": "AC-5", "covered": true},
+    {"ac": "AC-6", "covered": true},
+    {"ac": "AC-7", "covered": true}
+  ],
+  "role_gap_evidence": [
+    "Independently re-derived the callWithBudget leak analysis from first principles (ECMA-262 resolving-functions semantics) rather than trusting the pr-handoff's characterization, and additionally ran a standalone Node script instrumented with process.on('unhandledRejection') against a deliberately-late-rejecting fn() — zero unhandled rejections observed, confirming the implementation choice (manual Promise executor, not naive Promise.race) sidesteps the exact class of bug the review brief hypothesized.",
+    "Built and ran an independent wall-clock harness (not part of the shipped diff) calling reconcileInstanceEngineDrive directly with a port that never resolves/rejects on ANY of its 3 methods — measured 82ms elapsed against an 80ms budget, corroborating AC-1/FF-1 outside the shipped test file's own assertions.",
+    "Spun up a throwaway Postgres 16 container (port 55433, avoiding collision with sibling worktrees' own 54432/55432 instances already running), applied all 105 migrations, built the fitness:db test template, and ran ci/checks/db/engine-drive-generic.db.test.ts live: 3/3 pass, each sub-test honestly self-skipping its live-engine assertion because Flowable REST was not started (Postgres-only stack) — the file's OWN test code prints '[skip] Flowable not reachable' rather than silently passing, which is the honest-degrade behavior expected; container torn down after.",
+    "Traced all 5 callWithBudget call sites against the spec's stage discriminator (poll|complete|ended|next-tasks) line-by-line and confirmed each ENGINE_DRIVE_TIMEOUT branch reuses the SAME stage value the pre-existing non-timeout error at that exact call site already used (e.g. the pre-ended-check timeout returns stage:'poll', matching the adjacent ENGINE_TASK_NOT_FOUND's own stage:'poll' one code-block below) — no discriminator drift.",
+    "Confirmed EngineDriveResult's ok:false branch types `code` as plain `string` (not a closed union) prior to this change, so ENGINE_DRIVE_TIMEOUT slots in as genuinely additive with zero type-surface breakage — matches ADR §5's compatibility claim."
+  ]
+}
