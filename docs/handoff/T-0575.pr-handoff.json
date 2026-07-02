@@ -44,8 +44,18 @@
   "baseline_ff7": {
     "commit": "080486c",
     "methodology": "code-only (non-comment) occurrences of the literal-VALUE in double quotes, src/**/*.ts, excluding __tests__/*.ts and *.test.ts — matches the ADR's own with-comments 7/5/6 baseline exactly when comments are included (verified by archiving 080486c:src and re-running the grep); the code-only variant isolates ACTUAL hardcode usages from doc-comments explaining a config-primitive's default value",
-    "before": { "role_approver": 3, "soglasovanie": 3, "tel_approval": 1, "aggregate": 7 },
-    "after": { "role_approver": 2, "soglasovanie": 2, "tel_approval": 1, "aggregate": 5 },
+    "before": {
+      "role_approver": 3,
+      "soglasovanie": 3,
+      "tel_approval": 1,
+      "aggregate": 7
+    },
+    "after": {
+      "role_approver": 2,
+      "soglasovanie": 2,
+      "tel_approval": 1,
+      "aggregate": 5
+    },
     "note_tel_approval_floor": "tel-approval cannot mathematically drop below 1 while ТЭЛ backward-compat holds: ADR §3 requires the value survive as a config-primitive's DEFAULT (resolveTelApplicationSlug()/resolveApprovalFormRegistrySlug() in form-record-persister.ts, env CHOROS_TEL_APPLICATION_SLUG/CHOROS_DEFAULT_STEP_RESULT_SLUG) — a fallback default necessarily contains the literal once. AC-10 is satisfied by the AGGREGATE strictly decreasing (independent duplicate copies collapsed into shared config-primitives) and no individual literal regressing; ci/checks/detel-literal-baseline.sh enforces both.",
     "ci_check": "bash ci/checks/detel-literal-baseline.sh (+ --self-test) — green"
   },
@@ -76,5 +86,16 @@
     "FE-3: the deterministic-record-id seam for the FF-3 live-DB rollup test could not use vi.spyOn(nodeCrypto,'randomUUID') directly — node:crypto's exports are non-configurable properties, so spyOn throws 'Cannot redefine property'. Resolved with vi.mock('node:crypto', importOriginal) overriding only randomUUID, falling through to the real implementation for every call except the one explicitly forced.",
     "FE-4: db-lane fitness tests require live Postgres+Flowable; a sibling task's stack (t-0573-postgres-1) already occupied the default port 55432. Brought up an isolated docker compose project (-p t-0575, POSTGRES_PORT=55434, FLOWABLE_PORT=8085) for all live-DB verification, torn down (docker compose -p t-0575 down -v) after the final green run.",
     "FE-5: http-route-auth-coverage.sh FF-0328-3 (byte-freeze of process-start.ts, owned by T-0328) genuinely conflicts with this task's explicit, ADR-named scope — see notes_for_reviewer for the full analysis. Initially left as a known, flagged red rather than self-granting an unauthorized sanction; RESOLVED by review verdict 0060c59 (sanction additively) — durable documentary sanction recorded in frozen-sanctions.jsonl, FF-0328-3 §5 alignment with ADR §4.2 handed to T-0576."
-  ]
+  ],
+  "live_proof": {
+    "status": "green_partial",
+    "date": "2026-07-02T20:46+03:00",
+    "stand": "авто-деплой после пуша c334d43",
+    "machine_proof": "TEST-фаза на живом PG+Flowable: независимая кириллическая проба через продуктовый HTTP API — заявка 600000 (утренний живой кейс) уходит ВЕТКОЙ СОГЛАСОВАНИЯ (не дефолтной), метки/роль базовой задачи из движка; мутационные симуляции до-фикса воспроизводят все три бага; tel-linear-smoke 201/201; 5939/5939",
+    "blocked_ui_step": "Браузерный проход ждёт входа фаундера (сессии убиты деплоем).",
+    "founder_steps_after_login": [
+      "Создать заявку >500к → Мои задачи: задача носит имя из BPMN процесса (не «Согласовать заявку»-фантом), процесс уходит веткой согласования (утром уходил дефолтной)",
+      "Действие в инбоксе двигает процесс (как в live-proof T-0571), результат шага пишется в набор из binding"
+    ]
+  }
 }
