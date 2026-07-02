@@ -66,25 +66,29 @@ T-0199 — правка сужает предикат, не аддитивна �
 
 ## 2. Разведка (2026-07-02, живой worktree T-0576, HEAD=afa856b)
 
-Точный текущий (code-only, `src/**/*.ts`, исключая `__tests__`/`.test.ts`, исключая комментарии — методология
-`detel-literal-baseline.sh`) подсчёт денилиста:
+Точный текущий (code-only, `src/**/*.ts` + `web/src/**/*.{jsx,tsx}`, исключая `__tests__`/`.test.*`, исключая
+комментарии — методология `detel-literal-baseline.sh`) подсчёт денилиста
+*(числа исправлены по ревью R-2: telLinear 7→8 и агрегат 18→19 — первичная разведка пропустила web/src-вхождение,
+найденное позже при DESIGN; таблица теперь совпадает с ADR §4 и отгруженным `anti-case-baseline.json`)*:
 
 | Литерал | Count | Где (code-only, не комментарий, не тест) |
 |---|---|---|
 | `role-approver` | 2 | `process-projection.ts:278` (`APPROVER_ROLE` def), `http/inbox.ts:229` (`USER_ROLES` фикстура-массив ролей персоны) |
 | `soglasovanie` | 2 | `step-applier.ts:83` (`SOGLASOVANIE_SLUG` def), `form-record-persister.ts:122` (default-fallback значение) |
 | `tel-approval` | 1 | `form-record-persister.ts:135` (default-fallback значение) |
-| `telLinear` | 7 | `process-catalog-view.ts:89` (`fallbackDefinitionName` строковое сравнение), `process-projection.ts:850/928/964/1129/1799/1875` (default-fallback значения `procKey`) |
+| `telLinear` | 8 | src (7): `process-catalog-view.ts:89` (`fallbackDefinitionName` строковое сравнение), `process-projection.ts:850/928/964/1129/1799/1875` (default-fallback значения `procKey`); web (1): `web/src/forms/FormBuilder.jsx:509` (`placeholder="telLinear"` — UI-подсказка формата ключа, не бизнес-хардкод; включена ради честности подсчёта) |
 | `e-larina` | 2 | `http/inbox.ts:229` (`USER_ROLES` фикстура-ключ), `http/org.ts:73` (`people[]` object-literal фикстура оргструктуры) |
 | `e-orlov` | 2 | `http/inbox.ts:232` (`USER_ROLES` фикстура-ключ), `http/org.ts:86` (`people[]` object-literal фикстура) |
-| `approvalRequired` (`TEL_GATEWAY_VAR` значение) | 1 (код), 5 doc-comment | `core/dmn-gateway.ts:82` (`export const TEL_GATEWAY_VAR = "approvalRequired" as const` — сама сущность УЖЕ `@deprecated`, строки 77-84) |
+| `approvalRequired` (`TEL_GATEWAY_VAR` значение) | 1 (код), 5 doc-comment | `core/dmn-gateway.ts:82` (`export const TEL_GATEWAY_VAR = "approvalRequired" as const` — сама сущность УЖЕ `@deprecated`, строки 77-84); web-вхождение `gateway-condition-panel.jsx:45` — JSDoc-комментарий, отфильтровывается методологией |
 | `gw-approval-threshold` (`TEL_GATEWAY_ID` значение) | 1 | `core/dmn-gateway.ts:90` (`export const TEL_GATEWAY_ID = ... as const` — тоже `@deprecated`, строки 85-91) |
-| **Агрегат** | **18** | (сумма кода-строк выше; каждый литерал считается один раз на строку-определение/фикстуру, не на каждое упоминание типа/JSDoc) |
+| **Агрегат** | **19** | (сумма кода-строк выше; каждый литерал считается один раз на строку-определение/фикстуру, не на каждое упоминание типа/JSDoc) |
 
 `sod-dao.ts:382` (`e-orlov` в doc-комментарии `LATENT-TRAP GUARD`) — доказанно НЕ код (первый непробельный символ
-строки — `//`), исключается методологией. `web/src/**` на момент разведки НЕ содержит совпадений денилиста (сам
-`rights-ui-anti-case.sh` — git-diff-scoped на будущее, не repo-wide; отдельный repo-wide проход по `web/src/`
-подтверждает ноль текущих вхождений — фиксируется как baseline `0` для web-стороны, тем же гейтом).
+строки — `//`), исключается методологией. `web/src/**` на момент разведки содержит РОВНО ОДНО code-only совпадение
+денилиста — `telLinear`-placeholder выше (плюс один JSDoc-комментарий `approvalRequired`, отфильтровываемый);
+остальные 7 литералов на web-плоскости = 0. Все 8 литералов сканируются на ОБЕИХ плоскостях (src + web/src,
+ревью R-3 defense-in-depth) — сегодняшний baseline от этого не меняется, но будущий web-side врост любого
+литерала ловится этим же repo-wide гейтом, не только diff-scoped `rights-ui-anti-case.sh`.
 
 `FF-0328-3` разведка: на текущем HEAD (afa856b) `process-start.ts` byte-identical к merge-base — красного нет
 СЕЙЧАС (санкция T-0575 покрывала ЕЁ СОБСТВЕННЫЙ диф на своей ветке, уже смерженный и не оставивший остаточной
@@ -151,7 +155,7 @@ T-0199 — правка сужает предикат, не аддитивна �
   зонтиком).
 - **O2.** Параметризация порога `5000000` в `migrations/080_tel_dmn_seed.sql` — не `src/`, отдельная задача карты
   примитивов §5 (эта задача проверяет КОД, не seed-данные миграций).
-- **O3.** Полная деТЭЛизация оставшихся 18 вхождений (это BUILD-задачи будущих волн, не CI-инфраструктура).
+- **O3.** Полная деТЭЛизация оставшихся 19 вхождений (это BUILD-задачи будущих волн, не CI-инфраструктура).
 - **O4.** Изменение логики/владения существующих точечных гейтов (`read-pdp-anti-case.sh`,
   `rights-ui-anti-case.sh`, `detel-literal-baseline.sh`) — они остаются в собственности своих задач
   (T-0570/T-0572/T-0575), зонтик их только оркестрирует.
