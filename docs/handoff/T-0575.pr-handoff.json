@@ -1,0 +1,80 @@
+{
+  "task_id": "T-0575",
+  "status": "pr_open",
+  "branch": "task/T-0575-detel-primitives",
+  "pr_url": "local:task/T-0575-detel-primitives",
+  "ci_local": {
+    "build": true,
+    "lint": true,
+    "types": true,
+    "tests": true,
+    "tests_result": "252 files passed | 2 skipped (254); 4863 tests passed | 10 skipped (4873)",
+    "fitness": "one_known_red",
+    "fitness_result": "npm run fitness is RED at exactly ONE gate: ci/checks/http-route-auth-coverage.sh FF-0328-3 (byte-freeze of src/http/process-start.ts, owned by T-0328). Every other check in the ~280-step chain is green, including dual-control-isolation.sh FF-DC7 (auto-additive relief for migration 119, verified) and substitution-isolation.sh FF-SUB5 (resolves once migration 119 is committed — confirmed empirically both pre- and post-commit). See notes_for_reviewer for full analysis and deviations_from_adr for the concrete conflict.",
+    "fitness_db": true,
+    "fitness_db_result": "100 test files passed (100); 1076 tests passed (1076) — live Postgres+Flowable, project t-0575, stack torn down after (docker compose -p t-0575 down -v)",
+    "tel_linear_smoke": true,
+    "tel_linear_smoke_result": "PASS: tel-linear deploy + startInstance green (ci/checks/flowable/tel-linear-smoke.sh, live stack)",
+    "e2e_journeys_loader": true,
+    "e2e_journeys_loader_result": "62 tests passed (e2e/journeys/loader.test.ts) — frozen ТЭЛ journeys unaffected"
+  },
+  "files_changed": [
+    "src/http/process-projection.ts",
+    "src/http/process-start.ts",
+    "src/http/records.ts",
+    "src/runtime/agent-dispatch/dispatch-outcome.ts",
+    "src/core/flowable-client.ts",
+    "src/db/process-instance-resolver.ts",
+    "src/db/step-applier.ts",
+    "src/db/live-form-schema.ts",
+    "src/http/form-record-persister.ts",
+    "migrations/119_process_app_binding_target_registry_slug.sql",
+    "ci/checks/detel-base-task-from-engine.sh",
+    "ci/checks/detel-literal-baseline.sh",
+    "ci/checks/dual-control-isolation.sh",
+    "ci/checks/role-criticality-migration-excludes.txt",
+    "ci/checks/data/frozen-sanctions.jsonl",
+    "package.json",
+    "src/__tests__/step-applier.test.ts",
+    "src/__tests__/inbox-step-target-unresolved.test.ts",
+    "ci/checks/db/detel-base-task-role.db.test.ts",
+    "ci/checks/db/detel-rollup-to-variables.db.test.ts",
+    "docs/handoff/T-0575.pr-handoff.json"
+  ],
+  "baseline_ff7": {
+    "commit": "080486c",
+    "methodology": "code-only (non-comment) occurrences of the literal-VALUE in double quotes, src/**/*.ts, excluding __tests__/*.ts and *.test.ts — matches the ADR's own with-comments 7/5/6 baseline exactly when comments are included (verified by archiving 080486c:src and re-running the grep); the code-only variant isolates ACTUAL hardcode usages from doc-comments explaining a config-primitive's default value",
+    "before": { "role_approver": 3, "soglasovanie": 3, "tel_approval": 1, "aggregate": 7 },
+    "after": { "role_approver": 2, "soglasovanie": 2, "tel_approval": 1, "aggregate": 5 },
+    "note_tel_approval_floor": "tel-approval cannot mathematically drop below 1 while ТЭЛ backward-compat holds: ADR §3 requires the value survive as a config-primitive's DEFAULT (resolveTelApplicationSlug()/resolveApprovalFormRegistrySlug() in form-record-persister.ts, env CHOROS_TEL_APPLICATION_SLUG/CHOROS_DEFAULT_STEP_RESULT_SLUG) — a fallback default necessarily contains the literal once. AC-10 is satisfied by the AGGREGATE strictly decreasing (independent duplicate copies collapsed into shared config-primitives) and no individual literal regressing; ci/checks/detel-literal-baseline.sh enforces both.",
+    "ci_check": "bash ci/checks/detel-literal-baseline.sh (+ --self-test) — green"
+  },
+  "deviations_from_adr": [
+    "form-record-persister.ts: ADR §2.5 named this as 'соразмерность' escape-hatch scope ('минимум обязан уйти approval:\"soglasovanie\" и TEL_APPLICATION_SLUG как единственный путь') rather than a full data-driven form→registry mapping table (no existing config source keys on formId 'purchase'/'approval'; inventing one would be a new schema surface disproportionate to this task). Implemented the minimum: both literals are now config-primitive functions (resolveApprovalFormRegistrySlug/resolveTelApplicationSlug, env CHOROS_DEFAULT_STEP_RESULT_SLUG/CHOROS_TEL_APPLICATION_SLUG) rather than a bare const/map entry — an operator can override without a code change, satisfying 'не единственный путь' literally.",
+    "flowable-client.ts getActiveUserTasks: NOT named in the spec/ADR as a file to touch, but empirically required for BUG-015 to function on live infra at all. Flowable 7.1.0's GET /runtime/tasks LIST/query REST endpoint does NOT embed candidateGroups/involvedPeople inline in its response items (confirmed against a live flowable/flowable-rest:7.1.0 container) — only GET /runtime/tasks/{id}/identitylinks returns them ([{type:'candidate',group:'<slug>',user:null}]). Without this fix, the FF-2 live-DB test failed (role always fell back to the default, even for a GENERIC process with distinct candidateGroups) — proving the primitive genuinely worked required fixing this pre-existing infrastructure gap, not just the call sites named in the ADR. Added a best-effort per-task identity-links fetch (parallel, non-blocking, degrades to empty candidateGroups on failure — never fails the whole call).",
+    "Migration number: took 119 as instructed (ADR D1) — rebased onto origin/dev cleanly (dev carried 117; 118 was not yet present from T-0573). migrations/run.mjs sorts lexicographically and does not require dense numbering, so the 118 gap is not a defect.",
+    "step-applier.ts's line-625 'unresolved + markerPresent' throw (primary-target resolution failure, e.g. no_process_started_event) intentionally remains a plain Error (not StepTargetUnresolvedError) — that is a DIFFERENT failure class (instance addressing failed entirely) from BUG-017/AC-7's specific 'application resolved but no step-result registry configured' symptom; SA-2's existing /unresolved/i assertion was left untouched (still correct, no regression)."
+  ],
+  "tests_added": [
+    "ci/checks/db/detel-base-task-role.db.test.ts (FF-2, live Flowable+Postgres, 2 tests) — AC-1/AC-2/AC-4: two GENERIC processes (distinct candidateGroups/name from role-approver/Согласование) started via POST /api/processes/start on a live engine; process.started payload asserts task_role/task_name/task_step equal the REAL BPMN values, explicitly asserting they are NOT the ТЭЛ literals.",
+    "ci/checks/db/detel-rollup-to-variables.db.test.ts (FF-3, live Flowable+Postgres, 2 tests) — AC-3/AC-5: on_create with pre-seeded child records (rollup sum >500000 and <500000) via POST /api/records on a live engine; a plain JUEL exclusiveGateway (${amount>500000}, no DMN) proves the computed rollup value genuinely reaches flowable.startInstance's variables (high-value branch taken / default branch taken as the honest anti-case). Deterministic parent-record id via vi.mock('node:crypto') (its exports are non-configurable — vi.spyOn cannot redefine them directly; importOriginal indirection is required).",
+    "src/__tests__/step-applier.test.ts SA-9 (updated) + SA-10 (new) — SA-9 now asserts StepTargetUnresolvedError (code STEP_TARGET_UNRESOLVED, status 422) instead of the old bare-Error message-substring match (BUG-017 fix changes the error SHAPE, not the fail-closed semantics). SA-10 (FF-4/AC-6) proves resolution of an ARBITRARY (non-'soglasovanie') target_registry_slug from the binding row.",
+    "src/__tests__/inbox-step-target-unresolved.test.ts (FF-5/AC-7, 2 tests) — full HTTP approve round-trip (registerInboxRoutes) with an in-memory pg stub answering process_app_binding/registry_def/cross_app_ref queries: an unresolved target yields 422 {error:{code:'STEP_TARGET_UNRESOLVED'}} plus a structured console.warn carrying tenantId/processKey/applicationId/expectedSlug (not a silent 500); a configured arbitrary slug yields 200 (regression: the fail-honest path is not over-triggered).",
+    "ci/checks/detel-base-task-from-engine.sh (FF-1, + --self-test) — static grep gate: both appendProcessStarted call sites (process-start.ts, records.ts) thread approverRole/step/taskName AND call flowable.getActiveUserTasks — catches a regression back to the bare-call BUG-015 shape.",
+    "ci/checks/detel-literal-baseline.sh (FF-7, + --self-test) — code-only literal-VALUE count gate; see baseline_ff7 above; this is the recorded input T-0576's permanent anti-case gate is meant to build on."
+  ],
+  "notes_for_reviewer": [
+    "KNOWN RED (flagged, not silently bypassed): ci/checks/http-route-auth-coverage.sh FF-0328-3 fails because src/http/process-start.ts (declared byte-frozen by T-0328) was genuinely modified — both this task's own ADR (runtime_target) and its spec explicitly name process-start.ts as ONE of the two required appendProcessStarted call sites for BUG-015; there is no way to add the getActiveUserTasks-before-projection logic without touching this file's body. T-0328's OWN ADR (docs/design/T-0328-agent-facing-auth-model.adr.md §4.2) explicitly clarifies process-start.ts's freeze is 'contract-frozen (the REST shape, enforced by start-route-isolation.sh), NOT byte-frozen' — unlike secret-handle.ts, which §4.1 treats as genuinely byte-frozen. ci/checks/start-route-isolation.sh (the REAL structural invariant T-0328/T-0280 care about — no own engine transport, no env reads) PASSES cleanly against this change. Git history shows process-start.ts has been legitimately modified by several sibling tasks AFTER T-0328's freeze landed (T-0439/T-0443/T-0483/T-0558), with T-0558 (2026-06-30, +145/-lines) postdating the freeze by 4 days and merged to dev without a matching frozen-sanctions.jsonl entry found for this specific check — suggesting either the byte-diff baseline silently advances with each dev merge, or this exact friction has recurred before without a durable sanction being recorded. I deliberately did NOT self-grant a founder-class or auto_additive sanction for http-route-auth-coverage.sh (it is not in the T-0152 security-invariants catalog, so auto_additive verification is unavailable, and I have no actual founder authorization) — this is left for review/orchestrator judgment: either (a) sanction this specific change, or (b) narrow FF-0328-3's FROZEN_FILES array to match T-0328's own §4.2 text (secret-handle.ts only), which would require its own reviewed sanction on http-route-auth-coverage.sh.",
+    "dual-control-isolation.sh (FF-DC7) and role-criticality-migration-excludes.txt both required a per-migration relief for migration 119, following the exact 082/109/115/116/117 precedent (ADD COLUMN on the existing process_app_binding table, no CREATE/RLS, no confirmed2_by touch). The dual-control-isolation.sh edit itself required an auto_additive sanction in ci/checks/data/frozen-sanctions.jsonl (it is owned by T-0044, and I am on T-0575's branch) — verified locally with `bash ci/checks/auto-sanction-additive.sh --verify T-0575 ci/checks/dual-control-isolation.sh <base> <line>`-equivalent (frozen-checks-immutable.sh runs this automatically); A-1..A-4 additivity + TENANT-ISO Враг-attestation (corpus_ref=efa4b97, the same valid anchor T-0570's precedent entry uses) both PASS.",
+    "substitution-isolation.sh (FF-SUB5, owned by T-0035) transiently failed while migration 119 was uncommitted (its migration-number scan flags ANY new/uncommitted file numbered ≥38 unless it is 'tracked & unchanged vs HEAD') — confirmed empirically this resolves automatically once the migration is committed (no relief needed, no check edit made).",
+    "The FF-7 baseline script (detel-literal-baseline.sh) records the counting methodology and current numbers as the explicit input contract for T-0576 (the permanent anti-case CI gate, out of this task's scope per spec §8 O3) — T-0576's implementer should read baseline_ff7 above before designing the steady-state gate.",
+    "LIVE_PROOF (D-064) for this task is the automated FF-2/FF-3 db-lane tests above, run against a live Flowable+Postgres stack (project t-0575, ports 55434/8085, torn down after) — they are the equivalent of the manual UI walkthrough the spec's §5 LIVE_PROOF-path describes (deploy a non-ТЭЛ BPMN with distinct candidateGroups/name, create a record whose rollup exceeds a gateway threshold, observe the correct role/label/branch), just driven through the real HTTP routes + real engine instead of a browser. A manual UI walkthrough on the deployed dev stand was NOT performed by this coder pass (no dev-stand deploy access in this session) — flagged for the acceptance/live-proof phase if a human-observed pass is still required by D-064's own discipline."
+  ],
+  "friction_events": [
+    "FE-1: Flowable 7.1.0's GET /runtime/tasks LIST endpoint does not return candidateGroups/involvedPeople inline (only the single-task GET /runtime/tasks/{id}/identitylinks endpoint does) — discovered only after the FF-2 live-DB test kept falling back to the default role despite the BPMN declaring a distinct candidateGroups. Confirmed by directly curling a live flowable/flowable-rest:7.1.0 container's identitylinks endpoint. Fixed in src/core/flowable-client.ts's getActiveUserTasks (best-effort per-task identity-links fetch, parallel, degrades to empty on failure).",
+    "FE-2: process-start.ts's on_create-adjacent skip-submit logic auto-completes WHATEVER user-task is first active after start (by design, for the ТЭЛ-shaped task-submit-is-always-first assumption) — the FF-2 test's minimal generic BPMN (start→gateway-target-task directly) had its OWN target task silently auto-completed before it could be observed. Fixed by adding an explicit task-submit node ahead of the observed task in the test BPMN, matching the real production on_create shape (any authored on_create process has a submit-then-decide shape) rather than changing production code (the auto-complete behavior is correct/intentional, unrelated to this task).",
+    "FE-3: the deterministic-record-id seam for the FF-3 live-DB rollup test could not use vi.spyOn(nodeCrypto,'randomUUID') directly — node:crypto's exports are non-configurable properties, so spyOn throws 'Cannot redefine property'. Resolved with vi.mock('node:crypto', importOriginal) overriding only randomUUID, falling through to the real implementation for every call except the one explicitly forced.",
+    "FE-4: db-lane fitness tests require live Postgres+Flowable; a sibling task's stack (t-0573-postgres-1) already occupied the default port 55432. Brought up an isolated docker compose project (-p t-0575, POSTGRES_PORT=55434, FLOWABLE_PORT=8085) for all live-DB verification, torn down (docker compose -p t-0575 down -v) after the final green run.",
+    "FE-5: http-route-auth-coverage.sh FF-0328-3 (byte-freeze of process-start.ts, owned by T-0328) genuinely conflicts with this task's explicit, ADR-named scope — see notes_for_reviewer for the full analysis. Left as a known, flagged red rather than self-granting an unauthorized sanction."
+  ]
+}
