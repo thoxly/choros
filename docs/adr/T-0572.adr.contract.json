@@ -1,0 +1,168 @@
+{
+  "task_id": "T-0572",
+  "status": "ready",
+  "decision": "Экран «Доступ» перестаёт лгать и получает ручки выдачи/отзыва — БЕЗ нового write-пути (write-путь + dual-control уже построены и заморожены, NF-1). Пять сцепленных элементов: (1) Новый READ-эндпоинт GET /api/rights/tenant-state в НОВОМ файле src/http/rights-overview.ts (не в rights.ts — он несёт zero-pg инвариант FF-DISPLAY-4, который мы не снимаем): читает choros.role LEFT JOIN role_assignment LEFT JOIN grant + employee для тенанта ВЫЗЫВАЮЩЕГО, tenant ИЗ AUTH (resolveActorTenant), НЕ из query-параметра (урок tenant-hardcode — даже seed-write tenant-state берёт из query, мы этот шов не множим). Ответ {scope, can_manage, roles:[{id,slug,name,assignments[],grants[],pending{assignments,grants}}]}. Одна транзакция, три запроса (roles / assignments JOIN employee всех ролей разом / grants всех ролей разом), агрегация in-memory по role_id — O(1) запросов на HTTP-вызов, N+1-free; JOIN-форма переиспользует паттерн loadSubjectGrants (pdp-explain.ts) / listChangeRequests (rights-change-requests.ts) БЕЗ DEV_TENANT_ID-хардкода. (2) PDP-гейт на эндпоинте, две проекции по авторитету вызывающего (loadAdminContext, тот же сигнал, что питает GET /api/me/nav-capabilities zones='admin'): admin/owner (isGenesisOwner || adminGrants.length>0) ⇒ scope='tenant', can_manage=true, все роли тенанта; обычный юзер ⇒ scope='self', can_manage=false, сервер фильтрует по employee_id=self (резолвится из auth resolveActorSlugFromAuth, НИКОГДА из клиентского параметра — AC-10). Fail-closed: ошибка резолюции авторитета ⇒ self, не admin. (3) screen-rights.jsx переключает источник /api/rights → /api/rights/tenant-state, адаптирует shape, удаляет demo-ROLE_GROUPS/demo-id (мёртвые аффордансы, G7); Error/Loading/Empty уже есть (kit) — переиспользуются; пустой тенант ⇒ честный first-use EmptyState, отличимый от ErrorState-источник-недоступен. (4) «Кто что может» = СЕКЦИЯ во вкладке overview (не седьмая вкладка — UX Tabs >7-8 не сканируются; overview роль-деталь уже показывает «Производное от грантов»): admin-взгляд (действующие grants+assignments роли, human/agent/service бейджем) + self-взгляд («мои права» read-only). (5) Формы выдачи/отзыва рендерятся ТОЛЬКО при can_manage:true (при false компонент формы ОТСУТСТВУЕТ в DOM — деградация видимости, не disabled-кнопка, AC-9); бьют строго в СУЩЕСТВУЮЩИЕ POST /api/role-assignments(/:id/revoke) и POST /api/grants(/:id/revoke); scope формируется как ScopeElement-JSON для существующего parseScopeElement (node/tags/set день-1; interval/record-level К1 = out_of_scope, FR-4), клиент не вводит параллельный scope-формат (AC-14). Semi-confirmed честен (образец ra-criticality.jsx): ответ {state:'semi-confirmed', second_approver_required:true} рендерится как «ждёт подтверждения» в ОТДЕЛЬНОМ визуальном контейнере от confirmed (waiting-StatusChip), со ссылкой в СУЩЕСТВУЮЩИЙ инбокс /rights/criticality (GET /api/rights/change-requests) — approve/reject НЕ дублируется (NF-1). Semi-confirmed НИКОГДА не показан как действующее право (FR-5, AC-7/8): в проекции идёт в roles[].pending, «действующий» предикат зеркалит семантику записи grants.ts — confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL), не наивный confirmed_by-фильтр. Вердикт бейджа /rights/editor (FR-8/AC-12): ОСТАЁТСЯ 'demo' с КОНКРЕТНОЙ причиной — ra-role-editor.jsx пишет грант в реальный API целиком (POST /api/grants/propose/confirm2, роли из tenant-state), НО его грант-черновик засеян INITIAL_GRANTS (3 статичных атома, ra-role-editor.jsx:29-33, setGrants(INITIAL_GRANTS)) и существующие гранты роли из БД не подгружаются — остаточный мок по букве FR-8; тултип в shell.jsx меняется на конкретный («черновик засеян примером; гранты роли из БД не подгружаются»), снятие в 'live' = отдельный follow-up вне T-0572. NF-6 UX_REVIEW обязателен (существенно трогает web/).",
+  "rejected_alternatives": [
+    {
+      "option": "Живой READ в rights.ts (снять zero-pg инвариант FF-DISPLAY-4).",
+      "why_not": "Правка заявленного инварианта чужого модуля ради одного эндпоинта; rights.ts служит no-DB/showcase display-плоскости. Новый файл src/http/rights-overview.ts соразмернее (NF-5), не рвёт FF-DISPLAY-4."
+    },
+    {
+      "option": "Расширить GET /api/org/tenant-state (seed-write.ts) грантами/назначениями.",
+      "why_not": "Берёт tenant_id из QUERY (урок tenant-hardcode — не множим шов), gated только admin (нет self-проекции для обычного юзера FR-6), importer/reset-diff инструмент — смешивать «обзор прав» с ним размывает назначение. Новый read с tenant-из-auth и двумя проекциями чище."
+    },
+    {
+      "option": "Новый write-эндпоинт «выдать роль/грант» (POST /api/rights/overview/grant).",
+      "why_not": "Отвергнуто дословно (NF-1, AC-4/5/6): write-путь + dual-control уже построены и заморожены; второй вход = обход гейта или дубль. UI бьёт строго в существующие /api/grants и /api/role-assignments."
+    },
+    {
+      "option": "Дублировать approve/reject dual-control в новых местах экрана.",
+      "why_not": "rights-change-requests.ts + ra-criticality.jsx — готовый инбокс; T-0572 ВЕДЁТ туда ссылкой (NF-1), не копирует DC-1/2/3."
+    },
+    {
+      "option": "Седьмая верхнеуровневая вкладка «Кто что может».",
+      "why_not": "UX-паттерн Tabs: >7-8 не сканируются; нав уже несёт 6 (overview/trail/criticality/sod/editor/intents). overview роль-деталь — естественное место (уже есть «Производное от грантов»). Секция, не вкладка."
+    },
+    {
+      "option": "Оптимистично показывать semi-confirmed как активное право.",
+      "why_not": "Отвергнуто дословно (FR-5, PD-17 F2, AC-7/8): до confirmed2_by право не действующее. Оптимистичный рендер = ложь о состоянии прав = ровно тот класс лжи D4, который задача чинит."
+    },
+    {
+      "option": "Снять бейдж /rights/editor в 'live'.",
+      "why_not": "INITIAL_GRANTS засевает драфт (не проекция БД) — остаточный мок; 'live' нарушил бы G7 (бейдж≡контент). Оставлен 'demo' с конкретикой (§2.7)."
+    },
+    {
+      "option": "Клиент фильтрует «мои права» по клиентскому employee_id.",
+      "why_not": "AC-10, FR-6: сервер решает по идентичности вызывающего (resolveActorSlugFromAuth), не по клиентскому параметру — иначе подмена employee_id даёт чужие права. Проекция выбирается сервером по авторитету, параметра нет."
+    },
+    {
+      "option": "«Действующее» = confirmed_by IS NOT NULL (без учёта confirmed2_by).",
+      "why_not": "Критичный semi-confirmed грант (proposed_by=actor, confirmed2_by=NULL) НЕ активен по семантике записи grants.ts; показать его действующим = FR-5-нарушение. Предикат зеркалит семантику записи, а не наивный confirmed_by-фильтр."
+    }
+  ],
+  "object_model": [
+    {
+      "entity": "TenantStateResponse (src/http/rights-overview.ts — ответ GET /api/rights/tenant-state)",
+      "fields": [
+        { "name": "scope", "type": "'tenant' | 'self' — маркер проекции (admin видит весь тенант, обычный юзер — свои роли)" },
+        { "name": "can_manage", "type": "boolean — держит ли вызывающий mgmt_object:role/grant (форма записи видна в UI)" },
+        { "name": "roles", "type": "OverviewRole[] — агрегированные роли с назначениями, грантами, pending" }
+      ]
+    },
+    {
+      "entity": "OverviewRole",
+      "fields": [
+        { "name": "id/slug/name", "type": "string / string / string|null — из choros.role" },
+        { "name": "assignments", "type": "OverviewAssignment[] — ТОЛЬКО ДЕЙСТВУЮЩИЕ (confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) AND in-window)" },
+        { "name": "grants", "type": "OverviewGrant[] — ТОЛЬКО ДЕЙСТВУЮЩИЕ (тот же предикат)" },
+        { "name": "pending", "type": "OverviewPending — semi-confirmed (confirmed_by IS NOT NULL AND confirmed2_by IS NULL AND proposed_by IS NOT NULL), ОТДЕЛЬНО от действующих (FR-5)" }
+      ]
+    },
+    {
+      "entity": "OverviewAssignment",
+      "fields": [
+        { "name": "id/employee_id", "type": "string / string (uuid)" },
+        { "name": "employee_slug/employee_display", "type": "string|null / string|null (человеко-читаемо через JOIN employee)" },
+        { "name": "employee_kind", "type": "'human' | 'agent' | 'service' (бейдж исполнителя)" },
+        { "name": "org_scope", "type": "unknown (ScopeElement JSON)" },
+        { "name": "state", "type": "'active' (в этом массиве только действующие)" }
+      ]
+    },
+    {
+      "entity": "OverviewGrant",
+      "fields": [
+        { "name": "id", "type": "string (uuid)" },
+        { "name": "resource_type/operation", "type": "string / string" },
+        { "name": "resource_facet", "type": "unknown|null" },
+        { "name": "scope", "type": "unknown (ScopeElement JSON)" },
+        { "name": "state", "type": "'active'" }
+      ]
+    },
+    {
+      "entity": "OverviewPending",
+      "fields": [
+        { "name": "assignments", "type": "{id, employee_display, confirmed_by}[] — semi-confirmed назначения (первый подтвердивший, ждёт второго)" },
+        { "name": "grants", "type": "{id, description, confirmed_by}[] — semi-confirmed гранты" }
+      ]
+    },
+    {
+      "entity": "registerRightsOverviewRoutes (src/http/rights-overview.ts — регистрация маршрута)",
+      "fields": [
+        { "name": "signature", "type": "(router: Router, pool: pg.Pool) => void" },
+        { "name": "wiring", "type": "server.ts внутри if(grantsPool), ПЕРЕД registerRightsRoutes (literal '/api/rights/tenant-state' не должен попасть в GET /api/rights/:roleId catch-all — как change-requests/sod)" },
+        { "name": "actor/tenant", "type": "extractActorFromReq → resolveActorTenant (из auth, НЕ query); проекция через loadAdminContext" }
+      ]
+    },
+    {
+      "entity": "screen-rights.jsx (web/src/screens/rights/ — изменяемый, additive)",
+      "fields": [
+        { "name": "source", "type": "fetch('/api/rights') → fetch('/api/rights/tenant-state') (AC-3)" },
+        { "name": "shape", "type": "role.holders/grants(demo) → role.assignments/grants/pending(живые); удаление demo-ROLE_GROUPS/demo-id (G7)" },
+        { "name": "sections", "type": "«кто что может» (admin+self) + формы выдачи/отзыва роли+гранта под can_manage + pending-контейнер semi-confirmed (waiting-StatusChip, отдельно от действующих)" },
+        { "name": "states", "type": "Error/Loading/Empty — kit ErrorState/LoadingState/EmptyState (уже есть, переиспользуются)" }
+      ]
+    },
+    {
+      "entity": "shell.jsx REFERENCE_TABS editor (web/src/app-shell/ — единственная правка нав)",
+      "fields": [
+        { "name": "status", "type": "'demo' (ОСТАЁТСЯ — INITIAL_GRANTS засевает драфт, гранты роли из БД не подгружаются)" },
+        { "name": "tooltip", "type": "общий «данные иллюстративные (mock)» → конкретный «черновик грантов засеян примером; существующие гранты роли из БД пока не подгружаются» (G7 бейдж≡контент)" }
+      ]
+    }
+  ],
+  "contracts": [
+    "src/http/rights-overview.ts (НОВЫЙ): GET /api/rights/tenant-state — withAuth; tenant из resolveActorTenant (НЕ query); loadAdminContext ⇒ can_manage = isGenesisOwner||adminGrants.length>0; scope='tenant' при can_manage, иначе 'self' + фильтр employee_id=resolveActorSlugFromAuth→id. Одна withTenantTx: SELECT roles + SELECT assignments JOIN employee (все роли разом) + SELECT grants (все роли разом); агрегация in-memory по role_id (N+1-free). Предикат действующего: confirmed_by IS NOT NULL AND (confirmed2_by IS NOT NULL OR proposed_by IS NULL) [+ assignment in-window valid_from/until]; semi-confirmed (confirmed_by IS NOT NULL AND confirmed2_by IS NULL AND proposed_by IS NOT NULL) ⇒ roles[].pending. Экспорт registerRightsOverviewRoutes(router, pool).",
+    "src/server.ts (additive): import + registerRightsOverviewRoutes(router, grantsPool) внутри if(grantsPool) block, ПЕРЕД registerRightsRoutes (порядок регистрации: literal path перед :roleId, как registerRightsChangeRequestRoutes/registerSodRoutes).",
+    "web/src/screens/rights/screen-rights.jsx (изменяемый): источник → /api/rights/tenant-state; адаптация shape (assignments/grants/pending); удаление demo-ROLE_GROUPS/demo-id; секция «кто что может» (admin+self); формы выдачи/отзыва роли+гранта под can_manage (при false — форма НЕ в DOM); semi-confirmed pending-контейнер (waiting-StatusChip, отдельно). Error/Loading/Empty kit-переиспользование. Сигнатура RightsScreen (initialRole prop) не меняется.",
+    "web/src/screens/rights/screen-rights.jsx (формы): выдать роль → POST /api/role-assignments; отзыв роли → POST /api/role-assignments/:id/revoke; выдать грант → POST /api/grants; отзыв гранта → POST /api/grants/:id/revoke; второй подтверждающий — ссылка в /rights/criticality (НЕ дублирует). scope = ScopeElement-JSON для parseScopeElement (node/tags/set день-1). Никакого нового router.register(POST) и никакого прямого DAO.",
+    "web/src/app-shell/shell.jsx (изменяемый): REFERENCE_TABS editor status ОСТАЁТСЯ 'demo'; Tooltip label → конкретный маркер (черновик/гранты роли).",
+    "FROZEN (не редактируются, только импортируются): src/http/grants.ts, src/http/rights-change-requests.ts, src/http/rights.ts (zero-pg), src/core/dual-control.ts, src/core/role-criticality.ts, src/core/grant-resolver.ts, src/core/grant-lattice.ts. web/src/screens/rights/ra-role-editor.jsx, ra-intents.jsx, ra-criticality.jsx, ra-sod.jsx НЕ трогаются.",
+    "Читаемые таблицы (без DDL): choros.role {id,slug,name,tenant_id}, choros.role_assignment {id,employee_id,role_id,org_scope,confirmed_by,confirmed2_by,proposed_by,valid_from,valid_until}, choros.\"grant\" {id,role_id,resource_type,resource_facet,operation,scope,confirmed_by,confirmed2_by,proposed_by}, choros.employee {id,slug,display_name,kind}.",
+    "Переиспользуемые примитивы (NF-5, не переизобретаются): src/db/org.ts resolveActorTenant/resolveActorSlugFromAuth/loadAdminContext/isGenesisOwnerForTenant; ./auth.js withAuth/extractActorFromReq-паттерн; src/http/grants.ts parseScopeElement (через API-контракт, не импорт клиента); GET /api/rights/dictionaries для словарей форм.",
+    "Анти-кейс расширение: FF-T0572-ANTICASE покрывает src/ И web/src/ (существующий read-pdp-anti-case.sh scoped только src/); демо-константы 'Согласование' в rights.ts RIGHTS_SEED / ra-data.jsx — ПРЕДСУЩЕСТВУЮЩИЕ, не трогаются (гейт diff-scoped на добавленные строки)."
+  ],
+  "fitness_functions": [
+    { "id": "FF-T0572-1", "rule": "GET /api/rights/tenant-state возвращает роли ИЗ choros.role реального тенанта вызывающего (не demo-pack/RIGHTS_SEED); для тенанта с N>0 ролями — ровно эти N (сверка с прямым SQL).", "ci_check": "ci/checks/db/rights-overview.db.test.ts: seed тенант с N ролей → GET → roles.length===N, id-множество == SELECT id FROM role. (AC-1)" },
+    { "id": "FF-T0572-2", "rule": "Пустой тенант ⇒ {roles:[]} БЕЗ demo:true/фикстур-подмены (отличимо от источник-недоступен).", "ci_check": "src/__tests__/rights-overview.test.ts: 0 ролей ⇒ roles:[], нет demo-поля; DB-error ⇒ 5xx/error-shape ≠ пустой список. (AC-2)" },
+    { "id": "FF-T0572-3", "rule": "screen-rights.jsx НЕ фетчит /api/rights; источник сменён на /api/rights/tenant-state.", "ci_check": "ci/checks/rights-overview-source-switch.sh: grep screen-rights.jsx — нет fetch('/api/rights') (точный литерал без /tenant-state), есть /api/rights/tenant-state; self-test bad/good. (AC-3)" },
+    { "id": "FF-T0572-4", "rule": "Выдача роли из UI = ровно один POST /api/role-assignments; НЕТ нового write-эндпоинта для назначений.", "ci_check": "ci/checks/rights-ui-no-new-write.sh: git-diff-scoped grep — нет добавленного router.register(\"POST\", \"/api/role-assignments\"; web-форма бьёт в существующий путь. self-test. (AC-4)" },
+    { "id": "FF-T0572-5", "rule": "Выдача гранта из UI = ровно один POST /api/grants; НЕТ нового write-эндпоинта для грантов.", "ci_check": "ci/checks/rights-ui-no-new-write.sh: нет добавленного router.register(\"POST\", \"/api/grants\"; форма бьёт в существующий. self-test. (AC-5)" },
+    { "id": "FF-T0572-6", "rule": "Отзыв роли/гранта = существующие POST .../:id/revoke; НЕ прямой UPDATE, не новый revoke-путь.", "ci_check": "ci/checks/rights-ui-no-new-write.sh: нет добавленного router.register(\"POST\", \".../revoke\"; UI зовёт /api/grants/:id/revoke и /api/role-assignments/:id/revoke. (AC-6)" },
+    { "id": "FF-T0572-7", "rule": "Ответ {state:'semi-confirmed', second_approver_required:true} рендерится как явное «ждёт подтверждения», НЕ активное право (semi-строка не в контейнере confirmed без waiting-маркера).", "ci_check": "web unit (vitest+jsdom): мок POST-ответа semi-confirmed ⇒ DOM: строка в pending-контейнере с waiting-StatusChip, отсутствует в контейнере действующих. (AC-7)" },
+    { "id": "FF-T0572-8", "rule": "Полу-подтверждённое (critical: confirmed_by IS NOT NULL AND confirmed2_by IS NULL AND proposed_by IS NOT NULL) НЕ отображается в «кто что может» как действующее ни в admin-, ни в self-взгляде.", "ci_check": "ci/checks/db/rights-overview.db.test.ts: seed semi-confirmed grant+assignment ⇒ они в roles[].pending.*, НЕ в roles[].grants/assignments; сверка с SQL-фильтром на confirmed2_by. (AC-8)" },
+    { "id": "FF-T0572-9", "rule": "Обычный юзер (без mgmt_object:role/grant, не genesis owner) видит ТОЛЬКО read-only «мои права»; DOM не содержит форм выдачи; can_manage:false.", "ci_check": "src/__tests__/rights-overview.test.ts: актор без admin-гранта ⇒ scope:'self', can_manage:false, roles только его; web unit: can_manage:false ⇒ формы записи не в DOM. (AC-9)" },
+    { "id": "FF-T0572-10", "rule": "Self-взгляд для актора X возвращает права ТОЛЬКО X (не всего тенанта), когда вызывающий не admin/owner; сервер фильтрует по идентичности, не по клиентскому параметру.", "ci_check": "ci/checks/db/rights-overview.db.test.ts: два актора non-admin; запрос от X ⇒ только роли X; попытка подмешать employee_id в запрос игнорируется (параметра нет). (AC-10)" },
+    { "id": "FF-T0572-ANTICASE", "rule": "Анти-кейс (D-064): в diff src/ И web/src/ нет литералов role-approver/soglasovanie/tel-/Согласование/e-larina/e-orlov/e-configurator в ДОБАВЛЕННЫХ строках.", "ci_check": "ci/checks/rights-ui-anti-case.sh: git-diff-scoped grep по добавленным строкам под src/+web/src/ (расширяет read-pdp-anti-case.sh, чей scope только src/); comment-strip + word-boundary как оригинал; self-test bad/good; wired в fitness. (AC-11, NF-4)" },
+    { "id": "FF-T0572-BADGE", "rule": "Бейдж /rights/editor в shell.jsx == 'demo' с КОНКРЕТНЫМ тултипом (не общим): называет черновик/«гранты роли». (Вердикт §2.7.)", "ci_check": "ci/checks/rights-editor-badge-verdict.sh: grep shell.jsx REFERENCE_TABS editor-строка status:\"demo\" + тултип содержит конкретный маркер (напр. «гранты роли»/«черновик»); self-test. (AC-12)" },
+    { "id": "FF-T0572-STATES", "rule": "Empty/Loading/Error на: «Обзоре ролей», форме выдачи/отзыва, обеих проекциях «кто что может» (admin+self) — по одному явному тесту/ветке на состояние.", "ci_check": "web unit: для каждого — 3 ветки рендера (kit EmptyState/LoadingState/ErrorState) присутствуют; grep-присутствие компонентов + рендер-тест. (AC-13, NF-7)" },
+    { "id": "FF-T0572-SCOPE", "rule": "Формы используют существующий parseScopeElement через API-контракт: тело запроса — валидный ScopeElement JSON (node/tags/set), НЕ параллельный клиентский scope-формат.", "ci_check": "src/__tests__/rights-overview.test.ts или grant-scope-тест: тело формы гранта парсится parseScopeElement без ошибки; web — нет собственного scope-сериализатора вне dictionaries-формы. (AC-14)" },
+    { "id": "FF-T0572-FROZEN", "rule": "Write-ядро байт-без-правок: src/http/grants.ts, src/http/rights-change-requests.ts, src/core/dual-control.ts, src/core/role-criticality.ts, src/core/grant-resolver.ts, src/core/grant-lattice.ts не редактируются (только импортируются).", "ci_check": "ci/checks/rights-ui-frozen-write.sh: git diff --name-only <base> не содержит этих файлов (стиль read-pdp-frozen-core.sh); self-test bad/good; wired в fitness. (NF-1, NF-2, FR-5)" },
+    { "id": "FF-UX-G2", "rule": "Контраст обе темы: новые/изменённые CSS (overview секции, формы, pending-контейнер) читаемы light+dark; :root=light default, [data-theme=dark] достижим.", "ci_check": "существующий ci/checks/ux/ux-g2-theme-pairing.sh (репо-широкий, wired в fitness) — новые токены проходят A1/A2; ручная проверка обеих тем на LIVE_PROOF. (G2)" },
+    { "id": "FF-UX-G4", "rule": "State-примитивы: Empty/Loading/Error через kit-примитивы (EmptyState/LoadingState/ErrorState/Skeleton), не хэнд-роллед.", "ci_check": "существующий ci/checks/ux/ux-g4-state-primitives.sh; FF-T0572-STATES дублирует по факту наличия. (G4, NF-7)" },
+    { "id": "FF-UX-G5", "rule": "Нет dev-жаргона в видимом тексте новых экранов (web/src/screens/rights/**): нет T-\\d{3,}, bare-UUID, confirmed2_by, mgmt_object, RESOURCE_ROOT в отображаемом тексте.", "ci_check": "существующий ci/checks/ux/ux-g5-jargon-denylist.sh (comment-scoped, репо-широкий, wired) — новый видимый текст чист. (G5)" },
+    { "id": "FF-UX-G6", "rule": "Нет НОВОГО хардкода цвета/хэнд-роллед-оверлея в добавленных web/src/screens/**+app-shell/** строках; консумирует kit + токены.", "ci_check": "существующий ci/checks/ux/ux-g6-no-new-hardcode.sh (diff-based, wired) — добавленные строки без rgba(/hex-литералов/inline-модалок. (G6)" },
+    { "id": "FF-UX-G7", "rule": "Бейдж≡контент + нет мёртвых аффордансов: бейдж editor честен (FF-T0572-BADGE); demo-ROLE_GROUPS/demo-id удалены из screen-rights.jsx; нет disabled-кнопок без честной причины.", "ci_check": "FF-T0572-BADGE + FF-T0572-3 (demo-id ушли); ручной UX_REVIEW G7-чек. (G7, FR-8)" },
+    { "id": "FF-T0572-TSC-LINT", "rule": "tsc --noEmit чист; eslint чист для новых/изменённых файлов; npm run build (веб-сборка) зелёный.", "ci_check": "tsc --noEmit && eslint src + web build; часть npm run ci. (AC-15)" }
+  ],
+  "traceability": [
+    { "ac": "AC-1", "covered_by": "ADR §2.1 живой READ + FF-T0572-1" },
+    { "ac": "AC-2", "covered_by": "ADR §2.3 честный EmptyState + FF-T0572-2" },
+    { "ac": "AC-3", "covered_by": "ADR §2.3 смена источника + FF-T0572-3" },
+    { "ac": "AC-4", "covered_by": "ADR §2.5 POST /api/role-assignments + FF-T0572-4, FF-T0572-FROZEN" },
+    { "ac": "AC-5", "covered_by": "ADR §2.5 POST /api/grants + FF-T0572-5, FF-T0572-FROZEN" },
+    { "ac": "AC-6", "covered_by": "ADR §2.5 существующие revoke + FF-T0572-6" },
+    { "ac": "AC-7", "covered_by": "ADR §2.6 честный semi-confirmed + FF-T0572-7" },
+    { "ac": "AC-8", "covered_by": "ADR §2.1/§2.6 pending отдельно от действующих + FF-T0572-8" },
+    { "ac": "AC-9", "covered_by": "ADR §2.2/§2.5 форма не в DOM при can_manage:false + FF-T0572-9" },
+    { "ac": "AC-10", "covered_by": "ADR §2.2 self-фильтр по идентичности + FF-T0572-10" },
+    { "ac": "AC-11", "covered_by": "ADR §2.8 NF-4 + FF-T0572-ANTICASE (расширен на web/src/)" },
+    { "ac": "AC-12", "covered_by": "ADR §2.7 вердикт demo+конкретика + FF-T0572-BADGE" },
+    { "ac": "AC-13", "covered_by": "ADR §2.3/§2.4 kit-состояния + FF-T0572-STATES, FF-UX-G4" },
+    { "ac": "AC-14", "covered_by": "ADR §2.5 parseScopeElement API-контракт + FF-T0572-SCOPE" },
+    { "ac": "AC-15", "covered_by": "ADR §8 + FF-T0572-TSC-LINT" },
+    { "ac": "AC-16", "covered_by": "manual — LIVE_PROOF §7 ADR (владелец ООО Аксон); поддержан §2 (живой READ, выдача/отзыв, dual-control честно, обычный юзер видит только своё)" }
+  ],
+  "runtime_target": "runtime:node + web. Сервер: новый src/http/rights-overview.ts (read-only, single-resolver DAO, переиспользует src/db/org.ts) + wiring src/server.ts. Фронт: web/src/screens/rights/screen-rights.jsx (живой источник + секции + формы), web/src/app-shell/shell.jsx (бейдж-тултип). Fitness: vitest (src/__tests__/rights-overview.test.ts) + live-PG (ci/checks/db/rights-overview.db.test.ts, npm run fitness:db) + shell-линтеры (rights-overview-source-switch.sh, rights-ui-no-new-write.sh, rights-ui-anti-case.sh, rights-editor-badge-verdict.sh, rights-ui-frozen-write.sh — все self-test, wired в npm run fitness) + существующие UX-гейты G2/G4/G5/G6 (репо-широкие) + web unit (states, semi-confirmed) + tsc --noEmit/eslint/npm run build. NF-6: UX_REVIEW фаза обязательна перед TEST (существенно трогает web/).",
+  "adr_artifact_path": "docs/adr/ADR-T0572-rights-ui.md",
+  "escalation": ""
+}
