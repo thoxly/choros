@@ -161,3 +161,20 @@ enforcement-поверхности одного арма, компенсиров
 поведения на любом входе, где старое поведение было PASS по причине бага. Санкц-запись фиксирует
 это основание явно (`sanctioned_by:"founder"`, `decision` ссылается на этот ADR §7 + review/test
 находки T-0576).
+
+**Addendum (обнаружено в BUILD-фазе): вторая санкц-запись потребовалась и для фиксов 1/3.**
+`frozen-checks-immutable.sh`'s ownership-модель — per-header-T-ID (строка 2 файла, `# T-XXXX ·`),
+не per-feature-lineage. `ci/checks/anti-case-lock.sh`'s заголовок читается как `# T-0576 [...]` —
+хотя эта волна (T-0596) КОНЦЕПТУАЛЬНО продолжает ту же CI-lock фичу, `frozen-checks-immutable.sh`
+видит правку T-0596 на файле с owner-T-ID T-0576 как правку ЧУЖОГО чека (FF-FCI1), пока не найдёт
+sanction-запись. Это ТОТ ЖЕ established паттерн, что уже существует в репозитории для
+`dual-control-isolation.sh` (T-0570 → T-0573 → T-0575, каждая со своей записью) и
+`http-route-auth-coverage.sh` (T-0575 → T-0576) — follow-up-задачи в той же лоскутной области
+всегда получают собственную sanction-строку, заголовок не переписывается на каждую волну (иначе
+терялась бы история "кто исходно создал файл"). Правка фиксов 1/3 в `anti-case-lock.sh` мутирует
+СУЩЕСТВУЮЩИЕ строки (сам grep-паттерн в `count_literal()`, несколько объясняющих комментариев) —
+не чистое добавление, значит `auto_additive` (A-1 line-preservation) недоступен ровно по той же
+причине, что и для фикса 2. Добавлена вторая founder-класс запись
+(`task:"T-0596"`, `file:"ci/checks/anti-case-lock.sh"`, `owner:"T-0576"`) в `frozen-sanctions.jsonl`
+с тем же governance-обоснованием. `frozen-checks-immutable.sh` подтверждён живьём: PASS, обе
+SANCTION/AUDIT [FF-FCI12] строки печатаются для обоих файлов.

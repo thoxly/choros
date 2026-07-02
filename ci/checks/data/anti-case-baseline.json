@@ -1,12 +1,12 @@
 {
-  "_comment": "T-0576 anti-case-lock.sh data-baseline (D-064 §5 full denylist). NOT code — a plain flat object of literal-key -> recorded code-only count (src/**/*.ts + web/src/**/*.{jsx,tsx}, excluding __tests__/.test.*, excluding comment lines; methodology mirrors detel-literal-baseline.sh). Semantics: 'erodes, does not grow' -- anti-case-lock.sh FAILs only when a count exceeds (not: differs from) its recorded value here. Any future task that reduces one of these counts is expected to ALSO lower the matching value here in its own diff (visible in code review, same transparency principle as frozen-sanctions.jsonl append-only). Recorded on T-0576's own HEAD (afa856b + this task's additions produce zero net new violations -- this task is CI-infrastructure only, it adds no case-specific literal beyond this baseline's own denylist keys, which are legitimate meta-strings, not hardcodes).",
-  "role-approver": 2,
+  "_comment": "T-0576 anti-case-lock.sh data-baseline (D-064 §5 full denylist). NOT code — a plain flat object of literal-key -> recorded code-only count (src/**/*.ts + web/src/**/*.{jsx,tsx}, excluding __tests__/.test.*, excluding comment lines; methodology mirrors detel-literal-baseline.sh). Semantics: 'erodes, does not grow' -- anti-case-lock.sh FAILs only when a count exceeds (not: differs from) its recorded value here. Any future task that reduces one of these counts is expected to ALSO lower the matching value here in its own diff (visible in code review, same transparency principle as frozen-sanctions.jsonl append-only). Recorded on T-0576's own HEAD (afa856b + this task's additions produce zero net new violations -- this task is CI-infrastructure only, it adds no case-specific literal beyond this baseline's own denylist keys, which are legitimate meta-strings, not hardcodes). T-0596 [W2/замок-харден] RECOUNT (review R-4 harden): the matcher became quote-agnostic (double/single/backtick, was double-quote-only) -- it now sees 5 real pre-existing single-quoted code occurrences in web/src/ that the old matcher was blind to (role-approver in screen-inbox.jsx:835; approvalRequired x4 in gateway-condition-panel.jsx:55/87/90 and screen-dmn-editor.jsx:47). These numbers are FACTUAL, measured by running the recounted ci/checks/anti-case-lock.sh production scan on this branch's own HEAD (task/T-0596-lock-harden, base dev@0370cf5) -- not transcribed from the T-0576 review's textual estimate. role-approver and approvalRequired are the only two keys that changed; the other six planes are unaffected (no single-quoted pre-existing occurrences of those literals exist today).",
+  "role-approver": 3,
   "soglasovanie": 2,
   "tel-approval": 1,
   "telLinear": 8,
   "e-larina": 2,
   "e-orlov": 2,
-  "approvalRequired": 1,
+  "approvalRequired": 5,
   "gw-approval-threshold": 1,
-  "aggregate": 19
+  "aggregate": 24
 }
